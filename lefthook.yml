@@ -83,6 +83,52 @@ pre-push:
           exit 1
         fi
       timeout: 5s
+    fixture-manifest-gate:
+      # Mirror the `fixture-manifest-gate` CI job (ADR-5 PHI-safe invariant).
+      # Same shape as ci.yml but uses macOS-portable `find … | sed` rather
+      # than GNU `find -printf` so the hook works on dev machines. The
+      # cargo tests `tests/fixture_manifest_listed.rs` cover SHA-256 and
+      # synthetic_only assertions; this hook is the fastest "you forgot to
+      # list it" signal.
+      run: |
+        set -euo pipefail
+        manifest="tests/fixtures/MANIFEST.toml"
+        if [ ! -f "$manifest" ]; then
+          echo "fixture-manifest-gate: $manifest missing"
+          exit 1
+        fi
+        listed=$(awk '
+          /^[[:space:]]*\[\[fixture\]\][[:space:]]*$/ { in_fixture=1; next }
+          /^[[:space:]]*\[/ { in_fixture=0 }
+          in_fixture && /^[[:space:]]*path[[:space:]]*=/ {
+            line=$0
+            sub(/^[^"]*"/, "", line)
+            sub(/".*$/, "", line)
+            print line
+          }
+        ' "$manifest" | sort -u)
+        committed=$(find tests/fixtures -type f ! -name MANIFEST.toml \
+          | sed 's|^tests/fixtures/||' | sort -u)
+        unlisted=$(comm -23 <(printf '%s\n' "$committed") <(printf '%s\n' "$listed") | sed '/^$/d')
+        missing=$(comm -13 <(printf '%s\n' "$committed") <(printf '%s\n' "$listed") | sed '/^$/d')
+        fail=0
+        if [ -n "$unlisted" ]; then
+          echo "fixture-manifest-gate: unlisted files (PHI-safe invariant — ADR-5):"
+          printf '  - %s\n' $unlisted
+          fail=1
+        fi
+        if [ -n "$missing" ]; then
+          echo "fixture-manifest-gate: MANIFEST.toml lists missing paths:"
+          printf '  - %s\n' $missing
+          fail=1
+        fi
+        if grep -nE '^[[:space:]]*synthetic_only[[:space:]]*=' "$manifest" \
+            | grep -vE '=[[:space:]]*true([[:space:]]*#.*)?$' >&2; then
+          echo "fixture-manifest-gate: every entry must have synthetic_only = true"
+          fail=1
+        fi
+        exit "$fail"
+      timeout: 10s
     clippy:
       run: cargo clippy --all-targets --locked -- -D warnings
       timeout: 300s

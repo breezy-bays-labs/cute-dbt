@@ -1,0 +1,9 @@
+# `insta` snapshot directory.
+#
+# Scaffold landed in PR 4a (#5); first real snapshot lands PR 4b (golden
+# `insta::assert_json_snapshot!` over the deserialized fixture manifest)
+# or PR 8b (golden `insta::assert_snapshot!` over the rendered HTML).
+#
+# Snapshots are committed (`.snap` files) and reviewed with `cargo insta
+# review` / `cargo insta accept`. The `*.snap.new` pending-snapshot
+# artifacts are gitignored at the repo root.

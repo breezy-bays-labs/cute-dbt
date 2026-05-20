@@ -225,6 +225,78 @@ jobs:
             exit 1
           fi
 
+  fixture-manifest-gate:
+    # PHI-safe fixture invariant (ADR-5, hard, non-negotiable). Every file
+    # under `tests/fixtures/` (except MANIFEST.toml itself) MUST be listed
+    # in `tests/fixtures/MANIFEST.toml` with `synthetic_only = true`. A
+    # PHI-tainted fixture in the public repo torpedoes the cute-dbt
+    # adoption thesis on day one. This job is the STRUCTURAL gate;
+    # `tests/fixture_manifest_listed.rs` + `tests/fixture_parse.rs` mirror
+    # the constraint for fast local signal. No untrusted GitHub event
+    # interpolation in any `run:` block.
+    name: PHI-safe fixture gate (every fixture listed in MANIFEST.toml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every tests/fixtures/* file must be listed in MANIFEST.toml
+        run: |
+          set -euo pipefail
+          manifest="tests/fixtures/MANIFEST.toml"
+          if [ ! -f "$manifest" ]; then
+            echo "::error::fixture-manifest-gate: $manifest missing"
+            exit 1
+          fi
+
+          # Extract every `path = "..."` value inside a [[fixture]] table.
+          # We track whether we are inside a `[[fixture]]` block so a
+          # future `path = ...` in some other table does not pollute the
+          # listed set.
+          listed=$(awk '
+            /^[[:space:]]*\[\[fixture\]\][[:space:]]*$/ { in_fixture=1; next }
+            /^[[:space:]]*\[/ { in_fixture=0 }
+            in_fixture && /^[[:space:]]*path[[:space:]]*=/ {
+              line=$0
+              sub(/^[^"]*"/, "", line)
+              sub(/".*$/, "", line)
+              print line
+            }
+          ' "$manifest" | sort -u)
+
+          # Walk every regular file under tests/fixtures/ except the manifest.
+          # `find -printf` is GNU-only; this job pins ubuntu-latest so it is
+          # the right tool here (mirrors GNU-awk usage in
+          # baseline-required-grep).
+          committed=$(find tests/fixtures -type f \
+            ! -name MANIFEST.toml \
+            -printf '%P\n' 2>/dev/null \
+            | sort -u || true)
+
+          # Any committed file absent from `listed` violates the PHI-safe gate.
+          unlisted=$(comm -23 <(printf '%s\n' "$committed") <(printf '%s\n' "$listed") | sed '/^$/d')
+          # Any listed path not present on disk is MANIFEST drift.
+          missing=$(comm -13 <(printf '%s\n' "$committed") <(printf '%s\n' "$listed") | sed '/^$/d')
+
+          fail=0
+          if [ -n "$unlisted" ]; then
+            echo "::error::fixture-manifest-gate: files under tests/fixtures/ are NOT listed in MANIFEST.toml (PHI-safe invariant — ADR-5):"
+            printf '  - %s\n' $unlisted
+            fail=1
+          fi
+          if [ -n "$missing" ]; then
+            echo "::error::fixture-manifest-gate: MANIFEST.toml lists paths that are not present on disk:"
+            printf '  - %s\n' $missing
+            fail=1
+          fi
+          # Every fixture entry must have synthetic_only = true (cheap
+          # structural check; the cargo test does the strict TOML parse).
+          if grep -nE '^[[:space:]]*synthetic_only[[:space:]]*=' "$manifest" \
+              | grep -vE '=[[:space:]]*true([[:space:]]*#.*)?$' >&2; then
+            echo "::error::fixture-manifest-gate: every fixture entry must have synthetic_only = true (ADR-5)"
+            fail=1
+          fi
+          exit "$fail"
+
   resource-ref-lint:
     # tracked: breezy-bays-labs/cute-dbt#12 — activate when a
     # generated report.html exists (PR 8b). Until then this job no-ops; the
