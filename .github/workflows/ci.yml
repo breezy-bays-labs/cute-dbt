@@ -255,10 +255,12 @@ jobs:
   crap-scorecard:
     # crap4rs scorecard reads crap4rs.toml for keyed thresholds: strict
     # CRAP <= 15 on correctness-load-bearing modules, default <= 25
-    # elsewhere. The policy precedes the code it governs.
+    # elsewhere. CRAP = complexity * (1 - coverage)^3 + complexity, so the
+    # job needs the lcov.info artifact uploaded by the Coverage job.
     name: crap4rs scorecard
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    needs: coverage
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -266,15 +268,15 @@ jobs:
         with:
           shared-key: cute-dbt
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # crap4rs is not yet a vendored composite action for cute-dbt; the
-      # scorecard runs via `cargo install --git` until the breezy-bays-labs/
-      # crap4rs composite-action workflow lands a stable ref.
+      - uses: actions/download-artifact@v4
+        with:
+          name: lcov
       - run: |
           set -euo pipefail
           if cargo install --git https://github.com/breezy-bays-labs/crap4rs --locked --tag v0.4.0 crap4rs 2>/dev/null && command -v crap4rs >/dev/null 2>&1; then
             # crap4rs's natural exit code reports threshold breaches.
-            # v0.4.0 binary surface: `crap4rs --config <FILE>`.
-            crap4rs --config crap4rs.toml
+            # v0.4.0 binary surface: `crap4rs --config <FILE> --coverage <LCOV>`.
+            crap4rs --config crap4rs.toml --coverage lcov.info
           else
             echo "crap4rs binary not yet pinned for cute-dbt — scorecard job is no-op until the composite-action ref lands"
           fi
