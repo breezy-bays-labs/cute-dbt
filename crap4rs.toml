@@ -44,7 +44,8 @@ threshold = 15
 pattern ="src/adapters/asset_embed.rs"
 threshold = 15
 
-# Exclusions (tracked-or-ADR, per `~/.claude/rules/exclusions.md`).
-# Generated code, build scripts, and pure-data fixtures that crap4rs
-# cannot meaningfully score go here with a `tracked:` or `adr:` comment.
-exclude = []
+# crap4rs v0.4.0's [[overrides]] schema accepts only `pattern` and
+# `threshold`. There is no top-level `exclude` array; to exclude a file
+# from gating, add an [[overrides]] entry with a very high threshold
+# (with an inline `tracked: …#N` or `adr: …` comment per
+# `~/.claude/rules/exclusions.md`). No exclusions defined at v0.1.
