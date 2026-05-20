@@ -85,19 +85,23 @@ pre-push:
       timeout: 5s
     fixture-manifest-gate:
       # Mirror the `fixture-manifest-gate` CI job (ADR-5 PHI-safe invariant).
-      # Same shape as ci.yml but uses macOS-portable `find … | sed` rather
-      # than GNU `find -printf` so the hook works on dev machines. The
-      # cargo tests `tests/fixture_manifest_listed.rs` cover SHA-256 and
-      # synthetic_only assertions; this hook is the fastest "you forgot to
-      # list it" signal.
+      # The cargo tests `tests/fixture_manifest_listed.rs` cover SHA-256 +
+      # synthetic_only + listed-check exhaustively; this hook is the
+      # fastest "you forgot to list it" signal pre-push.
+      #
+      # POSIX-sh compatible (lefthook runs `sh -c`, not bash) — no process
+      # substitution; uses tmpfiles instead. macOS-portable: `find | sed`
+      # rather than GNU `find -printf`.
       run: |
-        set -euo pipefail
+        set -eu
         manifest="tests/fixtures/MANIFEST.toml"
         if [ ! -f "$manifest" ]; then
           echo "fixture-manifest-gate: $manifest missing"
           exit 1
         fi
-        listed=$(awk '
+        tmpdir=$(mktemp -d)
+        trap 'rm -rf "$tmpdir"' EXIT
+        awk '
           /^[[:space:]]*\[\[fixture\]\][[:space:]]*$/ { in_fixture=1; next }
           /^[[:space:]]*\[/ { in_fixture=0 }
           in_fixture && /^[[:space:]]*path[[:space:]]*=/ {
@@ -106,11 +110,11 @@ pre-push:
             sub(/".*$/, "", line)
             print line
           }
-        ' "$manifest" | sort -u)
-        committed=$(find tests/fixtures -type f ! -name MANIFEST.toml \
-          | sed 's|^tests/fixtures/||' | sort -u)
-        unlisted=$(comm -23 <(printf '%s\n' "$committed") <(printf '%s\n' "$listed") | sed '/^$/d')
-        missing=$(comm -13 <(printf '%s\n' "$committed") <(printf '%s\n' "$listed") | sed '/^$/d')
+        ' "$manifest" | sort -u > "$tmpdir/listed"
+        find tests/fixtures -type f ! -name MANIFEST.toml \
+          | sed 's|^tests/fixtures/||' | sort -u > "$tmpdir/committed"
+        unlisted=$(comm -23 "$tmpdir/committed" "$tmpdir/listed" | sed '/^$/d')
+        missing=$(comm -13 "$tmpdir/committed" "$tmpdir/listed" | sed '/^$/d')
         fail=0
         if [ -n "$unlisted" ]; then
           echo "fixture-manifest-gate: unlisted files (PHI-safe invariant — ADR-5):"
