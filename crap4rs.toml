@@ -19,29 +19,29 @@ threshold = 25
 # absent paths as no-op).
 [[overrides]]
 # StateComparator strategy + state:modified scoping (PR 5).
-path = "src/domain/state.rs"
+pattern ="src/domain/state.rs"
 threshold = 15
 
 [[overrides]]
 # Two-stage fail-closed (PR 6). Stage-1 lives in adapters; Stage-2 in
 # domain/preflight.rs. The strict threshold applies to both files
 # regardless of which module physically holds them.
-path = "src/domain/preflight.rs"
+pattern ="src/domain/preflight.rs"
 threshold = 15
 
 [[overrides]]
-path = "src/adapters/manifest.rs"
+pattern ="src/adapters/manifest.rs"
 threshold = 15
 
 [[overrides]]
 # sqlparser CTE engine — graph + join-type edge classification (PR 7).
-path = "src/adapters/cte_engine.rs"
+pattern ="src/adapters/cte_engine.rs"
 threshold = 15
 
 [[overrides]]
 # Asset-inlining infra (PR 8a). The embedding logic is where bytes-vs-
 # templates accidents creep in.
-path = "src/adapters/asset_embed.rs"
+pattern ="src/adapters/asset_embed.rs"
 threshold = 15
 
 # Exclusions (tracked-or-ADR, per `~/.claude/rules/exclusions.md`).
