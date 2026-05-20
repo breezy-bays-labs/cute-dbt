@@ -1,0 +1,26 @@
+# cargo-mutants configuration for cute-dbt.
+#
+# Focused (Quinn CQ8 proportional-rigor): mutation-test the four
+# correctness-load-bearing modules at 100%-kill-or-classified-equivalent;
+# render-template glue is reported, not gated. Strict modules mirror the
+# crap4rs strict-keyed paths.
+
+# cucumber-rs `harness = false` means `cargo nextest` is incompatible
+# with the bdd test target; cargo-mutants must invoke `cargo test` for
+# all test targets to keep bdd in the loop.
+test_tool = "cargo"
+
+# Focused scope. Render-glue and POD domain types are NOT in this list —
+# they are measured but not gated (per ADR-4 / quality-loop playbook).
+examine_globs = [
+  "src/domain/state.rs",
+  "src/domain/preflight.rs",
+  "src/adapters/manifest.rs",
+  "src/adapters/cte_engine.rs",
+  "src/adapters/asset_embed.rs",
+]
+
+# Skip unwrap_or-style fallbacks where surviving mutants are typically
+# equivalent. Tracked via the v0.1 fidelity-limit issue at the
+# StateComparator site (filed with PR 5).
+exclude_globs = []

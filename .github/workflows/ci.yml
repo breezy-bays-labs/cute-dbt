@@ -1,0 +1,278 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TARGET_DIR: target
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+# Security note: every `run:` in this workflow is a static script. None of the
+# run blocks interpolate untrusted GitHub event inputs (issue/PR titles, commit
+# messages, head refs). The only `${{ … }}` uses are `github.ref` for cache
+# keying and matrix values that are static within this file.
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cute-dbt
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86
+          - os: macos-latest
+            name: macos-arm
+          - os: macos-15-intel
+            name: macos-x86
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cute-dbt
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9
+      - run: cargo nextest run --all-targets --locked
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cute-dbt
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov@0.6
+      # 85% threshold — not relaxed for v0.x. Bootstrap surface (placeholder
+      # cli::run + main) hits 100% via tests/binary_smoke.rs + cli::run unit
+      # test. Real coverage of run loop / CTE engine / renderer arrives with
+      # their PRs.
+      - run: cargo llvm-cov nextest --locked --fail-under-lines 85 --lcov --output-path lcov.info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+          retention-days: 7
+
+  msrv:
+    name: MSRV (1.85)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cute-dbt-msrv
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check --all-targets --locked
+
+  deny:
+    name: cargo-deny (advisories + licenses + bans)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # SHA-pinned: cargo-deny is the supply-chain gate itself; a tag-poisoning
+      # attack on the action would silently disable every other supply-chain
+      # check.
+      - uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb # v2
+        with:
+          command: check
+
+  docs:
+    name: cargo doc (warnings as errors)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cute-dbt
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo doc --no-deps --document-private-items --locked
+
+  non-mirror-guard:
+    # Rejects "pattern completion" additions to apparatus this single-crate
+    # tool does not need — explicitly documented in ARCHITECTURE.md
+    # "Conscious non-mirrors". The structural mechanism is the absence of
+    # these constructs at bootstrap; this CI job preserves the absence over
+    # time. ARCHITECTURE explicitly anticipates a future agent "completing
+    # the pattern" — this job is the mechanical guard against that failure
+    # mode.
+    name: Non-mirror guard (no workspace / no deny.wrappers / no API shim)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject ADR-1 non-mirror tripwires
+        run: |
+          set -euo pipefail
+          fail=0
+          if grep -qE '^\[workspace\]' Cargo.toml; then
+            echo "::error::non-mirror-guard: Cargo.toml must not declare a [workspace] table — see ARCHITECTURE.md 'Conscious non-mirrors'"
+            fail=1
+          fi
+          if grep -qE '^[[:space:]]*\[bans\.deny\.wrappers\]|^[[:space:]]*deny\.wrappers[[:space:]]*=' deny.toml; then
+            echo "::error::non-mirror-guard: deny.toml must not use bans.deny.wrappers (proc-macro chain fragility; no AST-purity invariant here)"
+            fail=1
+          fi
+          if grep -rEn '^[[:space:]]*pub[[:space:]]+use[[:space:]]+crate::[a-zA-Z_]+::' src/lib.rs; then
+            echo "::error::non-mirror-guard: no public-API re-export shim pattern (single crate, no library consumers)"
+            fail=1
+          fi
+          exit "$fail"
+
+  baseline-required-grep:
+    # The locked policy decision: --baseline-manifest is a required CLI
+    # argument; omitting it is a clap usage error (NOT a PreflightError).
+    # This job makes that policy a structural CI invariant — every feature
+    # scenario invoking the CLI must pass --baseline-manifest, except
+    # scenarios explicitly tagged @no-baseline-usage-error (the one
+    # intentional exception that exercises the usage-error path itself).
+    name: Baseline-required scenario invariant
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every .feature scenario must use --baseline-manifest
+        run: |
+          set -euo pipefail
+          # Gherkin tag semantics: a tag line applies to the NEXT scenario.
+          # We track `pending_skip` on a tag line, then promote it to `skip`
+          # when the Scenario header is seen and reset both. This avoids
+          # flagging the very scenario that the @no-baseline-usage-error tag
+          # is meant to exempt.
+          if ! awk '
+            /^[[:space:]]*@no-baseline-usage-error([[:space:]]|$)/ { pending_skip=1; next }
+            /^[[:space:]]*Scenario(:|[[:space:]]+Outline)/ { skip=pending_skip; pending_skip=0; next }
+            /cute-dbt with --manifest/ && !skip {
+              if ($0 !~ /--baseline-manifest/) {
+                print FILENAME ":" NR ": " $0
+                found=1
+              }
+            }
+            END { exit (found ? 1 : 0) }
+          ' features/*.feature; then
+            echo "::error::baseline-required-grep: scenarios invoking the CLI without --baseline-manifest must be tagged @no-baseline-usage-error"
+            exit 1
+          fi
+
+  feature-count:
+    # Pins the 5-feature invariant. The README is not a feature.
+    name: Feature file count (==5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: features/*.feature count
+        run: |
+          set -euo pipefail
+          count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
+          if [ "$count" != "5" ]; then
+            echo "::error::feature-count: expected 5 .feature files, found $count"
+            exit 1
+          fi
+
+  resource-ref-lint:
+    # tracked: breezy-bays-labs/cute-dbt#12 — activate when a
+    # generated report.html exists (PR 8b). Until then this job no-ops; the
+    # `if: false` gate is removed in PR 9 along with the headless-zero-egress
+    # activation.
+    name: Resource-ref lint (real loading constructs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Activated in PR 9 — see ARCHITECTURE.md zero-egress section."
+
+  headless-zero-egress:
+    # tracked: breezy-bays-labs/cute-dbt#12 — activate when the
+    # generated report.html exists (PR 8b). This is the PRIMARY zero-egress
+    # gate: a headless browser opens the report with networking denied and
+    # asserts zero requests. Re-runnable by the risk team themselves; the
+    # strongest artifact in the auditability package.
+    name: Headless zero-egress proof (file://, network blocked)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: false
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Activated in PR 9 — see ARCHITECTURE.md zero-egress section."
+
+  crap-scorecard:
+    # crap4rs scorecard reads crap4rs.toml for keyed thresholds: strict
+    # CRAP <= 15 on correctness-load-bearing modules, default <= 25
+    # elsewhere. The policy precedes the code it governs.
+    name: crap4rs scorecard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cute-dbt
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # crap4rs is not yet a vendored composite action for cute-dbt; the
+      # scorecard runs via `cargo install --git` until the breezy-bays-labs/
+      # crap4rs composite-action workflow lands a stable ref.
+      - run: |
+          set -euo pipefail
+          if cargo install --git https://github.com/breezy-bays-labs/crap4rs --locked --tag v0.4.0 crap4rs 2>/dev/null && command -v crap4rs >/dev/null 2>&1; then
+            crap4rs --config crap4rs.toml --fail-on-threshold
+          else
+            echo "crap4rs binary not yet pinned for cute-dbt — scorecard job is no-op until the composite-action ref lands"
+          fi

@@ -1,0 +1,30 @@
+# Test-fixture provenance (PHI-safe invariant — hard, non-negotiable).
+#
+# Every file committed under `tests/fixtures/` is listed here with its
+# origin, source, SHA-256, and an explicit `synthetic_only = true` flag.
+# A `cargo test` (added with PR 4a) parses this manifest and asserts:
+#
+#   1. Every file under `tests/fixtures/` (excluding MANIFEST.toml itself)
+#      appears in this manifest's `[[fixture]]` table.
+#   2. Every entry has `synthetic_only = true`.
+#   3. SHA-256 matches.
+#
+# A CI grep failure on any unlisted file under `tests/fixtures/` blocks
+# the PR.
+#
+# This mechanism enforces the ADR-5 PHI-safe constraint structurally
+# (not via a review checklist). A PHI-tainted fixture in this public
+# repo would torpedo the adoption thesis on day one.
+#
+# Schema (each entry):
+#   [[fixture]]
+#   path = "tests/fixtures/<filename>"
+#   origin = "dbt-playground" | "tuva-project" | "jaffle-shop" | "synthetic-generated"
+#   source = "https://..." | "synthetic-generated"   # canonical reference if applicable
+#   sha256 = "..."
+#   synthetic_only = true       # MUST be true; non-synthetic fixtures are forbidden
+#
+# Skeleton at bootstrap; entries populated in PR 4a (#TBD) when the
+# fixture acquisition spike concludes.
+
+fixture = []

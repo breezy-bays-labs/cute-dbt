@@ -1,0 +1,99 @@
+# Pre-commit and pre-push hooks for cute-dbt.
+#
+# After cloning, run `lefthook install` once to wire git hooks. CI runs
+# the same gates plus coverage + the three new mechanical guards
+# (non-mirror-guard, baseline-required-grep, feature-count). pre-push
+# matches the coverage-independent CI subset so most pushes don't burn
+# CI minutes on easily-caught local issues.
+
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      glob: "*.rs"
+      run: cargo fmt --all --check
+      timeout: 60s
+    gitleaks:
+      run: gitleaks protect --staged --redact
+      timeout: 60s
+
+pre-push:
+  parallel: false
+  commands:
+    # Same battery the `Format`, `Clippy`, `Test (linux-x86)`,
+    # `cargo-deny`, and `cargo doc` CI jobs run. Pedantic clippy fires
+    # via `#![warn(clippy::pedantic, clippy::cargo)]` at the crate root.
+    fmt:
+      run: cargo fmt --all --check
+      timeout: 60s
+    non-mirror-guard:
+      # Mirror the `non-mirror-guard` CI job. Rejects "pattern completion"
+      # additions to apparatus this single-crate tool does not need —
+      # explicitly documented in ARCHITECTURE.md "Conscious non-mirrors."
+      # See `.github/workflows/ci.yml` for the canonical version.
+      run: |
+        set -euo pipefail
+        fail=0
+        if grep -qE '^\[workspace\]' Cargo.toml; then
+          echo "non-mirror-guard: Cargo.toml must not declare a [workspace] (single-crate by design)"
+          fail=1
+        fi
+        if grep -qE '^[[:space:]]*\[bans\.deny\.wrappers\]|^[[:space:]]*deny\.wrappers[[:space:]]*=' deny.toml; then
+          echo "non-mirror-guard: deny.toml must not use bans.deny.wrappers (proc-macro fragility; no AST-purity invariant here)"
+          fail=1
+        fi
+        if grep -rEn '^[[:space:]]*pub[[:space:]]+use[[:space:]]+crate::[a-zA-Z_]+::' src/lib.rs; then
+          echo "non-mirror-guard: no public-API re-export shim pattern (single crate, no library consumers)"
+          fail=1
+        fi
+        exit "$fail"
+      timeout: 30s
+    baseline-required-grep:
+      # Mirror the `baseline-required-grep` CI job. Every feature line
+      # invoking the CLI must pass --baseline-manifest unless explicitly
+      # tagged @no-baseline-usage-error (the one intentional exception).
+      # Makes the locked gate decision a structural invariant.
+      run: |
+        set -euo pipefail
+        # Gherkin tag semantics: a tag line applies to the NEXT scenario.
+        # See ci.yml for the matching guard.
+        if ! awk '
+          /^[[:space:]]*@no-baseline-usage-error([[:space:]]|$)/ { pending_skip=1; next }
+          /^[[:space:]]*Scenario(:|[[:space:]]+Outline)/ { skip=pending_skip; pending_skip=0; next }
+          /cute-dbt with --manifest/ && !skip {
+            if ($0 !~ /--baseline-manifest/) {
+              print FILENAME ":" NR ": " $0
+              found=1
+            }
+          }
+          END { exit (found ? 1 : 0) }
+        ' features/*.feature; then
+          echo "baseline-required-grep: scenarios invoking the CLI without --baseline-manifest must be tagged @no-baseline-usage-error"
+          exit 1
+        fi
+      timeout: 15s
+    feature-count:
+      # Asserts the 5-feature invariant (5 .feature files; not 6 — the
+      # README is not a feature).
+      run: |
+        set -euo pipefail
+        count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
+        if [ "$count" != "5" ]; then
+          echo "feature-count: expected 5 .feature files, found $count"
+          exit 1
+        fi
+      timeout: 5s
+    clippy:
+      run: cargo clippy --all-targets --locked -- -D warnings
+      timeout: 300s
+    test:
+      run: cargo nextest run --all-targets --locked
+      timeout: 300s
+    deny:
+      run: cargo deny check
+      timeout: 60s
+    docs:
+      env:
+        RUSTDOCFLAGS: -D warnings
+      run: cargo doc --no-deps --document-private-items --locked
+      timeout: 120s

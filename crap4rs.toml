@@ -1,0 +1,50 @@
+# crap4rs scorecard configuration for cute-dbt.
+#
+# Keyed-threshold policy scaffolded at PR 1 — the policy must precede the
+# code it governs (per the /plan audit: thresholds-as-adjectives are not
+# gates). As each strict-keyed module lands, the keyed threshold applies
+# from the same PR.
+#
+# Threshold semantics: CRAP = comp * (1 - cov)^3 + comp. Lower is better.
+# - default <= 25: the conservative starting line for v0.x render glue,
+#   CLI wiring, POD-only domain types — surfaces real complexity creep
+#   without flagging mundane wiring.
+# - strict <= 15: the modules where correctness is load-bearing.
+
+# v0.x defaults (apply to anything not explicitly keyed).
+threshold = 25
+
+# Per-path strict overrides. Paths land as their PR lands; the path
+# pattern is tolerated until the source file exists (crap4rs treats
+# absent paths as no-op).
+[[overrides]]
+# StateComparator strategy + state:modified scoping (PR 5).
+path = "src/domain/state.rs"
+threshold = 15
+
+[[overrides]]
+# Two-stage fail-closed (PR 6). Stage-1 lives in adapters; Stage-2 in
+# domain/preflight.rs. The strict threshold applies to both files
+# regardless of which module physically holds them.
+path = "src/domain/preflight.rs"
+threshold = 15
+
+[[overrides]]
+path = "src/adapters/manifest.rs"
+threshold = 15
+
+[[overrides]]
+# sqlparser CTE engine — graph + join-type edge classification (PR 7).
+path = "src/adapters/cte_engine.rs"
+threshold = 15
+
+[[overrides]]
+# Asset-inlining infra (PR 8a). The embedding logic is where bytes-vs-
+# templates accidents creep in.
+path = "src/adapters/asset_embed.rs"
+threshold = 15
+
+# Exclusions (tracked-or-ADR, per `~/.claude/rules/exclusions.md`).
+# Generated code, build scripts, and pure-data fixtures that crap4rs
+# cannot meaningfully score go here with a `tracked:` or `adr:` comment.
+exclude = []

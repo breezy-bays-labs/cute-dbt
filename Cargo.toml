@@ -1,0 +1,54 @@
+[package]
+name = "cute4dbt"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Zero-compute Rust CLI: parse dbt manifest.json into one self-contained interactive HTML report of unit tests"
+repository = "https://github.com/breezy-bays-labs/cute-dbt"
+homepage = "https://github.com/breezy-bays-labs/cute-dbt"
+authors = ["Christopher Bays <cmbays@breezybayslabs.com>"]
+rust-version = "1.85"
+readme = "README.md"
+keywords = ["dbt", "unit-test", "cte", "analytics-engineering", "cli"]
+categories = ["command-line-utilities", "development-tools", "visualization"]
+
+# Single-crate by deliberate design — see ARCHITECTURE.md. The hexagonal
+# layering (`src/{domain,ports,adapters,cli}`) is enforced by module
+# convention + clippy + review, not by Cargo crate boundaries.
+# Sibling structural-quality tools (dry-rs, scrap-rs) use workspaces because
+# they have multiple linkage-level consumers; cute-dbt has one binary, one
+# product. The `non-mirror-guard` CI job rejects a future `[workspace]` block
+# here so the single-crate decision is structurally enforced.
+
+[[bin]]
+name = "cute-dbt"
+path = "src/main.rs"
+
+[lib]
+name = "cute4dbt"
+path = "src/lib.rs"
+
+# v0.1 seed deps only. Feature deps land with their PRs (per the dry-rs
+# per-PR pattern — avoids unused-dep clippy noise on stubs):
+#   clap        -> PR 6 (CLI surface)
+#   askama      -> PR 8b (renderer, pinned 0.16)
+#   sqlparser   -> PR 7 (CTE engine, pinned 0.62)
+#   toml        -> PR 6 (config loading)
+#   insta       -> PR 4a (golden-snapshot scaffold)
+#   cucumber    -> PR 10 (ATDD wiring)
+#   tl          -> PR 9 (resource-ref lint HTML parser)
+#   chromiumoxide / headless_chrome -> PR 9 (zero-egress test)
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+# Placeholders for the dev-only fixture toolchain — populated as PRs land.
+
+# Crate-wide lint config. `clippy::pedantic` + `clippy::cargo` fire via
+# the crate-root `#![warn(...)]` in `src/lib.rs`, so `clippy -D warnings`
+# automatically enforces them without extra flags. See `clippy.toml` for
+# the cognitive-complexity threshold.
+[lints.rust]
+unsafe_code = "forbid"

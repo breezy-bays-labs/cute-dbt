@@ -1,0 +1,61 @@
+# cargo-deny configuration for cute-dbt.
+#
+# Double-duty: standard quality gate AND the supply-chain auditability
+# artifact the risk team reads (paired with `assets/MANIFEST.toml` for
+# vendored frontend assets — Cargo deps + frontend bundle together).
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Allowlisted exactly to the licenses that appear in the v0.1 dep tree.
+# Every additional license decision happens in the PR that introduces the
+# dep so the policy moment lands when it matters, not as a pre-allowance.
+# This keeps cargo-deny's signal-to-noise clean — every "unmatched license
+# allowance" warning becomes a real action item, not background noise.
+#
+# MIT-only crate license (R4) does not mean MIT-only deps: BSD and
+# Apache-2.0 transitive deps are permitted as long as they remain
+# permissive and copyleft-free.
+version = 2
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+# `multiple-versions = "warn"` is intentional for v0.x: feature PRs (CTE
+# engine via sqlparser, renderer via askama) inevitably introduce
+# duplicate-semver versions of transitive deps (e.g. `bitflags` from
+# multiple sources), and `deny` would block on benign duplicates. Promote
+# to `deny` at v1.0.
+#
+# IMPORTANT: do NOT use `bans.deny.wrappers` here. cute-dbt has no
+# AST-purity invariant (single parser, single consumer — see ARCHITECTURE.md
+# "Conscious non-mirrors"), and the `non-mirror-guard` CI job exists to
+# REJECT a future `bans.deny.wrappers` entry as a structurally forbidden
+# pattern completion. The proc-macro-chain fragility of `bans.deny.wrappers`
+# is captured org-wide under `feedback_cargo-deny-proc-macro-fragility`.
+multiple-versions = "warn"
+wildcards = "deny"
+allow = []
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

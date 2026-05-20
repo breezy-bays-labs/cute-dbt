@@ -1,0 +1,26 @@
+# Vendored frontend asset provenance.
+#
+# Every asset inlined into the generated `report.html` is listed here with
+# its pinned version, source URL, SHA-256, and SPDX license. This file is
+# the supply-chain artifact the risk team reads for the *frontend bundle*
+# (paired with `Cargo.toml` + `Cargo.lock` + `deny.toml` for the Rust
+# crate graph).
+#
+# Skeleton at bootstrap; entries populated in PR 8a (#TBD) when the
+# `include_str!` / `include_bytes!` embedding infrastructure lands.
+#
+# Schema (each entry):
+#   [[asset]]
+#   name = "..."                # human-readable name
+#   version = "..."             # pinned version
+#   source = "https://..."      # canonical download URL
+#   sha256 = "..."              # hex SHA-256 of the embedded bytes
+#   license = "MIT" | "BSD-3-Clause" | ...   # SPDX identifier
+#
+# Expected v0.1 entries (placeholder until PR 8a):
+#   - sakura ~1.5         (CSS, classless)
+#   - jquery 3.7.1        (JS, DataTables dep)
+#   - datatables 2.1.8    (JS + CSS, sort/filter/search)
+#   - mermaid 11.x        (UMD bundle, securityLevel:'strict')
+
+asset = []
