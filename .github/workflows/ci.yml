@@ -272,7 +272,9 @@ jobs:
       - run: |
           set -euo pipefail
           if cargo install --git https://github.com/breezy-bays-labs/crap4rs --locked --tag v0.4.0 crap4rs 2>/dev/null && command -v crap4rs >/dev/null 2>&1; then
-            crap4rs --config crap4rs.toml --fail-on-threshold
+            # crap4rs's natural exit code reports threshold breaches.
+            # v0.4.0 binary surface: `crap4rs --config <FILE>`.
+            crap4rs --config crap4rs.toml
           else
             echo "crap4rs binary not yet pinned for cute-dbt — scorecard job is no-op until the composite-action ref lands"
           fi
