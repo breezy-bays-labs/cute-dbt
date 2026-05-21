@@ -71,11 +71,10 @@ is **strict**:
   mapping, and the run-loop composition. Application orchestration lives
   here (single-crate composition choice — see ARCHITECTURE).
 
-The five **conscious non-mirrors** of the sibling sensor tools (no
-workspace, no per-crate versioning, no public-API shim, no AST-purity
-grep, no JSON envelope ADR) are documented in `ARCHITECTURE.md` and
-enforced by the `non-mirror-guard` CI job. Adding one is a regression,
-not a "pattern completion."
+The five **conscious design simplifications** (no workspace, no per-crate
+versioning, no public-API shim, no AST-purity grep, no JSON envelope ADR)
+are documented in `ARCHITECTURE.md` and enforced by the `non-mirror-guard`
+CI job. Adding one is a regression, not a "pattern completion."
 
 ## Exclusions and tracking-issue rule
 
@@ -96,7 +95,7 @@ Every `#[ignore]`, every `if: false` workflow gate, every `exclude` /
 
 ## Authoring `.feature` scenarios
 
-- Synthetic data only in example tables (PHI-safe constraint).
+- Synthetic data only in example tables (no real data, ever).
 - Scenarios assert **observable behavior** — exit code, file presence,
   DOM structure, network requests — never implementation detail.
 - Every scenario invoking the CLI must pass `--baseline-manifest`, except

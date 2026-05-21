@@ -313,8 +313,8 @@ jobs:
     # tracked: breezy-bays-labs/cute-dbt#12 — activate when the
     # generated report.html exists (PR 8b). This is the PRIMARY zero-egress
     # gate: a headless browser opens the report with networking denied and
-    # asserts zero requests. Re-runnable by the risk team themselves; the
-    # strongest artifact in the auditability package.
+    # asserts zero requests. Re-runnable by anyone with the repo checked
+    # out; the strongest artifact in the auditability package.
     name: Headless zero-egress proof (file://, network blocked)
     runs-on: ubuntu-latest
     timeout-minutes: 15

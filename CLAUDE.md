@@ -80,11 +80,11 @@ git worktree add ../cute-dbt-issue-N -b <area>-<issue>-<slug>
 
 ## Compact instructions
 
-Preserve: single-crate hexagonal discipline + ADR-1 conscious non-mirrors;
-two-stage fail-closed contract + the four `PreflightError` variants; the
-baseline-required CLI policy; StateComparator union semantics; asset-inlining
-+ Mermaid UMD constraints; the headless `file://` zero-egress gate; the
-PHI-safe fixture invariant.
+Preserve: single-crate hexagonal discipline + the conscious design
+simplifications; two-stage fail-closed contract + the four `PreflightError`
+variants; the baseline-required CLI policy; StateComparator union semantics;
+asset-inlining + Mermaid UMD constraints; the headless `file://` zero-egress
+gate; the synthetic-only fixture invariant.
 
 Discard: full file contents from old reads, search results not acted on,
 completed PR details, intermediate API-shape deliberations already encoded

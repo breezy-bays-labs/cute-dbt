@@ -10,9 +10,10 @@ this before touching code.
   publish, no GitHub Release tarballs, no `cargo install` path** until v1.0
   gates trip. Tags exist for git pinning only — internal versions like
   `v0.1.0` do not trigger any workflow.
-- v0.x consumer model: the tool runs locally. The risk-team adoption gate
-  is *trivially auditable* zero data exfiltration — the generated report
-  makes zero outbound requests when opened offline via `file://`.
+- v0.x consumer model: the tool runs locally and privately — your data
+  never leaves your machine. The core privacy property is *trivially
+  auditable* zero data exfiltration: the generated report makes zero
+  outbound requests when opened offline via `file://`.
 
 ## Architecture
 
@@ -21,8 +22,8 @@ ports, adapters, cli}` modules with `domain` depending on nothing outward.
 Enforced by module convention + clippy + review (a single crate cannot fail
 to compile on an inward `use`). The full layering invariant, the two-stage
 fail-closed contract, the StateComparator strategy, and the conscious
-non-mirrors (no workspace, no per-crate versioning, no API shim, no
-AST-purity grep, no JSON envelope) are recorded in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+design simplifications (no workspace, no per-crate versioning, no API shim,
+no AST-purity grep, no JSON envelope) are recorded in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ```
 domain  -> (no outward imports; std + serde derive only)
@@ -36,9 +37,10 @@ cli/    -> clap derive, ExitCode mapping, run loop composition
 main.rs -> thin entry
 ```
 
-**Never import inward.** The five "conscious non-mirrors" of the sibling
-sensor tools (`dry-rs`, `scrap-rs`, `crap4rs`) are documented absences, not
-omissions. Adding any of them is a regression, not a "pattern completion."
+**Never import inward.** The five "conscious design simplifications" (no
+workspace, no per-crate versioning, no API shim, no AST-purity grep, no
+JSON envelope) are documented absences, not omissions. Adding any of them
+is a regression, not a "pattern completion."
 The `non-mirror-guard` CI job rejects:
 - a `[workspace]` table in `Cargo.toml`
 - `bans.deny.wrappers` in `deny.toml`
@@ -103,35 +105,24 @@ Mermaid initializes with `securityLevel: 'strict'` and an explicit
 non-webfont `fontFamily` (system stack). The favicon is a `data:` URI.
 Pin + SHA-256 + SPDX license per asset in `assets/MANIFEST.toml`.
 
-## Zero-egress gate (the adoption gate)
+## Zero-egress gate (the core privacy property)
 
 The primary auditability artifact is the **headless-browser network-block
 test** — opens the generated `report.html` via real `file://` with all
-network access denied and asserts zero requests. Re-runnable by the risk
-team themselves. The secondary structured **resource-ref lint** rejects
+network access denied and asserts zero requests. Re-runnable by anyone with
+the repo checked out. The secondary structured **resource-ref lint** rejects
 real loading constructs (`<script src>`, `<link href>`, `<img src>`,
 CSS `@import` / `url()`, protocol-relative `//`) — never raw `grep http`
 (minified bundles carry hundreds of inert URL string literals).
 
-## PHI-safe fixture invariant (hard, non-negotiable)
+## Synthetic-only fixture invariant (hard, non-negotiable)
 
 Every committed fixture / `insta` snapshot / `.feature` example must be
-synthetic or public-demo data — no real customer or PHI data, ever.
-Enforced mechanically: `tests/fixtures/MANIFEST.toml` lists every fixture
-with origin / source / SHA-256 / `synthetic_only = true`; a `cargo test`
-parses the manifest and a CI grep fails on any unlisted file under
-`tests/fixtures/`. A PHI-tainted fixture in this public repo would
-torpedo the adoption thesis on day one.
-
-## Sibling tools
-
-| Tool       | Repo                                              | What it surfaces                          |
-|------------|---------------------------------------------------|-------------------------------------------|
-| `crap4rs`  | <https://github.com/breezy-bays-labs/crap4rs>     | production-code complexity (Rust)         |
-| `crap4ts`  | <https://github.com/breezy-bays-labs/crap4ts>     | production-code complexity (TypeScript)   |
-| `scrap-rs` | <https://github.com/breezy-bays-labs/scrap-rs>    | test-code structural smells               |
-| `dry-rs`   | <https://github.com/breezy-bays-labs/dry-rs>      | structural duplication in source          |
-| `cute-dbt` | this repo                                         | dbt unit-test PR-review report            |
+synthetic or public-demo data — no real data, ever. Enforced mechanically:
+`tests/fixtures/MANIFEST.toml` lists every fixture with origin / source /
+SHA-256 / `synthetic_only = true`; a `cargo test` parses the manifest and a
+CI grep fails on any unlisted file under `tests/fixtures/`. Real data in
+this public repo is a release blocker.
 
 ## Working commands
 
