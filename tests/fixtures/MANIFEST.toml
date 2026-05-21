@@ -1,30 +1,78 @@
 # Test-fixture provenance (synthetic-only invariant — hard, non-negotiable).
 #
 # Every file committed under `tests/fixtures/` is listed here with its
-# origin, source, SHA-256, and an explicit `synthetic_only = true` flag.
-# A `cargo test` (added with PR 4a) parses this manifest and asserts:
+# origin, source URL, SHA-256, and an explicit `synthetic_only = true`
+# flag. The PR 4a (#5) gate is structurally enforced by two mechanisms:
 #
-#   1. Every file under `tests/fixtures/` (excluding MANIFEST.toml itself)
-#      appears in this manifest's `[[fixture]]` table.
-#   2. Every entry has `synthetic_only = true`.
-#   3. SHA-256 matches.
+#   1. `cargo test` (`tests/fixture_manifest_listed.rs` +
+#      `tests/fixture_parse.rs`) parses this file and asserts:
+#        - every regular file under `tests/fixtures/` (excluding
+#          MANIFEST.toml itself) appears in the [[fixture]] table by `path`;
+#        - every entry has `synthetic_only = true`;
+#        - SHA-256 of each listed file matches.
+#   2. CI job `fixture-manifest-gate` (.github/workflows/ci.yml) runs the
+#      same constraint as a pure-shell awk-and-comm grep — no cargo
+#      dependency, fails the PR if anything under tests/fixtures/ is
+#      unlisted.
 #
-# A CI grep failure on any unlisted file under `tests/fixtures/` blocks
-# the PR.
+# Together these enforce the synthetic-only constraint structurally — a
+# fixture containing real data cannot land silently. Real data in this
+# public repo is a release blocker.
 #
-# This mechanism enforces the synthetic-only constraint structurally
-# (not via a review checklist). Real data in this public repo is a
-# release blocker.
-#
-# Schema (each entry):
-#   [[fixture]]
-#   path = "tests/fixtures/<filename>"
-#   origin = "dbt-playground" | "tuva-project" | "jaffle-shop" | "synthetic-generated"
-#   source = "https://..." | "synthetic-generated"   # canonical reference if applicable
-#   sha256 = "..."
-#   synthetic_only = true       # MUST be true; non-synthetic fixtures are forbidden
-#
-# Skeleton at bootstrap; entries populated in PR 4a (#TBD) when the
-# fixture acquisition spike concludes.
+# Schema for each [[fixture]] entry:
+#   path = "<filename-relative-to-tests/fixtures/>"
+#   origin = "dbt-playground" | "tuva-project" | "jaffle-shop"
+#          | "synthetic-handcrafted"
+#   origin_url = "https://..."             # canonical source repo URL
+#   sha256 = "<hex>"                       # `shasum -a 256 <path>`
+#   synthetic_only = true                  # MUST be true (ADR-5)
+#   license = "<SPDX identifier>"          # license of the source project
+#   description = "<one-line>"             # why this fixture, what it exercises
+#   synthetic_handcrafted = false          # true only for the last-resort
+#                                          #   hand-crafted v12 stub; defaults false
 
-fixture = []
+[[fixture]]
+path = "jaffle-shop-baseline.json"
+origin = "jaffle-shop"
+origin_url = "https://github.com/dbt-labs/jaffle_shop_duckdb"
+sha256 = "6f43eed2e927646c4bd2ed5e8348655e285a5fffd85c2053f6fdf144801eaa7e"
+synthetic_only = true
+license = "Apache-2.0"
+description = """
+Compiled dbt 1.11.9 manifest (schema v12) for the canonical \
+dbt-labs/jaffle_shop_duckdb demo with one authored unit test on \
+stg_customers. Synthetic Faker-style demo data only — no real customers, \
+no real records. Acts as the BASELINE of the diff-scoping pair: stg_customers \
+body is the un-modified version.\
+"""
+
+[[fixture]]
+path = "jaffle-shop-current.json"
+origin = "jaffle-shop"
+origin_url = "https://github.com/dbt-labs/jaffle_shop_duckdb"
+sha256 = "5cdd38df0dfcebcda3aea810978ed986d2c2ad5fd9ae915c074d74c22135094b"
+synthetic_only = true
+license = "Apache-2.0"
+description = """
+Compiled dbt 1.11.9 manifest (schema v12) for the same project as the \
+baseline, but with stg_customers body modified (added `trim()` calls on \
+first_name/last_name). This is the CURRENT side of the diff-scoping \
+pair — PR 5's StateComparator should see stg_customers in the modified \
+set and customers (depends on stg_customers but its own body is \
+unchanged) outside it. Pure synthetic data only.\
+"""
+
+[[fixture]]
+path = "jaffle-shop-parse-only.json"
+origin = "jaffle-shop"
+origin_url = "https://github.com/dbt-labs/jaffle_shop_duckdb"
+sha256 = "b049987eec60b18eea2320c93e42d1c03b73c103627d75a19ab205b33bc16a53"
+synthetic_only = true
+license = "Apache-2.0"
+description = """
+`dbt parse` (NOT `dbt compile`) output for the same project — every \
+model node has `compiled_code: null`. Feeds PR 6's Stage-2 fail-closed \
+`NotCompiled` arm (ADR-2): when an in-scope model lacks compiled SQL, \
+cute-dbt must exit non-zero, name the node, give remediation. Pure \
+synthetic data only.\
+"""

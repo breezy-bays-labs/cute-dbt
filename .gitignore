@@ -9,6 +9,10 @@ lcov.info
 # Mutation testing
 **/mutants.out*/
 
+# insta — pending snapshots are not committed; accepted `.snap` files are.
+**/*.snap.new
+.insta-pending/
+
 # OS
 .DS_Store
 

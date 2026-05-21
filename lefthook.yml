@@ -83,6 +83,56 @@ pre-push:
           exit 1
         fi
       timeout: 5s
+    fixture-manifest-gate:
+      # Mirror the `fixture-manifest-gate` CI job (synthetic-only invariant).
+      # The cargo tests `tests/fixture_manifest_listed.rs` cover SHA-256 +
+      # synthetic_only + listed-check exhaustively; this hook is the
+      # fastest "you forgot to list it" signal pre-push.
+      #
+      # POSIX-sh compatible (lefthook runs `sh -c`, not bash) — no process
+      # substitution; uses tmpfiles instead. macOS-portable: `find | sed`
+      # rather than GNU `find -printf`.
+      run: |
+        set -eu
+        manifest="tests/fixtures/MANIFEST.toml"
+        if [ ! -f "$manifest" ]; then
+          echo "fixture-manifest-gate: $manifest missing"
+          exit 1
+        fi
+        tmpdir=$(mktemp -d)
+        trap 'rm -rf "$tmpdir"' EXIT
+        awk '
+          /^[[:space:]]*\[\[fixture\]\][[:space:]]*$/ { in_fixture=1; next }
+          /^[[:space:]]*\[/ { in_fixture=0 }
+          in_fixture && /^[[:space:]]*path[[:space:]]*=/ {
+            line=$0
+            sub(/^[^"]*"/, "", line)
+            sub(/".*$/, "", line)
+            print line
+          }
+        ' "$manifest" | sort -u > "$tmpdir/listed"
+        find tests/fixtures -type f ! -name MANIFEST.toml \
+          | sed 's|^tests/fixtures/||' | sort -u > "$tmpdir/committed"
+        unlisted=$(comm -23 "$tmpdir/committed" "$tmpdir/listed" | sed '/^$/d')
+        missing=$(comm -13 "$tmpdir/committed" "$tmpdir/listed" | sed '/^$/d')
+        fail=0
+        if [ -n "$unlisted" ]; then
+          echo "fixture-manifest-gate: unlisted files (synthetic-only invariant):"
+          printf '  - %s\n' $unlisted
+          fail=1
+        fi
+        if [ -n "$missing" ]; then
+          echo "fixture-manifest-gate: MANIFEST.toml lists missing paths:"
+          printf '  - %s\n' $missing
+          fail=1
+        fi
+        if grep -nE '^[[:space:]]*synthetic_only[[:space:]]*=' "$manifest" \
+            | grep -vE '=[[:space:]]*true([[:space:]]*#.*)?$' >&2; then
+          echo "fixture-manifest-gate: every entry must have synthetic_only = true"
+          fail=1
+        fi
+        exit "$fail"
+      timeout: 10s
     clippy:
       run: cargo clippy --all-targets --locked -- -D warnings
       timeout: 300s

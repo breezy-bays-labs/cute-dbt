@@ -44,7 +44,20 @@ serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
-# Placeholders for the dev-only fixture toolchain — populated as PRs land.
+# Fixture-gate toolchain (PR 4a, #5):
+#   insta  -> golden-snapshot scaffold (first real snapshot lands PR 4b).
+#   toml   -> parse `tests/fixtures/MANIFEST.toml` in `tests/fixture_*.rs`
+#            so the synthetic-only invariant has a fast local signal
+#            alongside the structural CI grep job `fixture-manifest-gate`.
+#   sha2 + hex -> compute SHA-256 of each listed fixture file for the
+#            MANIFEST.toml integrity assertion (belt-and-braces with CI).
+#   walkdir -> walk `tests/fixtures/` from the listed-test (std-only walk
+#            would re-implement walkdir; the dev-only dep is cheap).
+insta = "1"
+toml = "1"
+sha2 = "0.10"
+hex = "0.4"
+walkdir = "2"
 
 # Crate-wide lint config. `clippy::pedantic` + `clippy::cargo` fire via
 # the crate-root `#![warn(...)]` in `src/lib.rs`, so `clippy -D warnings`
