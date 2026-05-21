@@ -35,7 +35,7 @@
 path = "jaffle-shop-baseline.json"
 origin = "jaffle-shop"
 origin_url = "https://github.com/dbt-labs/jaffle_shop_duckdb"
-sha256 = "eeace8628d69c0895a91b38dd23713d8f1a57067dcc04869f4585c4336677b6d"
+sha256 = "6f43eed2e927646c4bd2ed5e8348655e285a5fffd85c2053f6fdf144801eaa7e"
 synthetic_only = true
 license = "Apache-2.0"
 description = """
@@ -50,7 +50,7 @@ body is the un-modified version.\
 path = "jaffle-shop-current.json"
 origin = "jaffle-shop"
 origin_url = "https://github.com/dbt-labs/jaffle_shop_duckdb"
-sha256 = "7a61632c06cd3ebc8a5f5b8bb45494cf16935dae33a1f40bec2b1bccfadd5505"
+sha256 = "5cdd38df0dfcebcda3aea810978ed986d2c2ad5fd9ae915c074d74c22135094b"
 synthetic_only = true
 license = "Apache-2.0"
 description = """
@@ -66,7 +66,7 @@ unchanged) outside it. Pure synthetic data only.\
 path = "jaffle-shop-parse-only.json"
 origin = "jaffle-shop"
 origin_url = "https://github.com/dbt-labs/jaffle_shop_duckdb"
-sha256 = "0e22ece110c3732d039e22e1f9ac0f2b63279799e7d23b0bb6fe84c8026d0b7d"
+sha256 = "b049987eec60b18eea2320c93e42d1c03b73c103627d75a19ab205b33bc16a53"
 synthetic_only = true
 license = "Apache-2.0"
 description = """
