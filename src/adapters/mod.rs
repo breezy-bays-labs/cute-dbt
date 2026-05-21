@@ -3,7 +3,7 @@
 //!
 //! Filled across PRs 4b / 7 / 8a / 8b:
 //!
-//! - **PR 4b (#TBD)** — `manifest.rs`: serde structs against dbt schema
+//! - **PR 4b (#6)** — [`manifest`]: serde structs against dbt schema
 //!   v12 (`#[serde(default)]`, no `deny_unknown_fields`); Stage-1
 //!   pre-flight (`Unreadable` / `SchemaUnsupported` / `BaselineUnusable`);
 //!   the real-file manifest-source port impl.
@@ -14,3 +14,5 @@
 //!   embedding infra + `assets/MANIFEST.toml` provenance contract.
 //! - **PR 8b (#TBD)** — `render.rs`: askama 0.16 template reproducing the
 //!   returned Claude Design `report.html` DOM/class contract.
+
+pub mod manifest;

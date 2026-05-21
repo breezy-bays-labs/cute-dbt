@@ -5,19 +5,16 @@
 //! 1. Opens the file and parses it as a `serde_json::Value`.
 //! 2. Asserts top-level keys expected of a dbt manifest exist
 //!    (`metadata`, `nodes`).
-//! 3. Reports (via `println!` so the output is captured under
-//!    `--nocapture`) which container shape carries the unit tests:
-//!    - **A**: top-level `unit_tests` map.
-//!    - **B**: embedded in `nodes` (entries with
-//!      `resource_type == "unit_test"`).
-//!    - **C**: both populated.
-//!    - **none**: neither shape populated.
+//! 3. Asserts the container shape is **A** — a top-level `unit_tests`
+//!    map (vs. **B**: embedded in `nodes` with
+//!    `resource_type == "unit_test"`; **C**: both; **none**: neither).
 //!
-//! This finding feeds PR 4b's serde struct layout decision (ADR-5 leaves
-//! the container shape as a build-phase resolution). It is intentionally
-//! a *report*, not a strict assertion — the empty-fixture-set state of PR
-//! 4a passes vacuously, and a hand-crafted fixture in either shape is
-//! valid as long as ADR-5 invariants hold.
+//! PR 4a left the container shape as a build-phase resolution (ADR-5);
+//! PR 4b (#6) resolved it to **shape A** against the real jaffle-shop
+//! fixture and committed `adapters::manifest`'s serde layout to it. This
+//! test is now the guard for that commitment: a committed fixture in any
+//! other shape would silently ingest zero unit tests, so it must fail
+//! loudly here. The empty-fixture-set state still passes vacuously.
 //!
 //! For tests/fixtures-empty PR 4a: a sentinel test exercises the parse +
 //! shape-detection logic against an in-memory minimal manifest so the
@@ -124,6 +121,13 @@ fn every_listed_fixture_parses_and_reports_shape() {
 
         let shape = detect_container_shape(&value);
         println!("fixture_parse: {} container shape = {shape:?}", entry.path);
+        assert_eq!(
+            shape,
+            ContainerShape::TopLevelMap,
+            "fixture {} must be container shape A (top-level `unit_tests` map) — \
+             `adapters::manifest` (PR 4b, #6) only ingests shape A",
+            entry.path,
+        );
     }
 }
 

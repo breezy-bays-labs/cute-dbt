@@ -1,0 +1,336 @@
+---
+source: tests/manifest_ingestion.rs
+expression: rendered
+---
+{
+  "schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+  "node_count": 28,
+  "macro_count": 485,
+  "unit_test_count": 1,
+  "nodes": [
+    {
+      "id": "model.jaffle_shop.customers",
+      "resource_type": "model",
+      "checksum_name": "sha256",
+      "checksum": "60bd72e33da43fff3a7e7609135c17cd4468bd22afec0735dd36018bfb5af30a",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.stg_customers",
+        "model.jaffle_shop.stg_orders",
+        "model.jaffle_shop.stg_payments"
+      ]
+    },
+    {
+      "id": "model.jaffle_shop.orders",
+      "resource_type": "model",
+      "checksum_name": "sha256",
+      "checksum": "27f8c79aad1cfd8411ab9c3d2ce8da1d787f7f05c58bbee1d247510dc426be0f",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.stg_orders",
+        "model.jaffle_shop.stg_payments"
+      ]
+    },
+    {
+      "id": "model.jaffle_shop.stg_customers",
+      "resource_type": "model",
+      "checksum_name": "sha256",
+      "checksum": "80e3223cd54387e11fa16cd0f4cbe15f8ff74dcd9900b93856b9e39416178c9d",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "seed.jaffle_shop.raw_customers"
+      ]
+    },
+    {
+      "id": "model.jaffle_shop.stg_orders",
+      "resource_type": "model",
+      "checksum_name": "sha256",
+      "checksum": "f4f881cb09d2c4162200fc331d7401df6d1abd4fed492554a7db70dede347108",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "seed.jaffle_shop.raw_orders"
+      ]
+    },
+    {
+      "id": "model.jaffle_shop.stg_payments",
+      "resource_type": "model",
+      "checksum_name": "sha256",
+      "checksum": "9c1ee3bfb10e07c2dfc325d55925da0e521887136d9051768cb8acf09dc86bda",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "seed.jaffle_shop.raw_payments"
+      ]
+    },
+    {
+      "id": "seed.jaffle_shop.raw_customers",
+      "resource_type": "seed",
+      "checksum_name": "sha256",
+      "checksum": "357d173dda65a741ad97d6683502286cc2655bb396ab5f4dfad12b8c39bd2a63",
+      "has_compiled_code": false,
+      "depends_on_nodes": []
+    },
+    {
+      "id": "seed.jaffle_shop.raw_orders",
+      "resource_type": "seed",
+      "checksum_name": "sha256",
+      "checksum": "ddecd7adf70a07a88b9c302aec2a03fce615b925c2c06f2d5ef99a5c97b41250",
+      "has_compiled_code": false,
+      "depends_on_nodes": []
+    },
+    {
+      "id": "seed.jaffle_shop.raw_payments",
+      "resource_type": "seed",
+      "checksum_name": "sha256",
+      "checksum": "6de0626a8db9c1750eefd1b2e17fac4c2a4b9f778eb50532d8b377b90de395e6",
+      "has_compiled_code": false,
+      "depends_on_nodes": []
+    },
+    {
+      "id": "test.jaffle_shop.accepted_values_orders_status__placed__shipped__completed__return_pending__returned.be6b5b5ec3",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.orders"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.accepted_values_stg_orders_status__placed__shipped__completed__return_pending__returned.080fb20aad",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.stg_orders"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.accepted_values_stg_payments_payment_method__credit_card__coupon__bank_transfer__gift_card.3c3820f278",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.stg_payments"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.not_null_customers_customer_id.5c9bf9911d",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.customers"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.not_null_orders_amount.106140f9fd",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.orders"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.not_null_orders_bank_transfer_amount.7743500c49",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.orders"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.not_null_orders_coupon_amount.ab90c90625",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.orders"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.not_null_orders_credit_card_amount.d3ca593b59",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.orders"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.not_null_orders_customer_id.c5f02694af",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.orders"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.not_null_orders_gift_card_amount.413a0d2d7a",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.orders"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.not_null_orders_order_id.cf6c17daed",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.orders"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.not_null_stg_customers_customer_id.e2cfb1f9aa",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.stg_customers"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.not_null_stg_orders_order_id.81cfe2fe64",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.stg_orders"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.not_null_stg_payments_payment_id.c19cc50075",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.stg_payments"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.relationships_orders_customer_id__customer_id__ref_customers_.c6ec7f58f2",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.customers",
+        "model.jaffle_shop.orders"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.unique_customers_customer_id.c5af1ff4b1",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.customers"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.unique_orders_order_id.fed79b3a6e",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.orders"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.unique_stg_customers_customer_id.c7614daada",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.stg_customers"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.unique_stg_orders_order_id.e3b841c71a",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.stg_orders"
+      ]
+    },
+    {
+      "id": "test.jaffle_shop.unique_stg_payments_payment_id.3744510712",
+      "resource_type": "test",
+      "checksum_name": "none",
+      "checksum": "",
+      "has_compiled_code": true,
+      "depends_on_nodes": [
+        "model.jaffle_shop.stg_payments"
+      ]
+    }
+  ],
+  "unit_tests": {
+    "unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns": {
+      "name": "test_stg_customers_renames_columns",
+      "model": "stg_customers",
+      "given": [
+        {
+          "input": "ref('raw_customers')",
+          "rows": [
+            {
+              "first_name": "Alice",
+              "id": 1,
+              "last_name": "A."
+            },
+            {
+              "first_name": "Bob",
+              "id": 2,
+              "last_name": "B."
+            }
+          ],
+          "format": "dict"
+        }
+      ],
+      "expect": {
+        "rows": [
+          {
+            "customer_id": 1,
+            "first_name": "Alice",
+            "last_name": "A."
+          },
+          {
+            "customer_id": 2,
+            "first_name": "Bob",
+            "last_name": "B."
+          }
+        ],
+        "format": "dict"
+      },
+      "description": "stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows — no real customer data.\n",
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "model.jaffle_shop.stg_customers"
+        ]
+      }
+    }
+  }
+}
