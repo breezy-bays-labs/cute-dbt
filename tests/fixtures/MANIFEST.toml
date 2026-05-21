@@ -1,4 +1,4 @@
-# Test-fixture provenance (PHI-safe invariant — hard, non-negotiable).
+# Test-fixture provenance (synthetic-only invariant — hard, non-negotiable).
 #
 # Every file committed under `tests/fixtures/` is listed here with its
 # origin, source, SHA-256, and an explicit `synthetic_only = true` flag.
@@ -12,9 +12,9 @@
 # A CI grep failure on any unlisted file under `tests/fixtures/` blocks
 # the PR.
 #
-# This mechanism enforces the ADR-5 PHI-safe constraint structurally
-# (not via a review checklist). A PHI-tainted fixture in this public
-# repo would torpedo the adoption thesis on day one.
+# This mechanism enforces the synthetic-only constraint structurally
+# (not via a review checklist). Real data in this public repo is a
+# release blocker.
 #
 # Schema (each entry):
 #   [[fixture]]

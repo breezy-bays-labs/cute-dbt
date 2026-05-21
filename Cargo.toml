@@ -15,10 +15,10 @@ categories = ["command-line-utilities", "development-tools", "visualization"]
 # Single-crate by deliberate design — see ARCHITECTURE.md. The hexagonal
 # layering (`src/{domain,ports,adapters,cli}`) is enforced by module
 # convention + clippy + review, not by Cargo crate boundaries.
-# Sibling structural-quality tools (dry-rs, scrap-rs) use workspaces because
-# they have multiple linkage-level consumers; cute-dbt has one binary, one
-# product. The `non-mirror-guard` CI job rejects a future `[workspace]` block
-# here so the single-crate decision is structurally enforced.
+# A workspace earns its keep when more than one crate ships; cute-dbt has
+# one binary and one product, so a workspace would be empty ceremony. The
+# `non-mirror-guard` CI job rejects a future `[workspace]` block here so the
+# single-crate decision is structurally enforced.
 
 [[bin]]
 name = "cute-dbt"
@@ -28,8 +28,8 @@ path = "src/main.rs"
 name = "cute4dbt"
 path = "src/lib.rs"
 
-# v0.1 seed deps only. Feature deps land with their PRs (per the dry-rs
-# per-PR pattern — avoids unused-dep clippy noise on stubs):
+# v0.1 seed deps only. Feature deps land with their PRs — adding each dep
+# in the PR that first uses it avoids unused-dep clippy noise on stubs:
 #   clap        -> PR 6 (CLI surface)
 #   askama      -> PR 8b (renderer, pinned 0.16)
 #   sqlparser   -> PR 7 (CTE engine, pinned 0.62)

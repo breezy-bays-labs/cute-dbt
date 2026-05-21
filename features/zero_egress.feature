@@ -1,11 +1,11 @@
-# Maps: SC1 (offline correctness), SC4 (risk-team-re-runnable auditability)
+# Maps: SC1 (offline correctness), SC4 (auditability re-runnable by anyone)
 Feature: The generated report makes zero outbound network requests
-  As a corporate risk reviewer
+  As a developer running cute-dbt on private data
   I want to prove the report cannot exfiltrate data or call out
-  So that cute-dbt clears the adoption gate
+  So that I can trust the tool with my local manifest
 
-  # This is the PRIMARY zero-egress proof. It is the artifact the risk
-  # team re-runs themselves, unchanged. The test asserts against a real
+  # This is the PRIMARY zero-egress proof. It is the artifact anyone can
+  # re-run themselves, unchanged. The test asserts against a real
   # file:// origin (Chromium's stricter null-origin context), NEVER a
   # 127.0.0.1 loopback — the proof is invalid if it tests loopback.
   Scenario: Opening the report with networking denied issues no external requests
@@ -17,8 +17,8 @@ Feature: The generated report makes zero outbound network requests
 
   # SECONDARY structured lint — targets real loading constructs, NOT raw
   # `grep http` (minified bundles carry hundreds of inert URL string
-  # literals; raw grep is false-positive noise that gives the risk team a
-  # worse signal than the headless test).
+  # literals; raw grep is false-positive noise that gives a worse signal
+  # than the headless test).
   Scenario: The report contains no real external-resource-loading constructs
     Given a generated "report.html"
     When the resource-reference lint scans it

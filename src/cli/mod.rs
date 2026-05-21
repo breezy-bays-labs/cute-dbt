@@ -27,8 +27,8 @@ mod tests {
     use super::*;
 
     /// Bootstrap-surface coverage: exercises the placeholder so the
-    /// 85% coverage threshold passes on PR 1 (dry-rs coverage-trap
-    /// pattern). Replaced with real run-loop tests at PR 6.
+    /// 85% coverage threshold passes on PR 1 (coverage-trap pattern).
+    /// Replaced with real run-loop tests at PR 6.
     #[test]
     fn run_returns_success_without_panic() {
         // Using debug-format equality keeps the assertion meaningful even
