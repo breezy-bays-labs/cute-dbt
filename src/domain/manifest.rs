@@ -3,8 +3,8 @@
 //!
 //! POD-only owned data per ADR-1 (single-crate hexagonal,
 //! `domain → ports → adapters → cli`). Constructors are the canonical
-//! entry points so additive fields stay mechanical (scrap4rs D10
-//! constructor pattern).
+//! entry points so additive fields stay mechanical — adding a field
+//! touches the constructor, not every call site.
 //!
 //! ## Container-shape contract for PR 4b
 //!
@@ -136,7 +136,7 @@ impl DependsOn {
 ///
 /// Field set is the v0.1 consumption subset — see ADR-5 ("tolerant
 /// deserialization: model only the fields cute-dbt consumes"). Adding
-/// fields is mechanically additive via [`Node::new`] (scrap4rs D10).
+/// fields is mechanically additive via [`Node::new`].
 ///
 /// `compiled_code` is `Option<String>` so a parse-only manifest can
 /// deserialize without an early error; the Stage-2 fail-closed check
