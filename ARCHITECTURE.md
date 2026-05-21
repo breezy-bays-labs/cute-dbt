@@ -1,13 +1,13 @@
 # cute-dbt — Architecture
 
 This document is the public derivation of the cute-dbt v0.1 architecture: the
-single-crate hexagonal layering, the conscious non-mirrors of the sibling
-sensor tools, the two-stage fail-closed contract, the `StateComparator`
-strategy, the asset-inlining + zero-egress gate, and the PHI-safe fixture
-invariant. The canonical source for each decision is the project's decision
-records (ADR-1 through ADR-5); this file translates those decisions into a
-public-repo narrative that does not require access to the private records to
-read or audit.
+single-crate hexagonal layering, the conscious design simplifications, the
+two-stage fail-closed contract, the `StateComparator` strategy, the
+asset-inlining + zero-egress gate, and the synthetic-only fixture invariant.
+The canonical source for each decision is the project's decision records
+(ADR-1 through ADR-5); this file translates those decisions into a public-repo
+narrative that does not require access to the private records to read or
+audit.
 
 The `.feature` files under [`features/`](features/) are the **executable
 acceptance contract** (cucumber-rs ATDD outer loop, automated in PR 10);
@@ -49,17 +49,20 @@ v0.1 has one output format (HTML); `--format json` is explicitly v0.2+.
 machinery beyond what the run loop calls. This keeps the model trivial to
 build in tests from literals.
 
-## 2. Conscious non-mirrors
+## 2. Conscious design simplifications
 
-cute-dbt is the fourth sensor in an
-[agentic-development sensor suite](README.md#sibling-tools) alongside
-`crap4rs`, `scrap-rs`, and `dry-rs`. Each sibling is a multi-crate Rust
-workspace with apparatus cute-dbt deliberately does **not** adopt. The
-absences are documented architectural choices, not accidents — recording
-them stops a future contributor (human or agent) from "completing the
-pattern" by adding machinery that guards no invariant here.
+cute-dbt is a single artifact (one binary, one product) with HTML-primary
+output and exactly one parser in the dependency graph. Several pieces of
+common Rust apparatus exist for projects whose shape cute-dbt does not have
+— multi-crate workspaces for crates with multiple linkage-level consumers,
+public-API shims for library consumers, AST-purity bans for shared cores
+with rival adapter parsers, JSON wire envelopes for machine-readable output.
+cute-dbt deliberately does **not** adopt them. The absences are documented
+architectural choices, not accidents — recording them stops a future
+contributor (human or agent) from "completing the pattern" by adding
+machinery that guards no invariant here.
 
-| # | Sibling apparatus | cute-dbt | Why N/A (public-safe Y-statement) | Enforcement |
+| # | Apparatus | cute-dbt | Why N/A | Enforcement |
 |---|---|---|---|---|
 | 1 | Multi-crate Cargo workspace + per-crate `Cargo.toml` | Single crate `cute4dbt` (lib + bin) | No second linkage-level consumer in the v0.x horizon. A workspace exists to serve >1 crate; importing the apparatus here would be a project-value violation (R7: "not overly complex"). | **CI:** `non-mirror-guard` job rejects a `[workspace]` table in `Cargo.toml`. |
 | 2 | Per-crate independent versioning | Single artifact version | Moot — one crate, one version. The release cadence is whole-product, not per-component. | Absence (no second crate to version independently). |
@@ -245,7 +248,7 @@ file.
 
 `cargo-deny` covers crate-level supply-chain provenance; the asset
 manifest covers the embedded frontend bundle. Together they are the
-supply-chain artifact the risk team reads. The update flow is bounded:
+supply-chain artifact any auditor can read directly. The update flow is bounded:
 bump version → re-download → update `sha256` + `license` in
 `MANIFEST.toml` → the headless-network test (below) re-validates
 zero-egress on the new bundle.
@@ -255,7 +258,7 @@ zero-egress on the new bundle.
 The **headless-browser network-block test** opens the generated
 `report.html` via a real `file://` URL with all network access denied and
 asserts **zero requests**. This is the R1-spike method; it is re-runnable
-by the risk team themselves; it is the strongest auditability artifact.
+by anyone with the repository checked out; it is the strongest auditability artifact.
 It is a CI gate from PR 9 onward (the bootstrap workflow scaffolds the
 job and activates it when the first real `report.html` exists).
 
@@ -271,46 +274,47 @@ CSS `@import`, CSS `url()`, protocol-relative `//`. It uses an HTML parser
 (named in PR 9: `tl`, or `scraper` if CSS `url()` needs a real CSS pass),
 **never raw `grep http`.** Minified bundles carry hundreds of inert URL
 string literals (the R1 spike confirmed this empirically); a raw grep is
-false-positive noise that would give the risk team a worse signal than
-the headless test.
+false-positive noise that would hide the real signal under more text than
+the headless test's clear zero-requests output.
 
 ### Auditability index
 
 The PR 9 [`AUDIT.md`](AUDIT.md) lands as a one-page index of every
-artifact a risk team can re-run — the headless command, the resource-ref
+artifact a reviewer can re-run — the headless command, the resource-ref
 lint, `assets/MANIFEST.toml`, `tests/fixtures/MANIFEST.toml` (§6),
 `deny.toml`, `Cargo.lock`. See [`SECURITY.md`](SECURITY.md) for the
 plain-language version of this story.
 
-## 6. PHI-safe fixture invariant
+## 6. Synthetic-only fixture invariant
 
 Every committed fixture / `insta` snapshot / `.feature` example **must**
-contain only synthetic or public-demo data. No real customer rows, no
-real PHI, ever. This is not just hygiene — cute-dbt's reason to exist
-is that the risk team can trust it near PHI data. A PHI-tainted fixture
-in this public repo would torpedo the adoption argument on day one.
+contain only synthetic or public-demo data. No real data from any source,
+ever. cute-dbt's privacy property is that when you run it, your manifest
+stays on your machine; this public repository must reflect that property by
+never including real data of its own. A real-data fixture in this public
+repo would contradict the privacy story on day one.
 
 The invariant is **mechanically enforced**, not a checklist line:
 
 - **`tests/fixtures/MANIFEST.toml`** lists every committed fixture with:
   - `path` — the fixture file's repo-relative path
-  - `origin` — upstream source name (e.g. `tuva-demo`, `jaffle-shop`) or
+  - `origin` — upstream source name (e.g. `jaffle-shop`) or
     `synthetic-generated`
   - `url` — the upstream URL when the fixture is a public demo, omitted
     when synthetic
   - `sha256` — the SHA-256 of the fixture file
   - `synthetic_only = true` — explicit, per-file affirmation that the
-    fixture contains no real customer or PHI data
+    fixture contains no real data
 - A **`cargo test`** parses the manifest, walks `tests/fixtures/`, and
   verifies every file is listed.
 - A **CI grep** fails the build on any file under `tests/fixtures/` not
   listed in the manifest.
 
 The same shape is used for `assets/MANIFEST.toml` (§5) — provenance lives
-in a TOML file the risk team can read directly and the build is the gate
-that keeps it honest.
+in a TOML file anyone can read directly and the build is the gate that
+keeps it honest.
 
-PHI in this public repo is a release blocker.
+Real data in this public repo is a release blocker.
 
 ## 7. Composition note — the run loop lives in `cli`
 
@@ -358,12 +362,11 @@ Three CI invariants pin the feature-spec contract — see
 
 ## Cross-references
 
-- [`SECURITY.md`](SECURITY.md) — plain-language zero-egress + PHI-safe
-  statement (risk-team-followable; the non-engineer-readable companion
-  to §5 and §6)
+- [`SECURITY.md`](SECURITY.md) — plain-language zero-egress + privacy
+  statement (non-engineer-readable companion to §5 and §6)
 - [`AGENTS.md`](AGENTS.md) — cross-provider agent operating guide
 - [`CLAUDE.md`](CLAUDE.md) — Claude-specific entry point
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — developer workflow
-- [`README.md`](README.md) — what cute-dbt does and why it is safe to run
-  near sensitive data
+- [`README.md`](README.md) — what cute-dbt does and why your data stays
+  on your machine
 - [`features/README.md`](features/README.md) — acceptance-spec map

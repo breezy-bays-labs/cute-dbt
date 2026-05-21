@@ -2,7 +2,7 @@
 #
 # Every asset inlined into the generated `report.html` is listed here with
 # its pinned version, source URL, SHA-256, and SPDX license. This file is
-# the supply-chain artifact the risk team reads for the *frontend bundle*
+# the supply-chain artifact any auditor can read for the *frontend bundle*
 # (paired with `Cargo.toml` + `Cargo.lock` + `deny.toml` for the Rust
 # crate graph).
 #

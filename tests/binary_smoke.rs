@@ -1,8 +1,8 @@
 //! Binary-smoke integration test.
 //!
 //! Spawns the compiled `cute-dbt` binary via `CARGO_BIN_EXE_cute-dbt` and
-//! asserts it exits successfully on a no-args invocation. This is the
-//! dry-rs coverage-trap pattern: `cargo llvm-cov` instruments subprocess
+//! asserts it exits successfully on a no-args invocation. This applies a
+//! coverage-trap pattern: `cargo llvm-cov` instruments subprocess
 //! executions when run via `cargo llvm-cov nextest`, so this test covers
 //! `main` for the bootstrap coverage gate.
 //!

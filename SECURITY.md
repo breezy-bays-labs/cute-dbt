@@ -1,10 +1,10 @@
 # Security
 
-This document is the plain-language security statement for cute-dbt, written
-for a non-engineer risk reviewer. Every claim here corresponds to a
-mechanical artifact a risk team can re-run themselves; the technical
-mechanism lives in [`ARCHITECTURE.md`](ARCHITECTURE.md) §5 (zero-egress)
-and §6 (PHI-safe fixtures).
+This document is the plain-language security statement for cute-dbt. Every
+claim here corresponds to a mechanical artifact anyone with the repository
+checked out can re-run themselves; the technical mechanism lives in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) §5 (zero-egress) and §6 (synthetic-only
+fixtures).
 
 ## What cute-dbt is
 
@@ -22,10 +22,10 @@ or auto-update.
 
 ## What cute-dbt does **not** do
 
-This list is the adoption contract for risk-restricted environments
-(PHI-restricted, regulated, or air-gapped). Each item is either true by
-construction (the code that would do the thing does not exist in the
-binary) or verified mechanically (a CI gate enforces it).
+This list is the contract for running cute-dbt on private or sensitive
+datasets. Each item is either true by construction (the code that would do
+the thing does not exist in the binary) or verified mechanically (a CI gate
+enforces it).
 
 ### 1. No outbound network requests
 
@@ -45,7 +45,7 @@ that calls out.
 
 How this is proven, in two layers:
 
-- **Primary proof (the one the risk team re-runs):** a *headless-browser
+- **Primary proof (the one anyone can re-run):** a *headless-browser
   network-block test* opens the generated `report.html` with all network
   access denied and asserts zero requests. The test runs from a real
   `file://` URL — the same way an operator opens the report on their own
@@ -89,12 +89,12 @@ writes no HTML. There is no half-finished report and no "best-effort"
 output. The technical contract (the four named error variants) is in
 [`ARCHITECTURE.md`](ARCHITECTURE.md) §3.
 
-### 5. PHI-safe fixtures (this repository contains no real data)
+### 5. Synthetic-only fixtures (this repository contains no real data)
 
 Every committed test fixture, every snapshot, and every `.feature`
 example table in this repository must contain only **synthetic** data or
-**public demonstration** data. No real customer rows. No real PHI. No
-exception.
+**public demonstration** data. No real customer rows. No real records of
+any kind. No exception.
 
 This is not a checklist line; it is enforced mechanically:
 
@@ -129,10 +129,10 @@ The build is supply-chain-auditable:
   supply-chain artifact for the inlined assets that `cargo-deny` does
   not see (because they are not Cargo dependencies).
 
-## How a risk team verifies all of the above
+## How to verify all of the above
 
-Every claim in this document maps to an artifact in this repository
-that a risk team can inspect or re-run themselves:
+Every claim in this document maps to an artifact in this repository that
+anyone with the repository checked out can inspect or re-run themselves:
 
 | Claim | Artifact |
 |-------|----------|
@@ -141,7 +141,7 @@ that a risk team can inspect or re-run themselves:
 | No database driver | `Cargo.toml` dependency list (no DuckDB, no Snowflake, no warehouse driver). |
 | No telemetry | Source-level absence; reinforced by `cargo-deny`'s license + source policy. |
 | Fail-closed contract | The four `PreflightError` variants are exhaustively covered by the `fail_closed.feature` scenarios under `features/`. |
-| PHI-safe fixtures | `tests/fixtures/MANIFEST.toml` + the `cargo test` that parses it + the CI grep. |
+| Synthetic-only fixtures | `tests/fixtures/MANIFEST.toml` + the `cargo test` that parses it + the CI grep. |
 | Reproducible build | `Cargo.lock` + `rust-toolchain.toml` + `cargo-deny` gate. |
 | Vendored frontend provenance | `assets/MANIFEST.toml` (name, version, URL, SHA-256, SPDX). |
 

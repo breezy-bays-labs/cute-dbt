@@ -1,8 +1,8 @@
 # cargo-deny configuration for cute-dbt.
 #
-# Double-duty: standard quality gate AND the supply-chain auditability
-# artifact the risk team reads (paired with `assets/MANIFEST.toml` for
-# vendored frontend assets — Cargo deps + frontend bundle together).
+# Double-duty: standard quality gate AND a supply-chain auditability
+# artifact any auditor can read directly (paired with `assets/MANIFEST.toml`
+# for vendored frontend assets — Cargo deps + frontend bundle together).
 
 [graph]
 all-features = true

@@ -12,8 +12,8 @@
 //! - [`cli`] — clap derive, `ExitCode` mapping, run-loop composition
 //!
 //! See `ARCHITECTURE.md` at the repo root for the full layering invariant,
-//! the two-stage fail-closed contract, and the conscious non-mirrors of the
-//! sibling sensor tools.
+//! the two-stage fail-closed contract, and the conscious design
+//! simplifications.
 
 #![warn(clippy::pedantic, clippy::cargo)]
 #![forbid(unsafe_code)]

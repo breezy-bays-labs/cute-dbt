@@ -11,7 +11,7 @@ contract, and the auditability package have stabilized.
 ## [Unreleased]
 
 ### Added
-- Genesis bootstrap commit: single-crate Cargo workspace skeleton, full CI
+- Genesis bootstrap commit: single-crate Cargo skeleton, full CI
   battery (fmt / clippy pedantic / nextest / llvm-cov / MSRV / cargo-deny /
   docs / crap4rs / non-mirror-guard / baseline-required-grep /
   feature-count), repo chrome (README, AGENTS, CLAUDE, CONTRIBUTING,
