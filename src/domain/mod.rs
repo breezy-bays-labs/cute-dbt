@@ -14,10 +14,11 @@
 //!   [`CteGraph`] / [`CteNode`] / [`CteEdge`], [`JoinType`],
 //!   [`ModifiedSet`], [`PreflightError`] (`#[non_exhaustive]`, 4
 //!   variants).
-//! - **PR 5 (#TBD)** — `state` submodule additions: `StateModifier`
+//! - **PR 5 (#7)** — `state` submodule additions: `StateModifier`
 //!   trait (object-safe, deliberately not `Send + Sync`),
-//!   `BodyChecksumModifier`, `StateComparator::body_only`,
-//!   `modified_set`, in-scope selection.
+//!   `BodyChecksumModifier`, `StateComparator` (`body_only`,
+//!   `modified_set`, `in_scope_unit_tests`), `InScopeSet`, and
+//!   `resolve_target_model` (bare `model:` name → full node).
 //! - **PR 6 (#TBD)** — `preflight` submodule additions: Stage-2
 //!   compiled-SQL presence check (runs AFTER scope selects the
 //!   in-scope set).
@@ -38,5 +39,8 @@ pub mod unit_test;
 pub use cte::{CteEdge, CteGraph, CteNode, JoinType, Span};
 pub use manifest::{Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeId};
 pub use preflight::PreflightError;
-pub use state::ModifiedSet;
+pub use state::{
+    BodyChecksumModifier, InScopeSet, ModifiedSet, ModifierKind, StateComparator, StateModifier,
+    resolve_target_model,
+};
 pub use unit_test::{UnitTest, UnitTestExpect, UnitTestGiven};
