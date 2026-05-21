@@ -1,4 +1,4 @@
-# Test-fixture provenance (PHI-safe invariant — hard, non-negotiable).
+# Test-fixture provenance (synthetic-only invariant — hard, non-negotiable).
 #
 # Every file committed under `tests/fixtures/` is listed here with its
 # origin, source URL, SHA-256, and an explicit `synthetic_only = true`
@@ -15,10 +15,9 @@
 #      dependency, fails the PR if anything under tests/fixtures/ is
 #      unlisted.
 #
-# Together these enforce ADR-5's PHI-safe constraint structurally — a
-# PHI-tainted fixture cannot land silently. A real-PHI fixture in this
-# public repo would torpedo the cute-dbt adoption thesis (risk-team trust
-# IS the product) on day one.
+# Together these enforce the synthetic-only constraint structurally — a
+# fixture containing real data cannot land silently. Real data in this
+# public repo is a release blocker.
 #
 # Schema for each [[fixture]] entry:
 #   path = "<filename-relative-to-tests/fixtures/>"
@@ -43,7 +42,7 @@ description = """
 Compiled dbt 1.11.9 manifest (schema v12) for the canonical \
 dbt-labs/jaffle_shop_duckdb demo with one authored unit test on \
 stg_customers. Synthetic Faker-style demo data only — no real customers, \
-no PHI. Acts as the BASELINE of the diff-scoping pair: stg_customers \
+no real records. Acts as the BASELINE of the diff-scoping pair: stg_customers \
 body is the un-modified version.\
 """
 
@@ -60,7 +59,7 @@ baseline, but with stg_customers body modified (added `trim()` calls on \
 first_name/last_name). This is the CURRENT side of the diff-scoping \
 pair — PR 5's StateComparator should see stg_customers in the modified \
 set and customers (depends on stg_customers but its own body is \
-unchanged) outside it. Pure synthetic data, no PHI.\
+unchanged) outside it. Pure synthetic data only.\
 """
 
 [[fixture]]
@@ -75,5 +74,5 @@ description = """
 model node has `compiled_code: null`. Feeds PR 6's Stage-2 fail-closed \
 `NotCompiled` arm (ADR-2): when an in-scope model lacks compiled SQL, \
 cute-dbt must exit non-zero, name the node, give remediation. Pure \
-synthetic data, no PHI.\
+synthetic data only.\
 """

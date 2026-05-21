@@ -84,7 +84,7 @@ pre-push:
         fi
       timeout: 5s
     fixture-manifest-gate:
-      # Mirror the `fixture-manifest-gate` CI job (ADR-5 PHI-safe invariant).
+      # Mirror the `fixture-manifest-gate` CI job (synthetic-only invariant).
       # The cargo tests `tests/fixture_manifest_listed.rs` cover SHA-256 +
       # synthetic_only + listed-check exhaustively; this hook is the
       # fastest "you forgot to list it" signal pre-push.
@@ -117,7 +117,7 @@ pre-push:
         missing=$(comm -13 "$tmpdir/committed" "$tmpdir/listed" | sed '/^$/d')
         fail=0
         if [ -n "$unlisted" ]; then
-          echo "fixture-manifest-gate: unlisted files (PHI-safe invariant — ADR-5):"
+          echo "fixture-manifest-gate: unlisted files (synthetic-only invariant):"
           printf '  - %s\n' $unlisted
           fail=1
         fi

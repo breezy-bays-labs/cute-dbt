@@ -226,15 +226,14 @@ jobs:
           fi
 
   fixture-manifest-gate:
-    # PHI-safe fixture invariant (ADR-5, hard, non-negotiable). Every file
+    # Synthetic-only fixture invariant (hard, non-negotiable). Every file
     # under `tests/fixtures/` (except MANIFEST.toml itself) MUST be listed
-    # in `tests/fixtures/MANIFEST.toml` with `synthetic_only = true`. A
-    # PHI-tainted fixture in the public repo torpedoes the cute-dbt
-    # adoption thesis on day one. This job is the STRUCTURAL gate;
-    # `tests/fixture_manifest_listed.rs` + `tests/fixture_parse.rs` mirror
-    # the constraint for fast local signal. No untrusted GitHub event
-    # interpolation in any `run:` block.
-    name: PHI-safe fixture gate (every fixture listed in MANIFEST.toml)
+    # in `tests/fixtures/MANIFEST.toml` with `synthetic_only = true`. Real
+    # data in the public repo is a release blocker. This job is the
+    # STRUCTURAL gate; `tests/fixture_manifest_listed.rs` +
+    # `tests/fixture_parse.rs` mirror the constraint for fast local signal.
+    # No untrusted GitHub event interpolation in any `run:` block.
+    name: Synthetic-only fixture gate (every fixture listed in MANIFEST.toml)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -272,14 +271,14 @@ jobs:
             -printf '%P\n' 2>/dev/null \
             | sort -u || true)
 
-          # Any committed file absent from `listed` violates the PHI-safe gate.
+          # Any committed file absent from `listed` violates the synthetic-only gate.
           unlisted=$(comm -23 <(printf '%s\n' "$committed") <(printf '%s\n' "$listed") | sed '/^$/d')
           # Any listed path not present on disk is MANIFEST drift.
           missing=$(comm -13 <(printf '%s\n' "$committed") <(printf '%s\n' "$listed") | sed '/^$/d')
 
           fail=0
           if [ -n "$unlisted" ]; then
-            echo "::error::fixture-manifest-gate: files under tests/fixtures/ are NOT listed in MANIFEST.toml (PHI-safe invariant — ADR-5):"
+            echo "::error::fixture-manifest-gate: files under tests/fixtures/ are NOT listed in MANIFEST.toml (synthetic-only invariant):"
             printf '  - %s\n' $unlisted
             fail=1
           fi

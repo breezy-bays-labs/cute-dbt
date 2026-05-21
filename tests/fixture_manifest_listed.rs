@@ -1,7 +1,6 @@
-//! PHI-safe fixture gate (test-side mirror of the CI grep).
+//! Synthetic-only fixture gate (test-side mirror of the CI grep).
 //!
-//! Per ADR-5 (`ops/decisions/cute-dbt/adr-mvp-architecture.md`), every file
-//! committed under `tests/fixtures/` MUST be listed in
+//! Every file committed under `tests/fixtures/` MUST be listed in
 //! `tests/fixtures/MANIFEST.toml` with `synthetic_only = true`. The
 //! structural enforcement is the CI job `fixture-manifest-gate` (failing
 //! the PR if any file is unlisted); this `cargo test` is the
@@ -12,7 +11,7 @@
 //!
 //! 1. Every regular file under `tests/fixtures/` (excluding `MANIFEST.toml`
 //!    itself) appears in the manifest's `[[fixture]]` table by `path`.
-//! 2. Every entry has `synthetic_only = true` (the PHI-safe invariant).
+//! 2. Every entry has `synthetic_only = true` (the synthetic-only invariant).
 //! 3. Every entry's `sha256` matches the SHA-256 of the file on disk.
 //!
 //! Empty-fixture set is a valid state (assertion #1 vacuously true) — this
@@ -61,7 +60,7 @@ fn manifest_path() -> PathBuf {
 
 fn load_manifest() -> ManifestFile {
     let bytes = fs::read_to_string(manifest_path())
-        .expect("tests/fixtures/MANIFEST.toml must exist (PHI-safe invariant)");
+        .expect("tests/fixtures/MANIFEST.toml must exist (synthetic-only invariant)");
     toml::from_str(&bytes).expect("tests/fixtures/MANIFEST.toml must be valid TOML")
 }
 
@@ -111,7 +110,7 @@ fn every_committed_fixture_is_listed_in_manifest() {
     let unlisted: Vec<&String> = committed.difference(&listed).collect();
     assert!(
         unlisted.is_empty(),
-        "ADR-5 PHI-safe invariant violation: files under tests/fixtures/ \
+        "synthetic-only invariant violation: files under tests/fixtures/ \
          are not listed in MANIFEST.toml: {unlisted:?}\n\
          Every committed fixture must have a [[fixture]] entry with \
          synthetic_only = true."
@@ -135,7 +134,7 @@ fn every_listed_fixture_is_synthetic_only() {
         .collect();
     assert!(
         non_synthetic.is_empty(),
-        "ADR-5 PHI-safe invariant violation: fixtures must have \
+        "synthetic-only invariant violation: fixtures must have \
          synthetic_only = true: {non_synthetic:?}"
     );
 }

@@ -47,8 +47,8 @@ thiserror = "2"
 # Fixture-gate toolchain (PR 4a, #5):
 #   insta  -> golden-snapshot scaffold (first real snapshot lands PR 4b).
 #   toml   -> parse `tests/fixtures/MANIFEST.toml` in `tests/fixture_*.rs`
-#            so the PHI-safe invariant has a fast local signal alongside
-#            the structural CI grep job `fixture-manifest-gate`.
+#            so the synthetic-only invariant has a fast local signal
+#            alongside the structural CI grep job `fixture-manifest-gate`.
 #   sha2 + hex -> compute SHA-256 of each listed fixture file for the
 #            MANIFEST.toml integrity assertion (belt-and-braces with CI).
 #   walkdir -> walk `tests/fixtures/` from the listed-test (std-only walk
