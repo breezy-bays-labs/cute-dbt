@@ -121,11 +121,13 @@ fn mermaid_block(graph: &CteGraph) -> String {
 /// One Mermaid node declaration per CTE node, in declaration order.
 ///
 /// Nodes are keyed `n{index}` so edges can reference them by the same
-/// `usize` index a [`CteEdge`] already stores.
+/// `usize` index a [`CteEdge`] already stores. Each CTE name is
+/// input-derived (it comes from the manifest's compiled SQL), so it is
+/// HTML-escaped via [`escape_label`] before interpolation.
 fn node_lines(nodes: &[CteNode]) -> String {
     let mut out = String::new();
     for (index, node) in nodes.iter().enumerate() {
-        let _ = writeln!(out, "  n{index}[\"{}\"]", node.name());
+        let _ = writeln!(out, "  n{index}[\"{}\"]", escape_label(node.name()));
     }
     out
 }
@@ -154,6 +156,21 @@ fn join_label(join_type: JoinType) -> &'static str {
         JoinType::Full => "FULL",
         JoinType::Cross => "CROSS",
     }
+}
+
+/// HTML-escape a CTE name before it is interpolated into a Mermaid label.
+///
+/// CTE names are input-derived — they come from the manifest's compiled
+/// SQL. A quoted SQL identifier can carry a `"` (which would break the
+/// Mermaid `["..."]` label syntax) or an HTML metacharacter (which,
+/// inlined into the `<pre>` block, the browser's HTML parser would act
+/// on before Mermaid runs). `&` is escaped first so the substitutions
+/// cannot compound.
+fn escape_label(name: &str) -> String {
+    name.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -230,6 +247,16 @@ mod tests {
     }
 
     #[test]
+    fn escape_label_neutralizes_metacharacters() {
+        assert_eq!(escape_label("clean_name"), "clean_name");
+        assert_eq!(escape_label("a\"b"), "a&quot;b");
+        assert_eq!(escape_label("a & b"), "a &amp; b");
+        // `&` is escaped first: `<script>` becoming `&lt;script&gt;`
+        // (rather than `&amp;lt;script&amp;gt;`) proves the ordering.
+        assert_eq!(escape_label("<script>"), "&lt;script&gt;");
+    }
+
+    #[test]
     fn an_empty_graph_renders_a_bare_mermaid_block() {
         assert_eq!(mermaid_block(&CteGraph::default()), "graph LR\n");
     }
@@ -286,6 +313,22 @@ mod tests {
         assert!(html.contains("n0[\"orders\"]"), "first node rendered");
         assert!(html.contains("n1[\"customers\"]"), "second node rendered");
         assert!(html.contains("n0 -->|INNER| n1"), "edge rendered");
+    }
+
+    #[test]
+    fn the_smoke_report_escapes_a_hostile_cte_name() {
+        // A CTE name is input-derived; HTML metacharacters in it must not
+        // break out of the <pre> block when the report is opened.
+        let graph = CteGraph::new(vec![node("</pre><script>EVIL</script>")], vec![]);
+        let html = smoke_report_html(&graph);
+        assert!(
+            !html.contains("<script>EVIL"),
+            "the raw injection payload must not survive into the document",
+        );
+        assert!(
+            html.contains("&lt;/pre&gt;&lt;script&gt;EVIL&lt;/script&gt;"),
+            "the hostile name is HTML-escaped in the Mermaid label",
+        );
     }
 
     #[test]
