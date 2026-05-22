@@ -10,10 +10,14 @@
 //! - **PR 7 (#9)** — [`cte_engine`]: sqlparser-rs 0.62 parser-AST pass;
 //!   CTE dependency graph + join-type edge classification (inner / left /
 //!   right / full / cross). No tokenizer/comment pass (v0.2).
-//! - **PR 8a (#TBD)** — `asset_embed.rs`: `include_str!` / `include_bytes!`
-//!   embedding infra + `assets/MANIFEST.toml` provenance contract.
-//! - **PR 8b (#TBD)** — `render.rs`: askama 0.16 template reproducing the
+//! - **PR 8a (#10)** — [`asset_embed`]: the vendored frontend bundle
+//!   embedded via `include_str!` into `.rodata` + the
+//!   `assets/MANIFEST.toml` provenance contract + a placeholder smoke
+//!   renderer. Every vendored asset is text, so there is no
+//!   `include_bytes!` user.
+//! - **PR 8b (#11)** — `render.rs`: askama 0.16 template reproducing the
 //!   returned Claude Design `report.html` DOM/class contract.
 
+pub mod asset_embed;
 pub mod cte_engine;
 pub mod manifest;
