@@ -1,26 +1,67 @@
 # Vendored frontend asset provenance.
 #
-# Every asset inlined into the generated `report.html` is listed here with
-# its pinned version, source URL, SHA-256, and SPDX license. This file is
-# the supply-chain artifact any auditor can read for the *frontend bundle*
-# (paired with `Cargo.toml` + `Cargo.lock` + `deny.toml` for the Rust
-# crate graph).
+# Every asset inlined into cute-dbt's generated HTML report is listed here
+# with its pinned version, canonical source URL, SHA-256 of the embedded
+# bytes, and SPDX license. Paired with `Cargo.toml` + `Cargo.lock` +
+# `deny.toml` (the Rust crate graph), this file is the complete
+# supply-chain artifact an auditor reads for the frontend bundle.
 #
-# Skeleton at bootstrap; entries populated in PR 8a (#TBD) when the
-# `include_str!` / `include_bytes!` embedding infrastructure lands.
+# Integrity is enforced two ways, both of which fail the PR on drift:
+#   - `tests/assets_manifest.rs` — a `cargo test` asserting every listed
+#     asset exists on disk, its SHA-256 matches, its license is permissive,
+#     and no file under `assets/` is unlisted.
+#   - the `assets-manifest-gate` CI job — a structural grep mirroring
+#     `fixture-manifest-gate`.
+#
+# Update flow for a version bump: re-download from `source`, replace the
+# file, update `version` + `sha256` here; the PR 9 headless-zero-egress
+# test then re-validates that the new bundle still issues zero requests.
 #
 # Schema (each entry):
 #   [[asset]]
-#   name = "..."                # human-readable name
-#   version = "..."             # pinned version
-#   source = "https://..."      # canonical download URL
-#   sha256 = "..."              # hex SHA-256 of the embedded bytes
-#   license = "MIT" | "BSD-3-Clause" | ...   # SPDX identifier
-#
-# Expected v0.1 entries (placeholder until PR 8a):
-#   - sakura ~1.5         (CSS, classless)
-#   - jquery 3.7.1        (JS, DataTables dep)
-#   - datatables 2.1.8    (JS + CSS, sort/filter/search)
-#   - mermaid 11.x        (UMD bundle, securityLevel:'strict')
+#   name    = "..."             # library identifier (e.g. "mermaid")
+#   version = "..."             # pinned upstream version
+#   path    = "..."             # filename within assets/
+#   source  = "https://..."     # canonical download URL
+#   sha256  = "..."             # hex SHA-256 of the embedded bytes
+#   license = "MIT" | ...       # SPDX identifier (permissive only)
 
-asset = []
+[[asset]]
+name = "sakura"
+version = "1.5.0"
+path = "sakura-1.5.0.css"
+source = "https://unpkg.com/sakura.css@1.5.0/css/sakura.css"
+sha256 = "c997043b8e58936644e2bd47acb561c2f997a1167daf5706ab6ad2ca4fe9629c"
+license = "MIT"
+
+[[asset]]
+name = "jquery"
+version = "3.7.1"
+path = "jquery-3.7.1.min.js"
+source = "https://code.jquery.com/jquery-3.7.1.min.js"
+sha256 = "fc9a93dd241f6b045cbff0481cf4e1901becd0e12fb45166a8f17f95823f0b1a"
+license = "MIT"
+
+[[asset]]
+name = "datatables"
+version = "2.1.8"
+path = "datatables-2.1.8.min.js"
+source = "https://cdn.datatables.net/2.1.8/js/dataTables.min.js"
+sha256 = "69306f7b554a5a8ce68e8f4d6f613bdd1bcfe2df313962e7fc83cf5f6be5e085"
+license = "MIT"
+
+[[asset]]
+name = "datatables"
+version = "2.1.8"
+path = "datatables-2.1.8.min.css"
+source = "https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.min.css"
+sha256 = "10587c5eacd75926baec92990840987da4a8fb66b91c8c43ac955e7b174f21b0"
+license = "MIT"
+
+[[asset]]
+name = "mermaid"
+version = "11.15.0"
+path = "mermaid-11.15.0.umd.min.js"
+source = "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js"
+sha256 = "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de"
+license = "MIT"

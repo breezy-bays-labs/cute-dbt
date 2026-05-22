@@ -296,6 +296,88 @@ jobs:
           fi
           exit "$fail"
 
+  assets-manifest-gate:
+    # Vendored-asset provenance invariant. Every file under `assets/`
+    # (except MANIFEST.toml itself) MUST be listed in `assets/MANIFEST.toml`
+    # with a permissive (non-copyleft) SPDX license. This is the STRUCTURAL
+    # gate; `tests/assets_manifest.rs` mirrors the constraint and adds
+    # SHA-256 verification for fast local signal. Shape mirrors
+    # `fixture-manifest-gate`. No untrusted GitHub event interpolation in
+    # any `run:` block.
+    name: Asset-provenance gate (every asset listed in MANIFEST.toml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every assets/* file must be listed in MANIFEST.toml
+        run: |
+          set -euo pipefail
+          manifest="assets/MANIFEST.toml"
+          if [ ! -f "$manifest" ]; then
+            echo "::error::assets-manifest-gate: $manifest missing"
+            exit 1
+          fi
+
+          # Extract every `path = "..."` value inside an [[asset]] table.
+          # Track whether we are inside an `[[asset]]` block so a `path =`
+          # in some other table cannot pollute the listed set.
+          listed=$(awk '
+            /^[[:space:]]*\[\[asset\]\][[:space:]]*$/ { in_asset=1; next }
+            /^[[:space:]]*\[/ { in_asset=0 }
+            in_asset && /^[[:space:]]*path[[:space:]]*=/ {
+              line=$0
+              sub(/^[^"]*"/, "", line)
+              sub(/".*$/, "", line)
+              print line
+            }
+          ' "$manifest" | sort -u)
+
+          # Walk every regular file under assets/ except the manifest.
+          # `find -printf` is GNU-only; this job pins ubuntu-latest, so it
+          # is the right tool here (mirrors fixture-manifest-gate).
+          committed=$(find assets -type f \
+            ! -name MANIFEST.toml \
+            -printf '%P\n' 2>/dev/null \
+            | sort -u || true)
+
+          # Any committed file absent from `listed` violates provenance.
+          unlisted=$(comm -23 <(printf '%s\n' "$committed") <(printf '%s\n' "$listed") | sed '/^$/d')
+          # Any listed path not present on disk is MANIFEST drift.
+          missing=$(comm -13 <(printf '%s\n' "$committed") <(printf '%s\n' "$listed") | sed '/^$/d')
+
+          fail=0
+          if [ -n "$unlisted" ]; then
+            echo "::error::assets-manifest-gate: files under assets/ are NOT listed in MANIFEST.toml (provenance invariant):"
+            printf '  - %s\n' $unlisted
+            fail=1
+          fi
+          if [ -n "$missing" ]; then
+            echo "::error::assets-manifest-gate: MANIFEST.toml lists paths that are not present on disk:"
+            printf '  - %s\n' $missing
+            fail=1
+          fi
+
+          # Every [[asset]] license must be permissive (no copyleft).
+          bad_license=$(awk '
+            /^[[:space:]]*\[\[asset\]\][[:space:]]*$/ { in_asset=1; next }
+            /^[[:space:]]*\[/ { in_asset=0 }
+            in_asset && /^[[:space:]]*license[[:space:]]*=/ {
+              line=$0
+              sub(/^[^"]*"/, "", line)
+              sub(/".*$/, "", line)
+              if (line != "MIT" && line != "BSD-2-Clause" \
+                  && line != "BSD-3-Clause" && line != "Apache-2.0" \
+                  && line != "ISC" && line != "0BSD")
+                print line
+            }
+          ' "$manifest" | sort -u)
+          if [ -n "$bad_license" ]; then
+            echo "::error::assets-manifest-gate: non-permissive asset license(s) — only MIT / BSD-2-Clause / BSD-3-Clause / Apache-2.0 / ISC / 0BSD allowed:"
+            printf '  - %s\n' $bad_license
+            fail=1
+          fi
+          exit "$fail"
+
   resource-ref-lint:
     # tracked: breezy-bays-labs/cute-dbt#12 — activate when a
     # generated report.html exists (PR 8b). Until then this job no-ops; the

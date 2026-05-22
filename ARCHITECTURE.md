@@ -212,9 +212,10 @@ file.
 
 ### Build constructs
 
-- **Embedding:** `include_str!` (text — Sakura CSS, jQuery, DataTables
-  JS/CSS, the Mermaid UMD bundle) / `include_bytes!` (the `data:` favicon
-  source) at compile time. Asset bytes land in the binary's `.rodata`
+- **Embedding:** every v0.1 asset is text (Sakura CSS, jQuery, DataTables
+  JS/CSS, the Mermaid UMD bundle), so each is embedded with `include_str!`
+  at compile time — the bundle carries no binary asset and no
+  `include_bytes!` user. Asset bytes land in the binary's `.rodata`
   section; **there is no runtime asset directory and no code path that
   fetches them.** The askama template interpolates them inside
   `<style>` / `<script>` blocks with the `|safe` filter.
@@ -232,9 +233,10 @@ file.
   The system-font stack suppresses Mermaid's default Google Fonts fetch
   (proven empirically in the R1 spike); without it the report would emit
   a network request when opened in a browser with networking allowed.
-- **Favicon:** an embedded `data:` URI favicon (or an empty
-  `<link rel="icon">`) so the browser's automatic favicon request never
-  leaves the document. Reinforces the "literally zero requests" story.
+- **Favicon:** an empty `data:` URI favicon, emitted as
+  `<link rel="icon" href="data:,">`, so the browser's automatic favicon
+  request resolves in-document and never leaves it. Reinforces the
+  "literally zero requests" story.
 
 ### Vendored-asset provenance
 
@@ -242,7 +244,8 @@ file.
 
 - `name` — the asset's library identifier (e.g. `mermaid`)
 - `version` — the pinned upstream version
-- `url` — the upstream source URL the bytes were fetched from
+- `path` — the asset's filename within `assets/`
+- `source` — the canonical upstream URL the bytes were fetched from
 - `sha256` — the SHA-256 of the vendored file
 - `license` — SPDX identifier (all MIT/BSD/Apache-compatible)
 
