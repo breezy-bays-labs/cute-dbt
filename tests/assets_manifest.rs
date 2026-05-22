@@ -85,12 +85,13 @@ fn walk_committed_assets() -> BTreeSet<String> {
         if name == "MANIFEST.toml" {
             continue;
         }
+        // Normalize to POSIX separators so the walk matches the
+        // forward-slash `path` values in MANIFEST.toml on every platform.
         let rel = abs
             .strip_prefix(&root)
             .expect("walkdir entries are under assets_dir")
-            .to_str()
-            .expect("asset path must be UTF-8")
-            .to_string();
+            .to_string_lossy()
+            .replace('\\', "/");
         out.insert(rel);
     }
     out

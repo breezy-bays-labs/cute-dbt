@@ -158,19 +158,26 @@ fn join_label(join_type: JoinType) -> &'static str {
     }
 }
 
-/// HTML-escape a CTE name before it is interpolated into a Mermaid label.
+/// Escape a CTE name before it is interpolated into a Mermaid label.
 ///
-/// CTE names are input-derived — they come from the manifest's compiled
-/// SQL. A quoted SQL identifier can carry a `"` (which would break the
-/// Mermaid `["..."]` label syntax) or an HTML metacharacter (which,
-/// inlined into the `<pre>` block, the browser's HTML parser would act
-/// on before Mermaid runs). `&` is escaped first so the substitutions
-/// cannot compound.
+/// CTE names are input-derived (they come from the manifest's compiled
+/// SQL) and the Mermaid block is inlined into a `<pre>` element, so the
+/// name passes through two parsers and needs two kinds of escape:
+///
+/// - `&`, `<`, `>` become HTML entities. The browser's HTML parser
+///   decodes `<pre>` content, so an un-escaped `<` could close the block
+///   (`</pre><script>…`). `&` is escaped first so the substitutions
+///   cannot compound.
+/// - `"` becomes Mermaid's own `#quot;` escape, **not** the HTML
+///   `&quot;`. The HTML parser would decode `&quot;` back to `"` before
+///   Mermaid ever sees the label, breaking the `["..."]` syntax;
+///   `#quot;` carries no `&`, survives the HTML decode intact, and
+///   Mermaid resolves it to a literal quote.
 fn escape_label(name: &str) -> String {
     name.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-        .replace('"', "&quot;")
+        .replace('"', "#quot;")
 }
 
 #[cfg(test)]
@@ -249,7 +256,10 @@ mod tests {
     #[test]
     fn escape_label_neutralizes_metacharacters() {
         assert_eq!(escape_label("clean_name"), "clean_name");
-        assert_eq!(escape_label("a\"b"), "a&quot;b");
+        // `"` uses Mermaid's `#quot;` escape, not the HTML `&quot;` — an
+        // HTML entity would be decoded back to `"` before Mermaid parses
+        // the `["..."]` label.
+        assert_eq!(escape_label("a\"b"), "a#quot;b");
         assert_eq!(escape_label("a & b"), "a &amp; b");
         // `&` is escaped first: `<script>` becoming `&lt;script&gt;`
         // (rather than `&amp;lt;script&amp;gt;`) proves the ordering.
