@@ -19,9 +19,10 @@
 //!   `BodyChecksumModifier`, `StateComparator` (`body_only`,
 //!   `modified_set`, `in_scope_unit_tests`), `InScopeSet`, and
 //!   `resolve_target_model` (bare `model:` name → full node).
-//! - **PR 6 (#TBD)** — `preflight` submodule additions: Stage-2
-//!   compiled-SQL presence check (runs AFTER scope selects the
-//!   in-scope set).
+//! - **PR 6 (#8)** — `preflight::preflight_compiled` (the Stage-2
+//!   compiled-SQL presence check — runs AFTER scope selects the
+//!   in-scope set) and `state::BANNER_EMPTY_SCOPE` (the shared
+//!   empty-scope banner constant).
 
 // `domain::manifest::Manifest` / `unit_test::UnitTest` / `cte::CteGraph`
 // are the cleanest names from inside the module (the module name
@@ -38,9 +39,9 @@ pub mod unit_test;
 
 pub use cte::{CteEdge, CteGraph, CteNode, JoinType, Span};
 pub use manifest::{Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeId};
-pub use preflight::PreflightError;
+pub use preflight::{PreflightError, preflight_compiled};
 pub use state::{
-    BodyChecksumModifier, InScopeSet, ModifiedSet, ModifierKind, StateComparator, StateModifier,
-    resolve_target_model,
+    BANNER_EMPTY_SCOPE, BodyChecksumModifier, InScopeSet, ModifiedSet, ModifierKind,
+    StateComparator, StateModifier, resolve_target_model,
 };
 pub use unit_test::{UnitTest, UnitTestExpect, UnitTestGiven};

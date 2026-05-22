@@ -262,6 +262,13 @@ fn leaf_segment(id: &str) -> &str {
     id.rsplit('.').next().unwrap_or(id)
 }
 
+/// The diff-scope banner text shown when no unit test is in scope.
+///
+/// A single shared constant so the CLI banner emitter (PR 6) and the
+/// report template (PR 8b) cannot drift apart — the empty-scope contract
+/// in `report_generation.feature` is asserted against this exact string.
+pub const BANNER_EMPTY_SCOPE: &str = "0 unit tests in scope";
+
 /// The set of unit-test ids in scope for the current diff — the run loop
 /// renders exactly these (PR 6 / PR 8b).
 ///
@@ -603,6 +610,16 @@ mod tests {
             collected,
             vec!["unit_test.shop.a", "unit_test.shop.b", "unit_test.shop.c"],
         );
+    }
+
+    // ===== BANNER_EMPTY_SCOPE =====
+
+    #[test]
+    fn empty_scope_banner_is_the_locked_contract_string() {
+        // report_generation.feature asserts the diff-scope banner
+        // "states '0 unit tests in scope'" — pin the exact wording so
+        // the CLI emitter and the PR 8b template cannot drift from it.
+        assert_eq!(BANNER_EMPTY_SCOPE, "0 unit tests in scope");
     }
 
     // ===== StateComparator::in_scope_unit_tests — the diff_scoping.feature scenarios =====
