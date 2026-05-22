@@ -1,13 +1,13 @@
 //! Clean-architecture assertion: nothing in `src/domain/**` may import
-//! from `crate::adapters`.
+//! from `crate::adapters` or `crate::cli`.
 //!
 //! ADR-1 commits to hexagonal inward-dependency discipline
 //! (`domain → ports → adapters → cli`) but a single-crate project
 //! cannot fail-to-compile on an inward `use` — the discipline is
 //! editorial. This test gives that discipline a build-break by walking
-//! `src/domain/**/*.rs` and failing if any non-comment line contains
-//! `use crate::adapters` (▸AUDIT CAO-R2 carried over from the
-//! impl-plan).
+//! `src/domain/**/*.rs` and failing if any non-comment line imports an
+//! outward layer — `crate::adapters` or `crate::cli` (▸AUDIT CAO-R2
+//! carried over from the impl-plan).
 //!
 //! Kept deliberately simple — no full Rust parser, no regex crate;
 //! line-level scanning with comment-stripping is enough to catch every
@@ -17,7 +17,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const FORBIDDEN: &str = "use crate::adapters";
+/// Imports forbidden in the `domain` layer. ADR-1's inward-dependency
+/// discipline forbids `domain` reaching outward to *either* `adapters`
+/// or `cli`; the guard checks both.
+const FORBIDDEN: [&str; 2] = ["use crate::adapters", "use crate::cli"];
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).expect("read_dir on src/domain succeeded") {
@@ -42,7 +45,7 @@ fn strip_line_comment(line: &str) -> &str {
 }
 
 #[test]
-fn domain_does_not_import_adapters() {
+fn domain_imports_nothing_outward() {
     let domain_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
         .join("domain");
@@ -59,12 +62,14 @@ fn domain_does_not_import_adapters() {
         let content = fs::read_to_string(file).expect("read domain file");
         for (lineno, raw) in content.lines().enumerate() {
             let code = strip_line_comment(raw);
-            if code.contains(FORBIDDEN) {
-                violations.push(format!(
-                    "{}:{}: forbidden `{FORBIDDEN}` in domain layer",
-                    file.display(),
-                    lineno + 1
-                ));
+            for forbidden in FORBIDDEN {
+                if code.contains(forbidden) {
+                    violations.push(format!(
+                        "{}:{}: forbidden `{forbidden}` in domain layer",
+                        file.display(),
+                        lineno + 1
+                    ));
+                }
             }
         }
     }
