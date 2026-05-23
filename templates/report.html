@@ -159,7 +159,7 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
 <section class="diff-scope-banner" aria-label="Diff scope">
   <p class="diff-scope-line">
     <span class="diff-scope-text">{{ banner_text }}</span> —
-    vs baseline manifest <code class="diff-scope-baseline">{{ payload.baseline }}</code>.
+    vs baseline manifest <code class="diff-scope-baseline">{{ baseline_label }}</code>.
   </p>
 </section>
 
@@ -236,7 +236,7 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
 
 </div>
 
-<script type="application/json" id="cute-dbt-data">{{ payload|json|safe }}</script>
+<script type="application/json" id="cute-dbt-data">{{ payload_json|safe }}</script>
 
 <script>
 {{ jquery_js|safe }}

@@ -195,15 +195,27 @@ fn the_rendered_chrome_is_stable_for_a_known_fixture() {
 
 #[test]
 fn the_real_renderer_emits_no_external_resource_constructs() {
+    // Local belt-and-braces guard for the zero-egress invariant. The
+    // canonical proof is the structured resource-ref lint plus the
+    // headless-browser network-block test tracked at
+    // `breezy-bays-labs/cute-dbt#12`; this test is the fast fixture-
+    // backed signal that runs on every `cargo test`.
     let out = tmp("integration_egress.html");
     let _ = std::fs::remove_file(&out);
     render_jaffle_shop(&out);
     let html = std::fs::read_to_string(&out).expect("report exists");
     let chrome = chrome_only(&html);
-    assert!(!chrome.contains(" src=\""), "no src= attributes in chrome");
-    assert!(!chrome.contains("@import"), "no CSS @import");
-    assert!(!chrome.contains("http://"), "no http URL");
-    assert!(!chrome.contains("https://"), "no https URL");
+    assert!(!chrome.contains("<script src"), "no <script src> in chrome");
+    assert!(!chrome.contains("<link href"), "no <link href> in chrome");
+    assert!(
+        !chrome.contains("<img"),
+        "no <img> in chrome (we emit no images)",
+    );
+    assert!(!chrome.contains(" src=\""), "no src= attribute in chrome");
+    assert!(!chrome.contains("@import"), "no CSS @import in chrome");
+    assert!(!chrome.contains("url("), "no CSS url() in chrome");
+    assert!(!chrome.contains("http://"), "no http URL in chrome");
+    assert!(!chrome.contains("https://"), "no https URL in chrome");
     assert!(!chrome.contains("\"//"), "no protocol-relative reference");
     // The only href in the chrome is the empty data: favicon.
     assert_eq!(

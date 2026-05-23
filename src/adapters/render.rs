@@ -106,6 +106,11 @@ pub enum NodeRole {
 /// form `ref('NAME')` (case-insensitive `ref`, single quotes only —
 /// matches dbt's serialized form in the manifest).
 ///
+/// The keyword check is case-insensitive across any byte casing
+/// (`ref` / `REF` / `Ref` / `rEf` / …) and tolerates whitespace between
+/// the keyword and the opening parenthesis (`ref ('x')`, `REF\t('y')`,
+/// etc. — Jinja's `{{ ref(...) }}` macro accepts this).
+///
 /// Returns `None` when the input does not match the `ref('…')` shape,
 /// when the inner name is empty, or when the parentheses / quotes are
 /// unbalanced. The caller (`bind_import_to_given`) treats `None` as "no
@@ -113,13 +118,13 @@ pub enum NodeRole {
 #[must_use]
 pub fn parse_ref_name(input: &str) -> Option<&str> {
     let trimmed = input.trim();
-    let rest = trimmed.strip_prefix("ref(").or_else(|| {
-        trimmed
-            .strip_prefix("REF(")
-            .or_else(|| trimmed.strip_prefix("Ref("))
-    })?;
-    let rest = rest.strip_suffix(')')?;
-    let inner = rest.trim();
+    let prefix = trimmed.get(..3)?;
+    if !prefix.eq_ignore_ascii_case("ref") {
+        return None;
+    }
+    let after_ref = trimmed[3..].trim_start();
+    let inside = after_ref.strip_prefix('(')?.strip_suffix(')')?;
+    let inner = inside.trim();
     let name = inner.strip_prefix('\'')?.strip_suffix('\'')?;
     if name.is_empty() { None } else { Some(name) }
 }
@@ -169,21 +174,29 @@ pub fn classify_node_role(graph: &CteGraph, node_index: usize) -> NodeRole {
 /// `true` when `sql` is a single `SELECT … FROM <relation>` with no joins
 /// and no further FROM clauses — the import-CTE shape.
 ///
-/// Whitespace-and-comment-tolerant heuristic: lower-cases the body,
-/// requires a `select` keyword, exactly one `from` keyword, and no `join`
-/// keyword. Stricter classification would require a full AST walk; the
-/// CTE engine already parsed once and the renderer would re-parse to
-/// re-classify — overkill for the visual taxonomy this drives.
+/// Whitespace-tokenizing heuristic: tokenizes the body, requires a
+/// `select` keyword, exactly one `from` keyword, and no `join` keyword.
+/// Tokens are case-folded and have trailing punctuation (`,`/`;`/`)`)
+/// stripped so a token like `from\n` or `from;` still classifies. A
+/// stricter classifier would require a full AST walk; the CTE engine
+/// already parsed once and the renderer would re-parse to re-classify
+/// — overkill for the visual taxonomy this drives.
 fn is_simple_from_select(sql: &str) -> bool {
-    let lower = sql.to_ascii_lowercase();
-    if !lower.contains("select") {
-        return false;
+    let mut has_select = false;
+    let mut from_count = 0usize;
+    for raw in sql.split_whitespace() {
+        let token = raw
+            .to_ascii_lowercase()
+            .trim_end_matches([',', ';', ')'])
+            .to_owned();
+        match token.as_str() {
+            "select" => has_select = true,
+            "join" => return false,
+            "from" => from_count += 1,
+            _ => {}
+        }
     }
-    if lower.contains(" join ") || lower.contains("\njoin ") {
-        return false;
-    }
-    let from_count = lower.matches(" from ").count() + lower.matches("\nfrom ").count();
-    from_count == 1
+    has_select && from_count == 1
 }
 
 /// Per-model entry in the JSON payload — mirrors the design's
@@ -299,11 +312,11 @@ pub struct ReportPayload {
 
 /// askama template binding for the v0.1 report.
 ///
-/// Every field except `payload_json` is an inlined asset constant; the
-/// template interpolates them with `| safe` and the payload with
-/// `| json | safe`. Asset values are pinned `&'static str` constants
-/// from [`asset_embed`](crate::adapters::asset_embed) so the renderer
-/// cannot drift from the vendored bundle.
+/// Asset values are pinned `&'static str` constants from
+/// [`asset_embed`](crate::adapters::asset_embed) so the renderer cannot
+/// drift from the vendored bundle. `payload_json` is pre-escaped by
+/// [`payload_json_for_html_script`] so its `|safe` interpolation cannot
+/// terminate the `<script>` carrier.
 #[derive(Template)]
 #[template(path = "report.html", escape = "html")]
 struct ReportTemplate<'a> {
@@ -319,7 +332,50 @@ struct ReportTemplate<'a> {
     /// breaking the substring. JS may rewrite the `.diff-scope-text`
     /// element at boot, but the static fallback is the contract.
     banner_text: &'a str,
-    payload: &'a ReportPayload,
+    /// Human-readable baseline reference (the `--baseline-manifest`
+    /// path verbatim in v0.1) — rendered as plain text inside the
+    /// diff-scope banner's `.diff-scope-baseline` element.
+    baseline_label: &'a str,
+    /// JSON payload, pre-escaped for safe interpolation inside
+    /// `<script type="application/json">` via [`payload_json_for_html_script`].
+    /// The template emits this with `|safe`; the safety property is the
+    /// Rust-side escape, not askama's HTML filter.
+    payload_json: &'a str,
+}
+
+/// Serialize `payload` to JSON for safe embedding inside an HTML
+/// `<script type="application/json">` block.
+///
+/// HTML5's script-data state terminates on `</` followed by an ASCII
+/// alpha character; the script-data-double-escape state begins on
+/// `<!--`. A naive `serde_json` serialization of a payload containing
+/// `</script>` or `<!--` would allow a manifest-derived string to
+/// break out of the JSON carrier.
+///
+/// Escape `<` to its `<` Unicode form whenever it is followed by
+/// `/` or `!` — the only sequences that matter under HTML5's
+/// script-data state machine. The `\uXXXX` form is a documented JSON
+/// escape (RFC 8259 §7) so the output remains a valid JSON document
+/// that `JSON.parse(...)` decodes back to the original characters.
+///
+/// # Errors
+///
+/// Returns the underlying [`serde_json::Error`] if serialization
+/// fails — unreachable in practice for the payload shapes this module
+/// emits (all fields are concrete `Serialize` types known at compile
+/// time).
+fn payload_json_for_html_script(payload: &ReportPayload) -> Result<String, serde_json::Error> {
+    let json = serde_json::to_string(payload)?;
+    let mut out = String::with_capacity(json.len() + 16);
+    let mut chars = json.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' && matches!(chars.peek(), Some('/' | '!')) {
+            out.push_str("\\u003c");
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(out)
 }
 
 /// Compose the banner text rendered into the diff-scope section.
@@ -394,6 +450,8 @@ pub fn render_report(
 ) -> io::Result<()> {
     let payload = build_payload(current, in_scope, models_in_scope, baseline_label);
     let banner_text = compose_banner_text(in_scope);
+    let payload_json = payload_json_for_html_script(&payload)
+        .map_err(|err| io::Error::other(format!("payload serialization: {err}")))?;
     let template = ReportTemplate {
         sakura_css: SAKURA_CSS,
         datatables_css: DATATABLES_CSS,
@@ -402,7 +460,8 @@ pub fn render_report(
         mermaid_js: MERMAID_JS,
         favicon_data_uri: FAVICON_DATA_URI,
         banner_text: &banner_text,
-        payload: &payload,
+        baseline_label,
+        payload_json: &payload_json,
     };
     let html = template
         .render()
@@ -693,6 +752,18 @@ mod tests {
     fn parse_ref_name_accepts_case_variant_keyword() {
         assert_eq!(parse_ref_name("REF('A')"), Some("A"));
         assert_eq!(parse_ref_name("Ref('b')"), Some("b"));
+        // Any byte casing matches the keyword now (case-insensitive).
+        assert_eq!(parse_ref_name("rEf('c')"), Some("c"));
+    }
+
+    #[test]
+    fn parse_ref_name_tolerates_whitespace_between_ref_and_paren() {
+        // Jinja's `{{ ref(...) }}` macro accepts whitespace between the
+        // keyword and the opening paren; the YAML-stored verbatim form
+        // may carry it.
+        assert_eq!(parse_ref_name("ref ('x')"), Some("x"));
+        assert_eq!(parse_ref_name("REF\t('Y')"), Some("Y"));
+        assert_eq!(parse_ref_name("ref   ('z')"), Some("z"));
     }
 
     #[test]
@@ -1216,6 +1287,72 @@ mod tests {
         assert!(payload.models[0].is_recursive);
     }
 
+    // ===== payload_json_for_html_script =====
+
+    #[test]
+    fn payload_json_escapes_closing_script_tag_via_unicode() {
+        let payload = ReportPayload {
+            baseline: "</script><script>alert(1)</script>".to_owned(),
+            models: vec![],
+        };
+        let serialized = payload_json_for_html_script(&payload).unwrap();
+        assert!(
+            !serialized.contains("</script>"),
+            "no raw </script> survives in: {serialized}",
+        );
+        assert!(
+            serialized.contains("\\u003c/script>"),
+            "`</` is replaced with `\\u003c/` in: {serialized}",
+        );
+    }
+
+    #[test]
+    fn payload_json_escapes_html_comment_open_via_unicode() {
+        let payload = ReportPayload {
+            baseline: "x<!--hostile-->y".to_owned(),
+            models: vec![],
+        };
+        let serialized = payload_json_for_html_script(&payload).unwrap();
+        assert!(
+            !serialized.contains("<!--"),
+            "no raw <!-- survives in: {serialized}",
+        );
+        assert!(
+            serialized.contains("\\u003c!--"),
+            "`<!` is replaced with `\\u003c!` in: {serialized}",
+        );
+    }
+
+    #[test]
+    fn payload_json_leaves_bare_left_angle_alone() {
+        // Only `</` and `<!` are dangerous in HTML5 script-data state;
+        // a bare `<` followed by a space or other char is fine.
+        let payload = ReportPayload {
+            baseline: "a < b".to_owned(),
+            models: vec![],
+        };
+        let serialized = payload_json_for_html_script(&payload).unwrap();
+        assert!(serialized.contains("a < b"), "bare `<` is preserved");
+    }
+
+    #[test]
+    fn payload_json_output_is_round_trippable_through_json_parse() {
+        // The Unicode escape must remain valid JSON; serde_json round-trips
+        // it back to the original string.
+        let original = ReportPayload {
+            baseline: "</script><!--end".to_owned(),
+            models: vec![],
+        };
+        let serialized = payload_json_for_html_script(&original).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serialized).expect("escaped output is valid JSON");
+        assert_eq!(
+            parsed["baseline"],
+            serde_json::Value::String("</script><!--end".to_owned()),
+            "round-trip recovers the original baseline value",
+        );
+    }
+
     // ===== render_report end-to-end =====
 
     #[test]
@@ -1272,9 +1409,18 @@ mod tests {
 
     #[test]
     fn render_report_does_not_emit_external_resource_constructs() {
-        // Parallel to tests/asset_embed.rs::the_smoke_report_emits_no_external_resource_constructs.
-        // Strip the inlined asset bodies before scanning so we measure the
-        // CHROME, not the bundled URL literals inside the assets.
+        // Local belt-and-braces guard for the zero-egress invariant.
+        // The canonical proof is the structured resource-ref lint job
+        // plus the headless-browser network-block test tracked at
+        // `breezy-bays-labs/cute-dbt#12`; this test is the fast local
+        // signal that runs on every `cargo test` until that lands.
+        //
+        // Patterns cover the loading constructs the structured lint
+        // will reject: `<script src>`, `<link href>`, `<img src>`,
+        // CSS `@import`, CSS `url(`, protocol-relative `//`, and bare
+        // `http://` / `https://`. The chrome is measured AFTER
+        // stripping the five inlined asset bodies so we don't
+        // false-positive on the bundles' inert URL literals.
         let node = model_node("model.shop.x", "body", Some("select 1"));
         let manifest = manifest_for(vec![node], vec![]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
@@ -1291,10 +1437,17 @@ mod tests {
         ] {
             chrome = chrome.replace(asset, "<<inlined-asset>>");
         }
-        assert!(!chrome.contains(" src=\""), "no src= attributes in chrome");
-        assert!(!chrome.contains("@import"), "no CSS @import");
-        assert!(!chrome.contains("http://"), "no http URL");
-        assert!(!chrome.contains("https://"), "no https URL");
+        assert!(!chrome.contains("<script src"), "no <script src> in chrome");
+        assert!(!chrome.contains("<link href"), "no <link href> in chrome");
+        assert!(
+            !chrome.contains("<img"),
+            "no <img> in chrome (we emit no images)",
+        );
+        assert!(!chrome.contains(" src=\""), "no src= attribute in chrome");
+        assert!(!chrome.contains("@import"), "no CSS @import in chrome");
+        assert!(!chrome.contains("url("), "no CSS url() in chrome");
+        assert!(!chrome.contains("http://"), "no http URL in chrome");
+        assert!(!chrome.contains("https://"), "no https URL in chrome");
         assert!(!chrome.contains("\"//"), "no protocol-relative reference");
         let _ = std::fs::remove_file(&tmp);
     }
