@@ -1,7 +1,7 @@
 # Maps: SC2 (state:modified.body scoping correctness)
-Feature: Diff-scope unit tests via dbt state:modified (body subset)
+Feature: Diff-scope unit tests and models via dbt state:modified (body subset)
   As a PR reviewer
-  I want only the unit tests affected by this change
+  I want only the unit tests and models affected by this change
   So that the report is bounded to what the PR actually touches
 
   Background:
@@ -38,3 +38,12 @@ Feature: Diff-scope unit tests via dbt state:modified (body subset)
     And its body checksum is identical to the baseline
     When the in-scope set is computed
     Then "stg_orders" is not in scope
+
+  # Explorer mode (#30): modified models with zero unit tests appear in
+  # models_in_scope so the render layer can show an "0 unit tests wired"
+  # signal for them.
+  Scenario: A modified model with zero unit tests is in models_in_scope
+    Given the model "stg_payments" has a different body checksum than the baseline
+    And "stg_payments" has no unit tests in the current manifest
+    When the models-in-scope set is computed
+    Then the model "stg_payments" is in models_in_scope

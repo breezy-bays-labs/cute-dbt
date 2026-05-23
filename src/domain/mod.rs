@@ -23,6 +23,10 @@
 //!   compiled-SQL presence check — runs AFTER scope selects the
 //!   in-scope set) and `state::BANNER_EMPTY_SCOPE` (the shared
 //!   empty-scope banner constant).
+//! - **PR C (#30)** — `state::ModelInScopeSet` (explorer mode: models
+//!   targeted by in-scope unit tests plus modified models with zero
+//!   unit tests); `StateComparator::models_in_scope`; widened
+//!   `PreflightError::NotCompiled.unit_test: Option<String>`.
 
 // `domain::manifest::Manifest` / `unit_test::UnitTest` / `cte::CteGraph`
 // are the cleanest names from inside the module (the module name
@@ -41,7 +45,7 @@ pub use cte::{CteEdge, CteGraph, CteNode, JoinType, Span};
 pub use manifest::{Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeId};
 pub use preflight::{PreflightError, preflight_compiled};
 pub use state::{
-    BANNER_EMPTY_SCOPE, BodyChecksumModifier, InScopeSet, ModifiedSet, ModifierKind,
-    StateComparator, StateModifier, resolve_target_model,
+    BANNER_EMPTY_SCOPE, BodyChecksumModifier, InScopeSet, ModelInScopeSet, ModifiedSet,
+    ModifierKind, StateComparator, StateModifier, resolve_target_model,
 };
 pub use unit_test::{UnitTest, UnitTestExpect, UnitTestGiven};

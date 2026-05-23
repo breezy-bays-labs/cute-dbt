@@ -26,7 +26,8 @@ use clap::Parser;
 
 use crate::adapters::manifest::{FileManifestSource, load_baseline};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, InScopeSet, Manifest, PreflightError, StateComparator, preflight_compiled,
+    BANNER_EMPTY_SCOPE, InScopeSet, Manifest, ModelInScopeSet, PreflightError, StateComparator,
+    preflight_compiled,
 };
 use crate::ports::ManifestSource;
 
@@ -111,8 +112,8 @@ impl RunError {
 /// produces a partial `report.html`.
 fn execute(cli: &Cli) -> Result<(), RunError> {
     let (current, baseline) = load(cli)?;
-    let in_scope = scope(&current, &baseline);
-    preflight_compiled(&current, &in_scope)?;
+    let (in_scope, models_in_scope) = scope(&current, &baseline);
+    preflight_compiled(&current, &in_scope, &models_in_scope)?;
     parse_ctes();
     render(&cli.out, &in_scope)?;
     Ok(())
@@ -131,10 +132,17 @@ fn load(cli: &Cli) -> Result<(Manifest, Manifest), RunError> {
     Ok((current, baseline))
 }
 
-/// The `scope` stage: select the unit tests in scope for this diff (dbt
-/// `state:modified`, body-checksum fidelity — ADR-3).
-fn scope(current: &Manifest, baseline: &Manifest) -> InScopeSet {
-    StateComparator::body_only().in_scope_unit_tests(current, baseline)
+/// The `scope` stage: select the unit tests and models in scope for this
+/// diff (dbt `state:modified`, body-checksum fidelity — ADR-3).
+///
+/// Returns `(unit_tests_in_scope, models_in_scope)`. `models_in_scope`
+/// is the explorer-mode set: every model targeted by an in-scope unit
+/// test plus every modified model with zero unit tests (PR C / #30).
+fn scope(current: &Manifest, baseline: &Manifest) -> (InScopeSet, ModelInScopeSet) {
+    let comparator = StateComparator::body_only();
+    let in_scope = comparator.in_scope_unit_tests(current, baseline);
+    let models_in_scope = comparator.models_in_scope(current, baseline);
+    (in_scope, models_in_scope)
 }
 
 /// The `parse_ctes` stage — a deliberate no-op stub.
@@ -188,7 +196,7 @@ mod tests {
     fn a_preflight_failure_message_is_the_remediation_text() {
         let failure = RunError::Preflight(PreflightError::NotCompiled {
             node_id: "model.shop.stg_orders".to_owned(),
-            unit_test: "t".to_owned(),
+            unit_test: Some("t".to_owned()),
         });
         let msg = failure.message(&cli("report.html"));
         assert!(msg.contains("model.shop.stg_orders"), "{msg}");

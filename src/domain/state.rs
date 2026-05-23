@@ -19,13 +19,16 @@
 //!   `.relation` / `.macros` / `.contract` sub-selectors arrive as
 //!   additive `impl StateModifier`s.
 //! - [`BodyChecksumModifier`] — the only v0.1 modifier.
-//! - [`StateComparator`] — registers modifiers; computes the modified set
-//!   and the in-scope unit-test selection.
+//! - [`StateComparator`] — registers modifiers; computes the modified set,
+//!   the in-scope unit-test selection, and the in-scope model selection.
 //! - [`InScopeSet`] — the unit-test ids the report renders.
+//! - [`ModelInScopeSet`] — the model node ids the report renders
+//!   (explorer-mode: every model targeted by an in-scope unit test plus
+//!   every modified model with zero unit tests targeting it).
 //! - [`resolve_target_model`] — maps a unit test's bare `model:` name to
 //!   its full manifest node.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -230,6 +233,52 @@ impl StateComparator {
         }
         in_scope
     }
+
+    /// Model node ids in scope for this diff (explorer mode, PR C / #30).
+    ///
+    /// The **union** of two sources, deduplicated and in deterministic
+    /// [`BTreeSet`] order:
+    ///
+    /// 1. Every model that is the resolved target of an in-scope unit test
+    ///    (the same models the existing `in_scope_unit_tests` would surface
+    ///    via `resolve_target_model`).
+    /// 2. Every modified model that has **zero** unit tests targeting it in
+    ///    the current manifest — the "no tests wired" signal.
+    ///
+    /// Together these give the render layer a complete per-model view:
+    /// models with tests in scope appear with their tests; modified models
+    /// with no tests appear with an explicit empty-test signal.
+    #[must_use]
+    pub fn models_in_scope(&self, current: &Manifest, baseline: &Manifest) -> ModelInScopeSet {
+        let modified = self.modified_set(current, baseline);
+        let in_scope_tests = self.in_scope_unit_tests(current, baseline);
+
+        // Build a map: resolved model node id → list of unit-test ids that
+        // target it in the current manifest.
+        let test_targets = unit_test_targets(current);
+
+        let mut ids = BTreeSet::new();
+
+        // Arm 1: every model resolved from an in-scope unit test.
+        for test_id in in_scope_tests.iter() {
+            let Some(unit_test) = current.unit_test(test_id) else {
+                continue;
+            };
+            if let Some(model) = resolve_target_model(current, unit_test.model()) {
+                ids.insert(model.id().clone());
+            }
+        }
+
+        // Arm 2: every modified model that has zero unit tests targeting it.
+        for modified_id in modified.iter() {
+            let has_tests = test_targets.get(modified_id).is_some_and(|v| !v.is_empty());
+            if !has_tests {
+                ids.insert(modified_id.clone());
+            }
+        }
+
+        ModelInScopeSet { ids }
+    }
 }
 
 /// Resolve a unit test's `model:` reference to its manifest node.
@@ -260,6 +309,25 @@ pub fn resolve_target_model<'m>(manifest: &'m Manifest, target: &NodeId) -> Opti
 /// A bare name (no `.`) is returned unchanged.
 fn leaf_segment(id: &str) -> &str {
     id.rsplit('.').next().unwrap_or(id)
+}
+
+/// Build a map from resolved model node id to the unit-test ids in
+/// `manifest` that target it.
+///
+/// Used by [`StateComparator::models_in_scope`] to determine which
+/// modified models have zero unit tests targeting them. Resolution is
+/// via [`resolve_target_model`]; unresolvable `model:` references
+/// contribute nothing to the map (they are skipped, not failed).
+fn unit_test_targets(manifest: &Manifest) -> HashMap<NodeId, Vec<String>> {
+    let mut map: HashMap<NodeId, Vec<String>> = HashMap::new();
+    for (test_id, unit_test) in manifest.unit_tests() {
+        if let Some(model) = resolve_target_model(manifest, unit_test.model()) {
+            map.entry(model.id().clone())
+                .or_default()
+                .push(test_id.clone());
+        }
+    }
+    map
 }
 
 /// The diff-scope banner text shown when no unit test is in scope.
@@ -318,6 +386,59 @@ impl InScopeSet {
 
 impl FromIterator<String> for InScopeSet {
     fn from_iter<I: IntoIterator<Item = String>>(iter: I) -> Self {
+        Self {
+            ids: iter.into_iter().collect(),
+        }
+    }
+}
+
+/// The set of model node ids in scope for the current diff.
+///
+/// Explorer mode (#30): every model targeted by an in-scope unit test
+/// **plus** every modified model that has zero unit tests targeting it in
+/// the current manifest. Backed by a [`BTreeSet`] for deterministic
+/// iteration: the preflight pass and the renderer depend on a stable order.
+///
+/// Produced by [`StateComparator::models_in_scope`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ModelInScopeSet {
+    ids: BTreeSet<NodeId>,
+}
+
+impl ModelInScopeSet {
+    /// Empty set (equivalent to `Default::default`).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `true` when no model is in scope.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    /// Number of models in scope.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Membership test by full model node id.
+    #[must_use]
+    pub fn contains(&self, id: &NodeId) -> bool {
+        self.ids.contains(id)
+    }
+
+    /// Deterministic iteration over the in-scope model node ids
+    /// ([`BTreeSet`] ordering).
+    pub fn iter(&self) -> impl Iterator<Item = &NodeId> {
+        self.ids.iter()
+    }
+}
+
+impl FromIterator<NodeId> for ModelInScopeSet {
+    fn from_iter<I: IntoIterator<Item = NodeId>>(iter: I) -> Self {
         Self {
             ids: iter.into_iter().collect(),
         }
@@ -755,5 +876,197 @@ mod tests {
         assert_eq!(in_scope.len(), 1);
         assert!(in_scope.contains("unit_test.shop.a.t"));
         assert!(!in_scope.contains("unit_test.shop.b.t"));
+    }
+
+    // ===== ModelInScopeSet =====
+
+    #[test]
+    fn model_in_scope_set_new_and_default_are_empty() {
+        assert!(ModelInScopeSet::new().is_empty());
+        assert!(ModelInScopeSet::default().is_empty());
+        assert_eq!(ModelInScopeSet::new().len(), 0);
+    }
+
+    #[test]
+    fn model_in_scope_set_is_empty_is_false_on_a_non_empty_set() {
+        let s = ModelInScopeSet::from_iter([id("model.shop.a")]);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn model_in_scope_set_reports_membership_and_length() {
+        let s = ModelInScopeSet::from_iter([id("model.shop.a")]);
+        assert!(!s.is_empty());
+        assert_eq!(s.len(), 1);
+        assert!(s.contains(&id("model.shop.a")));
+        assert!(!s.contains(&id("model.shop.b")));
+    }
+
+    #[test]
+    fn model_in_scope_set_iterates_in_deterministic_order() {
+        let s = ModelInScopeSet::from_iter([
+            id("model.shop.c"),
+            id("model.shop.a"),
+            id("model.shop.b"),
+        ]);
+        let collected: Vec<&NodeId> = s.iter().collect();
+        assert_eq!(
+            collected,
+            vec![
+                &id("model.shop.a"),
+                &id("model.shop.b"),
+                &id("model.shop.c")
+            ],
+        );
+    }
+
+    // ===== StateComparator::models_in_scope =====
+
+    #[test]
+    fn models_in_scope_includes_target_of_an_in_scope_unit_test() {
+        // Arm 1: a model targeted by an in-scope unit test appears in
+        // models_in_scope (even though the model itself has tests).
+        let test = unit_test_for("stg_orders", None);
+        let current = manifest(
+            vec![model("model.shop.stg_orders", "new")],
+            vec![("unit_test.shop.stg_orders.t", test.clone())],
+        );
+        let baseline = manifest(
+            vec![model("model.shop.stg_orders", "old")],
+            vec![("unit_test.shop.stg_orders.t", test)],
+        );
+        let models = StateComparator::body_only().models_in_scope(&current, &baseline);
+        assert!(models.contains(&id("model.shop.stg_orders")));
+        assert_eq!(models.len(), 1);
+    }
+
+    #[test]
+    fn models_in_scope_includes_a_modified_model_with_zero_unit_tests() {
+        // Arm 2: a modified model with no unit tests targeting it in the
+        // current manifest is included in models_in_scope.
+        let current = manifest(
+            vec![model("model.shop.stg_orders", "new")],
+            vec![], // zero unit tests
+        );
+        let baseline = manifest(vec![model("model.shop.stg_orders", "old")], vec![]);
+        let models = StateComparator::body_only().models_in_scope(&current, &baseline);
+        assert!(models.contains(&id("model.shop.stg_orders")));
+        assert_eq!(models.len(), 1);
+    }
+
+    #[test]
+    fn models_in_scope_deduplicates_when_model_has_in_scope_test_and_is_modified() {
+        // A model that is BOTH the target of an in-scope unit test AND
+        // is modified with tests present appears exactly once in models_in_scope.
+        // (This exercises the dedup between arm 1 and arm 2 is a non-issue
+        // when the model has tests — arm 2 would be suppressed.)
+        let test = unit_test_for("stg_orders", None);
+        let current = manifest(
+            vec![model("model.shop.stg_orders", "new")],
+            vec![("unit_test.shop.stg_orders.t", test.clone())],
+        );
+        let baseline = manifest(
+            vec![model("model.shop.stg_orders", "old")],
+            vec![("unit_test.shop.stg_orders.t", test)],
+        );
+        let models = StateComparator::body_only().models_in_scope(&current, &baseline);
+        assert_eq!(models.len(), 1, "deduplication: model counted once");
+        assert!(models.contains(&id("model.shop.stg_orders")));
+    }
+
+    #[test]
+    fn models_in_scope_is_empty_when_nothing_changed() {
+        // An unchanged model with a unit test that itself is also unchanged
+        // produces an empty models_in_scope.
+        let test = unit_test_for("stg_customers", None);
+        let current = manifest(
+            vec![model("model.shop.stg_customers", "same")],
+            vec![("unit_test.shop.stg_customers.t", test.clone())],
+        );
+        let baseline = manifest(
+            vec![model("model.shop.stg_customers", "same")],
+            vec![("unit_test.shop.stg_customers.t", test)],
+        );
+        let models = StateComparator::body_only().models_in_scope(&current, &baseline);
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn models_in_scope_excludes_an_unchanged_model_with_zero_unit_tests() {
+        // Arm 2 is gated on the model being modified. An unchanged model
+        // with zero tests does NOT appear in models_in_scope.
+        let current = manifest(vec![model("model.shop.stg_customers", "same")], vec![]);
+        let baseline = manifest(vec![model("model.shop.stg_customers", "same")], vec![]);
+        let models = StateComparator::body_only().models_in_scope(&current, &baseline);
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn models_in_scope_union_covers_both_arms_simultaneously() {
+        // Two models:
+        // - `has_test` is modified and has a unit test in scope (arm 1).
+        // - `no_test` is modified and has zero unit tests (arm 2).
+        // Both must appear in models_in_scope; total = 2.
+        let test = unit_test_for("has_test", None);
+        let current = manifest(
+            vec![
+                model("model.shop.has_test", "new"),
+                model("model.shop.no_test", "new"),
+            ],
+            vec![("unit_test.shop.has_test.t", test.clone())],
+        );
+        let baseline = manifest(
+            vec![
+                model("model.shop.has_test", "old"),
+                model("model.shop.no_test", "old"),
+            ],
+            vec![("unit_test.shop.has_test.t", test)],
+        );
+        let models = StateComparator::body_only().models_in_scope(&current, &baseline);
+        assert_eq!(models.len(), 2);
+        assert!(models.contains(&id("model.shop.has_test")));
+        assert!(models.contains(&id("model.shop.no_test")));
+    }
+
+    #[test]
+    fn models_in_scope_iterates_in_deterministic_model_id_order() {
+        // Two no-test modified models; iteration order must be BTreeSet
+        // (lexicographic NodeId) order.
+        let current = manifest(
+            vec![
+                model("model.shop.zzz", "new"),
+                model("model.shop.aaa", "new"),
+            ],
+            vec![],
+        );
+        let baseline = manifest(
+            vec![
+                model("model.shop.zzz", "old"),
+                model("model.shop.aaa", "old"),
+            ],
+            vec![],
+        );
+        let models = StateComparator::body_only().models_in_scope(&current, &baseline);
+        let collected: Vec<&NodeId> = models.iter().collect();
+        assert_eq!(
+            collected,
+            vec![&id("model.shop.aaa"), &id("model.shop.zzz")],
+        );
+    }
+
+    #[test]
+    fn models_in_scope_does_not_include_an_unresolvable_unit_test_target() {
+        // A unit test whose model: reference cannot be resolved (no
+        // matching model node) contributes nothing to models_in_scope.
+        let current = manifest(
+            vec![],
+            vec![("unit_test.shop.ghost", unit_test_for("missing_model", None))],
+        );
+        let baseline = manifest(
+            vec![],
+            vec![], // ghost test is new → in_scope, but no resolvable target
+        );
+        let models = StateComparator::body_only().models_in_scope(&current, &baseline);
+        assert!(models.is_empty());
     }
 }

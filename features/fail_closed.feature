@@ -44,3 +44,14 @@ Feature: Fail closed on manifests that cannot be honestly visualized
     When I run cute-dbt with --manifest current.json --baseline-manifest baseline.json --out report.html
     Then the exit code is 0
     And the file "report.html" exists
+
+  Scenario: A modified model with zero unit tests and no compiled_code is rejected
+    Given a baseline manifest "baseline.json"
+    And the current manifest has a model "model.jaffle_shop.stg_orders" that is modified
+    And the current manifest has zero unit tests targeting "model.jaffle_shop.stg_orders"
+    And the current manifest has compiled_code null for "model.jaffle_shop.stg_orders"
+    When I run cute-dbt with --manifest current.json --baseline-manifest baseline.json --out report.html
+    Then the exit code is non-zero
+    And no file "report.html" is written
+    And stderr names "model.jaffle_shop.stg_orders" as the not-compiled node
+    And stderr does not name a unit test
