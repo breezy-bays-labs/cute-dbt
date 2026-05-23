@@ -1,0 +1,373 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "1.11.9",
+    "generated_at": "1970-01-01T00:00:00Z",
+    "invocation_id": "00000000-0000-0000-0000-000000000000",
+    "invocation_started_at": "1970-01-01T00:00:00+00:00",
+    "env": {},
+    "project_name": "jaffle_shop",
+    "project_id": "06e5b98c2db46f8a72cc4f66410e9b3b",
+    "user_id": "00000000-0000-0000-0000-000000000000",
+    "send_anonymous_usage_stats": true,
+    "adapter_type": "duckdb",
+    "quoting": {
+      "database": true,
+      "schema": true,
+      "identifier": true,
+      "column": null
+    },
+    "run_started_at": "1970-01-01T00:00:00+00:00"
+  },
+  "nodes": {
+    "model.jaffle_shop.stg_orders": {
+      "database": "jaffle_shop",
+      "schema": "main",
+      "name": "stg_orders",
+      "resource_type": "model",
+      "package_name": "jaffle_shop",
+      "path": "staging/stg_orders.sql",
+      "original_file_path": "models/staging/stg_orders.sql",
+      "unique_id": "model.jaffle_shop.stg_orders",
+      "fqn": [
+        "jaffle_shop",
+        "staging",
+        "stg_orders"
+      ],
+      "alias": "stg_orders",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "MODIFIED_UNCOMPILED_SENTINEL_NO_UNIT_TESTS"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "tags": [],
+        "meta": {},
+        "group": null,
+        "static_analysis": null,
+        "materialized": "view",
+        "incremental_strategy": null,
+        "batch_size": null,
+        "lookback": 1,
+        "begin": null,
+        "persist_docs": {},
+        "post-hook": [],
+        "pre-hook": [],
+        "quoting": {},
+        "column_types": {},
+        "full_refresh": null,
+        "unique_key": null,
+        "on_schema_change": "ignore",
+        "on_configuration_change": "apply",
+        "grants": {},
+        "packages": [],
+        "docs": {
+          "show": true,
+          "node_color": "silver"
+        },
+        "contract": {
+          "enforced": false,
+          "alias_types": true
+        },
+        "event_time": null,
+        "concurrent_batches": null,
+        "access": "protected",
+        "freshness": null
+      },
+      "tags": [],
+      "description": "",
+      "columns": {
+        "order_id": {
+          "name": "order_id",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "config": {
+            "meta": {},
+            "tags": []
+          },
+          "tags": [],
+          "granularity": null,
+          "doc_blocks": []
+        },
+        "status": {
+          "name": "status",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "config": {
+            "meta": {},
+            "tags": []
+          },
+          "tags": [],
+          "granularity": null,
+          "doc_blocks": []
+        }
+      },
+      "meta": {},
+      "group": null,
+      "docs": {
+        "show": true,
+        "node_color": "silver"
+      },
+      "patch_path": "jaffle_shop://models/staging/schema.yml",
+      "build_path": null,
+      "unrendered_config": {
+        "materialized": "view",
+        "docs": {
+          "node_color": "silver"
+        }
+      },
+      "created_at": 0,
+      "relation_name": "\"jaffle_shop\".\"main\".\"stg_orders\"",
+      "raw_code": "with source as (\n\n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project\n    #}\n    select * from {{ ref('raw_orders') }}\n\n),\n\nrenamed as (\n\n    select\n        id as order_id,\n        user_id as customer_id,\n        order_date,\n        status\n\n    from source\n\n)\n\nselect * from renamed",
+      "doc_blocks": [],
+      "language": "sql",
+      "refs": [
+        {
+          "name": "raw_orders",
+          "package": null,
+          "version": null
+        }
+      ],
+      "sources": [],
+      "metrics": [],
+      "functions": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "seed.jaffle_shop.raw_orders"
+        ]
+      },
+      "compiled_path": "target/compiled/jaffle_shop/models/staging/stg_orders.sql",
+      "compiled": true,
+      "compiled_code": null,
+      "extra_ctes_injected": true,
+      "extra_ctes": [],
+      "contract": {
+        "enforced": false,
+        "alias_types": true,
+        "checksum": null
+      },
+      "access": "protected",
+      "constraints": [],
+      "version": null,
+      "latest_version": null,
+      "deprecation_date": null,
+      "primary_key": [
+        "order_id"
+      ],
+      "time_spine": null
+    },
+    "model.jaffle_shop.stg_customers": {
+      "database": "jaffle_shop",
+      "schema": "main",
+      "name": "stg_customers",
+      "resource_type": "model",
+      "package_name": "jaffle_shop",
+      "path": "staging/stg_customers.sql",
+      "original_file_path": "models/staging/stg_customers.sql",
+      "unique_id": "model.jaffle_shop.stg_customers",
+      "fqn": [
+        "jaffle_shop",
+        "staging",
+        "stg_customers"
+      ],
+      "alias": "stg_customers",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "80e3223cd54387e11fa16cd0f4cbe15f8ff74dcd9900b93856b9e39416178c9d"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "tags": [],
+        "meta": {},
+        "group": null,
+        "static_analysis": null,
+        "materialized": "view",
+        "incremental_strategy": null,
+        "batch_size": null,
+        "lookback": 1,
+        "begin": null,
+        "persist_docs": {},
+        "post-hook": [],
+        "pre-hook": [],
+        "quoting": {},
+        "column_types": {},
+        "full_refresh": null,
+        "unique_key": null,
+        "on_schema_change": "ignore",
+        "on_configuration_change": "apply",
+        "grants": {},
+        "packages": [],
+        "docs": {
+          "show": true,
+          "node_color": "silver"
+        },
+        "contract": {
+          "enforced": false,
+          "alias_types": true
+        },
+        "event_time": null,
+        "concurrent_batches": null,
+        "access": "protected",
+        "freshness": null
+      },
+      "tags": [],
+      "description": "",
+      "columns": {
+        "customer_id": {
+          "name": "customer_id",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "config": {
+            "meta": {},
+            "tags": []
+          },
+          "tags": [],
+          "granularity": null,
+          "doc_blocks": []
+        }
+      },
+      "meta": {},
+      "group": null,
+      "docs": {
+        "show": true,
+        "node_color": "silver"
+      },
+      "patch_path": "jaffle_shop://models/staging/schema.yml",
+      "build_path": null,
+      "unrendered_config": {
+        "materialized": "view",
+        "docs": {
+          "node_color": "silver"
+        }
+      },
+      "created_at": 0,
+      "relation_name": "\"jaffle_shop\".\"main\".\"stg_customers\"",
+      "raw_code": "with source as (\n\n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project\n    #}\n    select * from {{ ref('raw_customers') }}\n\n),\n\nrenamed as (\n\n    select\n        id as customer_id,\n        first_name,\n        last_name\n\n    from source\n\n)\n\nselect * from renamed",
+      "doc_blocks": [],
+      "language": "sql",
+      "refs": [
+        {
+          "name": "raw_customers",
+          "package": null,
+          "version": null
+        }
+      ],
+      "sources": [],
+      "metrics": [],
+      "functions": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "seed.jaffle_shop.raw_customers"
+        ]
+      },
+      "compiled_path": "target/compiled/jaffle_shop/models/staging/stg_customers.sql",
+      "compiled": true,
+      "compiled_code": "with source as (\n    select * from \"jaffle_shop\".\"main\".\"raw_customers\"\n\n),\n\nrenamed as (\n\n    select\n        id as customer_id,\n        first_name,\n        last_name\n\n    from source\n\n)\n\nselect * from renamed",
+      "extra_ctes_injected": true,
+      "extra_ctes": [],
+      "contract": {
+        "enforced": false,
+        "alias_types": true,
+        "checksum": null
+      },
+      "access": "protected",
+      "constraints": [],
+      "version": null,
+      "latest_version": null,
+      "deprecation_date": null,
+      "primary_key": [
+        "customer_id"
+      ],
+      "time_spine": null
+    }
+  },
+  "unit_tests": {
+    "unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns": {
+      "model": "stg_customers",
+      "given": [
+        {
+          "input": "ref('raw_customers')",
+          "rows": [
+            {
+              "id": 1,
+              "first_name": "Alice",
+              "last_name": "A."
+            },
+            {
+              "id": 2,
+              "first_name": "Bob",
+              "last_name": "B."
+            }
+          ],
+          "format": "dict",
+          "fixture": null
+        }
+      ],
+      "expect": {
+        "rows": [
+          {
+            "customer_id": 1,
+            "first_name": "Alice",
+            "last_name": "A."
+          },
+          {
+            "customer_id": 2,
+            "first_name": "Bob",
+            "last_name": "B."
+          }
+        ],
+        "format": "dict",
+        "fixture": null
+      },
+      "name": "test_stg_customers_renames_columns",
+      "resource_type": "unit_test",
+      "package_name": "jaffle_shop",
+      "path": "staging/unit_tests.yml",
+      "original_file_path": "models/staging/unit_tests.yml",
+      "unique_id": "unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns",
+      "fqn": [
+        "jaffle_shop",
+        "staging",
+        "stg_customers",
+        "test_stg_customers_renames_columns"
+      ],
+      "description": "stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows \u2014 no real customer data.\n",
+      "overrides": null,
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "model.jaffle_shop.stg_customers"
+        ]
+      },
+      "config": {
+        "tags": [],
+        "meta": {},
+        "enabled": true,
+        "static_analysis": null
+      },
+      "checksum": "7eab413928c25333607be6220048bae8e7eeacc8b372ddfe429bdf188b4b950a",
+      "schema": "main",
+      "created_at": 0,
+      "versions": null,
+      "version": null
+    }
+  },
+  "sources": {}
+}

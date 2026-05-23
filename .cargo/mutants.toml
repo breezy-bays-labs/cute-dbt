@@ -24,3 +24,16 @@ examine_globs = [
 # equivalent. Tracked via the v0.1 fidelity-limit issue at the
 # StateComparator site (filed with PR 5).
 exclude_globs = []
+
+# Classified-equivalent mutation: `delete ! in StateComparator::models_in_scope`
+# at state.rs:288 (`!v.is_empty()` inside `is_some_and`). The only values
+# reachable via `test_targets.get(id)` are `None` (model absent → arm 2
+# inserts regardless of the closure) or `Some(non_empty_vec)` (model present
+# → arm 1 has already inserted it via its in-scope unit tests, so BTreeSet
+# dedup makes the arm-2 predicate invisible). No discriminating test is
+# constructible without violating the domain invariant that a modified model
+# with at least one unit test always has that test in scope.
+# cute-dbt#30 — filed with PR C.
+exclude_re = [
+  "delete ! in StateComparator::models_in_scope",
+]

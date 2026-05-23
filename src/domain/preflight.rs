@@ -11,10 +11,13 @@
 //! - [`PreflightError::SchemaUnsupported`] — Stage-1 (adapter):
 //!   `metadata.dbt_schema_version` is below the dbt ≥1.8 floor.
 //! - [`PreflightError::NotCompiled`] — Stage-2 (domain): an **in-scope**
-//!   unit test's target model has `compiled_code: null`. Raised by the
-//!   preflight pass in the run loop **after** `StateComparator` selects
-//!   the in-scope set (PR 6). The remediation message lives in the
-//!   `cli` exit-code mapping per ADR-2.
+//!   model has `compiled_code: null`. `unit_test` is `Some(name)` when the
+//!   model was in scope because of a specific unit test; `None` when the
+//!   model was in scope as a modified model with zero unit tests targeting
+//!   it (explorer mode, PR C / #30). Raised by the preflight pass in the
+//!   run loop **after** `StateComparator` selects the in-scope model set.
+//!   The remediation message lives in the `cli` exit-code mapping per
+//!   ADR-2.
 //! - [`PreflightError::BaselineUnusable`] — Stage-1 (adapter): the
 //!   `--baseline-manifest` was supplied (it is required per the locked
 //!   policy) but could not be read or did not parse against the schema.
@@ -27,7 +30,7 @@
 use thiserror::Error;
 
 use crate::domain::manifest::Manifest;
-use crate::domain::state::{InScopeSet, resolve_target_model};
+use crate::domain::state::{InScopeSet, ModelInScopeSet, resolve_target_model};
 
 /// Domain-level fail-closed currency for the two-stage preflight check.
 ///
@@ -59,16 +62,19 @@ pub enum PreflightError {
         minimum: &'static str,
     },
 
-    /// Stage-2: an in-scope unit test references a model whose
-    /// `compiled_code` is `None`. The error names **both** the offending
-    /// model node id and the unit-test name so the remediation message
-    /// can tell the user exactly which `dbt compile`/`dbt run` to run.
-    #[error("unit test `{unit_test}` references model `{node_id}` which has no compiled_code")]
+    /// Stage-2: an in-scope model has `compiled_code: null`.
+    ///
+    /// `unit_test` is `Some(name)` when the model was in scope because
+    /// a specific unit test targets it; `None` when the model was in
+    /// scope as a modified model with zero unit tests (explorer mode).
+    /// The Display impl produces variant wording for each shape.
+    #[error("{}", NotCompiled::display_for(node_id, unit_test.as_deref()))]
     NotCompiled {
-        /// Manifest node id of the uncompiled target model.
+        /// Manifest node id of the uncompiled model.
         node_id: String,
-        /// Name of the unit test that referenced it.
-        unit_test: String,
+        /// Name of the unit test that referenced it, or `None` when the
+        /// model is in scope as a modified-with-zero-tests model.
+        unit_test: Option<String>,
     },
 
     /// Stage-1: `--baseline-manifest` was supplied but the file could
@@ -81,62 +87,105 @@ pub enum PreflightError {
     },
 }
 
+/// Display helper for `PreflightError::NotCompiled`.
+///
+/// Extracted as an associated function so the `#[error("...")]` attribute
+/// can delegate to it without the noise of a custom `Display` impl on
+/// the whole enum. Not part of the public API.
+struct NotCompiled;
+
+impl NotCompiled {
+    fn display_for(node_id: &str, unit_test: Option<&str>) -> String {
+        match unit_test {
+            Some(name) => format!(
+                "unit test `{name}` references model `{node_id}` which has no compiled_code"
+            ),
+            None => format!(
+                "modified model `{node_id}` has no compiled_code; run `dbt compile` or `dbt run`"
+            ),
+        }
+    }
+}
+
 /// Stage-2 of the two-stage fail-closed contract (ADR-2): verify every
-/// in-scope unit test's target model carries compiled SQL.
+/// in-scope model carries compiled SQL.
+///
+/// **Explorer-mode widening (PR C / #30)**: the check now iterates over
+/// `models_in_scope` — the full union of models targeted by in-scope unit
+/// tests plus modified models with zero unit tests — rather than
+/// iterating unit tests individually. For each in-scope model, if
+/// `compiled_code` is `None`, the run fails closed. The reported
+/// `unit_test` field is:
+///
+/// - `Some(name)` — an in-scope unit test (`in_scope`) targets the model.
+///   If multiple tests target the same model, the lexicographically first
+///   test id's name is reported (deterministic).
+/// - `None` — no in-scope unit test targets the model; the model was in
+///   scope via the modified-with-zero-tests arm.
 ///
 /// Runs in the run loop **after** `StateComparator` selects the in-scope
-/// set. For each in-scope unit test the target model is resolved from
-/// its bare `model:` name; if that model is present and its
-/// `compiled_code` is `None`, the manifest came from `dbt parse` (not
-/// `dbt compile` / `dbt run`) and cannot be honestly visualised — the
-/// run loop fails closed before any HTML is written.
+/// model set. Only in-scope models are inspected: an out-of-scope model
+/// with no compiled SQL is not a fail condition.
 ///
-/// Only in-scope models are inspected: an out-of-scope model with no
-/// compiled SQL is not a fail condition (it is never rendered). That is
-/// what makes the two-stage split worthwhile — a manifest valid for the
-/// diff-scoped subset is not rejected over an irrelevant uncompiled
-/// node.
-///
-/// An in-scope unit test whose target model cannot be resolved at all
-/// (absent from `nodes`) is **skipped**, not failed: the in-scope
-/// selection can place a unit test in scope via its own definition
-/// change while the target model is missing from the manifest. Stage-2
-/// inspects compiled-SQL presence *on a model*, and there is no model
-/// to inspect — so it is not a Stage-2 concern, and deliberately not a
-/// fifth [`PreflightError`] variant.
-///
-/// The first offender in deterministic [`InScopeSet`] order is reported.
+/// The first offender in deterministic [`ModelInScopeSet`] (`BTreeSet` over
+/// `NodeId`) order is reported.
 ///
 /// # Errors
 ///
-/// [`PreflightError::NotCompiled`] — the first in-scope unit test whose
-/// resolvable target model has `compiled_code: None`.
-pub fn preflight_compiled(current: &Manifest, in_scope: &InScopeSet) -> Result<(), PreflightError> {
-    for unit_test_id in in_scope.iter() {
-        let Some(unit_test) = current.unit_test(unit_test_id) else {
-            // An in-scope id always keys `current.unit_tests()` — that
-            // is where the in-scope selection draws it from. The guard
-            // keeps the function total without relying on that.
+/// [`PreflightError::NotCompiled`] — the first in-scope model with
+/// `compiled_code: None`.
+pub fn preflight_compiled(
+    current: &Manifest,
+    in_scope: &InScopeSet,
+    models_in_scope: &ModelInScopeSet,
+) -> Result<(), PreflightError> {
+    for model_id in models_in_scope.iter() {
+        // Resolve the model node by its full id. If the node is not
+        // found, skip: the scope selection guarantees it came from a
+        // manifest node, but be defensive.
+        let Some(model) = current.node(model_id) else {
             continue;
         };
-        let Some(model) = resolve_target_model(current, unit_test.model()) else {
-            // Unresolved target model — skip (see the doc comment).
+        if model.compiled_code().is_some() {
             continue;
-        };
-        if model.compiled_code().is_none() {
-            return Err(PreflightError::NotCompiled {
-                node_id: model.id().as_str().to_owned(),
-                unit_test: unit_test.name().to_owned(),
-            });
         }
+        // Model is uncompiled. Find the first in-scope unit test that
+        // targets this model (lexicographic by test id, deterministic).
+        let unit_test_name = first_in_scope_test_for_model(current, in_scope, model_id);
+        return Err(PreflightError::NotCompiled {
+            node_id: model_id.as_str().to_owned(),
+            unit_test: unit_test_name,
+        });
     }
     Ok(())
+}
+
+/// Return the name of the lexicographically first in-scope unit test that
+/// resolves to `model_id`, or `None` if no in-scope test targets it.
+fn first_in_scope_test_for_model(
+    current: &Manifest,
+    in_scope: &InScopeSet,
+    model_id: &crate::domain::manifest::NodeId,
+) -> Option<String> {
+    // `in_scope` is backed by a BTreeSet, so `.iter()` is already sorted.
+    for test_id in in_scope.iter() {
+        let Some(unit_test) = current.unit_test(test_id) else {
+            continue;
+        };
+        if let Some(resolved) = resolve_target_model(current, unit_test.model()) {
+            if resolved.id() == model_id {
+                return Some(unit_test.name().to_owned());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::manifest::{Checksum, DependsOn, ManifestMetadata, Node, NodeId};
+    use crate::domain::state::ModelInScopeSet;
     use crate::domain::unit_test::{UnitTest, UnitTestExpect};
     use std::collections::HashMap;
 
@@ -161,15 +210,34 @@ mod tests {
     }
 
     #[test]
-    fn not_compiled_display_names_both_ids() {
+    fn not_compiled_display_with_unit_test_names_both_ids() {
         let err = PreflightError::NotCompiled {
             node_id: "model.shop.stg_orders".to_owned(),
-            unit_test: "test_stg_orders_dedup".to_owned(),
+            unit_test: Some("test_stg_orders_dedup".to_owned()),
         };
         assert_eq!(
             err.to_string(),
             "unit test `test_stg_orders_dedup` references model \
              `model.shop.stg_orders` which has no compiled_code"
+        );
+    }
+
+    #[test]
+    fn not_compiled_display_without_unit_test_names_model_only() {
+        // The None shape must not contain "unit test" — the fail_closed.feature
+        // scenario "stderr does not name a unit test" asserts this.
+        let err = PreflightError::NotCompiled {
+            node_id: "model.shop.stg_orders".to_owned(),
+            unit_test: None,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("model.shop.stg_orders"),
+            "names the node: {msg}"
+        );
+        assert!(
+            !msg.contains("unit test"),
+            "must not mention unit test: {msg}"
         );
     }
 
@@ -199,7 +267,7 @@ mod tests {
             },
             PreflightError::NotCompiled {
                 node_id: String::new(),
-                unit_test: String::new(),
+                unit_test: None,
             },
             PreflightError::BaselineUnusable {
                 detail: String::new(),
@@ -270,24 +338,36 @@ mod tests {
         )
     }
 
-    #[test]
-    fn an_empty_in_scope_set_passes() {
-        let m = manifest(vec![], vec![]);
-        assert!(preflight_compiled(&m, &InScopeSet::new()).is_ok());
+    /// Helper to build an `InScopeSet` + `ModelInScopeSet` from explicit
+    /// test-id and model-id strings. Used for tests that control both sets
+    /// independently of `StateComparator` to isolate preflight logic.
+    fn scope(test_ids: &[&str], model_ids: &[&str]) -> (InScopeSet, ModelInScopeSet) {
+        let in_scope = test_ids.iter().map(|s| (*s).to_string()).collect();
+        let models = model_ids.iter().map(|s| NodeId::new(*s)).collect();
+        (in_scope, models)
     }
 
     #[test]
-    fn an_in_scope_test_whose_model_has_compiled_sql_passes() {
+    fn an_empty_models_in_scope_passes() {
+        let m = manifest(vec![], vec![]);
+        let (in_scope, models) = scope(&[], &[]);
+        assert!(preflight_compiled(&m, &in_scope, &models).is_ok());
+    }
+
+    #[test]
+    fn an_in_scope_model_with_compiled_sql_passes() {
         let m = manifest(
             vec![model("model.shop.stg_orders", Some("select 1"))],
             vec![("unit_test.shop.t", unit_test_for("t", "stg_orders"))],
         );
-        let in_scope = InScopeSet::from_iter(["unit_test.shop.t".to_owned()]);
-        assert!(preflight_compiled(&m, &in_scope).is_ok());
+        let (in_scope, models) = scope(&["unit_test.shop.t"], &["model.shop.stg_orders"]);
+        assert!(preflight_compiled(&m, &in_scope, &models).is_ok());
     }
 
     #[test]
-    fn an_in_scope_test_whose_model_lacks_compiled_sql_fails_closed() {
+    fn an_in_scope_model_lacking_compiled_sql_fails_closed_with_unit_test_name() {
+        // The model was in scope via an in-scope unit test — unit_test
+        // should be Some(name).
         let m = manifest(
             vec![model("model.shop.stg_orders", None)],
             vec![(
@@ -295,21 +375,57 @@ mod tests {
                 unit_test_for("test_dedup", "stg_orders"),
             )],
         );
-        let in_scope = InScopeSet::from_iter(["unit_test.shop.t".to_owned()]);
-        match preflight_compiled(&m, &in_scope) {
+        let (in_scope, models) = scope(&["unit_test.shop.t"], &["model.shop.stg_orders"]);
+        match preflight_compiled(&m, &in_scope, &models) {
             Err(PreflightError::NotCompiled { node_id, unit_test }) => {
                 assert_eq!(node_id, "model.shop.stg_orders");
-                assert_eq!(unit_test, "test_dedup");
+                assert_eq!(unit_test, Some("test_dedup".to_owned()));
             }
             other => panic!("expected NotCompiled, got {other:?}"),
         }
     }
 
     #[test]
+    fn a_modified_model_with_zero_unit_tests_and_no_compiled_sql_fails_closed() {
+        // Explorer-mode case: the model is in models_in_scope but there
+        // is no in-scope unit test targeting it. unit_test must be None.
+        let m = manifest(
+            vec![model("model.shop.stg_orders", None)],
+            vec![], // zero unit tests
+        );
+        let (in_scope, models) = scope(
+            &[], // no unit tests in scope
+            &["model.shop.stg_orders"],
+        );
+        match preflight_compiled(&m, &in_scope, &models) {
+            Err(PreflightError::NotCompiled { node_id, unit_test }) => {
+                assert_eq!(node_id, "model.shop.stg_orders");
+                assert!(
+                    unit_test.is_none(),
+                    "unit_test must be None for zero-test case"
+                );
+            }
+            other => panic!("expected NotCompiled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_modified_model_with_zero_unit_tests_and_compiled_sql_passes() {
+        // Explorer-mode: a modified model in models_in_scope with
+        // compiled_code present does NOT fail closed.
+        let m = manifest(
+            vec![model("model.shop.stg_orders", Some("select 1"))],
+            vec![],
+        );
+        let (in_scope, models) = scope(&[], &["model.shop.stg_orders"]);
+        assert!(preflight_compiled(&m, &in_scope, &models).is_ok());
+    }
+
+    #[test]
     fn an_out_of_scope_uncompiled_model_does_not_trigger_fail_closed() {
         // The two-stage split's whole point: `other` has no compiled SQL
-        // but is out of scope, so Stage-2 ignores it. The in-scope test
-        // targets `stg_orders`, which IS compiled.
+        // but is NOT in models_in_scope. Only stg_orders is in scope and
+        // it IS compiled.
         let m = manifest(
             vec![
                 model("model.shop.stg_orders", Some("select 1")),
@@ -320,71 +436,26 @@ mod tests {
                 ("unit_test.shop.other_t", unit_test_for("other_t", "other")),
             ],
         );
-        // Only stg_orders' test is in scope; `other_t` is not.
-        let in_scope = InScopeSet::from_iter(["unit_test.shop.t".to_owned()]);
-        assert!(preflight_compiled(&m, &in_scope).is_ok());
+        // Only stg_orders in models_in_scope; `other` is out of scope.
+        let (in_scope, models) = scope(&["unit_test.shop.t"], &["model.shop.stg_orders"]);
+        assert!(preflight_compiled(&m, &in_scope, &models).is_ok());
     }
 
     #[test]
-    fn an_in_scope_test_with_an_unresolvable_target_is_skipped() {
-        // The finding routed to PR 6: the in-scope selection can place a
-        // unit test in scope via its own definition change while the
-        // target model is absent from `nodes`. Stage-2 skips it — no
-        // model to inspect — rather than failing closed or adding a
-        // fifth PreflightError variant.
-        let m = manifest(
-            vec![],
-            vec![(
-                "unit_test.shop.ghost",
-                unit_test_for("ghost", "missing_model"),
-            )],
-        );
-        let in_scope = InScopeSet::from_iter(["unit_test.shop.ghost".to_owned()]);
-        assert!(preflight_compiled(&m, &in_scope).is_ok());
-    }
-
-    #[test]
-    fn an_unresolved_target_does_not_short_circuit_a_later_offender() {
-        // Ordering kill: the unresolved-target test sorts BEFORE the
-        // uncompiled-target test in InScopeSet (BTreeSet) order. The
-        // `continue` after an unresolved target must keep iterating, not
-        // return Ok — so the later uncompiled model is still caught.
-        let m = manifest(
-            vec![model("model.shop.real", None)],
-            vec![
-                (
-                    "unit_test.shop.a_ghost",
-                    unit_test_for("ghost", "missing_model"),
-                ),
-                ("unit_test.shop.b_real", unit_test_for("real_t", "real")),
-            ],
-        );
-        let in_scope = InScopeSet::from_iter([
-            "unit_test.shop.a_ghost".to_owned(),
-            "unit_test.shop.b_real".to_owned(),
-        ]);
-        match preflight_compiled(&m, &in_scope) {
-            Err(PreflightError::NotCompiled { node_id, .. }) => {
-                assert_eq!(node_id, "model.shop.real");
-            }
-            other => panic!("expected NotCompiled for the later test, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn an_in_scope_id_absent_from_the_unit_tests_map_is_skipped() {
-        // Defensive: an in-scope id that is not a key of
-        // `current.unit_tests()` is skipped. Ordered before a genuine
-        // offender so a `continue -> return Ok` mutation is caught.
+    fn a_model_absent_from_nodes_in_models_in_scope_is_skipped() {
+        // Defensive: a model id in models_in_scope that is not a key of
+        // `current.nodes()` is skipped — no panic, no failure.
         let m = manifest(
             vec![model("model.shop.real", None)],
             vec![("unit_test.shop.b_real", unit_test_for("real_t", "real"))],
         );
-        let in_scope = InScopeSet::from_iter([
-            "unit_test.shop.a_absent".to_owned(),
-            "unit_test.shop.b_real".to_owned(),
-        ]);
-        match preflight_compiled(&m, &in_scope) {
+        // ghost is in models_in_scope but missing from nodes; real
+        // is uncompiled and in scope.
+        let (in_scope, models) = scope(
+            &["unit_test.shop.b_real"],
+            &["model.shop.a_ghost", "model.shop.real"],
+        );
+        match preflight_compiled(&m, &in_scope, &models) {
             Err(PreflightError::NotCompiled { node_id, .. }) => {
                 assert_eq!(node_id, "model.shop.real");
             }
@@ -393,10 +464,9 @@ mod tests {
     }
 
     #[test]
-    fn the_first_offender_in_in_scope_order_is_reported() {
-        // Two in-scope tests, both targeting uncompiled models. The
-        // offender reported is the one whose in-scope id sorts first
-        // (BTreeSet order) — deterministic regardless of HashMap order.
+    fn the_first_offender_in_model_id_order_is_reported() {
+        // Two in-scope models (both uncompiled). The offender reported is
+        // the one whose NodeId sorts first (BTreeSet / lexicographic order).
         let m = manifest(
             vec![model("model.shop.aaa", None), model("model.shop.zzz", None)],
             vec![
@@ -404,11 +474,13 @@ mod tests {
                 ("unit_test.shop.z", unit_test_for("z_t", "zzz")),
             ],
         );
-        let in_scope =
-            InScopeSet::from_iter(["unit_test.shop.a".to_owned(), "unit_test.shop.z".to_owned()]);
-        match preflight_compiled(&m, &in_scope) {
-            Err(PreflightError::NotCompiled { unit_test, .. }) => {
-                assert_eq!(unit_test, "a_t", "the first in-scope id's test wins");
+        let (in_scope, models) = scope(
+            &["unit_test.shop.a", "unit_test.shop.z"],
+            &["model.shop.aaa", "model.shop.zzz"],
+        );
+        match preflight_compiled(&m, &in_scope, &models) {
+            Err(PreflightError::NotCompiled { node_id, .. }) => {
+                assert_eq!(node_id, "model.shop.aaa", "first in model-id order wins");
             }
             other => panic!("expected NotCompiled, got {other:?}"),
         }

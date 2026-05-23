@@ -76,3 +76,20 @@ model node has `compiled_code: null`. Feeds PR 6's Stage-2 fail-closed \
 cute-dbt must exit non-zero, name the node, give remediation. Pure \
 synthetic data only.\
 """
+
+[[fixture]]
+path = "jaffle-shop-no-test-uncompiled.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/dbt-labs/jaffle_shop_duckdb"
+sha256 = "65f5ab183b4699d42adbef2e097c8a741e0fed2d33a6e409d2635073ef1d2cc0"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Minimal synthetic manifest derived from the jaffle-shop baseline: \
+contains only `model.jaffle_shop.stg_orders` with a modified body \
+checksum (`compiled_code: null`) and zero unit tests. Exercises PR C \
+(#30) explorer-mode fail-closed: a modified model that has no unit tests \
+targeting it but lacks compiled SQL must trigger the None-shape \
+`NotCompiled` error. Pure synthetic data only.\
+"""

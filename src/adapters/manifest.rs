@@ -543,7 +543,7 @@ mod tests {
     fn baseline_detail_falls_back_to_display_for_other_variants() {
         let err = PreflightError::NotCompiled {
             node_id: "model.p.m".to_owned(),
-            unit_test: "t".to_owned(),
+            unit_test: Some("t".to_owned()),
         };
         assert_eq!(baseline_detail(&err), err.to_string());
     }

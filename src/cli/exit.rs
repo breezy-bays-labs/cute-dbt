@@ -13,6 +13,11 @@ use crate::domain::PreflightError;
 /// The match is exhaustive over the four `PreflightError` variants with
 /// no `_` arm — a fifth variant would fail to compile here, forcing a
 /// deliberate remediation decision rather than a silent generic message.
+///
+/// `NotCompiled` destructures `unit_test: Option<String>` (widened in
+/// PR C / #30) but the hint text is identical for both shapes: the
+/// error's own `Display` already carries the shape-specific description;
+/// the hint adds the remediation action which is the same either way.
 #[must_use]
 pub fn remediation(err: &PreflightError) -> String {
     let hint = match err {
@@ -63,10 +68,12 @@ mod tests {
     }
 
     #[test]
-    fn not_compiled_message_names_the_node_and_recommends_compile() {
+    fn not_compiled_message_names_the_node_and_recommends_compile_with_unit_test() {
+        // With unit_test: Some — both node and test name appear; hint
+        // recommends dbt compile / dbt run.
         let msg = remediation(&PreflightError::NotCompiled {
             node_id: "model.shop.stg_orders".to_owned(),
-            unit_test: "test_dedup".to_owned(),
+            unit_test: Some("test_dedup".to_owned()),
         });
         assert!(
             msg.contains("model.shop.stg_orders"),
@@ -76,6 +83,29 @@ mod tests {
         assert!(
             msg.contains("dbt compile") && msg.contains("dbt run"),
             "recommends compiling: {msg}"
+        );
+    }
+
+    #[test]
+    fn not_compiled_message_names_the_node_and_recommends_compile_without_unit_test() {
+        // With unit_test: None — node appears; "unit test" does NOT appear
+        // in the error display (enforced by the domain Display impl);
+        // hint still recommends dbt compile / dbt run.
+        let msg = remediation(&PreflightError::NotCompiled {
+            node_id: "model.shop.stg_orders".to_owned(),
+            unit_test: None,
+        });
+        assert!(
+            msg.contains("model.shop.stg_orders"),
+            "names the node: {msg}"
+        );
+        assert!(
+            msg.contains("dbt compile") && msg.contains("dbt run"),
+            "recommends compiling: {msg}"
+        );
+        assert!(
+            !msg.contains("unit test"),
+            "should not mention a unit test when none is in scope: {msg}"
         );
     }
 
