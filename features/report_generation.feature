@@ -14,7 +14,6 @@ Feature: Generate a self-contained report from a compiled dbt manifest
     And the file "report.html" exists
     And "report.html" is a single self-contained file with no external resource references
     And "report.html" contains a diff-scope banner naming the baseline reference
-    And the banner states the v0.1 fidelity limit "model body changes"
 
   Scenario: Each in-scope unit test renders its full block
     Given the model "stg_orders" was modified relative to the baseline

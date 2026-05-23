@@ -18,6 +18,7 @@ examine_globs = [
   "src/adapters/manifest.rs",
   "src/adapters/cte_engine.rs",
   "src/adapters/asset_embed.rs",
+  "src/adapters/render.rs",
 ]
 
 # Skip unwrap_or-style fallbacks where surviving mutants are typically

@@ -115,14 +115,18 @@ real loading constructs (`<script src>`, `<link href>`, `<img src>`,
 CSS `@import` / `url()`, protocol-relative `//`) — never raw `grep http`
 (minified bundles carry hundreds of inert URL string literals).
 
-## Synthetic-only fixture invariant (hard, non-negotiable)
+## Synthetic-only fixtures
 
-Every committed fixture / `insta` snapshot / `.feature` example must be
-synthetic or public-demo data — no real data, ever. Enforced mechanically:
+A hard, non-negotiable invariant: every committed fixture / `insta`
+snapshot / `.feature` example must be synthetic or public-demo data —
+no real data, ever. Enforced mechanically:
 `tests/fixtures/MANIFEST.toml` lists every fixture with origin / source /
-SHA-256 / `synthetic_only = true`; a `cargo test` parses the manifest and a
-CI grep fails on any unlisted file under `tests/fixtures/`. Real data in
-this public repo is a release blocker.
+SHA-256 / `synthetic_only = true`; a `cargo test` parses the manifest
+and a CI grep fails on any unlisted file under `tests/fixtures/`. Real
+data in this public repo is a release blocker. The same mechanism shape
+applies to `assets/MANIFEST.toml` (the vendored frontend bundle's
+provenance index) — see
+[`ARCHITECTURE.md` §5](ARCHITECTURE.md#5-asset-embedding-zero-egress-gate).
 
 ## Working commands
 

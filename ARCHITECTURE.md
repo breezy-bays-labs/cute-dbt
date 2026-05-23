@@ -2,12 +2,17 @@
 
 This document is the public derivation of the cute-dbt v0.1 architecture: the
 single-crate hexagonal layering, the conscious design simplifications, the
-two-stage fail-closed contract, the `StateComparator` strategy, the
-asset-inlining + zero-egress gate, and the synthetic-only fixture invariant.
-The canonical source for each decision is the project's decision records
-(ADR-1 through ADR-5); this file translates those decisions into a public-repo
-narrative that does not require access to the private records to read or
-audit.
+two-stage fail-closed contract, the `StateComparator` strategy, and the
+asset-inlining + zero-egress gate. The synthetic-only-data invariant for
+fixtures, snapshots, and `.feature` examples lives in
+[`CONTRIBUTING.md`](CONTRIBUTING.md#synthetic-only-fixtures) (human
+contributors) and [`AGENTS.md`](AGENTS.md#synthetic-only-fixtures) (AI
+agents); the structural mechanism (`tests/fixtures/MANIFEST.toml` + a
+`cargo test` listed-file gate) is the same shape as §5's
+`assets/MANIFEST.toml`. The canonical source for each architectural
+decision is the project's decision records (ADR-1 through ADR-5); this
+file translates those decisions into a public-repo narrative that does
+not require access to the private records to read or audit.
 
 The `.feature` files under [`features/`](features/) are the **executable
 acceptance contract** (cucumber-rs ATDD outer loop, automated in PR 10);
@@ -284,42 +289,13 @@ the headless test's clear zero-requests output.
 
 The PR 9 [`AUDIT.md`](AUDIT.md) lands as a one-page index of every
 artifact a reviewer can re-run — the headless command, the resource-ref
-lint, `assets/MANIFEST.toml`, `tests/fixtures/MANIFEST.toml` (§6),
-`deny.toml`, `Cargo.lock`. See [`SECURITY.md`](SECURITY.md) for the
-plain-language version of this story.
+lint, `assets/MANIFEST.toml`, `tests/fixtures/MANIFEST.toml` (see
+[`CONTRIBUTING.md`](CONTRIBUTING.md#synthetic-only-fixtures) and
+[`AGENTS.md`](AGENTS.md#synthetic-only-fixtures) for the fixture-hygiene
+rule), `deny.toml`, `Cargo.lock`. See [`SECURITY.md`](SECURITY.md) for
+the plain-language version of this story.
 
-## 6. Synthetic-only fixture invariant
-
-Every committed fixture / `insta` snapshot / `.feature` example **must**
-contain only synthetic or public-demo data. No real data from any source,
-ever. cute-dbt's privacy property is that when you run it, your manifest
-stays on your machine; this public repository must reflect that property by
-never including real data of its own. A real-data fixture in this public
-repo would contradict the privacy story on day one.
-
-The invariant is **mechanically enforced**, not a checklist line:
-
-- **`tests/fixtures/MANIFEST.toml`** lists every committed fixture with:
-  - `path` — the fixture file's repo-relative path
-  - `origin` — upstream source name (e.g. `jaffle-shop`) or
-    `synthetic-generated`
-  - `url` — the upstream URL when the fixture is a public demo, omitted
-    when synthetic
-  - `sha256` — the SHA-256 of the fixture file
-  - `synthetic_only = true` — explicit, per-file affirmation that the
-    fixture contains no real data
-- A **`cargo test`** parses the manifest, walks `tests/fixtures/`, and
-  verifies every file is listed.
-- A **CI grep** fails the build on any file under `tests/fixtures/` not
-  listed in the manifest.
-
-The same shape is used for `assets/MANIFEST.toml` (§5) — provenance lives
-in a TOML file anyone can read directly and the build is the gate that
-keeps it honest.
-
-Real data in this public repo is a release blocker.
-
-## 7. Composition note — the run loop lives in `cli`
+## 6. Composition note — the run loop lives in `cli`
 
 The `scope → preflight_compiled → parse_ctes → render` run loop is
 composed in `cli`. This is a **conscious single-crate composition
@@ -332,7 +308,7 @@ If cute-dbt ever splits into multiple crates, the run loop migrates to an
 wiring, `ExitCode` mapping, *and* run-loop composition — and that is the
 right level of indirection for one consumer.
 
-## 8. Acceptance contract
+## 7. Acceptance contract
 
 The five `.feature` files under [`features/`](features/) are the
 executable acceptance contract:
@@ -366,7 +342,7 @@ Three CI invariants pin the feature-spec contract — see
 ## Cross-references
 
 - [`SECURITY.md`](SECURITY.md) — plain-language zero-egress + privacy
-  statement (non-engineer-readable companion to §5 and §6)
+  statement (non-engineer-readable companion to §5)
 - [`AGENTS.md`](AGENTS.md) — cross-provider agent operating guide
 - [`CLAUDE.md`](CLAUDE.md) — Claude-specific entry point
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — developer workflow
