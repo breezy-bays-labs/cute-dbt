@@ -51,8 +51,8 @@ use std::time::Duration;
 
 use headless_chrome::Browser;
 use headless_chrome::LaunchOptionsBuilder;
-use headless_chrome::protocol::cdp::Network;
 use headless_chrome::protocol::cdp::types::Event;
+use headless_chrome::protocol::cdp::{Network, Runtime};
 
 fn report_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -200,20 +200,45 @@ fn report_makes_zero_external_requests_when_opened_via_file_url() {
     // boolean is enough; "working sort + search" is not part of the
     // auditability proof (see PR body disposition D3 on issue #12 for
     // the focus.md vs. issue acceptance text reconciliation).
-    let datatable_ok = tab
-        .evaluate(
-            "(function () { \
-               try { \
-                 return !!(window.jQuery \
-                   && window.jQuery.fn \
-                   && window.jQuery.fn.DataTable \
-                   && document.querySelector('table.dataTable')); \
-               } catch (_) { return false; } \
-             })()",
-            false,
-        )
-        .ok()
-        .and_then(|v| v.value)
+    //
+    // Use `Runtime::Evaluate` directly with `returnByValue: true` so the
+    // result lands in `RemoteObject.value` as a deserialized JSON bool
+    // regardless of whether the runtime would otherwise return an
+    // `objectId` handle. `tab.evaluate(_, _)` hardcodes
+    // `returnByValue: false`, which works on primitives in practice but
+    // is implicit; spelling it out keeps the proof reliable across
+    // future headless_chrome / CDP changes.
+    let dt_eval = tab
+        .call_method(Runtime::Evaluate {
+            expression: "(function () { \
+                   try { \
+                     return !!(window.jQuery \
+                       && window.jQuery.fn \
+                       && window.jQuery.fn.DataTable \
+                       && document.querySelector('table.dataTable')); \
+                   } catch (_) { return false; } \
+                 })()"
+                .to_string(),
+            object_group: None,
+            include_command_line_api: None,
+            silent: Some(true),
+            context_id: None,
+            return_by_value: Some(true),
+            generate_preview: None,
+            user_gesture: None,
+            await_promise: Some(false),
+            throw_on_side_effect: None,
+            timeout: None,
+            disable_breaks: None,
+            repl_mode: None,
+            allow_unsafe_eval_blocked_by_csp: None,
+            unique_context_id: None,
+            serialization_options: None,
+        })
+        .expect("evaluate DataTables init probe");
+    let datatable_ok = dt_eval
+        .result
+        .value
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 

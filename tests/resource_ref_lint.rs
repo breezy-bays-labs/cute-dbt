@@ -6,14 +6,22 @@
 //! against the committed `examples/jaffle-shop-report.html`; the headless
 //! test proves the runtime property in a real browser.
 //!
-//! Forbidden constructs, per `SECURITY.md` and `ARCHITECTURE.md` §5:
-//!   - `<script src="...">` to any non-`data:` value
-//!   - `<link href="...">` to any non-`data:` value
-//!   - `<img src="...">` to any non-`data:` value
-//!   - CSS `@import` (banned outright; even `data:` imports are an
-//!     unwanted construct in the rendered chrome)
-//!   - CSS `url(...)` to any non-`data:` value
-//!   - Protocol-relative `//host/...` in any of the above
+//! Forbidden constructs, per `SECURITY.md` and `ARCHITECTURE.md` §5.
+//! The rendered chrome is a single self-contained HTML file — there are
+//! no sibling files to load. The lint therefore allows only inline
+//! values and rejects every reference that would resolve to a separate
+//! resource:
+//!   - `<script src="...">`  — only `data:` URIs / empty allowed
+//!   - `<link href="...">`   — only `data:` URIs / empty / `#fragment` allowed
+//!   - `<img src="...">`     — only `data:` URIs / empty allowed
+//!   - CSS `@import`         — banned outright (no exception)
+//!   - CSS `url(...)`        — only `data:` URIs / empty allowed
+//!
+//! Relative paths (`./style.css`, `style.css`, `/abs/path`),
+//! protocol-relative (`//host/...`), and any `scheme:`-prefixed value
+//! other than `data:` / `mailto:` are violations. There is no
+//! legitimate file in the same directory as the report; the proof
+//! breaks if the rendered chrome can resolve a sibling.
 //!
 //! Why structured parsing, not `grep`: the inlined Mermaid + DataTables +
 //! jQuery bundles contain hundreds of inert URL string literals inside
@@ -44,7 +52,15 @@ impl std::fmt::Display for Violation {
 }
 
 fn scan_violations(html: &str) -> Vec<Violation> {
-    let dom = tl::parse(html, tl::ParserOptions::default()).expect("HTML must be parseable");
+    // Strip <script> bodies BEFORE handing the HTML to `tl`. tl does not
+    // perfectly enforce the HTML5 "script content is raw text" rule —
+    // template-literal substrings like `<img src="${e}">` inside a
+    // minified bundle get materialized as spurious DOM nodes the lint
+    // would otherwise false-positive on. The lint only cares about the
+    // OPENING `<script src="...">` tag's attributes, never the body, so
+    // stripping content loses no real coverage.
+    let stripped = strip_script_bodies(html);
+    let dom = tl::parse(&stripped, tl::ParserOptions::default()).expect("HTML must be parseable");
     let parser = dom.parser();
     let mut out = Vec::new();
 
@@ -72,6 +88,47 @@ fn scan_violations(html: &str) -> Vec<Violation> {
     out
 }
 
+/// Replace every `<script ...>BODY</script>` content with an empty
+/// string while preserving the opening tag (so `<script src="...">`
+/// attribute checks still fire). The matching is case-insensitive and
+/// tolerates self-closing `<script.../>` (rare in HTML, but cheap to
+/// pass through unchanged).
+fn strip_script_bodies(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let lower = html.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(open_rel) = lower[cursor..].find("<script") {
+        let open_start = cursor + open_rel;
+        out.push_str(&html[cursor..open_start]);
+        let Some(open_end_rel) = lower[open_start..].find('>') else {
+            // Malformed; preserve the rest verbatim.
+            out.push_str(&html[open_start..]);
+            return out;
+        };
+        let open_end = open_start + open_end_rel + 1;
+        out.push_str(&html[open_start..open_end]);
+        // Self-closing variant — no body to strip.
+        if html[open_start..open_end].ends_with("/>") {
+            cursor = open_end;
+            continue;
+        }
+        match lower[open_end..].find("</script>") {
+            Some(close_rel) => {
+                let close_start = open_end + close_rel;
+                out.push_str("</script>");
+                cursor = close_start + "</script>".len();
+            }
+            None => {
+                // Unclosed <script> — preserve the rest verbatim.
+                out.push_str(&html[open_end..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(&html[cursor..]);
+    out
+}
+
 fn check_attr(
     attrs: &tl::Attributes<'_>,
     attr_name: &str,
@@ -82,7 +139,7 @@ fn check_attr(
         return;
     };
     let value = raw.as_utf8_str();
-    if is_external_url(&value) {
+    if is_forbidden_resource_ref(&value) {
         out.push(Violation {
             kind,
             value: value.into_owned(),
@@ -90,28 +147,28 @@ fn check_attr(
     }
 }
 
-fn is_external_url(value: &str) -> bool {
+/// Whether an `href` / `src` / `srcset` value is a forbidden resource
+/// reference for the self-contained-report contract.
+///
+/// The rendered chrome must not load *any* separate file. So the
+/// allowlist is narrow: empty, `#fragment`, `data:` URI, or `mailto:`
+/// (the last so a future "report a bug" link does not trip the lint).
+/// Everything else — relative paths, absolute paths, network schemes,
+/// protocol-relative, `file:` — is a violation.
+fn is_forbidden_resource_ref(value: &str) -> bool {
     let v = value.trim();
     if v.is_empty() || v.starts_with('#') {
         return false;
     }
-    // Inline / non-network schemes — allowed.
     if v.starts_with("data:") || v.starts_with("mailto:") {
         return false;
     }
-    // Protocol-relative — forbidden by the contract.
-    if v.starts_with("//") {
-        return true;
-    }
-    // Network schemes — forbidden.
-    if let Some((scheme, _)) = v.split_once(':') {
-        let s = scheme.to_ascii_lowercase();
-        return matches!(
-            s.as_str(),
-            "http" | "https" | "ws" | "wss" | "ftp" | "ftps" | "file",
-        );
-    }
-    false
+    // Everything else — relative paths (`script.js`, `./x`, `../y`,
+    // `/abs/path`), protocol-relative (`//host/x`), and any other
+    // `scheme:`-prefixed value (`http:`, `https:`, `file:`, etc.) —
+    // would resolve to a separate file or network endpoint and is a
+    // violation of the single-self-contained-file invariant.
+    true
 }
 
 fn find_css_external_refs(css: &str, out: &mut Vec<Violation>) {
@@ -291,4 +348,51 @@ fn empty_href_is_allowed() {
         <link rel="icon" href="">
     </head></html>"#;
     assert!(scan_violations(html).is_empty());
+}
+
+#[test]
+fn relative_path_script_is_caught() {
+    // The single-self-contained-file invariant: nothing in the report
+    // may resolve to a sibling file, even if it has no scheme. A
+    // future regression that adds `<script src="bundle.js">` (a
+    // tempting refactor for a developer who forgets the inlining
+    // contract) would otherwise silently slip through a lint that
+    // only looks for `http:` / `https:`.
+    let html = r#"<!DOCTYPE html><html><body>
+        <script src="bundle.js"></script>
+    </body></html>"#;
+    let v = scan_violations(html);
+    assert_eq!(v.len(), 1, "expected one violation, got {v:?}");
+    assert_eq!(v[0].kind, "<script src>");
+    assert_eq!(v[0].value, "bundle.js");
+}
+
+#[test]
+fn absolute_path_link_is_caught() {
+    let html = r#"<!DOCTYPE html><html><head>
+        <link rel="stylesheet" href="/css/main.css">
+    </head></html>"#;
+    let v = scan_violations(html);
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].kind, "<link href>");
+}
+
+#[test]
+fn parent_relative_img_is_caught() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <img src="../assets/logo.png">
+    </body></html>"#;
+    let v = scan_violations(html);
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].kind, "<img src>");
+}
+
+#[test]
+fn file_scheme_is_caught() {
+    let html = r#"<!DOCTYPE html><html><body>
+        <img src="file:///etc/passwd">
+    </body></html>"#;
+    let v = scan_violations(html);
+    assert_eq!(v.len(), 1);
+    assert_eq!(v[0].kind, "<img src>");
 }
