@@ -1,0 +1,94 @@
+//! The cucumber `World` — per-scenario mutable state.
+//!
+//! Cucumber constructs a fresh `World` via `Default::default()` at the
+//! start of every scenario, so this struct intentionally has only
+//! `Option<…>` and `HashMap<…>` fields. Scenario steps fill in the
+//! pieces they need; later steps read what earlier steps wrote.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use cute4dbt::domain::{CteGraph, EdgeType, InScopeSet, Manifest, ModelInScopeSet, ModifiedSet};
+
+#[derive(Debug, Default, cucumber::World)]
+pub struct World {
+    // --- Subprocess execution -------------------------------------------
+    /// Filename inside `CARGO_TARGET_TMPDIR` that the next subprocess
+    /// scenario will write `--out` to.
+    pub out_path: Option<PathBuf>,
+
+    /// Exit code of the last `cute-dbt` subprocess invocation.
+    pub last_exit_code: Option<i32>,
+
+    /// Captured stderr of the last subprocess invocation.
+    pub last_stderr: String,
+
+    /// Captured stdout of the last subprocess invocation.
+    #[allow(dead_code)]
+    pub last_stdout: String,
+
+    /// Contents of the report file at `out_path`, if the subprocess
+    /// wrote one. `None` when the subprocess failed closed.
+    pub report_html: Option<String>,
+
+    // --- In-memory manifest state (diff_scoping) ------------------------
+    /// Synthetic `current` manifest built by Given steps.
+    pub current_manifest: Option<Manifest>,
+
+    /// Synthetic `baseline` manifest built by Given steps.
+    pub baseline_manifest: Option<Manifest>,
+
+    /// Most-recent `modified_set` result.
+    #[allow(dead_code)]
+    pub last_modified: Option<ModifiedSet>,
+
+    /// Most-recent `in_scope_unit_tests` result.
+    pub last_in_scope: Option<InScopeSet>,
+
+    /// Most-recent `models_in_scope` result.
+    pub last_models_in_scope: Option<ModelInScopeSet>,
+
+    /// Side facts the scenario wants to assert later. Keyed by model
+    /// name → list of unit test names targeting it.
+    pub model_to_tests: HashMap<String, Vec<String>>,
+
+    /// The most-recently-named model in the current scenario — set by
+    /// every model-naming Given so a later step ("its unit test ...
+    /// was modified") can recover the target model without the
+    /// .feature having to restate the model name.
+    pub last_named_model: Option<String>,
+
+    /// Selector for which committed fixture pair the next subprocess
+    /// `When` step should use. Set by per-scenario Givens whose
+    /// English wording does not uniquely determine the fixture (two
+    /// scenarios in `fail_closed.feature` whose `When` clauses share
+    /// the `current.json + baseline.json` pattern but expect different
+    /// actual fixtures). `None` ⇒ default
+    /// `jaffle-shop-current.json` + `jaffle-shop-baseline.json`.
+    pub fixture_choice: Option<FixtureChoice>,
+
+    // --- CTE rendering --------------------------------------------------
+    /// Parsed CTE graph for the current `cte_rendering` scenario.
+    pub last_cte_graph: Option<CteGraph>,
+
+    /// Edge-type currently being checked by the scenario outline.
+    pub last_edge_type: Option<EdgeType>,
+}
+
+/// Which committed fixture pair the next subprocess `When` step
+/// should use, when the English wording does not uniquely identify
+/// it. See `World::fixture_choice`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixtureChoice {
+    /// `jaffle-shop-no-test-uncompiled.json` + `jaffle-shop-baseline.json`.
+    /// Used by the "modified model with zero unit tests and no
+    /// compiled_code" scenario.
+    NoTestUncompiled,
+
+    /// `jaffle-shop-current.json` + `jaffle-shop-baseline.json`. The
+    /// committed pair is fully compiled, so an out-of-scope
+    /// uncompiled assertion is vacuously satisfied (no in-scope
+    /// uncompiled nodes) and the run exits 0.
+    #[allow(dead_code)]
+    OutOfScopeUncompiled,
+}

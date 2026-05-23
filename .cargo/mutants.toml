@@ -6,9 +6,29 @@
 # crap4rs strict-keyed paths.
 
 # cucumber-rs `harness = false` means `cargo nextest` is incompatible
-# with the bdd test target; cargo-mutants must invoke `cargo test` for
-# all test targets to keep bdd in the loop.
+# with the bdd test target; cargo-mutants must invoke `cargo test`. We
+# explicitly enumerate the kill-detection test targets so the slow
+# Gherkin outer-loop binary (`tests/bdd.rs`, every scenario spawning a
+# subprocess) does NOT run on every candidate mutant. The
+# mutation-kill signal lives in the unit tests + the fast integration
+# tests below; the BDD target is the contract gate, not the
+# kill-detection gate.
 test_tool = "cargo"
+additional_cargo_test_args = [
+  "--lib",
+  "--bins",
+  "--test", "diff_scoping",
+  "--test", "run_loop",
+  "--test", "manifest_ingestion",
+  "--test", "cte_engine",
+  "--test", "render_integration",
+  "--test", "fixture_parse",
+  "--test", "fixture_manifest_listed",
+  "--test", "assets_manifest",
+  "--test", "domain_clean_arch",
+  "--test", "resource_ref_lint",
+  "--test", "golden_report",
+]
 
 # Focused scope. Render-glue and POD domain types are NOT in this list —
 # they are measured but not gated (per ADR-4 / quality-loop playbook).

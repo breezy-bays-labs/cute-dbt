@@ -514,6 +514,28 @@ jobs:
       # Chrome dependency. This dedicated job opts in explicitly.
       - run: cargo test --test headless_zero_egress --locked -- --ignored
 
+  bdd:
+    # ATDD outer loop — the executable acceptance contract for the
+    # five `features/*.feature` files. Uses cucumber-rs `harness = false`
+    # so cargo nextest is INCOMPATIBLE; the binary is invoked via
+    # `cargo test --test bdd`. The `feature-count` job pins the
+    # `.feature` file count at 5; the `baseline-required-grep` job
+    # pins the `--baseline-manifest` invariant per-scenario; this job
+    # is the step-definition gate (every scenario has a matching step,
+    # all 27 scenarios pass). No untrusted GitHub event interpolation
+    # in any `run:` block.
+    name: BDD outer loop (cucumber-rs, cargo test --test bdd)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cute-dbt
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --test bdd --locked
+
   crap-scorecard:
     # crap4rs scorecard reads crap4rs.toml for keyed thresholds: strict
     # CRAP <= 15 on correctness-load-bearing modules, default <= 25

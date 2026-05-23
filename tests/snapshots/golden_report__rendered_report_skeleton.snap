@@ -1,0 +1,110 @@
+---
+source: tests/golden_report.rs
+assertion_line: 104
+expression: skeleton
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cute-dbt report</title>
+<link rel="icon" href="data:,">
+<style></style>
+<style></style>
+</head>
+<body>
+
+<header class="report-header">
+  <h1>cute-dbt report</h1>
+</header>
+
+<section class="diff-scope-banner" aria-label="Diff scope">
+  <p class="diff-scope-line">
+    <span class="diff-scope-text">Showing 1 unit test in scope</span> —
+    vs baseline manifest <code class="diff-scope-baseline">jaffle-shop-baseline.json</code>.
+  </p>
+</section>
+
+<section class="error-card" role="alert" aria-label="Manifest error">
+  <h2>This manifest can't be visualized</h2>
+  <div class="error-node-id">node: <code>—</code></div>
+  <p class="error-remediation">
+    Re-run with <code>dbt compile</code> or <code>dbt run</code> —
+    <code>dbt parse</code> does not produce compiled SQL.
+  </p>
+</section>
+
+<section class="test-selection" aria-label="Test selection">
+  <div class="test-selector-row">
+    <div class="selector-field">
+      <label for="model-select">Model</label>
+      <select id="model-select"></select>
+    </div>
+    <span class="selector-arrow" aria-hidden="true">→</span>
+    <div class="selector-field">
+      <label for="test-select">Unit test</label>
+      <select id="test-select"></select>
+    </div>
+  </div>
+  <p class="test-description">…</p>
+
+  <details class="test-details">
+    <summary>Test details</summary>
+    <div class="test-details-body"></div>
+  </details>
+</section>
+
+<section class="cte-dag" aria-label="CTE dependency DAG">
+  <div class="cte-dag-header">
+    <h2>CTE dependency DAG</h2>
+    <p class="cte-dag-subtitle">Click a node to inspect.</p>
+  </div>
+  <div class="recursive-banner" hidden>
+    Recursive CTE present; recursive arm omitted from DAG (v0.1 limit).
+  </div>
+  <div class="cte-dag-mermaid"></div>
+  <div class="dag-legend">
+    <div class="dag-legend-group">
+      <span class="dag-legend-title">node role</span>
+      <span class="dag-legend-roles"></span>
+    </div>
+    <div class="dag-legend-group">
+      <span class="dag-legend-title">edge type</span>
+      <span class="dag-legend-joins"></span>
+    </div>
+  </div>
+</section>
+
+<div class="panel-row">
+
+  <section class="panel left-panel" aria-label="Node detail / All inputs">
+    <div class="panel-header">
+      <h2>Inspect</h2>
+      <div class="panel-toggle" role="group" aria-label="Left panel mode">
+        <button type="button" data-mode="node"   class="is-active" aria-pressed="true">Node detail</button>
+        <button type="button" data-mode="inputs" aria-pressed="false">All inputs</button>
+      </div>
+    </div>
+    <div class="left-panel-body" data-mode="node"></div>
+  </section>
+
+  <section class="panel expected-panel" aria-label="Expected output">
+    <div class="panel-header">
+      <h2>Expected</h2>
+      <span class="row-count-badge expected-rowcount">0 rows</span>
+    </div>
+    <div class="expected-body"></div>
+  </section>
+
+</div>
+
+<script type="application/json" id="cute-dbt-data"></script>
+
+<script></script>
+<script></script>
+<script></script>
+
+<script></script>
+</body>
+</html>
