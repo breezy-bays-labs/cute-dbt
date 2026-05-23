@@ -178,19 +178,51 @@ impl CteEdge {
 /// valid for the lifetime of the graph. The constructor does **not**
 /// validate edge indices — the producer (PR 7) is responsible for
 /// emitting only well-formed graphs; the renderer expects them to be.
+///
+/// `is_recursive` is `true` when the parsed query used `WITH RECURSIVE`.
+/// v0.1 does not attempt to render recursive CTEs; the renderer should
+/// surface a banner ("recursive CTE present; recursive arm omitted from
+/// DAG") and render only the non-recursive portion. The CTE engine drops
+/// self-referencing edges via the acyclicity invariant (`from < to`), so
+/// the node/edge list is always DAG-safe.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CteGraph {
     #[serde(default)]
     nodes: Vec<CteNode>,
     #[serde(default)]
     edges: Vec<CteEdge>,
+    /// `true` when the source query used `WITH RECURSIVE`.
+    ///
+    /// The renderer uses this to display a "recursive CTE present" banner.
+    /// Always `false` for standard dbt-compiled models; surfaced by
+    /// [`Self::new`] defaulting to `false` and [`Self::with_recursive`]
+    /// setting it.
+    #[serde(default)]
+    is_recursive: bool,
 }
 
 impl CteGraph {
     /// Canonical constructor — takes ownership of both vectors.
+    ///
+    /// `is_recursive` defaults to `false`. Use [`Self::with_recursive`] to
+    /// flag a `WITH RECURSIVE` query.
     #[must_use]
     pub fn new(nodes: Vec<CteNode>, edges: Vec<CteEdge>) -> Self {
-        Self { nodes, edges }
+        Self {
+            nodes,
+            edges,
+            is_recursive: false,
+        }
+    }
+
+    /// Mark the graph as derived from a `WITH RECURSIVE` query.
+    ///
+    /// Returns `self` with `is_recursive` set to `true`. Called by the CTE
+    /// engine when it detects `WITH RECURSIVE` in the parsed SQL.
+    #[must_use]
+    pub fn with_recursive(mut self) -> Self {
+        self.is_recursive = true;
+        self
     }
 
     /// CTE nodes in declaration order.
@@ -203,6 +235,16 @@ impl CteGraph {
     #[must_use]
     pub fn edges(&self) -> &[CteEdge] {
         &self.edges
+    }
+
+    /// `true` when the source query used `WITH RECURSIVE`.
+    ///
+    /// The renderer should surface a banner when this is `true` and omit
+    /// any self-referencing edges (which the engine already drops via the
+    /// `from < to` acyclicity invariant).
+    #[must_use]
+    pub fn is_recursive(&self) -> bool {
+        self.is_recursive
     }
 
     /// `true` when the graph carries no CTE nodes.
@@ -346,5 +388,44 @@ mod tests {
         );
         let back: CteGraph = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
         assert_eq!(back, g);
+    }
+
+    #[test]
+    fn cte_graph_new_defaults_is_recursive_to_false() {
+        let g = CteGraph::new(vec![], vec![]);
+        assert!(!g.is_recursive(), "new() sets is_recursive = false");
+    }
+
+    #[test]
+    fn cte_graph_with_recursive_sets_flag() {
+        let g = CteGraph::new(vec![], vec![]).with_recursive();
+        assert!(
+            g.is_recursive(),
+            "with_recursive() sets is_recursive = true"
+        );
+    }
+
+    #[test]
+    fn cte_graph_is_recursive_survives_serde_roundtrip() {
+        let g = CteGraph::new(vec![], vec![]).with_recursive();
+        let json = serde_json::to_string(&g).unwrap();
+        let back: CteGraph = serde_json::from_str(&json).unwrap();
+        assert!(
+            back.is_recursive(),
+            "is_recursive round-trips through serde"
+        );
+    }
+
+    #[test]
+    fn cte_graph_is_recursive_defaults_to_false_on_old_wire() {
+        // A serialized graph without an `is_recursive` field (old format)
+        // must deserialize with is_recursive = false (the #[serde(default)]
+        // path).
+        let json = r#"{"nodes":[],"edges":[]}"#;
+        let g: CteGraph = serde_json::from_str(json).unwrap();
+        assert!(
+            !g.is_recursive(),
+            "missing is_recursive field defaults to false"
+        );
     }
 }

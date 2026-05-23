@@ -174,6 +174,32 @@ jobs:
           fi
           exit "$fail"
 
+  edge-vocab-completeness:
+    # Guards that every EdgeType variant declared in domain/cte.rs is
+    # matched in the Mermaid edge label function in asset_embed.rs.
+    # The palette half (edge_palette.rs in PR 11) is deferred:
+    # tracked: cute-dbt#11 — wire palette match coverage once render/edge_palette.rs exists
+    name: EdgeType enum/label completeness guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Every EdgeType variant must appear in edge_label match
+        run: |
+          set -euo pipefail
+          # Extract all variant names from the EdgeType enum declaration.
+          variants=$(grep -A 40 'pub enum EdgeType' src/domain/cte.rs \
+            | grep -oE '^[[:space:]]+[A-Z][A-Za-z]+,' \
+            | tr -d ' ,' | sort -u)
+          # Extract all EdgeType variant arms present in the edge_label match.
+          covered=$(grep -oE 'EdgeType::[A-Z][A-Za-z]+' src/adapters/asset_embed.rs \
+            | grep -oE '[A-Z][A-Za-z]+$' | sort -u)
+          missing=$(comm -23 <(printf '%s\n' "$variants") <(printf '%s\n' "$covered"))
+          if [ -n "$missing" ]; then
+            echo "::error::edge-vocab-completeness: EdgeType variants not covered in edge_label: $missing"
+            exit 1
+          fi
+
   baseline-required-grep:
     # The locked policy decision: --baseline-manifest is a required CLI
     # argument; omitting it is a clap usage error (NOT a PreflightError).

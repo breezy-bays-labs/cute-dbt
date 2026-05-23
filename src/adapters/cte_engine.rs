@@ -109,15 +109,26 @@ fn parse_query(compiled_sql: &str) -> Result<Query, CteError> {
 }
 
 /// Assemble the [`CteGraph`] from a parsed [`Query`].
+///
+/// `WITH RECURSIVE` queries are flagged via [`CteGraph::with_recursive`]
+/// so the renderer can surface a banner. The acyclicity invariant (`from
+/// < to`) already drops self-referencing edges, keeping the edge list
+/// DAG-safe regardless.
 fn build_graph(query: &Query) -> CteGraph {
     let ctes = cte_tables(query);
     if ctes.is_empty() {
         return CteGraph::default();
     }
+    let recursive = query.with.as_ref().is_some_and(|with| with.recursive);
     let nodes = build_nodes(ctes, query);
     let index = name_index(ctes);
     let edges = build_edges(ctes, query, &index);
-    CteGraph::new(nodes, edges)
+    let graph = CteGraph::new(nodes, edges);
+    if recursive {
+        graph.with_recursive()
+    } else {
+        graph
+    }
 }
 
 /// The `WITH` clause's CTEs, or an empty slice when there is no `WITH`.
@@ -194,7 +205,7 @@ fn collect_edges(
             // Only UNION arms get a union-type override; EXCEPT/INTERSECT/
             // MINUS recurse without one (joins inside still emit normally).
             let arm_type = if *op == SetOperator::Union {
-                classify_union_quantifier(*set_quantifier)
+                Some(classify_union_quantifier(*set_quantifier))
             } else {
                 None
             };
@@ -286,16 +297,28 @@ fn classify_join(operator: &JoinOperator) -> Option<EdgeType> {
 
 /// Classify a `UNION` set quantifier into [`EdgeType`].
 ///
-/// - `All` → `UnionAll`
-/// - `Distinct` → `UnionDistinct`
-/// - `None` → `UnionDistinct` (plain `UNION` is semantically DISTINCT)
-/// - Other variants (`ByName`, `AllByName`, `DistinctByName`) → `None`
-///   (exotic quantifiers outside the two-kind vocabulary).
-fn classify_union_quantifier(quantifier: SetQuantifier) -> Option<EdgeType> {
+/// All six sqlparser 0.62 variants collapse onto the two-kind vocabulary:
+///
+/// | Variant | `EdgeType` | Rationale |
+/// |---|---|---|
+/// | `All` | `UnionAll` | direct |
+/// | `Distinct` | `UnionDistinct` | direct |
+/// | `None` | `UnionDistinct` | plain `UNION` is semantically DISTINCT per SQL spec |
+/// | `ByName` | `UnionDistinct` | by-name does not change graph topology |
+/// | `AllByName` | `UnionAll` | all-row semantics; positional vs by-name is irrelevant to topology |
+/// | `DistinctByName` | `UnionDistinct` | distinct-row semantics, same collapse as `Distinct` |
+///
+/// `SetQuantifier` is exhaustive in sqlparser 0.62 (no `#[non_exhaustive]`),
+/// so all 6 variants are listed explicitly. A future sqlparser version that
+/// adds new variants will produce a compile error here, which is the desired
+/// behavior: each new variant needs a deliberate topology decision.
+fn classify_union_quantifier(quantifier: SetQuantifier) -> EdgeType {
     match quantifier {
-        SetQuantifier::All => Some(EdgeType::UnionAll),
-        SetQuantifier::Distinct | SetQuantifier::None => Some(EdgeType::UnionDistinct),
-        _ => None,
+        SetQuantifier::All | SetQuantifier::AllByName => EdgeType::UnionAll,
+        SetQuantifier::Distinct
+        | SetQuantifier::None
+        | SetQuantifier::ByName
+        | SetQuantifier::DistinctByName => EdgeType::UnionDistinct,
     }
 }
 
@@ -687,28 +710,38 @@ mod tests {
     }
 
     #[test]
-    fn classify_union_quantifier_maps_all_cases() {
-        // All → UnionAll; Distinct → UnionDistinct; None → UnionDistinct;
-        // exotic ByName variants → None (catch-all).
+    fn classify_union_quantifier_maps_all_six_variants() {
+        // The three direct variants.
         assert_eq!(
             classify_union_quantifier(SetQuantifier::All),
-            Some(EdgeType::UnionAll),
+            EdgeType::UnionAll,
         );
         assert_eq!(
             classify_union_quantifier(SetQuantifier::Distinct),
-            Some(EdgeType::UnionDistinct),
+            EdgeType::UnionDistinct,
         );
         assert_eq!(
             classify_union_quantifier(SetQuantifier::None),
-            Some(EdgeType::UnionDistinct),
-            "plain UNION (no quantifier) is semantically DISTINCT",
+            EdgeType::UnionDistinct,
+            "plain UNION (no quantifier) is semantically DISTINCT per SQL spec",
         );
-        // ByName / AllByName / DistinctByName are outside the two-kind
-        // vocabulary and produce no edge.
+        // The three ByName variants collapse to the same topology as their
+        // positional counterparts — by-name vs positional does not affect the
+        // CTE dependency graph.
+        assert_eq!(
+            classify_union_quantifier(SetQuantifier::AllByName),
+            EdgeType::UnionAll,
+            "UNION ALL BY NAME collapses to UnionAll",
+        );
         assert_eq!(
             classify_union_quantifier(SetQuantifier::ByName),
-            None,
-            "BY NAME variant is outside the edge vocabulary",
+            EdgeType::UnionDistinct,
+            "UNION BY NAME collapses to UnionDistinct",
+        );
+        assert_eq!(
+            classify_union_quantifier(SetQuantifier::DistinctByName),
+            EdgeType::UnionDistinct,
+            "UNION DISTINCT BY NAME collapses to UnionDistinct",
         );
     }
 
@@ -792,6 +825,39 @@ mod tests {
                     "`{sql}`: edge endpoint is in range",
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_standard_with_clause_is_not_recursive() {
+        let g = graph("WITH a AS (SELECT 1 AS id) SELECT * FROM a");
+        assert!(
+            !g.is_recursive(),
+            "a standard WITH clause is not flagged as recursive",
+        );
+    }
+
+    #[test]
+    fn with_recursive_sets_the_is_recursive_flag() {
+        // sqlparser parses WITH RECURSIVE correctly; the engine sets the
+        // flag so the renderer can surface a banner. The self-referencing
+        // edge (n → n) is dropped by the from < to acyclicity guard.
+        let g = graph(
+            "WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 10) \
+             SELECT * FROM t",
+        );
+        assert!(
+            g.is_recursive(),
+            "WITH RECURSIVE query sets the is_recursive flag",
+        );
+        // The recursive CTE appears as a node, but the self-referencing
+        // edge is dropped (n.from < n.to invariant). Nodes: t + terminal.
+        assert_eq!(g.nodes().len(), 2, "one CTE node plus the terminal");
+        for edge in g.edges() {
+            assert!(
+                edge.from() < edge.to(),
+                "all emitted edges remain acyclic even in recursive queries",
+            );
         }
     }
 }
