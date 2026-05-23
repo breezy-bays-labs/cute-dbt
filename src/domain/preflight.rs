@@ -255,6 +255,9 @@ mod tests {
             UnitTestExpect::new(serde_json::Value::Null, None),
             None,
             DependsOn::default(),
+            None,
+            None,
+            None,
         )
     }
 
