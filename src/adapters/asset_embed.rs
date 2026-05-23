@@ -31,7 +31,7 @@
 
 use std::fmt::Write as _;
 
-use crate::domain::{CteEdge, CteGraph, CteNode, JoinType};
+use crate::domain::{CteEdge, CteGraph, CteNode, EdgeType};
 
 /// Sakura 1.5.0 — the classless base stylesheet. Vendored at
 /// `assets/sakura-1.5.0.css`; see `assets/MANIFEST.toml` for provenance.
@@ -132,7 +132,7 @@ fn node_lines(nodes: &[CteNode]) -> String {
     out
 }
 
-/// One Mermaid edge per [`CteEdge`], labelled with its join kind.
+/// One Mermaid edge per [`CteEdge`], labelled with its edge kind.
 fn edge_lines(edges: &[CteEdge]) -> String {
     let mut out = String::new();
     for edge in edges {
@@ -140,21 +140,24 @@ fn edge_lines(edges: &[CteEdge]) -> String {
             out,
             "  n{} -->|{}| n{}",
             edge.from(),
-            join_label(edge.join_type()),
+            edge_label(edge.edge_type()),
             edge.to(),
         );
     }
     out
 }
 
-/// The Mermaid edge label for a [`JoinType`].
-fn join_label(join_type: JoinType) -> &'static str {
-    match join_type {
-        JoinType::Inner => "INNER",
-        JoinType::Left => "LEFT",
-        JoinType::Right => "RIGHT",
-        JoinType::Full => "FULL",
-        JoinType::Cross => "CROSS",
+/// The Mermaid edge label for an [`EdgeType`].
+fn edge_label(edge_type: EdgeType) -> &'static str {
+    match edge_type {
+        EdgeType::From => "FROM",
+        EdgeType::Inner => "INNER",
+        EdgeType::Left => "LEFT",
+        EdgeType::Right => "RIGHT",
+        EdgeType::Full => "FULL",
+        EdgeType::Cross => "CROSS",
+        EdgeType::UnionAll => "UNION ALL",
+        EdgeType::UnionDistinct => "UNION",
     }
 }
 
@@ -245,12 +248,15 @@ mod tests {
     }
 
     #[test]
-    fn join_label_covers_every_join_kind() {
-        assert_eq!(join_label(JoinType::Inner), "INNER");
-        assert_eq!(join_label(JoinType::Left), "LEFT");
-        assert_eq!(join_label(JoinType::Right), "RIGHT");
-        assert_eq!(join_label(JoinType::Full), "FULL");
-        assert_eq!(join_label(JoinType::Cross), "CROSS");
+    fn edge_label_covers_every_edge_kind() {
+        assert_eq!(edge_label(EdgeType::From), "FROM");
+        assert_eq!(edge_label(EdgeType::Inner), "INNER");
+        assert_eq!(edge_label(EdgeType::Left), "LEFT");
+        assert_eq!(edge_label(EdgeType::Right), "RIGHT");
+        assert_eq!(edge_label(EdgeType::Full), "FULL");
+        assert_eq!(edge_label(EdgeType::Cross), "CROSS");
+        assert_eq!(edge_label(EdgeType::UnionAll), "UNION ALL");
+        assert_eq!(edge_label(EdgeType::UnionDistinct), "UNION");
     }
 
     #[test]
@@ -280,14 +286,31 @@ mod tests {
     }
 
     #[test]
-    fn mermaid_block_labels_each_edge_with_its_join_kind() {
+    fn mermaid_block_labels_each_edge_with_its_edge_kind() {
         let graph = CteGraph::new(
             vec![node("a"), node("b")],
-            vec![CteEdge::new(0, 1, JoinType::Left)],
+            vec![CteEdge::new(0, 1, EdgeType::Left)],
         );
         assert!(
             mermaid_block(&graph).contains("n0 -->|LEFT| n1"),
-            "the edge carries its join label",
+            "the edge carries its edge label",
+        );
+    }
+
+    #[test]
+    fn mermaid_block_labels_from_and_union_edges() {
+        let graph = CteGraph::new(
+            vec![node("src"), node("renamed"), node("unioned")],
+            vec![
+                CteEdge::new(0, 1, EdgeType::From),
+                CteEdge::new(0, 2, EdgeType::UnionAll),
+            ],
+        );
+        let block = mermaid_block(&graph);
+        assert!(block.contains("n0 -->|FROM| n1"), "From edge labelled FROM");
+        assert!(
+            block.contains("n0 -->|UNION ALL| n2"),
+            "UnionAll edge labelled UNION ALL",
         );
     }
 
@@ -317,7 +340,7 @@ mod tests {
     fn the_smoke_report_renders_the_passed_graph() {
         let graph = CteGraph::new(
             vec![node("orders"), node("customers")],
-            vec![CteEdge::new(0, 1, JoinType::Inner)],
+            vec![CteEdge::new(0, 1, EdgeType::Inner)],
         );
         let html = smoke_report_html(&graph);
         assert!(html.contains("n0[\"orders\"]"), "first node rendered");

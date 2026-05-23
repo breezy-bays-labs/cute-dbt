@@ -11,7 +11,7 @@ aware).
 | SC | Behavior | Spec |
 |----|----------|------|
 | SC1 | compiled dbt ≥1.8 manifest → offline-correct report | `report_generation.feature`, `zero_egress.feature` |
-| SC2 | per in-scope test: header + Given/Expected panels + join-colored CTE DAG + banner | `report_generation.feature`, `diff_scoping.feature`, `cte_rendering.feature` |
+| SC2 | per in-scope test: header + Given/Expected panels + edge-colored CTE DAG + banner | `report_generation.feature`, `diff_scoping.feature`, `cte_rendering.feature` |
 | SC3 | parse-only / partial / pre-1.8 → clear fail-closed error, no HTML | `fail_closed.feature` |
 | SC4 | auditability package re-runnable by anyone | `zero_egress.feature` (headless-network proof + resource-ref lint). **Asset-manifest completeness is a CI invariant** (`cargo-deny` + `cargo test` over `assets/MANIFEST.toml`), NOT a scenario — same bucket as SC5/SC6. |
 | SC5 | MIT, public, single crate, reproducible build | **Not a scenario** — verified by repo config + `cargo-deny` + committed `Cargo.lock` (CI gate). |

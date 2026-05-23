@@ -1,4 +1,4 @@
-//! `CteGraph` + `CteNode` + `CteEdge` + `JoinType` — the AST output the
+//! `CteGraph` + `CteNode` + `CteEdge` + `EdgeType` — the AST output the
 //! sqlparser CTE engine (PR 7) produces and the renderer (PR 8b)
 //! consumes.
 //!
@@ -8,21 +8,25 @@
 //! `nodes` vector exactly once so indices remain valid for the lifetime
 //! of the `CteGraph`.
 //!
-//! `JoinType` is `#[non_exhaustive]` per the
+//! `EdgeType` is `#[non_exhaustive]` per the
 //! [enums-yes-structs-no rule](https://github.com/cmbays/.claude/blob/main/rules/non-exhaustive.md):
-//! consumers pattern-match this and new SQL dialect joins (e.g.
+//! consumers pattern-match this and new SQL structural kinds (e.g.
 //! `LATERAL`) are additive.
 
 use serde::{Deserialize, Serialize};
 
-/// SQL join kind classified by the CTE engine.
+/// SQL edge kind classified by the CTE engine.
 ///
-/// `#[non_exhaustive]` — adding a dialect-specific variant is a v0.x
-/// additive change that consumers must opt into via `_` arms.
+/// Covers all structural relationships that can appear between CTEs:
+/// plain `FROM` references, the five join types, and the two UNION
+/// variants. `#[non_exhaustive]` — adding a dialect-specific variant is
+/// a v0.x additive change that consumers must opt into via `_` arms.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JoinType {
+#[serde(rename_all = "snake_case")]
+pub enum EdgeType {
+    /// Plain `FROM <cte>` reference (no join operator).
+    From,
     /// `INNER JOIN`.
     Inner,
     /// `LEFT [OUTER] JOIN`.
@@ -33,6 +37,10 @@ pub enum JoinType {
     Full,
     /// `CROSS JOIN` / Cartesian product.
     Cross,
+    /// `UNION ALL` arm reference.
+    UnionAll,
+    /// `UNION` / `UNION DISTINCT` arm reference.
+    UnionDistinct,
 }
 
 /// 1-based `(line, column)` span anchor; future use by the renderer to
@@ -124,22 +132,22 @@ impl CteNode {
 /// A directed edge between two CTE nodes in [`CteGraph`].
 ///
 /// `from` and `to` are indices into the parent `CteGraph::nodes` vector;
-/// `join_type` classifies the SQL relationship the edge represents.
+/// `edge_type` classifies the SQL relationship the edge represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CteEdge {
     from: usize,
     to: usize,
-    join_type: JoinType,
+    edge_type: EdgeType,
 }
 
 impl CteEdge {
     /// Canonical constructor.
     #[must_use]
-    pub fn new(from: usize, to: usize, join_type: JoinType) -> Self {
+    pub fn new(from: usize, to: usize, edge_type: EdgeType) -> Self {
         Self {
             from,
             to,
-            join_type,
+            edge_type,
         }
     }
 
@@ -155,10 +163,10 @@ impl CteEdge {
         self.to
     }
 
-    /// SQL join kind classified by the CTE engine.
+    /// SQL edge kind classified by the CTE engine.
     #[must_use]
-    pub fn join_type(&self) -> JoinType {
-        self.join_type
+    pub fn edge_type(&self) -> EdgeType {
+        self.edge_type
     }
 }
 
@@ -170,19 +178,51 @@ impl CteEdge {
 /// valid for the lifetime of the graph. The constructor does **not**
 /// validate edge indices — the producer (PR 7) is responsible for
 /// emitting only well-formed graphs; the renderer expects them to be.
+///
+/// `is_recursive` is `true` when the parsed query used `WITH RECURSIVE`.
+/// v0.1 does not attempt to render recursive CTEs; the renderer should
+/// surface a banner ("recursive CTE present; recursive arm omitted from
+/// DAG") and render only the non-recursive portion. The CTE engine drops
+/// self-referencing edges via the acyclicity invariant (`from < to`), so
+/// the node/edge list is always DAG-safe.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CteGraph {
     #[serde(default)]
     nodes: Vec<CteNode>,
     #[serde(default)]
     edges: Vec<CteEdge>,
+    /// `true` when the source query used `WITH RECURSIVE`.
+    ///
+    /// The renderer uses this to display a "recursive CTE present" banner.
+    /// Always `false` for standard dbt-compiled models; surfaced by
+    /// [`Self::new`] defaulting to `false` and [`Self::with_recursive`]
+    /// setting it.
+    #[serde(default)]
+    is_recursive: bool,
 }
 
 impl CteGraph {
     /// Canonical constructor — takes ownership of both vectors.
+    ///
+    /// `is_recursive` defaults to `false`. Use [`Self::with_recursive`] to
+    /// flag a `WITH RECURSIVE` query.
     #[must_use]
     pub fn new(nodes: Vec<CteNode>, edges: Vec<CteEdge>) -> Self {
-        Self { nodes, edges }
+        Self {
+            nodes,
+            edges,
+            is_recursive: false,
+        }
+    }
+
+    /// Mark the graph as derived from a `WITH RECURSIVE` query.
+    ///
+    /// Returns `self` with `is_recursive` set to `true`. Called by the CTE
+    /// engine when it detects `WITH RECURSIVE` in the parsed SQL.
+    #[must_use]
+    pub fn with_recursive(mut self) -> Self {
+        self.is_recursive = true;
+        self
     }
 
     /// CTE nodes in declaration order.
@@ -197,6 +237,16 @@ impl CteGraph {
         &self.edges
     }
 
+    /// `true` when the source query used `WITH RECURSIVE`.
+    ///
+    /// The renderer should surface a banner when this is `true` and omit
+    /// any self-referencing edges (which the engine already drops via the
+    /// `from < to` acyclicity invariant).
+    #[must_use]
+    pub fn is_recursive(&self) -> bool {
+        self.is_recursive
+    }
+
     /// `true` when the graph carries no CTE nodes.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -209,46 +259,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn join_type_serde_roundtrip_lowercase_variants() {
-        for jt in [
-            JoinType::Inner,
-            JoinType::Left,
-            JoinType::Right,
-            JoinType::Full,
-            JoinType::Cross,
+    fn edge_type_serde_roundtrip_all_variants() {
+        for et in [
+            EdgeType::From,
+            EdgeType::Inner,
+            EdgeType::Left,
+            EdgeType::Right,
+            EdgeType::Full,
+            EdgeType::Cross,
+            EdgeType::UnionAll,
+            EdgeType::UnionDistinct,
         ] {
-            let json = serde_json::to_string(&jt).unwrap();
-            let back: JoinType = serde_json::from_str(&json).unwrap();
-            assert_eq!(back, jt, "round-trip failed for {jt:?}");
+            let json = serde_json::to_string(&et).unwrap();
+            let back: EdgeType = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, et, "round-trip failed for {et:?}");
         }
     }
 
     #[test]
-    fn join_type_serializes_as_lowercase() {
+    fn edge_type_serializes_as_snake_case() {
+        assert_eq!(serde_json::to_string(&EdgeType::From).unwrap(), "\"from\"");
         assert_eq!(
-            serde_json::to_string(&JoinType::Inner).unwrap(),
+            serde_json::to_string(&EdgeType::Inner).unwrap(),
             "\"inner\""
         );
-        assert_eq!(serde_json::to_string(&JoinType::Left).unwrap(), "\"left\"");
+        assert_eq!(serde_json::to_string(&EdgeType::Left).unwrap(), "\"left\"");
         assert_eq!(
-            serde_json::to_string(&JoinType::Right).unwrap(),
+            serde_json::to_string(&EdgeType::Right).unwrap(),
             "\"right\""
         );
-        assert_eq!(serde_json::to_string(&JoinType::Full).unwrap(), "\"full\"");
+        assert_eq!(serde_json::to_string(&EdgeType::Full).unwrap(), "\"full\"");
         assert_eq!(
-            serde_json::to_string(&JoinType::Cross).unwrap(),
+            serde_json::to_string(&EdgeType::Cross).unwrap(),
             "\"cross\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EdgeType::UnionAll).unwrap(),
+            "\"union_all\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EdgeType::UnionDistinct).unwrap(),
+            "\"union_distinct\""
         );
     }
 
     #[test]
-    fn join_type_is_copy_and_hashable() {
+    fn edge_type_is_copy_and_hashable() {
         use std::collections::HashSet;
         let mut set = HashSet::new();
-        set.insert(JoinType::Inner);
-        set.insert(JoinType::Inner);
-        set.insert(JoinType::Left);
-        assert_eq!(set.len(), 2);
+        set.insert(EdgeType::Inner);
+        set.insert(EdgeType::Inner);
+        set.insert(EdgeType::Left);
+        set.insert(EdgeType::UnionAll);
+        assert_eq!(set.len(), 3);
     }
 
     #[test]
@@ -284,10 +347,10 @@ mod tests {
 
     #[test]
     fn cte_edge_constructor_and_getters() {
-        let e = CteEdge::new(0, 1, JoinType::Left);
+        let e = CteEdge::new(0, 1, EdgeType::Left);
         assert_eq!(e.from(), 0);
         assert_eq!(e.to(), 1);
-        assert_eq!(e.join_type(), JoinType::Left);
+        assert_eq!(e.edge_type(), EdgeType::Left);
     }
 
     #[test]
@@ -304,7 +367,7 @@ mod tests {
             CteNode::new("a", None, None, None),
             CteNode::new("b", None, None, None),
         ];
-        let edges = vec![CteEdge::new(0, 1, JoinType::Inner)];
+        let edges = vec![CteEdge::new(0, 1, EdgeType::Inner)];
         let g = CteGraph::new(nodes, edges);
         assert_eq!(g.nodes().len(), 2);
         assert_eq!(g.edges().len(), 1);
@@ -319,11 +382,50 @@ mod tests {
                 CteNode::new("b", None, Some("select * from a".to_owned()), None),
             ],
             vec![
-                CteEdge::new(0, 1, JoinType::Inner),
-                CteEdge::new(1, 0, JoinType::Cross),
+                CteEdge::new(0, 1, EdgeType::Inner),
+                CteEdge::new(1, 0, EdgeType::Cross),
             ],
         );
         let back: CteGraph = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
         assert_eq!(back, g);
+    }
+
+    #[test]
+    fn cte_graph_new_defaults_is_recursive_to_false() {
+        let g = CteGraph::new(vec![], vec![]);
+        assert!(!g.is_recursive(), "new() sets is_recursive = false");
+    }
+
+    #[test]
+    fn cte_graph_with_recursive_sets_flag() {
+        let g = CteGraph::new(vec![], vec![]).with_recursive();
+        assert!(
+            g.is_recursive(),
+            "with_recursive() sets is_recursive = true"
+        );
+    }
+
+    #[test]
+    fn cte_graph_is_recursive_survives_serde_roundtrip() {
+        let g = CteGraph::new(vec![], vec![]).with_recursive();
+        let json = serde_json::to_string(&g).unwrap();
+        let back: CteGraph = serde_json::from_str(&json).unwrap();
+        assert!(
+            back.is_recursive(),
+            "is_recursive round-trips through serde"
+        );
+    }
+
+    #[test]
+    fn cte_graph_is_recursive_defaults_to_false_on_old_wire() {
+        // A serialized graph without an `is_recursive` field (old format)
+        // must deserialize with is_recursive = false (the #[serde(default)]
+        // path).
+        let json = r#"{"nodes":[],"edges":[]}"#;
+        let g: CteGraph = serde_json::from_str(json).unwrap();
+        assert!(
+            !g.is_recursive(),
+            "missing is_recursive field defaults to false"
+        );
     }
 }
