@@ -21,8 +21,12 @@
 //!   a plain `SELECT … FROM <single relation>` with zero incoming edges
 //!   is `import`; everything else is `transform`.
 //! - **Clean-import-CTE binding.** Parses `ref('NAME')` out of each
-//!   unit test's `given[].input` and matches `NAME` to an import-CTE node
-//!   by name (case-insensitive). Unmatched givens surface "no fixture
+//!   unit test's `given[].input`, then locates the matching import-CTE
+//!   node in two passes (case-insensitive): first by CTE name (the
+//!   convention where the unwrapper CTE inherits the upstream model's
+//!   name), then by the leaf table reference inside the CTE's body
+//!   (dbt's compiled-SQL idiom: `with source as (select * from
+//!   "db"."schema"."MODEL")`). Unmatched givens surface "no fixture
 //!   provided — dbt treats unspecified inputs as empty" in the template.
 //!
 //! ## Security
@@ -550,29 +554,87 @@ fn build_test_payload(
     }
 }
 
-/// Locate a node by case-insensitive name; return its rendered id
-/// (terminal nodes get the model's bare name).
-fn find_import_node_id(graph: &CteGraph, ref_name: &str, model_name: &str) -> Option<String> {
+/// Locate the import-CTE node that binds to `ref_name`.
+///
+/// Two-pass match — both case-insensitive:
+///
+/// 1. **Name match** (the design's sample-data convention): an
+///    import-CTE whose own name equals `ref_name`.
+/// 2. **Body match** (dbt's idiomatic compiled-SQL shape): an
+///    import-CTE whose body unwraps an external table whose leaf
+///    identifier equals `ref_name`. dbt-compiled SQL commonly carries
+///    `with source as (select * from "db"."schema"."MODEL")`, where the
+///    CTE name is the unwrapper convention (`source`, `src_*`, etc.)
+///    and the model name lives only inside the body. Pass 1 misses
+///    that shape; pass 2 catches it via [`extract_table_leaf_refs`].
+///
+/// Returns the import-CTE's name (the payload's stable node id), or
+/// `None` when neither pass matches.
+fn find_import_node_id(graph: &CteGraph, ref_name: &str, _model_name: &str) -> Option<String> {
     let target = ref_name.to_ascii_lowercase();
-    graph
-        .nodes()
-        .iter()
-        .enumerate()
-        .find(|(_, node)| node.name().eq_ignore_ascii_case(&target))
-        .map(|(idx, node)| {
-            if node.name() == TERMINAL_NODE_NAME {
-                model_name.to_owned()
-            } else {
-                // Honor the role classification — only import nodes
-                // surface as bound targets in the design.
-                if classify_node_role(graph, idx) == NodeRole::Import {
-                    node.name().to_owned()
-                } else {
-                    String::new()
-                }
-            }
-        })
-        .filter(|id| !id.is_empty())
+    // Pass 1: name match (design's convention).
+    if let Some((_, node)) = graph.nodes().iter().enumerate().find(|(idx, node)| {
+        node.name().eq_ignore_ascii_case(&target)
+            && classify_node_role(graph, *idx) == NodeRole::Import
+    }) {
+        return Some(node.name().to_owned());
+    }
+    // Pass 2: body match (dbt's compiled-SQL shape).
+    for (idx, node) in graph.nodes().iter().enumerate() {
+        if classify_node_role(graph, idx) != NodeRole::Import {
+            continue;
+        }
+        let Some(sql) = node.raw_sql() else {
+            continue;
+        };
+        if extract_table_leaf_refs(sql).iter().any(|t| t == &target) {
+            return Some(node.name().to_owned());
+        }
+    }
+    None
+}
+
+/// Extract leaf table identifiers from any `FROM` or `JOIN` clause in
+/// `sql`, lowercased.
+///
+/// Whitespace-tokenizing heuristic: walks the body, looks for a `from`
+/// or `join` keyword, and takes the next token's trailing identifier
+/// (stripping schema/database prefixes and surrounding quotes). Used by
+/// [`find_import_node_id`]'s pass-2 body match. Not a SQL parser —
+/// false positives are constrained by the surrounding [`NodeRole`]
+/// filter (only import-CTE nodes are searched), and the typical dbt
+/// `source as (select * from "db"."schema"."MODEL")` shape resolves to
+/// the right leaf cleanly.
+///
+/// Returned identifiers are lowercase so the caller can compare
+/// case-insensitively without re-folding.
+fn extract_table_leaf_refs(sql: &str) -> Vec<String> {
+    let tokens: Vec<&str> = sql.split_whitespace().collect();
+    let mut out = Vec::new();
+    for (i, tok) in tokens.iter().enumerate() {
+        let lower = tok.to_ascii_lowercase();
+        if lower != "from" && lower != "join" {
+            continue;
+        }
+        let Some(next) = tokens.get(i + 1) else {
+            continue;
+        };
+        // Strip surrounding `(` and trailing `,`/`)`/`;`/`(`; take the
+        // last `.`-delimited segment; strip `"` quotes.
+        let cleaned = next
+            .trim_start_matches('(')
+            .trim_end_matches([',', ')', ';']);
+        let leaf = cleaned.rsplit('.').next().unwrap_or("");
+        let leaf = leaf.trim_matches('"');
+        if leaf.is_empty() {
+            continue;
+        }
+        if !leaf.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        out.push(leaf.to_ascii_lowercase());
+    }
+    out
 }
 
 /// Build a map from in-scope model id to the unit tests targeting it.
@@ -1044,6 +1106,39 @@ mod tests {
     }
 
     #[test]
+    fn build_payload_given_binds_import_cte_via_body_table_reference() {
+        // The dbt-idiomatic shape: import CTE is named `source` (the
+        // unwrapper convention), but its body references the model the
+        // unit test mocks. The renderer's pass-2 body match must catch
+        // this — pass-1 name match misses it.
+        let compiled = "with source as (\
+                          select * from \"jaffle_shop\".\"main\".\"raw_customers\"\
+                        ) select customer_id, first_name from source";
+        let node = model_node("model.shop.stg_customers", "body", Some(compiled));
+        let ut = UnitTest::new(
+            "test_one",
+            NodeId::new("stg_customers"),
+            vec![UnitTestGiven::new("ref('raw_customers')", json!([]), None)],
+            UnitTestExpect::new(json!([]), None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.stg_customers")]);
+        let payload = build_payload(&manifest, &in_scope, &models, "b");
+        let test = &payload.models[0].tests[0];
+        assert_eq!(
+            test.given[0].bound_to_node.as_deref(),
+            Some("source"),
+            "ref('raw_customers') binds to the import-CTE `source` via its body table reference",
+        );
+    }
+
+    #[test]
     fn build_payload_given_does_not_bind_when_no_matching_import_cte() {
         let compiled = "select 1";
         let node = model_node("model.shop.flat", "body", Some(compiled));
@@ -1215,6 +1310,41 @@ mod tests {
         let payload_count = chrome.matches(payload_open).count();
         assert_eq!(payload_count, 1, "exactly one payload carrier open tag");
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ===== extract_table_leaf_refs =====
+
+    #[test]
+    fn extract_table_leaf_refs_strips_schema_and_quote_qualifiers() {
+        let sql = "select * from \"jaffle_shop\".\"main\".\"raw_customers\"";
+        assert_eq!(extract_table_leaf_refs(sql), vec!["raw_customers"]);
+    }
+
+    #[test]
+    fn extract_table_leaf_refs_lowercases_and_handles_unquoted_idents() {
+        let sql = "SELECT * FROM RAW_CUSTOMERS";
+        assert_eq!(extract_table_leaf_refs(sql), vec!["raw_customers"]);
+    }
+
+    #[test]
+    fn extract_table_leaf_refs_picks_up_join_clauses() {
+        let sql = "select * from \"a\".\"b\".\"orders\" join customers on c.id = o.cid";
+        let refs = extract_table_leaf_refs(sql);
+        assert!(refs.iter().any(|r| r == "orders"));
+        assert!(refs.iter().any(|r| r == "customers"));
+    }
+
+    #[test]
+    fn extract_table_leaf_refs_ignores_non_from_tokens() {
+        let sql = "from x where from_col = 1";
+        assert_eq!(extract_table_leaf_refs(sql), vec!["x"]);
+    }
+
+    #[test]
+    fn extract_table_leaf_refs_drops_punctuation_around_idents() {
+        let sql = "select * from (raw_customers)";
+        let refs = extract_table_leaf_refs(sql);
+        assert!(refs.iter().any(|r| r == "raw_customers"), "{refs:?}");
     }
 
     // ===== is_simple_from_select =====

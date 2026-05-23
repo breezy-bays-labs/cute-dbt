@@ -62,7 +62,6 @@ table.given-table th, table.expected-table th {
 .test-selector-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem 1rem; }
 .selector-field { display: flex; flex-direction: column; min-width: 16rem; }
 .selector-arrow { padding-bottom: 0.9rem; color: #6a6a72; }
-.test-select-count { padding-bottom: 1rem; color: #6a6a72; font-size: 0.9em; }
 .cte-dag-mermaid { display: flex; justify-content: center; overflow-x: auto; padding: 0.5rem 0; }
 .cte-dag-mermaid svg { max-width: 100%; height: auto; }
 .dag-legend {
@@ -116,7 +115,11 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
 .cell-num { text-align: right; }
 
 .compiled-sql > summary { cursor: pointer; }
-.sql-block { margin-top: 0.5rem; }
+/* padding-top reserves vertical space for the absolute-positioned
+   `.sql-copy` button so the first line of SQL is never partially hidden
+   under it. The button sits at top:8px + ~22px (font 0.78em + padding +
+   border) ≈ 30px from the wrapper's top edge; 2.5rem clears it. */
+.sql-block { margin-top: 0.5rem; padding-top: 2.5rem; }
 .sql-block-wrap { position: relative; }
 .sql-copy {
   position: absolute; top: 8px; right: 8px;
@@ -180,7 +183,6 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
       <label for="test-select">Unit test</label>
       <select id="test-select"></select>
     </div>
-    <span class="test-select-count"></span>
   </div>
   <p class="test-description">…</p>
 
@@ -262,8 +264,12 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
   "use strict";
 
   // Edge / edge-type colors keyed by the snake_case wire form serialized
-  // by the renderer. union_all and union_distinct both render dashed
-  // orange (shades pickable). Okabe-Ito colorblind-safe palette.
+  // by the renderer. Okabe-Ito colorblind-safe palette. UNION variants
+  // both render dashed (row concatenation, not row matching) but split
+  // colors so the legend distinguishes them: orange for `union_all`
+  // (duplicates preserved) and blue for `union_distinct` (deduplicated).
+  // `right` reuses the same blue family — fine because joins render
+  // solid, UNION renders dashed; the dash pattern is the visual cue.
   var JOIN_COLORS = {
     from:           "#1c1c1f",
     inner:          "#009E73",
@@ -272,7 +278,7 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     cross:          "#CC79A7",
     full:           "#982c61",
     union_all:      "#E69F00",
-    union_distinct: "#E69F00"
+    union_distinct: "#0072B2"
   };
 
   var ROLE_LABEL = {
@@ -326,13 +332,11 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
   }
 
   function renderBanner() {
-    // Count is the total number of in-scope unit tests across all in-scope
-    // models — matches the design's banner semantics. (Models with zero
-    // tests contribute zero to this count; the explorer-mode "no tests
-    // wired" signal is surfaced per-model, not in the global banner.)
-    // The server already rendered `banner_text` into `.diff-scope-text`;
-    // this re-write keeps the JS contract observable when sample data
-    // is swapped in DevTools without re-rendering server-side.
+    // The per-model selector option labels already carry each model's
+    // test count (`stg_customers (1 test)` etc.), so the global banner
+    // only restates the diff-scope total. JS re-writes the server-
+    // rendered text only so swapping DATA in DevTools repaints
+    // consistently without a server round trip.
     var n = 0;
     DATA.models.forEach(function (m) { n += m.tests.length; });
     var noun = n === 1 ? "unit test" : "unit tests";
@@ -389,7 +393,6 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
       state.leftPanelMode = "node";
       renderForSelectedModel();
     });
-    $(".test-select-count").text(tests.length + " test" + (tests.length === 1 ? "" : "s"));
   }
 
   function renderForSelectedModel() {
