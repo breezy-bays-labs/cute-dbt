@@ -222,6 +222,18 @@ impl StateComparator {
     #[must_use]
     pub fn in_scope_unit_tests(&self, current: &Manifest, baseline: &Manifest) -> InScopeSet {
         let modified = self.modified_set(current, baseline);
+        Self::in_scope_unit_tests_with_modified(current, baseline, &modified)
+    }
+
+    /// Inner implementation — computes in-scope unit tests given a
+    /// pre-computed `modified` set. Shared by `in_scope_unit_tests` and
+    /// `models_in_scope` so the `modified_set` computation is not
+    /// duplicated when both outputs are needed.
+    fn in_scope_unit_tests_with_modified(
+        current: &Manifest,
+        baseline: &Manifest,
+        modified: &ModifiedSet,
+    ) -> InScopeSet {
         let mut in_scope = InScopeSet::new();
         for (id, unit_test) in current.unit_tests() {
             let target_modified = resolve_target_model(current, unit_test.model())
@@ -250,8 +262,10 @@ impl StateComparator {
     /// with no tests appear with an explicit empty-test signal.
     #[must_use]
     pub fn models_in_scope(&self, current: &Manifest, baseline: &Manifest) -> ModelInScopeSet {
+        // Compute modified_set once and reuse it for both in_scope_unit_tests
+        // and the arm-2 no-test check — avoids the redundant second traversal.
         let modified = self.modified_set(current, baseline);
-        let in_scope_tests = self.in_scope_unit_tests(current, baseline);
+        let in_scope_tests = Self::in_scope_unit_tests_with_modified(current, baseline, &modified);
 
         // Build a map: resolved model node id → list of unit-test ids that
         // target it in the current manifest.

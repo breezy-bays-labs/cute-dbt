@@ -103,6 +103,10 @@ mod tests {
             msg.contains("dbt compile") && msg.contains("dbt run"),
             "recommends compiling: {msg}"
         );
+        assert!(
+            !msg.contains("unit test"),
+            "should not mention a unit test when none is in scope: {msg}"
+        );
     }
 
     #[test]
