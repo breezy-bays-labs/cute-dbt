@@ -43,5 +43,6 @@ human-readable summary of what changed in the rendered output.
 ## Future examples
 
 This directory will grow as cute-dbt's renderer is exercised against
-richer manifests (multi-model, multi-test-per-model, UNION CTEs, etc.).
-Tracked: see the `examples` label on this repo's issues.
+richer manifests (multi-model, multi-test-per-model, UNION CTEs,
+modified-models-with-zero-tests, etc.). Tracked at
+[cute-dbt#39](https://github.com/breezy-bays-labs/cute-dbt/issues/39).
