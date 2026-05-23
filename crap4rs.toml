@@ -45,10 +45,11 @@ pattern ="src/adapters/asset_embed.rs"
 threshold = 15
 
 [[overrides]]
-# askama renderer (PR 8b). The composition layer between domain types,
-# CTE engine output, and the askama template — payload assembly, node-role
+# askama renderer. The composition layer between domain types, CTE
+# engine output, and the askama template — payload assembly, node-role
 # classification, import-CTE binding, and the run-loop wiring all live
-# here. Correctness regressions silently produce wrong reports, not crashes.
+# here. Correctness regressions silently produce wrong reports, not
+# crashes.
 pattern ="src/adapters/render.rs"
 threshold = 15
 

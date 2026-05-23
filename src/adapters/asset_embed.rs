@@ -16,16 +16,17 @@
 //! Every vendored asset is text (CSS / JS), so every one is embedded with
 //! `include_str!` as a `&'static str`. v0.1's bundle carries no binary
 //! asset: the favicon is an empty `data:` URI ([`FAVICON_DATA_URI`]), the
-//! alternative ADR-4 §5 sanctions, so there is no `include_bytes!` user.
+//! alternative `ARCHITECTURE.md` §5 sanctions, so there is no
+//! `include_bytes!` user.
 //!
 //! ## Mermaid initialization
 //!
-//! The mandatory Mermaid init (ADR-4 amendment 2026-05-22:
-//! `startOnLoad:false`, `securityLevel:'strict'`, system `fontFamily`)
-//! lives inside the askama template's inlined interaction script — there
-//! is no Rust-side constant for it. The init is exercised at render
-//! time per selected model, not at page load; pinning a Rust string
-//! constant would invite drift from the JS that actually runs.
+//! The mandatory Mermaid init (`startOnLoad: false`,
+//! `securityLevel: 'strict'`, system `fontFamily`) lives inside the
+//! askama template's inlined interaction script — there is no Rust-side
+//! constant for it. The init is exercised at render time per selected
+//! model, not at page load; pinning a Rust string constant would invite
+//! drift from the JS that actually runs.
 
 /// Sakura 1.5.0 — the classless base stylesheet. Vendored at
 /// `assets/sakura-1.5.0.css`; see `assets/MANIFEST.toml` for provenance.
@@ -44,16 +45,18 @@ pub const DATATABLES_JS: &str = include_str!("../../assets/datatables-2.1.8.min.
 pub const DATATABLES_CSS: &str = include_str!("../../assets/datatables-2.1.8.min.css");
 
 /// Mermaid 11.15.0 — the **UMD** bundle (never the ESM `type="module"`
-/// variant; ADR-4 §5). Vendored at `assets/mermaid-11.15.0.umd.min.js`.
+/// variant; see `ARCHITECTURE.md` §5). Vendored at
+/// `assets/mermaid-11.15.0.umd.min.js`.
 pub const MERMAID_JS: &str = include_str!("../../assets/mermaid-11.15.0.umd.min.js");
 
 /// An empty `data:` URI favicon.
 ///
 /// Emitted as `<link rel="icon" href="data:,">`, this resolves the
 /// browser's automatic favicon request to an empty in-document resource
-/// — never a network call. ADR-4 §5 sanctions this as the alternative to
-/// an embedded binary favicon; v0.1's vendored bundle is entirely text,
-/// so there is no binary asset and no `include_bytes!` user.
+/// — never a network call. `ARCHITECTURE.md` §5 sanctions this as the
+/// alternative to an embedded binary favicon; v0.1's vendored bundle is
+/// entirely text, so there is no binary asset and no `include_bytes!`
+/// user.
 pub const FAVICON_DATA_URI: &str = "data:,";
 
 #[cfg(test)]

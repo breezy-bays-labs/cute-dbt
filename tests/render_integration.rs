@@ -1,12 +1,12 @@
-//! Integration coverage for the PR 8b askama renderer, exercised against
-//! a real compiled jaffle-shop manifest.
+//! Integration coverage for the askama renderer, exercised against a
+//! real compiled jaffle-shop manifest.
 //!
-//! This is the cross-PR fixture-readiness edge for the renderer: the test
-//! loads the real fixture through the manifest adapter (PR 4b), computes
-//! scope via `StateComparator` (PR 5 + PR C), and asserts the rendered
-//! HTML carries the asset bundle (PR 8a) + the expected DOM contract +
-//! emits no external resource constructs (the secondary zero-egress
-//! guard pending PR 9's primary headless-network test).
+//! The test loads the fixture through the manifest adapter, computes
+//! scope via [`StateComparator`], and asserts the rendered HTML carries
+//! the inlined asset bundle, the expected DOM contract, and emits no
+//! external resource-loading constructs (the secondary zero-egress
+//! guard alongside the headless-browser network-block test tracked
+//! separately).
 
 use std::path::{Path, PathBuf};
 
@@ -56,7 +56,7 @@ fn render_jaffle_shop(out: &Path) {
 /// The HTML cute-dbt itself emits, with the five inlined asset bodies
 /// stripped out. Scanning *this* for egress constructs avoids the false
 /// positives the minified bundles' inert URL literals would otherwise
-/// produce (ADR-4 §6).
+/// produce (`ARCHITECTURE.md` §5).
 fn chrome_only(html: &str) -> String {
     let mut chrome = html.to_owned();
     for asset in [

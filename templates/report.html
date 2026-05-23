@@ -252,17 +252,18 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
    it untouched. The JSON payload above is templated normally. #}
 {% raw %}
 // cute-dbt report.html — interactive layer.
-// Adapted from the Claude Design hand-back (`interaction.js`) with the
-// dormant dark-mode infrastructure stripped (YAGNI) and the Mermaid
-// selector updated to the runtime-constructed `{svgId}-flowchart-` form
-// per ADR-4 amendment 2026-05-22.
 //
 // DOM + class + data-* attributes are the askama template contract.
+// The Mermaid `<g id>` selector is runtime-constructed against the
+// `{svgId}-flowchart-` prefix Mermaid 11.14+ stamps each node group
+// with; never anchor on the bare `^flowchart-` form (it matches
+// nothing on 11.14+ and produces a silent click-binding failure).
 (function () {
   "use strict";
 
-  // Edge / edge-type colors per ADR-4 amendment. union_all and
-  // union_distinct both render dashed orange (shades pickable).
+  // Edge / edge-type colors keyed by the snake_case wire form serialized
+  // by the renderer. union_all and union_distinct both render dashed
+  // orange (shades pickable). Okabe-Ito colorblind-safe palette.
   var JOIN_COLORS = {
     from:           "#1c1c1f",
     inner:          "#009E73",
@@ -562,7 +563,7 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     // Mermaid 11.14+ stamps each node group with the id
     // "{svgElementId}-flowchart-{nodeName}-{counter}". Use the runtime
     // svgId to anchor a precise selector — broken selectors are visible
-    // in DevTools (fail-loud per ADR-4 amendment), not silent.
+    // in DevTools (fail-loud), not silent.
     var prefix = svgId + "-flowchart-";
     var groups = svgHost.querySelectorAll('g.node[id^="' + prefix + '"]');
     if (!groups.length) {

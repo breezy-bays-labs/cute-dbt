@@ -3,13 +3,13 @@
 //!
 //! The run loop is composed here as four named stages —
 //! `scope` → `preflight_compiled` → `parse_ctes` → `render`
-//! (`ARCHITECTURE.md` §3, §7). Composition lives in `cli` by deliberate
+//! (`ARCHITECTURE.md` §3, §6). Composition lives in `cli` by deliberate
 //! single-crate design: there is no separate `app` / `usecase` crate.
-//! `parse_ctes` remains a named no-op call site; PR 8b inlined per-model
-//! CTE parsing into the renderer (each model parses its own
-//! `compiled_code` once during payload assembly), so the run loop's
-//! `parse_ctes` step is purely greppable scaffolding. The `render` step
-//! invokes the askama renderer ([`crate::adapters::render::render_report`]).
+//! `parse_ctes` is a named no-op call site: each in-scope model parses
+//! its own `compiled_code` once during payload assembly inside
+//! [`crate::adapters::render::render_report`], so the explicit
+//! `parse_ctes` step is purely greppable scaffolding that mirrors the
+//! ARCHITECTURE diagram. The `render` step invokes the askama renderer.
 //!
 //! Three exit codes: `0` success, `1` a run-time failure (a fail-closed
 //! manifest or an unwritable output path — no partial report is ever
@@ -154,14 +154,14 @@ fn scope(current: &Manifest, baseline: &Manifest) -> (InScopeSet, ModelInScopeSe
 
 /// The `parse_ctes` stage — a named no-op call site.
 ///
-/// PR 8b inlined per-model CTE parsing into the renderer: each in-scope
-/// model parses its own `compiled_code` exactly once during payload
-/// assembly. The run loop keeps this name greppable so `ARCHITECTURE.md`
-/// §3's four-stage diagram still resolves; the work happens one stage
-/// downstream.
+/// Per-model CTE parsing happens inside the renderer's payload
+/// assembly: each in-scope model parses its own `compiled_code` exactly
+/// once when `render_report` walks `models_in_scope`. The run loop keeps
+/// this name greppable so `ARCHITECTURE.md` §3's four-stage diagram
+/// still resolves; the work happens one stage downstream.
 fn parse_ctes() {}
 
-/// The `render` stage — invokes the askama renderer (PR 8b).
+/// The `render` stage — invokes the askama renderer.
 ///
 /// `render` is the last stage: an earlier fail-closed `?` short-circuits
 /// before this is reached, so no `report.html` is ever partially written.

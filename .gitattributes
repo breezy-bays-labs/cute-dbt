@@ -1,0 +1,6 @@
+# Committed example reports — 3+ MB single-file HTML each, dominated by
+# inlined minified asset bytes (Sakura / jQuery / DataTables / Mermaid).
+# Mark `-diff` so `git diff` shows "Binary files differ" instead of a
+# many-thousand-line unreadable wall of CSS/JS noise; the
+# `example-report-up-to-date` CI job is the real change detector.
+examples/*.html -diff linguist-generated

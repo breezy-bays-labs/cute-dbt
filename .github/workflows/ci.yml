@@ -426,32 +426,67 @@ jobs:
           fi
           exit "$fail"
 
+  example-report-up-to-date:
+    # The committed examples/jaffle-shop-report.html is regenerated and
+    # diffed against the rendered output here. Drift between the renderer
+    # and the committed artifact is silent — the file ships unchanged
+    # until someone re-runs the CLI locally; this job re-runs it on every
+    # PR. If the diff fails, regenerate locally:
+    #   cargo run --bin cute-dbt -- \
+    #     --manifest tests/fixtures/jaffle-shop-current.json \
+    #     --baseline-manifest tests/fixtures/jaffle-shop-baseline.json \
+    #     --out examples/jaffle-shop-report.html
+    # The renderer is deterministic over fixture input, so byte-equality
+    # is the correct gate.
+    name: Example report is byte-identical to renderer output
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate examples/jaffle-shop-report.html and diff
+        run: |
+          set -euo pipefail
+          mkdir -p target/example-check
+          cargo run --quiet --locked --bin cute-dbt -- \
+            --manifest tests/fixtures/jaffle-shop-current.json \
+            --baseline-manifest tests/fixtures/jaffle-shop-baseline.json \
+            --out target/example-check/jaffle-shop-report.html
+          if ! diff -q target/example-check/jaffle-shop-report.html examples/jaffle-shop-report.html >/dev/null; then
+            echo "::error::example-report-up-to-date: examples/jaffle-shop-report.html does not match the renderer output. Regenerate with:"
+            echo "  cargo run --bin cute-dbt -- --manifest tests/fixtures/jaffle-shop-current.json --baseline-manifest tests/fixtures/jaffle-shop-baseline.json --out examples/jaffle-shop-report.html"
+            # Surface the byte sizes so the diff is human-greppable in CI logs.
+            echo "Sizes:"
+            ls -l target/example-check/jaffle-shop-report.html examples/jaffle-shop-report.html
+            exit 1
+          fi
+
   resource-ref-lint:
-    # tracked: breezy-bays-labs/cute-dbt#12 — activate when a
-    # generated report.html exists (PR 8b). Until then this job no-ops; the
-    # `if: false` gate is removed in PR 9 along with the headless-zero-egress
-    # activation.
+    # tracked: breezy-bays-labs/cute-dbt#12 — activate when the headless
+    # zero-egress proof lands. Until then this job no-ops; the `if: false`
+    # gate is removed alongside the headless-zero-egress activation.
     name: Resource-ref lint (real loading constructs)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: false
     steps:
       - uses: actions/checkout@v4
-      - run: echo "Activated in PR 9 — see ARCHITECTURE.md zero-egress section."
+      - run: echo "Activated alongside the headless zero-egress proof."
 
   headless-zero-egress:
-    # tracked: breezy-bays-labs/cute-dbt#12 — activate when the
-    # generated report.html exists (PR 8b). This is the PRIMARY zero-egress
-    # gate: a headless browser opens the report with networking denied and
-    # asserts zero requests. Re-runnable by anyone with the repo checked
-    # out; the strongest artifact in the auditability package.
+    # tracked: breezy-bays-labs/cute-dbt#12 — this is the PRIMARY
+    # zero-egress gate: a headless browser opens the report with
+    # networking denied and asserts zero requests. Re-runnable by anyone
+    # with the repo checked out; the strongest artifact in the
+    # auditability package.
     name: Headless zero-egress proof (file://, network blocked)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     if: false
     steps:
       - uses: actions/checkout@v4
-      - run: echo "Activated in PR 9 — see ARCHITECTURE.md zero-egress section."
+      - run: echo "Activated when the headless harness lands — see ARCHITECTURE.md zero-egress section."
 
   crap-scorecard:
     # crap4rs scorecard reads crap4rs.toml for keyed thresholds: strict

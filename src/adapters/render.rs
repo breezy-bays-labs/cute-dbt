@@ -3,8 +3,8 @@
 //!
 //! Composition layer between [`Manifest`] / [`InScopeSet`] /
 //! [`ModelInScopeSet`] / [`CteGraph`] and the askama template at
-//! `templates/report.html`. The template owns DOM + class + JS structure
-//! (the Claude Design hand-back contract); this module owns:
+//! `templates/report.html`. The template owns DOM + class + JS structure;
+//! this module owns:
 //!
 //! - **Per-model payload assembly.** Walks `models_in_scope`, resolves
 //!   each model node, builds a [`ModelPayload`] carrying its CTE graph,
@@ -12,10 +12,10 @@
 //!   it. Models with zero in-scope unit tests render the "0 unit tests
 //!   wired" empty state.
 //! - **CTE graph parsing.** Invokes [`parse_cte_graph`] once per in-scope
-//!   model. Preflight (PR 6) already proves `compiled_code` is `Some`
-//!   for every in-scope model; a parse failure here is treated as an
-//!   empty graph (the renderer surfaces "no DAG available" — the report
-//!   stays valid, the model card is just sparse).
+//!   model. The Stage-2 preflight already proves `compiled_code` is
+//!   `Some` for every in-scope model; a parse failure here is treated as
+//!   an empty graph (the renderer surfaces "no DAG available" — the
+//!   report stays valid, the model card is just sparse).
 //! - **Node-role classification.** Walks the [`CteGraph`]; the terminal
 //!   node (named [`TERMINAL_NODE_NAME`]) is `final`; a CTE whose body is
 //!   a plain `SELECT … FROM <single relation>` with zero incoming edges
@@ -33,8 +33,10 @@
 //! manifest-derived `</script>` substring cannot break out of the JSON
 //! block. The Mermaid runtime renders DAGs from this same payload under
 //! `securityLevel: 'strict'`; click-to-expand is wired by external jQuery
-//! handlers (ADR-4 amendment 2026-05-22) — never Mermaid's `click`
-//! directive (which `'strict'` disables).
+//! handlers binding to the rendered SVG `<g>` elements — never Mermaid's
+//! `click` directive (which `'strict'` disables). See
+//! [`ARCHITECTURE.md` §5](../../../ARCHITECTURE.md) for the zero-egress
+//! gate this preserves.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -199,7 +201,7 @@ pub struct ModelPayload {
     pub tests: Vec<TestPayload>,
     /// `true` when the model's compiled SQL was a `WITH RECURSIVE`
     /// query — the template surfaces a banner; the recursive arm has
-    /// already been omitted from the graph (ADR-4 amendment).
+    /// already been omitted from the graph by the CTE engine.
     pub is_recursive: bool,
 }
 
