@@ -44,8 +44,10 @@ use serde::Deserialize;
 
 use crate::domain::{
     Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeId, PreflightError, UnitTest,
+    UnitTestExpect, UnitTestGiven,
 };
 use crate::ports::ManifestSource;
+use serde_json::Value;
 
 /// Minimum supported dbt manifest schema major version. Schema v12 is
 /// the dbt 1.8 era — the floor at which unit tests went GA. dbt 1.8
@@ -73,7 +75,7 @@ struct WireManifest {
     #[serde(default)]
     nodes: HashMap<String, WireNode>,
     #[serde(default)]
-    unit_tests: HashMap<String, UnitTest>,
+    unit_tests: HashMap<String, WireUnitTest>,
     #[serde(default)]
     macros: HashMap<String, WireMacro>,
 }
@@ -99,11 +101,71 @@ struct WireMacro {
     macro_sql: String,
 }
 
+/// Wire projection of one `unit_tests` map entry.
+///
+/// The domain [`UnitTest`] type stores `tags` and `meta` flat, but the
+/// dbt manifest nests them under a `config` sub-object. This wire struct
+/// keeps the raw nesting; [`WireManifest::into_domain`] lifts the nested
+/// values into the flat domain constructor. `original_file_path` is a
+/// top-level sibling of `config`, not nested inside it.
+///
+/// All other fields (`name`, `model`, `given`, `expect`, `description`,
+/// `depends_on`) match the domain shape directly and are passed through.
+#[derive(Debug, Deserialize)]
+struct WireUnitTest {
+    name: String,
+    model: NodeId,
+    #[serde(default)]
+    given: Vec<UnitTestGiven>,
+    expect: UnitTestExpect,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    depends_on: DependsOn,
+    /// Nested `config` block — carries `tags` and `meta` per ADR-5.
+    #[serde(default)]
+    config: WireUnitTestConfig,
+    /// Top-level path to the declaring `.yml` file (not under `config`).
+    #[serde(default)]
+    original_file_path: Option<String>,
+}
+
+/// Tolerant wire projection of the `config` sub-object on a dbt unit-test
+/// node. Only `tags` and `meta` are consumed; `enabled`, `static_analysis`,
+/// and any future dbt additions are accepted and discarded (ADR-5 — no
+/// `deny_unknown_fields`, `#[serde(default)]` on all fields).
+#[derive(Debug, Default, Deserialize)]
+struct WireUnitTestConfig {
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    meta: Option<Value>,
+}
+
+impl WireUnitTest {
+    /// Translate the wire projection into the domain [`UnitTest`], lifting
+    /// `config.tags` and `config.meta` out of the nested `config` block and
+    /// keeping `original_file_path` from the top level.
+    fn into_domain(self) -> UnitTest {
+        UnitTest::new(
+            self.name,
+            self.model,
+            self.given,
+            self.expect,
+            self.description,
+            self.depends_on,
+            self.config.tags,
+            self.config.meta,
+            self.original_file_path,
+        )
+    }
+}
+
 impl WireManifest {
     /// Translate the tolerant wire projection into the post-normalized
-    /// domain [`Manifest`]: fold each node's map key into its `id` and
-    /// reduce each macro object to its body string. Every other field
-    /// passes through unchanged.
+    /// domain [`Manifest`]: fold each node's map key into its `id`,
+    /// lift `config.tags` / `config.meta` out of each unit test's nested
+    /// `config` block, and reduce each macro object to its body string.
     fn into_domain(self) -> Manifest {
         let nodes = self
             .nodes
@@ -120,12 +182,17 @@ impl WireManifest {
                 (id, node)
             })
             .collect();
+        let unit_tests = self
+            .unit_tests
+            .into_iter()
+            .map(|(key, wire)| (key, wire.into_domain()))
+            .collect();
         let macros = self
             .macros
             .into_iter()
             .map(|(key, wire)| (key, wire.macro_sql))
             .collect();
-        Manifest::new(self.metadata, nodes, self.unit_tests, macros)
+        Manifest::new(self.metadata, nodes, unit_tests, macros)
     }
 }
 
@@ -654,5 +721,81 @@ mod tests {
         let err =
             load_baseline(&source, Path::new("missing.json")).expect_err("no such baseline path");
         assert!(matches!(err, PreflightError::BaselineUnusable { .. }));
+    }
+
+    // ----- unit-test metadata fields (PR #29) -----------------------
+
+    /// Regression: `config.tags`, `config.meta`, and the top-level
+    /// `original_file_path` on a unit-test node must survive the
+    /// wire→domain translation with their values intact.
+    #[test]
+    fn parse_manifest_extracts_unit_test_metadata_fields() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "unit_tests": {{
+                "unit_test.shop.tagged": {{
+                  "name": "tagged",
+                  "model": "stg_orders",
+                  "given": [],
+                  "expect": {{ "rows": [] }},
+                  "config": {{
+                    "tags": ["quality", "smoke"],
+                    "meta": {{ "owner": "data-eng", "priority": 1 }},
+                    "enabled": true
+                  }},
+                  "original_file_path": "models/staging/unit_tests.yml"
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest with metadata fields");
+        let ut = manifest
+            .unit_test("unit_test.shop.tagged")
+            .expect("unit test present");
+        let expected_tags: Vec<String> = vec!["quality".to_owned(), "smoke".to_owned()];
+        assert_eq!(
+            ut.tags(),
+            Some(expected_tags.as_slice()),
+            "config.tags must be extracted"
+        );
+        let meta = ut.meta().expect("config.meta must be present");
+        assert_eq!(meta["owner"], serde_json::json!("data-eng"));
+        assert_eq!(meta["priority"], serde_json::json!(1));
+        assert_eq!(
+            ut.original_file_path(),
+            Some("models/staging/unit_tests.yml"),
+            "original_file_path must be extracted from top level"
+        );
+    }
+
+    /// Regression: a unit-test node with an empty `config` block (or no
+    /// `config` key at all) must produce `None` for all three new
+    /// optional fields — no default panic, no hard error.
+    #[test]
+    fn parse_manifest_unit_test_metadata_defaults_to_none_when_absent() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "unit_tests": {{
+                "unit_test.shop.t": {{
+                  "name": "t",
+                  "model": "stg_orders",
+                  "given": [],
+                  "expect": {{ "rows": [] }}
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest without optional fields");
+        let ut = manifest
+            .unit_test("unit_test.shop.t")
+            .expect("unit test present");
+        assert!(ut.tags().is_none(), "tags should be None when absent");
+        assert!(ut.meta().is_none(), "meta should be None when absent");
+        assert!(
+            ut.original_file_path().is_none(),
+            "original_file_path should be None when absent"
+        );
     }
 }

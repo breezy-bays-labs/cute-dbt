@@ -50,7 +50,7 @@ body is the un-modified version.\
 path = "jaffle-shop-current.json"
 origin = "jaffle-shop"
 origin_url = "https://github.com/dbt-labs/jaffle_shop_duckdb"
-sha256 = "5cdd38df0dfcebcda3aea810978ed986d2c2ad5fd9ae915c074d74c22135094b"
+sha256 = "951c492b3443aa9d6ebea739dbf8530ccddfdfe49acadf9a0a366e45a5cce72c"
 synthetic_only = true
 license = "Apache-2.0"
 description = """
@@ -59,7 +59,10 @@ baseline, but with stg_customers body modified (added `trim()` calls on \
 first_name/last_name). This is the CURRENT side of the diff-scoping \
 pair — PR 5's StateComparator should see stg_customers in the modified \
 set and customers (depends on stg_customers but its own body is \
-unchanged) outside it. Pure synthetic data only.\
+unchanged) outside it. Augmented (PR #29): the unit test node carries \
+config.tags=["quality","smoke"] and config.meta={"owner":"data-eng",...} \
+to exercise the populated-state path for tags/meta ingestion. Pure \
+synthetic data only.\
 """
 
 [[fixture]]

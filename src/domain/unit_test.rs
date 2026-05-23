@@ -99,6 +99,21 @@ pub struct UnitTest {
     description: Option<String>,
     #[serde(default)]
     depends_on: DependsOn,
+    /// dbt `config.tags` for this unit test (`None` when omitted by the
+    /// manifest). Populated by the adapter from the nested `config` block;
+    /// stored flat here per ADR-5 tolerant shape.
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    /// dbt `config.meta` for this unit test — arbitrary key/value map
+    /// (`None` when omitted). Stored as `serde_json::Value` (passthrough)
+    /// per ADR-5: the renderer decides how to surface individual keys.
+    #[serde(default)]
+    meta: Option<Value>,
+    /// Path to the `.yml` file that declares this unit test, relative to the
+    /// dbt project root. Top-level field on the unit-test node in the wire
+    /// manifest (NOT under `config`). `None` when the manifest omits it.
+    #[serde(default)]
+    original_file_path: Option<String>,
 }
 
 impl UnitTest {
@@ -111,6 +126,9 @@ impl UnitTest {
         expect: UnitTestExpect,
         description: Option<String>,
         depends_on: DependsOn,
+        tags: Option<Vec<String>>,
+        meta: Option<Value>,
+        original_file_path: Option<String>,
     ) -> Self {
         Self {
             name: name.into(),
@@ -119,6 +137,9 @@ impl UnitTest {
             expect,
             description,
             depends_on,
+            tags,
+            meta,
+            original_file_path,
         }
     }
 
@@ -156,6 +177,27 @@ impl UnitTest {
     #[must_use]
     pub fn depends_on(&self) -> &DependsOn {
         &self.depends_on
+    }
+
+    /// dbt `config.tags` for this unit test (`None` when absent in the
+    /// manifest).
+    #[must_use]
+    pub fn tags(&self) -> Option<&[String]> {
+        self.tags.as_deref()
+    }
+
+    /// dbt `config.meta` for this unit test (`None` when absent in the
+    /// manifest). The value is passthrough JSON per ADR-5 tolerance.
+    #[must_use]
+    pub fn meta(&self) -> Option<&Value> {
+        self.meta.as_ref()
+    }
+
+    /// Path to the `.yml` file that declares this unit test (`None` when
+    /// the manifest omits `original_file_path`).
+    #[must_use]
+    pub fn original_file_path(&self) -> Option<&str> {
+        self.original_file_path.as_deref()
     }
 }
 
@@ -225,20 +267,32 @@ mod tests {
     #[test]
     fn unit_test_constructor_and_getters() {
         let model = NodeId::new("model.shop.stg_orders");
+        let deps = DependsOn::new(
+            vec!["macro.shop.helper".to_owned()],
+            vec![NodeId::new("seed.shop.raw_orders")],
+        );
         let ut = UnitTest::new(
             "test_stg_orders_dedup",
             model.clone(),
             vec![sample_given()],
             sample_expect(),
             Some("dedup test".to_owned()),
-            DependsOn::default(),
+            deps.clone(),
+            None,
+            None,
+            None,
         );
         assert_eq!(ut.name(), "test_stg_orders_dedup");
         assert_eq!(ut.model(), &model);
         assert_eq!(ut.given().len(), 1);
         assert_eq!(ut.expect(), &sample_expect());
         assert_eq!(ut.description(), Some("dedup test"));
-        assert_eq!(ut.depends_on(), &DependsOn::default());
+        assert_eq!(ut.depends_on(), &deps);
+        assert_ne!(
+            ut.depends_on(),
+            &DependsOn::default(),
+            "getter must return the actual DependsOn, not a manufactured default"
+        );
     }
 
     #[test]
@@ -253,6 +307,12 @@ mod tests {
         assert!(ut.given().is_empty());
         assert!(ut.description().is_none());
         assert!(ut.expect().rows().is_array());
+        assert!(ut.tags().is_none(), "tags should default to None");
+        assert!(ut.meta().is_none(), "meta should default to None");
+        assert!(
+            ut.original_file_path().is_none(),
+            "original_file_path should default to None"
+        );
     }
 
     #[test]
@@ -267,8 +327,38 @@ mod tests {
                 vec!["macro.shop.foo".to_owned()],
                 vec![NodeId::new("model.shop.upstream")],
             ),
+            Some(vec!["quality".to_owned(), "smoke".to_owned()]),
+            Some(json!({"owner": "data-eng", "priority": 1})),
+            Some("models/staging/unit_tests.yml".to_owned()),
         );
         let back: UnitTest = serde_json::from_str(&serde_json::to_string(&ut).unwrap()).unwrap();
         assert_eq!(back, ut);
+    }
+
+    #[test]
+    fn unit_test_metadata_getters_return_populated_values() {
+        let ut = UnitTest::new(
+            "tagged_test",
+            NodeId::new("model.shop.stg_orders"),
+            vec![],
+            sample_expect(),
+            None,
+            DependsOn::default(),
+            Some(vec!["quality".to_owned(), "smoke".to_owned()]),
+            Some(json!({"owner": "data-eng"})),
+            Some("models/staging/unit_tests.yml".to_owned()),
+        );
+        let expected_tags: Vec<String> = vec!["quality".to_owned(), "smoke".to_owned()];
+        assert_eq!(
+            ut.tags(),
+            Some(expected_tags.as_slice()),
+            "tags getter must return the vec as a slice"
+        );
+        let meta = ut.meta().expect("meta should be Some");
+        assert_eq!(meta["owner"], json!("data-eng"));
+        assert_eq!(
+            ut.original_file_path(),
+            Some("models/staging/unit_tests.yml")
+        );
     }
 }

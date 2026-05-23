@@ -1,1 +1,4 @@
 cognitive-complexity-threshold = 15
+# Domain constructors are explicit-field canonical constructors (ADR-1);
+# 9 args is the current ceiling for UnitTest::new after PR #29 widening.
+too-many-arguments-threshold = 10

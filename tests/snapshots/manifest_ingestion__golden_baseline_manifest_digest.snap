@@ -330,7 +330,10 @@ expression: rendered
         "nodes": [
           "model.jaffle_shop.stg_customers"
         ]
-      }
+      },
+      "tags": [],
+      "meta": {},
+      "original_file_path": "models/staging/unit_tests.yml"
     }
   }
 }

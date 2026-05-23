@@ -509,6 +509,9 @@ mod tests {
             UnitTestExpect::new(Value::Null, None),
             description.map(str::to_owned),
             DependsOn::default(),
+            None,
+            None,
+            None,
         )
     }
 
