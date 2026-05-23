@@ -1111,40 +1111,56 @@ mod tests {
     }
 
     #[test]
-    fn render_report_xss_payload_in_cte_name_does_not_escape_script_block() {
-        // A hostile CTE name like </script><script>alert(1)</script>
-        // must NOT break out of the JSON <script type="application/json">
-        // carrier. askama's `| json` filter escapes <, >, &, ' so the
-        // payload-side injection is structurally prevented; this test
-        // assertively pins that property at the render layer.
+    fn render_report_xss_payload_in_unit_test_tag_does_not_escape_script_block() {
+        // A hostile string in a unit-test's `tags` (which is verbatim YAML
+        // metadata in the dbt manifest — no SQL parser sits between it
+        // and the payload) must NOT break out of the JSON
+        // `<script type="application/json">` carrier. askama's `| json`
+        // filter escapes `<`, `>`, `&`, and `'`; this test pins that the
+        // payload-side injection is structurally prevented.
         let hostile = "</script><script>alert(1)</script>";
-        let compiled = format!("with \"{hostile}\" as (select 1) select * from \"{hostile}\"");
-        let node = model_node("model.shop.x", "body", Some(&compiled));
-        let manifest = manifest_for(vec![node], vec![]);
+        let compiled = "select 1";
+        let node = model_node("model.shop.x", "body", Some(compiled));
+        let ut = UnitTest::new(
+            "test_one",
+            NodeId::new("x"),
+            vec![],
+            UnitTestExpect::new(json!([]), None),
+            None,
+            DependsOn::default(),
+            Some(vec![hostile.to_owned()]),
+            None,
+            None,
+        );
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
         let tmp = std::env::temp_dir().join("cute_dbt_render_xss_test.html");
         let _ = std::fs::remove_file(&tmp);
-        let _ = render_report(&tmp, &manifest, &InScopeSet::new(), &models, "b");
-        if let Ok(html) = std::fs::read_to_string(&tmp) {
-            // The raw `</script>` substring may legitimately appear inside
-            // the inlined asset bodies; strip those and the closing tag of
-            // the JSON script block itself, then assert no hostile script
-            // tag survived in the chrome.
-            let mut chrome = html;
-            for asset in [
-                SAKURA_CSS,
-                DATATABLES_CSS,
-                JQUERY_JS,
-                DATATABLES_JS,
-                MERMAID_JS,
-            ] {
-                chrome = chrome.replace(asset, "<<inlined-asset>>");
-            }
-            assert!(
-                !chrome.contains("<script>alert(1)</script>"),
-                "hostile script tag must not survive into the chrome",
-            );
+        render_report(&tmp, &manifest, &in_scope, &models, "b").expect("render writes the report");
+        let html = std::fs::read_to_string(&tmp).expect("report exists");
+        // `</script>` legitimately appears inside the inlined asset
+        // bodies; strip those before scanning the chrome.
+        let mut chrome = html.clone();
+        for asset in [
+            SAKURA_CSS,
+            DATATABLES_CSS,
+            JQUERY_JS,
+            DATATABLES_JS,
+            MERMAID_JS,
+        ] {
+            chrome = chrome.replace(asset, "<<inlined-asset>>");
         }
+        assert!(
+            !chrome.contains("<script>alert(1)</script>"),
+            "hostile script tag must not survive into the chrome: {chrome}",
+        );
+        // The payload carrier is exactly one `<script type="application/json">`
+        // …`</script>` block; no second `</script>` smuggled in by the
+        // hostile tag value can close it early.
+        let payload_open = "<script type=\"application/json\" id=\"cute-dbt-data\">";
+        let payload_count = chrome.matches(payload_open).count();
+        assert_eq!(payload_count, 1, "exactly one payload carrier open tag");
         let _ = std::fs::remove_file(&tmp);
     }
 
