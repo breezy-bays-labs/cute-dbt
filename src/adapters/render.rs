@@ -54,6 +54,29 @@ use crate::domain::{
     UnitTest, UnitTestGiven, resolve_target_model,
 };
 
+/// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
+/// the JS `JOIN_COLORS` map keys are matched against.
+///
+/// Exhaustive match — adding a new [`EdgeType`] variant fails to compile
+/// here, which keeps the render-side palette in lockstep with the
+/// classifier vocabulary. The `edge-vocab-completeness` CI guard greps
+/// this match (and the JS palette in `templates/report.html`) so the
+/// invariant is structurally enforced both at compile time and at CI
+/// time.
+#[must_use]
+pub fn edge_type_wire_key(edge_type: EdgeType) -> &'static str {
+    match edge_type {
+        EdgeType::From => "from",
+        EdgeType::Inner => "inner",
+        EdgeType::Left => "left",
+        EdgeType::Right => "right",
+        EdgeType::Full => "full",
+        EdgeType::Cross => "cross",
+        EdgeType::UnionAll => "union_all",
+        EdgeType::UnionDistinct => "union_distinct",
+    }
+}
+
 /// Role of a node in the rendered CTE DAG.
 ///
 /// Classification happens at the render layer (not in `domain`) because
@@ -760,6 +783,34 @@ mod tests {
         // import shape needs to inspect the body). Fall back to `Transform`.
         let graph = CteGraph::new(vec![cte_node("stg_x", None)], vec![]);
         assert_eq!(classify_node_role(&graph, 0), NodeRole::Transform);
+    }
+
+    // ===== edge_type_wire_key =====
+
+    #[test]
+    fn edge_type_wire_key_matches_serde_snake_case_for_every_variant() {
+        // Pin every variant's wire key against the serde-emitted
+        // snake_case string. If a new EdgeType variant lands and serde
+        // gives it a different snake_case shape than the JS expects, this
+        // test fails before the rendered report ships a broken color
+        // legend.
+        for et in [
+            EdgeType::From,
+            EdgeType::Inner,
+            EdgeType::Left,
+            EdgeType::Right,
+            EdgeType::Full,
+            EdgeType::Cross,
+            EdgeType::UnionAll,
+            EdgeType::UnionDistinct,
+        ] {
+            let key = edge_type_wire_key(et);
+            let serde_value: String = serde_json::to_string(&et)
+                .expect("EdgeType serializes")
+                .trim_matches('"')
+                .to_owned();
+            assert_eq!(key, serde_value, "wire-key drift for {et:?}");
+        }
     }
 
     // ===== compose_banner_text =====
