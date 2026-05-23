@@ -31,12 +31,20 @@ PR-review is the first-class use case), the report renders:
 - A **Given** data panel and an **Expected** data panel as searchable,
   sortable [DataTables](https://datatables.net/).
 - A **CTE dependency DAG** of the target model — a `graph LR` Mermaid
-  diagram whose edges are colored by JOIN type (inner / left / right /
-  full / cross), with an always-visible colorblind-safe legend.
+  diagram whose edges are colored by edge type
+  (`from` / `inner` / `left` / `right` / `full` / `cross` / `union_all` /
+  `union_distinct`), with an always-visible colorblind-safe legend.
 
-A diff-scope banner names the baseline reference and the v0.1 fidelity limit
-(scope = model body changes; config- and contract-only changes not yet
-detected).
+A diff-scope banner names the baseline reference and the in-scope test
+count.
+
+**v0.1 scope = `state:modified.body`.** cute-dbt detects model **body**
+changes (a model's `checksum` differs between the current and baseline
+manifests). Pure `.configs`-only / `.contract`-only / `.relation`-only /
+`.macros`-only changes leave the body checksum identical, so they are
+**not** detected in v0.1 — a documented, named limit, not a defect; the
+missing sub-selectors arrive as additive `impl StateModifier` blocks in
+v0.x.
 
 ## Why your data stays on your machine
 

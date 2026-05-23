@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cute-dbt report</title>
+<link rel="icon" href="{{ favicon_data_uri }}">
+<style>
+{{ sakura_css|safe }}
+{{ datatables_css|safe }}
+</style>
+<style>
+/* DENSITY PATCH + report-specific CSS — verbatim from the Claude Design
+   hand-back. Dark-mode rules deliberately stripped (YAGNI). */
+body {
+  font-size: 1.4rem;
+  line-height: 1.5;
+  max-width: min(120rem, 100% - 4rem);
+}
+h1, h2, h3, h4, h5, h6 { margin-top: 1.25rem; margin-bottom: 0.5rem; }
+h1 { font-size: 1.5em; }
+h2 { font-size: 1em; }
+h3 { font-size: 0.95em; }
+h4 { font-size: 0.85em; }
+.report-header h1 { font-size: 1.25em; margin-top: 0.25rem; }
+p { margin-bottom: 0.875rem; }
+.panel-header h2, .cte-dag-header h2 { font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.06em; color: #6a6a72; margin: 0; }
+.table-title { font-size: 0.8em; font-weight: 600; font-family: ui-monospace, monospace; margin: 0; }
+.table-header { margin: 0.4rem 0 0.2rem; }
+table.given-table th, table.expected-table th,
+table.given-table td, table.expected-table td {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.78em;
+}
+table.given-table th, table.expected-table th {
+  white-space: normal;
+  max-width: 12rem;
+  vertical-align: bottom;
+  line-height: 1.2;
+}
+.diff-scope-banner, .test-selection, .cte-dag, .panel { margin-bottom: 1rem; }
+.test-details-body {
+  padding: 0.6rem 0 0; margin-top: 0.35rem;
+  border-top: 1px solid #ccc;
+  display: flex; flex-direction: column; gap: 0.3rem;
+  font-size: 0.85em;
+}
+.td-line { line-height: 1.5; }
+.td-label { color: #6a6a72; }
+.td-tag { font-family: ui-monospace, monospace; }
+.td-meta-key { color: #6a6a72; font-family: ui-monospace, monospace; }
+.td-meta-val { font-family: ui-monospace, monospace; }
+.td-defined-in { font-family: ui-monospace, monospace; background: #f1f1f1; padding: 0.05rem 0.35rem; border-radius: 3px; }
+.cte-dag-subtitle { margin: 0 0 0.25rem; color: #6a6a72; font-size: 0.85em; }
+.cte-dag-header h2 { margin-bottom: 0.15rem; }
+
+.diff-scope-banner { padding: 0; margin: 0 0 1rem; color: #4a4a4a; }
+.test-description {
+  background: #f1f1f1; border-left: 5px solid #1d7484;
+  padding: 0.875rem 1.125rem; margin: 0 0 1.25rem;
+}
+.test-selector-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem 1rem; }
+.selector-field { display: flex; flex-direction: column; min-width: 16rem; }
+.selector-arrow { padding-bottom: 0.9rem; color: #6a6a72; }
+.cte-dag-mermaid { display: flex; justify-content: center; overflow-x: auto; padding: 0.5rem 0; }
+.cte-dag-mermaid svg { max-width: 100%; height: auto; }
+.dag-legend {
+  display: flex; flex-wrap: wrap; gap: 0.4rem 2rem; align-items: center;
+  margin-top: 0.75rem; padding-top: 0.5rem;
+  border-top: 1px dashed #ccc; font-size: 0.9em;
+}
+.dag-legend-group { display: flex; flex-wrap: wrap; gap: 0.4rem 1rem; align-items: center; margin-bottom: 0; }
+.dag-legend-title { font-weight: 600; }
+.dag-legend-roles, .dag-legend-joins { display: inline-flex; flex-wrap: wrap; gap: 0.4rem 1.25rem; align-items: center; }
+.legend-item { display: inline-flex; align-items: center; gap: 0.4rem; }
+.legend-swatch { display: inline-block; width: 22px; height: 14px; border: 1.5px solid currentColor; background: #fff; }
+.legend-item.role-import    { color: #0072B2; }
+.legend-item.role-import    .legend-swatch { background: #e8f1f8; border-radius: 999px; }
+.legend-item.role-transform { color: #6a6a72; }
+.legend-item.role-transform .legend-swatch { background: #f4f4f5; }
+.legend-item.role-final     { color: #E69F00; }
+.legend-item.role-final     .legend-swatch {
+  background: #fdf2dc;
+  clip-path: polygon(15% 0, 85% 0, 100% 50%, 85% 100%, 15% 100%, 0 50%);
+  border: 0;
+}
+.legend-edge { display: inline-block; width: 28px; height: 3px; border-radius: 2px; }
+
+.panel-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.5rem; margin: 1.5rem 0; }
+.panel-row.is-stacked { grid-template-columns: 1fr; }
+.panel-toggle { display: inline-flex; gap: 4px; }
+.panel-toggle button { font-size: 0.85em; padding: 4px 10px; }
+.panel-toggle button:not(.is-active) { opacity: 0.55; }
+.panel-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; }
+.panel-header h2 { margin: 0; }
+.expected-panel { border: 2px solid #1d7484; padding: 0.5rem 1rem 1rem; position: sticky; top: 1rem; align-self: start; }
+.panel-row.is-stacked .expected-panel { position: static; }
+
+.empty-hint { padding: 2rem; text-align: center; color: #6a6a72; border: 1px dashed #ccc; }
+.node-detail-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; }
+.node-role-badge { font-size: 0.7em; padding: 0.1rem 0.5rem; border: 1px solid currentColor; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.05em; }
+.node-role-badge.role-import    { color: #0072B2; }
+.node-role-badge.role-transform { color: #6a6a72; }
+.node-role-badge.role-final     { color: #b07400; }
+.given-empty { padding: 0.75rem 1rem; color: #6a6a72; font-style: italic; border: 1px dashed #ccc; margin-bottom: 0.75rem; }
+.given-section + .given-section { margin-top: 1rem; }
+.table-header { display: flex; align-items: baseline; gap: 0.5rem; margin: 0.5rem 0 0.25rem; }
+.table-title { margin: 0; }
+.row-count-badge { font-size: 0.75em; color: #6a6a72; padding: 0.05rem 0.4rem; border: 1px solid #ccc; border-radius: 999px; }
+.table-fit { width: 100%; overflow-x: auto; }
+table.given-table, table.expected-table { width: max-content; min-width: 100%; }
+table.given-table th, table.expected-table th { font-weight: 700; border-bottom: 2px solid #1d7484; }
+table.given-table td, table.expected-table td { white-space: nowrap; }
+.cell-null { color: #6a6a72; font-style: italic; }
+.cell-num { text-align: right; }
+
+.compiled-sql > summary { cursor: pointer; }
+/* padding-top reserves vertical space for the absolute-positioned
+   `.sql-copy` button so the first line of SQL is never partially hidden
+   under it. The button sits at top:8px + ~22px (font 0.78em + padding +
+   border) ≈ 30px from the wrapper's top edge; 2.5rem clears it. */
+.sql-block { margin-top: 0.5rem; padding-top: 2.5rem; }
+.sql-block-wrap { position: relative; }
+.sql-copy {
+  position: absolute; top: 8px; right: 8px;
+  font-size: 0.78em; padding: 0.1rem 0.5rem;
+  background: #fff; border: 1px solid #c4c4c4; border-radius: 3px;
+  color: #4a4a4a; cursor: pointer; opacity: 0.55;
+  transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+.sql-block-wrap:hover .sql-copy, .sql-copy:focus-visible { opacity: 1; }
+.sql-copy:hover { background: #f1f1f1; }
+.sql-copy.copied { background: #e1eedb; border-color: #1d7484; color: #1d7484; opacity: 1; }
+.sql-copy.copy-failed { background: #fdecea; border-color: #b3261e; color: #b3261e; opacity: 1; }
+
+.error-card { display: none; border: 2px solid #b3261e; background: #fdecea; padding: 1rem 1.25rem; margin: 0 0 1.5rem; }
+.error-card.is-visible { display: block; }
+.error-card h2 { margin-top: 0; color: #b3261e; }
+.error-card .error-node-id { font-family: monospace; color: #b3261e; }
+
+.mermaid-error { color: #b3261e; }
+.muted { color: #6a6a72; }
+.recursive-banner { background: #fff8e1; border-left: 4px solid #E69F00; padding: 0.5rem 0.75rem; margin: 0.5rem 0; font-size: 0.85em; color: #6a4a00; }
+.no-tests-empty { padding: 1.25rem 1rem; text-align: center; color: #6a6a72; border: 1px dashed #ccc; font-style: italic; }
+
+.sql-keyword { color: #1d7484; font-weight: 700; }
+.sql-string  { color: #006d3a; }
+.sql-comment { color: #6a6a72; font-style: italic; }
+.sql-jinja   { color: #982c61; }
+</style>
+</head>
+<body>
+
+<header class="report-header">
+  <h1>cute-dbt report</h1>
+</header>
+
+<section class="diff-scope-banner" aria-label="Diff scope">
+  <p class="diff-scope-line">
+    <span class="diff-scope-text">{{ banner_text }}</span> —
+    vs baseline manifest <code class="diff-scope-baseline">{{ baseline_label }}</code>.
+  </p>
+</section>
+
+<section class="error-card" role="alert" aria-label="Manifest error">
+  <h2>This manifest can't be visualized</h2>
+  <div class="error-node-id">node: <code>—</code></div>
+  <p class="error-remediation">
+    Re-run with <code>dbt compile</code> or <code>dbt run</code> —
+    <code>dbt parse</code> does not produce compiled SQL.
+  </p>
+</section>
+
+<section class="test-selection" aria-label="Test selection">
+  <div class="test-selector-row">
+    <div class="selector-field">
+      <label for="model-select">Model</label>
+      <select id="model-select"></select>
+    </div>
+    <span class="selector-arrow" aria-hidden="true">→</span>
+    <div class="selector-field">
+      <label for="test-select">Unit test</label>
+      <select id="test-select"></select>
+    </div>
+  </div>
+  <p class="test-description">…</p>
+
+  <details class="test-details">
+    <summary>Test details</summary>
+    <div class="test-details-body"></div>
+  </details>
+</section>
+
+<section class="cte-dag" aria-label="CTE dependency DAG">
+  <div class="cte-dag-header">
+    <h2>CTE dependency DAG</h2>
+    <p class="cte-dag-subtitle">Click a node to inspect.</p>
+  </div>
+  <div class="recursive-banner" hidden>
+    Recursive CTE present; recursive arm omitted from DAG (v0.1 limit).
+  </div>
+  <div class="cte-dag-mermaid"></div>
+  <div class="dag-legend">
+    <div class="dag-legend-group">
+      <span class="dag-legend-title">node role</span>
+      <span class="dag-legend-roles"></span>
+    </div>
+    <div class="dag-legend-group">
+      <span class="dag-legend-title">edge type</span>
+      <span class="dag-legend-joins"></span>
+    </div>
+  </div>
+</section>
+
+<div class="panel-row">
+
+  <section class="panel left-panel" aria-label="Node detail / All inputs">
+    <div class="panel-header">
+      <h2>Inspect</h2>
+      <div class="panel-toggle" role="group" aria-label="Left panel mode">
+        <button type="button" data-mode="node"   class="is-active" aria-pressed="true">Node detail</button>
+        <button type="button" data-mode="inputs" aria-pressed="false">All inputs</button>
+      </div>
+    </div>
+    <div class="left-panel-body" data-mode="node"></div>
+  </section>
+
+  <section class="panel expected-panel" aria-label="Expected output">
+    <div class="panel-header">
+      <h2>Expected</h2>
+      <span class="row-count-badge expected-rowcount">0 rows</span>
+    </div>
+    <div class="expected-body"></div>
+  </section>
+
+</div>
+
+<script type="application/json" id="cute-dbt-data">{{ payload_json|safe }}</script>
+
+<script>
+{{ jquery_js|safe }}
+</script>
+<script>
+{{ datatables_js|safe }}
+</script>
+<script>
+{{ mermaid_js|safe }}
+</script>
+
+<script>
+{# The inlined interaction layer contains literal `{{ }}` for Mermaid
+   hexagon node shapes and regex patterns; wrap in `raw` so askama leaves
+   it untouched. The JSON payload above is templated normally. #}
+{% raw %}
+// cute-dbt report.html — interactive layer.
+//
+// DOM + class + data-* attributes are the askama template contract.
+// The Mermaid `<g id>` selector is runtime-constructed against the
+// `{svgId}-flowchart-` prefix Mermaid 11.14+ stamps each node group
+// with; never anchor on the bare `^flowchart-` form (it matches
+// nothing on 11.14+ and produces a silent click-binding failure).
+(function () {
+  "use strict";
+
+  // Edge / edge-type colors keyed by the snake_case wire form serialized
+  // by the renderer. Okabe-Ito colorblind-safe palette. UNION variants
+  // both render dashed (row concatenation, not row matching) but split
+  // colors so the legend distinguishes them: orange for `union_all`
+  // (duplicates preserved) and blue for `union_distinct` (deduplicated).
+  // `right` reuses the same blue family — fine because joins render
+  // solid, UNION renders dashed; the dash pattern is the visual cue.
+  var JOIN_COLORS = {
+    from:           "#1c1c1f",
+    inner:          "#009E73",
+    left:           "#0072B2",
+    right:          "#56B4E9",
+    cross:          "#CC79A7",
+    full:           "#982c61",
+    union_all:      "#E69F00",
+    union_distinct: "#0072B2"
+  };
+
+  var ROLE_LABEL = {
+    import:    "Import CTE",
+    transform: "Transform CTE",
+    final:     "Final select"
+  };
+
+  var DATA = (function () {
+    var el = document.getElementById("cute-dbt-data");
+    if (!el) return { baseline: "", models: [] };
+    try {
+      return JSON.parse(el.textContent);
+    } catch (e) {
+      return { baseline: "", models: [] };
+    }
+  })();
+
+  var state = {
+    selectedModel:  null,
+    selectedTestId: null,
+    selectedNodeId: null,
+    leftPanelMode:  "node"
+  };
+
+  $(function () {
+    initExplainHash();
+    renderBanner();
+    if (!DATA.models.length) {
+      $(".test-selection").hide();
+      $(".cte-dag").hide();
+      $(".panel-row").hide();
+      return;
+    }
+    state.selectedModel = DATA.models[0].name;
+    var firstTest = DATA.models[0].tests[0];
+    state.selectedTestId = firstTest ? firstTest.id : null;
+    renderModelSelector();
+    renderTestSelector();
+    renderForSelectedModel();
+    bindGlobalHandlers();
+  });
+
+  function initExplainHash() {
+    function sync() {
+      var on = window.location.hash === "#explain";
+      $(".error-card").toggleClass("is-visible", on);
+    }
+    sync();
+    $(window).on("hashchange", sync);
+  }
+
+  function renderBanner() {
+    // The per-model selector option labels already carry each model's
+    // test count (`stg_customers (1 test)` etc.), so the global banner
+    // only restates the diff-scope total. JS re-writes the server-
+    // rendered text only so swapping DATA in DevTools repaints
+    // consistently without a server round trip.
+    var n = 0;
+    DATA.models.forEach(function (m) { n += m.tests.length; });
+    var noun = n === 1 ? "unit test" : "unit tests";
+    var text = n === 0
+      ? "0 unit tests in scope"
+      : "Showing " + n + " " + noun + " in scope";
+    $(".diff-scope-text").text(text);
+    $(".diff-scope-baseline").text(DATA.baseline);
+  }
+
+  function currentModel() {
+    return DATA.models.filter(function (m) { return m.name === state.selectedModel; })[0];
+  }
+
+  function currentTest() {
+    var m = currentModel();
+    if (!m) return null;
+    return m.tests.filter(function (t) { return t.id === state.selectedTestId; })[0];
+  }
+
+  function renderModelSelector() {
+    var $sel = $("#model-select").empty();
+    DATA.models.forEach(function (m) {
+      var n = m.tests.length;
+      var label = n === 1
+        ? m.name + "  (1 test)"
+        : m.name + "  (" + n + " tests)";
+      $sel.append($("<option>").val(m.name).text(label));
+    });
+    $sel.val(state.selectedModel);
+    $sel.off("change.cuteDbt").on("change.cuteDbt", function () {
+      state.selectedModel = $(this).val();
+      var m = currentModel();
+      var firstForModel = m && m.tests[0];
+      state.selectedTestId = firstForModel ? firstForModel.id : null;
+      state.selectedNodeId = null;
+      state.leftPanelMode = "node";
+      renderTestSelector();
+      renderForSelectedModel();
+    });
+  }
+
+  function renderTestSelector() {
+    var $sel = $("#test-select").empty();
+    var m = currentModel();
+    var tests = m ? m.tests : [];
+    tests.forEach(function (t) {
+      $sel.append($("<option>").val(t.id).text(t.name));
+    });
+    $sel.val(state.selectedTestId);
+    $sel.off("change.cuteDbt").on("change.cuteDbt", function () {
+      state.selectedTestId = $(this).val();
+      state.selectedNodeId = null;
+      state.leftPanelMode = "node";
+      renderForSelectedModel();
+    });
+  }
+
+  function renderForSelectedModel() {
+    var m = currentModel();
+    var t = currentTest();
+    $(".recursive-banner").prop("hidden", !(m && m.is_recursive));
+    renderTestDetails(t);
+    renderDagLegend();
+    renderDag();
+    renderSegmentedToggle();
+    if (t) {
+      $(".test-description").text(t.description || "");
+      renderLeftPanel();
+      renderExpectedPanel(t);
+    } else {
+      $(".test-description").text("");
+      $(".left-panel-body").empty().append(
+        $("<div>").addClass("no-tests-empty")
+          .text("This model is modified but has no unit tests — consider adding one.")
+      );
+      $(".expected-panel .expected-rowcount").text("0 rows");
+      $(".expected-body").empty().append(
+        $("<div>").addClass("no-tests-empty")
+          .text("No unit test selected.")
+      );
+    }
+  }
+
+  function renderTestDetails(t) {
+    var $body = $(".test-details-body").empty();
+    if (!t) return;
+    var $tagsLine = $("<div>").addClass("td-line td-tags-line");
+    if (t.tags && t.tags.length) {
+      $tagsLine.append($("<span>").addClass("td-label").text("Tagged "));
+      t.tags.forEach(function (tag, i) {
+        if (i > 0) $tagsLine.append(document.createTextNode(", "));
+        $tagsLine.append($("<span>").addClass("td-tag").text(tag));
+      });
+    } else {
+      $tagsLine.addClass("muted").text("Untagged");
+    }
+    $body.append($tagsLine);
+
+    var $metaLine = $("<div>").addClass("td-line td-meta-line");
+    var metaKeys = t.meta ? Object.keys(t.meta) : [];
+    if (metaKeys.length === 0) {
+      $metaLine.addClass("muted").text("No metadata");
+    } else {
+      metaKeys.forEach(function (k, i) {
+        if (i > 0) $metaLine.append(document.createTextNode(" · "));
+        $metaLine.append($("<span>").addClass("td-meta-key").text(k));
+        $metaLine.append(document.createTextNode(": "));
+        $metaLine.append($("<span>").addClass("td-meta-val").text(String(t.meta[k])));
+      });
+    }
+    $body.append($metaLine);
+
+    if (t.defined_in) {
+      $body.append(
+        $("<div>").addClass("td-line td-defined-in-line")
+          .append($("<span>").addClass("td-label").text("Defined in "))
+          .append($("<code>").addClass("td-defined-in").text(t.defined_in))
+      );
+    }
+  }
+
+  function renderDagLegend() {
+    var $roles = $(".dag-legend-roles").empty();
+    [
+      { role: "import",    label: ROLE_LABEL.import },
+      { role: "transform", label: ROLE_LABEL.transform },
+      { role: "final",     label: ROLE_LABEL.final }
+    ].forEach(function (r) {
+      $roles.append(
+        $("<span>").addClass("legend-item role-" + r.role)
+          .append($("<span>").addClass("legend-swatch"))
+          .append($("<span>").addClass("legend-label").text(r.label))
+      );
+    });
+
+    var $joins = $(".dag-legend-joins").empty();
+    ["from", "inner", "left", "right", "full", "cross", "union_all", "union_distinct"].forEach(function (j) {
+      var $edge = $("<span>").addClass("legend-edge");
+      if (j === "union_all" || j === "union_distinct") {
+        $edge.addClass("is-dashed").css({
+          background: "transparent",
+          "border-top": "3px dashed " + JOIN_COLORS[j],
+          height: "0"
+        });
+      } else {
+        $edge.css("background", JOIN_COLORS[j]);
+      }
+      $joins.append(
+        $("<span>").addClass("legend-item join-" + j)
+          .append($edge)
+          .append($("<span>").addClass("legend-label").text(j))
+      );
+    });
+  }
+
+  function buildMermaidSource(m, t) {
+    var lines = ["graph LR"];
+    var dag = m.dag;
+    if (!dag || !dag.nodes.length) {
+      lines.push("    empty[\"(no DAG available)\"]");
+      return lines.join("\n");
+    }
+    var safeIds = {};
+    dag.nodes.forEach(function (n, i) { safeIds[n.id] = "n" + i; });
+
+    dag.nodes.forEach(function (n) {
+      var safe = String(n.id).replace(/"/g, "&quot;");
+      var shape;
+      if (n.role === "import") {
+        shape = "([\"" + safe + "\"])";
+      } else if (n.role === "final") {
+        shape = "{{\"" + safe + "\"}}";
+      } else {
+        shape = "[\"" + safe + "\"]";
+      }
+      lines.push("    " + safeIds[n.id] + shape + ":::role_" + n.role);
+    });
+    dag.edges.forEach(function (e) {
+      lines.push("    " + safeIds[e.from] + " --> " + safeIds[e.to]);
+    });
+
+    lines.push("    classDef role_import fill:#e8f1f8,stroke:#0072B2,stroke-width:1.5px,color:#1c1c1f;");
+    lines.push("    classDef role_transform fill:#f4f4f5,stroke:#8a8a90,stroke-width:1.5px,color:#1c1c1f;");
+    lines.push("    classDef role_final fill:#fdf2dc,stroke:#E69F00,stroke-width:2px,color:#1c1c1f;");
+    lines.push("    classDef selected stroke:#E91E63,stroke-width:4px;");
+
+    dag.edges.forEach(function (e, i) {
+      var color = JOIN_COLORS[e.edge_type] || "#8a8a90";
+      var dash = (e.edge_type === "union_all" || e.edge_type === "union_distinct") ? ",stroke-dasharray:5 3" : "";
+      lines.push("    linkStyle " + i + " stroke:" + color + ",stroke-width:1.8px,fill:none" + dash + ";");
+    });
+
+    if (state.selectedNodeId) {
+      var safeSel = safeIds[state.selectedNodeId];
+      if (safeSel) lines.push("    class " + safeSel + " selected;");
+    }
+    return lines.join("\n");
+  }
+
+  function renderDag() {
+    var m = currentModel();
+    var $host = $(".cte-dag-mermaid").empty();
+    if (!m) return;
+    var src = buildMermaidSource(m);
+
+    window.mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme: "base",
+      fontFamily: 'system-ui,-apple-system,"Segoe UI",sans-serif'
+    });
+
+    var id = "mermaid-" + Math.random().toString(36).slice(2, 9);
+    window.mermaid.render(id, src).then(function (out) {
+      $host.html(out.svg);
+      if (out.bindFunctions) out.bindFunctions($host[0]);
+      bindDagNodeClicks($host[0], m, id);
+    }).catch(function (err) {
+      $host.empty().append(
+        $("<pre>").addClass("mermaid-error").text("Mermaid render failed: " + String(err))
+      );
+    });
+  }
+
+  function bindDagNodeClicks(svgHost, m, svgId) {
+    // Mermaid 11.14+ stamps each node group with the id
+    // "{svgElementId}-flowchart-{nodeName}-{counter}". Use the runtime
+    // svgId to anchor a precise selector — broken selectors are visible
+    // in DevTools (fail-loud), not silent.
+    var prefix = svgId + "-flowchart-";
+    var groups = svgHost.querySelectorAll('g.node[id^="' + prefix + '"]');
+    if (!groups.length) {
+      // Fallback substring selector — version-agnostic across Mermaid
+      // 11.14+ point releases. (The precise prefix above misses if
+      // Mermaid changes its internal id structure; the substring catches
+      // any "flowchart-" stamped id.)
+      groups = svgHost.querySelectorAll('g.node[id*="-flowchart-"]');
+    }
+    var safeToOriginal = {};
+    m.dag.nodes.forEach(function (n, i) { safeToOriginal["n" + i] = n.id; });
+    groups.forEach(function (g) {
+      var raw = g.getAttribute("id") || "";
+      var stripped = raw.replace(prefix, "");
+      // Trailing "-{counter}" — find last hyphen-digit boundary.
+      var m2 = stripped.match(/^(.+?)-\d+$/);
+      if (!m2) return;
+      var safeId = m2[1];
+      var originalId = safeToOriginal[safeId];
+      if (!originalId) return;
+      g.classList.add("dag-node");
+      g.setAttribute("data-node-id", originalId);
+      g.style.cursor = "pointer";
+      g.addEventListener("click", function () {
+        state.selectedNodeId = originalId;
+        if (state.leftPanelMode !== "node") {
+          state.leftPanelMode = "node";
+          renderSegmentedToggle();
+        }
+        renderLeftPanel();
+        renderDag();
+      });
+    });
+  }
+
+  function renderSegmentedToggle() {
+    $(".panel-toggle [data-mode]").each(function () {
+      var mode = $(this).attr("data-mode");
+      $(this).attr("aria-pressed", mode === state.leftPanelMode ? "true" : "false");
+      $(this).toggleClass("is-active", mode === state.leftPanelMode);
+    });
+  }
+
+  function bindGlobalHandlers() {
+    $(".panel-toggle").on("click", "[data-mode]", function () {
+      state.leftPanelMode = $(this).attr("data-mode");
+      renderSegmentedToggle();
+      renderLeftPanel();
+    });
+  }
+
+  function renderLeftPanel() {
+    var t = currentTest();
+    if (!t) return;
+    if (state.leftPanelMode === "inputs") {
+      renderAllInputs(t);
+    } else {
+      renderNodeDetail(t);
+    }
+  }
+
+  function renderNodeDetail(t) {
+    var $wrap = $(".left-panel-body").empty().attr("data-mode", "node");
+    var m = currentModel();
+    if (!state.selectedNodeId) {
+      $wrap.append($("<div>").addClass("empty-hint").text("Click a node above to inspect."));
+      return;
+    }
+    var node = m && m.dag.nodes.filter(function (n) { return n.id === state.selectedNodeId; })[0];
+    if (!node) {
+      $wrap.append($("<div>").addClass("empty-hint").text("Node not found."));
+      return;
+    }
+    var $detail = $("<div>").addClass("node-detail")
+      .attr("data-node-id", node.id)
+      .attr("data-node-role", node.role);
+
+    var $hdr = $("<div>").addClass("node-detail-header");
+    $hdr.append($("<h3>").addClass("node-detail-title").text(node.id));
+    $hdr.append($("<span>").addClass("node-role-badge role-" + node.role).text(node.role));
+    $detail.append($hdr);
+
+    var sql = (m.compiled_sql && m.compiled_sql[node.id]) || "-- compiled SQL not available";
+    var $det = $("<details>").addClass("compiled-sql").attr("open", "open");
+    $det.append($("<summary>").text("Compiled SQL"));
+    var $sqlWrap = $("<div>").addClass("sql-block-wrap");
+    var $copy = $("<button>").attr("type", "button").addClass("sql-copy").text("Copy")
+      .on("click", function (e) { e.preventDefault(); e.stopPropagation(); copySql(sql, $(this)); });
+    var $pre = $("<pre>").addClass("sql-block").append($("<code>").html(highlightSql(sql)));
+    $sqlWrap.append($copy).append($pre);
+    $det.append($sqlWrap);
+    $detail.append($det);
+
+    if (node.role === "import") {
+      var bound = t.given.filter(function (g) { return g.bound_to_node === node.id; })[0];
+      if (bound) {
+        $detail.append(renderGivenSection(bound));
+      } else {
+        $detail.append(
+          $("<div>").addClass("given-empty")
+            .text('no fixture provided — dbt treats unspecified inputs as empty')
+        );
+      }
+    }
+    $wrap.append($detail);
+    initDataTablesIn($wrap);
+  }
+
+  function renderGivenSection(given) {
+    var $sec = $("<section>").addClass("given-section").attr("data-input-name", given.input);
+    var $hdr = $("<div>").addClass("table-header");
+    $hdr.append($("<h4>").addClass("table-title").text("given · " + given.input));
+    var rows = unwrapRows(given.rows);
+    $hdr.append($("<span>").addClass("row-count-badge")
+      .text(rows.length + " row" + (rows.length === 1 ? "" : "s")));
+    $sec.append($hdr);
+    var cols = collectColumns(rows);
+    $sec.append(buildTable(cols, rows, "given-table"));
+    return $sec;
+  }
+
+  function renderAllInputs(t) {
+    var $wrap = $(".left-panel-body").empty().attr("data-mode", "inputs");
+    if (!t.given.length) {
+      $wrap.append($("<div>").addClass("empty-hint").text("No fixtures defined for this test."));
+      return;
+    }
+    t.given.forEach(function (given) { $wrap.append(renderGivenSection(given)); });
+    initDataTablesIn($wrap);
+  }
+
+  function renderExpectedPanel(t) {
+    var $panel = $(".expected-panel");
+    var rows = unwrapRows(t.expected.rows);
+    $panel.find(".expected-rowcount").text(rows.length + " row" + (rows.length === 1 ? "" : "s"));
+    var $body = $panel.find(".expected-body").empty();
+    var cols = collectColumns(rows);
+    $body.append(buildTable(cols, rows, "expected-table"));
+    initDataTablesIn($body);
+  }
+
+  // dbt's `format: dict` rows arrive as an array of {col: val} maps; the
+  // design's data.js carries column-keyed rows directly. Normalize either
+  // shape to a plain array.
+  function unwrapRows(rows) {
+    if (!rows) return [];
+    if (Array.isArray(rows)) return rows;
+    return [];
+  }
+
+  function collectColumns(rows) {
+    var seen = {};
+    var order = [];
+    rows.forEach(function (row) {
+      if (row && typeof row === "object" && !Array.isArray(row)) {
+        Object.keys(row).forEach(function (k) {
+          if (!seen[k]) { seen[k] = true; order.push(k); }
+        });
+      }
+    });
+    return order;
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function escapeHtmlForBody(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  var SQL_KEYWORDS_RE = new RegExp(
+    "\\b(" +
+      "select|from|where|left|right|inner|outer|full|cross|join|on|using|" +
+      "group\\s+by|order\\s+by|partition\\s+by|having|as|and|or|not|" +
+      "case|when|then|else|end|null|is|distinct|with|union|all|over|" +
+      "coalesce|sum|count|avg|min|max|row_number|asc|desc|true|false" +
+    ")\\b", "gi"
+  );
+  function highlightSql(sql) {
+    var s = escapeHtmlForBody(sql);
+    s = s.replace(/(--[^\n]*)/g, '<span class="sql-comment">$1</span>');
+    s = s.replace(/('[^'\n]*')/g, '<span class="sql-string">$1</span>');
+    s = s.replace(/(\{\{[^}]+\}\})/g, '<span class="sql-jinja">$1</span>');
+    s = s.replace(SQL_KEYWORDS_RE, '<span class="sql-keyword">$1</span>');
+    return s;
+  }
+
+  function copySql(text, $btn) {
+    function done(ok) {
+      $btn.addClass(ok ? "copied" : "copy-failed").text(ok ? "Copied" : "Failed");
+      setTimeout(function () {
+        $btn.removeClass("copied copy-failed").text("Copy");
+      }, 1500);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done(true); }, function () {
+        fallbackCopy(text, done);
+      });
+    } else {
+      fallbackCopy(text, done);
+    }
+  }
+  function fallbackCopy(text, done) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    done(ok);
+  }
+
+  function buildTable(columns, rows, cls) {
+    var $wrap = $("<div>").addClass("table-fit");
+    var $tbl = $("<table>").addClass(cls);
+    var $thead = $("<thead>").appendTo($tbl);
+    var $hr = $("<tr>").appendTo($thead);
+    columns.forEach(function (c) {
+      var html = escapeHtml(c).replace(/_/g, "_<wbr>");
+      $hr.append($("<th>").attr("title", c).html(html));
+    });
+    var $tbody = $("<tbody>").appendTo($tbl);
+    rows.forEach(function (r) {
+      var $tr = $("<tr>").appendTo($tbody);
+      columns.forEach(function (col) {
+        var cell = (r && typeof r === "object" && !Array.isArray(r)) ? r[col] : undefined;
+        var $td = $("<td>");
+        if (cell === null || cell === undefined) {
+          $td.addClass("cell-null").text("NULL");
+        } else if (typeof cell === "number") {
+          $td.addClass("cell-num").text(cell);
+        } else {
+          $td.text(String(cell));
+        }
+        $tr.append($td);
+      });
+    });
+    $wrap.append($tbl);
+    return $wrap;
+  }
+
+  function initDataTablesIn($scope) {
+    $scope.find("table.given-table, table.expected-table").each(function () {
+      if ($.fn && $.fn.DataTable) {
+        if ($.fn.DataTable.isDataTable(this)) return;
+        $(this).DataTable({
+          paging: false,
+          info: false,
+          searching: false,
+          scrollX: false,
+          ordering: true,
+          order: []
+        });
+      }
+    });
+    reflowPanelsForOverflow();
+  }
+
+  var reflowScheduled = false;
+  function reflowPanelsForOverflow() {
+    if (reflowScheduled) return;
+    reflowScheduled = true;
+    requestAnimationFrame(function () {
+      reflowScheduled = false;
+      var $row = $(".panel-row");
+      if (!$row.length) return;
+      $row.removeClass("is-stacked");
+      void $row[0].offsetWidth;
+      var needsStack = false;
+      $row.find(".table-fit").each(function () {
+        if (this.scrollWidth > this.clientWidth + 1) { needsStack = true; }
+      });
+      if (needsStack) $row.addClass("is-stacked");
+    });
+  }
+
+  $(window).on("resize", reflowPanelsForOverflow);
+
+})();
+{% endraw %}
+</script>
+</body>
+</html>

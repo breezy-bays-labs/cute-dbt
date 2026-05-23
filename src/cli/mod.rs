@@ -3,11 +3,13 @@
 //!
 //! The run loop is composed here as four named stages —
 //! `scope` → `preflight_compiled` → `parse_ctes` → `render`
-//! (`ARCHITECTURE.md` §3, §7). Composition lives in `cli` by deliberate
+//! (`ARCHITECTURE.md` §3, §6). Composition lives in `cli` by deliberate
 //! single-crate design: there is no separate `app` / `usecase` crate.
-//! `parse_ctes` and `render` are stubs in this PR — PR 7 shipped the
-//! real CTE engine and PR 8b lands the askama renderer; wiring them into
-//! the loop is downstream integration work.
+//! `parse_ctes` is a named no-op call site: each in-scope model parses
+//! its own `compiled_code` once during payload assembly inside
+//! [`crate::adapters::render::render_report`], so the explicit
+//! `parse_ctes` step is purely greppable scaffolding that mirrors the
+//! ARCHITECTURE diagram. The `render` step invokes the askama renderer.
 //!
 //! Three exit codes: `0` success, `1` a run-time failure (a fail-closed
 //! manifest or an unwritable output path — no partial report is ever
@@ -17,7 +19,6 @@
 mod args;
 mod exit;
 
-use std::fs;
 use std::io;
 use std::path::Path;
 use std::process::ExitCode;
@@ -25,9 +26,9 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::adapters::manifest::{FileManifestSource, load_baseline};
+use crate::adapters::render::render_report;
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, InScopeSet, Manifest, ModelInScopeSet, PreflightError, StateComparator,
-    preflight_compiled,
+    InScopeSet, Manifest, ModelInScopeSet, PreflightError, StateComparator, preflight_compiled,
 };
 use crate::ports::ManifestSource;
 
@@ -115,7 +116,13 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
     let (in_scope, models_in_scope) = scope(&current, &baseline);
     preflight_compiled(&current, &in_scope, &models_in_scope)?;
     parse_ctes();
-    render(&cli.out, &in_scope)?;
+    render(
+        &cli.out,
+        &current,
+        &in_scope,
+        &models_in_scope,
+        &cli.baseline_manifest,
+    )?;
     Ok(())
 }
 
@@ -145,39 +152,30 @@ fn scope(current: &Manifest, baseline: &Manifest) -> (InScopeSet, ModelInScopeSe
     (in_scope, models_in_scope)
 }
 
-/// The `parse_ctes` stage — a deliberate no-op stub.
+/// The `parse_ctes` stage — a named no-op call site.
 ///
-/// PR 7 shipped the real engine (`adapters::cte_engine::parse_cte_graph`);
-/// building a per-unit-test CTE graph into the rendered report is
-/// downstream integration work (PR 8b), not PR 6's scope. The stub keeps
-/// the run loop's four named stages present and greppable today.
+/// Per-model CTE parsing happens inside the renderer's payload
+/// assembly: each in-scope model parses its own `compiled_code` exactly
+/// once when `render_report` walks `models_in_scope`. The run loop keeps
+/// this name greppable so `ARCHITECTURE.md` §3's four-stage diagram
+/// still resolves; the work happens one stage downstream.
 fn parse_ctes() {}
 
-/// The `render` stage — a stub renderer.
+/// The `render` stage — invokes the askama renderer.
 ///
-/// PR 8b replaces this with the askama template reproducing the Claude
-/// Design report. v0.1-PR6 writes a minimal valid HTML5 document
-/// carrying the diff-scope banner so the empty-but-valid vs fail-closed
-/// contract is observable end-to-end. `render` is the last stage: an
-/// earlier fail-closed `?` means it never runs and no `report.html` is
-/// written.
-fn render(out: &Path, in_scope: &InScopeSet) -> Result<(), io::Error> {
-    let banner = if in_scope.is_empty() {
-        BANNER_EMPTY_SCOPE.to_owned()
-    } else {
-        format!(
-            "{} unit test(s) in scope — cute-dbt v0.1 scopes on model body changes",
-            in_scope.len()
-        )
-    };
-    let html = format!(
-        "<!doctype html>\n\
-         <html lang=\"en\">\n\
-         <head><meta charset=\"utf-8\"><title>cute-dbt report</title></head>\n\
-         <body><main><p class=\"diff-scope-banner\">{banner}</p></main></body>\n\
-         </html>\n"
-    );
-    fs::write(out, html)
+/// `render` is the last stage: an earlier fail-closed `?` short-circuits
+/// before this is reached, so no `report.html` is ever partially written.
+/// `baseline_label` is the human-readable reference shown in the
+/// diff-scope banner; v0.1 uses the `--baseline-manifest` path verbatim.
+fn render(
+    out: &Path,
+    current: &Manifest,
+    in_scope: &InScopeSet,
+    models_in_scope: &ModelInScopeSet,
+    baseline_path: &Path,
+) -> Result<(), io::Error> {
+    let baseline_label = baseline_path.display().to_string();
+    render_report(out, current, in_scope, models_in_scope, &baseline_label)
 }
 
 #[cfg(test)]

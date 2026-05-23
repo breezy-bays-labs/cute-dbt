@@ -44,6 +44,15 @@ threshold = 15
 pattern ="src/adapters/asset_embed.rs"
 threshold = 15
 
+[[overrides]]
+# askama renderer. The composition layer between domain types, CTE
+# engine output, and the askama template — payload assembly, node-role
+# classification, import-CTE binding, and the run-loop wiring all live
+# here. Correctness regressions silently produce wrong reports, not
+# crashes.
+pattern ="src/adapters/render.rs"
+threshold = 15
+
 # crap4rs v0.4.0's [[overrides]] schema accepts only `pattern` and
 # `threshold`. There is no top-level `exclude` array; to exclude a file
 # from gating, add an [[overrides]] entry with a very high threshold

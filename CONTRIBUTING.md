@@ -95,13 +95,44 @@ Every `#[ignore]`, every `if: false` workflow gate, every `exclude` /
 
 ## Authoring `.feature` scenarios
 
-- Synthetic data only in example tables (no real data, ever).
+- Synthetic data only in example tables (no real data, ever) — see the
+  synthetic-only fixtures rule below.
 - Scenarios assert **observable behavior** — exit code, file presence,
   DOM structure, network requests — never implementation detail.
 - Every scenario invoking the CLI must pass `--baseline-manifest`, except
   scenarios explicitly tagged `@no-baseline-usage-error` (the one
   intentional exception that exercises the usage-error path itself). The
   `baseline-required-grep` CI job enforces this.
+
+## Synthetic-only fixtures
+
+Every committed fixture / `insta` snapshot / `.feature` example **must**
+contain only synthetic or public-demo data. No real data from any source,
+ever. cute-dbt's privacy property is that when you run it, your manifest
+stays on your machine; this public repository must reflect that property
+by never including real data of its own. A real-data fixture in this
+public repo would contradict the privacy story on day one.
+
+The invariant is **mechanically enforced**, not a checklist line:
+
+- **`tests/fixtures/MANIFEST.toml`** lists every committed fixture with:
+  - `path` — the fixture file's repo-relative path
+  - `origin` — upstream source name (e.g. `jaffle-shop`) or
+    `synthetic-generated`
+  - `url` — the upstream URL when the fixture is a public demo, omitted
+    when synthetic
+  - `sha256` — the SHA-256 of the fixture file
+  - `synthetic_only = true` — explicit, per-file affirmation that the
+    fixture contains no real data
+- A **`cargo test`** parses the manifest, walks `tests/fixtures/`, and
+  verifies every file is listed.
+- A **CI grep** fails the build on any file under `tests/fixtures/` not
+  listed in the manifest.
+
+The same mechanism shape applies to `assets/MANIFEST.toml` (the vendored
+frontend bundle's provenance index) — see
+[`ARCHITECTURE.md` §5](ARCHITECTURE.md#5-asset-embedding-zero-egress-gate).
+Real data in this public repo is a release blocker.
 
 ## Release discipline (v0.x)
 
