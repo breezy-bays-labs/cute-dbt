@@ -34,12 +34,15 @@ chrome.
 **How to re-run.**
 
 ```bash
-cargo test --test headless_zero_egress --locked
+cargo test --test headless_zero_egress --locked -- --ignored
 ```
 
-On CI this runs in the [`headless-zero-egress`](.github/workflows/ci.yml)
-job with Chrome installed via `browser-actions/setup-chrome`. The job
-is a required gate on every PR to `main`.
+The `-- --ignored` flag is required because the test is `#[ignore]` by
+default — the standard cross-platform `cargo nextest run --all-targets`
+invocation does not carry a Chrome dependency. On CI this runs in the
+[`headless-zero-egress`](.github/workflows/ci.yml) job with Chrome
+installed via `browser-actions/setup-chrome`. The job is a required
+gate on every PR to `main`.
 
 **Where to look.** [`tests/headless_zero_egress.rs`](tests/headless_zero_egress.rs).
 The test asserts the URL begins with `file://` (hard gate — Chromium

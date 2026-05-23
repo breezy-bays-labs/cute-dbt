@@ -30,6 +30,18 @@
 //! schemes (`file:`, `data:`, `blob:`) are excluded from the filter,
 //! never blocked — the `data:` URI favicon is part of the design.
 //!
+//! ## `#[ignore]` opt-in
+//!
+//! The test is `#[ignore]` by default so the standard `cargo nextest
+//! run --all-targets` invocation does not pull in a Chrome dependency.
+//! It runs explicitly in the dedicated `headless-zero-egress` CI job
+//! (which installs Chrome via `browser-actions/setup-chrome`) via
+//! `cargo test --test headless_zero_egress -- --ignored`. Locally:
+//!
+//! ```bash
+//! cargo test --test headless_zero_egress -- --ignored
+//! ```
+//!
 //! Tracked: breezy-bays-labs/cute-dbt#12.
 
 use std::ffi::OsStr;
@@ -95,6 +107,7 @@ fn scheme_is_external(url: &str) -> bool {
 }
 
 #[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn report_makes_zero_external_requests_when_opened_via_file_url() {
     let url = report_file_url();
     assert!(
@@ -182,11 +195,11 @@ fn report_makes_zero_external_requests_when_opened_via_file_url() {
         .wait_for_element_with_custom_timeout(".cte-dag-mermaid svg", Duration::from_secs(15))
         .is_ok();
 
-    // DataTables initialization signal — when the library has wrapped
-    // the unit-test rows, the table gets the `dataTable` class. A
-    // single boolean is enough; "working sort + search" is not part of
-    // the auditability proof (see PR body disposition on the issue
-    // comment for the focus.md vs. issue acceptance text reconciliation).
+    // DataTables initialization signal — once `$('table').DataTable()`
+    // resolves, the table element gets the `dataTable` class. A single
+    // boolean is enough; "working sort + search" is not part of the
+    // auditability proof (see PR body disposition D3 on issue #12 for
+    // the focus.md vs. issue acceptance text reconciliation).
     let datatable_ok = tab
         .evaluate(
             "(function () { \
@@ -194,7 +207,7 @@ fn report_makes_zero_external_requests_when_opened_via_file_url() {
                  return !!(window.jQuery \
                    && window.jQuery.fn \
                    && window.jQuery.fn.DataTable \
-                   && document.querySelector('table.dataTable, table.dt-rows')); \
+                   && document.querySelector('table.dataTable')); \
                } catch (_) { return false; } \
              })()",
             false,
