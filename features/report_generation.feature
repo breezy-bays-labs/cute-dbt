@@ -24,7 +24,7 @@ Feature: Generate a self-contained report from a compiled dbt manifest
     And that section shows the unit test header and target model "stg_orders"
     And that section shows a Given data panel and an Expected data panel
     And that section shows a Mermaid "graph LR" CTE dependency diagram
-    And the CTE diagram edges are colored by join type with a visible legend
+    And the CTE diagram edges are colored by edge type with a visible legend
 
   Scenario: A change touching no models yields an empty but valid report
     Given every model has the same body checksum as the baseline
