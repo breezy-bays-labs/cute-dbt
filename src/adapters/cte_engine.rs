@@ -1,5 +1,5 @@
 //! CTE engine — a `sqlparser-rs` 0.62 parser-AST pass that extracts a
-//! [`CteGraph`] (CTE dependency graph + join-type-classified edges) from a
+//! [`CteGraph`] (CTE dependency graph + edge-type-classified edges) from a
 //! dbt model's compiled SQL.
 //!
 //! ## What it produces
@@ -10,22 +10,31 @@
 //! `WITH` clause has no CTE structure to visualise and yields an empty
 //! [`CteGraph`].
 //!
-//! ## The v0.1 edge model — a *join* graph
+//! ## The v0.1 edge model — a *structural* graph
 //!
-//! [`JoinType`] is a closed vocabulary of five SQL join kinds, so every
-//! emitted edge *is* a join. The engine walks each query body's `FROM`
-//! clause and, for each join chain `base [JOIN r1] [JOIN r2] …`, emits a
-//! `referenced_cte → consumer` edge coloured by the join that introduces
-//! the reference: each joined relation is introduced by its own join
-//! operator; the base relation is introduced by the **first** join in the
-//! chain. A plain single-table `FROM cte` (no join) carries no join type
-//! and therefore emits no edge — so a CTE referenced only by pass-through,
-//! and a terminal `SELECT * FROM last_cte`, appear as nodes with no
-//! incoming edge. v0.1 visualises join structure; capturing plain
-//! pass-through references is a future widening of the vocabulary.
+//! [`EdgeType`] covers all structural relationships between CTEs:
 //!
-//! Joins outside the five-kind vocabulary (`SEMI` / `ANTI` / `ASOF` /
-//! `APPLY` / `ARRAY JOIN`, …) are not classified and emit no edge.
+//! - **`From`** — a plain `FROM <cte>` reference with no join operator.
+//!   Every base relation and every join-free CTE reference emits a `From`
+//!   edge into its consumer.
+//! - **`Inner` / `Left` / `Right` / `Full` / `Cross`** — the five SQL
+//!   join kinds. The joined relation (right-hand side of the join) takes
+//!   the specific join type; the base relation of a join chain always
+//!   takes `From`.
+//! - **`UnionAll`** — a `UNION ALL` arm reference: the CTE appearing as
+//!   the direct `FROM` source of a join-free UNION arm.
+//! - **`UnionDistinct`** — a `UNION` / `UNION DISTINCT` arm reference
+//!   (plain `UNION` is semantically distinct). `SetQuantifier::None`
+//!   maps here.
+//!
+//! The base relation of a JOIN chain inside a UNION arm gets `From`, not
+//! the union type — only join-free arm sources get the union type.
+//!
+//! Join kinds outside the five-kind vocabulary (`SEMI` / `ANTI` / `ASOF`
+//! / `APPLY` / `ARRAY JOIN`, …) are not classified and emit no edge.
+//! Non-`UNION` set operations (`EXCEPT` / `INTERSECT` / `MINUS`) are
+//! recursed into — JOIN edges inside them still emit — but no union-type
+//! edge is emitted for the arms themselves.
 //!
 //! ## Acyclicity
 //!
@@ -40,11 +49,14 @@
 
 use std::collections::HashMap;
 
-use sqlparser::ast::{Cte, JoinOperator, Query, SetExpr, Statement, TableFactor, TableWithJoins};
+use sqlparser::ast::{
+    Cte, JoinOperator, Query, SetExpr, SetOperator, SetQuantifier, Statement, TableFactor,
+    TableWithJoins,
+};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 
-use crate::domain::{CteEdge, CteGraph, CteNode, JoinType};
+use crate::domain::{CteEdge, CteGraph, CteNode, EdgeType};
 
 /// Display name of the synthetic terminal node — the final `SELECT` that
 /// follows a model's `WITH` clause. The compiled SQL does not carry the
@@ -71,7 +83,7 @@ pub enum CteError {
 /// Extract a [`CteGraph`] from a dbt model's compiled SQL.
 ///
 /// A model with no `WITH` clause yields an empty graph (no CTE structure
-/// to visualise). See the module docs for the join-graph edge model.
+/// to visualise). See the module docs for the structural edge model.
 ///
 /// # Errors
 ///
@@ -140,35 +152,54 @@ fn name_index(ctes: &[Cte]) -> HashMap<String, usize> {
         .collect()
 }
 
-/// Every join edge from every consumer body — each CTE body plus the
-/// terminal `SELECT`.
+/// Every edge from every consumer body — each CTE body plus the terminal
+/// `SELECT`.
 fn build_edges(ctes: &[Cte], query: &Query, index: &HashMap<String, usize>) -> Vec<CteEdge> {
     let mut edges: Vec<CteEdge> = Vec::new();
     for (consumer_idx, cte) in ctes.iter().enumerate() {
-        collect_edges(consumer_idx, &cte.query.body, index, &mut edges);
+        collect_edges(consumer_idx, &cte.query.body, index, None, &mut edges);
     }
-    collect_edges(ctes.len(), &query.body, index, &mut edges);
+    collect_edges(ctes.len(), &query.body, index, None, &mut edges);
     edges
 }
 
 /// Walk a query body's `FROM` clauses, descending through parenthesised
-/// subqueries and set operations, appending each join edge it finds.
+/// subqueries and set operations, appending each edge it finds.
+///
+/// `union_type` is `Some(EdgeType)` when this body is a direct arm of a
+/// `UNION ALL` / `UNION DISTINCT` operation; plain join-free `FROM`
+/// references in that arm get the union type instead of `From`.
 fn collect_edges(
     consumer_idx: usize,
     body: &SetExpr,
     index: &HashMap<String, usize>,
+    union_type: Option<EdgeType>,
     edges: &mut Vec<CteEdge>,
 ) {
     match body {
         SetExpr::Select(select) => {
             for table in &select.from {
-                edges_from_join_chain(consumer_idx, table, index, edges);
+                edges_from_join_chain(consumer_idx, table, index, union_type, edges);
             }
         }
-        SetExpr::Query(inner) => collect_edges(consumer_idx, &inner.body, index, edges),
-        SetExpr::SetOperation { left, right, .. } => {
-            collect_edges(consumer_idx, left, index, edges);
-            collect_edges(consumer_idx, right, index, edges);
+        SetExpr::Query(inner) => {
+            collect_edges(consumer_idx, &inner.body, index, union_type, edges);
+        }
+        SetExpr::SetOperation {
+            op,
+            set_quantifier,
+            left,
+            right,
+        } => {
+            // Only UNION arms get a union-type override; EXCEPT/INTERSECT/
+            // MINUS recurse without one (joins inside still emit normally).
+            let arm_type = if *op == SetOperator::Union {
+                classify_union_quantifier(*set_quantifier)
+            } else {
+                None
+            };
+            collect_edges(consumer_idx, left, index, arm_type, edges);
+            collect_edges(consumer_idx, right, index, arm_type, edges);
         }
         _ => {}
     }
@@ -176,23 +207,28 @@ fn collect_edges(
 
 /// Emit an edge for every CTE reference in one `FROM` join chain.
 ///
-/// Each joined relation is introduced by its own join operator; the base
-/// relation is introduced by the first join in the chain (and emits no
-/// edge when the chain has no joins).
+/// - If the chain has **no joins** (`table.joins` is empty), the base
+///   relation gets the `union_type` override when present, or `From`.
+/// - If the chain **has joins**, the base relation always gets `From`;
+///   each joined relation gets its specific join type.
 fn edges_from_join_chain(
     consumer_idx: usize,
     table: &TableWithJoins,
     index: &HashMap<String, usize>,
+    union_type: Option<EdgeType>,
     edges: &mut Vec<CteEdge>,
 ) {
-    if let Some(first) = table.joins.first() {
-        if let Some(join_type) = classify_join(&first.join_operator) {
-            push_edge(&table.relation, consumer_idx, join_type, index, edges);
-        }
-    }
-    for join in &table.joins {
-        if let Some(join_type) = classify_join(&join.join_operator) {
-            push_edge(&join.relation, consumer_idx, join_type, index, edges);
+    if table.joins.is_empty() {
+        // Plain FROM reference — use union context if present, else From.
+        let base_type = union_type.unwrap_or(EdgeType::From);
+        push_edge(&table.relation, consumer_idx, base_type, index, edges);
+    } else {
+        // JOIN chain: base gets From; each joined relation gets its type.
+        push_edge(&table.relation, consumer_idx, EdgeType::From, index, edges);
+        for join in &table.joins {
+            if let Some(join_type) = classify_join(&join.join_operator) {
+                push_edge(&join.relation, consumer_idx, join_type, index, edges);
+            }
         }
     }
 }
@@ -203,7 +239,7 @@ fn edges_from_join_chain(
 fn push_edge(
     factor: &TableFactor,
     consumer_idx: usize,
-    join_type: JoinType,
+    edge_type: EdgeType,
     index: &HashMap<String, usize>,
     edges: &mut Vec<CteEdge>,
 ) {
@@ -213,7 +249,7 @@ fn push_edge(
     if source_idx >= consumer_idx {
         return;
     }
-    let edge = CteEdge::new(source_idx, consumer_idx, join_type);
+    let edge = CteEdge::new(source_idx, consumer_idx, edge_type);
     if !edges.contains(&edge) {
         edges.push(edge);
     }
@@ -229,21 +265,36 @@ fn resolve_factor(factor: &TableFactor, index: &HashMap<String, usize>) -> Optio
     index.get(&leaf.value.to_ascii_lowercase()).copied()
 }
 
-/// Classify a `sqlparser` join operator into the v0.1 [`JoinType`]
+/// Classify a `sqlparser` join operator into the [`EdgeType`] join
 /// vocabulary, or `None` for join kinds outside it.
 ///
 /// The catch-all arm is load-bearing: it keeps the engine forward
 /// compatible with future `sqlparser` releases that add `JoinOperator`
 /// variants, and it is where every non-vocabulary join (`SEMI` / `ANTI` /
 /// `ASOF` / `APPLY` / `ARRAY JOIN`) lands.
-fn classify_join(operator: &JoinOperator) -> Option<JoinType> {
+fn classify_join(operator: &JoinOperator) -> Option<EdgeType> {
     use JoinOperator as Op;
     match operator {
-        Op::Join(_) | Op::Inner(_) => Some(JoinType::Inner),
-        Op::Left(_) | Op::LeftOuter(_) => Some(JoinType::Left),
-        Op::Right(_) | Op::RightOuter(_) => Some(JoinType::Right),
-        Op::FullOuter(_) => Some(JoinType::Full),
-        Op::CrossJoin(_) => Some(JoinType::Cross),
+        Op::Join(_) | Op::Inner(_) => Some(EdgeType::Inner),
+        Op::Left(_) | Op::LeftOuter(_) => Some(EdgeType::Left),
+        Op::Right(_) | Op::RightOuter(_) => Some(EdgeType::Right),
+        Op::FullOuter(_) => Some(EdgeType::Full),
+        Op::CrossJoin(_) => Some(EdgeType::Cross),
+        _ => None,
+    }
+}
+
+/// Classify a `UNION` set quantifier into [`EdgeType`].
+///
+/// - `All` → `UnionAll`
+/// - `Distinct` → `UnionDistinct`
+/// - `None` → `UnionDistinct` (plain `UNION` is semantically DISTINCT)
+/// - Other variants (`ByName`, `AllByName`, `DistinctByName`) → `None`
+///   (exotic quantifiers outside the two-kind vocabulary).
+fn classify_union_quantifier(quantifier: SetQuantifier) -> Option<EdgeType> {
+    match quantifier {
+        SetQuantifier::All => Some(EdgeType::UnionAll),
+        SetQuantifier::Distinct | SetQuantifier::None => Some(EdgeType::UnionDistinct),
         _ => None,
     }
 }
@@ -263,10 +314,10 @@ mod tests {
     }
 
     /// `true` when `g` carries an edge with exactly these endpoints/kind.
-    fn has_edge(g: &CteGraph, from: usize, to: usize, join_type: JoinType) -> bool {
+    fn has_edge(g: &CteGraph, from: usize, to: usize, edge_type: EdgeType) -> bool {
         g.edges()
             .iter()
-            .any(|e| e.from() == from && e.to() == to && e.join_type() == join_type)
+            .any(|e| e.from() == from && e.to() == to && e.edge_type() == edge_type)
     }
 
     #[test]
@@ -286,11 +337,12 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_pass_through_from_emits_no_edge() {
-        // `SELECT * FROM a` references the CTE `a` but does not join it —
-        // the v0.1 join-graph model carries no edge for a pass-through.
+    fn a_plain_from_emits_a_from_edge() {
+        // `SELECT * FROM a` references the CTE `a` with no join —
+        // the v0.1 model now carries a From edge for plain pass-through.
         let g = graph("WITH a AS (SELECT 1 AS id) SELECT * FROM a");
-        assert!(g.edges().is_empty(), "a non-join reference is not an edge");
+        assert_eq!(g.edges().len(), 1, "a plain FROM reference is a From edge");
+        assert!(has_edge(&g, 0, 1, EdgeType::From), "a->terminal is From");
     }
 
     #[test]
@@ -306,31 +358,30 @@ mod tests {
     }
 
     #[test]
-    fn each_join_keyword_classifies_its_edge() {
-        // Maps `cte_rendering.feature`'s Scenario Outline: every join
-        // variant produces a correctly classified edge. `a` is the base
-        // and `b` the joined relation, so both edges carry the join type.
+    fn each_join_keyword_classifies_its_joined_edge() {
+        // The base relation `a` gets From; the joined relation `b` gets
+        // its specific join type.
         let cases = [
-            ("a JOIN b ON a.id = b.id", JoinType::Inner),
-            ("a INNER JOIN b ON a.id = b.id", JoinType::Inner),
-            ("a LEFT JOIN b ON a.id = b.id", JoinType::Left),
-            ("a RIGHT JOIN b ON a.id = b.id", JoinType::Right),
-            ("a FULL JOIN b ON a.id = b.id", JoinType::Full),
-            ("a CROSS JOIN b", JoinType::Cross),
+            ("a JOIN b ON a.id = b.id", EdgeType::Inner),
+            ("a INNER JOIN b ON a.id = b.id", EdgeType::Inner),
+            ("a LEFT JOIN b ON a.id = b.id", EdgeType::Left),
+            ("a RIGHT JOIN b ON a.id = b.id", EdgeType::Right),
+            ("a FULL JOIN b ON a.id = b.id", EdgeType::Full),
+            ("a CROSS JOIN b", EdgeType::Cross),
         ];
-        for (from_clause, expected) in cases {
+        for (from_clause, joined_type) in cases {
             let sql = format!(
                 "WITH a AS (SELECT 1 AS id), b AS (SELECT 1 AS id) \
                  SELECT * FROM {from_clause}"
             );
             let g = graph(&sql);
             assert!(
-                has_edge(&g, 0, 2, expected),
-                "`{from_clause}`: base edge a->terminal should be {expected:?}",
+                has_edge(&g, 0, 2, EdgeType::From),
+                "`{from_clause}`: base `a` → terminal must be From",
             );
             assert!(
-                has_edge(&g, 1, 2, expected),
-                "`{from_clause}`: joined edge b->terminal should be {expected:?}",
+                has_edge(&g, 1, 2, joined_type),
+                "`{from_clause}`: joined `b` → terminal must be {joined_type:?}",
             );
         }
     }
@@ -343,26 +394,39 @@ mod tests {
             "WITH a AS (SELECT 1 AS id), b AS (SELECT 1 AS id) \
              SELECT * FROM a LEFT OUTER JOIN b ON a.id = b.id",
         );
-        assert!(has_edge(&left, 1, 2, JoinType::Left));
+        assert!(
+            has_edge(&left, 0, 2, EdgeType::From),
+            "base a->terminal is From"
+        );
+        assert!(has_edge(&left, 1, 2, EdgeType::Left), "b->terminal is Left");
         let right = graph(
             "WITH a AS (SELECT 1 AS id), b AS (SELECT 1 AS id) \
              SELECT * FROM a RIGHT OUTER JOIN b ON a.id = b.id",
         );
-        assert!(has_edge(&right, 1, 2, JoinType::Right));
+        assert!(
+            has_edge(&right, 0, 2, EdgeType::From),
+            "base a->terminal is From"
+        );
+        assert!(
+            has_edge(&right, 1, 2, EdgeType::Right),
+            "b->terminal is Right"
+        );
     }
 
     #[test]
-    fn the_base_relation_takes_the_first_joins_type() {
-        // `c` joins `a LEFT JOIN b`: both the base `a` and the joined `b`
-        // become LEFT-coloured edges into `c`.
+    fn base_gets_from_and_joined_relations_keep_their_join_type() {
+        // Replaces `the_base_relation_takes_the_first_joins_type`:
+        // `c` joins `a LEFT JOIN b` — base `a` gets From, joined `b` gets Left.
         let g = graph(
             "WITH a AS (SELECT 1 AS id), \
                   b AS (SELECT 1 AS id), \
                   c AS (SELECT * FROM a LEFT JOIN b ON a.id = b.id) \
              SELECT * FROM c",
         );
-        assert!(has_edge(&g, 0, 2, JoinType::Left), "base a->c is LEFT");
-        assert!(has_edge(&g, 1, 2, JoinType::Left), "joined b->c is LEFT");
+        assert!(has_edge(&g, 0, 2, EdgeType::From), "base a->c is From");
+        assert!(has_edge(&g, 1, 2, EdgeType::Left), "joined b->c is Left");
+        // The terminal SELECT * FROM c also emits a From edge.
+        assert!(has_edge(&g, 2, 3, EdgeType::From), "c->terminal is From");
     }
 
     #[test]
@@ -372,7 +436,8 @@ mod tests {
              SELECT * FROM a",
         );
         assert_eq!(g.nodes().len(), 2, "only the CTE and terminal are nodes");
-        assert!(g.edges().is_empty(), "raw_source/other_raw are not CTEs");
+        assert_eq!(g.edges().len(), 1, "only the From edge a->terminal");
+        assert!(has_edge(&g, 0, 1, EdgeType::From), "a->terminal is From");
     }
 
     #[test]
@@ -384,7 +449,13 @@ mod tests {
                   selfish AS (SELECT * FROM selfish JOIN a ON 1 = 1) \
              SELECT * FROM selfish",
         );
-        assert!(has_edge(&g, 0, 1, JoinType::Inner), "a->selfish resolves");
+        // `selfish` is the base but it's a self-reference; `a` is the
+        // joined relation with Inner type. Base-is-From rule still
+        // applies to the base slot, but acyclicity drops the self-edge.
+        assert!(
+            has_edge(&g, 0, 1, EdgeType::Inner),
+            "a->selfish resolves as Inner"
+        );
         assert!(
             !g.edges().iter().any(|e| e.from() == e.to()),
             "no edge points a node at itself",
@@ -399,22 +470,150 @@ mod tests {
                   joined AS (SELECT * FROM orders JOIN customers ON 1 = 1) \
              SELECT * FROM joined",
         );
-        assert!(has_edge(&g, 0, 2, JoinType::Inner), "orders -> joined");
-        assert!(has_edge(&g, 1, 2, JoinType::Inner), "customers -> joined");
+        assert!(
+            has_edge(&g, 0, 2, EdgeType::From),
+            "orders (base) -> joined is From"
+        );
+        assert!(
+            has_edge(&g, 1, 2, EdgeType::Inner),
+            "customers -> joined is Inner"
+        );
     }
 
     #[test]
-    fn a_repeated_reference_is_deduplicated() {
-        // `a JOIN a` resolves the base and the joined relation to the
-        // same CTE under the same join type — one edge, not two.
+    fn a_repeated_plain_from_reference_is_deduplicated() {
+        // `FROM a JOIN a t2` — two references to the same CTE:
+        // the base slot resolves to (a → terminal, From)
+        // the joined slot resolves to (a → terminal, Inner).
+        // They are DISTINCT edges (different edge_type), so both exist.
         let g = graph("WITH a AS (SELECT 1 AS id) SELECT * FROM a JOIN a t2 ON 1 = 1");
-        assert_eq!(g.edges().len(), 1, "identical edges collapse to one");
-        assert!(has_edge(&g, 0, 1, JoinType::Inner));
+        assert_eq!(
+            g.edges().len(),
+            2,
+            "From + Inner edges both exist (different edge_type)"
+        );
+        assert!(
+            has_edge(&g, 0, 1, EdgeType::From),
+            "base a->terminal is From"
+        );
+        assert!(
+            has_edge(&g, 0, 1, EdgeType::Inner),
+            "joined a->terminal is Inner"
+        );
+    }
+
+    #[test]
+    fn union_all_arms_emit_union_all_edges() {
+        // A CTE body that is `SELECT * FROM a UNION ALL SELECT * FROM b` —
+        // both arm references emit UnionAll.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS id), \
+                  b AS (SELECT 1 AS id), \
+                  u AS (SELECT * FROM a UNION ALL SELECT * FROM b) \
+             SELECT * FROM u",
+        );
+        assert!(has_edge(&g, 0, 2, EdgeType::UnionAll), "a->u is UnionAll");
+        assert!(has_edge(&g, 1, 2, EdgeType::UnionAll), "b->u is UnionAll");
+        // Terminal references u via a plain FROM.
+        assert!(has_edge(&g, 2, 3, EdgeType::From), "u->terminal is From");
+    }
+
+    #[test]
+    fn union_distinct_arms_emit_union_distinct_edges() {
+        // Plain UNION and UNION DISTINCT both map to UnionDistinct.
+        let g_plain = graph(
+            "WITH a AS (SELECT 1 AS id), \
+                  b AS (SELECT 1 AS id), \
+                  u AS (SELECT * FROM a UNION SELECT * FROM b) \
+             SELECT * FROM u",
+        );
+        assert!(
+            has_edge(&g_plain, 0, 2, EdgeType::UnionDistinct),
+            "a->u plain UNION is UnionDistinct"
+        );
+        assert!(
+            has_edge(&g_plain, 1, 2, EdgeType::UnionDistinct),
+            "b->u plain UNION is UnionDistinct"
+        );
+        let g_distinct = graph(
+            "WITH a AS (SELECT 1 AS id), \
+                  b AS (SELECT 1 AS id), \
+                  u AS (SELECT * FROM a UNION DISTINCT SELECT * FROM b) \
+             SELECT * FROM u",
+        );
+        assert!(
+            has_edge(&g_distinct, 0, 2, EdgeType::UnionDistinct),
+            "a->u UNION DISTINCT is UnionDistinct"
+        );
+        assert!(
+            has_edge(&g_distinct, 1, 2, EdgeType::UnionDistinct),
+            "b->u UNION DISTINCT is UnionDistinct"
+        );
+    }
+
+    #[test]
+    fn join_inside_union_arm_keeps_join_semantics_base_gets_from() {
+        // `FROM a JOIN b UNION ALL SELECT * FROM c`:
+        // left arm: base `a` gets From, joined `b` gets Inner
+        // right arm: `c` gets UnionAll
+        let g = graph(
+            "WITH a AS (SELECT 1 AS id), \
+                  b AS (SELECT 1 AS id), \
+                  c AS (SELECT 1 AS id), \
+                  u AS (SELECT * FROM a JOIN b ON 1 = 1 \
+                        UNION ALL SELECT * FROM c) \
+             SELECT * FROM u",
+        );
+        assert!(
+            has_edge(&g, 0, 3, EdgeType::From),
+            "left arm base a->u is From"
+        );
+        assert!(
+            has_edge(&g, 1, 3, EdgeType::Inner),
+            "left arm joined b->u is Inner"
+        );
+        assert!(
+            has_edge(&g, 2, 3, EdgeType::UnionAll),
+            "right arm c->u is UnionAll"
+        );
+    }
+
+    #[test]
+    fn non_union_set_operations_recurse_without_union_classification() {
+        // EXCEPT: joins inside the arms still emit edges; no UnionAll/UnionDistinct.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS id), \
+                  b AS (SELECT 1 AS id), \
+                  c AS (SELECT 1 AS id), \
+                  ex AS (SELECT * FROM a JOIN b ON 1 = 1 \
+                         EXCEPT SELECT * FROM c) \
+             SELECT * FROM ex",
+        );
+        assert!(
+            has_edge(&g, 0, 3, EdgeType::From),
+            "a is base -> From in EXCEPT arm"
+        );
+        assert!(
+            has_edge(&g, 1, 3, EdgeType::Inner),
+            "b joins in EXCEPT arm -> Inner"
+        );
+        assert!(
+            has_edge(&g, 2, 3, EdgeType::From),
+            "c is plain FROM in EXCEPT arm -> From"
+        );
+        // No UnionAll or UnionDistinct edges.
+        assert!(
+            !g.edges()
+                .iter()
+                .any(|e| matches!(e.edge_type(), EdgeType::UnionAll | EdgeType::UnionDistinct)),
+            "EXCEPT does not produce union-type edges",
+        );
     }
 
     #[test]
     fn set_operations_in_a_body_are_walked() {
-        // A CTE whose body is `… UNION ALL …` has both arms scanned.
+        // A CTE whose body is `… UNION ALL …` has both arms scanned;
+        // joins inside the left arm retain their semantics.
         let g = graph(
             "WITH a AS (SELECT 1 AS id), \
                   b AS (SELECT 1 AS id), \
@@ -422,8 +621,20 @@ mod tests {
                         UNION ALL SELECT * FROM a) \
              SELECT * FROM u",
         );
-        assert!(has_edge(&g, 0, 2, JoinType::Inner), "left arm: a->u");
-        assert!(has_edge(&g, 1, 2, JoinType::Inner), "left arm: b->u");
+        // Left arm: a (base→From), b (joined→Inner).
+        assert!(
+            has_edge(&g, 0, 2, EdgeType::From),
+            "left arm: base a->u is From"
+        );
+        assert!(
+            has_edge(&g, 1, 2, EdgeType::Inner),
+            "left arm: b->u is Inner"
+        );
+        // Right arm: a (plain FROM, union context) → UnionAll.
+        assert!(
+            has_edge(&g, 0, 2, EdgeType::UnionAll),
+            "right arm: a->u is UnionAll"
+        );
     }
 
     #[test]
@@ -435,8 +646,11 @@ mod tests {
                   wrapped AS ((SELECT * FROM a JOIN b ON 1 = 1)) \
              SELECT * FROM wrapped",
         );
-        assert!(has_edge(&g, 0, 2, JoinType::Inner), "a -> wrapped");
-        assert!(has_edge(&g, 1, 2, JoinType::Inner), "b -> wrapped");
+        assert!(
+            has_edge(&g, 0, 2, EdgeType::From),
+            "a (base) -> wrapped is From"
+        );
+        assert!(has_edge(&g, 1, 2, EdgeType::Inner), "b -> wrapped is Inner");
     }
 
     #[test]
@@ -444,23 +658,23 @@ mod tests {
         use sqlparser::ast::JoinConstraint::None as NoConstraint;
         assert_eq!(
             classify_join(&JoinOperator::Inner(NoConstraint)),
-            Some(JoinType::Inner),
+            Some(EdgeType::Inner),
         );
         assert_eq!(
             classify_join(&JoinOperator::Left(NoConstraint)),
-            Some(JoinType::Left),
+            Some(EdgeType::Left),
         );
         assert_eq!(
             classify_join(&JoinOperator::Right(NoConstraint)),
-            Some(JoinType::Right),
+            Some(EdgeType::Right),
         );
         assert_eq!(
             classify_join(&JoinOperator::FullOuter(NoConstraint)),
-            Some(JoinType::Full),
+            Some(EdgeType::Full),
         );
         assert_eq!(
             classify_join(&JoinOperator::CrossJoin(NoConstraint)),
-            Some(JoinType::Cross),
+            Some(EdgeType::Cross),
         );
     }
 
@@ -470,6 +684,32 @@ mod tests {
         // and so produce no edge.
         assert_eq!(classify_join(&JoinOperator::CrossApply), None);
         assert_eq!(classify_join(&JoinOperator::OuterApply), None);
+    }
+
+    #[test]
+    fn classify_union_quantifier_maps_all_cases() {
+        // All → UnionAll; Distinct → UnionDistinct; None → UnionDistinct;
+        // exotic ByName variants → None (catch-all).
+        assert_eq!(
+            classify_union_quantifier(SetQuantifier::All),
+            Some(EdgeType::UnionAll),
+        );
+        assert_eq!(
+            classify_union_quantifier(SetQuantifier::Distinct),
+            Some(EdgeType::UnionDistinct),
+        );
+        assert_eq!(
+            classify_union_quantifier(SetQuantifier::None),
+            Some(EdgeType::UnionDistinct),
+            "plain UNION (no quantifier) is semantically DISTINCT",
+        );
+        // ByName / AllByName / DistinctByName are outside the two-kind
+        // vocabulary and produce no edge.
+        assert_eq!(
+            classify_union_quantifier(SetQuantifier::ByName),
+            None,
+            "BY NAME variant is outside the edge vocabulary",
+        );
     }
 
     #[test]
@@ -511,8 +751,7 @@ mod tests {
 
     #[test]
     fn structural_invariants_hold_across_varied_sql() {
-        // Enumerated property test (no proptest dep, per the per-PR
-        // dependency discipline): for every sample, node count matches
+        // Enumerated property test: for every sample, node count matches
         // the CTE count and every edge is acyclic and in range.
         let samples: [(&str, usize); 5] = [
             ("SELECT 1", 0),

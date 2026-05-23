@@ -344,7 +344,7 @@ executable acceptance contract:
 - `zero_egress.feature`
 
 They cover the success criteria (manifest → offline-correct report,
-per-test header + Given/Expected panels + join-colored CTE DAG + banner,
+per-test header + Given/Expected panels + edge-colored CTE DAG + banner,
 fail-closed paths, zero-egress proofs). The cucumber-rs step definitions
 and the `cargo test --test bdd` harness land in PR 10. The
 [`features/README.md`](features/README.md) is the source of truth for the

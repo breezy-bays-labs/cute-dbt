@@ -1,4 +1,4 @@
-//! `CteGraph` + `CteNode` + `CteEdge` + `JoinType` — the AST output the
+//! `CteGraph` + `CteNode` + `CteEdge` + `EdgeType` — the AST output the
 //! sqlparser CTE engine (PR 7) produces and the renderer (PR 8b)
 //! consumes.
 //!
@@ -8,21 +8,25 @@
 //! `nodes` vector exactly once so indices remain valid for the lifetime
 //! of the `CteGraph`.
 //!
-//! `JoinType` is `#[non_exhaustive]` per the
+//! `EdgeType` is `#[non_exhaustive]` per the
 //! [enums-yes-structs-no rule](https://github.com/cmbays/.claude/blob/main/rules/non-exhaustive.md):
-//! consumers pattern-match this and new SQL dialect joins (e.g.
+//! consumers pattern-match this and new SQL structural kinds (e.g.
 //! `LATERAL`) are additive.
 
 use serde::{Deserialize, Serialize};
 
-/// SQL join kind classified by the CTE engine.
+/// SQL edge kind classified by the CTE engine.
 ///
-/// `#[non_exhaustive]` — adding a dialect-specific variant is a v0.x
-/// additive change that consumers must opt into via `_` arms.
+/// Covers all structural relationships that can appear between CTEs:
+/// plain `FROM` references, the five join types, and the two UNION
+/// variants. `#[non_exhaustive]` — adding a dialect-specific variant is
+/// a v0.x additive change that consumers must opt into via `_` arms.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum JoinType {
+#[serde(rename_all = "snake_case")]
+pub enum EdgeType {
+    /// Plain `FROM <cte>` reference (no join operator).
+    From,
     /// `INNER JOIN`.
     Inner,
     /// `LEFT [OUTER] JOIN`.
@@ -33,6 +37,10 @@ pub enum JoinType {
     Full,
     /// `CROSS JOIN` / Cartesian product.
     Cross,
+    /// `UNION ALL` arm reference.
+    UnionAll,
+    /// `UNION` / `UNION DISTINCT` arm reference.
+    UnionDistinct,
 }
 
 /// 1-based `(line, column)` span anchor; future use by the renderer to
@@ -124,22 +132,22 @@ impl CteNode {
 /// A directed edge between two CTE nodes in [`CteGraph`].
 ///
 /// `from` and `to` are indices into the parent `CteGraph::nodes` vector;
-/// `join_type` classifies the SQL relationship the edge represents.
+/// `edge_type` classifies the SQL relationship the edge represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CteEdge {
     from: usize,
     to: usize,
-    join_type: JoinType,
+    edge_type: EdgeType,
 }
 
 impl CteEdge {
     /// Canonical constructor.
     #[must_use]
-    pub fn new(from: usize, to: usize, join_type: JoinType) -> Self {
+    pub fn new(from: usize, to: usize, edge_type: EdgeType) -> Self {
         Self {
             from,
             to,
-            join_type,
+            edge_type,
         }
     }
 
@@ -155,10 +163,10 @@ impl CteEdge {
         self.to
     }
 
-    /// SQL join kind classified by the CTE engine.
+    /// SQL edge kind classified by the CTE engine.
     #[must_use]
-    pub fn join_type(&self) -> JoinType {
-        self.join_type
+    pub fn edge_type(&self) -> EdgeType {
+        self.edge_type
     }
 }
 
@@ -209,46 +217,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn join_type_serde_roundtrip_lowercase_variants() {
-        for jt in [
-            JoinType::Inner,
-            JoinType::Left,
-            JoinType::Right,
-            JoinType::Full,
-            JoinType::Cross,
+    fn edge_type_serde_roundtrip_all_variants() {
+        for et in [
+            EdgeType::From,
+            EdgeType::Inner,
+            EdgeType::Left,
+            EdgeType::Right,
+            EdgeType::Full,
+            EdgeType::Cross,
+            EdgeType::UnionAll,
+            EdgeType::UnionDistinct,
         ] {
-            let json = serde_json::to_string(&jt).unwrap();
-            let back: JoinType = serde_json::from_str(&json).unwrap();
-            assert_eq!(back, jt, "round-trip failed for {jt:?}");
+            let json = serde_json::to_string(&et).unwrap();
+            let back: EdgeType = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, et, "round-trip failed for {et:?}");
         }
     }
 
     #[test]
-    fn join_type_serializes_as_lowercase() {
+    fn edge_type_serializes_as_snake_case() {
+        assert_eq!(serde_json::to_string(&EdgeType::From).unwrap(), "\"from\"");
         assert_eq!(
-            serde_json::to_string(&JoinType::Inner).unwrap(),
+            serde_json::to_string(&EdgeType::Inner).unwrap(),
             "\"inner\""
         );
-        assert_eq!(serde_json::to_string(&JoinType::Left).unwrap(), "\"left\"");
+        assert_eq!(serde_json::to_string(&EdgeType::Left).unwrap(), "\"left\"");
         assert_eq!(
-            serde_json::to_string(&JoinType::Right).unwrap(),
+            serde_json::to_string(&EdgeType::Right).unwrap(),
             "\"right\""
         );
-        assert_eq!(serde_json::to_string(&JoinType::Full).unwrap(), "\"full\"");
+        assert_eq!(serde_json::to_string(&EdgeType::Full).unwrap(), "\"full\"");
         assert_eq!(
-            serde_json::to_string(&JoinType::Cross).unwrap(),
+            serde_json::to_string(&EdgeType::Cross).unwrap(),
             "\"cross\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EdgeType::UnionAll).unwrap(),
+            "\"union_all\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EdgeType::UnionDistinct).unwrap(),
+            "\"union_distinct\""
         );
     }
 
     #[test]
-    fn join_type_is_copy_and_hashable() {
+    fn edge_type_is_copy_and_hashable() {
         use std::collections::HashSet;
         let mut set = HashSet::new();
-        set.insert(JoinType::Inner);
-        set.insert(JoinType::Inner);
-        set.insert(JoinType::Left);
-        assert_eq!(set.len(), 2);
+        set.insert(EdgeType::Inner);
+        set.insert(EdgeType::Inner);
+        set.insert(EdgeType::Left);
+        set.insert(EdgeType::UnionAll);
+        assert_eq!(set.len(), 3);
     }
 
     #[test]
@@ -284,10 +305,10 @@ mod tests {
 
     #[test]
     fn cte_edge_constructor_and_getters() {
-        let e = CteEdge::new(0, 1, JoinType::Left);
+        let e = CteEdge::new(0, 1, EdgeType::Left);
         assert_eq!(e.from(), 0);
         assert_eq!(e.to(), 1);
-        assert_eq!(e.join_type(), JoinType::Left);
+        assert_eq!(e.edge_type(), EdgeType::Left);
     }
 
     #[test]
@@ -304,7 +325,7 @@ mod tests {
             CteNode::new("a", None, None, None),
             CteNode::new("b", None, None, None),
         ];
-        let edges = vec![CteEdge::new(0, 1, JoinType::Inner)];
+        let edges = vec![CteEdge::new(0, 1, EdgeType::Inner)];
         let g = CteGraph::new(nodes, edges);
         assert_eq!(g.nodes().len(), 2);
         assert_eq!(g.edges().len(), 1);
@@ -319,8 +340,8 @@ mod tests {
                 CteNode::new("b", None, Some("select * from a".to_owned()), None),
             ],
             vec![
-                CteEdge::new(0, 1, JoinType::Inner),
-                CteEdge::new(1, 0, JoinType::Cross),
+                CteEdge::new(0, 1, EdgeType::Inner),
+                CteEdge::new(1, 0, EdgeType::Cross),
             ],
         );
         let back: CteGraph = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();

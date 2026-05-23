@@ -11,7 +11,7 @@
 //! Filled across PRs 3 / 5 / 6:
 //!
 //! - **PR 3 (#4)** — core types: [`Manifest`], [`Node`], [`UnitTest`],
-//!   [`CteGraph`] / [`CteNode`] / [`CteEdge`], [`JoinType`],
+//!   [`CteGraph`] / [`CteNode`] / [`CteEdge`], [`EdgeType`],
 //!   [`ModifiedSet`], [`PreflightError`] (`#[non_exhaustive]`, 4
 //!   variants).
 //! - **PR 5 (#7)** — `state` submodule additions: `StateModifier`
@@ -37,7 +37,7 @@ pub mod preflight;
 pub mod state;
 pub mod unit_test;
 
-pub use cte::{CteEdge, CteGraph, CteNode, JoinType, Span};
+pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};
 pub use manifest::{Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeId};
 pub use preflight::{PreflightError, preflight_compiled};
 pub use state::{

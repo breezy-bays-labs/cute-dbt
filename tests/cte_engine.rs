@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use cute4dbt::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use cute4dbt::adapters::manifest::FileManifestSource;
-use cute4dbt::domain::{JoinType, Manifest};
+use cute4dbt::domain::{EdgeType, Manifest};
 use cute4dbt::ports::ManifestSource;
 
 /// Absolute path to a committed fixture under `tests/fixtures/`.
@@ -63,47 +63,84 @@ fn the_customers_model_yields_its_six_ctes_and_a_terminal_node() {
 }
 
 #[test]
-fn the_customers_model_classifies_every_join_as_left() {
-    // The jaffle-shop `customers` model joins exclusively with LEFT
-    // joins: `customer_payments` left-joins `payments`+`orders`, and
-    // `final` left-joins `customers`+`customer_orders`+`customer_payments`.
+fn the_customers_model_classifies_every_join_as_left_and_bases_as_from() {
+    // The jaffle-shop `customers` model joins exclusively with LEFT joins.
+    // With the widened vocabulary, base relations get From edges and joined
+    // relations get Left edges. The plain FROM-only CTEs also emit From.
     let manifest = load("jaffle-shop-current.json");
     let sql = compiled_code(&manifest, "model.jaffle_shop.customers");
     let graph = parse_cte_graph(&sql).expect("parses");
 
-    assert_eq!(graph.edges().len(), 5, "five join edges");
+    // Every edge must be acyclic.
     for edge in graph.edges() {
-        assert_eq!(edge.join_type(), JoinType::Left, "all joins are LEFT");
         assert!(edge.from() < edge.to(), "the graph is acyclic");
+    }
+    // No UnionAll/UnionDistinct edges in the customers model.
+    for edge in graph.edges() {
+        assert!(
+            !matches!(
+                edge.edge_type(),
+                EdgeType::UnionAll | EdgeType::UnionDistinct
+            ),
+            "customers model has no UNION edges",
+        );
+    }
+    // All non-From edges must be Left.
+    for edge in graph.edges() {
+        if edge.edge_type() != EdgeType::From {
+            assert_eq!(
+                edge.edge_type(),
+                EdgeType::Left,
+                "all join edges in customers are LEFT",
+            );
+        }
     }
 }
 
 #[test]
-fn a_join_free_cte_has_no_incoming_edge() {
+fn a_join_free_cte_has_a_from_incoming_edge() {
     // `customer_orders` (declaration index 3) depends on `orders` via a
-    // plain `FROM orders` — a non-join reference, which the v0.1
-    // join-graph model does not carry as an edge. The node still exists;
-    // it simply has no incoming edge.
+    // plain `FROM orders` — now emits a From edge (widened from v0.1
+    // "non-join FROM emits no edge" rule).
     let manifest = load("jaffle-shop-current.json");
     let sql = compiled_code(&manifest, "model.jaffle_shop.customers");
     let graph = parse_cte_graph(&sql).expect("parses");
 
+    // `orders` is index 1, `customer_orders` is index 3.
+    let from_edges_to_customer_orders: Vec<_> =
+        graph.edges().iter().filter(|e| e.to() == 3).collect();
     assert!(
-        !graph.edges().iter().any(|e| e.to() == 3),
-        "customer_orders is reached only by a plain FROM — no join edge",
+        !from_edges_to_customer_orders.is_empty(),
+        "customer_orders now has an incoming From edge",
+    );
+    assert!(
+        from_edges_to_customer_orders
+            .iter()
+            .all(|e| e.edge_type() == EdgeType::From),
+        "all edges into customer_orders are From (no join)",
     );
 }
 
 #[test]
-fn a_model_whose_ctes_never_join_produces_a_node_only_graph() {
+fn a_model_whose_ctes_never_join_produces_from_edges() {
     // `stg_customers` has two CTEs (`source`, `renamed`) wired purely by
-    // pass-through `FROM` — nodes but no edges.
+    // pass-through `FROM` — now emits From edges (not an empty edge set).
     let manifest = load("jaffle-shop-current.json");
     let sql = compiled_code(&manifest, "model.jaffle_shop.stg_customers");
     let graph = parse_cte_graph(&sql).expect("parses");
 
     assert_eq!(graph.nodes().len(), 3, "two CTEs plus the terminal node");
-    assert!(graph.edges().is_empty(), "no joins means no edges");
+    assert!(
+        !graph.edges().is_empty(),
+        "pass-through FROM now emits From edges",
+    );
+    for edge in graph.edges() {
+        assert_eq!(
+            edge.edge_type(),
+            EdgeType::From,
+            "every edge in a join-free model is From",
+        );
+    }
 }
 
 #[test]
