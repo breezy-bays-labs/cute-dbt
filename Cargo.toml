@@ -36,8 +36,8 @@ path = "src/lib.rs"
 #   toml        -> PR 6 (config loading)
 #   insta       -> PR 4a (golden-snapshot scaffold)
 #   cucumber    -> PR 10 (ATDD wiring)
-#   tl          -> PR 9 (resource-ref lint HTML parser)
-#   chromiumoxide / headless_chrome -> PR 9 (zero-egress test)
+#   tl          -> PR 9 (resource-ref lint HTML parser) — landed
+#   headless_chrome -> PR 9 (zero-egress test) — landed
 [dependencies]
 askama = { version = "0.16", features = ["serde_json"] }
 clap = { version = "4", features = ["derive"] }
@@ -56,11 +56,26 @@ thiserror = "2"
 #            MANIFEST.toml integrity assertion (belt-and-braces with CI).
 #   walkdir -> walk `tests/fixtures/` from the listed-test (std-only walk
 #            would re-implement walkdir; the dev-only dep is cheap).
+#
+# Zero-egress gate toolchain (PR 9, #12):
+#   headless_chrome -> drives a real Chromium against the committed
+#            examples/jaffle-shop-report.html via file://. Synchronous
+#            API (no tokio dep) — the test reads top-to-bottom so the
+#            auditor can follow the proof linearly. CDP subscription
+#            captures every Network.requestWillBeSent event; the
+#            assertion is "filter to http/https/ws/wss → empty".
+#   tl       -> zero-dep HTML parser for the secondary structural lint
+#            over the rendered chrome. Rejects real loading constructs
+#            (<script src>, <link href>, <img src>, CSS @import,
+#            CSS url(), protocol-relative //) — never raw `grep http`,
+#            which is false-positive noise against minified bundles.
 insta = "1"
 toml = "1"
 sha2 = "0.10"
 hex = "0.4"
 walkdir = "2"
+headless_chrome = "1.0.21"
+tl = "0.7.8"
 
 # Crate-wide lint config. `clippy::pedantic` + `clippy::cargo` fire via
 # the crate-root `#![warn(...)]` in `src/lib.rs`, so `clippy -D warnings`

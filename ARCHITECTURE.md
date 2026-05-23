@@ -267,8 +267,8 @@ The **headless-browser network-block test** opens the generated
 `report.html` via a real `file://` URL with all network access denied and
 asserts **zero requests**. This is the R1-spike method; it is re-runnable
 by anyone with the repository checked out; it is the strongest auditability artifact.
-It is a CI gate from PR 9 onward (the bootstrap workflow scaffolds the
-job and activates it when the first real `report.html` exists).
+It is a required CI gate on every PR to `main`; the test crate is
+[`tests/headless_zero_egress.rs`](tests/headless_zero_egress.rs).
 
 The proof is invalid against a `127.0.0.1` loopback origin — the report
 must be tested against a real `file://` URL, the same way an operator
@@ -278,18 +278,19 @@ opens it. This is a hard gate condition, not a stylistic preference.
 
 A **structured resource-ref lint** targets *real loading constructs* over
 the generated HTML — `<script src>`, `<link href>`, `<img src>`,
-CSS `@import`, CSS `url()`, protocol-relative `//`. It uses an HTML parser
-(named in PR 9: `tl`, or `scraper` if CSS `url()` needs a real CSS pass),
+CSS `@import`, CSS `url()`, protocol-relative `//`. It uses the `tl`
+HTML parser (zero-dep, sufficient for attribute extraction),
 **never raw `grep http`.** Minified bundles carry hundreds of inert URL
 string literals (the R1 spike confirmed this empirically); a raw grep is
 false-positive noise that would hide the real signal under more text than
-the headless test's clear zero-requests output.
+the headless test's clear zero-requests output. The test crate is
+[`tests/resource_ref_lint.rs`](tests/resource_ref_lint.rs).
 
 ### Auditability index
 
-The PR 9 [`AUDIT.md`](AUDIT.md) lands as a one-page index of every
-artifact a reviewer can re-run — the headless command, the resource-ref
-lint, `assets/MANIFEST.toml`, `tests/fixtures/MANIFEST.toml` (see
+[`AUDIT.md`](AUDIT.md) is the one-page index of every artifact a
+reviewer can re-run — the headless command, the resource-ref lint,
+`assets/MANIFEST.toml`, `tests/fixtures/MANIFEST.toml` (see
 [`CONTRIBUTING.md`](CONTRIBUTING.md#synthetic-only-fixtures) and
 [`AGENTS.md`](AGENTS.md#synthetic-only-fixtures) for the fixture-hygiene
 rule), `deny.toml`, `Cargo.lock`. See [`SECURITY.md`](SECURITY.md) for
