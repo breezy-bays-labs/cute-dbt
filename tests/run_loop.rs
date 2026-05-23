@@ -259,6 +259,43 @@ fn an_unwritable_output_path_is_reported() {
 }
 
 #[test]
+fn a_modified_model_with_zero_unit_tests_and_no_compiled_sql_fails_closed() {
+    // fail_closed.feature — None-shape NotCompiled: a modified model that
+    // has zero unit tests targeting it in the current manifest but whose
+    // compiled_code is null. The error must name the model node id but
+    // must NOT name a unit test (the None arm of NotCompiled::display_for).
+    let out = tmp("no_test_uncompiled.html");
+    clear(&out);
+    let output = run(&[
+        "--manifest",
+        s(&fixture("jaffle-shop-no-test-uncompiled.json")),
+        "--baseline-manifest",
+        s(&fixture("jaffle-shop-baseline.json")),
+        "--out",
+        s(&out),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "fail-closed exits 1: {output:?}"
+    );
+    assert!(!out.exists(), "no report.html is written on fail-closed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("model.jaffle_shop.stg_orders"),
+        "stderr names the not-compiled model: {stderr}",
+    );
+    assert!(
+        !stderr.contains("unit test"),
+        "stderr must not mention a unit test for the no-test case: {stderr}",
+    );
+    assert!(
+        stderr.contains("dbt compile") || stderr.contains("dbt run"),
+        "stderr recommends compiling: {stderr}",
+    );
+}
+
+#[test]
 fn help_exits_zero() {
     let output = run(&["--help"]);
     assert!(output.status.success(), "--help exits 0: {output:?}");

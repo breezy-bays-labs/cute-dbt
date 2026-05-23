@@ -1069,6 +1069,42 @@ mod tests {
     }
 
     #[test]
+    fn unit_test_targets_maps_model_id_to_test_ids() {
+        // Direct test of `unit_test_targets`: ensures the function is not
+        // replaced by `HashMap::new()` (which would produce an empty map,
+        // letting arm 2 spuriously insert every modified model even those
+        // with tests).
+        let test = unit_test_for("stg_orders", None);
+        let m = manifest(
+            vec![model("model.shop.stg_orders", "x")],
+            vec![
+                ("unit_test.shop.stg_orders.t1", test.clone()),
+                ("unit_test.shop.stg_orders.t2", test),
+            ],
+        );
+        let targets = unit_test_targets(&m);
+        let entry = targets
+            .get(&id("model.shop.stg_orders"))
+            .expect("model.shop.stg_orders is in the targets map");
+        assert_eq!(entry.len(), 2, "two tests registered for the model");
+        // A model with zero tests is absent from the map.
+        assert!(
+            !targets.contains_key(&id("model.shop.other")),
+            "model with no tests has no entry",
+        );
+    }
+
+    #[test]
+    fn unit_test_targets_returns_empty_for_manifest_with_no_unit_tests() {
+        // Explicit empty-map case: no unit tests → empty targets.
+        // Kills the `unit_test_targets -> HashMap::new()` mutant when
+        // combined with the non-empty case above — a manifest with tests
+        // must produce a non-empty map.
+        let m = manifest(vec![model("model.shop.stg_orders", "x")], vec![]);
+        assert!(unit_test_targets(&m).is_empty());
+    }
+
+    #[test]
     fn models_in_scope_does_not_include_an_unresolvable_unit_test_target() {
         // A unit test whose model: reference cannot be resolved (no
         // matching model node) contributes nothing to models_in_scope.
