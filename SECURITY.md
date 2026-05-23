@@ -58,9 +58,9 @@ How this is proven, in two layers:
   because minified asset bundles contain hundreds of inert URL string
   literals that are not loading constructs and would noise up a grep.
 
-Both gates land in PR 9 and become enforced CI invariants from that
-point onward. The PR 9 [`AUDIT.md`](AUDIT.md) lands as a one-page index
-listing the exact command for each.
+Both gates are required CI invariants on every PR to `main`.
+[`AUDIT.md`](AUDIT.md) is the one-page index listing the exact command
+for each.
 
 ### 2. No database connection, no SQL execution
 
@@ -137,7 +137,7 @@ anyone with the repository checked out can inspect or re-run themselves:
 | Claim | Artifact |
 |-------|----------|
 | Zero outbound requests (binary) | The source code under `src/` contains no HTTP client crate (`reqwest`, `ureq`, `hyper-client`, `curl`); `cargo-deny` would surface one if added. |
-| Zero outbound requests (report) | Headless network-block test + resource-ref lint, both in CI from PR 9 onward; indexed in [`AUDIT.md`](AUDIT.md). |
+| Zero outbound requests (report) | Headless network-block test + resource-ref lint, both required CI gates; indexed in [`AUDIT.md`](AUDIT.md). |
 | No database driver | `Cargo.toml` dependency list (no DuckDB, no Snowflake, no warehouse driver). |
 | No telemetry | Source-level absence; reinforced by `cargo-deny`'s license + source policy. |
 | Fail-closed contract | The four `PreflightError` variants are exhaustively covered by the `fail_closed.feature` scenarios under `features/`. |
@@ -145,9 +145,9 @@ anyone with the repository checked out can inspect or re-run themselves:
 | Reproducible build | `Cargo.lock` + `rust-toolchain.toml` + `cargo-deny` gate. |
 | Vendored frontend provenance | `assets/MANIFEST.toml` (name, version, URL, SHA-256, SPDX). |
 
-The PR 9 [`AUDIT.md`](AUDIT.md) is the single entry point — a one-page
-index of every command and artifact above, written so a non-engineer can
-follow it end to end without reading the source code.
+[`AUDIT.md`](AUDIT.md) is the single entry point — a one-page index of
+every command and artifact above, written so a non-engineer can follow
+it end to end without reading the source code.
 
 ## Reporting a vulnerability
 

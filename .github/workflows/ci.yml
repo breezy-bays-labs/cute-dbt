@@ -463,30 +463,53 @@ jobs:
           fi
 
   resource-ref-lint:
-    # tracked: breezy-bays-labs/cute-dbt#12 — activate when the headless
-    # zero-egress proof lands. Until then this job no-ops; the `if: false`
-    # gate is removed alongside the headless-zero-egress activation.
+    # Secondary zero-egress gate: structured HTML parse over the committed
+    # examples/jaffle-shop-report.html via the `tl` crate. Rejects real
+    # loading constructs (<script src>, <link href>, <img src>, CSS
+    # @import, CSS url(), protocol-relative //) — NOT raw `grep http`
+    # (minified bundles carry hundreds of inert URL string literals).
+    # The PRIMARY gate is `headless-zero-egress` below; this one runs
+    # in milliseconds and catches template-layer regressions fast.
     name: Resource-ref lint (real loading constructs)
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: false
     steps:
       - uses: actions/checkout@v4
-      - run: echo "Activated alongside the headless zero-egress proof."
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cute-dbt
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo test --test resource_ref_lint --locked
 
   headless-zero-egress:
-    # tracked: breezy-bays-labs/cute-dbt#12 — this is the PRIMARY
-    # zero-egress gate: a headless browser opens the report with
-    # networking denied and asserts zero requests. Re-runnable by anyone
-    # with the repo checked out; the strongest artifact in the
-    # auditability package.
+    # PRIMARY zero-egress gate. A real Chromium opens
+    # examples/jaffle-shop-report.html via real file:// with DNS denied
+    # (`--host-resolver-rules=MAP * ~NOTFOUND`) and subscribes to every
+    # Network.requestWillBeSent event. The proof: zero external requests
+    # (http/https/ws/wss/ftp) are emitted by the rendered chrome.
+    # Re-runnable by anyone with the repo checked out — the strongest
+    # auditability artifact, indexed in AUDIT.md.
     name: Headless zero-egress proof (file://, network blocked)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: false
     steps:
       - uses: actions/checkout@v4
-      - run: echo "Activated when the headless harness lands — see ARCHITECTURE.md zero-egress section."
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cute-dbt
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Pin Chrome explicitly — relying on headless_chrome's auto-fetch
+      # at test time would silently hit the network during CI setup and
+      # the failure mode is opaque. browser-actions/setup-chrome installs
+      # a known version of Chrome and adds it to PATH; headless_chrome
+      # discovers it from PATH (its built-in auto-fetch path is only
+      # used when no system Chrome is found).
+      - uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+      - run: cargo test --test headless_zero_egress --locked
 
   crap-scorecard:
     # crap4rs scorecard reads crap4rs.toml for keyed thresholds: strict

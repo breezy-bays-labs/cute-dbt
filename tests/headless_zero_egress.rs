@@ -1,0 +1,235 @@
+//! Headless `file://` zero-egress proof.
+//!
+//! The PRIMARY zero-egress gate. A real Chromium opens the committed
+//! `examples/jaffle-shop-report.html` via a real `file://` URL with DNS
+//! denied at the browser level, and we subscribe to every
+//! `Network.requestWillBeSent` event. The proof: zero external requests
+//! (http / https / ws / wss / ftp) are emitted by the rendered chrome.
+//!
+//! Why this matters: the v0.x adoption gate is "your data stays on your
+//! machine." The renderer makes that property *structurally* true by
+//! inlining every asset (Sakura CSS / jQuery / DataTables / Mermaid UMD
+//! bundle) at compile time. This test makes the property *trivially
+//! auditable*: a non-engineer with the repo checked out can re-run
+//! `cargo test --test headless_zero_egress` and observe the empty
+//! request log themselves.
+//!
+//! ## Hard gate
+//!
+//! The test asserts a REAL `file://` URL. NEVER `127.0.0.1` loopback —
+//! Chromium treats real `file://` as a stricter null-origin context
+//! than loopback, and the proof is invalid against any other origin.
+//! See ADR-4 (asset embedding + zero-egress gate) and ARCHITECTURE.md §5.
+//!
+//! ## DNS denial vs event capture
+//!
+//! `--host-resolver-rules=MAP * ~NOTFOUND` is belt-and-braces — even if
+//! the page tried to fetch, DNS would fail. The LOAD-BEARING assertion
+//! is the captured event log: subscribe to `Network.requestWillBeSent`
+//! before navigate, filter to external schemes, assert empty. Local
+//! schemes (`file:`, `data:`, `blob:`) are excluded from the filter,
+//! never blocked — the `data:` URI favicon is part of the design.
+//!
+//! Tracked: breezy-bays-labs/cute-dbt#12.
+
+use std::ffi::OsStr;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use headless_chrome::Browser;
+use headless_chrome::LaunchOptionsBuilder;
+use headless_chrome::protocol::cdp::Network;
+use headless_chrome::protocol::cdp::types::Event;
+
+fn report_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("jaffle-shop-report.html")
+}
+
+fn report_file_url() -> String {
+    let path = report_path();
+    let p = path.to_str().expect("report path must be valid UTF-8");
+    format!("file://{p}")
+}
+
+#[derive(Debug, Clone)]
+struct ExternalRequest {
+    url: String,
+    initiator_type: String,
+    initiator_url: Option<String>,
+    initiator_line: Option<f64>,
+}
+
+impl std::fmt::Display for ExternalRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let init = self
+            .initiator_url
+            .as_deref()
+            .map(|u| {
+                let ln = self
+                    .initiator_line
+                    .map_or(String::new(), |l| format!(":{l}"));
+                format!("{u}{ln}")
+            })
+            .unwrap_or_else(|| "<unknown>".to_string());
+        write!(
+            f,
+            "  - {url}\n      initiator: {kind} from {init}",
+            url = self.url,
+            kind = self.initiator_type,
+        )
+    }
+}
+
+fn scheme_is_external(url: &str) -> bool {
+    let (scheme, _) = match url.split_once(':') {
+        Some(parts) => parts,
+        None => return false,
+    };
+    matches!(
+        scheme.to_ascii_lowercase().as_str(),
+        "http" | "https" | "ws" | "wss" | "ftp" | "ftps",
+    )
+}
+
+#[test]
+fn report_makes_zero_external_requests_when_opened_via_file_url() {
+    let url = report_file_url();
+    assert!(
+        url.starts_with("file://"),
+        "zero-egress proof MUST run against a real file:// origin; got {url}",
+    );
+    let path = report_path();
+    assert!(
+        path.exists(),
+        "examples/jaffle-shop-report.html missing — regenerate via the \
+         `example-report-up-to-date` CI step or run:\n  cargo run --bin cute-dbt -- \
+         --manifest tests/fixtures/jaffle-shop-current.json \
+         --baseline-manifest tests/fixtures/jaffle-shop-baseline.json \
+         --out examples/jaffle-shop-report.html",
+    );
+
+    // CI provides Chrome via `browser-actions/setup-chrome` and exports
+    // CHROME=<path>. Locally we fall back to headless_chrome's discovery
+    // (it picks the system Chrome / Chromium binary). Pinning the CI
+    // path explicitly prevents the auto-fetch path from silently hitting
+    // the network during CI startup.
+    let chrome_path = std::env::var_os("CHROME").map(PathBuf::from);
+
+    // Args: DNS-denial + standard CI flags. Order matches Chromium's
+    // documented short forms.
+    let host_resolver = OsStr::new("--host-resolver-rules=MAP * ~NOTFOUND");
+    let no_first_run = OsStr::new("--no-first-run");
+    let no_default_check = OsStr::new("--no-default-browser-check");
+    let disable_breakpad = OsStr::new("--disable-breakpad");
+
+    let mut builder = LaunchOptionsBuilder::default();
+    builder
+        .headless(true)
+        .sandbox(false) // GitHub Actions runners need --no-sandbox
+        .args(vec![
+            host_resolver,
+            no_first_run,
+            no_default_check,
+            disable_breakpad,
+        ]);
+    if let Some(p) = chrome_path.as_ref() {
+        builder.path(Some(p.clone()));
+    }
+    let opts = builder.build().expect("LaunchOptions must build");
+
+    let browser = Browser::new(opts).expect("Chromium must launch");
+    let tab = browser.new_tab().expect("new tab");
+
+    // Enable the Network domain BEFORE navigate so RequestWillBeSent
+    // events fire for the navigation and any subsequent fetches.
+    tab.call_method(Network::Enable {
+        max_total_buffer_size: None,
+        max_resource_buffer_size: None,
+        max_post_data_size: None,
+        report_direct_socket_traffic: None,
+        enable_durable_messages: None,
+    })
+    .expect("enable Network domain");
+
+    let external = Arc::new(Mutex::new(Vec::<ExternalRequest>::new()));
+    let external_recorder = external.clone();
+    tab.add_event_listener(Arc::new(move |event: &Event| {
+        if let Event::NetworkRequestWillBeSent(e) = event {
+            let req_url = e.params.request.url.clone();
+            if scheme_is_external(&req_url) {
+                external_recorder.lock().unwrap().push(ExternalRequest {
+                    url: req_url,
+                    initiator_type: format!("{:?}", e.params.initiator.Type),
+                    initiator_url: e.params.initiator.url.clone(),
+                    initiator_line: e.params.initiator.line_number,
+                });
+            }
+        }
+    }))
+    .expect("subscribe Network.requestWillBeSent");
+
+    tab.navigate_to(&url).expect("navigate to file:// URL");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // Mermaid renders on-demand (ADR-4 amendment 2026-05-22: `startOnLoad: false`).
+    // The SVG appears inside `.cte-dag-mermaid` once `renderDag()` runs +
+    // `mermaid.render()` resolves. We wait for the SVG element to assert
+    // the inlined Mermaid UMD bundle actually works offline.
+    let mermaid_ok = tab
+        .wait_for_element_with_custom_timeout(".cte-dag-mermaid svg", Duration::from_secs(15))
+        .is_ok();
+
+    // DataTables initialization signal — when the library has wrapped
+    // the unit-test rows, the table gets the `dataTable` class. A
+    // single boolean is enough; "working sort + search" is not part of
+    // the auditability proof (see PR body disposition on the issue
+    // comment for the focus.md vs. issue acceptance text reconciliation).
+    let datatable_ok = tab
+        .evaluate(
+            "(function () { \
+               try { \
+                 return !!(window.jQuery \
+                   && window.jQuery.fn \
+                   && window.jQuery.fn.DataTable \
+                   && document.querySelector('table.dataTable, table.dt-rows')); \
+               } catch (_) { return false; } \
+             })()",
+            false,
+        )
+        .ok()
+        .and_then(|v| v.value)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let captured = external.lock().unwrap().clone();
+
+    if !captured.is_empty() {
+        let listing = captured
+            .iter()
+            .map(|r| r.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        panic!(
+            "zero-egress proof FAILED — captured {n} external network request(s) when \
+             examples/jaffle-shop-report.html was opened via real file:// with DNS denied. \
+             Each request is a hole in the auditability story:\n{listing}",
+            n = captured.len(),
+        );
+    }
+    assert!(
+        mermaid_ok,
+        "Mermaid SVG never appeared inside .cte-dag-mermaid — \
+         either the inlined UMD bundle is broken or the rendering path \
+         tried to fetch something blocked by DNS denial. \
+         The zero-request count is necessary but not sufficient; the \
+         render must also work offline.",
+    );
+    assert!(
+        datatable_ok,
+        "DataTables did not initialize — the inlined jQuery + DataTables \
+         bundle is broken or one of them tried to fetch externally.",
+    );
+}
