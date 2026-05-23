@@ -1139,6 +1139,47 @@ mod tests {
     }
 
     #[test]
+    fn build_payload_pass_1_requires_both_name_match_and_import_role() {
+        // Pass-1 matching is `name == target AND role == Import`. If a
+        // graph contains an import CTE with the WRONG name and a
+        // transform CTE with the RIGHT name, neither pass-1 candidate
+        // should bind: the import is wrong-named, and the transform's
+        // role disqualifies it even though the name matches. With the
+        // role check loosened (e.g. `||` instead of `&&`) the wrong-name
+        // import would spuriously bind.
+        //
+        // Body match must also fail here so the test isolates pass-1:
+        // the import's raw_sql references an unrelated table, and the
+        // transform CTE's body refers only to other CTEs.
+        let compiled = "with not_target as (select * from \"db\".\"schema\".\"unrelated\"), \
+             target as (select * from not_target) \
+             select * from target";
+        let node = model_node("model.shop.x", "body", Some(compiled));
+        let ut = UnitTest::new(
+            "test_one",
+            NodeId::new("x"),
+            vec![UnitTestGiven::new("ref('target')", json!([]), None)],
+            UnitTestExpect::new(json!([]), None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let payload = build_payload(&manifest, &in_scope, &models, "b");
+        let test = &payload.models[0].tests[0];
+        assert!(
+            test.given[0].bound_to_node.is_none(),
+            "matching name on a non-import node must NOT bind (role gate honored); \
+             got bound_to_node={:?}",
+            test.given[0].bound_to_node,
+        );
+    }
+
+    #[test]
     fn build_payload_given_does_not_bind_when_no_matching_import_cte() {
         let compiled = "select 1";
         let node = model_node("model.shop.flat", "body", Some(compiled));
