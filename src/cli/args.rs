@@ -71,8 +71,7 @@ mod tests {
         let nonce = COUNTER.fetch_add(1, Ordering::SeqCst);
         let micros = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_micros())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_micros());
         let pid = std::process::id();
         std::env::temp_dir().join(format!("cute-dbt-args-{pid}-{micros}-{nonce}-{stem}.toml"))
     }

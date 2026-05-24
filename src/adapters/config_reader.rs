@@ -84,8 +84,7 @@ mod tests {
         let nonce = COUNTER.fetch_add(1, Ordering::SeqCst);
         let micros = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_micros())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_micros());
         let pid = std::process::id();
         std::env::temp_dir().join(format!("cute-dbt-test-{pid}-{micros}-{nonce}-{stem}.toml"))
     }
@@ -136,7 +135,9 @@ subtitle = "PR 1234 / staging diff"
                     "Io error carries the operator path: {reported}"
                 );
             }
-            other => panic!("expected Io error, got {other:?}"),
+            other @ ConfigLoadError::Toml { .. } => {
+                panic!("expected Io error, got {other:?}");
+            }
         }
     }
 
@@ -151,7 +152,9 @@ subtitle = "PR 1234 / staging diff"
                     "Toml error carries the operator path: {reported}"
                 );
             }
-            other => panic!("expected Toml error, got {other:?}"),
+            other @ ConfigLoadError::Io { .. } => {
+                panic!("expected Toml error, got {other:?}");
+            }
         }
         let _ = fs::remove_file(&path);
     }
@@ -183,7 +186,9 @@ tilte = "typo'd"
                     "underlying TOML error names the typo'd field: {detail}"
                 );
             }
-            other => panic!("expected Toml error, got {other:?}"),
+            other @ ConfigLoadError::Io { .. } => {
+                panic!("expected Toml error, got {other:?}");
+            }
         }
         let _ = fs::remove_file(&path);
     }
