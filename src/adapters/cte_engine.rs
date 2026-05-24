@@ -148,6 +148,11 @@ fn cte_tables(query: &Query) -> &[Cte] {
 /// drops through the `parse → Display` roundtrip (cute-dbt#31).
 /// Falls back to AST `to_string()` when the span is empty (defensive —
 /// sqlparser 0.62 populates spans for every CTE we've observed).
+///
+/// Each node also carries engine-computed structural facts derived
+/// from the parsed body — `is_simple_from_shape` and
+/// `body_leaf_table_refs` (cute-dbt#40). The renderer reads these
+/// directly via the POD accessors; it never re-parses the slice.
 fn build_nodes(compiled_sql: &str, ctes: &[Cte], query: &Query) -> Vec<CteNode> {
     let byte_index = ByteIndex::new(compiled_sql);
     let mut nodes: Vec<CteNode> = ctes
@@ -156,13 +161,100 @@ fn build_nodes(compiled_sql: &str, ctes: &[Cte], query: &Query) -> Vec<CteNode> 
             let raw = slice_or_fallback(compiled_sql, &byte_index, cte.span(), || {
                 cte.query.to_string()
             });
+            let facts = compute_shape_facts(&cte.query.body);
             CteNode::new(cte_name(cte), None, Some(raw), None)
+                .with_shape_facts(facts.is_simple, facts.leaf_refs)
         })
         .collect();
-    let terminal =
+    let terminal_raw =
         slice_terminal(compiled_sql, &byte_index, ctes).unwrap_or_else(|| query.body.to_string());
-    nodes.push(CteNode::new(TERMINAL_NODE_NAME, None, Some(terminal), None));
+    let terminal_facts = compute_shape_facts(&query.body);
+    nodes.push(
+        CteNode::new(TERMINAL_NODE_NAME, None, Some(terminal_raw), None)
+            .with_shape_facts(terminal_facts.is_simple, terminal_facts.leaf_refs),
+    );
     nodes
+}
+
+/// Engine-computed structural facts about a query body
+/// (cute-dbt#40 Option C).
+struct BodyShapeFacts {
+    is_simple: bool,
+    leaf_refs: Vec<String>,
+}
+
+/// Compute the structural facts the renderer needs to classify a CTE
+/// node's role and resolve import-CTE body matches — without ever
+/// exposing the AST outside the adapter layer.
+fn compute_shape_facts(body: &SetExpr) -> BodyShapeFacts {
+    let mut leaf_refs = Vec::new();
+    collect_leaf_table_refs(body, &mut leaf_refs);
+    BodyShapeFacts {
+        is_simple: is_body_simple_from_select(body),
+        leaf_refs,
+    }
+}
+
+/// `true` when `body` is a single `SELECT … FROM <Table>` with no joins
+/// — the import-CTE shape. The top-level form must be `SetExpr::Select`;
+/// a `UNION`, parenthesised query, or anything else is not "simple"
+/// even if the AST walk would eventually find a single source. The
+/// renderer's `NodeRole::Import` classification keys off this fact.
+fn is_body_simple_from_select(body: &SetExpr) -> bool {
+    let SetExpr::Select(select) = body else {
+        return false;
+    };
+    select.from.len() == 1
+        && select.from[0].joins.is_empty()
+        && matches!(select.from[0].relation, TableFactor::Table { .. })
+}
+
+/// Walk `body` recursively, appending the lowercased leaf identifier of
+/// every `TableFactor::Table` reference in any `FROM` or `JOIN` to
+/// `refs`. Descends through parenthesised subqueries, derived tables
+/// (`(SELECT …) AS alias`), and set operations so the renderer's
+/// import-CTE body match sees every reachable leaf.
+fn collect_leaf_table_refs(body: &SetExpr, refs: &mut Vec<String>) {
+    match body {
+        SetExpr::Select(select) => {
+            for table in &select.from {
+                collect_leaves_from_join_chain(table, refs);
+            }
+        }
+        SetExpr::Query(inner) => collect_leaf_table_refs(&inner.body, refs),
+        SetExpr::SetOperation { left, right, .. } => {
+            collect_leaf_table_refs(left, refs);
+            collect_leaf_table_refs(right, refs);
+        }
+        _ => {}
+    }
+}
+
+/// Collect leaves from one `FROM` join chain — the base relation plus
+/// every joined relation. Derived tables (subqueries with an alias)
+/// recurse into [`collect_leaf_table_refs`] so subquery leaves surface.
+fn collect_leaves_from_join_chain(table: &TableWithJoins, refs: &mut Vec<String>) {
+    push_leaf(&table.relation, refs);
+    for join in &table.joins {
+        push_leaf(&join.relation, refs);
+    }
+}
+
+/// Append the lowercased leaf identifier of `factor` to `refs` when
+/// `factor` is a plain named table; recurse into a derived subquery's
+/// body when it is a `TableFactor::Derived`; otherwise drop.
+fn push_leaf(factor: &TableFactor, refs: &mut Vec<String>) {
+    match factor {
+        TableFactor::Table { name, .. } => {
+            if let Some(ident) = name.0.last().and_then(|p| p.as_ident()) {
+                refs.push(ident.value.to_ascii_lowercase());
+            }
+        }
+        TableFactor::Derived { subquery, .. } => {
+            collect_leaf_table_refs(&subquery.body, refs);
+        }
+        _ => {}
+    }
 }
 
 /// Slice `sql` over `span` (start inclusive, end exclusive per sqlparser
@@ -998,5 +1090,110 @@ mod tests {
                 "all emitted edges remain acyclic even in recursive queries",
             );
         }
+    }
+
+    // ===== shape facts (cute-dbt#40, Option C) =====
+
+    #[test]
+    fn import_cte_body_is_classified_simple_from_shape() {
+        // Plain `SELECT * FROM <single relation>` — the import-CTE shape.
+        let g = graph("WITH src AS (SELECT * FROM raw.users) SELECT * FROM src");
+        let src = &g.nodes()[0];
+        assert_eq!(src.name(), "src");
+        assert!(
+            src.is_simple_from_shape(),
+            "single-source SELECT FROM is the import-CTE shape",
+        );
+        assert_eq!(
+            src.body_leaf_table_refs(),
+            &["users".to_owned()],
+            "leaf table identifier extracted from schema-qualified ref",
+        );
+    }
+
+    #[test]
+    fn comma_cross_join_body_is_not_simple_from_shape() {
+        // cute-dbt#40: the bug the AST refactor fixes. The whitespace
+        // heuristic counted one `from` keyword and called this "simple";
+        // the AST correctly identifies two source relations.
+        let g = graph("WITH a AS (SELECT * FROM x, y) SELECT * FROM a");
+        let a = &g.nodes()[0];
+        assert_eq!(a.name(), "a");
+        assert!(
+            !a.is_simple_from_shape(),
+            "comma cross-join is two sources — NOT the import-CTE shape",
+        );
+        let refs = a.body_leaf_table_refs();
+        assert!(
+            refs.iter().any(|t| t == "x"),
+            "leaf x extracted, got {refs:?}"
+        );
+        assert!(
+            refs.iter().any(|t| t == "y"),
+            "leaf y extracted, got {refs:?}"
+        );
+    }
+
+    #[test]
+    fn join_body_is_not_simple_from_shape_and_carries_both_leaves() {
+        // A JOIN body is structurally transform-shaped; both joined
+        // leaves appear in body_leaf_table_refs.
+        let g = graph(
+            "WITH j AS (SELECT * FROM a JOIN b ON a.k = b.k) \
+             SELECT * FROM j",
+        );
+        let j = &g.nodes()[0];
+        assert_eq!(j.name(), "j");
+        assert!(!j.is_simple_from_shape(), "JOIN body is transform-shaped");
+        let refs = j.body_leaf_table_refs();
+        assert!(
+            refs.iter().any(|t| t == "a"),
+            "leaf a extracted, got {refs:?}"
+        );
+        assert!(
+            refs.iter().any(|t| t == "b"),
+            "leaf b extracted, got {refs:?}"
+        );
+    }
+
+    #[test]
+    fn schema_qualified_refs_yield_lowercased_leaf_only() {
+        // dbt's compiled SQL commonly produces `"db"."schema"."MODEL"`;
+        // the engine extracts the leaf identifier and lowercases.
+        let g = graph(
+            "WITH src AS (SELECT * FROM \"db\".\"main\".\"RAW_CUSTOMERS\") \
+             SELECT * FROM src",
+        );
+        let src = &g.nodes()[0];
+        assert!(src.is_simple_from_shape());
+        assert_eq!(src.body_leaf_table_refs(), &["raw_customers".to_owned()]);
+    }
+
+    #[test]
+    fn terminal_node_carries_its_own_shape_facts() {
+        // The terminal node's body is itself walked for shape facts —
+        // useful for non-CTE models (empty graph), where the terminal
+        // is the only node the renderer has to reason about.
+        let g = graph("WITH src AS (SELECT * FROM raw.t) SELECT * FROM src");
+        let terminal = &g.nodes()[1];
+        assert_eq!(terminal.name(), TERMINAL_NODE_NAME);
+        assert!(
+            terminal.is_simple_from_shape(),
+            "terminal `SELECT * FROM src` is single-source"
+        );
+        assert_eq!(terminal.body_leaf_table_refs(), &["src".to_owned()]);
+    }
+
+    #[test]
+    fn select_only_body_is_not_simple_from_shape() {
+        // `SELECT 1` (no FROM clause) — not the import-CTE shape; no
+        // table refs to extract.
+        let g = graph("WITH lit AS (SELECT 1 AS id) SELECT * FROM lit");
+        let lit = &g.nodes()[0];
+        assert!(
+            !lit.is_simple_from_shape(),
+            "SELECT without FROM is not single-source-FROM",
+        );
+        assert!(lit.body_leaf_table_refs().is_empty());
     }
 }

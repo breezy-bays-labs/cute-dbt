@@ -76,6 +76,17 @@ impl Span {
 ///
 /// `desc` is reserved for a future `-- @desc <text>` per-CTE comment
 /// pass (deferred to v0.2 per ADR); v0.1 always emits `None`.
+///
+/// `is_simple_from_shape` and `body_leaf_table_refs` are structural
+/// facts about the CTE body, populated by the CTE engine during the
+/// existing single AST-parse pass and consumed by the renderer for
+/// node-role classification and import-CTE body-match (cute-dbt#40).
+/// The renderer never re-parses the slice; the engine is the single
+/// source of truth for AST-derived structural facts. Defaults are
+/// `false` and empty — a `CteNode` constructed without facts
+/// classifies as `Transform`, the safer default. New facts of this
+/// kind are additive POD fields with `#[serde(default)]`; no domain
+/// layer ever pulls in `sqlparser`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CteNode {
     name: String,
@@ -85,10 +96,24 @@ pub struct CteNode {
     raw_sql: Option<String>,
     #[serde(default)]
     desc: Option<String>,
+    /// `true` when the CTE body is a single `SELECT … FROM <relation>`
+    /// with no joins and exactly one source — the import-CTE shape.
+    /// Computed by the engine from the parsed AST; defaults to `false`.
+    #[serde(default)]
+    is_simple_from_shape: bool,
+    /// Lowercased leaf table identifiers appearing in `FROM` / `JOIN`
+    /// clauses of the CTE body. Computed by the engine from the parsed
+    /// AST; defaults to empty.
+    #[serde(default)]
+    body_leaf_table_refs: Vec<String>,
 }
 
 impl CteNode {
     /// Canonical constructor.
+    ///
+    /// `is_simple_from_shape` defaults to `false` and `body_leaf_table_refs`
+    /// to empty. Use [`Self::with_shape_facts`] to attach engine-computed
+    /// structural facts.
     #[must_use]
     pub fn new(
         name: impl Into<String>,
@@ -101,7 +126,25 @@ impl CteNode {
             span,
             raw_sql,
             desc,
+            is_simple_from_shape: false,
+            body_leaf_table_refs: Vec::new(),
         }
+    }
+
+    /// Attach engine-computed structural facts about the CTE body.
+    ///
+    /// Returns `self` with `is_simple_from_shape` and
+    /// `body_leaf_table_refs` set. Called by the CTE engine during
+    /// `build_nodes` from the parsed AST.
+    #[must_use]
+    pub fn with_shape_facts(
+        mut self,
+        is_simple_from_shape: bool,
+        body_leaf_table_refs: Vec<String>,
+    ) -> Self {
+        self.is_simple_from_shape = is_simple_from_shape;
+        self.body_leaf_table_refs = body_leaf_table_refs;
+        self
     }
 
     /// CTE name as declared in `WITH <name> AS (...)`.
@@ -126,6 +169,24 @@ impl CteNode {
     #[must_use]
     pub fn desc(&self) -> Option<&str> {
         self.desc.as_deref()
+    }
+
+    /// `true` when the engine classified the CTE body as a single
+    /// `SELECT … FROM <relation>` with no joins (the import-CTE shape).
+    /// `false` for transform-shaped bodies and for nodes constructed
+    /// without engine-computed facts.
+    #[must_use]
+    pub fn is_simple_from_shape(&self) -> bool {
+        self.is_simple_from_shape
+    }
+
+    /// Lowercased leaf table identifiers appearing in `FROM` / `JOIN`
+    /// clauses of the CTE body, in source order. Empty when the engine
+    /// found no table-factor references or the node was constructed
+    /// without engine-computed facts.
+    #[must_use]
+    pub fn body_leaf_table_refs(&self) -> &[String] {
+        &self.body_leaf_table_refs
     }
 }
 
@@ -333,16 +394,37 @@ mod tests {
         assert_eq!(n.span(), Some(&Span::new(3, 1)));
         assert_eq!(n.raw_sql(), Some("select * from raw.orders"));
         assert!(n.desc().is_none(), "v0.1 always emits desc: None");
+        assert!(
+            !n.is_simple_from_shape(),
+            "default constructor classifies as Transform (the safer default)"
+        );
+        assert!(
+            n.body_leaf_table_refs().is_empty(),
+            "default constructor emits no AST-derived table refs"
+        );
+    }
+
+    #[test]
+    fn cte_node_with_shape_facts_attaches_engine_computed_data() {
+        let n = CteNode::new("src_orders", None, None, None)
+            .with_shape_facts(true, vec!["orders".to_owned()]);
+        assert!(n.is_simple_from_shape());
+        assert_eq!(n.body_leaf_table_refs(), &["orders".to_owned()]);
     }
 
     #[test]
     fn cte_node_tolerates_missing_optionals_on_wire() {
+        // `{"name": "x"}` is the minimal wire form — every other field
+        // is `#[serde(default)]` so older payloads deserialize cleanly
+        // and the new shape-fact fields fall back to their safe defaults.
         let json = r#"{ "name": "x" }"#;
         let n: CteNode = serde_json::from_str(json).unwrap();
         assert_eq!(n.name(), "x");
         assert!(n.span().is_none());
         assert!(n.raw_sql().is_none());
         assert!(n.desc().is_none());
+        assert!(!n.is_simple_from_shape());
+        assert!(n.body_leaf_table_refs().is_empty());
     }
 
     #[test]
