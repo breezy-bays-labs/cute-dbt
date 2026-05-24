@@ -84,6 +84,29 @@ genesis baseline. There is no implicit "full manifest" path — keeping
 diff-scoping the default keeps reports bounded and the fail-closed surface
 narrow.
 
+## Known v0.1 fidelity limits
+
+Both limits below are *documented*, not defects, and each has a tracked
+follow-up issue for v0.2+:
+
+- **Body-only state-modified scoping.** Pure `.configs` / `.contract` /
+  `.relation` / `.macros` changes leave the model body checksum
+  identical and are **not** detected in v0.1. Tracked:
+  [`cute-dbt#14`](https://github.com/breezy-bays-labs/cute-dbt/issues/14)
+  → sub-selectors land as additive `impl StateModifier` blocks in v0.2+
+  ([`cute-dbt#15`](https://github.com/breezy-bays-labs/cute-dbt/issues/15)).
+- **SQL comments are stripped from the compiled-SQL drawer.** The CTE
+  engine sources each CTE's `raw_sql` via `sqlparser`'s
+  `parse → Display::to_string()` roundtrip, which drops every SQL
+  comment shape (`--` line comments, `/* */` block comments, comments
+  inside or outside CTE bodies). Jinja `{# #}` comments are already
+  stripped upstream at `dbt compile` time, so the drawer shows
+  comment-free SQL even on models that author intentional commentary.
+  Tracked:
+  [`cute-dbt#45`](https://github.com/breezy-bays-labs/cute-dbt/issues/45)
+  → v0.2 widening will preserve comments via span-based slicing of
+  `compiled_code`.
+
 ## Architecture
 
 Single-crate Rust CLI, hexagonal **inward-dependency discipline**.

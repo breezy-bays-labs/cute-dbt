@@ -140,6 +140,11 @@ fn cte_tables(query: &Query) -> &[Cte] {
 }
 
 /// One [`CteNode`] per CTE in declaration order, then the terminal node.
+///
+/// tracked: cute-dbt#45 — `Display::to_string()` on the parsed AST is
+/// the v0.1 source of `raw_sql`, which sqlparser 0.62 emits without
+/// the original SQL comments (cute-dbt#31 confirmed). The v0.2
+/// widening will swap this for span-based slicing of `compiled_code`.
 fn build_nodes(ctes: &[Cte], query: &Query) -> Vec<CteNode> {
     let mut nodes: Vec<CteNode> = ctes
         .iter()
