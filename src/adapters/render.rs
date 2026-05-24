@@ -327,7 +327,7 @@ pub struct ModelPayload {
     pub is_recursive: bool,
 }
 
-/// One DAG node — id, role, and (for import nodes) the source ref name.
+/// One DAG node — id and role.
 #[derive(Debug, Clone, Serialize)]
 pub struct NodePayload {
     /// Stable node id used by both the DAG (Mermaid `g.node[id]`) and
@@ -336,11 +336,6 @@ pub struct NodePayload {
     pub id: String,
     /// Render-layer classification (see [`NodeRole`]).
     pub role: NodeRole,
-    /// For import nodes, the upstream `ref('…')` name (carried so the
-    /// node-detail panel can label the Given table). `None` for
-    /// transform and final nodes.
-    #[serde(skip_serializing_if = "Option::is_none", rename = "ref")]
-    pub ref_name: Option<String>,
 }
 
 /// One DAG edge — `from` and `to` are the [`NodePayload::id`] strings.
@@ -589,7 +584,7 @@ fn build_model_payload(model: &Node, tests: &[(&str, &UnitTest)]) -> ModelPayloa
         .map(str::to_owned);
     let test_payloads = tests
         .iter()
-        .map(|(id, ut)| build_test_payload(id, ut, &graph, &bare_name))
+        .map(|(id, ut)| build_test_payload(id, ut, &graph))
         .collect();
     ModelPayload {
         name: bare_name,
@@ -615,12 +610,7 @@ fn build_node_payloads(graph: &CteGraph, model_name: &str) -> Vec<NodePayload> {
             } else {
                 node.name().to_owned()
             };
-            let ref_name = if role == NodeRole::Import {
-                Some(node.name().to_owned())
-            } else {
-                None
-            };
-            NodePayload { id, role, ref_name }
+            NodePayload { id, role }
         })
         .collect()
 }
@@ -687,18 +677,13 @@ fn build_compiled_sql(
 
 /// Build a single test's payload, including import-CTE binding for each
 /// given.
-fn build_test_payload(
-    id: &str,
-    unit_test: &UnitTest,
-    graph: &CteGraph,
-    model_name: &str,
-) -> TestPayload {
+fn build_test_payload(id: &str, unit_test: &UnitTest, graph: &CteGraph) -> TestPayload {
     let given = unit_test
         .given()
         .iter()
         .map(|g| {
-            let bound_to_node = parse_ref_name(g.input())
-                .and_then(|ref_name| find_import_node_id(graph, ref_name, model_name));
+            let bound_to_node =
+                parse_ref_name(g.input()).and_then(|ref_name| find_import_node_id(graph, ref_name));
             GivenPayload {
                 input: g.input().to_owned(),
                 bound_to_node,
@@ -739,7 +724,7 @@ fn build_test_payload(
 ///
 /// Returns the import-CTE's name (the payload's stable node id), or
 /// `None` when neither pass matches.
-fn find_import_node_id(graph: &CteGraph, ref_name: &str, _model_name: &str) -> Option<String> {
+fn find_import_node_id(graph: &CteGraph, ref_name: &str) -> Option<String> {
     let target = ref_name.to_ascii_lowercase();
     // Pass 1: name match (design's convention).
     if let Some((_, node)) = graph.nodes().iter().enumerate().find(|(idx, node)| {
