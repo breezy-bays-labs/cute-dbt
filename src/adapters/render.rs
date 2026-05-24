@@ -220,50 +220,80 @@ fn is_simple_from_select(sql: &str) -> bool {
 /// literal stays inside the literal).
 fn strip_sql_comments(sql: &str) -> String {
     let mut out = String::with_capacity(sql.len());
-    let mut iter = sql.char_indices().peekable();
-    while let Some((_, ch)) = iter.next() {
+    let mut chars = sql.chars().peekable();
+    while let Some(ch) = chars.next() {
         match ch {
-            '\'' | '"' => {
-                let quote = ch;
-                out.push(ch);
-                while let Some((_, next)) = iter.next() {
-                    out.push(next);
-                    if next == quote {
-                        if iter.peek().is_some_and(|(_, c)| *c == quote) {
-                            // Doubled-quote escape — consume and continue inside the string.
-                            let (_, escaped) = iter.next().expect("peek confirmed");
-                            out.push(escaped);
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-            '-' if iter.peek().is_some_and(|(_, c)| *c == '-') => {
-                iter.next();
-                for (_, c) in iter.by_ref() {
-                    if c == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-                out.push(' ');
-            }
-            '/' if iter.peek().is_some_and(|(_, c)| *c == '*') => {
-                iter.next();
-                let mut prev = '\0';
-                for (_, c) in iter.by_ref() {
-                    if prev == '*' && c == '/' {
-                        break;
-                    }
-                    prev = c;
-                }
-                out.push(' ');
-            }
+            '\'' | '"' => copy_string_literal(&mut chars, &mut out, ch),
+            '-' if chars.peek() == Some(&'-') => skip_line_comment(&mut chars, &mut out),
+            '/' if chars.peek() == Some(&'*') => skip_block_comment(&mut chars, &mut out),
             _ => out.push(ch),
         }
     }
     out
+}
+
+/// Copy a SQL string literal verbatim into `out`, handling the SQL
+/// doubled-quote escape (`''` inside a `'..'` literal stays inside the
+/// literal). The opening `quote` has not yet been pushed.
+fn copy_string_literal<I>(chars: &mut std::iter::Peekable<I>, out: &mut String, quote: char)
+where
+    I: Iterator<Item = char>,
+{
+    out.push(quote);
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c != quote {
+            continue;
+        }
+        if chars.peek() == Some(&quote) {
+            out.push(
+                chars
+                    .next()
+                    .expect("peek confirmed the doubled-quote escape"),
+            );
+        } else {
+            return;
+        }
+    }
+}
+
+/// Skip a `--` line comment up to (and including) the terminating
+/// newline, writing a single space into `out` as a token boundary so
+/// downstream tokenizers don't merge what was on either side. The
+/// `\n` itself is preserved so line-counting downstream stays correct.
+/// The leading `-` has already been consumed; the second `-` is still
+/// in the peeked position.
+fn skip_line_comment<I>(chars: &mut std::iter::Peekable<I>, out: &mut String)
+where
+    I: Iterator<Item = char>,
+{
+    chars.next();
+    for c in chars.by_ref() {
+        if c == '\n' {
+            out.push('\n');
+            break;
+        }
+    }
+    out.push(' ');
+}
+
+/// Skip a `/* */` block comment up to (and including) the terminating
+/// `*/`, writing a single space into `out` as a token boundary. The
+/// leading `/` has been consumed; the `*` is still in the peeked
+/// position.
+fn skip_block_comment<I>(chars: &mut std::iter::Peekable<I>, out: &mut String)
+where
+    I: Iterator<Item = char>,
+{
+    chars.next();
+    let mut prev = '\0';
+    for c in chars.by_ref() {
+        if prev == '*' && c == '/' {
+            break;
+        }
+        prev = c;
+    }
+    out.push(' ');
 }
 
 /// Per-model entry in the JSON payload — mirrors the design's
