@@ -291,6 +291,11 @@ table.given-table th, table.expected-table th {
 .selector-arrow { padding-bottom: 0.9rem; color: #6a6a72; }
 .cte-dag-mermaid { display: flex; justify-content: center; overflow-x: auto; padding: 0.5rem 0; }
 .cte-dag-mermaid svg { max-width: 100%; height: auto; }
+/* Keyboard-accessibility (cute-dbt#41): visible focus ring on focused
+   DAG nodes. :focus-visible isolates keyboard focus from mouse clicks
+   so a click doesn't leave a ring stuck on the clicked node. */
+g.dag-node { outline: none; }
+g.dag-node:focus-visible { outline: 2px dashed #1d7484; outline-offset: 3px; }
 .dag-legend {
   display: flex; flex-wrap: wrap; gap: 0.4rem 2rem; align-items: center;
   margin-top: 0.75rem; padding-top: 0.5rem;
@@ -330,6 +335,14 @@ table.given-table th, table.expected-table th {
 .node-role-badge.role-transform { color: #6a6a72; }
 .node-role-badge.role-final     { color: #b07400; }
 .given-empty { padding: 0.75rem 1rem; color: #6a6a72; font-style: italic; border: 1px dashed #ccc; margin-bottom: 0.75rem; }
+/* dbt fixture formats other than `dict` (`csv`, `sql`) deliver `rows`
+   as a non-array shape that the table renderer cannot tabulate.
+   Surface a visible notice (cute-dbt#40 CR-5) instead of an empty
+   table, so the user knows the fixture is intentional but not yet
+   visualized. */
+.format-notice { padding: 0.75rem 1rem; color: #4a4a4a; background: #f7f4ea; border: 1px solid #d6ce9e; border-radius: 3px; }
+.format-notice code { background: #fff; padding: 0 0.2rem; border: 1px solid #d6ce9e; border-radius: 2px; }
+.format-badge { font-size: 0.75em; color: #6a6a72; padding: 0.05rem 0.4rem; border: 1px solid #ccc; border-radius: 999px; }
 .given-section + .given-section { margin-top: 1rem; }
 .table-header { display: flex; align-items: baseline; gap: 0.5rem; margin: 0.5rem 0 0.25rem; }
 .table-title { margin: 0; }
@@ -451,7 +464,7 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
 <section class="cte-dag" aria-label="CTE dependency DAG">
   <div class="cte-dag-header">
     <h2>CTE dependency DAG</h2>
-    <p class="cte-dag-subtitle">Click a node to inspect.</p>
+    <p class="cte-dag-subtitle">Click a node (or Tab to it and press Enter) to inspect.</p>
   </div>
   <div class="recursive-banner" hidden>
     Recursive CTE present; recursive arm omitted from DAG (v0.1 limit).
@@ -492,7 +505,7 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
 
 </div>
 
-<script type="application/json" id="cute-dbt-data">{"baseline":"tests/fixtures/jaffle-shop-baseline.json","models":[{"name":"stg_customers","dag":{"nodes":[{"id":"source","role":"import","ref":"source"},{"id":"renamed","role":"transform"},{"id":"stg_customers","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"stg_customers","edge_type":"from"}]},"compiled_sql":{"renamed":"renamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)","source":"source as (\n    select * from \"jaffle_shop\".\"main\".\"raw_customers\"\n\n)","stg_customers":"select * from renamed"},"raw_sql":"with source as (\n\n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project. Modified body — adds a trim() pass on names so\n    PR 5's StateComparator sees the body checksum change.\n    #}\n    select * from {{ ref('raw_customers') }}\n\n),\n\nrenamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)\n\nselect * from renamed","tests":[{"id":"unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns","name":"test_stg_customers_renames_columns","target_model":"stg_customers","description":"stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows — no real customer data.\n","tags":["quality","smoke"],"meta":{"owner":"data-eng","priority":"high"},"defined_in":"models/staging/unit_tests.yml","given":[{"input":"ref('raw_customers')","bound_to_node":"source","rows":[{"first_name":"Alice","id":1,"last_name":"A."},{"first_name":"Bob","id":2,"last_name":"B."}],"format":"dict"}],"expected":{"rows":[{"customer_id":1,"first_name":"Alice","last_name":"A."},{"customer_id":2,"first_name":"Bob","last_name":"B."}],"format":"dict"}}],"is_recursive":false}]}</script>
+<script type="application/json" id="cute-dbt-data">{"baseline":"tests/fixtures/jaffle-shop-baseline.json","models":[{"name":"stg_customers","dag":{"nodes":[{"id":"source","role":"import"},{"id":"renamed","role":"transform"},{"id":"stg_customers","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"stg_customers","edge_type":"from"}]},"compiled_sql":{"renamed":"renamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)","source":"source as (\n    select * from \"jaffle_shop\".\"main\".\"raw_customers\"\n\n)","stg_customers":"select * from renamed"},"raw_sql":"with source as (\n\n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project. Modified body — adds a trim() pass on names so\n    PR 5's StateComparator sees the body checksum change.\n    #}\n    select * from {{ ref('raw_customers') }}\n\n),\n\nrenamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)\n\nselect * from renamed","tests":[{"id":"unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns","name":"test_stg_customers_renames_columns","target_model":"stg_customers","description":"stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows — no real customer data.\n","tags":["quality","smoke"],"meta":{"owner":"data-eng","priority":"high"},"defined_in":"models/staging/unit_tests.yml","given":[{"input":"ref('raw_customers')","bound_to_node":"source","rows":[{"first_name":"Alice","id":1,"last_name":"A."},{"first_name":"Bob","id":2,"last_name":"B."}],"format":"dict"}],"expected":{"rows":[{"customer_id":1,"first_name":"Alice","last_name":"A."},{"customer_id":2,"first_name":"Bob","last_name":"B."}],"format":"dict"}}],"is_recursive":false}]}</script>
 
 <script>
 /*! jQuery v3.7.1 | (c) OpenJS Foundation and other contributors | jquery.org/license */
@@ -3981,6 +3994,14 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     state.selectedModel = DATA.models[0].name;
     var firstTest = DATA.models[0].tests[0];
     state.selectedTestId = firstTest ? firstTest.id : null;
+    // Mermaid config is static across model switches — initialize once
+    // (cute-dbt#40 CR-4). renderDag() then only invokes mermaid.render.
+    window.mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "strict",
+      theme: "base",
+      fontFamily: 'system-ui,-apple-system,"Segoe UI",sans-serif'
+    });
     renderModelSelector();
     renderTestSelector();
     renderForSelectedModel();
@@ -4181,7 +4202,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     });
   }
 
-  function buildMermaidSource(m, t) {
+  function buildMermaidSource(m) {
     var lines = ["graph LR"];
     var dag = m.dag;
     if (!dag || !dag.nodes.length) {
@@ -4231,13 +4252,6 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     if (!m) return;
     var src = buildMermaidSource(m);
 
-    window.mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      theme: "base",
-      fontFamily: 'system-ui,-apple-system,"Segoe UI",sans-serif'
-    });
-
     var id = "mermaid-" + Math.random().toString(36).slice(2, 9);
     window.mermaid.render(id, src).then(function (out) {
       $host.html(out.svg);
@@ -4277,8 +4291,14 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       if (!originalId) return;
       g.classList.add("dag-node");
       g.setAttribute("data-node-id", originalId);
+      // Keyboard accessibility (cute-dbt#41): tabindex makes the SVG
+      // group focusable; role="button" announces it to screen readers;
+      // Enter/Space activate via the same selection path as click.
+      g.setAttribute("tabindex", "0");
+      g.setAttribute("role", "button");
+      g.setAttribute("aria-label", "Inspect DAG node: " + originalId);
       g.style.cursor = "pointer";
-      g.addEventListener("click", function () {
+      function activate() {
         state.selectedNodeId = originalId;
         if (state.leftPanelMode !== "node") {
           state.leftPanelMode = "node";
@@ -4286,6 +4306,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
         }
         renderLeftPanel();
         renderDag();
+      }
+      g.addEventListener("click", activate);
+      g.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          activate();
+        }
       });
     });
   }
@@ -4367,6 +4394,12 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     var $sec = $("<section>").addClass("given-section").attr("data-input-name", given.input);
     var $hdr = $("<div>").addClass("table-header");
     $hdr.append($("<h4>").addClass("table-title").text("given · " + given.input));
+    if (isNonArrayFormatFixture(given)) {
+      $hdr.append($("<span>").addClass("format-badge").text("format: " + given.format));
+      $sec.append($hdr);
+      $sec.append(buildFormatNotVisualizedNotice(given.format));
+      return $sec;
+    }
     var rows = unwrapRows(given.rows);
     $hdr.append($("<span>").addClass("row-count-badge")
       .text(rows.length + " row" + (rows.length === 1 ? "" : "s")));
@@ -4388,9 +4421,14 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
 
   function renderExpectedPanel(t) {
     var $panel = $(".expected-panel");
+    var $body = $panel.find(".expected-body").empty();
+    if (isNonArrayFormatFixture(t.expected)) {
+      $panel.find(".expected-rowcount").text("format: " + t.expected.format);
+      $body.append(buildFormatNotVisualizedNotice(t.expected.format));
+      return;
+    }
     var rows = unwrapRows(t.expected.rows);
     $panel.find(".expected-rowcount").text(rows.length + " row" + (rows.length === 1 ? "" : "s"));
-    var $body = $panel.find(".expected-body").empty();
     var cols = collectColumns(rows);
     $body.append(buildTable(cols, rows, "expected-table"));
     initDataTablesIn($body);
@@ -4403,6 +4441,21 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     if (!rows) return [];
     if (Array.isArray(rows)) return rows;
     return [];
+  }
+
+  // dbt's `format: csv` / `format: sql` carry `rows` as a raw string
+  // (the CSV body or the SELECT statement) rather than an array of
+  // row objects. v0.1 cannot tabulate those — surface a visible notice
+  // instead of dropping silently (cute-dbt#40 CR-5).
+  function isNonArrayFormatFixture(obj) {
+    return Boolean(obj && obj.format && obj.rows != null && !Array.isArray(obj.rows));
+  }
+
+  function buildFormatNotVisualizedNotice(format) {
+    return $("<div>").addClass("format-notice")
+      .append($("<span>").text("Fixture uses "))
+      .append($("<code>").text("format: " + format))
+      .append($("<span>").text(" — not yet visualized in cute-dbt v0.1. See the raw fixture in the manifest."));
   }
 
   function collectColumns(rows) {
