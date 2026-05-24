@@ -1,0 +1,13 @@
+# cargo-nextest configuration for cute-dbt.
+#
+# The BDD outer-loop binary (`tests/bdd.rs`) uses cucumber-rs's
+# `harness = false` mode — the cucumber runner replaces libtest's
+# harness with its own dispatcher. nextest cannot enumerate scenarios
+# from such a binary; trying to list its tests fails with exit code 2.
+# We exclude the bdd binary from every nextest profile so
+# `cargo nextest run --all-targets` succeeds without manual filters.
+# The bdd target is invoked via plain `cargo test --test bdd` in its
+# own CI job and locally via `cargo test --test bdd`.
+
+[profile.default]
+default-filter = "all() - binary(bdd)"

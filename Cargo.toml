@@ -69,6 +69,15 @@ thiserror = "2"
 #            (<script src>, <link href>, <img src>, CSS @import,
 #            CSS url(), protocol-relative //) — never raw `grep http`,
 #            which is false-positive noise against minified bundles.
+#
+# ATDD outer-loop toolchain (PR 10, #13):
+#   cucumber -> Gherkin runner for the `.feature` acceptance contract.
+#            Wired with `harness = false` on the bdd target so the
+#            cucumber-generated main owns scenario dispatch. `cargo
+#            nextest` is NOT compatible with `harness = false`; the bdd
+#            target is invoked via `cargo test --test bdd` (the
+#            `.cargo/mutants.toml` `test_tool = "cargo"` preserves that
+#            invocation under mutation testing).
 insta = "1"
 toml = "1"
 sha2 = "0.10"
@@ -76,6 +85,25 @@ hex = "0.4"
 walkdir = "2"
 headless_chrome = "1.0.21"
 tl = "0.7.8"
+cucumber = "0.23"
+# Synchronous executor for the cucumber runner. cute-dbt has no `tokio`
+# dep (the binary is fully sync). Using `futures::executor::block_on`
+# in `tests/bdd.rs` keeps the harness sync and avoids pulling tokio
+# into the supply-chain footprint. The `futures` crate is a thin
+# meta-crate; cucumber already pulls in the underlying primitives
+# transitively, so this is a near-zero footprint addition.
+futures = "0.3"
+
+# Cucumber-rs requires `harness = false` (the cucumber runner replaces
+# libtest's harness with its own dispatcher). This declaration tells
+# cargo to build `tests/bdd.rs` as a standalone test binary whose
+# `main()` lives in the source file. `cargo nextest run` cannot
+# enumerate scenarios from a `harness = false` binary; the bdd target
+# is invoked via `cargo test --test bdd` in CI and locally.
+[[test]]
+name = "bdd"
+path = "tests/bdd.rs"
+harness = false
 
 # Crate-wide lint config. `clippy::pedantic` + `clippy::cargo` fire via
 # the crate-root `#![warn(...)]` in `src/lib.rs`, so `clippy -D warnings`

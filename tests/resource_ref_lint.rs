@@ -31,7 +31,12 @@
 //!
 //! Tracked: breezy-bays-labs/cute-dbt#12.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use std::path::PathBuf;
+
+use common::ResourceRefViolation as Violation;
 
 fn example_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -39,175 +44,11 @@ fn example_path() -> PathBuf {
         .join("jaffle-shop-report.html")
 }
 
-#[derive(Debug)]
-struct Violation {
-    kind: &'static str,
-    value: String,
-}
-
-impl std::fmt::Display for Violation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.kind, self.value)
-    }
-}
-
+/// Scan HTML for forbidden resource references. Thin wrapper over
+/// `common::scan_resource_refs` so this test surface and the BDD
+/// `zero_egress.feature` step share the exact same lint code path.
 fn scan_violations(html: &str) -> Vec<Violation> {
-    // Strip <script> bodies BEFORE handing the HTML to `tl`. tl does not
-    // perfectly enforce the HTML5 "script content is raw text" rule —
-    // template-literal substrings like `<img src="${e}">` inside a
-    // minified bundle get materialized as spurious DOM nodes the lint
-    // would otherwise false-positive on. The lint only cares about the
-    // OPENING `<script src="...">` tag's attributes, never the body, so
-    // stripping content loses no real coverage.
-    let stripped = strip_script_bodies(html);
-    let dom = tl::parse(&stripped, tl::ParserOptions::default()).expect("HTML must be parseable");
-    let parser = dom.parser();
-    let mut out = Vec::new();
-
-    for node_handle in dom.nodes() {
-        let Some(tag) = node_handle.as_tag() else {
-            continue;
-        };
-        let name_lc = tag.name().as_utf8_str().to_ascii_lowercase();
-        let attrs = tag.attributes();
-
-        match name_lc.as_str() {
-            "script" => check_attr(attrs, "src", "<script src>", &mut out),
-            "link" => check_attr(attrs, "href", "<link href>", &mut out),
-            "img" => {
-                check_attr(attrs, "src", "<img src>", &mut out);
-                check_attr(attrs, "srcset", "<img srcset>", &mut out);
-            }
-            "style" => {
-                let css = tag.inner_text(parser);
-                find_css_external_refs(&css, &mut out);
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-/// Replace every `<script ...>BODY</script>` content with an empty
-/// string while preserving the opening tag (so `<script src="...">`
-/// attribute checks still fire). The matching is case-insensitive and
-/// tolerates self-closing `<script.../>` (rare in HTML, but cheap to
-/// pass through unchanged).
-fn strip_script_bodies(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let lower = html.to_ascii_lowercase();
-    let mut cursor = 0;
-    while let Some(open_rel) = lower[cursor..].find("<script") {
-        let open_start = cursor + open_rel;
-        out.push_str(&html[cursor..open_start]);
-        let Some(open_end_rel) = lower[open_start..].find('>') else {
-            // Malformed; preserve the rest verbatim.
-            out.push_str(&html[open_start..]);
-            return out;
-        };
-        let open_end = open_start + open_end_rel + 1;
-        out.push_str(&html[open_start..open_end]);
-        // Self-closing variant — no body to strip.
-        if html[open_start..open_end].ends_with("/>") {
-            cursor = open_end;
-            continue;
-        }
-        match lower[open_end..].find("</script>") {
-            Some(close_rel) => {
-                let close_start = open_end + close_rel;
-                out.push_str("</script>");
-                cursor = close_start + "</script>".len();
-            }
-            None => {
-                // Unclosed <script> — preserve the rest verbatim.
-                out.push_str(&html[open_end..]);
-                return out;
-            }
-        }
-    }
-    out.push_str(&html[cursor..]);
-    out
-}
-
-fn check_attr(
-    attrs: &tl::Attributes<'_>,
-    attr_name: &str,
-    kind: &'static str,
-    out: &mut Vec<Violation>,
-) {
-    let Some(Some(raw)) = attrs.get(attr_name) else {
-        return;
-    };
-    let value = raw.as_utf8_str();
-    if is_forbidden_resource_ref(&value) {
-        out.push(Violation {
-            kind,
-            value: value.into_owned(),
-        });
-    }
-}
-
-/// Whether an `href` / `src` / `srcset` value is a forbidden resource
-/// reference for the self-contained-report contract.
-///
-/// The rendered chrome must not load *any* separate file. So the
-/// allowlist is narrow: empty, `#fragment`, `data:` URI, or `mailto:`
-/// (the last so a future "report a bug" link does not trip the lint).
-/// Everything else — relative paths, absolute paths, network schemes,
-/// protocol-relative, `file:` — is a violation.
-fn is_forbidden_resource_ref(value: &str) -> bool {
-    let v = value.trim();
-    if v.is_empty() || v.starts_with('#') {
-        return false;
-    }
-    if v.starts_with("data:") || v.starts_with("mailto:") {
-        return false;
-    }
-    // Everything else — relative paths (`script.js`, `./x`, `../y`,
-    // `/abs/path`), protocol-relative (`//host/x`), and any other
-    // `scheme:`-prefixed value (`http:`, `https:`, `file:`, etc.) —
-    // would resolve to a separate file or network endpoint and is a
-    // violation of the single-self-contained-file invariant.
-    true
-}
-
-fn find_css_external_refs(css: &str, out: &mut Vec<Violation>) {
-    // @import — banned outright. Even data: imports are an unwanted
-    // construct in the rendered chrome (the contract is "no @import",
-    // not "no external @import").
-    let lower = css.to_ascii_lowercase();
-    let mut i = 0;
-    while let Some(rel) = lower[i..].find("@import") {
-        let start = i + rel;
-        let end_of_snippet = (start + 80).min(css.len());
-        out.push(Violation {
-            kind: "@import",
-            value: css[start..end_of_snippet]
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string(),
-        });
-        i = start + "@import".len();
-    }
-
-    // url(...) — only external (non-data, non-empty) values are forbidden.
-    let mut i = 0;
-    while let Some(rel) = lower[i..].find("url(") {
-        let start = i + rel + 4;
-        let end = lower[start..].find(')').map_or(lower.len(), |n| start + n);
-        let inner = css[start..end]
-            .trim()
-            .trim_matches(|c| c == '"' || c == '\'');
-        if !inner.is_empty() && !inner.starts_with("data:") && !inner.starts_with('#') {
-            out.push(Violation {
-                kind: "url()",
-                value: inner.to_string(),
-            });
-        }
-        i = end + 1;
-    }
+    common::scan_resource_refs(html)
 }
 
 #[test]
@@ -348,6 +189,23 @@ fn empty_href_is_allowed() {
         <link rel="icon" href="">
     </head></html>"#;
     assert!(scan_violations(html).is_empty());
+}
+
+#[test]
+fn mixed_srcset_external_candidate_is_caught() {
+    // A multi-value srcset where the first candidate is a data: URI
+    // and a later candidate is off-document. Passing the whole
+    // srcset into a single resource-ref check would let the off-doc
+    // candidate slip through because the value starts with `data:`.
+    let html = r#"<!DOCTYPE html><html><body>
+        <img srcset="data:image/png;base64,iVBORw0KGgo= 1x, https://tracker.example.com/2x.png 2x">
+    </body></html>"#;
+    let v = scan_violations(html);
+    assert!(
+        v.iter()
+            .any(|x| x.kind == "<img srcset>" && x.value.contains("tracker.example.com")),
+        "expected an <img srcset> violation for the off-document candidate, got {v:?}"
+    );
 }
 
 #[test]
