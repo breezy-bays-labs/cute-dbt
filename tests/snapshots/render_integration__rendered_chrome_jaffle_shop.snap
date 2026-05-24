@@ -682,6 +682,16 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
         }
       });
     });
+    // Keyboard a11y (cute-dbt#41): activate() triggers a full SVG
+    // re-render, which detaches the previously focused <g>. Restore
+    // focus to the selected node so Tab+Enter chains feel continuous.
+    // `:focus-visible` reflects the originating input heuristic, so
+    // mouse activation does not produce a stuck outline here.
+    if (state.selectedNodeId) {
+      var escaped = String(state.selectedNodeId).replace(/[\\"]/g, "\\$&");
+      var sel = svgHost.querySelector('g.dag-node[data-node-id="' + escaped + '"]');
+      if (sel) sel.focus({ preventScroll: true });
+    }
   }
 
   function renderSegmentedToggle() {
@@ -822,7 +832,7 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     return $("<div>").addClass("format-notice")
       .append($("<span>").text("Fixture uses "))
       .append($("<code>").text("format: " + format))
-      .append($("<span>").text(" — not yet visualized in cute-dbt v0.1. See the raw fixture in the manifest."));
+      .append($("<span>").text(" — not yet visualized in cute-dbt. See the raw fixture in the manifest."));
   }
 
   function collectColumns(rows) {
