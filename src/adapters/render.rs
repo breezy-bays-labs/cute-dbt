@@ -302,6 +302,17 @@ struct ReportTemplate<'a> {
     datatables_js: &'a str,
     mermaid_js: &'a str,
     favicon_data_uri: &'a str,
+    /// Report title — substituted into both `<title>` (head) and
+    /// `<h1>` (header). Resolved by the cli layer from
+    /// `cli.config.report.title`, falling back to
+    /// [`crate::domain::DEFAULT_REPORT_TITLE`] when no config is supplied.
+    report_title: &'a str,
+    /// Optional report subtitle (PR 14 / cute-dbt#24). When
+    /// `Some(...)`, the template renders a new
+    /// `<p class="report-subtitle">` element immediately after the
+    /// `<h1>`. When `None`, the element is omitted entirely (no empty
+    /// DOM node).
+    report_subtitle: Option<&'a str>,
     /// Server-rendered banner text — a single contiguous string the
     /// `report_generation.feature` and `tests/run_loop.rs` assertions
     /// can grep against without the static HTML's span boundaries
@@ -423,6 +434,8 @@ pub fn render_report(
     in_scope: &InScopeSet,
     models_in_scope: &ModelInScopeSet,
     baseline_label: &str,
+    report_title: &str,
+    report_subtitle: Option<&str>,
 ) -> io::Result<()> {
     let payload = build_payload(current, in_scope, models_in_scope, baseline_label);
     let banner_text = compose_banner_text(in_scope);
@@ -435,6 +448,8 @@ pub fn render_report(
         datatables_js: DATATABLES_JS,
         mermaid_js: MERMAID_JS,
         favicon_data_uri: FAVICON_DATA_URI,
+        report_title,
+        report_subtitle,
         banner_text: &banner_text,
         baseline_label,
         payload_json: &payload_json,
@@ -657,8 +672,8 @@ fn leaf_segment(id: &str) -> &str {
 mod tests {
     use super::*;
     use crate::domain::{
-        Checksum, CteEdge, CteNode, DependsOn, EdgeType, Manifest, ManifestMetadata, NodeId,
-        UnitTest, UnitTestExpect, UnitTestGiven,
+        Checksum, CteEdge, CteNode, DEFAULT_REPORT_TITLE, DependsOn, EdgeType, Manifest,
+        ManifestMetadata, NodeId, UnitTest, UnitTestExpect, UnitTestGiven,
     };
     use serde_json::json;
     use std::collections::HashMap;
@@ -1395,6 +1410,186 @@ mod tests {
         );
     }
 
+    // ===== render_report: report_title + report_subtitle threading =====
+
+    #[test]
+    fn render_report_default_title_renders_into_title_and_h1() {
+        let node = model_node("model.shop.x", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let tmp = std::env::temp_dir().join("cute_dbt_render_title_default_test.html");
+        let _ = std::fs::remove_file(&tmp);
+        render_report(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            "b",
+            DEFAULT_REPORT_TITLE,
+            None,
+        )
+        .expect("render writes the report");
+        let html = std::fs::read_to_string(&tmp).expect("report exists");
+        assert!(
+            html.contains("<title>cute-dbt report</title>"),
+            "default title in <title>: {}",
+            html.lines()
+                .find(|l| l.contains("<title>"))
+                .unwrap_or("<not found>"),
+        );
+        assert!(
+            html.contains("<h1>cute-dbt report</h1>"),
+            "default title in <h1>: {}",
+            html.lines()
+                .find(|l| l.contains("<h1>"))
+                .unwrap_or("<not found>"),
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn render_report_custom_title_overrides_both_surfaces() {
+        let node = model_node("model.shop.x", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let tmp = std::env::temp_dir().join("cute_dbt_render_title_custom_test.html");
+        let _ = std::fs::remove_file(&tmp);
+        render_report(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            "b",
+            "Q3 unit test review",
+            None,
+        )
+        .expect("render writes the report");
+        let html = std::fs::read_to_string(&tmp).expect("report exists");
+        assert!(
+            html.contains("<title>Q3 unit test review</title>"),
+            "custom title in <title>: {}",
+            html.lines()
+                .find(|l| l.contains("<title>"))
+                .unwrap_or("<not found>"),
+        );
+        assert!(
+            html.contains("<h1>Q3 unit test review</h1>"),
+            "custom title in <h1>: {}",
+            html.lines()
+                .find(|l| l.contains("<h1>"))
+                .unwrap_or("<not found>"),
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn render_report_absent_subtitle_omits_the_subtitle_element() {
+        let node = model_node("model.shop.x", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let tmp = std::env::temp_dir().join("cute_dbt_render_no_subtitle_test.html");
+        let _ = std::fs::remove_file(&tmp);
+        render_report(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            "b",
+            DEFAULT_REPORT_TITLE,
+            None,
+        )
+        .expect("render writes the report");
+        let html = std::fs::read_to_string(&tmp).expect("report exists");
+        assert!(
+            !html.contains("class=\"report-subtitle\""),
+            "subtitle element omitted when None"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn render_report_present_subtitle_renders_the_subtitle_element() {
+        let node = model_node("model.shop.x", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let tmp = std::env::temp_dir().join("cute_dbt_render_with_subtitle_test.html");
+        let _ = std::fs::remove_file(&tmp);
+        render_report(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            "b",
+            "Q3 review",
+            Some("PR 1234 / staging diff"),
+        )
+        .expect("render writes the report");
+        let html = std::fs::read_to_string(&tmp).expect("report exists");
+        assert!(
+            html.contains("<p class=\"report-subtitle\">PR 1234 / staging diff</p>"),
+            "subtitle element rendered with text: {}",
+            html.lines()
+                .find(|l| l.contains("report-subtitle"))
+                .unwrap_or("<not found>"),
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn render_report_xss_in_title_is_html_escaped() {
+        // askama's `html` escape filter (template default) prevents a
+        // hostile title containing `<script>` from breaking out of the
+        // <title> / <h1> text nodes.
+        let node = model_node("model.shop.x", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let tmp = std::env::temp_dir().join("cute_dbt_render_xss_title_test.html");
+        let _ = std::fs::remove_file(&tmp);
+        render_report(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            "b",
+            "<script>alert(1)</script>",
+            None,
+        )
+        .expect("render writes");
+        let html = std::fs::read_to_string(&tmp).expect("report exists");
+        // The escaped form appears; the raw form does NOT appear in the
+        // chrome (it may appear inside inlined script bodies — strip
+        // those first, mirroring the egress test pattern).
+        let mut chrome = html.clone();
+        for asset in [
+            SAKURA_CSS,
+            DATATABLES_CSS,
+            JQUERY_JS,
+            DATATABLES_JS,
+            MERMAID_JS,
+        ] {
+            chrome = chrome.replace(asset, "<<inlined-asset>>");
+        }
+        assert!(
+            !chrome.contains("<script>alert(1)</script>"),
+            "raw <script> never appears in the chrome"
+        );
+        // askama's html escape may use entity names (&lt;) or numeric
+        // (&#60; / &#x3c;); accept any escaped form. The title literal
+        // `alert(1)` must still appear (escapes leave text alone) so
+        // the title is reachable in the rendered output.
+        assert!(
+            chrome.contains("alert(1)"),
+            "escaped title still carries its text payload"
+        );
+        let has_escaped_lt =
+            chrome.contains("&lt;") || chrome.contains("&#60;") || chrome.contains("&#x3c;");
+        assert!(
+            has_escaped_lt,
+            "some escaped < entity appears in the chrome (askama html filter)"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
     // ===== render_report end-to-end =====
 
     #[test]
@@ -1411,6 +1606,8 @@ mod tests {
             &InScopeSet::new(),
             &models,
             "baseline.json",
+            DEFAULT_REPORT_TITLE,
+            None,
         )
         .expect("render writes the report");
         let html = std::fs::read_to_string(&tmp).expect("report exists");
@@ -1435,8 +1632,16 @@ mod tests {
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
         let tmp = std::env::temp_dir().join("cute_dbt_render_json_test.html");
         let _ = std::fs::remove_file(&tmp);
-        render_report(&tmp, &manifest, &InScopeSet::new(), &models, "lab1@aaaaaaa")
-            .expect("render writes");
+        render_report(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            "lab1@aaaaaaa",
+            DEFAULT_REPORT_TITLE,
+            None,
+        )
+        .expect("render writes");
         let html = std::fs::read_to_string(&tmp).unwrap();
         assert!(
             html.contains("id=\"cute-dbt-data\""),
@@ -1468,7 +1673,16 @@ mod tests {
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
         let tmp = std::env::temp_dir().join("cute_dbt_render_egress_test.html");
         let _ = std::fs::remove_file(&tmp);
-        render_report(&tmp, &manifest, &InScopeSet::new(), &models, "b").expect("render writes");
+        render_report(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            "b",
+            DEFAULT_REPORT_TITLE,
+            None,
+        )
+        .expect("render writes");
         let mut chrome = std::fs::read_to_string(&tmp).unwrap();
         for asset in [
             SAKURA_CSS,
@@ -1521,7 +1735,16 @@ mod tests {
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
         let tmp = std::env::temp_dir().join("cute_dbt_render_xss_test.html");
         let _ = std::fs::remove_file(&tmp);
-        render_report(&tmp, &manifest, &in_scope, &models, "b").expect("render writes the report");
+        render_report(
+            &tmp,
+            &manifest,
+            &in_scope,
+            &models,
+            "b",
+            DEFAULT_REPORT_TITLE,
+            None,
+        )
+        .expect("render writes the report");
         let html = std::fs::read_to_string(&tmp).expect("report exists");
         // `</script>` legitimately appears inside the inlined asset
         // bodies; strip those before scanning the chrome.

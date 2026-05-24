@@ -23,7 +23,7 @@ use std::path::PathBuf;
 
 use cute4dbt::adapters::manifest::FileManifestSource;
 use cute4dbt::adapters::render::render_report;
-use cute4dbt::domain::{Manifest, StateComparator};
+use cute4dbt::domain::{DEFAULT_REPORT_TITLE, Manifest, StateComparator};
 use cute4dbt::ports::ManifestSource;
 
 fn fixture(name: &str) -> PathBuf {
@@ -97,6 +97,8 @@ fn rendered_report_skeleton() {
         &in_scope,
         &models_in_scope,
         "jaffle-shop-baseline.json",
+        DEFAULT_REPORT_TITLE,
+        None,
     )
     .expect("render writes the report");
     let html = std::fs::read_to_string(&out).expect("report exists");

@@ -1,0 +1,7 @@
+# Synthetic happy-path fixture for the cute-dbt#24 `--config <PATH>` flag.
+# Exercises both keys (`report.title` and `report.subtitle`) in the
+# v0.1 config surface.
+
+[report]
+title = "Q3 unit test review"
+subtitle = "PR 1234 / staging diff"

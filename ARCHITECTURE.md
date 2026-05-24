@@ -147,6 +147,28 @@ data is unusable) would muddy the contract and add a fifth enum variant
 that the CLI exit-code mapping would have to route differently from the
 other four. Don't add it.
 
+### `--config` errors are NOT a `PreflightError` variant either
+
+The optional `--config <PATH>` flag (PR 14, cute-dbt#24) uses a **clap
+value-parser fn** that opens + parses the TOML at clap parse time. A
+missing, unreadable, or invalid config file produces a `clap::Error`
+(kind: `ValueValidation`) → exit 2, same path as any other clap usage
+error. A config-loader error is **never** a `PreflightError` variant —
+the same usage-time-vs-runtime argument applies as for baseline-missing.
+The `PreflightError` enum stays locked at four variants
+(`Unreadable`, `SchemaUnsupported`, `BaselineUnusable`, `NotCompiled`).
+Adding a fifth variant for `BadConfig` would route through the runtime
+remediation path, conflate operator-misuse with input-data failures, and
+break the symmetry the two-stage fail-closed contract is built on.
+
+The config loader lives in `src/adapters/config_reader.rs` and returns a
+typed `ConfigLoadError { Io | Toml }` that the cli value-parser fn
+stringifies for clap. The domain (`src/domain/config.rs`) holds only the
+POD `AnalysisConfig` struct — no I/O, no parser dependency. The v0.1
+surface is two optional keys under `[report]` (`title`, `subtitle`);
+additional sections are additive POD additions with `#[serde(default)]`
+in v0.2+.
+
 Locked policy consequences:
 
 - Baseline present, no in-scope changes → **exit 0** with a valid (small)
@@ -326,7 +348,7 @@ right level of indirection for one consumer.
 
 ## 7. Acceptance contract
 
-The five `.feature` files under [`features/`](features/) are the
+The six `.feature` files under [`features/`](features/) are the
 executable acceptance contract:
 
 - `report_generation.feature`
@@ -334,6 +356,7 @@ executable acceptance contract:
 - `cte_rendering.feature`
 - `fail_closed.feature`
 - `zero_egress.feature`
+- `config.feature` (PR 14, cute-dbt#24 — operator-supplied TOML `--config`)
 
 They cover the success criteria (manifest → offline-correct report,
 per-test header + Given/Expected panels + edge-colored CTE DAG + banner,
@@ -346,8 +369,9 @@ document and the spec files from drifting.
 Three CI invariants pin the feature-spec contract — see
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 
-- `feature-count` asserts exactly **5** `.feature` files exist (adding a
-  sixth requires a deliberate update).
+- `feature-count` asserts exactly **6** `.feature` files exist (bumped
+  from 5 to 6 in PR 14 when `config.feature` joined the contract;
+  adding a seventh requires a deliberate update).
 - `baseline-required-grep` asserts every scenario invoking the CLI passes
   `--baseline-manifest`, except scenarios tagged
   `@no-baseline-usage-error` (the one intentional exception that

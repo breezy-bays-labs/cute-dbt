@@ -9,6 +9,7 @@
 //! Given/When/Then prose.
 
 pub mod builders;
+pub mod config;
 pub mod cte_rendering;
 pub mod diff_scoping;
 pub mod fail_closed;

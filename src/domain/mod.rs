@@ -35,12 +35,14 @@
 // categories — repetition is intentional, so silence the lint locally.
 #![allow(clippy::module_name_repetitions)]
 
+pub mod config;
 pub mod cte;
 pub mod manifest;
 pub mod preflight;
 pub mod state;
 pub mod unit_test;
 
+pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};
 pub use manifest::{Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeId};
 pub use preflight::{PreflightError, preflight_compiled};

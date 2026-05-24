@@ -5,6 +5,10 @@
 //!   (`#[serde(default)]`, no `deny_unknown_fields`); Stage-1 pre-flight
 //!   (`Unreadable` / `SchemaUnsupported` / `BaselineUnusable`); the
 //!   real-file manifest-source port impl.
+//! - [`config_reader`] — TOML loader for the operator-supplied
+//!   `--config <PATH>` (PR 14, #24). Failures are clap usage errors
+//!   surfaced via the value-parser fn in [`crate::cli`], **never** a
+//!   `PreflightError` variant.
 //! - [`cte_engine`] — sqlparser-rs 0.62 parser-AST pass; CTE dependency
 //!   graph + edge-type classification (`From`, the five joins,
 //!   `UnionAll`, `UnionDistinct`).
@@ -17,6 +21,7 @@
 //!   `report.html`).
 
 pub mod asset_embed;
+pub mod config_reader;
 pub mod cte_engine;
 pub mod manifest;
 pub mod render;
