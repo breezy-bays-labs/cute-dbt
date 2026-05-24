@@ -86,26 +86,25 @@ narrow.
 
 ## Known v0.1 fidelity limits
 
-Both limits below are *documented*, not defects, and each has a tracked
-follow-up issue for v0.2+:
-
 - **Body-only state-modified scoping.** Pure `.configs` / `.contract` /
   `.relation` / `.macros` changes leave the model body checksum
-  identical and are **not** detected in v0.1. Tracked:
+  identical and are **not** detected in v0.1 — a documented limit, not
+  a defect. Tracked:
   [`cute-dbt#14`](https://github.com/breezy-bays-labs/cute-dbt/issues/14)
   → sub-selectors land as additive `impl StateModifier` blocks in v0.2+
   ([`cute-dbt#15`](https://github.com/breezy-bays-labs/cute-dbt/issues/15)).
-- **SQL comments are stripped from the compiled-SQL drawer.** The CTE
-  engine sources each CTE's `raw_sql` via `sqlparser`'s
-  `parse → Display::to_string()` roundtrip, which drops every SQL
-  comment shape (`--` line comments, `/* */` block comments, comments
-  inside or outside CTE bodies). Jinja `{# #}` comments are already
-  stripped upstream at `dbt compile` time, so the drawer shows
-  comment-free SQL even on models that author intentional commentary.
-  Tracked:
-  [`cute-dbt#45`](https://github.com/breezy-bays-labs/cute-dbt/issues/45)
-  → v0.2 widening will preserve comments via span-based slicing of
-  `compiled_code`.
+
+## Compiled-SQL fidelity
+
+The per-node compiled-SQL drawer shows the model's `compiled_code`
+**exactly as `dbt compile` produced it** — including the user's
+indentation, casing, blank lines, and `--` / `/* */` SQL comments.
+The CTE engine slices each CTE's source extent from `compiled_code`
+via sqlparser's span metadata rather than emitting the AST back through
+`Display`, which would drop comments
+([`cute-dbt#31`](https://github.com/breezy-bays-labs/cute-dbt/issues/31)).
+Jinja `{# #}` comments are stripped at `dbt compile` time and never
+reach `compiled_code`.
 
 ## Architecture
 

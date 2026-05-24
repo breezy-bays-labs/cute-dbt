@@ -50,11 +50,12 @@
 use std::collections::HashMap;
 
 use sqlparser::ast::{
-    Cte, JoinOperator, Query, SetExpr, SetOperator, SetQuantifier, Statement, TableFactor,
+    Cte, JoinOperator, Query, SetExpr, SetOperator, SetQuantifier, Spanned, Statement, TableFactor,
     TableWithJoins,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
+use sqlparser::tokenizer::{Location, Span};
 
 use crate::domain::{CteEdge, CteGraph, CteNode, EdgeType};
 
@@ -92,7 +93,7 @@ pub enum CteError {
 /// first statement is not a `SELECT` query.
 pub fn parse_cte_graph(compiled_sql: &str) -> Result<CteGraph, CteError> {
     let query = parse_query(compiled_sql)?;
-    Ok(build_graph(&query))
+    Ok(build_graph(compiled_sql, &query))
 }
 
 /// Parse `compiled_sql` and return its first statement as a [`Query`].
@@ -114,13 +115,13 @@ fn parse_query(compiled_sql: &str) -> Result<Query, CteError> {
 /// so the renderer can surface a banner. The acyclicity invariant (`from
 /// < to`) already drops self-referencing edges, keeping the edge list
 /// DAG-safe regardless.
-fn build_graph(query: &Query) -> CteGraph {
+fn build_graph(compiled_sql: &str, query: &Query) -> CteGraph {
     let ctes = cte_tables(query);
     if ctes.is_empty() {
         return CteGraph::default();
     }
     let recursive = query.with.as_ref().is_some_and(|with| with.recursive);
-    let nodes = build_nodes(ctes, query);
+    let nodes = build_nodes(compiled_sql, ctes, query);
     let index = name_index(ctes);
     let edges = build_edges(ctes, query, &index);
     let graph = CteGraph::new(nodes, edges);
@@ -141,22 +142,128 @@ fn cte_tables(query: &Query) -> &[Cte] {
 
 /// One [`CteNode`] per CTE in declaration order, then the terminal node.
 ///
-/// tracked: cute-dbt#45 — `Display::to_string()` on the parsed AST is
-/// the v0.1 source of `raw_sql`, which sqlparser 0.62 emits without
-/// the original SQL comments (cute-dbt#31 confirmed). The v0.2
-/// widening will swap this for span-based slicing of `compiled_code`.
-fn build_nodes(ctes: &[Cte], query: &Query) -> Vec<CteNode> {
+/// Per-CTE `raw_sql` is sliced from the original `compiled_code` via
+/// each CTE's [`Spanned::span()`] (alias-start through close-paren).
+/// This preserves SQL comments authored in the CTE body that sqlparser
+/// drops through the `parse → Display` roundtrip (cute-dbt#31).
+/// Falls back to AST `to_string()` when the span is empty (defensive —
+/// sqlparser 0.62 populates spans for every CTE we've observed).
+fn build_nodes(compiled_sql: &str, ctes: &[Cte], query: &Query) -> Vec<CteNode> {
+    let byte_index = ByteIndex::new(compiled_sql);
     let mut nodes: Vec<CteNode> = ctes
         .iter()
-        .map(|cte| CteNode::new(cte_name(cte), None, Some(cte.query.to_string()), None))
+        .map(|cte| {
+            let raw = slice_or_fallback(compiled_sql, &byte_index, cte.span(), || {
+                cte.query.to_string()
+            });
+            CteNode::new(cte_name(cte), None, Some(raw), None)
+        })
         .collect();
-    nodes.push(CteNode::new(
-        TERMINAL_NODE_NAME,
-        None,
-        Some(query.body.to_string()),
-        None,
-    ));
+    let terminal =
+        slice_terminal(compiled_sql, &byte_index, ctes).unwrap_or_else(|| query.body.to_string());
+    nodes.push(CteNode::new(TERMINAL_NODE_NAME, None, Some(terminal), None));
     nodes
+}
+
+/// Slice `sql` over `span` (start inclusive, end exclusive per sqlparser
+/// 0.62 token spans — `closing_paren_token` reports
+/// `(Location(L, C), Location(L, C+1))` for the single-character `)`).
+///
+/// Returns the fallback when the span is empty or yields an out-of-bounds
+/// range (defensive — sqlparser populates spans for every CTE we've
+/// observed, but the engine must never panic on a fixture).
+fn slice_or_fallback<F: FnOnce() -> String>(
+    sql: &str,
+    index: &ByteIndex,
+    span: Span,
+    fallback: F,
+) -> String {
+    if span.start.line == 0 || span.end.line == 0 {
+        return fallback();
+    }
+    let start = index.byte_of(sql, span.start);
+    let end = index.byte_of(sql, span.end);
+    if start > end || end > sql.len() {
+        return fallback();
+    }
+    sql[start..end].to_owned()
+}
+
+/// Slice the terminal `SELECT` — everything after the last CTE's
+/// closing paren to end-of-`sql`.
+///
+/// Starts at the byte position immediately past `)` so any comments or
+/// whitespace between the `WITH` clause and the final `SELECT` survive.
+/// Returns `None` when no CTEs are present (the caller falls back to the
+/// AST roundtrip, though `build_nodes` only fires this branch when at
+/// least one CTE exists).
+fn slice_terminal(sql: &str, index: &ByteIndex, ctes: &[Cte]) -> Option<String> {
+    let last = ctes.last()?;
+    let close_end = last.closing_paren_token.0.span.end;
+    if close_end.line == 0 {
+        return None;
+    }
+    let start = index.byte_of(sql, close_end);
+    if start > sql.len() {
+        return None;
+    }
+    Some(
+        sql[start..]
+            .trim_start_matches([',', '\n', '\r', ' ', '\t'])
+            .to_owned(),
+    )
+}
+
+/// Maps `(line, column)` to byte offsets in a SQL source string.
+///
+/// `line` and `column` are 1-indexed per sqlparser's convention.
+/// Columns are character indices (codepoints), not byte indices —
+/// matters whenever a SQL comment carries non-ASCII text.
+struct ByteIndex {
+    /// `line_starts[i]` = byte offset of the start of line `i + 1`.
+    line_starts: Vec<usize>,
+}
+
+impl ByteIndex {
+    fn new(sql: &str) -> Self {
+        let mut line_starts = Vec::with_capacity(sql.bytes().filter(|&b| b == b'\n').count() + 1);
+        line_starts.push(0);
+        for (i, byte) in sql.bytes().enumerate() {
+            if byte == b'\n' {
+                line_starts.push(i + 1);
+            }
+        }
+        Self { line_starts }
+    }
+
+    /// Byte offset of the character at `loc`. For end-exclusive spans
+    /// (`Location(line, col + 1)` where `col` is the last character),
+    /// this returns the byte immediately past the span — slice it as
+    /// `sql[start..end]` directly.
+    fn byte_of(&self, sql: &str, loc: Location) -> usize {
+        if loc.line == 0 {
+            return 0;
+        }
+        let line_idx = usize::try_from(loc.line - 1).unwrap_or(usize::MAX);
+        let col_idx = usize::try_from(loc.column.saturating_sub(1)).unwrap_or(usize::MAX);
+        let line_start = self.line_starts.get(line_idx).copied().unwrap_or(sql.len());
+        if col_idx == 0 {
+            return line_start;
+        }
+        let next_line_start = self
+            .line_starts
+            .get(line_idx + 1)
+            .copied()
+            .unwrap_or(sql.len().saturating_add(1));
+        let line_terminator = next_line_start.saturating_sub(1).min(sql.len());
+        let line_text = &sql[line_start..line_terminator];
+        for (chars_passed, (byte_off, _ch)) in line_text.char_indices().enumerate() {
+            if chars_passed == col_idx {
+                return line_start + byte_off;
+            }
+        }
+        line_start + line_text.len()
+    }
 }
 
 /// Map each CTE name (lowercased — SQL identifiers are case-insensitive)
@@ -777,13 +884,40 @@ mod tests {
     #[test]
     fn nodes_carry_their_raw_sql() {
         let g = graph("WITH a AS (SELECT 1 AS id) SELECT * FROM a");
-        assert!(
-            g.nodes()[0].raw_sql().is_some_and(|s| s.contains("SELECT")),
-            "a CTE node carries its body SQL",
-        );
+        let cte_sql = g.nodes()[0].raw_sql().expect("CTE carries SQL");
+        // Wrapper-plus-body slice (cute-dbt#31): preserves the `name AS
+        // (...)` extent so the compiled-SQL drawer can show the CTE as
+        // the user authored it.
+        assert!(cte_sql.contains("a AS ("), "CTE slice starts at alias");
+        assert!(cte_sql.contains("SELECT 1 AS id"), "CTE slice covers body");
+        assert!(cte_sql.trim_end().ends_with(')'), "CTE slice ends at )");
         assert!(
             g.nodes()[1].raw_sql().is_some(),
             "the terminal node carries the final SELECT",
+        );
+    }
+
+    #[test]
+    fn cte_slice_preserves_sql_comments() {
+        // The point of the span-based slice (cute-dbt#31): SQL comments
+        // authored in the compiled_code survive into raw_sql. dbt
+        // preserves `--` and `/* */` in compiled_code; cute-dbt now
+        // preserves them through to the compiled-SQL drawer.
+        let sql = "with stg AS (\n    -- pulling from raw.users\n    /* note: id only */\n    select id from raw.users\n)\n-- final pass\nselect * from stg";
+        let g = parse_cte_graph(sql).unwrap();
+        let cte_body = g.nodes()[0].raw_sql().expect("CTE body sliced");
+        assert!(
+            cte_body.contains("-- pulling from raw.users"),
+            "line comment preserved in CTE body, got:\n{cte_body}"
+        );
+        assert!(
+            cte_body.contains("/* note: id only */"),
+            "block comment preserved in CTE body, got:\n{cte_body}"
+        );
+        let terminal = g.nodes()[1].raw_sql().expect("terminal sliced");
+        assert!(
+            terminal.contains("-- final pass"),
+            "comment between WITH-clause and final SELECT preserved, got:\n{terminal}"
         );
     }
 

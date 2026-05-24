@@ -177,17 +177,23 @@ pub fn classify_node_role(graph: &CteGraph, node_index: usize) -> NodeRole {
 /// Whitespace-tokenizing heuristic: tokenizes the body, requires a
 /// `select` keyword, exactly one `from` keyword, and no `join` keyword.
 /// Tokens are case-folded and have trailing punctuation (`,`/`;`/`)`)
-/// stripped so a token like `from\n` or `from;` still classifies. A
-/// stricter classifier would require a full AST walk; the CTE engine
-/// already parsed once and the renderer would re-parse to re-classify
-/// — overkill for the visual taxonomy this drives.
+/// stripped so a token like `from\n` or `from;` still classifies. SQL
+/// comments are stripped first (cute-dbt#31) so a `-- pulled from raw`
+/// comment doesn't get counted as a real `from`. A stricter classifier
+/// would require a full AST walk; the CTE engine already parsed once
+/// and the renderer would re-parse to re-classify — overkill for the
+/// visual taxonomy this drives.
 fn is_simple_from_select(sql: &str) -> bool {
+    let stripped = strip_sql_comments(sql);
     let mut has_select = false;
     let mut from_count = 0usize;
-    for raw in sql.split_whitespace() {
+    for raw in stripped.split_whitespace() {
+        // Trim both ends — the engine's slice (cute-dbt#31) puts the
+        // CTE body inside a `name AS (...)` wrapper, so the first
+        // SELECT in `(select` would otherwise be invisible.
         let token = raw
             .to_ascii_lowercase()
-            .trim_end_matches([',', ';', ')'])
+            .trim_matches(['(', ')', ',', ';'])
             .to_owned();
         match token.as_str() {
             "select" => has_select = true,
@@ -197,6 +203,67 @@ fn is_simple_from_select(sql: &str) -> bool {
         }
     }
     has_select && from_count == 1
+}
+
+/// Strip SQL `--` line comments and `/* */` block comments from `sql`,
+/// replacing each with a single space so token boundaries are preserved.
+///
+/// Used as a prefilter for the whitespace-tokenizing classifiers
+/// ([`is_simple_from_select`], [`extract_table_leaf_refs`]) once the
+/// CTE engine started slicing the original `compiled_code` to preserve
+/// authored comments in the drawer (cute-dbt#31). A `-- pulled from
+/// raw.users` comment must not be counted as a real `FROM`.
+///
+/// String-literal-aware: `'--'` inside a quoted string does NOT start a
+/// comment, and `/* */` inside a string is plain text. Quote escaping
+/// follows SQL's doubled-quote convention (`''` inside a `'..'`
+/// literal stays inside the literal).
+fn strip_sql_comments(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut iter = sql.char_indices().peekable();
+    while let Some((_, ch)) = iter.next() {
+        match ch {
+            '\'' | '"' => {
+                let quote = ch;
+                out.push(ch);
+                while let Some((_, next)) = iter.next() {
+                    out.push(next);
+                    if next == quote {
+                        if iter.peek().is_some_and(|(_, c)| *c == quote) {
+                            // Doubled-quote escape — consume and continue inside the string.
+                            let (_, escaped) = iter.next().expect("peek confirmed");
+                            out.push(escaped);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            '-' if iter.peek().is_some_and(|(_, c)| *c == '-') => {
+                iter.next();
+                for (_, c) in iter.by_ref() {
+                    if c == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+                out.push(' ');
+            }
+            '/' if iter.peek().is_some_and(|(_, c)| *c == '*') => {
+                iter.next();
+                let mut prev = '\0';
+                for (_, c) in iter.by_ref() {
+                    if prev == '*' && c == '/' {
+                        break;
+                    }
+                    prev = c;
+                }
+                out.push(' ');
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 /// Per-model entry in the JSON payload — mirrors the design's
@@ -668,7 +735,10 @@ fn find_import_node_id(graph: &CteGraph, ref_name: &str, _model_name: &str) -> O
 /// Returned identifiers are lowercase so the caller can compare
 /// case-insensitively without re-folding.
 fn extract_table_leaf_refs(sql: &str) -> Vec<String> {
-    let tokens: Vec<&str> = sql.split_whitespace().collect();
+    // Strip SQL comments first (cute-dbt#31): a `-- from raw.users`
+    // comment line must not produce a `users` leaf ref.
+    let stripped = strip_sql_comments(sql);
+    let tokens: Vec<&str> = stripped.split_whitespace().collect();
     let mut out = Vec::new();
     for (i, tok) in tokens.iter().enumerate() {
         let lower = tok.to_ascii_lowercase();
@@ -1577,5 +1647,78 @@ mod tests {
         assert_eq!(leaf_segment("model.shop.x"), "x");
         assert_eq!(leaf_segment("x"), "x");
         assert_eq!(leaf_segment(""), "");
+    }
+
+    // ===== strip_sql_comments =====
+
+    #[test]
+    fn strip_sql_comments_removes_line_comment_through_newline() {
+        let stripped = strip_sql_comments("select 1 -- inline comment\nfrom t");
+        assert!(!stripped.contains("inline comment"));
+        assert!(stripped.contains("from t"));
+    }
+
+    #[test]
+    fn strip_sql_comments_removes_block_comment() {
+        let stripped = strip_sql_comments("select /* block */ 1 from t");
+        assert!(!stripped.contains("block"));
+        assert!(stripped.contains("select"));
+        assert!(stripped.contains("from t"));
+    }
+
+    #[test]
+    fn strip_sql_comments_preserves_dash_inside_string_literal() {
+        let stripped = strip_sql_comments("select 'a -- b' from t");
+        assert!(
+            stripped.contains("a -- b"),
+            "string-literal '--' must NOT start a comment, got: {stripped}"
+        );
+    }
+
+    #[test]
+    fn strip_sql_comments_preserves_block_open_inside_string_literal() {
+        let stripped = strip_sql_comments("select '/* not a comment */' from t");
+        assert!(
+            stripped.contains("not a comment"),
+            "string-literal '/*' must NOT open a block comment, got: {stripped}"
+        );
+    }
+
+    #[test]
+    fn strip_sql_comments_handles_doubled_quote_escape_in_string_literal() {
+        let stripped = strip_sql_comments("select 'it''s' -- real comment\nfrom t");
+        assert!(stripped.contains("it''s"), "doubled-quote escape preserved");
+        assert!(
+            !stripped.contains("real comment"),
+            "comment after the string IS stripped, got: {stripped}"
+        );
+    }
+
+    #[test]
+    fn is_simple_from_select_is_robust_to_leading_comment() {
+        // cute-dbt#31: with engine slicing, the import CTE body now
+        // includes its leading comment. The classifier must ignore it.
+        assert!(is_simple_from_select(
+            "-- pulled from raw\nselect id from raw.users"
+        ));
+        assert!(is_simple_from_select("/* block intro */ select * from x"));
+    }
+
+    #[test]
+    fn is_simple_from_select_unaffected_by_keyword_inside_comment() {
+        // A `from` keyword inside a comment must not bump from_count
+        // past 1, which would mis-classify the import as a transform.
+        assert!(is_simple_from_select(
+            "select id from raw.users -- pulled from raw.users earlier today"
+        ));
+    }
+
+    #[test]
+    fn extract_table_leaf_refs_ignores_keyword_inside_comment() {
+        // A `from raw.users` reference inside a `--` line comment must
+        // not produce a `users` leaf ref.
+        let refs =
+            extract_table_leaf_refs("-- pulled from comment_table\nselect id from raw.users");
+        assert_eq!(refs, vec!["users".to_owned()]);
     }
 }

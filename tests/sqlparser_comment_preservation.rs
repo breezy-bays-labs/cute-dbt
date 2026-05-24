@@ -1,21 +1,19 @@
-//! Empirical probe: does sqlparser 0.62's `Display` impl preserve SQL
-//! `--` line comments and `/* */` block comments through the
-//! `parse → to_string` roundtrip that `cte_engine.rs` uses?
+//! Regression gate: documents the sqlparser 0.62 behavior that
+//! motivated cute-dbt's span-based slicing of `compiled_code`
+//! (cute-dbt#31).
 //!
-//! Context: `CteNode::raw_sql` is sourced from `cte.query.to_string()`
-//! (cte_engine.rs:146) and `query.body.to_string()` (cte_engine.rs:151).
-//! If sqlparser drops comments at parse time, the compiled-SQL drawer
-//! shown by the renderer is comment-stripped — a DevX loss for users
-//! who author intentional commentary in their CTEs.
+//! Empirical finding: sqlparser 0.62's `Display` impl drops every
+//! SQL comment shape — `--` line comments outside or inside a CTE,
+//! `/* */` block comments, trailing line comments — through the
+//! `parse → to_string()` roundtrip. The CTE engine therefore slices
+//! each CTE's `raw_sql` from the original `compiled_code` directly,
+//! preserving SQL comments faithfully. See `cte_engine::build_nodes`
+//! and `cte_engine::slice_or_fallback`.
 //!
-//! Empirical finding (cute-dbt#31, 2026-05-23): sqlparser 0.62 drops
-//! every comment shape tested (line/block, inside/outside CTE,
-//! mid-select). The v0.1 fidelity limit was accepted; v0.2+ widening
-//! is tracked in cute-dbt#45.
-//!
-//! The `sqlparser_062_drops_sql_comments` test below is the hard
-//! regression gate — if it ever fails (sqlparser starts preserving),
-//! revisit the cute-dbt#31 decision and the cute-dbt#45 follow-up.
+//! `sqlparser_062_drops_sql_comments` is the **hard regression gate**.
+//! If it ever fails (sqlparser starts preserving comments via
+//! `Display`), the slicing layer's failure mode shifts — re-read
+//! cute-dbt#31 to confirm slicing is still the right call.
 
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -33,16 +31,17 @@ fn roundtrip(sql: &str) -> String {
 
 #[test]
 fn sqlparser_062_drops_sql_comments() {
-    // Hard regression gate locking the v0.1 fidelity limit decision
-    // (cute-dbt#31). If this assertion ever fires, sqlparser has
-    // started preserving comments and the cute-dbt#45 widening can
-    // either ship for free or change shape.
+    // Hard regression gate. If sqlparser ever starts preserving SQL
+    // comments through Display, the cte_engine's span-slicing layer
+    // becomes belt-and-suspenders rather than load-bearing — revisit
+    // cute-dbt#31 to decide whether to drop the slice in favor of the
+    // simpler AST roundtrip.
     let rendered = roundtrip(
         "WITH stg AS (\n  -- intentional comment\n  SELECT id FROM users\n)\nSELECT id FROM stg",
     );
     assert!(
         !rendered.contains("intentional comment"),
-        "sqlparser appears to preserve comments now — revisit cute-dbt#31 / cute-dbt#45. Got: {rendered}"
+        "sqlparser appears to preserve comments now — revisit cute-dbt#31. Got: {rendered}"
     );
 }
 
