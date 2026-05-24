@@ -145,14 +145,46 @@ fn model_with_any_cte_dependency(world: &mut World) {
     world.last_cte_graph = Some(graph);
 }
 
+/// The committed report template — the source of truth for the legend
+/// palette. Read at test time so the legend assertions go through the
+/// actual rendered chrome's color table, not just the producer-side
+/// wire-key projection.
+fn template_html() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("templates")
+        .join("report.html");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// Extract a `JOIN_COLORS` palette entry from the template
+/// (e.g. `inner: "#009E73"` → `"#009E73"`). Scoped to the
+/// `var JOIN_COLORS = { … };` block so other `<wire_key>:` matches
+/// (e.g. `"Segoe UI"` inside a CSS font-family declaration) cannot
+/// pollute the lookup.
+fn legend_color(template: &str, wire_key: &str) -> Option<String> {
+    let block_start = template.find("var JOIN_COLORS")?;
+    let open_brace = template[block_start..].find('{')?;
+    let close_brace = template[block_start + open_brace..].find('}')?;
+    let block_end = block_start + open_brace + close_brace;
+    let block = &template[block_start + open_brace..block_end];
+    let needle = format!("{wire_key}:");
+    let idx = block.find(&needle)?;
+    let tail = &block[idx + needle.len()..];
+    let open = tail.find('"')?;
+    let rest = &tail[open + 1..];
+    let close = rest.find('"')?;
+    Some(rest[..close].to_owned())
+}
+
 #[then("an edge-type color legend is visible")]
 fn edge_legend_visible(_world: &mut World) {
-    // The legend lives in the rendered HTML, in `templates/report.html`.
-    // The structural CI gate `edge-vocab-completeness` enforces that
-    // every EdgeType variant has a `JOIN_COLORS` entry; this BDD step
-    // is the contract assertion that those entries together form the
-    // visible legend. We assert the producer-side projection is
-    // complete by enumerating every variant and checking its wire key.
+    // The legend lives in the rendered HTML's `JOIN_COLORS` map
+    // (`templates/report.html`). The structural CI gate
+    // `edge-vocab-completeness` already enforces snake_case-key
+    // presence; this BDD step asserts the rendered contract — every
+    // `EdgeType` variant has a non-empty `#…` color value in the
+    // committed template.
+    let template = template_html();
     let known: &[EdgeType] = &[
         EdgeType::From,
         EdgeType::Inner,
@@ -165,24 +197,43 @@ fn edge_legend_visible(_world: &mut World) {
     ];
     for edge in known {
         let key = edge_type_wire_key(*edge);
-        assert!(!key.is_empty(), "wire key for {edge:?} is non-empty");
+        let color = legend_color(&template, key)
+            .unwrap_or_else(|| panic!("legend entry for {key} missing from template"));
+        assert!(
+            color.starts_with('#') && color.len() >= 4,
+            "legend color for {key} ({color}) must be a `#…` value",
+        );
     }
 }
 
 #[then("the legend palette is colorblind-safe (not red/green alone)")]
 fn legend_palette_colorblind_safe(_world: &mut World) {
-    // The committed `templates/report.html` defines `JOIN_COLORS` with
-    // non-red-vs-green pairings — the canonical pair the scenario
-    // calls out is the union-arm contrast (`union_all` orange vs
-    // `union_distinct` blue). Asserting via the template would
-    // re-implement the edge-vocab-completeness CI grep; the BDD layer
-    // exercises the contract that the two union arms are visually
-    // distinguishable in the wire vocabulary (which the renderer
-    // matches with the orange/blue palette in the committed template).
-    let all = edge_type_wire_key(EdgeType::UnionAll);
-    let distinct = edge_type_wire_key(EdgeType::UnionDistinct);
+    // The colorblind-safe contract: the two union arms (the .feature's
+    // primary contrast pair) must use distinct colors AND must not be
+    // a pure red/green pairing. Read actual color values from the
+    // committed template so a future palette change that violates the
+    // contract fails this gate.
+    let template = template_html();
+    let union_all = legend_color(&template, "union_all").expect("union_all entry");
+    let union_distinct = legend_color(&template, "union_distinct").expect("union_distinct entry");
     assert_ne!(
-        all, distinct,
-        "union_all and union_distinct must be distinct wire keys for the legend's colorblind-safe split",
+        union_all, union_distinct,
+        "union_all and union_distinct must use distinct colors",
+    );
+    // Reject a literal red/green pairing in either order. The current
+    // palette uses orange (#E69F00) and blue (#0072B2) — well outside
+    // the red/green axis. This guards against a future regression to
+    // a naive green/red split.
+    let pair = (
+        union_all.to_ascii_lowercase(),
+        union_distinct.to_ascii_lowercase(),
+    );
+    let red_green = [
+        ("#ff0000".to_owned(), "#00ff00".to_owned()),
+        ("#00ff00".to_owned(), "#ff0000".to_owned()),
+    ];
+    assert!(
+        !red_green.contains(&pair),
+        "union arm pair is a literal red/green split: {pair:?}",
     );
 }

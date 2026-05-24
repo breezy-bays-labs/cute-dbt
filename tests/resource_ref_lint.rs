@@ -192,6 +192,23 @@ fn empty_href_is_allowed() {
 }
 
 #[test]
+fn mixed_srcset_external_candidate_is_caught() {
+    // A multi-value srcset where the first candidate is a data: URI
+    // and a later candidate is off-document. Passing the whole
+    // srcset into a single resource-ref check would let the off-doc
+    // candidate slip through because the value starts with `data:`.
+    let html = r#"<!DOCTYPE html><html><body>
+        <img srcset="data:image/png;base64,iVBORw0KGgo= 1x, https://tracker.example.com/2x.png 2x">
+    </body></html>"#;
+    let v = scan_violations(html);
+    assert!(
+        v.iter()
+            .any(|x| x.kind == "<img srcset>" && x.value.contains("tracker.example.com")),
+        "expected an <img srcset> violation for the off-document candidate, got {v:?}"
+    );
+}
+
+#[test]
 fn relative_path_script_is_caught() {
     // The single-self-contained-file invariant: nothing in the report
     // may resolve to a sibling file, even if it has no scheme. A

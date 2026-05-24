@@ -173,6 +173,14 @@ fn report_has_diff_scope_banner(world: &mut World, _name: String) {
         "expected diff-scope banner; html[0..500]={}",
         &html[..html.len().min(500)]
     );
+    // The .feature wording says "naming the baseline reference" — the
+    // banner must mention the actual baseline label (the committed
+    // fixture name passed to the run loop).
+    assert!(
+        html.contains("jaffle-shop-baseline.json"),
+        "expected banner to name the baseline reference; html[0..500]={}",
+        &html[..html.len().min(500)]
+    );
 }
 
 #[then(regex = r#"^"report\.html" contains a section for "([^"]+)"$"#)]

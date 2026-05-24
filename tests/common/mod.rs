@@ -136,6 +136,28 @@ fn check_attr(
     }
 }
 
+/// Validate `<img srcset>` by splitting on commas: each candidate is
+/// `<url> [<descriptor>]` (e.g. `data:image/png;... 1x, https://… 2x`).
+/// Passing the whole srcset value into `is_forbidden_resource_ref`
+/// would let a multi-value `data:foo 1x, https://attacker.com 2x`
+/// bypass detection — the first candidate's `data:` prefix would mark
+/// the whole value as allowed.
+fn check_srcset(attrs: &tl::Attributes<'_>, out: &mut Vec<ResourceRefViolation>) {
+    let Some(Some(raw)) = attrs.get("srcset") else {
+        return;
+    };
+    let value = raw.as_utf8_str();
+    for candidate in value.split(',') {
+        let url = candidate.split_whitespace().next().unwrap_or("").trim();
+        if is_forbidden_resource_ref(url) {
+            out.push(ResourceRefViolation {
+                kind: "<img srcset>",
+                value: url.to_owned(),
+            });
+        }
+    }
+}
+
 fn find_css_external_refs(css: &str, out: &mut Vec<ResourceRefViolation>) {
     let lower = css.to_ascii_lowercase();
     let mut i = 0;
@@ -190,7 +212,7 @@ pub fn scan_resource_refs(html: &str) -> Vec<ResourceRefViolation> {
             "link" => check_attr(attrs, "href", "<link href>", &mut out),
             "img" => {
                 check_attr(attrs, "src", "<img src>", &mut out);
-                check_attr(attrs, "srcset", "<img srcset>", &mut out);
+                check_srcset(attrs, &mut out);
             }
             "style" => {
                 let css = tag.inner_text(parser);
