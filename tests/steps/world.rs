@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use cute4dbt::domain::{CteGraph, EdgeType, InScopeSet, Manifest, ModelInScopeSet, ModifiedSet};
+use cute4dbt::domain::{CteGraph, EdgeType, InScopeSet, Manifest, ModelInScopeSet};
 
 #[derive(Debug, Default, cucumber::World)]
 pub struct World {
@@ -23,10 +23,6 @@ pub struct World {
     /// Captured stderr of the last subprocess invocation.
     pub last_stderr: String,
 
-    /// Captured stdout of the last subprocess invocation.
-    #[allow(dead_code)]
-    pub last_stdout: String,
-
     /// Contents of the report file at `out_path`, if the subprocess
     /// wrote one. `None` when the subprocess failed closed.
     pub report_html: Option<String>,
@@ -37,10 +33,6 @@ pub struct World {
 
     /// Synthetic `baseline` manifest built by Given steps.
     pub baseline_manifest: Option<Manifest>,
-
-    /// Most-recent `modified_set` result.
-    #[allow(dead_code)]
-    pub last_modified: Option<ModifiedSet>,
 
     /// Most-recent `in_scope_unit_tests` result.
     pub last_in_scope: Option<InScopeSet>,
@@ -88,7 +80,7 @@ pub enum FixtureChoice {
     /// `jaffle-shop-current.json` + `jaffle-shop-baseline.json`. The
     /// committed pair is fully compiled, so an out-of-scope
     /// uncompiled assertion is vacuously satisfied (no in-scope
-    /// uncompiled nodes) and the run exits 0.
-    #[allow(dead_code)]
+    /// uncompiled nodes) and the run exits 0. Set by
+    /// `given_out_of_scope_uncompiled` in `fail_closed.rs`.
     OutOfScopeUncompiled,
 }

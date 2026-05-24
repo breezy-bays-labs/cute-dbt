@@ -96,10 +96,10 @@ pub fn unit_test_for(name: &str, target_bare: &str) -> UnitTest {
 /// Insert a `Node` into a `Manifest`, returning the modified manifest.
 #[must_use]
 pub fn with_node(mut manifest: Manifest, node: Node) -> Manifest {
-    // The HashMap is owned via `manifest.nodes()` (a reference). To
-    // mutate, deconstruct via serde round-trip (POD-only domain has no
-    // builder mutation method by ADR-1). The round-trip is cheap on a
-    // small synthetic manifest.
+    // The HashMap is reached via a borrowing accessor (`manifest.nodes()`).
+    // To mutate, clone the inner maps (POD-only domain has no builder
+    // mutation method by ADR-1). Cloning is cheap on the small
+    // synthetic manifests these scenarios build.
     let mut nodes: HashMap<NodeId, Node> = manifest.nodes().clone();
     nodes.insert(node.id().clone(), node);
     let unit_tests = manifest.unit_tests().clone();

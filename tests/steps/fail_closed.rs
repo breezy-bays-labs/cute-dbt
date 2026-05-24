@@ -193,7 +193,6 @@ fn run_subprocess(
     ]);
     world.last_exit_code = output.status.code();
     world.last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    world.last_stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     world.report_html = std::fs::read_to_string(&out).ok();
     world.out_path = Some(out);
 }

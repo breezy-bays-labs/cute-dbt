@@ -145,17 +145,18 @@ fn then_no_protocol_relative(world: &mut World, _label: String) {
 
 #[then(regex = r#"^the favicon is a "([^"]+)" URI or absent$"#)]
 fn then_favicon_data_or_absent(world: &mut World, _label: String) {
+    // Delegate to the shared resource-ref lint: a `<link rel="icon"
+    // href="…">` whose href is not in the narrow allowlist (empty,
+    // #fragment, data:, mailto:) is caught by
+    // `common::scan_resource_refs` via the `<link href>` check, with
+    // `<script>` bodies stripped first so template-literal
+    // substrings inside minified bundles don't false-positive. The
+    // earlier ad-hoc `html.contains("href=\"data:")` test passed
+    // trivially whenever ANY data: URI appeared anywhere in the
+    // document, even if the favicon's actual href was off-document.
     let html = world
         .report_html
         .as_ref()
         .expect("a report.html was loaded");
-    // Check that any favicon link uses a data: URI or there's no
-    // favicon link at all.
-    let has_favicon_link = html.contains("rel=\"icon\"") || html.contains("rel='icon'");
-    if has_favicon_link {
-        assert!(
-            html.contains("href=\"data:") || html.contains("href='data:"),
-            "favicon link present but not a data: URI"
-        );
-    }
+    common::assert_no_external_refs(html);
 }
