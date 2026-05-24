@@ -310,6 +310,7 @@ mod tests {
             "model",
             Checksum::new("sha256", "c"),
             compiled.map(str::to_owned),
+            None,
             DependsOn::default(),
         )
     }

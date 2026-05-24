@@ -375,6 +375,25 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
 .sql-string  { color: #006d3a; }
 .sql-comment { color: #6a6a72; font-style: italic; }
 .sql-jinja   { color: #982c61; }
+
+/* cute-dbt#47 — Model SQL expandable section (raw Jinja, model-level).
+   Sits between test-selection and the CTE DAG. Collapsed by default. */
+.model-sql { margin-bottom: 1rem; }
+.model-sql > details > summary { cursor: pointer; font-weight: 600; }
+.model-sql-summary-hint { font-weight: 400; color: #6a6a72; margin-left: 0.4rem; font-size: 0.9em; }
+.model-sql-block {
+  padding-top: 2.25rem;
+  /* User-resizable: drag the bottom-right corner to taste. min-height
+     keeps it from collapsing past a useful preview; no max-height so the
+     user can grow it freely. */
+  height: 24rem;
+  min-height: 8rem;
+  overflow: auto;
+  resize: vertical;
+}
+/* Sit further from the right edge so the button doesn't overlap the
+   vertical scrollbar that appears when the SQL is long. */
+.model-sql-wrap .sql-copy { right: 22px; }
 </style>
 </head>
 <body>
@@ -416,6 +435,16 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
   <details class="test-details">
     <summary>Test details</summary>
     <div class="test-details-body"></div>
+  </details>
+</section>
+
+<section class="model-sql" aria-label="Model SQL">
+  <details class="model-sql-details">
+    <summary>Model SQL<span class="model-sql-summary-hint">raw, with Jinja</span></summary>
+    <div class="sql-block-wrap model-sql-wrap">
+      <button type="button" class="sql-copy model-sql-copy">Copy</button>
+      <pre class="sql-block model-sql-block"><code class="model-sql-code"></code></pre>
+    </div>
   </details>
 </section>
 
@@ -463,7 +492,7 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
 
 </div>
 
-<script type="application/json" id="cute-dbt-data">{"baseline":"tests/fixtures/jaffle-shop-baseline.json","models":[{"name":"stg_customers","dag":{"nodes":[{"id":"source","role":"import","ref":"source"},{"id":"renamed","role":"transform"},{"id":"stg_customers","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"stg_customers","edge_type":"from"}]},"compiled_sql":{"renamed":"renamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)","source":"source as (\n    select * from \"jaffle_shop\".\"main\".\"raw_customers\"\n\n)","stg_customers":"select * from renamed"},"tests":[{"id":"unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns","name":"test_stg_customers_renames_columns","target_model":"stg_customers","description":"stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows — no real customer data.\n","tags":["quality","smoke"],"meta":{"owner":"data-eng","priority":"high"},"defined_in":"models/staging/unit_tests.yml","given":[{"input":"ref('raw_customers')","bound_to_node":"source","rows":[{"first_name":"Alice","id":1,"last_name":"A."},{"first_name":"Bob","id":2,"last_name":"B."}],"format":"dict"}],"expected":{"rows":[{"customer_id":1,"first_name":"Alice","last_name":"A."},{"customer_id":2,"first_name":"Bob","last_name":"B."}],"format":"dict"}}],"is_recursive":false}]}</script>
+<script type="application/json" id="cute-dbt-data">{"baseline":"tests/fixtures/jaffle-shop-baseline.json","models":[{"name":"stg_customers","dag":{"nodes":[{"id":"source","role":"import","ref":"source"},{"id":"renamed","role":"transform"},{"id":"stg_customers","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"stg_customers","edge_type":"from"}]},"compiled_sql":{"renamed":"renamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)","source":"source as (\n    select * from \"jaffle_shop\".\"main\".\"raw_customers\"\n\n)","stg_customers":"select * from renamed"},"raw_sql":"with source as (\n\n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project. Modified body — adds a trim() pass on names so\n    PR 5's StateComparator sees the body checksum change.\n    #}\n    select * from {{ ref('raw_customers') }}\n\n),\n\nrenamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)\n\nselect * from renamed","tests":[{"id":"unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns","name":"test_stg_customers_renames_columns","target_model":"stg_customers","description":"stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows — no real customer data.\n","tags":["quality","smoke"],"meta":{"owner":"data-eng","priority":"high"},"defined_in":"models/staging/unit_tests.yml","given":[{"input":"ref('raw_customers')","bound_to_node":"source","rows":[{"first_name":"Alice","id":1,"last_name":"A."},{"first_name":"Bob","id":2,"last_name":"B."}],"format":"dict"}],"expected":{"rows":[{"customer_id":1,"first_name":"Alice","last_name":"A."},{"customer_id":2,"first_name":"Bob","last_name":"B."}],"format":"dict"}}],"is_recursive":false}]}</script>
 
 <script>
 /*! jQuery v3.7.1 | (c) OpenJS Foundation and other contributors | jquery.org/license */
@@ -3944,6 +3973,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     renderBanner();
     if (!DATA.models.length) {
       $(".test-selection").hide();
+      $(".model-sql").hide();
       $(".cte-dag").hide();
       $(".panel-row").hide();
       return;
@@ -4035,6 +4065,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     var t = currentTest();
     $(".recursive-banner").prop("hidden", !(m && m.is_recursive));
     renderTestDetails(t);
+    renderModelSql(m);
     renderDagLegend();
     renderDag();
     renderSegmentedToggle();
@@ -4092,6 +4123,28 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
           .append($("<code>").addClass("td-defined-in").text(t.defined_in))
       );
     }
+  }
+
+  // cute-dbt#47 — populate (or hide) the per-model Model SQL section.
+  // The askama template emits one static <section class="model-sql">; JS
+  // rebinds its <code> body and Copy handler each time the user selects a
+  // different model. When `raw_sql` is missing, hide the whole section
+  // (defensive — dbt 1.8+ populates raw_code on every node).
+  function renderModelSql(m) {
+    var $section = $(".model-sql");
+    var raw = m && m.raw_sql;
+    if (!raw) {
+      $section.hide();
+      return;
+    }
+    $section.show();
+    $section.find(".model-sql-code").html(highlightSql(raw));
+    var $copy = $section.find(".model-sql-copy");
+    $copy.off("click.cuteDbtModelSql").on("click.cuteDbtModelSql", function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      copySql(raw, $(this));
+    });
   }
 
   function renderDagLegend() {
@@ -4382,11 +4435,18 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   // matched FIRST as opaque blobs so keyword recognition can't reach
   // inside them. Without this, a comment like `-- pulled from raw.users`
   // would render the `from` token as a keyword (cute-dbt#31 + #40 CR-1).
+  //
+  // Jinja arms (cute-dbt#47):
+  //   - `{# ... #}` styles as a comment (semantically equivalent to `--`).
+  //   - `{{ ... }}` and `{% ... %}` style as jinja (control flow / refs).
+  // Order matters: comment arm precedes the tag arm so `{#...#}` isn't
+  // swallowed by a hypothetical wider tag pattern.
   var SQL_TOKEN_RE = new RegExp(
-    "(\\/\\*[\\s\\S]*?\\*\\/)" +              // /* block comment */
-    "|(--[^\\n]*)" +                          // -- line comment
-    "|('(?:[^'\\\\]|\\\\.|'')*')" +           // 'string literal' (escapes: \' and '')
-    "|(\\{\\{[^}]+\\}\\})" +                  // {{ jinja }}
+    "(\\/\\*[\\s\\S]*?\\*\\/)" +                              // /* block comment */
+    "|(--[^\\n]*)" +                                          // -- line comment
+    "|('(?:[^'\\\\]|\\\\.|'')*')" +                           // 'string literal' (escapes: \' and '')
+    "|(\\{#[\\s\\S]*?#\\})" +                                 // {# jinja comment #}
+    "|(\\{\\{[\\s\\S]*?\\}\\}|\\{%[\\s\\S]*?%\\})" +          // {{ jinja }} or {% jinja %}
     "|\\b(" +
       "select|from|where|left|right|inner|outer|full|cross|join|on|using|" +
       "group\\s+by|order\\s+by|partition\\s+by|having|as|and|or|not|" +
@@ -4397,12 +4457,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   );
   function highlightSql(sql) {
     var s = escapeHtmlForBody(sql);
-    return s.replace(SQL_TOKEN_RE, function (_match, block, line, str, jinja, kw) {
-      if (block) return '<span class="sql-comment">' + block + '</span>';
-      if (line) return '<span class="sql-comment">' + line + '</span>';
-      if (str) return '<span class="sql-string">' + str + '</span>';
-      if (jinja) return '<span class="sql-jinja">' + jinja + '</span>';
-      if (kw) return '<span class="sql-keyword">' + kw + '</span>';
+    return s.replace(SQL_TOKEN_RE, function (_match, block, line, str, jcomment, jinja, kw) {
+      if (block)    return '<span class="sql-comment">' + block + '</span>';
+      if (line)     return '<span class="sql-comment">' + line + '</span>';
+      if (str)      return '<span class="sql-string">'  + str + '</span>';
+      if (jcomment) return '<span class="sql-comment">' + jcomment + '</span>';
+      if (jinja)    return '<span class="sql-jinja">'   + jinja + '</span>';
+      if (kw)       return '<span class="sql-keyword">' + kw + '</span>';
       return _match;
     });
   }

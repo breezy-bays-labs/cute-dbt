@@ -310,6 +310,14 @@ pub struct ModelPayload {
     /// for the terminal). Empty when the CTE engine could not parse
     /// (the model card still renders the metadata + tests + an empty DAG).
     pub compiled_sql: BTreeMap<String, String>,
+    /// Raw Jinja source of the model file (`models/**/*.sql`).
+    /// Surfaced verbatim in the per-model "Model SQL" expandable
+    /// section (cute-dbt#47). `None` only when the manifest lacks
+    /// `raw_code` (defensive — dbt 1.8+ populates this on every node).
+    /// Skipped from the JSON payload when `None` so older fixtures
+    /// stay stable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_sql: Option<String>,
     /// Unit tests targeting this model that are in scope. Empty
     /// `[]` triggers the "0 unit tests wired" empty state.
     pub tests: Vec<TestPayload>,
@@ -575,6 +583,10 @@ fn build_model_payload(model: &Node, tests: &[(&str, &UnitTest)]) -> ModelPayloa
     let nodes = build_node_payloads(&graph, &bare_name);
     let edges = build_edge_payloads(&graph, &bare_name);
     let compiled_sql = build_compiled_sql(&graph, &bare_name, compiled_code);
+    let raw_sql = model
+        .raw_code()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
     let test_payloads = tests
         .iter()
         .map(|(id, ut)| build_test_payload(id, ut, &graph, &bare_name))
@@ -583,6 +595,7 @@ fn build_model_payload(model: &Node, tests: &[(&str, &UnitTest)]) -> ModelPayloa
         name: bare_name,
         dag: DagPayload { nodes, edges },
         compiled_sql,
+        raw_sql,
         tests: test_payloads,
         is_recursive,
     }
@@ -1091,11 +1104,21 @@ mod tests {
     }
 
     fn model_node(id: &str, body: &str, compiled: Option<&str>) -> Node {
+        model_node_with_raw(id, body, compiled, None)
+    }
+
+    fn model_node_with_raw(
+        id: &str,
+        body: &str,
+        compiled: Option<&str>,
+        raw: Option<&str>,
+    ) -> Node {
         Node::new(
             NodeId::new(id),
             "model",
             checksum(body),
             compiled.map(str::to_owned),
+            raw.map(str::to_owned),
             DependsOn::default(),
         )
     }
@@ -1155,6 +1178,47 @@ mod tests {
         assert_eq!(model.name, "stg_orders");
         assert_eq!(model.tests.len(), 1);
         assert_eq!(model.tests[0].name, "test_one");
+    }
+
+    #[test]
+    fn build_payload_carries_raw_sql_when_node_has_raw_code() {
+        // cute-dbt#47 — verify the per-model payload surfaces `raw_code`
+        // verbatim into `raw_sql` so the template's Model SQL section can
+        // render it. Jinja content (refs + comments) is preserved.
+        let raw = "{# header #}\nselect * from {{ ref('upstream') }}";
+        let compiled = "select * from raw_upstream";
+        let node = model_node_with_raw("model.shop.stg_x", "body", Some(compiled), Some(raw));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.stg_x")]);
+        let payload = build_payload(&manifest, &InScopeSet::new(), &models, "baseline.json");
+        assert_eq!(payload.models.len(), 1);
+        assert_eq!(payload.models[0].raw_sql.as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn build_payload_raw_sql_is_none_when_node_has_no_raw_code() {
+        // Defensive — older manifests / hand-crafted fixtures lacking
+        // `raw_code` produce `raw_sql = None`, which the template handler
+        // hides the section for.
+        let node = model_node("model.shop.stg_y", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.stg_y")]);
+        let payload = build_payload(&manifest, &InScopeSet::new(), &models, "baseline.json");
+        assert_eq!(payload.models.len(), 1);
+        assert!(payload.models[0].raw_sql.is_none());
+    }
+
+    #[test]
+    fn build_payload_raw_sql_is_none_when_raw_code_is_empty_string() {
+        // dbt populates `raw_code: ""` for some node types (e.g. seeds);
+        // treat empty string identically to `None` so the template doesn't
+        // render an empty Model SQL section.
+        let node = model_node_with_raw("model.shop.stg_z", "body", Some("select 1"), Some(""));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.stg_z")]);
+        let payload = build_payload(&manifest, &InScopeSet::new(), &models, "baseline.json");
+        assert_eq!(payload.models.len(), 1);
+        assert!(payload.models[0].raw_sql.is_none());
     }
 
     #[test]

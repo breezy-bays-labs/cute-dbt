@@ -484,6 +484,7 @@ mod tests {
             "model",
             Checksum::new("sha256", checksum),
             Some("select 1".to_owned()),
+            None,
             DependsOn::default(),
         )
     }
@@ -494,6 +495,7 @@ mod tests {
             NodeId::new(full_id),
             resource_type,
             Checksum::new("sha256", "x"),
+            None,
             None,
             DependsOn::default(),
         )

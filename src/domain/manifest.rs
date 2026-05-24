@@ -144,6 +144,11 @@ impl DependsOn {
 /// selects the in-scope set, raising
 /// [`PreflightError::NotCompiled`](crate::domain::preflight::PreflightError::NotCompiled)
 /// only for in-scope unit-test targets that have `compiled_code: null`.
+///
+/// `raw_code` is the model's Jinja source (pre-compile) — populated by
+/// dbt 1.8+ on every node. The renderer (cute-dbt#47) surfaces it in
+/// the per-model Model SQL section. `None` is tolerated so older
+/// manifests still deserialize.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     id: NodeId,
@@ -151,6 +156,8 @@ pub struct Node {
     checksum: Checksum,
     #[serde(default)]
     compiled_code: Option<String>,
+    #[serde(default)]
+    raw_code: Option<String>,
     #[serde(default)]
     depends_on: DependsOn,
 }
@@ -163,6 +170,7 @@ impl Node {
         resource_type: impl Into<String>,
         checksum: Checksum,
         compiled_code: Option<String>,
+        raw_code: Option<String>,
         depends_on: DependsOn,
     ) -> Self {
         Self {
@@ -170,6 +178,7 @@ impl Node {
             resource_type: resource_type.into(),
             checksum,
             compiled_code,
+            raw_code,
             depends_on,
         }
     }
@@ -197,6 +206,13 @@ impl Node {
     #[must_use]
     pub fn compiled_code(&self) -> Option<&str> {
         self.compiled_code.as_deref()
+    }
+
+    /// Raw Jinja source of the model file (`models/**/*.sql`), if the
+    /// manifest carries one. dbt 1.8+ populates this on every node.
+    #[must_use]
+    pub fn raw_code(&self) -> Option<&str> {
+        self.raw_code.as_deref()
     }
 
     /// Forward dependency edges declared in the manifest.
@@ -388,12 +404,17 @@ mod tests {
             "model",
             sample_checksum(),
             Some("select 1".to_owned()),
+            Some("{{ config(materialized='view') }} select 1".to_owned()),
             DependsOn::default(),
         );
         assert_eq!(n.id(), &id);
         assert_eq!(n.resource_type(), "model");
         assert_eq!(n.checksum(), &sample_checksum());
         assert_eq!(n.compiled_code(), Some("select 1"));
+        assert_eq!(
+            n.raw_code(),
+            Some("{{ config(materialized='view') }} select 1")
+        );
         assert_eq!(n.depends_on(), &DependsOn::default());
     }
 
@@ -403,6 +424,7 @@ mod tests {
             NodeId::new("model.shop.parsed_only"),
             "model",
             sample_checksum(),
+            None,
             None,
             DependsOn::default(),
         );
@@ -460,6 +482,7 @@ mod tests {
                 "model",
                 sample_checksum(),
                 Some("select 1".to_owned()),
+                None,
                 DependsOn::default(),
             ),
         );
