@@ -42,8 +42,9 @@ automatically — no extra flag needed.
 ## Branch + PR
 
 - Always branch off `main`; never push directly. The repo enforces this for
-  ongoing work. (The genesis commit is the one-time exception — an empty
-  repo cannot accept a PR targeting `main`.)
+  ongoing work via branch protection (see [Branch protection](#branch-protection)
+  below). The genesis commit is the one-time historical exception — an
+  empty repo could not accept a PR targeting `main`.
 - Use worktrees for parallel work:
   `git worktree add ../cute-dbt-issue-N -b <area>-<issue>-<slug>`.
 - Title: `<conventional-prefix>(<area>): #<issue> — <one-liner>` (e.g.
@@ -51,6 +52,78 @@ automatically — no extra flag needed.
 - Body: include `Closes #N` to link to the sub-issue.
 - **1 PR closes exactly 1 sub-issue** (per the org issue-hierarchy convention).
   Never names like `PR2.a`, `Wave 1 PR-A`, `Stage 3.1`.
+
+## Branch protection
+
+`main` is protected via GitHub branch protection rules. The canonical
+policy is committed at [`.github/branch-protection.json`](.github/branch-protection.json);
+the live state is queryable at
+`GET /repos/breezy-bays-labs/cute-dbt/branches/main/protection`.
+
+**What is enforced:**
+
+- **PRs required.** No direct pushes to `main` from any user, including
+  the repo owner (`enforce_admins: true`). The genesis-commit one-time
+  exception is historical and does not apply to ongoing work.
+- **All required CI checks must pass** before merge — the required-check
+  set is listed below.
+- **Linear history.** Squash-merge only on `main`. Non-linear merges
+  are blocked (`required_linear_history: true`); the repo's UI still
+  exposes merge + rebase buttons, but they fail policy on `main`.
+- **No force-pushes, no branch deletion.** `main` cannot be rewritten
+  or removed.
+- **Conversation resolution required.** Unresolved review threads —
+  bot or human — block the merge button.
+
+**What is NOT enforced (solo-phase posture):**
+
+- **No required reviewers.** GitHub does not permit a PR author to
+  approve their own PR; as a solo project, requiring a review would
+  permanently block self-merge. The `## Branch + PR` rules above are
+  the operative discipline for the author. Review-required protection
+  will be added when external contributors arrive (v1.0+, alongside
+  the first crates.io publish).
+
+**Required status checks** — the CI job names that must succeed
+before merge, in sync with `.github/workflows/ci.yml`:
+
+- `Format`
+- `Clippy`
+- `Test (linux-x86)` / `Test (macos-arm)` / `Test (macos-x86)`
+- `Coverage`
+- `MSRV (1.85)`
+- `cargo-deny (advisories + licenses + bans)`
+- `cargo doc (warnings as errors)`
+- `Non-mirror guard (no workspace / no deny.wrappers / no API shim)`
+- `EdgeType enum/label completeness guard`
+- `Baseline-required scenario invariant`
+- `Feature file count (==6)`
+- `Synthetic-only fixture gate (every fixture listed in MANIFEST.toml)`
+- `Asset-provenance gate (every asset listed in MANIFEST.toml)`
+- `Example report is byte-identical to renderer output`
+- `Resource-ref lint (real loading constructs)`
+- `Headless zero-egress proof (file://, network blocked)`
+- `BDD outer loop (cucumber-rs, cargo test --test bdd)`
+- `crap4rs scorecard`
+
+Bot review checks (`CodeRabbit`, `Gemini`) are intentionally **not**
+required: they rate-limit on rapid-cycle PR waves and would
+unnecessarily block otherwise-green merges. Bot findings remain
+advisory; PR authors still address them on the visible-disposition
+discipline.
+
+When a new mandatory CI job is added or an existing job is renamed,
+update both `.github/workflows/ci.yml` and
+`.github/branch-protection.json` in the same PR, then re-apply via:
+
+```bash
+gh api -X PUT repos/breezy-bays-labs/cute-dbt/branches/main/protection \
+  --input .github/branch-protection.json
+```
+
+If the gate has a local mirror in `lefthook.yml` (e.g. `feature-count`),
+update that file too — silent drift between the CI gate and the local
+pre-push mirror was the failure mode that delayed PR 15.
 
 ## Architecture discipline
 

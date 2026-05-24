@@ -1,0 +1,37 @@
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": [
+      "Format",
+      "Clippy",
+      "Test (linux-x86)",
+      "Test (macos-arm)",
+      "Test (macos-x86)",
+      "Coverage",
+      "MSRV (1.85)",
+      "cargo-deny (advisories + licenses + bans)",
+      "cargo doc (warnings as errors)",
+      "Non-mirror guard (no workspace / no deny.wrappers / no API shim)",
+      "EdgeType enum/label completeness guard",
+      "Baseline-required scenario invariant",
+      "Feature file count (==6)",
+      "Synthetic-only fixture gate (every fixture listed in MANIFEST.toml)",
+      "Asset-provenance gate (every asset listed in MANIFEST.toml)",
+      "Example report is byte-identical to renderer output",
+      "Resource-ref lint (real loading constructs)",
+      "Headless zero-egress proof (file://, network blocked)",
+      "BDD outer loop (cucumber-rs, cargo test --test bdd)",
+      "crap4rs scorecard"
+    ]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": null,
+  "restrictions": null,
+  "required_linear_history": true,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "block_creations": false,
+  "required_conversation_resolution": true,
+  "lock_branch": false,
+  "allow_fork_syncing": true
+}
