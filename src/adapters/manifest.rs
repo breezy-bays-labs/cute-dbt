@@ -92,6 +92,8 @@ struct WireNode {
     #[serde(default)]
     compiled_code: Option<String>,
     #[serde(default)]
+    raw_code: Option<String>,
+    #[serde(default)]
     depends_on: DependsOn,
 }
 
@@ -177,6 +179,7 @@ impl WireManifest {
                     wire.resource_type,
                     wire.checksum,
                     wire.compiled_code,
+                    wire.raw_code,
                     wire.depends_on,
                 );
                 (id, node)
@@ -472,6 +475,58 @@ mod tests {
                 .map(String::as_str),
             Some("{% macro helper() %}{% endmacro %}")
         );
+    }
+
+    #[test]
+    fn parse_manifest_threads_raw_code_through_to_domain_node() {
+        // cute-dbt#47 — `raw_code` is the model's Jinja source; the
+        // adapter must thread it from the wire DTO into the domain Node
+        // verbatim (Jinja comments + refs preserved). Newline + nested
+        // quotes are JSON-escaped in the literal below.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.stg_x": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "abc" }},
+                  "compiled_code": "select 1",
+                  "raw_code": "{{# header #}}\nselect * from {{{{ ref('upstream') }}}}"
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid v12 manifest");
+        let node = manifest
+            .node(&NodeId::new("model.shop.stg_x"))
+            .expect("stg_x present");
+        assert_eq!(
+            node.raw_code(),
+            Some("{# header #}\nselect * from {{ ref('upstream') }}")
+        );
+    }
+
+    #[test]
+    fn parse_manifest_tolerates_a_node_missing_raw_code() {
+        // Older fixtures / hand-crafted stubs may lack `raw_code`. The
+        // adapter accepts it (`#[serde(default)]`) and surfaces `None`.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.stg_y": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "def" }},
+                  "compiled_code": "select 1"
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid v12 manifest");
+        let node = manifest
+            .node(&NodeId::new("model.shop.stg_y"))
+            .expect("stg_y present");
+        assert!(node.raw_code().is_none());
     }
 
     #[test]

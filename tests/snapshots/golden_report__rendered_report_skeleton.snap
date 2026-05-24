@@ -1,6 +1,5 @@
 ---
 source: tests/golden_report.rs
-assertion_line: 104
 expression: skeleton
 ---
 <!DOCTYPE html>
@@ -52,6 +51,16 @@ expression: skeleton
   <details class="test-details">
     <summary>Test details</summary>
     <div class="test-details-body"></div>
+  </details>
+</section>
+
+<section class="model-sql" aria-label="Model SQL">
+  <details class="model-sql-details">
+    <summary>Model SQL<span class="model-sql-summary-hint">raw, with Jinja</span></summary>
+    <div class="sql-block-wrap model-sql-wrap">
+      <button type="button" class="sql-copy model-sql-copy">Copy</button>
+      <pre class="sql-block model-sql-block"><code class="model-sql-code"></code></pre>
+    </div>
   </details>
 </section>
 

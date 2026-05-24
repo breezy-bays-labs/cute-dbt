@@ -71,6 +71,7 @@ pub fn model_node(bare: &str, checksum: &str, compiled: Option<&str>) -> Node {
         "model",
         Checksum::new("sha256", checksum),
         compiled.map(str::to_owned),
+        None,
         DependsOn::default(),
     )
 }
