@@ -656,7 +656,16 @@ fn find_import_node_id(graph: &CteGraph, ref_name: &str) -> Option<String> {
         if !is_leaf_binding_candidate(graph, idx) {
             continue;
         }
-        if node.body_leaf_table_refs().iter().any(|t| t == &target) {
+        // The engine already lowercases body_leaf_table_refs at extract
+        // time (cte_engine.rs::push_leaf), so the case-fold here is
+        // belt-and-braces — defends pass-2 against any future engine
+        // change that ships raw-case refs, and keeps the contract
+        // symmetric with pass-1's `eq_ignore_ascii_case` (Gemini PR 17).
+        if node
+            .body_leaf_table_refs()
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(&target))
+        {
             return Some(node.name().to_owned());
         }
     }
