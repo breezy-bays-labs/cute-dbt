@@ -73,13 +73,14 @@ pre-push:
         fi
       timeout: 15s
     feature-count:
-      # Asserts the 5-feature invariant (5 .feature files; not 6 — the
-      # README is not a feature).
+      # Asserts the 6-feature invariant (bumped from 5 in PR 14 when
+      # config.feature joined the contract — cute-dbt#24). Mirrors the
+      # `feature-count` CI job; the README is not a feature.
       run: |
         set -euo pipefail
         count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
-        if [ "$count" != "5" ]; then
-          echo "feature-count: expected 5 .feature files, found $count"
+        if [ "$count" != "6" ]; then
+          echo "feature-count: expected 6 .feature files, found $count"
           exit 1
         fi
       timeout: 5s
