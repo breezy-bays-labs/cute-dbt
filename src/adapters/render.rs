@@ -149,9 +149,10 @@ pub fn bind_import_to_given<'t>(
 /// Classify a graph node into a [`NodeRole`].
 ///
 /// The terminal node (whose name equals [`TERMINAL_NODE_NAME`]) is
-/// `Final`. A CTE with zero incoming edges and a body that consists of a
-/// plain `SELECT … FROM <single relation>` is `Import`. Everything else
-/// is `Transform`.
+/// `Final`. A CTE with zero incoming edges whose body the engine
+/// classified as `is_simple_from_shape` is `Import`. Everything else
+/// is `Transform`. The renderer reads the engine-computed POD fact
+/// directly; it never re-parses the CTE body slice (cute-dbt#40).
 #[must_use]
 pub fn classify_node_role(graph: &CteGraph, node_index: usize) -> NodeRole {
     let Some(node) = graph.nodes().get(node_index) else {
@@ -164,136 +165,11 @@ pub fn classify_node_role(graph: &CteGraph, node_index: usize) -> NodeRole {
     if has_incoming {
         return NodeRole::Transform;
     }
-    if node.raw_sql().is_some_and(is_simple_from_select) {
+    if node.is_simple_from_shape() {
         NodeRole::Import
     } else {
         NodeRole::Transform
     }
-}
-
-/// `true` when `sql` is a single `SELECT … FROM <relation>` with no joins
-/// and no further FROM clauses — the import-CTE shape.
-///
-/// Whitespace-tokenizing heuristic: tokenizes the body, requires a
-/// `select` keyword, exactly one `from` keyword, and no `join` keyword.
-/// Tokens are case-folded and have trailing punctuation (`,`/`;`/`)`)
-/// stripped so a token like `from\n` or `from;` still classifies. SQL
-/// comments are stripped first (cute-dbt#31) so a `-- pulled from raw`
-/// comment doesn't get counted as a real `from`. A stricter classifier
-/// would require a full AST walk; the CTE engine already parsed once
-/// and the renderer would re-parse to re-classify — overkill for the
-/// visual taxonomy this drives.
-fn is_simple_from_select(sql: &str) -> bool {
-    let stripped = strip_sql_comments(sql);
-    let mut has_select = false;
-    let mut from_count = 0usize;
-    for raw in stripped.split_whitespace() {
-        // Trim both ends — the engine's slice (cute-dbt#31) puts the
-        // CTE body inside a `name AS (...)` wrapper, so the first
-        // SELECT in `(select` would otherwise be invisible.
-        let token = raw
-            .to_ascii_lowercase()
-            .trim_matches(['(', ')', ',', ';'])
-            .to_owned();
-        match token.as_str() {
-            "select" => has_select = true,
-            "join" => return false,
-            "from" => from_count += 1,
-            _ => {}
-        }
-    }
-    has_select && from_count == 1
-}
-
-/// Strip SQL `--` line comments and `/* */` block comments from `sql`,
-/// replacing each with a single space so token boundaries are preserved.
-///
-/// Used as a prefilter for the whitespace-tokenizing classifiers
-/// ([`is_simple_from_select`], [`extract_table_leaf_refs`]) once the
-/// CTE engine started slicing the original `compiled_code` to preserve
-/// authored comments in the drawer (cute-dbt#31). A `-- pulled from
-/// raw.users` comment must not be counted as a real `FROM`.
-///
-/// String-literal-aware: `'--'` inside a quoted string does NOT start a
-/// comment, and `/* */` inside a string is plain text. Quote escaping
-/// follows SQL's doubled-quote convention (`''` inside a `'..'`
-/// literal stays inside the literal).
-fn strip_sql_comments(sql: &str) -> String {
-    let mut out = String::with_capacity(sql.len());
-    let mut chars = sql.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '\'' | '"' => copy_string_literal(&mut chars, &mut out, ch),
-            '-' if chars.peek() == Some(&'-') => skip_line_comment(&mut chars, &mut out),
-            '/' if chars.peek() == Some(&'*') => skip_block_comment(&mut chars, &mut out),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-/// Copy a SQL string literal verbatim into `out`, handling the SQL
-/// doubled-quote escape (`''` inside a `'..'` literal stays inside the
-/// literal). The opening `quote` has not yet been pushed.
-fn copy_string_literal<I>(chars: &mut std::iter::Peekable<I>, out: &mut String, quote: char)
-where
-    I: Iterator<Item = char>,
-{
-    out.push(quote);
-    while let Some(c) = chars.next() {
-        out.push(c);
-        if c != quote {
-            continue;
-        }
-        if chars.peek() == Some(&quote) {
-            out.push(
-                chars
-                    .next()
-                    .expect("peek confirmed the doubled-quote escape"),
-            );
-        } else {
-            return;
-        }
-    }
-}
-
-/// Skip a `--` line comment up to (and including) the terminating
-/// newline, writing a single space into `out` as a token boundary so
-/// downstream tokenizers don't merge what was on either side. The
-/// `\n` itself is preserved so line-counting downstream stays correct.
-/// The leading `-` has already been consumed; the second `-` is still
-/// in the peeked position.
-fn skip_line_comment<I>(chars: &mut std::iter::Peekable<I>, out: &mut String)
-where
-    I: Iterator<Item = char>,
-{
-    chars.next();
-    for c in chars.by_ref() {
-        if c == '\n' {
-            out.push('\n');
-            break;
-        }
-    }
-    out.push(' ');
-}
-
-/// Skip a `/* */` block comment up to (and including) the terminating
-/// `*/`, writing a single space into `out` as a token boundary. The
-/// leading `/` has been consumed; the `*` is still in the peeked
-/// position.
-fn skip_block_comment<I>(chars: &mut std::iter::Peekable<I>, out: &mut String)
-where
-    I: Iterator<Item = char>,
-{
-    chars.next();
-    let mut prev = '\0';
-    for c in chars.by_ref() {
-        if prev == '*' && c == '/' {
-            break;
-        }
-        prev = c;
-    }
-    out.push(' ');
 }
 
 /// Per-model entry in the JSON payload — mirrors the design's
@@ -717,10 +593,11 @@ fn build_test_payload(id: &str, unit_test: &UnitTest, graph: &CteGraph) -> TestP
 /// 2. **Body match** (dbt's idiomatic compiled-SQL shape): an
 ///    import-CTE whose body unwraps an external table whose leaf
 ///    identifier equals `ref_name`. dbt-compiled SQL commonly carries
-///    `with source as (select * from "db"."schema"."MODEL")`, where the
-///    CTE name is the unwrapper convention (`source`, `src_*`, etc.)
-///    and the model name lives only inside the body. Pass 1 misses
-///    that shape; pass 2 catches it via [`extract_table_leaf_refs`].
+///    `with source as (select * from "db"."schema"."MODEL")`, where
+///    the CTE name is the unwrapper convention (`source`, `src_*`,
+///    etc.) and the model name lives only inside the body. Pass 1
+///    misses that shape; pass 2 catches it via the engine-computed
+///    [`CteNode::body_leaf_table_refs`] (cute-dbt#40).
 ///
 /// Returns the import-CTE's name (the payload's stable node id), or
 /// `None` when neither pass matches.
@@ -738,76 +615,11 @@ fn find_import_node_id(graph: &CteGraph, ref_name: &str) -> Option<String> {
         if classify_node_role(graph, idx) != NodeRole::Import {
             continue;
         }
-        let Some(sql) = node.raw_sql() else {
-            continue;
-        };
-        if extract_table_leaf_refs(sql).iter().any(|t| t == &target) {
+        if node.body_leaf_table_refs().iter().any(|t| t == &target) {
             return Some(node.name().to_owned());
         }
     }
     None
-}
-
-/// Extract leaf table identifiers from any `FROM` or `JOIN` clause in
-/// `sql`, lowercased.
-///
-/// Whitespace-tokenizing heuristic: walks the body, looks for a `from`
-/// or `join` keyword, and takes the next token's trailing identifier
-/// (stripping schema/database prefixes and surrounding quotes). Used by
-/// [`find_import_node_id`]'s pass-2 body match. Not a SQL parser —
-/// false positives are constrained by the surrounding [`NodeRole`]
-/// filter (only import-CTE nodes are searched), and the typical dbt
-/// `source as (select * from "db"."schema"."MODEL")` shape resolves to
-/// the right leaf cleanly.
-///
-/// Returned identifiers are lowercase so the caller can compare
-/// case-insensitively without re-folding.
-fn extract_table_leaf_refs(sql: &str) -> Vec<String> {
-    // Strip SQL comments first (cute-dbt#31): a `-- from raw.users`
-    // comment line must not produce a `users` leaf ref.
-    let stripped = strip_sql_comments(sql);
-    let tokens: Vec<&str> = stripped.split_whitespace().collect();
-    tokens
-        .iter()
-        .enumerate()
-        .filter(|(_, tok)| is_from_or_join_keyword(tok))
-        .filter_map(|(i, _)| tokens.get(i + 1).copied())
-        .filter_map(extract_leaf_table_identifier)
-        .collect()
-}
-
-/// `true` when `tok`'s case-folded form is exactly the SQL keyword
-/// `FROM` or `JOIN`. Trailing punctuation (`,`, `;`, `)`) is tolerated
-/// since the tokenizer is whitespace-only.
-fn is_from_or_join_keyword(tok: &str) -> bool {
-    let cleaned = tok.trim_end_matches([',', ';', ')']).to_ascii_lowercase();
-    matches!(cleaned.as_str(), "from" | "join")
-}
-
-/// Pull the leaf identifier from a raw token that follows a `FROM` /
-/// `JOIN` keyword. Returns `None` for tokens whose leaf segment is
-/// empty or contains characters outside `[A-Za-z0-9_]` — those are
-/// subqueries, parenthesised expressions, or anything the heuristic
-/// cannot identify cleanly. Returned identifier is lowercased.
-fn extract_leaf_table_identifier(raw: &str) -> Option<String> {
-    // Strip surrounding `(`, trailing `,`/`)`/`;`; take the last
-    // `.`-delimited segment; strip `"` quotes.
-    let cleaned = raw
-        .trim_start_matches('(')
-        .trim_end_matches([',', ')', ';']);
-    let leaf = cleaned.rsplit('.').next()?.trim_matches('"');
-    if leaf.is_empty() || !leaf.chars().all(is_identifier_char) {
-        return None;
-    }
-    Some(leaf.to_ascii_lowercase())
-}
-
-/// SQL identifier character: ASCII alphanumeric plus underscore.
-/// Quoted identifiers with arbitrary characters are out of scope —
-/// the heuristic's caller (import-CTE body match) is constrained to
-/// dbt-style unquoted-after-stripping leaf names.
-fn is_identifier_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
 }
 
 /// Build a map from in-scope model id to the unit tests targeting it.
@@ -970,8 +782,21 @@ mod tests {
 
     // ===== classify_node_role =====
 
+    /// Construct a transform-shaped `CteNode` for fixtures: shape facts
+    /// default to `is_simple_from_shape = false` and empty refs.
     fn cte_node(name: &str, raw_sql: Option<&str>) -> CteNode {
         CteNode::new(name, None, raw_sql.map(str::to_owned), None)
+    }
+
+    /// Construct an import-shaped `CteNode` for fixtures — the renderer
+    /// classifies these as [`NodeRole::Import`] when they have no
+    /// incoming edges. The engine populates these facts via AST walk;
+    /// tests pin them directly (cute-dbt#40).
+    fn import_cte_node(name: &str, raw_sql: &str, body_leaf_refs: &[&str]) -> CteNode {
+        cte_node(name, Some(raw_sql)).with_shape_facts(
+            true,
+            body_leaf_refs.iter().map(|s| (*s).to_owned()).collect(),
+        )
     }
 
     #[test]
@@ -989,7 +814,11 @@ mod tests {
     #[test]
     fn classify_simple_from_select_with_no_incoming_as_import() {
         let graph = CteGraph::new(
-            vec![cte_node("stg_orders", Some("select id from raw.orders"))],
+            vec![import_cte_node(
+                "stg_orders",
+                "select id from raw.orders",
+                &["orders"],
+            )],
             vec![],
         );
         assert_eq!(classify_node_role(&graph, 0), NodeRole::Import);
@@ -997,10 +826,13 @@ mod tests {
 
     #[test]
     fn classify_node_with_incoming_edges_as_transform() {
+        // Even when the node carries simple-from-shape facts, an
+        // incoming edge takes precedence — the node is consumed by
+        // another CTE, so it is part of the transform pipeline.
         let graph = CteGraph::new(
             vec![
-                cte_node("a", Some("select 1 from x")),
-                cte_node("b", Some("select * from a")),
+                import_cte_node("a", "select 1 from x", &["x"]),
+                import_cte_node("b", "select * from a", &["a"]),
             ],
             vec![CteEdge::new(0, 1, EdgeType::From)],
         );
@@ -1009,6 +841,8 @@ mod tests {
 
     #[test]
     fn classify_node_with_join_as_transform() {
+        // JOIN body — engine would set is_simple_from_shape=false;
+        // the default `cte_node` helper preserves that fact.
         let graph = CteGraph::new(
             vec![cte_node(
                 "with_join",
@@ -1027,9 +861,11 @@ mod tests {
     }
 
     #[test]
-    fn classify_no_raw_sql_with_no_incoming_is_transform() {
-        // A node with no raw_sql cannot be classified as `Import` (the
-        // import shape needs to inspect the body). Fall back to `Transform`.
+    fn classify_node_without_simple_from_shape_is_transform() {
+        // A node whose engine-computed `is_simple_from_shape` is `false`
+        // (the default for the bare constructor — covers nodes without
+        // raw_sql and nodes whose body the engine did not classify as
+        // single-source) falls back to `Transform`.
         let graph = CteGraph::new(vec![cte_node("stg_x", None)], vec![]);
         assert_eq!(classify_node_role(&graph, 0), NodeRole::Transform);
     }
@@ -1711,177 +1547,6 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
-    // ===== extract_table_leaf_refs =====
-
-    #[test]
-    fn extract_table_leaf_refs_strips_schema_and_quote_qualifiers() {
-        let sql = "select * from \"jaffle_shop\".\"main\".\"raw_customers\"";
-        assert_eq!(extract_table_leaf_refs(sql), vec!["raw_customers"]);
-    }
-
-    #[test]
-    fn extract_table_leaf_refs_lowercases_and_handles_unquoted_idents() {
-        let sql = "SELECT * FROM RAW_CUSTOMERS";
-        assert_eq!(extract_table_leaf_refs(sql), vec!["raw_customers"]);
-    }
-
-    #[test]
-    fn extract_table_leaf_refs_picks_up_join_clauses() {
-        let sql = "select * from \"a\".\"b\".\"orders\" join customers on c.id = o.cid";
-        let refs = extract_table_leaf_refs(sql);
-        assert!(refs.iter().any(|r| r == "orders"));
-        assert!(refs.iter().any(|r| r == "customers"));
-    }
-
-    #[test]
-    fn extract_table_leaf_refs_ignores_non_from_tokens() {
-        let sql = "from x where from_col = 1";
-        assert_eq!(extract_table_leaf_refs(sql), vec!["x"]);
-    }
-
-    #[test]
-    fn extract_table_leaf_refs_drops_punctuation_around_idents() {
-        let sql = "select * from (raw_customers)";
-        let refs = extract_table_leaf_refs(sql);
-        assert!(refs.iter().any(|r| r == "raw_customers"), "{refs:?}");
-    }
-
-    #[test]
-    fn extract_table_leaf_refs_returns_empty_when_from_is_the_last_token() {
-        // No next token after FROM — extract gracefully degrades.
-        assert!(extract_table_leaf_refs("select * from").is_empty());
-    }
-
-    #[test]
-    fn extract_table_leaf_refs_drops_subquery_paren_token() {
-        // `from (select ...)` — the next token is `(select`, whose leaf
-        // after stripping is the SQL keyword `select`, not a real table.
-        // Real-world: stripping `(` and matching identifiers would let
-        // `select` through; we accept this is a known false-positive
-        // bounded by the import-CTE filter at the call site, but locking
-        // the current behavior so regressions in the heuristic are loud.
-        let refs = extract_table_leaf_refs("select * from (select id from x)");
-        // The trailing `from x` still produces `x`.
-        assert!(refs.iter().any(|r| r == "x"));
-    }
-
-    // ===== is_from_or_join_keyword =====
-
-    #[test]
-    fn is_from_or_join_keyword_matches_case_folded() {
-        assert!(is_from_or_join_keyword("FROM"));
-        assert!(is_from_or_join_keyword("from"));
-        assert!(is_from_or_join_keyword("Join"));
-        assert!(is_from_or_join_keyword("jOiN"));
-    }
-
-    #[test]
-    fn is_from_or_join_keyword_tolerates_trailing_punctuation() {
-        assert!(is_from_or_join_keyword("FROM,"));
-        assert!(is_from_or_join_keyword("Join;"));
-        assert!(is_from_or_join_keyword("from)"));
-    }
-
-    #[test]
-    fn is_from_or_join_keyword_rejects_substring_matches() {
-        // `from_col`, `joiner`, `tofrom` must NOT match.
-        assert!(!is_from_or_join_keyword("from_col"));
-        assert!(!is_from_or_join_keyword("joiner"));
-        assert!(!is_from_or_join_keyword("tofrom"));
-        assert!(!is_from_or_join_keyword(""));
-    }
-
-    // ===== extract_leaf_table_identifier =====
-
-    #[test]
-    fn extract_leaf_table_identifier_lowercases_simple_token() {
-        assert_eq!(
-            extract_leaf_table_identifier("RAW_CUSTOMERS"),
-            Some("raw_customers".to_owned())
-        );
-    }
-
-    #[test]
-    fn extract_leaf_table_identifier_strips_schema_prefix_and_quotes() {
-        assert_eq!(
-            extract_leaf_table_identifier("\"db\".\"schema\".\"raw_customers\""),
-            Some("raw_customers".to_owned())
-        );
-    }
-
-    #[test]
-    fn extract_leaf_table_identifier_strips_surrounding_paren_and_punctuation() {
-        assert_eq!(
-            extract_leaf_table_identifier("(raw_customers),"),
-            Some("raw_customers".to_owned())
-        );
-    }
-
-    #[test]
-    fn extract_leaf_table_identifier_returns_none_for_empty_leaf() {
-        // Pure quote pair or pure punctuation — leaf is empty after
-        // stripping.
-        assert_eq!(extract_leaf_table_identifier("\"\""), None);
-        assert_eq!(extract_leaf_table_identifier(";"), None);
-        assert_eq!(extract_leaf_table_identifier(""), None);
-    }
-
-    #[test]
-    fn extract_leaf_table_identifier_returns_none_for_non_identifier_chars() {
-        // A `*` glob, a `+` operator, a `$` sigil — none are valid leaf
-        // identifiers under the heuristic's grammar.
-        assert_eq!(extract_leaf_table_identifier("*"), None);
-        assert_eq!(extract_leaf_table_identifier("a+b"), None);
-        assert_eq!(extract_leaf_table_identifier("$var"), None);
-    }
-
-    // ===== is_identifier_char =====
-
-    #[test]
-    fn is_identifier_char_accepts_alnum_and_underscore() {
-        assert!(is_identifier_char('a'));
-        assert!(is_identifier_char('Z'));
-        assert!(is_identifier_char('0'));
-        assert!(is_identifier_char('_'));
-    }
-
-    #[test]
-    fn is_identifier_char_rejects_punctuation_and_non_ascii() {
-        assert!(!is_identifier_char('-'));
-        assert!(!is_identifier_char('.'));
-        assert!(!is_identifier_char(' '));
-        assert!(!is_identifier_char('é'));
-    }
-
-    // ===== is_simple_from_select =====
-
-    #[test]
-    fn is_simple_from_select_accepts_a_plain_from() {
-        assert!(is_simple_from_select("select id, name\nfrom raw.customers"));
-    }
-
-    #[test]
-    fn is_simple_from_select_rejects_a_join() {
-        assert!(!is_simple_from_select(
-            "select * from a join b on a.k = b.k",
-        ));
-    }
-
-    #[test]
-    fn is_simple_from_select_rejects_multiple_from_clauses() {
-        // A subquery introduces a second `from` keyword — not a "simple"
-        // import-style body.
-        assert!(!is_simple_from_select(
-            "select * from (select id from raw.x) from raw.y",
-        ));
-    }
-
-    #[test]
-    fn is_simple_from_select_rejects_an_empty_or_select_only_body() {
-        assert!(!is_simple_from_select(""));
-        assert!(!is_simple_from_select("select 1"));
-    }
-
     // ===== leaf_segment =====
 
     #[test]
@@ -1889,78 +1554,5 @@ mod tests {
         assert_eq!(leaf_segment("model.shop.x"), "x");
         assert_eq!(leaf_segment("x"), "x");
         assert_eq!(leaf_segment(""), "");
-    }
-
-    // ===== strip_sql_comments =====
-
-    #[test]
-    fn strip_sql_comments_removes_line_comment_through_newline() {
-        let stripped = strip_sql_comments("select 1 -- inline comment\nfrom t");
-        assert!(!stripped.contains("inline comment"));
-        assert!(stripped.contains("from t"));
-    }
-
-    #[test]
-    fn strip_sql_comments_removes_block_comment() {
-        let stripped = strip_sql_comments("select /* block */ 1 from t");
-        assert!(!stripped.contains("block"));
-        assert!(stripped.contains("select"));
-        assert!(stripped.contains("from t"));
-    }
-
-    #[test]
-    fn strip_sql_comments_preserves_dash_inside_string_literal() {
-        let stripped = strip_sql_comments("select 'a -- b' from t");
-        assert!(
-            stripped.contains("a -- b"),
-            "string-literal '--' must NOT start a comment, got: {stripped}"
-        );
-    }
-
-    #[test]
-    fn strip_sql_comments_preserves_block_open_inside_string_literal() {
-        let stripped = strip_sql_comments("select '/* not a comment */' from t");
-        assert!(
-            stripped.contains("not a comment"),
-            "string-literal '/*' must NOT open a block comment, got: {stripped}"
-        );
-    }
-
-    #[test]
-    fn strip_sql_comments_handles_doubled_quote_escape_in_string_literal() {
-        let stripped = strip_sql_comments("select 'it''s' -- real comment\nfrom t");
-        assert!(stripped.contains("it''s"), "doubled-quote escape preserved");
-        assert!(
-            !stripped.contains("real comment"),
-            "comment after the string IS stripped, got: {stripped}"
-        );
-    }
-
-    #[test]
-    fn is_simple_from_select_is_robust_to_leading_comment() {
-        // cute-dbt#31: with engine slicing, the import CTE body now
-        // includes its leading comment. The classifier must ignore it.
-        assert!(is_simple_from_select(
-            "-- pulled from raw\nselect id from raw.users"
-        ));
-        assert!(is_simple_from_select("/* block intro */ select * from x"));
-    }
-
-    #[test]
-    fn is_simple_from_select_unaffected_by_keyword_inside_comment() {
-        // A `from` keyword inside a comment must not bump from_count
-        // past 1, which would mis-classify the import as a transform.
-        assert!(is_simple_from_select(
-            "select id from raw.users -- pulled from raw.users earlier today"
-        ));
-    }
-
-    #[test]
-    fn extract_table_leaf_refs_ignores_keyword_inside_comment() {
-        // A `from raw.users` reference inside a `--` line comment must
-        // not produce a `users` leaf ref.
-        let refs =
-            extract_table_leaf_refs("-- pulled from comment_table\nselect id from raw.users");
-        assert_eq!(refs, vec!["users".to_owned()]);
     }
 }

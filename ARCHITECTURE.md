@@ -54,6 +54,21 @@ v0.1 has one output format (HTML); `--format json` is explicitly v0.2+.
 machinery beyond what the run loop calls. This keeps the model trivial to
 build in tests from literals.
 
+**AST-derived structural facts flow through the domain as POD.** Adapters
+that parse external grammars (the `sqlparser` CTE engine, the
+serde-on-dbt-schema manifest reader) precompute the structural facts
+the downstream layers need and write them back as POD fields on the
+relevant domain type. Example: `CteNode::is_simple_from_shape` and
+`CteNode::body_leaf_table_refs` are populated by the CTE engine during
+the existing single-parse pass — they are POD (`bool` and
+`Vec<String>`); the renderer reads them via accessors and never holds a
+parser, an AST reference, or re-parses the raw SQL slice
+(cute-dbt#40). New facts of this kind are additive POD fields with
+`#[serde(default)]`. No domain layer ever pulls in `sqlparser`. This is
+the data-flow echo of the inward-dependency discipline: the single
+parser pass in the adapter is the single source of truth for everything
+downstream of it.
+
 ## 2. Conscious design simplifications
 
 cute-dbt is a single artifact (one binary, one product) with HTML-primary
