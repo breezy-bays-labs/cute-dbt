@@ -84,6 +84,28 @@ genesis baseline. There is no implicit "full manifest" path — keeping
 diff-scoping the default keeps reports bounded and the fail-closed surface
 narrow.
 
+## Known v0.1 fidelity limits
+
+- **Body-only state-modified scoping.** Pure `.configs` / `.contract` /
+  `.relation` / `.macros` changes leave the model body checksum
+  identical and are **not** detected in v0.1 — a documented limit, not
+  a defect. Tracked:
+  [`cute-dbt#14`](https://github.com/breezy-bays-labs/cute-dbt/issues/14)
+  → sub-selectors land as additive `impl StateModifier` blocks in v0.2+
+  ([`cute-dbt#15`](https://github.com/breezy-bays-labs/cute-dbt/issues/15)).
+
+## Compiled-SQL fidelity
+
+The per-node compiled-SQL drawer shows the model's `compiled_code`
+**exactly as `dbt compile` produced it** — including the user's
+indentation, casing, blank lines, and `--` / `/* */` SQL comments.
+The CTE engine slices each CTE's source extent from `compiled_code`
+via sqlparser's span metadata rather than emitting the AST back through
+`Display`, which would drop comments
+([`cute-dbt#31`](https://github.com/breezy-bays-labs/cute-dbt/issues/31)).
+Jinja `{# #}` comments are stripped at `dbt compile` time and never
+reach `compiled_code`.
+
 ## Architecture
 
 Single-crate Rust CLI, hexagonal **inward-dependency discipline**.

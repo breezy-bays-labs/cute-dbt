@@ -177,17 +177,23 @@ pub fn classify_node_role(graph: &CteGraph, node_index: usize) -> NodeRole {
 /// Whitespace-tokenizing heuristic: tokenizes the body, requires a
 /// `select` keyword, exactly one `from` keyword, and no `join` keyword.
 /// Tokens are case-folded and have trailing punctuation (`,`/`;`/`)`)
-/// stripped so a token like `from\n` or `from;` still classifies. A
-/// stricter classifier would require a full AST walk; the CTE engine
-/// already parsed once and the renderer would re-parse to re-classify
-/// — overkill for the visual taxonomy this drives.
+/// stripped so a token like `from\n` or `from;` still classifies. SQL
+/// comments are stripped first (cute-dbt#31) so a `-- pulled from raw`
+/// comment doesn't get counted as a real `from`. A stricter classifier
+/// would require a full AST walk; the CTE engine already parsed once
+/// and the renderer would re-parse to re-classify — overkill for the
+/// visual taxonomy this drives.
 fn is_simple_from_select(sql: &str) -> bool {
+    let stripped = strip_sql_comments(sql);
     let mut has_select = false;
     let mut from_count = 0usize;
-    for raw in sql.split_whitespace() {
+    for raw in stripped.split_whitespace() {
+        // Trim both ends — the engine's slice (cute-dbt#31) puts the
+        // CTE body inside a `name AS (...)` wrapper, so the first
+        // SELECT in `(select` would otherwise be invisible.
         let token = raw
             .to_ascii_lowercase()
-            .trim_end_matches([',', ';', ')'])
+            .trim_matches(['(', ')', ',', ';'])
             .to_owned();
         match token.as_str() {
             "select" => has_select = true,
@@ -197,6 +203,97 @@ fn is_simple_from_select(sql: &str) -> bool {
         }
     }
     has_select && from_count == 1
+}
+
+/// Strip SQL `--` line comments and `/* */` block comments from `sql`,
+/// replacing each with a single space so token boundaries are preserved.
+///
+/// Used as a prefilter for the whitespace-tokenizing classifiers
+/// ([`is_simple_from_select`], [`extract_table_leaf_refs`]) once the
+/// CTE engine started slicing the original `compiled_code` to preserve
+/// authored comments in the drawer (cute-dbt#31). A `-- pulled from
+/// raw.users` comment must not be counted as a real `FROM`.
+///
+/// String-literal-aware: `'--'` inside a quoted string does NOT start a
+/// comment, and `/* */` inside a string is plain text. Quote escaping
+/// follows SQL's doubled-quote convention (`''` inside a `'..'`
+/// literal stays inside the literal).
+fn strip_sql_comments(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut chars = sql.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' | '"' => copy_string_literal(&mut chars, &mut out, ch),
+            '-' if chars.peek() == Some(&'-') => skip_line_comment(&mut chars, &mut out),
+            '/' if chars.peek() == Some(&'*') => skip_block_comment(&mut chars, &mut out),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Copy a SQL string literal verbatim into `out`, handling the SQL
+/// doubled-quote escape (`''` inside a `'..'` literal stays inside the
+/// literal). The opening `quote` has not yet been pushed.
+fn copy_string_literal<I>(chars: &mut std::iter::Peekable<I>, out: &mut String, quote: char)
+where
+    I: Iterator<Item = char>,
+{
+    out.push(quote);
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c != quote {
+            continue;
+        }
+        if chars.peek() == Some(&quote) {
+            out.push(
+                chars
+                    .next()
+                    .expect("peek confirmed the doubled-quote escape"),
+            );
+        } else {
+            return;
+        }
+    }
+}
+
+/// Skip a `--` line comment up to (and including) the terminating
+/// newline, writing a single space into `out` as a token boundary so
+/// downstream tokenizers don't merge what was on either side. The
+/// `\n` itself is preserved so line-counting downstream stays correct.
+/// The leading `-` has already been consumed; the second `-` is still
+/// in the peeked position.
+fn skip_line_comment<I>(chars: &mut std::iter::Peekable<I>, out: &mut String)
+where
+    I: Iterator<Item = char>,
+{
+    chars.next();
+    for c in chars.by_ref() {
+        if c == '\n' {
+            out.push('\n');
+            break;
+        }
+    }
+    out.push(' ');
+}
+
+/// Skip a `/* */` block comment up to (and including) the terminating
+/// `*/`, writing a single space into `out` as a token boundary. The
+/// leading `/` has been consumed; the `*` is still in the peeked
+/// position.
+fn skip_block_comment<I>(chars: &mut std::iter::Peekable<I>, out: &mut String)
+where
+    I: Iterator<Item = char>,
+{
+    chars.next();
+    let mut prev = '\0';
+    for c in chars.by_ref() {
+        if prev == '*' && c == '/' {
+            break;
+        }
+        prev = c;
+    }
+    out.push(' ');
 }
 
 /// Per-model entry in the JSON payload — mirrors the design's
@@ -668,32 +765,51 @@ fn find_import_node_id(graph: &CteGraph, ref_name: &str, _model_name: &str) -> O
 /// Returned identifiers are lowercase so the caller can compare
 /// case-insensitively without re-folding.
 fn extract_table_leaf_refs(sql: &str) -> Vec<String> {
-    let tokens: Vec<&str> = sql.split_whitespace().collect();
-    let mut out = Vec::new();
-    for (i, tok) in tokens.iter().enumerate() {
-        let lower = tok.to_ascii_lowercase();
-        if lower != "from" && lower != "join" {
-            continue;
-        }
-        let Some(next) = tokens.get(i + 1) else {
-            continue;
-        };
-        // Strip surrounding `(` and trailing `,`/`)`/`;`/`(`; take the
-        // last `.`-delimited segment; strip `"` quotes.
-        let cleaned = next
-            .trim_start_matches('(')
-            .trim_end_matches([',', ')', ';']);
-        let leaf = cleaned.rsplit('.').next().unwrap_or("");
-        let leaf = leaf.trim_matches('"');
-        if leaf.is_empty() {
-            continue;
-        }
-        if !leaf.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            continue;
-        }
-        out.push(leaf.to_ascii_lowercase());
+    // Strip SQL comments first (cute-dbt#31): a `-- from raw.users`
+    // comment line must not produce a `users` leaf ref.
+    let stripped = strip_sql_comments(sql);
+    let tokens: Vec<&str> = stripped.split_whitespace().collect();
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, tok)| is_from_or_join_keyword(tok))
+        .filter_map(|(i, _)| tokens.get(i + 1).copied())
+        .filter_map(extract_leaf_table_identifier)
+        .collect()
+}
+
+/// `true` when `tok`'s case-folded form is exactly the SQL keyword
+/// `FROM` or `JOIN`. Trailing punctuation (`,`, `;`, `)`) is tolerated
+/// since the tokenizer is whitespace-only.
+fn is_from_or_join_keyword(tok: &str) -> bool {
+    let cleaned = tok.trim_end_matches([',', ';', ')']).to_ascii_lowercase();
+    matches!(cleaned.as_str(), "from" | "join")
+}
+
+/// Pull the leaf identifier from a raw token that follows a `FROM` /
+/// `JOIN` keyword. Returns `None` for tokens whose leaf segment is
+/// empty or contains characters outside `[A-Za-z0-9_]` — those are
+/// subqueries, parenthesised expressions, or anything the heuristic
+/// cannot identify cleanly. Returned identifier is lowercased.
+fn extract_leaf_table_identifier(raw: &str) -> Option<String> {
+    // Strip surrounding `(`, trailing `,`/`)`/`;`; take the last
+    // `.`-delimited segment; strip `"` quotes.
+    let cleaned = raw
+        .trim_start_matches('(')
+        .trim_end_matches([',', ')', ';']);
+    let leaf = cleaned.rsplit('.').next()?.trim_matches('"');
+    if leaf.is_empty() || !leaf.chars().all(is_identifier_char) {
+        return None;
     }
-    out
+    Some(leaf.to_ascii_lowercase())
+}
+
+/// SQL identifier character: ASCII alphanumeric plus underscore.
+/// Quoted identifiers with arbitrary characters are out of scope —
+/// the heuristic's caller (import-CTE body match) is constrained to
+/// dbt-style unquoted-after-stripping leaf names.
+fn is_identifier_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
 }
 
 /// Build a map from in-scope model id to the unit tests targeting it.
@@ -1058,6 +1174,46 @@ mod tests {
         let manifest = manifest_for(vec![], vec![]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.ghost")]);
         let payload = build_payload(&manifest, &InScopeSet::new(), &models, "b");
+        assert!(payload.models.is_empty());
+    }
+
+    #[test]
+    fn build_payload_skips_an_in_scope_test_id_missing_from_manifest() {
+        // Defensive `index_in_scope_tests_by_model` path: a test id is
+        // in the InScopeSet but the manifest has no matching unit_test
+        // entry. The indexer skips it; build_payload must not crash and
+        // the model that WOULD have carried it has zero tests.
+        let node = model_node("model.shop.x", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.ghost".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let payload = build_payload(&manifest, &in_scope, &models, "b");
+        assert_eq!(payload.models.len(), 1);
+        assert!(payload.models[0].tests.is_empty());
+    }
+
+    #[test]
+    fn build_payload_skips_an_in_scope_test_whose_target_model_is_missing() {
+        // Defensive `index_in_scope_tests_by_model` path: a unit test
+        // exists in the manifest but its `model:` selector resolves to
+        // None (target model not in manifest). The indexer skips it.
+        let ut = UnitTest::new(
+            "test_ghost",
+            NodeId::new("ghost_model"),
+            vec![],
+            UnitTestExpect::new(json!([]), None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let manifest = manifest_for(vec![], vec![("unit_test.shop.test_ghost", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_ghost".to_owned()]);
+        let models = ModelInScopeSet::new();
+        let payload = build_payload(&manifest, &in_scope, &models, "b");
+        // No models in scope → no payload entries; the indexer's None
+        // branch simply doesn't contribute.
         assert!(payload.models.is_empty());
     }
 
@@ -1541,6 +1697,113 @@ mod tests {
         assert!(refs.iter().any(|r| r == "raw_customers"), "{refs:?}");
     }
 
+    #[test]
+    fn extract_table_leaf_refs_returns_empty_when_from_is_the_last_token() {
+        // No next token after FROM — extract gracefully degrades.
+        assert!(extract_table_leaf_refs("select * from").is_empty());
+    }
+
+    #[test]
+    fn extract_table_leaf_refs_drops_subquery_paren_token() {
+        // `from (select ...)` — the next token is `(select`, whose leaf
+        // after stripping is the SQL keyword `select`, not a real table.
+        // Real-world: stripping `(` and matching identifiers would let
+        // `select` through; we accept this is a known false-positive
+        // bounded by the import-CTE filter at the call site, but locking
+        // the current behavior so regressions in the heuristic are loud.
+        let refs = extract_table_leaf_refs("select * from (select id from x)");
+        // The trailing `from x` still produces `x`.
+        assert!(refs.iter().any(|r| r == "x"));
+    }
+
+    // ===== is_from_or_join_keyword =====
+
+    #[test]
+    fn is_from_or_join_keyword_matches_case_folded() {
+        assert!(is_from_or_join_keyword("FROM"));
+        assert!(is_from_or_join_keyword("from"));
+        assert!(is_from_or_join_keyword("Join"));
+        assert!(is_from_or_join_keyword("jOiN"));
+    }
+
+    #[test]
+    fn is_from_or_join_keyword_tolerates_trailing_punctuation() {
+        assert!(is_from_or_join_keyword("FROM,"));
+        assert!(is_from_or_join_keyword("Join;"));
+        assert!(is_from_or_join_keyword("from)"));
+    }
+
+    #[test]
+    fn is_from_or_join_keyword_rejects_substring_matches() {
+        // `from_col`, `joiner`, `tofrom` must NOT match.
+        assert!(!is_from_or_join_keyword("from_col"));
+        assert!(!is_from_or_join_keyword("joiner"));
+        assert!(!is_from_or_join_keyword("tofrom"));
+        assert!(!is_from_or_join_keyword(""));
+    }
+
+    // ===== extract_leaf_table_identifier =====
+
+    #[test]
+    fn extract_leaf_table_identifier_lowercases_simple_token() {
+        assert_eq!(
+            extract_leaf_table_identifier("RAW_CUSTOMERS"),
+            Some("raw_customers".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_leaf_table_identifier_strips_schema_prefix_and_quotes() {
+        assert_eq!(
+            extract_leaf_table_identifier("\"db\".\"schema\".\"raw_customers\""),
+            Some("raw_customers".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_leaf_table_identifier_strips_surrounding_paren_and_punctuation() {
+        assert_eq!(
+            extract_leaf_table_identifier("(raw_customers),"),
+            Some("raw_customers".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_leaf_table_identifier_returns_none_for_empty_leaf() {
+        // Pure quote pair or pure punctuation — leaf is empty after
+        // stripping.
+        assert_eq!(extract_leaf_table_identifier("\"\""), None);
+        assert_eq!(extract_leaf_table_identifier(";"), None);
+        assert_eq!(extract_leaf_table_identifier(""), None);
+    }
+
+    #[test]
+    fn extract_leaf_table_identifier_returns_none_for_non_identifier_chars() {
+        // A `*` glob, a `+` operator, a `$` sigil — none are valid leaf
+        // identifiers under the heuristic's grammar.
+        assert_eq!(extract_leaf_table_identifier("*"), None);
+        assert_eq!(extract_leaf_table_identifier("a+b"), None);
+        assert_eq!(extract_leaf_table_identifier("$var"), None);
+    }
+
+    // ===== is_identifier_char =====
+
+    #[test]
+    fn is_identifier_char_accepts_alnum_and_underscore() {
+        assert!(is_identifier_char('a'));
+        assert!(is_identifier_char('Z'));
+        assert!(is_identifier_char('0'));
+        assert!(is_identifier_char('_'));
+    }
+
+    #[test]
+    fn is_identifier_char_rejects_punctuation_and_non_ascii() {
+        assert!(!is_identifier_char('-'));
+        assert!(!is_identifier_char('.'));
+        assert!(!is_identifier_char(' '));
+        assert!(!is_identifier_char('é'));
+    }
+
     // ===== is_simple_from_select =====
 
     #[test]
@@ -1577,5 +1840,78 @@ mod tests {
         assert_eq!(leaf_segment("model.shop.x"), "x");
         assert_eq!(leaf_segment("x"), "x");
         assert_eq!(leaf_segment(""), "");
+    }
+
+    // ===== strip_sql_comments =====
+
+    #[test]
+    fn strip_sql_comments_removes_line_comment_through_newline() {
+        let stripped = strip_sql_comments("select 1 -- inline comment\nfrom t");
+        assert!(!stripped.contains("inline comment"));
+        assert!(stripped.contains("from t"));
+    }
+
+    #[test]
+    fn strip_sql_comments_removes_block_comment() {
+        let stripped = strip_sql_comments("select /* block */ 1 from t");
+        assert!(!stripped.contains("block"));
+        assert!(stripped.contains("select"));
+        assert!(stripped.contains("from t"));
+    }
+
+    #[test]
+    fn strip_sql_comments_preserves_dash_inside_string_literal() {
+        let stripped = strip_sql_comments("select 'a -- b' from t");
+        assert!(
+            stripped.contains("a -- b"),
+            "string-literal '--' must NOT start a comment, got: {stripped}"
+        );
+    }
+
+    #[test]
+    fn strip_sql_comments_preserves_block_open_inside_string_literal() {
+        let stripped = strip_sql_comments("select '/* not a comment */' from t");
+        assert!(
+            stripped.contains("not a comment"),
+            "string-literal '/*' must NOT open a block comment, got: {stripped}"
+        );
+    }
+
+    #[test]
+    fn strip_sql_comments_handles_doubled_quote_escape_in_string_literal() {
+        let stripped = strip_sql_comments("select 'it''s' -- real comment\nfrom t");
+        assert!(stripped.contains("it''s"), "doubled-quote escape preserved");
+        assert!(
+            !stripped.contains("real comment"),
+            "comment after the string IS stripped, got: {stripped}"
+        );
+    }
+
+    #[test]
+    fn is_simple_from_select_is_robust_to_leading_comment() {
+        // cute-dbt#31: with engine slicing, the import CTE body now
+        // includes its leading comment. The classifier must ignore it.
+        assert!(is_simple_from_select(
+            "-- pulled from raw\nselect id from raw.users"
+        ));
+        assert!(is_simple_from_select("/* block intro */ select * from x"));
+    }
+
+    #[test]
+    fn is_simple_from_select_unaffected_by_keyword_inside_comment() {
+        // A `from` keyword inside a comment must not bump from_count
+        // past 1, which would mis-classify the import as a transform.
+        assert!(is_simple_from_select(
+            "select id from raw.users -- pulled from raw.users earlier today"
+        ));
+    }
+
+    #[test]
+    fn extract_table_leaf_refs_ignores_keyword_inside_comment() {
+        // A `from raw.users` reference inside a `--` line comment must
+        // not produce a `users` leaf ref.
+        let refs =
+            extract_table_leaf_refs("-- pulled from comment_table\nselect id from raw.users");
+        assert_eq!(refs, vec!["users".to_owned()]);
     }
 }

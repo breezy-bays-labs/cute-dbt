@@ -240,7 +240,7 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
 
 </div>
 
-<script type="application/json" id="cute-dbt-data">{"baseline":"jaffle-shop-baseline.json","models":[{"name":"stg_customers","dag":{"nodes":[{"id":"source","role":"import","ref":"source"},{"id":"renamed","role":"transform"},{"id":"stg_customers","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"stg_customers","edge_type":"from"}]},"compiled_sql":{"renamed":"SELECT id AS customer_id, TRIM(first_name) AS first_name, TRIM(last_name) AS last_name FROM source","source":"SELECT * FROM \"jaffle_shop\".\"main\".\"raw_customers\"","stg_customers":"SELECT * FROM renamed"},"tests":[{"id":"unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns","name":"test_stg_customers_renames_columns","target_model":"stg_customers","description":"stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows — no real customer data.\n","tags":["quality","smoke"],"meta":{"owner":"data-eng","priority":"high"},"defined_in":"models/staging/unit_tests.yml","given":[{"input":"ref('raw_customers')","bound_to_node":"source","rows":[{"first_name":"Alice","id":1,"last_name":"A."},{"first_name":"Bob","id":2,"last_name":"B."}],"format":"dict"}],"expected":{"rows":[{"customer_id":1,"first_name":"Alice","last_name":"A."},{"customer_id":2,"first_name":"Bob","last_name":"B."}],"format":"dict"}}],"is_recursive":false}]}</script>
+<script type="application/json" id="cute-dbt-data">{"baseline":"jaffle-shop-baseline.json","models":[{"name":"stg_customers","dag":{"nodes":[{"id":"source","role":"import","ref":"source"},{"id":"renamed","role":"transform"},{"id":"stg_customers","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"stg_customers","edge_type":"from"}]},"compiled_sql":{"renamed":"renamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)","source":"source as (\n    select * from \"jaffle_shop\".\"main\".\"raw_customers\"\n\n)","stg_customers":"select * from renamed"},"tests":[{"id":"unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns","name":"test_stg_customers_renames_columns","target_model":"stg_customers","description":"stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows — no real customer data.\n","tags":["quality","smoke"],"meta":{"owner":"data-eng","priority":"high"},"defined_in":"models/staging/unit_tests.yml","given":[{"input":"ref('raw_customers')","bound_to_node":"source","rows":[{"first_name":"Alice","id":1,"last_name":"A."},{"first_name":"Bob","id":2,"last_name":"B."}],"format":"dict"}],"expected":{"rows":[{"customer_id":1,"first_name":"Alice","last_name":"A."},{"customer_id":2,"first_name":"Bob","last_name":"B."}],"format":"dict"}}],"is_recursive":false}]}</script>
 
 <script>
 <<inlined-asset>>
@@ -744,21 +744,34 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
   function escapeHtmlForBody(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
-  var SQL_KEYWORDS_RE = new RegExp(
-    "\\b(" +
+  // Single-pass tokenizer-style highlighter. Alternation order matters:
+  // block comments, line comments, string literals, and Jinja tags are
+  // matched FIRST as opaque blobs so keyword recognition can't reach
+  // inside them. Without this, a comment like `-- pulled from raw.users`
+  // would render the `from` token as a keyword (cute-dbt#31 + #40 CR-1).
+  var SQL_TOKEN_RE = new RegExp(
+    "(\\/\\*[\\s\\S]*?\\*\\/)" +              // /* block comment */
+    "|(--[^\\n]*)" +                          // -- line comment
+    "|('(?:[^'\\\\]|\\\\.|'')*')" +           // 'string literal' (escapes: \' and '')
+    "|(\\{\\{[^}]+\\}\\})" +                  // {{ jinja }}
+    "|\\b(" +
       "select|from|where|left|right|inner|outer|full|cross|join|on|using|" +
       "group\\s+by|order\\s+by|partition\\s+by|having|as|and|or|not|" +
       "case|when|then|else|end|null|is|distinct|with|union|all|over|" +
       "coalesce|sum|count|avg|min|max|row_number|asc|desc|true|false" +
-    ")\\b", "gi"
+    ")\\b",
+    "gi"
   );
   function highlightSql(sql) {
     var s = escapeHtmlForBody(sql);
-    s = s.replace(/(--[^\n]*)/g, '<span class="sql-comment">$1</span>');
-    s = s.replace(/('[^'\n]*')/g, '<span class="sql-string">$1</span>');
-    s = s.replace(/(\{\{[^}]+\}\})/g, '<span class="sql-jinja">$1</span>');
-    s = s.replace(SQL_KEYWORDS_RE, '<span class="sql-keyword">$1</span>');
-    return s;
+    return s.replace(SQL_TOKEN_RE, function (_match, block, line, str, jinja, kw) {
+      if (block) return '<span class="sql-comment">' + block + '</span>';
+      if (line) return '<span class="sql-comment">' + line + '</span>';
+      if (str) return '<span class="sql-string">' + str + '</span>';
+      if (jinja) return '<span class="sql-jinja">' + jinja + '</span>';
+      if (kw) return '<span class="sql-keyword">' + kw + '</span>';
+      return _match;
+    });
   }
 
   function copySql(text, $btn) {
