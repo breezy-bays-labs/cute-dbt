@@ -93,6 +93,50 @@ narrow.
   [`cute-dbt#14`](https://github.com/breezy-bays-labs/cute-dbt/issues/14)
   → sub-selectors land as additive `impl StateModifier` blocks in v0.2+
   ([`cute-dbt#15`](https://github.com/breezy-bays-labs/cute-dbt/issues/15)).
+- **`source()` references are not bound to fixtures.** dbt resolves
+  `source('package', 'name')` to a relation name at `dbt compile`
+  time, so the compiled SQL the renderer sees no longer carries the
+  `source()` form — only the resolved relation. Binding a unit-test
+  `given: source(...)` to its import-CTE node requires reading the
+  manifest's `sources` block and re-resolving on the renderer side.
+  Tracked:
+  [`cute-dbt#57`](https://github.com/breezy-bays-labs/cute-dbt/issues/57)
+  → v0.2 sources widening.
+
+## Import-CTE binding
+
+cute-dbt binds each unit-test `given[].input` to a node in the model's
+CTE DAG so the "Node detail" panel can render the fixture rows next to
+the compiled SQL for the CTE the fixture mocks. The binding is a
+two-pass match against the engine-parsed CTE graph, both passes
+case-insensitive:
+
+1. **Name match.** A leaf CTE whose own name equals the `ref()`
+   target — the design's sample-data convention (`with stg_orders as
+   (select * from {{ ref('stg_orders') }})`). Strict role gate: the
+   CTE must classify as `Import` (single-source body), so a transform
+   CTE that happens to share a name with the queried `ref()` cannot
+   spuriously bind.
+2. **Body match.** A leaf CTE (zero incoming edges, not the terminal
+   `SELECT`) whose engine-extracted body-leaf table references contain
+   the `ref()` target. Pass-2 catches two real shapes:
+   - dbt's idiomatic `with source as (select * from
+     "db"."schema"."MODEL")` unwrapper, where the CTE name is a
+     convention (`source`, `src_*`, …) and the model name lives only
+     inside the body.
+   - The messy multi-ref shape: one CTE body referencing multiple
+     `ref()` targets via `UNION ALL`, `JOIN`, or derived subqueries.
+     Every leaf ref the engine extracts is independently bindable
+     against a unit test's `given[]`; the report's node-detail panel
+     stacks every matching given as its own fixture card on that
+     single CTE node. Tracked:
+     [`cute-dbt#34`](https://github.com/breezy-bays-labs/cute-dbt/issues/34).
+
+When neither pass matches — and the node is an `Import` CTE — the
+node-detail panel surfaces *"no fixture provided — dbt treats
+unspecified inputs as empty"*. The same empty-state is the
+intentional behaviour when a unit test simply does not declare a
+`given[]` for some upstream input (dbt's documented semantics).
 
 ## Compiled-SQL fidelity
 

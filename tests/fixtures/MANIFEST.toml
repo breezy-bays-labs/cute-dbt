@@ -128,6 +128,26 @@ element entirely. No real data.\
 """
 
 [[fixture]]
+path = "messy-multi-ref-import-cte.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/34"
+sha256 = "19c60e9334fcaa703bfe70f42bb4bf5fef661c61a5daaff86fa517349ac10fed"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Synthetic single-model manifest exercising the messy-import-CTE \
+multi-ref binding case (cute-dbt#34). The `union_orders` model carries \
+a single import CTE (`raw_union`) whose body is `SELECT ... UNION ALL \
+SELECT ...` referencing two distinct `ref()` targets. The unit test \
+declares two `given` entries — one for each ref — both of which the \
+renderer must bind to the SAME `raw_union` node id via the pass-2 \
+body-leaf match (widened by PR 17 from import-only to any leaf CTE \
+with engine-extracted body_leaf_table_refs). Pure synthetic data only; \
+the `messy_shop` package name and node names are fictitious.\
+"""
+
+[[fixture]]
 path = "config-broken.toml"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/24"

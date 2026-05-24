@@ -1,0 +1,71 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "1.11.9",
+    "generated_at": "1970-01-01T00:00:00Z",
+    "invocation_id": "00000000-0000-0000-0000-000000000000",
+    "project_name": "messy_shop",
+    "project_id": "0000000000000000000000000000000000000000",
+    "user_id": "00000000-0000-0000-0000-000000000000",
+    "send_anonymous_usage_stats": false,
+    "adapter_type": "duckdb"
+  },
+  "nodes": {
+    "model.messy_shop.union_orders": {
+      "database": "messy_shop",
+      "schema": "main",
+      "name": "union_orders",
+      "resource_type": "model",
+      "package_name": "messy_shop",
+      "path": "marts/union_orders.sql",
+      "original_file_path": "models/marts/union_orders.sql",
+      "unique_id": "model.messy_shop.union_orders",
+      "fqn": ["messy_shop", "marts", "union_orders"],
+      "alias": "union_orders",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "MESSY_MULTI_REF_SYNTHETIC_SENTINEL_0001"
+      },
+      "raw_code": "{# Synthetic messy-import-CTE fixture exercising multi-ref binding (cute-dbt#34). #}\nwith raw_union as (\n  select id, kind from {{ ref('raw_orders') }}\n  union all\n  select id, kind from {{ ref('raw_returns') }}\n)\nselect * from raw_union",
+      "compiled_code": "with raw_union as (\n  select id, kind from \"messy_shop\".\"main\".\"raw_orders\"\n  union all\n  select id, kind from \"messy_shop\".\"main\".\"raw_returns\"\n)\nselect * from raw_union",
+      "depends_on": {
+        "nodes": [
+          "model.messy_shop.raw_orders",
+          "model.messy_shop.raw_returns"
+        ]
+      }
+    }
+  },
+  "unit_tests": {
+    "unit_test.messy_shop.test_union_orders_combines_both_sources": {
+      "name": "test_union_orders_combines_both_sources",
+      "model": "union_orders",
+      "package_name": "messy_shop",
+      "resource_type": "unit_test",
+      "unique_id": "unit_test.messy_shop.test_union_orders_combines_both_sources",
+      "original_file_path": "models/marts/_unit_tests.yml",
+      "given": [
+        {
+          "input": "ref('raw_orders')",
+          "rows": [{"id": 1, "kind": "order"}, {"id": 2, "kind": "order"}]
+        },
+        {
+          "input": "ref('raw_returns')",
+          "rows": [{"id": 9, "kind": "return"}]
+        }
+      ],
+      "expect": {
+        "rows": [
+          {"id": 1, "kind": "order"},
+          {"id": 2, "kind": "order"},
+          {"id": 9, "kind": "return"}
+        ]
+      },
+      "description": "Synthetic multi-ref import-CTE: both ref() targets must surface as separate fixture cards in the report's node detail panel.",
+      "config": {
+        "tags": [],
+        "meta": {}
+      }
+    }
+  }
+}
