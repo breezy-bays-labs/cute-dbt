@@ -20,14 +20,24 @@
 //!   node (named [`TERMINAL_NODE_NAME`]) is `final`; a CTE whose body is
 //!   a plain `SELECT … FROM <single relation>` with zero incoming edges
 //!   is `import`; everything else is `transform`.
-//! - **Clean-import-CTE binding.** Parses `ref('NAME')` out of each
-//!   unit test's `given[].input`, then locates the matching import-CTE
-//!   node in two passes (case-insensitive): first by CTE name (the
-//!   convention where the unwrapper CTE inherits the upstream model's
-//!   name), then by the leaf table reference inside the CTE's body
-//!   (dbt's compiled-SQL idiom: `with source as (select * from
-//!   "db"."schema"."MODEL")`). Unmatched givens surface "no fixture
-//!   provided — dbt treats unspecified inputs as empty" in the template.
+//! - **Import-CTE binding.** Parses `ref('NAME')` out of each unit
+//!   test's `given[].input`, then locates the matching leaf-CTE node
+//!   in two passes (case-insensitive). Pass-1: name match — an
+//!   import-CTE whose own name equals `NAME` (the unwrapper
+//!   convention; strict role gate so a transform CTE cannot
+//!   spuriously bind). Pass-2: body match — any non-terminal leaf
+//!   CTE (zero incoming edges) whose engine-extracted
+//!   `body_leaf_table_refs` contain `NAME`. Pass-2 catches both the
+//!   dbt-idiomatic `with source as (select * from
+//!   "db"."schema"."MODEL")` shape and the messy multi-ref case
+//!   (cute-dbt#34) where one CTE body references multiple `ref()`
+//!   targets via `UNION ALL`, `JOIN`, or derived subqueries —
+//!   classified `Transform` in the DAG but still a valid binding
+//!   surface for every leaf ref. The template stacks every matching
+//!   given vertically; unmatched givens against an import-CTE
+//!   surface "no fixture provided — dbt treats unspecified inputs
+//!   as empty". `source()` references are NOT yet bound — tracked
+//!   as cute-dbt#57 for v0.2.
 //!
 //! ## Security
 //!
@@ -599,43 +609,86 @@ fn build_test_payload(id: &str, unit_test: &UnitTest, graph: &CteGraph) -> TestP
     }
 }
 
-/// Locate the import-CTE node that binds to `ref_name`.
+/// Locate the leaf CTE node that binds to `ref_name`.
 ///
 /// Two-pass match — both case-insensitive:
 ///
 /// 1. **Name match** (the design's sample-data convention): an
-///    import-CTE whose own name equals `ref_name`.
-/// 2. **Body match** (dbt's idiomatic compiled-SQL shape): an
-///    import-CTE whose body unwraps an external table whose leaf
+///    import-CTE whose own name equals `ref_name`. Pass-1 is strict —
+///    the node must also classify as [`NodeRole::Import`], so a
+///    transform CTE that happens to share a name with the queried
+///    `ref()` cannot spuriously bind.
+/// 2. **Body match** (dbt's idiomatic compiled-SQL shape and the
+///    multi-ref messy-import case): a leaf CTE (no incoming edges,
+///    not the terminal) whose body references a table whose leaf
 ///    identifier equals `ref_name`. dbt-compiled SQL commonly carries
 ///    `with source as (select * from "db"."schema"."MODEL")`, where
 ///    the CTE name is the unwrapper convention (`source`, `src_*`,
-///    etc.) and the model name lives only inside the body. Pass 1
-///    misses that shape; pass 2 catches it via the engine-computed
-///    [`body_leaf_table_refs`](crate::domain::CteNode::body_leaf_table_refs)
-///    (cute-dbt#40).
+///    etc.) and the model name lives only inside the body. The messy
+///    import case (cute-dbt#34) further generalises this: a single
+///    CTE body may reference multiple `ref()` targets (e.g. via
+///    `UNION ALL` or `JOIN`), which the engine classifies as
+///    `Transform` rather than `Import` because the body is not a
+///    single `SELECT … FROM <relation>`. Pass-2 widens the gate to any
+///    leaf node with engine-extracted
+///    [`body_leaf_table_refs`](crate::domain::CteNode::body_leaf_table_refs);
+///    the presence of those refs is the binding signal regardless of
+///    the structural [`NodeRole`] badge the DAG renders.
 ///
-/// Returns the import-CTE's name (the payload's stable node id), or
-/// `None` when neither pass matches.
+/// Returns the matching node's name (the payload's stable node id),
+/// or `None` when neither pass matches. The renderer (and the
+/// template JS) call this once per `given[].input` so a unit test
+/// whose multiple `ref()` givens all live inside one CTE body see
+/// every given bound to that single node id (cute-dbt#34).
 fn find_import_node_id(graph: &CteGraph, ref_name: &str) -> Option<String> {
     let target = ref_name.to_ascii_lowercase();
-    // Pass 1: name match (design's convention).
+    // Pass 1: name match (design's convention; strict role gate).
     if let Some((_, node)) = graph.nodes().iter().enumerate().find(|(idx, node)| {
         node.name().eq_ignore_ascii_case(&target)
             && classify_node_role(graph, *idx) == NodeRole::Import
     }) {
         return Some(node.name().to_owned());
     }
-    // Pass 2: body match (dbt's compiled-SQL shape).
+    // Pass 2: body match — any leaf CTE with the ref in its
+    // engine-extracted body_leaf_table_refs (catches dbt's `source`
+    // unwrapper shape AND the messy multi-ref shape).
     for (idx, node) in graph.nodes().iter().enumerate() {
-        if classify_node_role(graph, idx) != NodeRole::Import {
+        if !is_leaf_binding_candidate(graph, idx) {
             continue;
         }
-        if node.body_leaf_table_refs().iter().any(|t| t == &target) {
+        // The engine already lowercases body_leaf_table_refs at extract
+        // time (cte_engine.rs::push_leaf), so the case-fold here is
+        // belt-and-braces — defends pass-2 against any future engine
+        // change that ships raw-case refs, and keeps the contract
+        // symmetric with pass-1's `eq_ignore_ascii_case` (Gemini PR 17).
+        if node
+            .body_leaf_table_refs()
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(&target))
+        {
             return Some(node.name().to_owned());
         }
     }
     None
+}
+
+/// `true` when the node at `index` is a candidate for pass-2 binding —
+/// i.e. a leaf CTE that may carry engine-extracted body-leaf refs.
+///
+/// A binding candidate is any non-terminal node with zero incoming
+/// edges. We deliberately do not require [`NodeRole::Import`] here:
+/// the import classification narrows to single-source bodies, which
+/// excludes the multi-ref shapes this PR (cute-dbt#34) needs to bind
+/// (`UNION ALL`, `JOIN`, derived subqueries). Leaf-ness alone is the
+/// binding contract; structural shape is the DAG-badge contract.
+fn is_leaf_binding_candidate(graph: &CteGraph, index: usize) -> bool {
+    let Some(node) = graph.nodes().get(index) else {
+        return false;
+    };
+    if node.name() == TERMINAL_NODE_NAME {
+        return false;
+    }
+    !graph.edges().iter().any(|edge| edge.to() == index)
 }
 
 /// Build a map from in-scope model id to the unit tests targeting it.
@@ -1264,6 +1317,89 @@ mod tests {
             Some("source"),
             "ref('raw_customers') binds to the import-CTE `source` via its body table reference",
         );
+    }
+
+    #[test]
+    fn build_payload_messy_multi_ref_cte_binds_every_given_to_one_node() {
+        // cute-dbt#34 medium scope: a single CTE whose body references
+        // MULTIPLE `ref()` targets (here via UNION ALL) must surface ALL
+        // matching unit-test givens, not just the first. The engine
+        // classifies this body as Transform (multi-source, not the
+        // import-CTE shape) but populates body_leaf_table_refs with both
+        // leaves; pass-2 binds against any leaf node with those refs.
+        let compiled = "with raw_union as (\
+                          select id, kind from \"db\".\"schema\".\"raw_orders\" \
+                          union all \
+                          select id, kind from \"db\".\"schema\".\"raw_returns\"\
+                        ) select * from raw_union";
+        let node = model_node("model.shop.union_model", "body", Some(compiled));
+        let ut = UnitTest::new(
+            "test_one",
+            NodeId::new("union_model"),
+            vec![
+                UnitTestGiven::new("ref('raw_orders')", json!([{"id": 1}]), None),
+                UnitTestGiven::new("ref('raw_returns')", json!([{"id": 9}]), None),
+            ],
+            UnitTestExpect::new(json!([]), None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.union_model")]);
+        let payload = build_payload(&manifest, &in_scope, &models, "b");
+        let test = &payload.models[0].tests[0];
+        assert_eq!(
+            test.given[0].bound_to_node.as_deref(),
+            Some("raw_union"),
+            "ref('raw_orders') binds to the multi-ref CTE via body-leaf match; \
+             got bound_to_node={:?}",
+            test.given[0].bound_to_node,
+        );
+        assert_eq!(
+            test.given[1].bound_to_node.as_deref(),
+            Some("raw_union"),
+            "ref('raw_returns') binds to the SAME multi-ref CTE; \
+             got bound_to_node={:?}",
+            test.given[1].bound_to_node,
+        );
+    }
+
+    #[test]
+    fn build_payload_messy_join_cte_binds_both_givens() {
+        // Variant of the multi-ref case where the messy CTE body is a
+        // single SELECT with a JOIN — also not the import shape, also
+        // populates body_leaf_table_refs with both joined leaves.
+        let compiled = "with joined_src as (\
+                          select o.id, c.name \
+                          from \"db\".\"schema\".\"raw_orders\" o \
+                          inner join \"db\".\"schema\".\"raw_customers\" c on c.id = o.cid\
+                        ) select * from joined_src";
+        let node = model_node("model.shop.join_model", "body", Some(compiled));
+        let ut = UnitTest::new(
+            "test_one",
+            NodeId::new("join_model"),
+            vec![
+                UnitTestGiven::new("ref('raw_orders')", json!([]), None),
+                UnitTestGiven::new("ref('raw_customers')", json!([]), None),
+            ],
+            UnitTestExpect::new(json!([]), None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.join_model")]);
+        let payload = build_payload(&manifest, &in_scope, &models, "b");
+        let test = &payload.models[0].tests[0];
+        assert_eq!(test.given[0].bound_to_node.as_deref(), Some("joined_src"));
+        assert_eq!(test.given[1].bound_to_node.as_deref(), Some("joined_src"));
     }
 
     #[test]

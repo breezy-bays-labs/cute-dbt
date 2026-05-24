@@ -752,16 +752,22 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     $det.append($sqlWrap);
     $detail.append($det);
 
-    if (node.role === "import") {
-      var bound = t.given.filter(function (g) { return g.bound_to_node === node.id; })[0];
-      if (bound) {
-        $detail.append(renderGivenSection(bound));
-      } else {
-        $detail.append(
-          $("<div>").addClass("given-empty")
-            .text('no fixture provided — dbt treats unspecified inputs as empty')
-        );
-      }
+    // Fixture binding surface — cute-dbt#34 messy-import-CTE medium scope.
+    // A single CTE body may reference multiple ref() targets (UNION ALL,
+    // JOIN, derived subqueries), in which case the renderer binds EVERY
+    // matching given to that one node; we stack them vertically here so
+    // each fixture card is independently scannable. Pass-1 import-CTEs
+    // with no bound given retain the historic "no fixture provided"
+    // empty-state copy; transform leaves without a binding render
+    // nothing extra (most non-import CTEs carry no fixture by design).
+    var bound = t.given.filter(function (g) { return g.bound_to_node === node.id; });
+    if (bound.length > 0) {
+      bound.forEach(function (g) { $detail.append(renderGivenSection(g)); });
+    } else if (node.role === "import") {
+      $detail.append(
+        $("<div>").addClass("given-empty")
+          .text('no fixture provided — dbt treats unspecified inputs as empty')
+      );
     }
     $wrap.append($detail);
     initDataTablesIn($wrap);
