@@ -152,7 +152,8 @@ pub trait StateModifier {
 /// is a documented, named limit — not a defect; the missing sub-selectors
 /// arrive as additive `impl StateModifier`s.
 //
-// tracked: breezy-bays-labs/cute-dbt#14 — config-only / contract-only changes not detected
+// tracked: breezy-bays-labs/cute-dbt#14 — v0.1 body-only scoping;
+// .configs and .contract sub-selectors land with #15
 #[derive(Debug, Clone, Copy)]
 pub struct BodyChecksumModifier;
 
