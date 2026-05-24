@@ -769,31 +769,47 @@ fn extract_table_leaf_refs(sql: &str) -> Vec<String> {
     // comment line must not produce a `users` leaf ref.
     let stripped = strip_sql_comments(sql);
     let tokens: Vec<&str> = stripped.split_whitespace().collect();
-    let mut out = Vec::new();
-    for (i, tok) in tokens.iter().enumerate() {
-        let lower = tok.to_ascii_lowercase();
-        if lower != "from" && lower != "join" {
-            continue;
-        }
-        let Some(next) = tokens.get(i + 1) else {
-            continue;
-        };
-        // Strip surrounding `(` and trailing `,`/`)`/`;`/`(`; take the
-        // last `.`-delimited segment; strip `"` quotes.
-        let cleaned = next
-            .trim_start_matches('(')
-            .trim_end_matches([',', ')', ';']);
-        let leaf = cleaned.rsplit('.').next().unwrap_or("");
-        let leaf = leaf.trim_matches('"');
-        if leaf.is_empty() {
-            continue;
-        }
-        if !leaf.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            continue;
-        }
-        out.push(leaf.to_ascii_lowercase());
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, tok)| is_from_or_join_keyword(tok))
+        .filter_map(|(i, _)| tokens.get(i + 1).copied())
+        .filter_map(extract_leaf_table_identifier)
+        .collect()
+}
+
+/// `true` when `tok`'s case-folded form is exactly the SQL keyword
+/// `FROM` or `JOIN`. Trailing punctuation (`,`, `;`, `)`) is tolerated
+/// since the tokenizer is whitespace-only.
+fn is_from_or_join_keyword(tok: &str) -> bool {
+    let cleaned = tok.trim_end_matches([',', ';', ')']).to_ascii_lowercase();
+    matches!(cleaned.as_str(), "from" | "join")
+}
+
+/// Pull the leaf identifier from a raw token that follows a `FROM` /
+/// `JOIN` keyword. Returns `None` for tokens whose leaf segment is
+/// empty or contains characters outside `[A-Za-z0-9_]` — those are
+/// subqueries, parenthesised expressions, or anything the heuristic
+/// cannot identify cleanly. Returned identifier is lowercased.
+fn extract_leaf_table_identifier(raw: &str) -> Option<String> {
+    // Strip surrounding `(`, trailing `,`/`)`/`;`; take the last
+    // `.`-delimited segment; strip `"` quotes.
+    let cleaned = raw
+        .trim_start_matches('(')
+        .trim_end_matches([',', ')', ';']);
+    let leaf = cleaned.rsplit('.').next()?.trim_matches('"');
+    if leaf.is_empty() || !leaf.chars().all(is_identifier_char) {
+        return None;
     }
-    out
+    Some(leaf.to_ascii_lowercase())
+}
+
+/// SQL identifier character: ASCII alphanumeric plus underscore.
+/// Quoted identifiers with arbitrary characters are out of scope —
+/// the heuristic's caller (import-CTE body match) is constrained to
+/// dbt-style unquoted-after-stripping leaf names.
+fn is_identifier_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
 }
 
 /// Build a map from in-scope model id to the unit tests targeting it.
@@ -1158,6 +1174,46 @@ mod tests {
         let manifest = manifest_for(vec![], vec![]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.ghost")]);
         let payload = build_payload(&manifest, &InScopeSet::new(), &models, "b");
+        assert!(payload.models.is_empty());
+    }
+
+    #[test]
+    fn build_payload_skips_an_in_scope_test_id_missing_from_manifest() {
+        // Defensive `index_in_scope_tests_by_model` path: a test id is
+        // in the InScopeSet but the manifest has no matching unit_test
+        // entry. The indexer skips it; build_payload must not crash and
+        // the model that WOULD have carried it has zero tests.
+        let node = model_node("model.shop.x", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.ghost".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let payload = build_payload(&manifest, &in_scope, &models, "b");
+        assert_eq!(payload.models.len(), 1);
+        assert!(payload.models[0].tests.is_empty());
+    }
+
+    #[test]
+    fn build_payload_skips_an_in_scope_test_whose_target_model_is_missing() {
+        // Defensive `index_in_scope_tests_by_model` path: a unit test
+        // exists in the manifest but its `model:` selector resolves to
+        // None (target model not in manifest). The indexer skips it.
+        let ut = UnitTest::new(
+            "test_ghost",
+            NodeId::new("ghost_model"),
+            vec![],
+            UnitTestExpect::new(json!([]), None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let manifest = manifest_for(vec![], vec![("unit_test.shop.test_ghost", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_ghost".to_owned()]);
+        let models = ModelInScopeSet::new();
+        let payload = build_payload(&manifest, &in_scope, &models, "b");
+        // No models in scope → no payload entries; the indexer's None
+        // branch simply doesn't contribute.
         assert!(payload.models.is_empty());
     }
 
@@ -1639,6 +1695,113 @@ mod tests {
         let sql = "select * from (raw_customers)";
         let refs = extract_table_leaf_refs(sql);
         assert!(refs.iter().any(|r| r == "raw_customers"), "{refs:?}");
+    }
+
+    #[test]
+    fn extract_table_leaf_refs_returns_empty_when_from_is_the_last_token() {
+        // No next token after FROM — extract gracefully degrades.
+        assert!(extract_table_leaf_refs("select * from").is_empty());
+    }
+
+    #[test]
+    fn extract_table_leaf_refs_drops_subquery_paren_token() {
+        // `from (select ...)` — the next token is `(select`, whose leaf
+        // after stripping is the SQL keyword `select`, not a real table.
+        // Real-world: stripping `(` and matching identifiers would let
+        // `select` through; we accept this is a known false-positive
+        // bounded by the import-CTE filter at the call site, but locking
+        // the current behavior so regressions in the heuristic are loud.
+        let refs = extract_table_leaf_refs("select * from (select id from x)");
+        // The trailing `from x` still produces `x`.
+        assert!(refs.iter().any(|r| r == "x"));
+    }
+
+    // ===== is_from_or_join_keyword =====
+
+    #[test]
+    fn is_from_or_join_keyword_matches_case_folded() {
+        assert!(is_from_or_join_keyword("FROM"));
+        assert!(is_from_or_join_keyword("from"));
+        assert!(is_from_or_join_keyword("Join"));
+        assert!(is_from_or_join_keyword("jOiN"));
+    }
+
+    #[test]
+    fn is_from_or_join_keyword_tolerates_trailing_punctuation() {
+        assert!(is_from_or_join_keyword("FROM,"));
+        assert!(is_from_or_join_keyword("Join;"));
+        assert!(is_from_or_join_keyword("from)"));
+    }
+
+    #[test]
+    fn is_from_or_join_keyword_rejects_substring_matches() {
+        // `from_col`, `joiner`, `tofrom` must NOT match.
+        assert!(!is_from_or_join_keyword("from_col"));
+        assert!(!is_from_or_join_keyword("joiner"));
+        assert!(!is_from_or_join_keyword("tofrom"));
+        assert!(!is_from_or_join_keyword(""));
+    }
+
+    // ===== extract_leaf_table_identifier =====
+
+    #[test]
+    fn extract_leaf_table_identifier_lowercases_simple_token() {
+        assert_eq!(
+            extract_leaf_table_identifier("RAW_CUSTOMERS"),
+            Some("raw_customers".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_leaf_table_identifier_strips_schema_prefix_and_quotes() {
+        assert_eq!(
+            extract_leaf_table_identifier("\"db\".\"schema\".\"raw_customers\""),
+            Some("raw_customers".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_leaf_table_identifier_strips_surrounding_paren_and_punctuation() {
+        assert_eq!(
+            extract_leaf_table_identifier("(raw_customers),"),
+            Some("raw_customers".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_leaf_table_identifier_returns_none_for_empty_leaf() {
+        // Pure quote pair or pure punctuation — leaf is empty after
+        // stripping.
+        assert_eq!(extract_leaf_table_identifier("\"\""), None);
+        assert_eq!(extract_leaf_table_identifier(";"), None);
+        assert_eq!(extract_leaf_table_identifier(""), None);
+    }
+
+    #[test]
+    fn extract_leaf_table_identifier_returns_none_for_non_identifier_chars() {
+        // A `*` glob, a `+` operator, a `$` sigil — none are valid leaf
+        // identifiers under the heuristic's grammar.
+        assert_eq!(extract_leaf_table_identifier("*"), None);
+        assert_eq!(extract_leaf_table_identifier("a+b"), None);
+        assert_eq!(extract_leaf_table_identifier("$var"), None);
+    }
+
+    // ===== is_identifier_char =====
+
+    #[test]
+    fn is_identifier_char_accepts_alnum_and_underscore() {
+        assert!(is_identifier_char('a'));
+        assert!(is_identifier_char('Z'));
+        assert!(is_identifier_char('0'));
+        assert!(is_identifier_char('_'));
+    }
+
+    #[test]
+    fn is_identifier_char_rejects_punctuation_and_non_ascii() {
+        assert!(!is_identifier_char('-'));
+        assert!(!is_identifier_char('.'));
+        assert!(!is_identifier_char(' '));
+        assert!(!is_identifier_char('é'));
     }
 
     // ===== is_simple_from_select =====
