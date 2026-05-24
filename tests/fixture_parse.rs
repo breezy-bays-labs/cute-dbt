@@ -104,6 +104,19 @@ fn every_listed_fixture_parses_and_reports_shape() {
             // Reported by fixture_manifest_listed; skip here.
             continue;
         }
+        // Skip non-JSON fixtures — dbt manifests are JSON by definition;
+        // non-`.json` fixtures (e.g. the PR 14 `config-*.toml` fixtures
+        // for the `--config <PATH>` value-parser scenarios) are
+        // intentionally not dbt manifests and have their own dedicated
+        // assertions in `tests/adapters/config_reader.rs` /
+        // `features/config.feature`.
+        if !entry.path.ends_with(".json") {
+            println!(
+                "fixture_parse: {} is non-JSON (manifest-shape assertions do not apply)",
+                entry.path
+            );
+            continue;
+        }
         let bytes = fs::read_to_string(&path).expect("read listed fixture");
         let value: Value = serde_json::from_str(&bytes)
             .unwrap_or_else(|e| panic!("fixture {} must parse as JSON: {e}", entry.path));

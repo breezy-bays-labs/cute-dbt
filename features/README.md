@@ -1,6 +1,6 @@
 # cute-dbt BDD acceptance specs
 
-These five `.feature` files are the **ATDD outer loop** for cute-dbt v0.1.
+These six `.feature` files are the **ATDD outer loop** for cute-dbt v0.1.
 Step definitions and the `cargo test --test bdd` harness land in PR 10
 (#TBD) via cucumber-rs (`harness = false`; NOT nextest-compatible — set
 `test_tool = "cargo"` in `.cargo/mutants.toml` to keep mutation testing
@@ -16,6 +16,7 @@ aware).
 | SC4 | auditability package re-runnable by anyone | `zero_egress.feature` (headless-network proof + resource-ref lint). **Asset-manifest completeness is a CI invariant** (`cargo-deny` + `cargo test` over `assets/MANIFEST.toml`), NOT a scenario — same bucket as SC5/SC6. |
 | SC5 | MIT, public, single crate, reproducible build | **Not a scenario** — verified by repo config + `cargo-deny` + committed `Cargo.lock` (CI gate). |
 | SC6 | full quality/ATDD suite green in CI | **Not a scenario** — verified by CI pipeline existence (clippy pedantic, fmt, these features, insta, crap4rs, cargo-mutants, cargo-deny, lefthook). |
+| SC7 | optional TOML config → report metadata reflected end-to-end | `config.feature` (PR 14, cute-dbt#24). |
 
 SC5/SC6 are repo/CI invariants, deliberately not Gherkin. Synthetic-only
 fixture completeness is the same shape — enforced by
@@ -33,7 +34,9 @@ fixture completeness is the same shape — enforced by
   exercises the usage-error path itself). The `baseline-required-grep`
   CI job enforces this structurally.
 
-## File count is pinned (==5)
+## File count is pinned (==6)
 
-The `feature-count` CI job asserts exactly five `.feature` files exist
-under `features/`. Adding a sixth feature requires updating the job.
+The `feature-count` CI job asserts exactly six `.feature` files exist
+under `features/`. The bump from 5 → 6 landed in PR 14 (cute-dbt#24)
+when `config.feature` joined the contract. Adding a seventh requires
+updating the job.

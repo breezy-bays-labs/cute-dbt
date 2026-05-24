@@ -45,13 +45,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlparser = "0.62"
 thiserror = "2"
+# Runtime dep since PR 14 (#24): the `--config <PATH>` clap value-parser
+# parses the operator-supplied TOML into `domain::AnalysisConfig`. The
+# fixture-gate tests (`tests/fixture_*.rs`) also use this crate; they
+# now share the runtime entry.
+toml = "1"
 
 [dev-dependencies]
 # Fixture-gate toolchain (PR 4a, #5):
 #   insta  -> golden-snapshot scaffold (first real snapshot lands PR 4b).
-#   toml   -> parse `tests/fixtures/MANIFEST.toml` in `tests/fixture_*.rs`
-#            so the synthetic-only invariant has a fast local signal
-#            alongside the structural CI grep job `fixture-manifest-gate`.
+#   (toml -> promoted to runtime in PR 14, see [dependencies]; the
+#            fixture-gate tests still use it to parse
+#            `tests/fixtures/MANIFEST.toml`.)
 #   sha2 + hex -> compute SHA-256 of each listed fixture file for the
 #            MANIFEST.toml integrity assertion (belt-and-braces with CI).
 #   walkdir -> walk `tests/fixtures/` from the listed-test (std-only walk
@@ -79,7 +84,6 @@ thiserror = "2"
 #            `.cargo/mutants.toml` `test_tool = "cargo"` preserves that
 #            invocation under mutation testing).
 insta = "1"
-toml = "1"
 sha2 = "0.10"
 hex = "0.4"
 walkdir = "2"

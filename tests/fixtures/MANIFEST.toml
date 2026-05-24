@@ -96,3 +96,49 @@ checksum (`compiled_code: null`) and zero unit tests. Exercises PR C \
 targeting it but lacks compiled SQL must trigger the None-shape \
 `NotCompiled` error. Pure synthetic data only.\
 """
+
+[[fixture]]
+path = "config-q3-review.toml"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/24"
+sha256 = "9e1b3cbdc01ad0e530830499a33f203ab8c9d28c4e3056788987ecd9e4071fe5"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Synthetic happy-path TOML config fixture for PR 14 (cute-dbt#24). \
+Sets both `report.title` and `report.subtitle` so the cucumber \
+`features/config.feature` scenarios can assert both surfaces are \
+reflected in the rendered HTML. No real data.\
+"""
+
+[[fixture]]
+path = "config-title-only.toml"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/24"
+sha256 = "6d47f195d820f89f148ca72ff7b12215874c7651d97cc96a080e3e76295f2955"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Synthetic title-only TOML config fixture for PR 14 (cute-dbt#24). \
+Sets `report.title` but omits `report.subtitle`; the cucumber scenario \
+asserts the absent-subtitle path omits the `<p class=\"report-subtitle\">` \
+element entirely. No real data.\
+"""
+
+[[fixture]]
+path = "config-broken.toml"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/24"
+sha256 = "1f9fe2ff5dcdb24c4afc2c01028b155c27e49ea871fba108b72c1463c1a2f907"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Synthetic invalid-TOML fixture for PR 14 (cute-dbt#24). Wholesale-broken \
+TOML — the clap value-parser fn fails the parse, producing exit 2 (clap \
+usage error, NOT a PreflightError variant — ARCHITECTURE.md §3 \
+baseline-missing precedent). No real data; not parseable as TOML by \
+design.\
+"""

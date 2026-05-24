@@ -15,7 +15,7 @@ use cute4dbt::adapters::asset_embed::{
 };
 use cute4dbt::adapters::manifest::FileManifestSource;
 use cute4dbt::adapters::render::render_report;
-use cute4dbt::domain::{Manifest, StateComparator};
+use cute4dbt::domain::{DEFAULT_REPORT_TITLE, Manifest, StateComparator};
 use cute4dbt::ports::ManifestSource;
 
 /// Absolute path to a committed fixture under `tests/fixtures/`.
@@ -49,6 +49,8 @@ fn render_jaffle_shop(out: &Path) {
         &in_scope,
         &models_in_scope,
         "jaffle-shop-baseline.json",
+        DEFAULT_REPORT_TITLE,
+        None,
     )
     .expect("render writes the report");
 }

@@ -1,0 +1,6 @@
+# Synthetic title-only fixture for cute-dbt#24. Asserts that an
+# absent [report].subtitle key omits the <p class="report-subtitle">
+# element from the rendered HTML.
+
+[report]
+title = "Title-only review"

@@ -28,7 +28,8 @@ use clap::Parser;
 use crate::adapters::manifest::{FileManifestSource, load_baseline};
 use crate::adapters::render::render_report;
 use crate::domain::{
-    InScopeSet, Manifest, ModelInScopeSet, PreflightError, StateComparator, preflight_compiled,
+    DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, PreflightError, StateComparator,
+    preflight_compiled,
 };
 use crate::ports::ManifestSource;
 
@@ -116,14 +117,33 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
     let (in_scope, models_in_scope) = scope(&current, &baseline);
     preflight_compiled(&current, &in_scope, &models_in_scope)?;
     parse_ctes();
+    let (report_title, report_subtitle) = resolve_report_strings(cli);
     render(
         &cli.out,
         &current,
         &in_scope,
         &models_in_scope,
         &cli.baseline_manifest,
+        &report_title,
+        report_subtitle.as_deref(),
     )?;
     Ok(())
+}
+
+/// Resolve the rendered report's title + subtitle from `--config`,
+/// falling back to [`DEFAULT_REPORT_TITLE`] for an absent / unset title.
+///
+/// Returns `(title, subtitle)` where `subtitle` is `None` when no
+/// config is supplied or the config omits `[report].subtitle` (the
+/// renderer then omits the `<p class="report-subtitle">` element
+/// entirely).
+fn resolve_report_strings(cli: &Cli) -> (String, Option<String>) {
+    let report_cfg = cli.config.as_ref().map(|c| &c.report);
+    let title = report_cfg
+        .and_then(|r| r.title.clone())
+        .unwrap_or_else(|| DEFAULT_REPORT_TITLE.to_owned());
+    let subtitle = report_cfg.and_then(|r| r.subtitle.clone());
+    (title, subtitle)
 }
 
 /// Stage-1 pre-flight: load the primary and baseline manifests through
@@ -173,9 +193,19 @@ fn render(
     in_scope: &InScopeSet,
     models_in_scope: &ModelInScopeSet,
     baseline_path: &Path,
+    report_title: &str,
+    report_subtitle: Option<&str>,
 ) -> Result<(), io::Error> {
     let baseline_label = baseline_path.display().to_string();
-    render_report(out, current, in_scope, models_in_scope, &baseline_label)
+    render_report(
+        out,
+        current,
+        in_scope,
+        models_in_scope,
+        &baseline_label,
+        report_title,
+        report_subtitle,
+    )
 }
 
 #[cfg(test)]
@@ -187,6 +217,7 @@ mod tests {
             manifest: "current.json".into(),
             baseline_manifest: "baseline.json".into(),
             out: out.into(),
+            config: None,
         }
     }
 
@@ -199,6 +230,56 @@ mod tests {
         let msg = failure.message(&cli("report.html"));
         assert!(msg.contains("model.shop.stg_orders"), "{msg}");
         assert!(msg.contains("dbt compile"), "{msg}");
+    }
+
+    #[test]
+    fn resolve_report_strings_uses_the_default_title_without_config() {
+        let cli = cli("report.html");
+        let (title, subtitle) = resolve_report_strings(&cli);
+        assert_eq!(title, DEFAULT_REPORT_TITLE);
+        assert!(subtitle.is_none());
+    }
+
+    #[test]
+    fn resolve_report_strings_uses_the_default_title_when_config_omits_title() {
+        let mut cli = cli("report.html");
+        cli.config = Some(crate::domain::AnalysisConfig {
+            report: crate::domain::ReportConfig {
+                title: None,
+                subtitle: Some("PR 1234".to_owned()),
+            },
+        });
+        let (title, subtitle) = resolve_report_strings(&cli);
+        assert_eq!(title, DEFAULT_REPORT_TITLE);
+        assert_eq!(subtitle.as_deref(), Some("PR 1234"));
+    }
+
+    #[test]
+    fn resolve_report_strings_uses_configured_title_and_subtitle() {
+        let mut cli = cli("report.html");
+        cli.config = Some(crate::domain::AnalysisConfig {
+            report: crate::domain::ReportConfig {
+                title: Some("Q3 review".to_owned()),
+                subtitle: Some("PR 1234 / staging diff".to_owned()),
+            },
+        });
+        let (title, subtitle) = resolve_report_strings(&cli);
+        assert_eq!(title, "Q3 review");
+        assert_eq!(subtitle.as_deref(), Some("PR 1234 / staging diff"));
+    }
+
+    #[test]
+    fn resolve_report_strings_omits_subtitle_when_absent() {
+        let mut cli = cli("report.html");
+        cli.config = Some(crate::domain::AnalysisConfig {
+            report: crate::domain::ReportConfig {
+                title: Some("title-only".to_owned()),
+                subtitle: None,
+            },
+        });
+        let (title, subtitle) = resolve_report_strings(&cli);
+        assert_eq!(title, "title-only");
+        assert!(subtitle.is_none());
     }
 
     #[test]
