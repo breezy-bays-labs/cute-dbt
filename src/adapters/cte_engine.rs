@@ -199,7 +199,7 @@ fn compute_shape_facts(body: &SetExpr) -> BodyShapeFacts {
 /// — the import-CTE shape. The top-level form must be `SetExpr::Select`;
 /// a `UNION`, parenthesised query, or anything else is not "simple"
 /// even if the AST walk would eventually find a single source. The
-/// renderer's [`NodeRole::Import`] classification keys off this fact.
+/// renderer's `NodeRole::Import` classification keys off this fact.
 fn is_body_simple_from_select(body: &SetExpr) -> bool {
     let SetExpr::Select(select) = body else {
         return false;
@@ -1144,7 +1144,7 @@ mod tests {
         );
         let j = &g.nodes()[0];
         assert_eq!(j.name(), "j");
-        assert!(!j.is_simple_from_shape(), "JOIN body is transform-shaped",);
+        assert!(!j.is_simple_from_shape(), "JOIN body is transform-shaped");
         let refs = j.body_leaf_table_refs();
         assert!(
             refs.iter().any(|t| t == "a"),

@@ -597,7 +597,8 @@ fn build_test_payload(id: &str, unit_test: &UnitTest, graph: &CteGraph) -> TestP
 ///    the CTE name is the unwrapper convention (`source`, `src_*`,
 ///    etc.) and the model name lives only inside the body. Pass 1
 ///    misses that shape; pass 2 catches it via the engine-computed
-///    [`CteNode::body_leaf_table_refs`] (cute-dbt#40).
+///    [`body_leaf_table_refs`](crate::domain::CteNode::body_leaf_table_refs)
+///    (cute-dbt#40).
 ///
 /// Returns the import-CTE's name (the payload's stable node id), or
 /// `None` when neither pass matches.
