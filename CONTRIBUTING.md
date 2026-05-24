@@ -65,8 +65,8 @@ the live state is queryable at
 - **PRs required.** No direct pushes to `main` from any user, including
   the repo owner (`enforce_admins: true`). The genesis-commit one-time
   exception is historical and does not apply to ongoing work.
-- **All 20 CI checks must pass** before merge — the required-check set
-  is listed below.
+- **All required CI checks must pass** before merge — the required-check
+  set is listed below.
 - **Linear history.** Squash-merge only on `main`. Non-linear merges
   are blocked (`required_linear_history: true`); the repo's UI still
   exposes merge + rebase buttons, but they fail policy on `main`.
@@ -84,7 +84,7 @@ the live state is queryable at
   will be added when external contributors arrive (v1.0+, alongside
   the first crates.io publish).
 
-**Required status checks** — the 20 CI job names that must SUCCESS
+**Required status checks** — the CI job names that must succeed
 before merge, in sync with `.github/workflows/ci.yml`:
 
 - `Format`
