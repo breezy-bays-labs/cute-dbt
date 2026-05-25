@@ -15,7 +15,7 @@
 //! the two-stage fail-closed contract, and the conscious design
 //! simplifications.
 
-#![warn(clippy::pedantic, clippy::cargo)]
+#![warn(clippy::pedantic, clippy::cargo, missing_docs)]
 #![forbid(unsafe_code)]
 
 pub mod adapters;

@@ -3,10 +3,14 @@
 All notable changes to this project will be documented in this file. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-cute-dbt follows a deliberate **no-public-release** policy through v0.x —
-the tool runs locally during development and PR review; tags exist for git
-pinning only. v1.0 ships when the CLI surface, the askama template
-contract, and the auditability package have stabilized.
+cute-dbt publishes to crates.io from `v0.1.0+` via `release-plz` + OIDC
+trusted publishing. v0.x is unstable per Cargo SemVer convention: every
+minor bump (`0.1 → 0.2`) MAY carry breaking changes; v1.0 ships the
+first stability commitment when the CLI surface, the askama template
+contract, and the auditability package have stabilized. Full release-
+discipline policy in
+[`AGENTS.md` §Release discipline](AGENTS.md#release-discipline).
+`release-plz` generates entries below from conventional commits.
 
 ## [Unreleased]
 

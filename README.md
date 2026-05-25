@@ -1,5 +1,10 @@
 # cute-dbt
 
+[![Crates.io](https://img.shields.io/crates/v/cute4dbt.svg)](https://crates.io/crates/cute4dbt)
+[![Documentation](https://docs.rs/cute4dbt/badge.svg)](https://docs.rs/cute4dbt)
+[![CI](https://github.com/breezy-bays-labs/cute-dbt/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/breezy-bays-labs/cute-dbt/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **cute** = **C**TE · **C**ontextualized · **C**LI — **U**nit **T**est **E**xplorer
 for **dbt**. (Pick whichever expansion suits the conversation: the headline
 feature is the CTE dependency DAG; the value-prop is reading unit tests *in
@@ -17,10 +22,12 @@ opens directly from the filesystem (`file://`), makes **zero outbound
 requests**, and is *trivially auditable*: open it offline with DevTools →
 Network and observe nothing.
 
-> **Status: v0.x — pre-release.** Public repo for free GitHub Actions and
-> agent reviews; **no crates.io publish, no GitHub Release tarballs, no
-> `cargo install` path** until v1.0. Tags during v0.x exist for git pinning
-> only and do not trigger any workflow.
+> **Status: v0.x — unstable.** Available on crates.io from `v0.1.0`
+> (`cargo install cute4dbt` installs the `cute-dbt` binary). v0.x follows
+> Cargo SemVer convention: every minor bump (`0.1 → 0.2`) MAY carry
+> breaking changes (CLI flag renames, output-shape changes, exit-code
+> changes); v1.0 ships the first stability commitment. Full release-
+> discipline policy in [`AGENTS.md` §Release discipline](AGENTS.md#release-discipline).
 
 ## What it shows
 
