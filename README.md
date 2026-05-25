@@ -2,8 +2,11 @@
 
 [![Crates.io](https://img.shields.io/crates/v/cute4dbt.svg)](https://crates.io/crates/cute4dbt)
 [![Documentation](https://docs.rs/cute4dbt/badge.svg)](https://docs.rs/cute4dbt)
+[![Book](https://img.shields.io/badge/book-mdbook-blue.svg)](https://breezy-bays-labs.github.io/cute-dbt/)
 [![CI](https://github.com/breezy-bays-labs/cute-dbt/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/breezy-bays-labs/cute-dbt/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+> **Product documentation**: [https://breezy-bays-labs.github.io/cute-dbt/](https://breezy-bays-labs.github.io/cute-dbt/) — mdbook with introduction, getting-started, features, examples, and the zero-egress privacy property.
 
 **cute** = **C**TE · **C**ontextualized · **C**LI — **U**nit **T**est **E**xplorer
 for **dbt**. (Pick whichever expansion suits the conversation: the headline

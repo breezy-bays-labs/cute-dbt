@@ -84,6 +84,19 @@ pre-push:
           exit 1
         fi
       timeout: 5s
+    mdbook-build:
+      # Mirror the `mdbook (book build)` CI job. Builds the product-docs
+      # mdbook locally so book/SUMMARY.md / book.toml / cross-references
+      # break before push, not in CI. Requires `mdbook` on PATH
+      # (`cargo install mdbook` or `brew install mdbook`).
+      run: |
+        set -euo pipefail
+        if ! command -v mdbook >/dev/null 2>&1; then
+          echo "mdbook-build: mdbook not on PATH — install via 'cargo install mdbook' or 'brew install mdbook'"
+          exit 1
+        fi
+        mdbook build book
+      timeout: 60s
     fixture-manifest-gate:
       # Mirror the `fixture-manifest-gate` CI job (synthetic-only invariant).
       # The cargo tests `tests/fixture_manifest_listed.rs` cover SHA-256 +
