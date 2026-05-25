@@ -22,6 +22,22 @@ pub fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// Every committed example HTML under `examples/`. Adding a new
+/// `examples/<name>-report.html` requires appending its filename here
+/// so the zero-egress gates (`tests/headless_zero_egress.rs` and
+/// `tests/resource_ref_lint.rs`) AND the `.github/workflows/ci.yml`
+/// `example-report-check` matrix both pick it up. Single source of
+/// truth — duplicating this list across test files is the kind of
+/// silent gap an audit gate catches months too late.
+pub const COMMITTED_EXAMPLES: &[&str] = &["jaffle-shop-report.html", "playground-report.html"];
+
+/// Absolute path to a committed example HTML under `examples/`.
+pub fn example_path(filename: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join(filename)
+}
+
 /// A path inside the cargo-provided integration-test temp directory.
 pub fn tmp(name: &str) -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join(name)

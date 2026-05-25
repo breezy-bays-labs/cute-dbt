@@ -34,20 +34,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use std::path::PathBuf;
-
 use common::ResourceRefViolation as Violation;
-
-/// Every committed example HTML the lint must scan. Adding a new
-/// `examples/<name>-report.html` requires appending its filename here
-/// so the secondary structural gate runs against it on every PR.
-const COMMITTED_EXAMPLES: &[&str] = &["jaffle-shop-report.html", "playground-report.html"];
-
-fn example_path(filename: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("examples")
-        .join(filename)
-}
 
 /// Scan HTML for forbidden resource references. Thin wrapper over
 /// `common::scan_resource_refs` so this test surface and the BDD
@@ -59,8 +46,8 @@ fn scan_violations(html: &str) -> Vec<Violation> {
 #[test]
 fn committed_examples_have_no_external_resource_refs() {
     let mut failures: Vec<String> = Vec::new();
-    for filename in COMMITTED_EXAMPLES {
-        let path = example_path(filename);
+    for filename in common::COMMITTED_EXAMPLES {
+        let path = common::example_path(filename);
         let html = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let violations = scan_violations(&html);

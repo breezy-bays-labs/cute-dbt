@@ -44,6 +44,9 @@
 //!
 //! Tracked: breezy-bays-labs/cute-dbt#12.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -54,19 +57,8 @@ use headless_chrome::LaunchOptionsBuilder;
 use headless_chrome::protocol::cdp::types::Event;
 use headless_chrome::protocol::cdp::{Network, Runtime};
 
-/// Every committed example HTML the headless proof must verify. Adding
-/// a new `examples/<name>-report.html` requires appending its filename
-/// here so the primary zero-egress gate runs against it on every PR.
-const COMMITTED_EXAMPLES: &[&str] = &["jaffle-shop-report.html", "playground-report.html"];
-
-fn report_path(filename: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("examples")
-        .join(filename)
-}
-
 fn report_file_url(filename: &str) -> String {
-    let path = report_path(filename);
+    let path = common::example_path(filename);
     let p = path.to_str().expect("report path must be valid UTF-8");
     format!("file://{p}")
 }
@@ -116,8 +108,8 @@ fn scheme_is_external(url: &str) -> bool {
 fn every_committed_example_makes_zero_external_requests_when_opened_via_file_url() {
     // Validate the example files exist BEFORE launching Chrome — a
     // missing file is a config error, not a Chrome failure.
-    for filename in COMMITTED_EXAMPLES {
-        let path = report_path(filename);
+    for filename in common::COMMITTED_EXAMPLES {
+        let path = common::example_path(filename);
         assert!(
             path.exists(),
             "examples/{filename} missing — regenerate via the \
@@ -162,7 +154,7 @@ fn every_committed_example_makes_zero_external_requests_when_opened_via_file_url
     // light (no per-example launch) while ensuring per-example event
     // capture is isolated.
     let mut failures: Vec<String> = Vec::new();
-    for filename in COMMITTED_EXAMPLES {
+    for filename in common::COMMITTED_EXAMPLES {
         let url = report_file_url(filename);
         assert!(
             url.starts_with("file://"),

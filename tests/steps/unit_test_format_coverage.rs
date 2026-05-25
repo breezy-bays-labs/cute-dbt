@@ -8,8 +8,16 @@
 //! formats so this feature pins the renderer against the full surface
 //! — a change that breaks any one format would surface here before
 //! shipping.
+//!
+//! Assertions parse the embedded `<script id="cute-dbt-data">` JSON
+//! payload (the source of truth for the rendered DOM) rather than
+//! string-grepping the HTML. The JS template builds per-model cards
+//! at runtime from this payload, so model-scoped facts (does THIS
+//! model have zero tests?) only have a structural answer at the
+//! payload level.
 
 use cucumber::{given, then, when};
+use serde_json::Value;
 
 use super::super::common;
 use super::World;
@@ -42,6 +50,39 @@ fn when_run_against_playground(world: &mut World) {
     world.out_path = Some(out);
 }
 
+/// Extract the embedded `<script id="cute-dbt-data">` JSON payload —
+/// the source of truth for what the rendered DOM displays per model.
+/// Panics with a useful message if the script element or its JSON is
+/// missing, so a renderer regression that drops the payload fails
+/// loudly here.
+fn extract_payload(html: &str) -> Value {
+    let dom = tl::parse(html, tl::ParserOptions::default()).expect("report HTML must parse");
+    let parser = dom.parser();
+    let node = dom
+        .get_element_by_id("cute-dbt-data")
+        .expect("report must include <script id=\"cute-dbt-data\">")
+        .get(parser)
+        .expect("payload script node resolves");
+    let raw = node.inner_text(parser);
+    serde_json::from_str(&raw).expect("payload script body must be valid JSON")
+}
+
+fn find_model<'p>(payload: &'p Value, model_name: &str) -> Option<&'p Value> {
+    payload
+        .get("models")?
+        .as_array()?
+        .iter()
+        .find(|m| m.get("name").and_then(Value::as_str) == Some(model_name))
+}
+
+fn model_tests(model: &Value) -> &[Value] {
+    model
+        .get("tests")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+
 #[then(regex = r#"^the playground report contains the unit test "([^"]+)"$"#)]
 fn report_contains_unit_test(world: &mut World, test_name: String) {
     assert_eq!(
@@ -54,23 +95,45 @@ fn report_contains_unit_test(world: &mut World, test_name: String) {
         .report_html
         .as_ref()
         .expect("report.html was written by the subprocess");
-    assert!(
-        html.contains(&test_name),
-        "expected report to contain unit test {test_name}; html length {} bytes",
-        html.len(),
-    );
+    let payload = extract_payload(html);
+    let mut found_model: Option<String> = None;
+    for model in payload["models"]
+        .as_array()
+        .expect("payload.models is an array")
+    {
+        for test in model_tests(model) {
+            if test.get("name").and_then(Value::as_str) == Some(&test_name) {
+                found_model = model.get("name").and_then(Value::as_str).map(str::to_owned);
+                break;
+            }
+        }
+    }
+    let owner = found_model.unwrap_or_else(|| {
+        panic!(
+            "expected the rendered payload to carry a unit test named {test_name}; \
+             payload models: {:?}",
+            payload["models"]
+                .as_array()
+                .unwrap_or(&Vec::new())
+                .iter()
+                .map(|m| m.get("name").and_then(Value::as_str).unwrap_or("?"))
+                .collect::<Vec<_>>(),
+        )
+    });
+    // Stash the owning model so the next And step can verify the
+    // test's `model:` binding without restating the name verbatim.
+    world.last_named_model = Some(owner);
 }
 
 #[then(regex = r#"^that unit test names the target model "([^"]+)"$"#)]
 fn unit_test_names_target_model(world: &mut World, model_name: String) {
-    let html = world
-        .report_html
+    let owner = world
+        .last_named_model
         .as_ref()
-        .expect("report.html was written by the subprocess");
-    assert!(
-        html.contains(&model_name),
-        "expected report to name the target model {model_name}; html length {} bytes",
-        html.len(),
+        .expect("the previous Then step set the owning model");
+    assert_eq!(
+        owner, &model_name,
+        "expected unit test to be owned by {model_name}; payload says {owner}",
     );
 }
 
@@ -80,31 +143,41 @@ fn report_contains_model_section(world: &mut World, model_name: String) {
         .report_html
         .as_ref()
         .expect("report.html was written by the subprocess");
+    let payload = extract_payload(html);
     assert!(
-        html.contains(&model_name),
-        "expected report to contain a section for model {model_name}; html length {} bytes",
-        html.len(),
+        find_model(&payload, &model_name).is_some(),
+        "expected payload to carry a model section for {model_name}; payload models: {:?}",
+        payload["models"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .map(|m| m.get("name").and_then(Value::as_str).unwrap_or("?"))
+            .collect::<Vec<_>>(),
     );
+    world.last_named_model = Some(model_name);
 }
 
 #[then("that model's section indicates zero unit tests are wired")]
 fn model_section_indicates_empty_state(world: &mut World) {
+    let model_name = world
+        .last_named_model
+        .as_ref()
+        .expect("the previous Then step named a model");
     let html = world
         .report_html
         .as_ref()
         .expect("report.html was written by the subprocess");
-    // The renderer's empty-state copy on the per-model card. The
-    // canonical phrasing is "0 unit tests wired" (set when a modified
-    // model has no in-scope unit tests targeting it). The empty-state
-    // also appears at the top of the report when nothing is in scope;
-    // here we just assert the copy is present anywhere on the page —
-    // the per-model-card structural assertion comes from the
-    // model-name section assertion above.
+    let payload = extract_payload(html);
+    let model = find_model(&payload, model_name)
+        .unwrap_or_else(|| panic!("model {model_name} present in payload"));
+    let tests = model_tests(model);
     assert!(
-        html.contains("0 unit tests wired")
-            || html.contains("No unit tests")
-            || html.contains("no unit tests"),
-        "expected empty-state copy ('0 unit tests wired' / 'No unit tests'); html length {} bytes",
-        html.len(),
+        tests.is_empty(),
+        "expected model {model_name} to have zero unit tests wired; payload says {} test(s): {:?}",
+        tests.len(),
+        tests
+            .iter()
+            .map(|t| t.get("name").and_then(Value::as_str).unwrap_or("?"))
+            .collect::<Vec<_>>(),
     );
 }
