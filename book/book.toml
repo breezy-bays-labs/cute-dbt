@@ -1,0 +1,22 @@
+[book]
+authors = ["Christopher Bays"]
+language = "en"
+src = "src"
+title = "cute-dbt — Unit Test Explorer for dbt"
+description = "Product documentation for cute-dbt — a zero-compute Rust CLI that turns a dbt manifest.json into one self-contained interactive HTML report visualizing dbt unit tests in CTE context."
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/breezy-bays-labs/cute-dbt"
+edit-url-template = "https://github.com/breezy-bays-labs/cute-dbt/edit/main/book/src/{path}"
+mathjax-support = false
+no-section-label = false
+site-url = "/cute-dbt/"
+
+[output.html.print]
+enable = true
+
+[output.html.fold]
+enable = true
+level = 1

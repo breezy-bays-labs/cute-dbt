@@ -2,6 +2,9 @@
 *.pdb
 **/*.rs.bk
 
+# mdbook build output (book/src/ is committed; book/book/ is generated)
+/book/book/
+
 # Coverage
 /coverage/
 lcov.info

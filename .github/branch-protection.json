@@ -21,7 +21,8 @@
       "Resource-ref lint (real loading constructs)",
       "Headless zero-egress proof (file://, network blocked)",
       "BDD outer loop (cucumber-rs, cargo test --test bdd)",
-      "crap4rs scorecard"
+      "crap4rs scorecard",
+      "mdbook (book build)"
     ]
   },
   "enforce_admins": true,
