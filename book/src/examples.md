@@ -39,18 +39,45 @@ in a headless Chromium with all network denied, and asserts zero
 [the privacy property page](./zero-egress.md) for the full audit
 mechanism.
 
-## Richer examples
+## dbt-playground
 
-Tracked separately on
-[issue #39](https://github.com/breezy-bays-labs/cute-dbt/issues/39):
-a fixture sourced from the [Tuva](https://thetuvaproject.com/) demo
-(public-domain healthcare data) inside Christopher's
-`dbt-playground` — exercising the multi-model selector cascade, a
-UNION arm in the CTE DAG, and the "modified model with zero unit
-tests in scope" empty-state card.
+👉 **[Open the rendered playground report](./examples/playground-report.html)**
+([source on GitHub](https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/playground-report.html))
 
-Once #39 lands, this page will index the new example HTML alongside
-jaffle-shop.
+The richer example. cute-dbt dogfooded against a real dbt project —
+[`cmbays/dbt-playground`](https://github.com/cmbays/dbt-playground), a
+healthcare-analytics project built on synthetic Synthea patient data.
+The fixture pair captures three modified models in a single diff,
+exercising in one report:
+
+- **Multi-model in-scope cascade**: `mart_dq_summary`, `dim_payers`,
+  and `int_dq_quarantine__encounters` are all modified. Three
+  per-model cards render side by side.
+- **UNION arm rendering** in two distinct patterns:
+  - `mart_dq_summary` UNION-ALLs encounter and medication DQ metrics
+    (one branch per upstream source).
+  - `dim_payers` UNION-ALLs an unknown-member sentinel row
+    (`payer_key = -1`) with the sequenced source rows.
+  The dashed-orange UNION edge appears in the CTE DAG with a matching
+  legend entry.
+- **Multi-test-per-model**: `mart_dq_summary` carries 2 unit tests
+  (combines-metrics + zero-quarantined-when-all-valid); `dim_payers`
+  carries 1 (unknown-sentinel injection).
+- **Empty-state card**:
+  `int_dq_quarantine__encounters` is in scope (its body checksum
+  changed) but has zero unit tests targeting it — the per-model card
+  renders the "0 unit tests wired" empty state.
+- **dbt unit_test fixture-format diversity**: the three unit tests
+  authored in the playground PR span sql `given` + mixed dict / csv
+  `expect` formats. cute-dbt renders their `compiled_code` uniformly
+  regardless of the authored format.
+
+The playground itself is synthetic (Synthea is a deterministic
+patient-data generator with no real PHI); the fixture's provenance
+is recorded in
+[`tests/fixtures/MANIFEST.toml`](https://github.com/breezy-bays-labs/cute-dbt/blob/main/tests/fixtures/MANIFEST.toml)
+with `synthetic_only = true` and the playground commit SHA the
+manifest was compiled at.
 
 ## How examples are generated
 

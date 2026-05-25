@@ -14,6 +14,7 @@ pub mod cte_rendering;
 pub mod diff_scoping;
 pub mod fail_closed;
 pub mod report_generation;
+pub mod unit_test_format_coverage;
 pub mod world;
 pub mod zero_egress;
 

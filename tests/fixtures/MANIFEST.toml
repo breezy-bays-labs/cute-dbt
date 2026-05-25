@@ -148,6 +148,48 @@ the `messy_shop` package name and node names are fictitious.\
 """
 
 [[fixture]]
+path = "playground-baseline.json"
+origin = "dbt-playground"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/602cb38"
+sha256 = "cf5c83e2490ad796c478422b8d7b8d4310f2f381f425c0ace40c5e4090223897"
+synthetic_only = true
+license = "MIT"
+description = """
+Compiled dbt-core 1.11.11 manifest (schema v12) for cmbays/dbt-playground \
+at the cute-dbt-dogfood-unit-tests branch HEAD. Pristine model bodies \
++ 3 newly authored unit_tests (test_dim_payers_injects_unknown_sentinel, \
+test_mart_dq_summary_combines_encounter_and_medication_metrics, \
+test_mart_dq_summary_zero_quarantined_when_all_valid). Synthetic Synthea \
+healthcare data only — the playground is itself synthetic (Synthea is a \
+deterministic patient-generator with no real PHI). Acts as the BASELINE \
+of the diff-scoping pair for cute-dbt#39's richer example. Source: \
+cmbays/dbt-playground#290 (private repo; URL provided for provenance \
+audit, not public retrieval).\
+"""
+
+[[fixture]]
+path = "playground-current.json"
+origin = "dbt-playground"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/602cb38"
+sha256 = "490cb708665cd196dc3cba1f769b80519f2ca0097b818c2a8c3ec15f6ae67f95"
+synthetic_only = true
+license = "MIT"
+description = """
+Same playground state as the baseline plus three synthetic local-only \
+single-line comment additions to mart_dq_summary.sql, dim_payers.sql, \
+and int_dq_quarantine__encounters.sql — enough to trip the model \
+checksum on each. Together with playground-baseline.json this pair \
+demonstrates cute-dbt's full diff-scoping surface: multi-model in-scope \
+(3 modified models), multi-test-per-model (2 tests on mart_dq_summary), \
+UNION-arm rendering (both mart_dq_summary + dim_payers use UNION ALL), \
+and the modified-no-tests empty-state card (int_dq_quarantine__encounters \
+is modified but carries no unit_tests). The comment-only modifications \
+are NOT committed to the playground — they exist only in this committed \
+manifest snapshot as the right-hand side of cute-dbt's hypothetical PR \
+diff. Source: cmbays/dbt-playground#290.\
+"""
+
+[[fixture]]
 path = "config-broken.toml"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/24"

@@ -44,6 +44,9 @@
 //!
 //! Tracked: breezy-bays-labs/cute-dbt#12.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -54,14 +57,8 @@ use headless_chrome::LaunchOptionsBuilder;
 use headless_chrome::protocol::cdp::types::Event;
 use headless_chrome::protocol::cdp::{Network, Runtime};
 
-fn report_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("examples")
-        .join("jaffle-shop-report.html")
-}
-
-fn report_file_url() -> String {
-    let path = report_path();
+fn report_file_url(filename: &str) -> String {
+    let path = common::example_path(filename);
     let p = path.to_str().expect("report path must be valid UTF-8");
     format!("file://{p}")
 }
@@ -108,21 +105,19 @@ fn scheme_is_external(url: &str) -> bool {
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
-fn report_makes_zero_external_requests_when_opened_via_file_url() {
-    let url = report_file_url();
-    assert!(
-        url.starts_with("file://"),
-        "zero-egress proof MUST run against a real file:// origin; got {url}",
-    );
-    let path = report_path();
-    assert!(
-        path.exists(),
-        "examples/jaffle-shop-report.html missing — regenerate via the \
-         `example-report-up-to-date` CI step or run:\n  cargo run --bin cute-dbt -- \
-         --manifest tests/fixtures/jaffle-shop-current.json \
-         --baseline-manifest tests/fixtures/jaffle-shop-baseline.json \
-         --out examples/jaffle-shop-report.html",
-    );
+fn every_committed_example_makes_zero_external_requests_when_opened_via_file_url() {
+    // Validate the example files exist BEFORE launching Chrome — a
+    // missing file is a config error, not a Chrome failure.
+    for filename in common::COMMITTED_EXAMPLES {
+        let path = common::example_path(filename);
+        assert!(
+            path.exists(),
+            "examples/{filename} missing — regenerate via the \
+             `example-report-up-to-date` CI step or run:\n  cargo run --bin cute-dbt -- \
+             --manifest <fixture-current.json> --baseline-manifest <fixture-baseline.json> \
+             --out examples/{filename}",
+        );
+    }
 
     // CI provides Chrome via `browser-actions/setup-chrome` and exports
     // CHROME=<path>. Locally we fall back to headless_chrome's discovery
@@ -154,120 +149,136 @@ fn report_makes_zero_external_requests_when_opened_via_file_url() {
     let opts = builder.build().expect("LaunchOptions must build");
 
     let browser = Browser::new(opts).expect("Chromium must launch");
-    let tab = browser.new_tab().expect("new tab");
 
-    // Enable the Network domain BEFORE navigate so RequestWillBeSent
-    // events fire for the navigation and any subsequent fetches.
-    tab.call_method(Network::Enable {
-        max_total_buffer_size: None,
-        max_resource_buffer_size: None,
-        max_post_data_size: None,
-        report_direct_socket_traffic: None,
-        enable_durable_messages: None,
-    })
-    .expect("enable Network domain");
-
-    let external = Arc::new(Mutex::new(Vec::<ExternalRequest>::new()));
-    let external_recorder = external.clone();
-    tab.add_event_listener(Arc::new(move |event: &Event| {
-        if let Event::NetworkRequestWillBeSent(e) = event {
-            let req_url = e.params.request.url.clone();
-            if scheme_is_external(&req_url) {
-                external_recorder.lock().unwrap().push(ExternalRequest {
-                    url: req_url,
-                    initiator_type: format!("{:?}", e.params.initiator.Type),
-                    initiator_url: e.params.initiator.url.clone(),
-                    initiator_line: e.params.initiator.line_number,
-                });
-            }
-        }
-    }))
-    .expect("subscribe Network.requestWillBeSent");
-
-    tab.navigate_to(&url).expect("navigate to file:// URL");
-    tab.wait_until_navigated().expect("await navigation");
-
-    // Mermaid renders on-demand (ADR-4 amendment 2026-05-22: `startOnLoad: false`).
-    // The SVG appears inside `.cte-dag-mermaid` once `renderDag()` runs +
-    // `mermaid.render()` resolves. We wait for the SVG element to assert
-    // the inlined Mermaid UMD bundle actually works offline.
-    let mermaid_ok = tab
-        .wait_for_element_with_custom_timeout(".cte-dag-mermaid svg", Duration::from_secs(15))
-        .is_ok();
-
-    // DataTables initialization signal — once `$('table').DataTable()`
-    // resolves, the table element gets the `dataTable` class. A single
-    // boolean is enough; "working sort + search" is not part of the
-    // auditability proof (see PR body disposition D3 on issue #12 for
-    // the focus.md vs. issue acceptance text reconciliation).
-    //
-    // Use `Runtime::Evaluate` directly with `returnByValue: true` so the
-    // result lands in `RemoteObject.value` as a deserialized JSON bool
-    // regardless of whether the runtime would otherwise return an
-    // `objectId` handle. `tab.evaluate(_, _)` hardcodes
-    // `returnByValue: false`, which works on primitives in practice but
-    // is implicit; spelling it out keeps the proof reliable across
-    // future headless_chrome / CDP changes.
-    let dt_eval = tab
-        .call_method(Runtime::Evaluate {
-            expression: "(function () { \
-                   try { \
-                     return !!(window.jQuery \
-                       && window.jQuery.fn \
-                       && window.jQuery.fn.DataTable \
-                       && document.querySelector('table.dataTable')); \
-                   } catch (_) { return false; } \
-                 })()"
-                .to_string(),
-            object_group: None,
-            include_command_line_api: None,
-            silent: Some(true),
-            context_id: None,
-            return_by_value: Some(true),
-            generate_preview: None,
-            user_gesture: None,
-            await_promise: Some(false),
-            throw_on_side_effect: None,
-            timeout: None,
-            disable_breaks: None,
-            repl_mode: None,
-            allow_unsafe_eval_blocked_by_csp: None,
-            unique_context_id: None,
-            serialization_options: None,
-        })
-        .expect("evaluate DataTables init probe");
-    let datatable_ok = dt_eval
-        .result
-        .value
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    let captured = external.lock().unwrap().clone();
-
-    if !captured.is_empty() {
-        let listing = captured
-            .iter()
-            .map(|r| r.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-        panic!(
-            "zero-egress proof FAILED — captured {n} external network request(s) when \
-             examples/jaffle-shop-report.html was opened via real file:// with DNS denied. \
-             Each request is a hole in the auditability story:\n{listing}",
-            n = captured.len(),
+    // One Chrome instance, fresh tab per example — keeps the test
+    // light (no per-example launch) while ensuring per-example event
+    // capture is isolated.
+    let mut failures: Vec<String> = Vec::new();
+    for filename in common::COMMITTED_EXAMPLES {
+        let url = report_file_url(filename);
+        assert!(
+            url.starts_with("file://"),
+            "zero-egress proof MUST run against a real file:// origin; got {url}",
         );
+
+        let tab = browser.new_tab().expect("new tab");
+
+        // Enable the Network domain BEFORE navigate so
+        // RequestWillBeSent events fire for the navigation and any
+        // subsequent fetches.
+        tab.call_method(Network::Enable {
+            max_total_buffer_size: None,
+            max_resource_buffer_size: None,
+            max_post_data_size: None,
+            report_direct_socket_traffic: None,
+            enable_durable_messages: None,
+        })
+        .expect("enable Network domain");
+
+        let external = Arc::new(Mutex::new(Vec::<ExternalRequest>::new()));
+        let external_recorder = external.clone();
+        tab.add_event_listener(Arc::new(move |event: &Event| {
+            if let Event::NetworkRequestWillBeSent(e) = event {
+                let req_url = e.params.request.url.clone();
+                if scheme_is_external(&req_url) {
+                    external_recorder.lock().unwrap().push(ExternalRequest {
+                        url: req_url,
+                        initiator_type: format!("{:?}", e.params.initiator.Type),
+                        initiator_url: e.params.initiator.url.clone(),
+                        initiator_line: e.params.initiator.line_number,
+                    });
+                }
+            }
+        }))
+        .expect("subscribe Network.requestWillBeSent");
+
+        tab.navigate_to(&url).expect("navigate to file:// URL");
+        tab.wait_until_navigated().expect("await navigation");
+
+        // Mermaid renders on-demand (ADR-4 amendment 2026-05-22:
+        // `startOnLoad: false`). The SVG appears inside
+        // `.cte-dag-mermaid` once `renderDag()` runs + `mermaid.render()`
+        // resolves. We wait for the SVG element to assert the inlined
+        // Mermaid UMD bundle actually works offline.
+        let mermaid_ok = tab
+            .wait_for_element_with_custom_timeout(".cte-dag-mermaid svg", Duration::from_secs(15))
+            .is_ok();
+
+        // DataTables initialization signal — once
+        // `$('table').DataTable()` resolves, the table element gets
+        // the `dataTable` class. Use `Runtime::Evaluate` directly with
+        // `returnByValue: true` so the result lands in
+        // `RemoteObject.value` as a deserialized JSON bool regardless
+        // of whether the runtime would otherwise return an `objectId`
+        // handle.
+        let dt_eval = tab
+            .call_method(Runtime::Evaluate {
+                expression: "(function () { \
+                       try { \
+                         return !!(window.jQuery \
+                           && window.jQuery.fn \
+                           && window.jQuery.fn.DataTable \
+                           && document.querySelector('table.dataTable')); \
+                       } catch (_) { return false; } \
+                     })()"
+                    .to_string(),
+                object_group: None,
+                include_command_line_api: None,
+                silent: Some(true),
+                context_id: None,
+                return_by_value: Some(true),
+                generate_preview: None,
+                user_gesture: None,
+                await_promise: Some(false),
+                throw_on_side_effect: None,
+                timeout: None,
+                disable_breaks: None,
+                repl_mode: None,
+                allow_unsafe_eval_blocked_by_csp: None,
+                unique_context_id: None,
+                serialization_options: None,
+            })
+            .expect("evaluate DataTables init probe");
+        let datatable_ok = dt_eval
+            .result
+            .value
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let captured = external.lock().unwrap().clone();
+
+        if !captured.is_empty() {
+            let listing = captured
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            failures.push(format!(
+                "examples/{filename}: {n} external request(s):\n{listing}",
+                n = captured.len(),
+            ));
+        }
+        if !mermaid_ok {
+            failures.push(format!(
+                "examples/{filename}: Mermaid SVG never appeared inside .cte-dag-mermaid \
+                 — either the inlined UMD bundle is broken or the rendering path tried to \
+                 fetch something blocked by DNS denial.",
+            ));
+        }
+        if !datatable_ok {
+            failures.push(format!(
+                "examples/{filename}: DataTables did not initialize — the inlined jQuery + \
+                 DataTables bundle is broken or one of them tried to fetch externally.",
+            ));
+        }
+
+        // Close the tab to free the resources before opening the next.
+        let _ = tab.close(true);
     }
+
     assert!(
-        mermaid_ok,
-        "Mermaid SVG never appeared inside .cte-dag-mermaid — \
-         either the inlined UMD bundle is broken or the rendering path \
-         tried to fetch something blocked by DNS denial. \
-         The zero-request count is necessary but not sufficient; the \
-         render must also work offline.",
-    );
-    assert!(
-        datatable_ok,
-        "DataTables did not initialize — the inlined jQuery + DataTables \
-         bundle is broken or one of them tried to fetch externally.",
+        failures.is_empty(),
+        "zero-egress proof FAILED on one or more committed examples — each is a hole in the auditability story:\n{}",
+        failures.join("\n"),
     );
 }

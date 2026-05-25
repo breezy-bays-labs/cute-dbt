@@ -34,15 +34,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use std::path::PathBuf;
-
 use common::ResourceRefViolation as Violation;
-
-fn example_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("examples")
-        .join("jaffle-shop-report.html")
-}
 
 /// Scan HTML for forbidden resource references. Thin wrapper over
 /// `common::scan_resource_refs` so this test surface and the BDD
@@ -52,21 +44,29 @@ fn scan_violations(html: &str) -> Vec<Violation> {
 }
 
 #[test]
-fn committed_example_has_no_external_resource_refs() {
-    let path = example_path();
-    let html =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let violations = scan_violations(&html);
+fn committed_examples_have_no_external_resource_refs() {
+    let mut failures: Vec<String> = Vec::new();
+    for filename in common::COMMITTED_EXAMPLES {
+        let path = common::example_path(filename);
+        let html = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let violations = scan_violations(&html);
+        if !violations.is_empty() {
+            let listing = violations
+                .iter()
+                .map(|v| format!("    - {v}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            failures.push(format!(
+                "examples/{filename}: {} violation(s)\n{listing}",
+                violations.len()
+            ));
+        }
+    }
     assert!(
-        violations.is_empty(),
-        "committed examples/jaffle-shop-report.html contains {} external resource \
-         reference(s) — the zero-egress invariant is broken:\n{}",
-        violations.len(),
-        violations
-            .iter()
-            .map(|v| format!("  - {v}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        failures.is_empty(),
+        "committed examples contain external resource reference(s) — the zero-egress invariant is broken:\n{}",
+        failures.join("\n"),
     );
 }
 
