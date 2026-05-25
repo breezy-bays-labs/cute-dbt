@@ -302,8 +302,8 @@ jobs:
         run: |
           set -euo pipefail
           count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
-          if [ "$count" != "6" ]; then
-            echo "::error::feature-count: expected 6 .feature files, found $count"
+          if [ "$count" != "7" ]; then
+            echo "::error::feature-count: expected 7 .feature files, found $count"
             exit 1
           fi
 
@@ -464,43 +464,91 @@ jobs:
           fi
           exit "$fail"
 
-  example-report-up-to-date:
-    # The committed examples/jaffle-shop-report.html is regenerated and
-    # diffed against the rendered output here. Drift between the renderer
-    # and the committed artifact is silent — the file ships unchanged
-    # until someone re-runs the CLI locally; this job re-runs it on every
-    # PR. If the diff fails, regenerate locally:
-    #   cargo run --bin cute-dbt -- \
-    #     --manifest tests/fixtures/jaffle-shop-current.json \
-    #     --baseline-manifest tests/fixtures/jaffle-shop-baseline.json \
-    #     --out examples/jaffle-shop-report.html
-    # The renderer is deterministic over fixture input, so byte-equality
-    # is the correct gate.
-    name: Example report is byte-identical to renderer output
+  example-report-check:
+    # Per-example matrix worker. Regenerates one committed
+    # examples/*-report.html against its fixture pair and diffs
+    # byte-by-byte. Drift between the renderer and the committed
+    # artifact is silent — the file ships unchanged until someone
+    # re-runs the CLI locally; this job re-runs it on every PR. If
+    # the diff fails for any example, regenerate locally with the
+    # command surfaced in the failure log. The renderer is
+    # deterministic over fixture input, so byte-equality is the
+    # correct gate.
+    #
+    # To add a new example: commit examples/<name>-report.html
+    # alongside its fixture pair in tests/fixtures/ AND add a row
+    # to the matrix below. The fixture pair MUST also be listed in
+    # tests/fixtures/MANIFEST.toml (separate gate enforces that).
+    #
+    # The aggregator job `example-report-up-to-date` below presents
+    # a single stable check name to branch protection so adding new
+    # matrix rows doesn't require a branch-protection.json bump.
+    name: Example report check (${{ matrix.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: jaffle-shop
+            current: tests/fixtures/jaffle-shop-current.json
+            baseline: tests/fixtures/jaffle-shop-baseline.json
+            output: examples/jaffle-shop-report.html
+          - name: playground
+            current: tests/fixtures/playground-current.json
+            baseline: tests/fixtures/playground-baseline.json
+            output: examples/playground-report.html
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - name: Regenerate examples/jaffle-shop-report.html and diff
+      - name: Regenerate example and diff
+        env:
+          # Matrix values are workflow-controlled (defined above), not
+          # user-controlled inputs — but passing through env: is the
+          # official safe pattern for any `${{ }}` interpolation.
+          EXAMPLE_NAME: ${{ matrix.name }}
+          CURRENT_MANIFEST: ${{ matrix.current }}
+          BASELINE_MANIFEST: ${{ matrix.baseline }}
+          OUTPUT_PATH: ${{ matrix.output }}
         run: |
           set -euo pipefail
           mkdir -p target/example-check
+          rendered="target/example-check/$(basename "$OUTPUT_PATH")"
           cargo run --quiet --locked --bin cute-dbt -- \
-            --manifest tests/fixtures/jaffle-shop-current.json \
-            --baseline-manifest tests/fixtures/jaffle-shop-baseline.json \
-            --out target/example-check/jaffle-shop-report.html
-          if ! diff -q target/example-check/jaffle-shop-report.html examples/jaffle-shop-report.html >/dev/null; then
-            echo "::error::example-report-up-to-date: examples/jaffle-shop-report.html does not match the renderer output. Regenerate with:"
-            echo "  cargo run --bin cute-dbt -- --manifest tests/fixtures/jaffle-shop-current.json --baseline-manifest tests/fixtures/jaffle-shop-baseline.json --out examples/jaffle-shop-report.html"
-            # Surface the byte sizes so the diff is human-greppable in CI logs.
+            --manifest "$CURRENT_MANIFEST" \
+            --baseline-manifest "$BASELINE_MANIFEST" \
+            --out "$rendered"
+          if ! diff -q "$rendered" "$OUTPUT_PATH" >/dev/null; then
+            echo "::error::example-report-up-to-date: $OUTPUT_PATH does not match the renderer output ($EXAMPLE_NAME). Regenerate with:"
+            echo "  cargo run --bin cute-dbt -- --manifest $CURRENT_MANIFEST --baseline-manifest $BASELINE_MANIFEST --out $OUTPUT_PATH"
             echo "Sizes:"
-            ls -l target/example-check/jaffle-shop-report.html examples/jaffle-shop-report.html
+            ls -l "$rendered" "$OUTPUT_PATH"
             exit 1
           fi
+
+  example-report-up-to-date:
+    # Stable aggregator. Presents a single check name to branch
+    # protection. Succeeds iff every example-report-check matrix job
+    # passes. Adding a new example only requires adding a row to the
+    # matrix above — branch-protection.json stays untouched.
+    name: Example report is byte-identical to renderer output
+    runs-on: ubuntu-latest
+    needs: example-report-check
+    if: always()
+    steps:
+      - name: Assert all matrix example reports passed
+        env:
+          MATRIX_RESULT: ${{ needs.example-report-check.result }}
+        run: |
+          set -euo pipefail
+          if [ "$MATRIX_RESULT" != "success" ]; then
+            echo "::error::example-report-up-to-date: one or more example reports drifted (matrix result: $MATRIX_RESULT). See the example-report-check (<name>) jobs above for the specific failure and regeneration command."
+            exit 1
+          fi
+          echo "All example reports are byte-identical to renderer output."
 
   resource-ref-lint:
     # Secondary zero-egress gate: structured HTML parse over the committed
