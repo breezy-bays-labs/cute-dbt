@@ -20,9 +20,11 @@ the CLI emits. Open DevTools → Network as you load the page and
 observe **zero outbound requests** (every asset is inlined; only the
 initial HTML document is fetched).
 
-**Audit-grade local check** — clone the repo and open the file via
-`file://` with network access denied at the OS or browser level. The
-re-runnable headless proof lives in
+**Audit-grade local check** — clone the repo and run the automated
+zero-egress proof. The test opens the report in a headless browser
+with all network access denied at the protocol level (Chrome DevTools
+Protocol), so you don't have to set up OS-level network blocking
+yourself. The proof lives in
 [`tests/headless_zero_egress.rs`](https://github.com/breezy-bays-labs/cute-dbt/blob/main/tests/headless_zero_egress.rs):
 
 ```sh
