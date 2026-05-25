@@ -47,8 +47,13 @@ Scenario: Empty scope produces an exit-0 report with the empty-state banner
 
 `Given` sets up the input. `When` runs the tool. `Then` asserts on
 the output. Each line corresponds to a step definition in
-[`tests/bdd.rs`](https://github.com/breezy-bays-labs/cute-dbt/blob/main/tests/bdd.rs)
+[`tests/steps/`](https://github.com/breezy-bays-labs/cute-dbt/tree/main/tests/steps)
+(one file per feature — `report_generation.rs`, `cte_rendering.rs`,
+`diff_scoping.rs`, `fail_closed.rs`, `zero_egress.rs`, `config.rs`)
 that drives the real CLI binary.
+[`tests/bdd.rs`](https://github.com/breezy-bays-labs/cute-dbt/blob/main/tests/bdd.rs)
+is the harness entrypoint (cucumber-rs `harness = false`), not the
+step definitions.
 
 ## v0.x roadmap (feature-level)
 

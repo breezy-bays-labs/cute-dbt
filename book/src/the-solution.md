@@ -2,7 +2,7 @@
 
 A single static, local, single-binary tool. The form factor:
 
-```
+```text
 manifest.json + baseline-manifest.json
               │
               ▼

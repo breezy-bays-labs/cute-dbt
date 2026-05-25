@@ -21,6 +21,14 @@ jobs:
   build:
     name: mdbook (book build)
     runs-on: ubuntu-latest
+    # `configure-pages` + `upload-pages-artifact` need pages:write and
+    # id-token:write when they run (gated to main-push by `if:` on each
+    # step). On PR runs these steps skip and the workflow-level
+    # `contents: read` is sufficient.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:

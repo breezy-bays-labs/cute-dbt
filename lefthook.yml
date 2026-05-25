@@ -87,13 +87,17 @@ pre-push:
     mdbook-build:
       # Mirror the `mdbook (book build)` CI job. Builds the product-docs
       # mdbook locally so book/SUMMARY.md / book.toml / cross-references
-      # break before push, not in CI. Requires `mdbook` on PATH
-      # (`cargo install mdbook` or `brew install mdbook`).
+      # break before push, not in CI.
+      #
+      # **Soft mirror**: when `mdbook` is not on PATH the hook prints an
+      # install hint and exits 0 — contributors who don't touch the book
+      # aren't blocked. CI is authoritative for absent-mdbook breakage;
+      # the hook is a best-effort local mirror.
       run: |
         set -euo pipefail
         if ! command -v mdbook >/dev/null 2>&1; then
-          echo "mdbook-build: mdbook not on PATH — install via 'cargo install mdbook' or 'brew install mdbook'"
-          exit 1
+          echo "mdbook-build: mdbook not on PATH — install via 'cargo install mdbook' or 'brew install mdbook' to mirror the CI gate locally. Skipping."
+          exit 0
         fi
         mdbook build book
       timeout: 60s

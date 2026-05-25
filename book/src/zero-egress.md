@@ -41,8 +41,9 @@ denied via Chrome DevTools Protocol**, and subscribes to every
 request — even an inert pre-flight — fails the test.
 
 ```sh
-# From a fresh clone
-cargo test --test zero_egress  # the test name will vary; see the file
+# From a fresh clone (the test is `#[ignore]` by default so it
+# doesn't slow down standard `cargo nextest run` invocations).
+cargo test --test headless_zero_egress -- --ignored
 ```
 
 This is the **load-bearing artifact**. It runs on every PR in CI as

@@ -8,7 +8,7 @@ in the repo.)
 
 ## The pipeline
 
-```
+```text
 ┌─────────────────────┐    ┌─────────────────────┐
 │ current manifest    │    │ baseline manifest   │
 │ (your PR's diff)    │    │ (target branch)     │
