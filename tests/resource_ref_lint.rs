@@ -38,10 +38,15 @@ use std::path::PathBuf;
 
 use common::ResourceRefViolation as Violation;
 
-fn example_path() -> PathBuf {
+/// Every committed example HTML the lint must scan. Adding a new
+/// `examples/<name>-report.html` requires appending its filename here
+/// so the secondary structural gate runs against it on every PR.
+const COMMITTED_EXAMPLES: &[&str] = &["jaffle-shop-report.html", "playground-report.html"];
+
+fn example_path(filename: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
-        .join("jaffle-shop-report.html")
+        .join(filename)
 }
 
 /// Scan HTML for forbidden resource references. Thin wrapper over
@@ -52,21 +57,29 @@ fn scan_violations(html: &str) -> Vec<Violation> {
 }
 
 #[test]
-fn committed_example_has_no_external_resource_refs() {
-    let path = example_path();
-    let html =
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let violations = scan_violations(&html);
+fn committed_examples_have_no_external_resource_refs() {
+    let mut failures: Vec<String> = Vec::new();
+    for filename in COMMITTED_EXAMPLES {
+        let path = example_path(filename);
+        let html = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let violations = scan_violations(&html);
+        if !violations.is_empty() {
+            let listing = violations
+                .iter()
+                .map(|v| format!("    - {v}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            failures.push(format!(
+                "examples/{filename}: {} violation(s)\n{listing}",
+                violations.len()
+            ));
+        }
+    }
     assert!(
-        violations.is_empty(),
-        "committed examples/jaffle-shop-report.html contains {} external resource \
-         reference(s) — the zero-egress invariant is broken:\n{}",
-        violations.len(),
-        violations
-            .iter()
-            .map(|v| format!("  - {v}"))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        failures.is_empty(),
+        "committed examples contain external resource reference(s) — the zero-egress invariant is broken:\n{}",
+        failures.join("\n"),
     );
 }
 
