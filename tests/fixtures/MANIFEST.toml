@@ -150,7 +150,7 @@ the `messy_shop` package name and node names are fictitious.\
 [[fixture]]
 path = "playground-baseline.json"
 origin = "dbt-playground"
-origin_url = "https://github.com/cmbays/dbt-playground/commit/dc1b08f"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/602cb38"
 sha256 = "cf5c83e2490ad796c478422b8d7b8d4310f2f381f425c0ace40c5e4090223897"
 synthetic_only = true
 license = "MIT"
@@ -170,7 +170,7 @@ audit, not public retrieval).\
 [[fixture]]
 path = "playground-current.json"
 origin = "dbt-playground"
-origin_url = "https://github.com/cmbays/dbt-playground/commit/dc1b08f"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/602cb38"
 sha256 = "490cb708665cd196dc3cba1f769b80519f2ca0097b818c2a8c3ec15f6ae67f95"
 synthetic_only = true
 license = "MIT"
