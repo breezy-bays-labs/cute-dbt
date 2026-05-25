@@ -43,10 +43,15 @@ gate. Operational summary for external contributors:
   under a `[YANKED]` heading with the reason.
 - **Deprecations**: v1.0+ require ≥2-minor notice (e.g., deprecated in
   `1.5` → removed no earlier than `1.7`). v0.x is best-effort.
-- **Conventional commits drive version bumps**: `feat` → minor;
-  `fix` → patch; `BREAKING CHANGE` footer → major. Existing prefixes
-  (`feat`/`fix`/`docs`/`chore`/`test`/`refactor`/`ci`/`adr`/`closeout`)
-  continue to apply.
+- **Conventional commits drive version bumps** (`release-plz` aligns to
+  Cargo SemVer — different mappings per phase):
+  - **v0.x** (current): `feat` → patch (`0.1.0 → 0.1.1`, additive);
+    `fix` → patch; `BREAKING CHANGE` footer → minor (`0.1 → 0.2`, the
+    v0.x breaking-change line per Cargo convention).
+  - **v1.0+**: `feat` → minor (`1.x → 1.(x+1)`, additive); `fix` → patch;
+    `BREAKING CHANGE` footer → major (`1.x → 2.0`).
+  - Non-versioning prefixes (`docs`/`chore`/`test`/`refactor`/`ci`/`adr`/
+    `closeout`) do not trigger version bumps.
 
 ## Architecture
 
