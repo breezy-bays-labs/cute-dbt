@@ -227,15 +227,24 @@ pub struct NodePayload {
 /// One DAG edge — `from` and `to` are the [`NodePayload::id`] strings.
 #[derive(Debug, Clone, Serialize)]
 pub struct EdgePayload {
+    /// Source node id (the [`NodePayload::id`] the edge starts from).
     pub from: String,
+    /// Destination node id (the [`NodePayload::id`] the edge ends at).
     pub to: String,
+    /// Edge classification driving the Mermaid edge color + legend
+    /// entry (`from` / `inner` / `left` / `right` / `full` / `cross` /
+    /// `union_all` / `union_distinct`).
     pub edge_type: EdgeType,
 }
 
 /// The full DAG carried in a [`ModelPayload`].
 #[derive(Debug, Clone, Serialize)]
 pub struct DagPayload {
+    /// CTE nodes plus the terminal model node, in stable rendering
+    /// order.
     pub nodes: Vec<NodePayload>,
+    /// Directed edges between [`Self::nodes`] entries, classified by
+    /// [`EdgePayload::edge_type`].
     pub edges: Vec<EdgePayload>,
 }
 
@@ -247,10 +256,21 @@ pub struct DagPayload {
 /// copy on the bound node.
 #[derive(Debug, Clone, Serialize)]
 pub struct GivenPayload {
+    /// Verbatim `input:` value from the unit-test `given[i]` entry
+    /// (typically `ref('…')` or `source('…','…')`).
     pub input: String,
+    /// Import-CTE node id this given binds to, when the engine
+    /// successfully matched [`Self::input`] to a node in the model's
+    /// CTE graph. `None` triggers the "no fixture provided" empty-state
+    /// copy on the bound node.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound_to_node: Option<String>,
+    /// Tabular fixture rows lifted verbatim from the unit-test
+    /// `given[i].rows` field (kept as serde `Value` to accept the
+    /// heterogeneous shapes dbt allows).
     pub rows: Value,
+    /// Fixture format hint (`csv`, `yaml`, `dict`, etc.) when the
+    /// manifest specified one; absent for inline-rows fixtures.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
 }
@@ -265,22 +285,37 @@ pub struct TestPayload {
     pub name: String,
     /// `model:` reference verbatim from the manifest.
     pub target_model: String,
+    /// Optional human-readable test description from the manifest's
+    /// `description:` field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Optional `config.tags` list from the manifest (e.g. `["smoke",
+    /// "nightly"]`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    /// Optional `config.meta` blob from the manifest (kept as serde
+    /// `Value` to accept any JSON shape teams put under `meta`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
+    /// Optional `original_file_path` from the manifest — the on-disk
+    /// location the test was defined in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub defined_in: Option<String>,
+    /// Ordered list of fixture inputs for the test (`given[…]`).
     pub given: Vec<GivenPayload>,
+    /// Expected result block (`expect`).
     pub expected: ExpectedPayload,
 }
 
 /// `expect` block lifted into payload shape.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExpectedPayload {
+    /// Expected tabular rows lifted verbatim from the unit-test
+    /// `expect.rows` field (serde `Value` accepts the heterogeneous
+    /// shapes dbt allows).
     pub rows: Value,
+    /// Expected-block format hint (`csv`, `yaml`, `dict`, etc.) when
+    /// the manifest specified one; absent for inline-rows fixtures.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
 }

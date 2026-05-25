@@ -207,13 +207,25 @@ frontend bundle's provenance index) — see
 [`ARCHITECTURE.md` §5](ARCHITECTURE.md#5-asset-embedding-zero-egress-gate).
 Real data in this public repo is a release blocker.
 
-## Release discipline (v0.x)
+## Release discipline
 
-- **No `cargo publish`** until v1.0 gates trip.
-- **No GitHub Release** until v1.0.
-- Tags during v0.x exist solely for git-pinning consumers; they do not
-  trigger any workflow.
-- See `CHANGELOG.md` for the deliberate-no-release policy.
+cute-dbt publishes to crates.io from `v0.1.0+` via `release-plz` + OIDC
+trusted publishing. v0.x is unstable per Cargo SemVer convention: every
+minor bump (`0.1 → 0.2`) MAY carry breaking changes; v1.0 ships the first
+stability commitment. Full policy in
+[`AGENTS.md` §Release discipline](AGENTS.md#release-discipline).
+
+Contributor notes:
+
+- Use conventional-commit prefixes (`feat:` / `fix:` / `docs:` / `chore:`
+  / `test:` / `refactor:` / `ci:` / `adr:` / `closeout:`) — `release-plz`
+  infers version bumps from them. In v0.x, `feat` → patch; `BREAKING
+  CHANGE` footer → minor (the Cargo SemVer "0.1 → 0.2 is the breaking
+  line" convention). In v1.0+, `feat` → minor; `BREAKING CHANGE` → major.
+- Manual `cargo publish` is forbidden — OIDC + `release-plz` is the only
+  publish path.
+- Tag deletion is forbidden — to "fix" a bad tag, ship the next patch.
+- See `CHANGELOG.md` for release history.
 
 ## License
 
