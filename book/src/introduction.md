@@ -45,6 +45,6 @@ against a baseline manifest you supply, identifies models whose
 test that targets those models — plus tests whose own body changed,
 even if the target model didn't.
 
-This page is the [introduction]. The next chapter sketches [what
+This page is the introduction. The next chapter sketches [what
 cute-dbt is at a glance](./the-solution.md); after that, [Getting
 started](./getting-started.md) walks the install + first-report path.

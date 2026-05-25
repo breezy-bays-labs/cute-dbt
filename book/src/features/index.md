@@ -74,4 +74,4 @@ Planned for later v0.x (filed as open issues):
   `state:modified.contract` /
   `state:modified.relation` /
   `state:modified.macros` (mentioned as v0.x-future in
-  [the v0.1 fidelity-limit note](./how-it-works.md)).
+  [the v0.x fidelity-limit note](./the-solution.md)).
