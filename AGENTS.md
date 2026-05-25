@@ -6,14 +6,52 @@ this before touching code.
 ## Repo identity
 
 - `cute-dbt` is a **single-crate** Rust CLI (`cute4dbt`, lib + bin) in the
-  `breezy-bays-labs` org. Public visibility from day one; **no crates.io
-  publish, no GitHub Release tarballs, no `cargo install` path** until v1.0
-  gates trip. Tags exist for git pinning only — internal versions like
-  `v0.1.0` do not trigger any workflow.
+  `breezy-bays-labs` org. Public visibility from day one. **crates.io
+  publish is enabled at v0.1.0+** via `release-plz` + OIDC trusted
+  publishing; v0.x is explicitly unstable (per Cargo SemVer convention:
+  every minor MAY carry breaking changes; v1.0 ships the first stability
+  commitment).
 - v0.x consumer model: the tool runs locally and privately — your data
   never leaves your machine. The core privacy property is *trivially
   auditable* zero data exfiltration: the generated report makes zero
   outbound requests when opened offline via `file://`.
+
+## Release discipline
+
+Full rationale lives in a private ops-repo ADR
+(`decisions/cute-dbt/adr-release-discipline.md`) — superseded the
+bootstrap-era "no crates.io publish until v1.0" stance at the v0.1.0
+gate. Operational summary for external contributors:
+
+- **Publish**: `release-plz` orchestrates; OIDC trusted publishing; no
+  long-lived `CARGO_REGISTRY_TOKEN` in repo secrets. Manual
+  `cargo publish` is forbidden.
+- **Versioning**: SemVer. v0.x minor (`0.1 → 0.2`) MAY break (CLI flag
+  renames, output-shape changes, exit-code changes). v0.x patch
+  (`0.1.0 → 0.1.1`) is bug-fix / additive only. v1.0+ minor is
+  backward-compatible.
+- **Library surface**: the `cute4dbt` lib crate is internal-only in
+  v0.x. Promoting any of it to the public API at v1.0 warrants its own
+  ADR (and is currently blocked by the `non-mirror-guard` against the
+  `pub use crate::…::…` re-export shim pattern).
+- **Tags**: signed annotated only; `release-plz` creates them in CI.
+  Tag deletion is forbidden — to "fix" a bad tag, ship the next patch.
+- **Cadence**: event-driven via `release-plz` auto-PR on `main`. No
+  calendar SLA.
+- **Yanks**: security or licensing only. Never amend version numbers;
+  always ship a patch version. Yanks documented in `CHANGELOG.md`
+  under a `[YANKED]` heading with the reason.
+- **Deprecations**: v1.0+ require ≥2-minor notice (e.g., deprecated in
+  `1.5` → removed no earlier than `1.7`). v0.x is best-effort.
+- **Conventional commits drive version bumps** (`release-plz` aligns to
+  Cargo SemVer — different mappings per phase):
+  - **v0.x** (current): `feat` → patch (`0.1.0 → 0.1.1`, additive);
+    `fix` → patch; `BREAKING CHANGE` footer → minor (`0.1 → 0.2`, the
+    v0.x breaking-change line per Cargo convention).
+  - **v1.0+**: `feat` → minor (`1.x → 1.(x+1)`, additive); `fix` → patch;
+    `BREAKING CHANGE` footer → major (`1.x → 2.0`).
+  - Non-versioning prefixes (`docs`/`chore`/`test`/`refactor`/`ci`/`adr`/
+    `closeout`) do not trigger version bumps.
 
 ## Architecture
 
