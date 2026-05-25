@@ -8,24 +8,36 @@ CI fails before merge.
 
 ## jaffle-shop
 
-[`examples/jaffle-shop-report.html`](https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/jaffle-shop-report.html)
+👉 **[Open the rendered jaffle-shop report](./examples/jaffle-shop-report.html)**
+([source on GitHub](https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/jaffle-shop-report.html))
 
 The structural minimum: one in-scope model, one unit test, a 3-node
 CTE DAG. Useful for confirming "this is what an output looks like";
 narrow but auditable.
 
-To inspect:
+**Web view** (above) opens the rendered report directly — same HTML
+the CLI emits. Open DevTools → Network as you load the page and
+observe **zero outbound requests** (every asset is inlined; only the
+initial HTML document is fetched).
+
+**Audit-grade local check** — clone the repo and run the automated
+zero-egress proof. The test opens the report in a headless browser
+with all network access denied at the protocol level (Chrome DevTools
+Protocol), so you don't have to set up OS-level network blocking
+yourself. The proof lives in
+[`tests/headless_zero_egress.rs`](https://github.com/breezy-bays-labs/cute-dbt/blob/main/tests/headless_zero_egress.rs):
 
 ```sh
 git clone https://github.com/breezy-bays-labs/cute-dbt
-open cute-dbt/examples/jaffle-shop-report.html  # macOS
-# or
-xdg-open cute-dbt/examples/jaffle-shop-report.html  # Linux
+cd cute-dbt
+cargo test --test headless_zero_egress -- --ignored
 ```
 
-Open it offline with DevTools → Network and observe zero outbound
-requests — the report demonstrates the zero-egress property
-end-to-end.
+The test opens `examples/jaffle-shop-report.html` via real `file://`
+in a headless Chromium with all network denied, and asserts zero
+`Network.requestWillBeSent` events for http/https/ws/wss. See
+[the privacy property page](./zero-egress.md) for the full audit
+mechanism.
 
 ## Richer examples
 
