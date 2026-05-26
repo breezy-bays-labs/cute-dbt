@@ -19,9 +19,15 @@
 //! - [`render`] — askama 0.16 template + per-model payload assembly +
 //!   node-role classification + import-CTE binding (produces the v0.1
 //!   `report.html`).
+//! - [`source_yaml`] — the v0.2 `SourceYamlReader` port impl
+//!   (`FsSourceYamlReader`). Reads project-relative YAML files for the
+//!   authoring-YAML drawer in the report (cute-dbt#69). Soft failure
+//!   path: `NotFound` is the "no YAML to surface for this test"
+//!   signal, not a fatal error.
 
 pub mod asset_embed;
 pub mod config_reader;
 pub mod cte_engine;
 pub mod manifest;
 pub mod render;
+pub mod source_yaml;

@@ -1,15 +1,20 @@
 //! CLI surface: clap argument parsing, the named run loop, and the
 //! mapping from a run outcome to a process [`ExitCode`].
 //!
-//! The run loop is composed here as four named stages —
-//! `scope` → `preflight_compiled` → `parse_ctes` → `render`
-//! (`ARCHITECTURE.md` §3, §6). Composition lives in `cli` by deliberate
-//! single-crate design: there is no separate `app` / `usecase` crate.
-//! `parse_ctes` is a named no-op call site: each in-scope model parses
-//! its own `compiled_code` once during payload assembly inside
+//! The run loop is composed here as five named stages —
+//! `scope` → `preflight_compiled` → `parse_ctes` →
+//! `gather_authoring_yaml` → `render` (`ARCHITECTURE.md` §3, §6).
+//! Composition lives in `cli` by deliberate single-crate design: there
+//! is no separate `app` / `usecase` crate. `parse_ctes` is a named
+//! no-op call site: each in-scope model parses its own `compiled_code`
+//! once during payload assembly inside
 //! [`crate::adapters::render::render_report`], so the explicit
 //! `parse_ctes` step is purely greppable scaffolding that mirrors the
-//! ARCHITECTURE diagram. The `render` step invokes the askama renderer.
+//! ARCHITECTURE diagram. The `gather_authoring_yaml` step reads each
+//! in-scope unit-test's source YAML through the [`SourceYamlReader`]
+//! port and slices the authored block — soft-failing per test so a
+//! missing file or unsupported manifest never breaks the report
+//! (cute-dbt#69). The `render` step invokes the askama renderer.
 //!
 //! Three exit codes: `0` success, `1` a run-time failure (a fail-closed
 //! manifest or an unwritable output path — no partial report is ever
@@ -19,6 +24,7 @@
 mod args;
 mod exit;
 
+use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::process::ExitCode;
@@ -27,11 +33,12 @@ use clap::Parser;
 
 use crate::adapters::manifest::{FileManifestSource, load_baseline};
 use crate::adapters::render::render_report;
+use crate::adapters::source_yaml::FsSourceYamlReader;
 use crate::domain::{
     DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, PreflightError, StateComparator,
-    preflight_compiled,
+    UnitTestYamlBlock, extract_unit_test_block, preflight_compiled,
 };
-use crate::ports::ManifestSource;
+use crate::ports::{ManifestSource, SourceYamlReader};
 
 use args::Cli;
 
@@ -117,17 +124,86 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
     let (in_scope, models_in_scope) = scope(&current, &baseline);
     preflight_compiled(&current, &in_scope, &models_in_scope)?;
     parse_ctes();
+    let authoring_yaml = gather_authoring_yaml(cli, &current, &in_scope);
     let (report_title, report_subtitle) = resolve_report_strings(cli);
     render(
         &cli.out,
         &current,
         &in_scope,
         &models_in_scope,
+        &authoring_yaml,
         &cli.baseline_manifest,
         &report_title,
         report_subtitle.as_deref(),
     )?;
     Ok(())
+}
+
+/// The `gather_authoring_yaml` stage — read each in-scope `unit_test`'s
+/// source YAML and slice the authored block.
+///
+/// Resolution semantics:
+///
+/// - If `cli.project_root` is `Some`, use it (clap already validated).
+/// - Else try to derive from `cli.manifest` via the `target/manifest.json`
+///   convention. A successful derive emits a one-line stderr breadcrumb
+///   so the operator can see what cute-dbt assumed.
+/// - Else return an empty map and silently skip — the authoring-YAML
+///   drawer simply won't appear in the rendered report.
+///
+/// Per-test soft failure: a [`io::ErrorKind::NotFound`] on read is
+/// silent; any other read error emits a stderr warning but does not
+/// fail the run. A slice that returns [`None`] (test name not found
+/// inside its declared source YAML) is silent.
+fn gather_authoring_yaml(
+    cli: &Cli,
+    current: &Manifest,
+    in_scope: &InScopeSet,
+) -> HashMap<String, UnitTestYamlBlock> {
+    let (resolved, derived) =
+        args::resolve_project_root(cli.project_root.as_deref(), &cli.manifest);
+    let Some(project_root) = resolved else {
+        return HashMap::new();
+    };
+    if derived {
+        eprintln!(
+            "cute-dbt: deriving --project-root from --manifest: {}",
+            project_root.display(),
+        );
+    }
+    let reader = FsSourceYamlReader::new(project_root);
+    gather_authoring_yaml_with_reader(&reader, current, in_scope)
+}
+
+/// Pure composition step over the [`SourceYamlReader`] port — testable
+/// without touching the filesystem by passing an in-memory impl.
+fn gather_authoring_yaml_with_reader(
+    reader: &dyn SourceYamlReader,
+    current: &Manifest,
+    in_scope: &InScopeSet,
+) -> HashMap<String, UnitTestYamlBlock> {
+    let mut out: HashMap<String, UnitTestYamlBlock> = HashMap::new();
+    for id in in_scope.iter() {
+        let Some(unit_test) = current.unit_test(id) else {
+            continue;
+        };
+        let Some(path) = unit_test.original_file_path() else {
+            continue;
+        };
+        let contents = match reader.read(path) {
+            Ok(c) => c,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+            Err(err) => {
+                eprintln!("cute-dbt: warning: could not read source YAML for {id}: {err}");
+                continue;
+            }
+        };
+        let Some(block) = extract_unit_test_block(&contents, unit_test.name()) else {
+            continue;
+        };
+        out.insert(id.to_owned(), block);
+    }
+    out
 }
 
 /// Resolve the rendered report's title + subtitle from `--config`,
@@ -192,6 +268,7 @@ fn render(
     current: &Manifest,
     in_scope: &InScopeSet,
     models_in_scope: &ModelInScopeSet,
+    authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     baseline_path: &Path,
     report_title: &str,
     report_subtitle: Option<&str>,
@@ -202,6 +279,7 @@ fn render(
         current,
         in_scope,
         models_in_scope,
+        authoring_yaml,
         &baseline_label,
         report_title,
         report_subtitle,
@@ -218,6 +296,7 @@ mod tests {
             baseline_manifest: "baseline.json".into(),
             out: out.into(),
             config: None,
+            project_root: None,
         }
     }
 
