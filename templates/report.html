@@ -109,14 +109,13 @@ g.dag-node:focus-visible { outline: 2px dashed #1d7484; outline-offset: 3px; }
 .node-role-badge.role-transform { color: #6a6a72; }
 .node-role-badge.role-final     { color: #b07400; }
 .given-empty { padding: 0.75rem 1rem; color: #6a6a72; font-style: italic; border: 1px dashed #ccc; margin-bottom: 0.75rem; }
-/* dbt fixture formats other than `dict` (`csv`, `sql`) deliver `rows`
-   as a non-array shape that the table renderer cannot tabulate.
-   Surface a visible notice (cute-dbt#40 CR-5) instead of an empty
-   table, so the user knows the fixture is intentional but not yet
-   visualized. */
-.format-notice { padding: 0.75rem 1rem; color: #4a4a4a; background: #f7f4ea; border: 1px solid #d6ce9e; border-radius: 3px; }
-.format-notice code { background: #fff; padding: 0 0.2rem; border: 1px solid #d6ce9e; border-radius: 2px; }
 .format-badge { font-size: 0.75em; color: #6a6a72; padding: 0.05rem 0.4rem; border: 1px solid #ccc; border-radius: 999px; }
+/* Fixture sql-block wrapper reuses the compiled-SQL drawer styling
+   (.sql-block-wrap + .sql-block) but has no copy button, so the
+   top padding reserved for the absolute-positioned `.sql-copy`
+   button in the compiled-SQL drawer would leave dead space. Drop
+   it back to the standard pre padding. */
+.fixture-sql-block-wrap .sql-block { padding-top: 0.75rem; }
 .given-section + .given-section { margin-top: 1rem; }
 .table-header { display: flex; align-items: baseline; gap: 0.5rem; margin: 0.5rem 0 0.25rem; }
 .table-title { margin: 0; }
@@ -777,13 +776,16 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     var $sec = $("<section>").addClass("given-section").attr("data-input-name", given.input);
     var $hdr = $("<div>").addClass("table-header");
     $hdr.append($("<h4>").addClass("table-title").text("given · " + given.input));
-    if (isNonArrayFormatFixture(given)) {
-      $hdr.append($("<span>").addClass("format-badge").text("format: " + given.format));
+    if (isSqlStringFixture(given)) {
+      $hdr.append($("<span>").addClass("format-badge").text("format: sql"));
       $sec.append($hdr);
-      $sec.append(buildFormatNotVisualizedNotice(given.format));
+      $sec.append(buildSqlCodeBlock(given.rows));
       return $sec;
     }
-    var rows = unwrapRows(given.rows);
+    var rows = extractRowsFromFixture(given);
+    if (given.format && given.format !== "dict") {
+      $hdr.append($("<span>").addClass("format-badge").text("format: " + given.format));
+    }
     $hdr.append($("<span>").addClass("row-count-badge")
       .text(rows.length + " row" + (rows.length === 1 ? "" : "s")));
     $sec.append($hdr);
@@ -805,40 +807,176 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
   function renderExpectedPanel(t) {
     var $panel = $(".expected-panel");
     var $body = $panel.find(".expected-body").empty();
-    if (isNonArrayFormatFixture(t.expected)) {
-      $panel.find(".expected-rowcount").text("format: " + t.expected.format);
-      $body.append(buildFormatNotVisualizedNotice(t.expected.format));
+    if (isSqlStringFixture(t.expected)) {
+      $panel.find(".expected-rowcount").text("format: sql");
+      $body.append(buildSqlCodeBlock(t.expected.rows));
       return;
     }
-    var rows = unwrapRows(t.expected.rows);
+    var rows = extractRowsFromFixture(t.expected);
     $panel.find(".expected-rowcount").text(rows.length + " row" + (rows.length === 1 ? "" : "s"));
     var cols = collectColumns(rows);
     $body.append(buildTable(cols, rows, "expected-table"));
     initDataTablesIn($body);
   }
 
-  // dbt's `format: dict` rows arrive as an array of {col: val} maps; the
-  // design's data.js carries column-keyed rows directly. Normalize either
-  // shape to a plain array.
-  function unwrapRows(rows) {
-    if (!rows) return [];
+  // dbt's unit-test fixture format determines what shape `rows` arrives
+  // in (cute-dbt#66, 2026-05-26 — engine divergence finding):
+  //
+  //   format | dbt-core 1.11+    | dbt-fusion 2.0-preview
+  //   -------|-------------------|-----------------------
+  //   dict   | array of dicts    | array of dicts
+  //   csv    | array of dicts    | raw CSV string
+  //   sql    | raw SELECT string | raw SELECT string
+  //
+  // The two engines diverge on csv normalization — core pre-parses the
+  // CSV body at compile time, fusion passes it through. cute-dbt must
+  // tabulate both csv paths so reports look identical regardless of
+  // which engine compiled the manifest. `format: sql` always arrives
+  // as a string and cannot be tabulated without execution; we render
+  // it as a syntax-highlighted code block.
+
+  function isSqlStringFixture(obj) {
+    return Boolean(obj && obj.format === "sql" && typeof obj.rows === "string");
+  }
+
+  // Return a tabulable row array from a fixture, handling both
+  // array shapes (dict/csv-from-core) and raw-CSV-string shapes
+  // (csv-from-fusion). Returns `[]` for sql fixtures and other
+  // unexpected shapes — the sql path is dispatched separately by the
+  // caller via `isSqlStringFixture`.
+  function extractRowsFromFixture(fixture) {
+    if (!fixture) return [];
+    var rows = fixture.rows;
+    if (rows == null) return [];
     if (Array.isArray(rows)) return rows;
+    if (typeof rows === "string" && fixture.format === "csv") {
+      return parseCsvRows(rows);
+    }
     return [];
   }
 
-  // dbt's `format: csv` / `format: sql` carry `rows` as a raw string
-  // (the CSV body or the SELECT statement) rather than an array of
-  // row objects. v0.1 cannot tabulate those — surface a visible notice
-  // instead of dropping silently (cute-dbt#40 CR-5).
-  function isNonArrayFormatFixture(obj) {
-    return Boolean(obj && obj.format && obj.rows != null && !Array.isArray(obj.rows));
+  // Render a sql-format fixture as a syntax-highlighted code block.
+  // Reuses the compiled-SQL drawer's `.sql-block-wrap` shell so visual
+  // style stays consistent. No copy button: the source of truth is the
+  // fixture in the manifest, not the rendered DOM.
+  function buildSqlCodeBlock(sql) {
+    var $wrap = $("<div>").addClass("sql-block-wrap fixture-sql-block-wrap");
+    var $pre = $("<pre>").addClass("sql-block").append(
+      $("<code>").html(highlightSql(String(sql)))
+    );
+    $wrap.append($pre);
+    return $wrap;
   }
 
-  function buildFormatNotVisualizedNotice(format) {
-    return $("<div>").addClass("format-notice")
-      .append($("<span>").text("Fixture uses "))
-      .append($("<code>").text("format: " + format))
-      .append($("<span>").text(" — not yet visualized in cute-dbt. See the raw fixture in the manifest."));
+  // RFC 4180 CSV parser — state machine over the input string.
+  //
+  // dbt-fusion 2.0-preview emits `format: csv` unit-test fixtures as
+  // a raw CSV body in the manifest. dbt-core 1.11+ pre-parses csv to
+  // an array of dicts. cute-dbt does the parse at render time so both
+  // engines render identically (cute-dbt#66).
+  //
+  // Behavior summary:
+  //   * First row is headers; subsequent rows are body values.
+  //   * Quoted fields strip the surrounding double-quotes.
+  //   * Double-quote inside a quoted field is the RFC 4180 escape:
+  //     `""` decodes to a literal `"`.
+  //   * Quoted fields may contain commas and newlines verbatim.
+  //   * A single trailing newline (LF or CRLF) is consumed — dbt YAML
+  //     `rows: |` block scalars always end in `\n`; preserving it
+  //     would create a spurious final empty row.
+  //   * An unterminated final row is accepted (graceful — the
+  //     renderer is not a validator).
+  //   * CRLF (`\r\n`) terminates a row as a single unit.
+  //   * Empty input or header-only input returns `[]`.
+  //
+  // Correctness is unit-tested via `tests/headless_csv_parser.rs` —
+  // the parser is exposed on `window.__cuteParseCsv` so that test can
+  // invoke it through the headless Chrome runtime.
+  function parseCsvRows(text) {
+    if (text == null) return [];
+    var t = String(text);
+    if (t.length === 0) return [];
+    // Strip exactly one trailing newline (LF or CRLF).
+    if (t.charAt(t.length - 1) === "\n") {
+      t = t.slice(0, -1);
+      if (t.length > 0 && t.charAt(t.length - 1) === "\r") {
+        t = t.slice(0, -1);
+      }
+    }
+    if (t.length === 0) return [];
+
+    var matrix = [];
+    var fields = [];
+    var field = "";
+    var inQuotes = false;
+    for (var i = 0; i < t.length; i++) {
+      var c = t.charAt(i);
+      if (inQuotes) {
+        if (c === '"') {
+          // RFC 4180 escape: doubled quote inside a quoted field
+          // collapses to a single literal quote.
+          if (i + 1 < t.length && t.charAt(i + 1) === '"') {
+            field += '"';
+            i++;
+            continue;
+          }
+          inQuotes = false;
+          continue;
+        }
+        field += c;
+        continue;
+      }
+      // Outside quotes.
+      if (c === '"' && field === "") {
+        inQuotes = true;
+        continue;
+      }
+      if (c === ',') {
+        fields.push(field);
+        field = "";
+        continue;
+      }
+      if (c === '\n' || c === '\r') {
+        fields.push(field);
+        matrix.push(fields);
+        fields = [];
+        field = "";
+        if (c === '\r' && i + 1 < t.length && t.charAt(i + 1) === '\n') {
+          i++;
+        }
+        continue;
+      }
+      field += c;
+    }
+    // Flush the final field/row. We always run this — the trailing-
+    // newline strip above guarantees at least one character of
+    // content survives to reach this branch in non-empty input.
+    fields.push(field);
+    matrix.push(fields);
+
+    if (matrix.length < 2) return [];
+    var headers = matrix[0];
+    var out = [];
+    for (var ri = 1; ri < matrix.length; ri++) {
+      var row = matrix[ri];
+      var obj = {};
+      for (var hi = 0; hi < headers.length; hi++) {
+        obj[headers[hi]] = hi < row.length ? row[hi] : "";
+      }
+      out.push(obj);
+    }
+    return out;
+  }
+
+  // Expose the parser on `window.__cuteParseCsv` so the headless
+  // integration test at `tests/headless_csv_parser.rs` can invoke it
+  // via `Runtime.Evaluate` and assert RFC 4180 edge cases (quoted
+  // fields, embedded commas, embedded newlines, escaped quotes,
+  // CRLF, empty input, header-only input). The `__` prefix marks it
+  // as a test-only seam; production code reaches it via the closure
+  // binding above.
+  if (typeof window !== "undefined") {
+    window.__cuteParseCsv = parseCsvRows;
   }
 
   function collectColumns(rows) {

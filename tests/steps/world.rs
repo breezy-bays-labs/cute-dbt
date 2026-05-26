@@ -50,6 +50,13 @@ pub struct World {
     /// .feature having to restate the model name.
     pub last_named_model: Option<String>,
 
+    /// The most-recently-named unit test in the current scenario — set
+    /// when an assertion step locates a unit test in the rendered
+    /// payload, so a follow-on shape-assertion step
+    /// (`unit_test_format_coverage.feature`) can look the test back
+    /// up without the .feature having to restate the test name.
+    pub last_named_unit_test: Option<String>,
+
     /// Selector for which committed fixture pair the next subprocess
     /// `When` step should use. Set by per-scenario Givens whose
     /// English wording does not uniquely determine the fixture (two
