@@ -302,8 +302,8 @@ jobs:
         run: |
           set -euo pipefail
           count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
-          if [ "$count" != "7" ]; then
-            echo "::error::feature-count: expected 7 .feature files, found $count"
+          if [ "$count" != "8" ]; then
+            echo "::error::feature-count: expected 8 .feature files, found $count"
             exit 1
           fi
 

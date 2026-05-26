@@ -207,3 +207,57 @@ usage error, NOT a PreflightError variant — ARCHITECTURE.md §3 \
 baseline-missing precedent). No real data; not parseable as TOML by \
 design.\
 """
+
+[[fixture]]
+path = "source-yaml/manifest-current.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/69"
+sha256 = "aa1b8849819eb44f8dae4625caccd7c02a9ab29abd7a3903bf9677a10cb4da35"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Synthetic minimal v12 manifest for cute-dbt#69 — exercises the \
+authoring-YAML drawer pipeline end-to-end. One model (`dim_users`) \
+with a single `unit_test` whose `original_file_path` points at \
+`models/_unit_tests.yml` under the paired project root. Model checksum \
+differs from the baseline so the diff-scoping pass selects the unit \
+test as in-scope, and `gather_authoring_yaml` reads the YAML stub when \
+`--project-root` resolves to `source-yaml/project/`. Pure synthetic; \
+the `yaml_demo` package name and node names are fictitious.\
+"""
+
+[[fixture]]
+path = "source-yaml/manifest-baseline.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/69"
+sha256 = "ae0f1135c1d076e6906b3709189f75dabf0149ff0a23e0725ccd035b7828d015"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Paired BASELINE manifest for the cute-dbt#69 YAML-drawer pipeline \
+fixture. Same `dim_users` model identity as `manifest-current.json` \
+but a different `checksum` so the StateComparator's body-checksum \
+modifier flags the model as modified between baseline and current. \
+Pure synthetic.\
+"""
+
+[[fixture]]
+path = "source-yaml/project/models/_unit_tests.yml"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/69"
+sha256 = "a6686506d0d2515bf75ba8f1f1e1b81b7da0387f16232544e44eda328bc96b7f"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Synthetic source YAML for cute-dbt#69 — pairs with \
+`source-yaml/manifest-{current,baseline}.json` via the manifest \
+`unit_tests.<id>.original_file_path` field. Hand-crafted so the slicer \
+exercises leading-comment capture, the body block, and trailing-comment \
+capture in a single fixture. Layout mirrors the dbt convention of \
+`<project_root>/models/_unit_tests.yml`; the BDD scenarios invoke \
+cute-dbt with `--project-root tests/fixtures/source-yaml/project` so \
+the relative path resolves. Pure synthetic.\
+"""

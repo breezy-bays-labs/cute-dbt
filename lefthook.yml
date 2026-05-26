@@ -73,15 +73,14 @@ pre-push:
         fi
       timeout: 15s
     feature-count:
-      # Asserts the 7-feature invariant (bumped from 6 in PR-D when
-      # unit_test_format_coverage.feature joined the contract —
-      # cute-dbt#39). Mirrors the `feature-count` CI job; the README
-      # is not a feature.
+      # Asserts the 8-feature invariant (bumped from 7 in cute-dbt#69 when
+      # unit_test_yaml.feature joined the contract). Mirrors the
+      # `feature-count` CI job; the README is not a feature.
       run: |
         set -euo pipefail
         count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
-        if [ "$count" != "7" ]; then
-          echo "feature-count: expected 7 .feature files, found $count"
+        if [ "$count" != "8" ]; then
+          echo "feature-count: expected 8 .feature files, found $count"
           exit 1
         fi
       timeout: 5s

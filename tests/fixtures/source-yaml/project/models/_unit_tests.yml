@@ -1,0 +1,25 @@
+# Synthetic source YAML for cute-dbt#69 BDD coverage.
+# Hand-crafted to exercise the authoring-YAML drawer pipeline end-to-end
+# without depending on an external dbt project checkout. This file
+# pairs with `tests/fixtures/source-yaml/manifest-{current,baseline}.json`
+# via the `original_file_path` field; cute-dbt slices each `- name:`
+# entry out of this file at render time.
+
+unit_tests:
+  # Leading comment for test_dim_users_basic — the slicer should
+  # capture this whole comment block as part of the test's authoring
+  # YAML (acceptance criterion: contiguous comments directly above
+  # the `- name:` line, terminated by a blank line).
+  - name: test_dim_users_basic
+    description: "Verifies basic id+name mapping from raw_users to dim_users"
+    model: dim_users
+    given:
+      - input: ref('raw_users')
+        rows:
+          - {id: 1, name: alice}
+    expect:
+      rows:
+        - {id: 1, name: alice}
+  # Trailing comment for test_dim_users_basic — contiguous comment
+  # lines immediately following the block, before the next blank
+  # line or the next `- name:`, are part of the slice too.
