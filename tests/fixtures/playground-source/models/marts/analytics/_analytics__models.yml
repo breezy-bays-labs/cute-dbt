@@ -1,0 +1,1378 @@
+version: 2
+
+models:
+  # ============================================================================
+  # DIMENSIONS
+  # ============================================================================
+
+  - name: dim_conditions
+    description: |
+      Master condition dimension for healthcare analytics.
+      One row per unique ICD/SNOMED condition code, deduplicated from staging.
+      Use for filtering and grouping by condition across fact tables.
+
+      Use cases:
+      - Condition-based cohort analysis
+      - Disease prevalence tracking
+      - Condition frequency and distribution reporting
+      - Join target for condition-related facts
+
+    config:
+      tags: ['analytics', 'marts', 'dimension']
+    meta:
+      grain: condition_code
+      owner: healthcare_analytics
+      uses:
+        - "Condition lookup and filtering"
+        - "Cohort analysis by diagnosis"
+        - "Disease prevalence reporting"
+      example_queries:
+        - name: "Top 10 most common conditions"
+          description: "Identify the most prevalent conditions in the patient population"
+          sql: |
+            select
+                condition_code
+                , condition_description
+                , patient_count
+                , encounter_count
+            from main_marts.dim_conditions
+            order by patient_count desc
+            limit 10
+
+        - name: "Conditions by encounter frequency"
+          description: "Find conditions that drive the most healthcare utilization"
+          sql: |
+            select
+                condition_code
+                , condition_description
+                , encounter_count
+                , patient_count
+                , round(encounter_count * 1.0 / patient_count, 2) as avg_encounters_per_patient
+            from main_marts.dim_conditions
+            where patient_count > 0
+            order by encounter_count desc
+            limit 20
+
+        - name: "Recently diagnosed conditions"
+          description: "Find conditions first diagnosed in the last year"
+          sql: |
+            select
+                condition_code
+                , condition_description
+                , first_occurrence_date
+                , last_occurrence_date
+                , patient_count
+            from main_marts.dim_conditions
+            where first_occurrence_date >= current_date - interval '1 year'
+            order by first_occurrence_date desc
+
+    columns:
+      - name: condition_key
+        description: Surrogate key (row_number)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: condition_code
+        description: ICD/SNOMED code (natural key)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: condition_description
+        description: Full condition name/description
+        data_tests:
+          - not_null
+
+      - name: first_occurrence_date
+        description: Earliest date this condition was diagnosed in the dataset
+
+      - name: last_occurrence_date
+        description: Most recent date this condition was diagnosed
+
+      - name: patient_count
+        description: Number of unique patients with this condition
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: encounter_count
+        description: Total number of encounters with this condition
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded
+
+  # ============================================================================
+  # FACT TABLES
+  # ============================================================================
+
+  - name: fct_patient_summary
+    description: |
+      Annual patient-level aggregations for outcomes tracking and population health analysis.
+      One row per patient per calendar year with comprehensive utilization and cost metrics.
+      Grain: (patient_id, year_actual)
+
+      Use cases:
+      - Patient outcomes tracking over time
+      - Annual cost summaries and trends
+      - Cohort analysis and patient stratification
+      - Health trajectory visualization
+      - High-cost patient identification
+
+    config:
+      tags: ['analytics', 'marts', 'fact']
+    meta:
+      grain: patient_id + year_actual
+      owner: healthcare_analytics
+      uses:
+        - "Population health reporting"
+        - "Cost and utilization analysis"
+        - "Patient stratification"
+        - "Year-over-year trending"
+      example_queries:
+        - name: "Top 10 costliest patients by year"
+          description: "Identify high-cost patients for care management programs"
+          sql: |
+            select
+                p.patient_id
+                , p.first_name || ' ' || p.last_name as patient_name
+                , fps.year_actual
+                , fps.total_cost
+                , fps.encounter_count
+                , fps.condition_count
+                , fps.payer_coverage_pct
+            from main_marts.fct_patient_summary fps
+            join main_marts.dim_patients p
+                on fps.patient_key = p.patient_key
+            where fps.year_actual = 2024
+            order by fps.total_cost desc
+            limit 10
+
+        - name: "Patient count and cost by age group"
+          description: "Analyze patient population distribution and costs by age cohort"
+          sql: |
+            select
+                case
+                    when fps.patient_age_at_year_end < 18 then '0-17'
+                    when fps.patient_age_at_year_end < 35 then '18-34'
+                    when fps.patient_age_at_year_end < 50 then '35-49'
+                    when fps.patient_age_at_year_end < 65 then '50-64'
+                    else '65+'
+                end as age_group
+                , count(distinct fps.patient_id) as patient_count
+                , round(avg(fps.total_cost), 2) as avg_annual_cost
+                , round(sum(fps.total_cost), 2) as total_cost
+                , round(avg(fps.encounter_count), 2) as avg_encounters
+            from main_marts.fct_patient_summary fps
+            where fps.year_actual = 2024
+            group by 1
+            order by 1
+
+        - name: "Cost and utilization trends over time"
+          description: "Year-over-year comparison of costs and utilization metrics"
+          sql: |
+            select
+                fps.year_actual
+                , count(distinct fps.patient_id) as patient_count
+                , round(avg(fps.encounter_count), 2) as avg_encounters_per_patient
+                , round(avg(fps.condition_count), 2) as avg_conditions_per_patient
+                , round(avg(fps.total_cost), 2) as avg_annual_cost
+                , round(sum(fps.total_cost), 2) as total_population_cost
+                , round(avg(fps.payer_coverage_pct), 2) as avg_coverage_pct
+            from main_marts.fct_patient_summary fps
+            group by fps.year_actual
+            order by fps.year_actual desc
+
+        - name: "High utilization patients"
+          description: "Find patients with above-average encounters and conditions"
+          sql: |
+            with averages as (
+                select
+                    avg(encounter_count) as avg_encounters
+                    , avg(condition_count) as avg_conditions
+                from main_marts.fct_patient_summary
+                where year_actual = 2024
+            )
+            select
+                fps.patient_id
+                , fps.encounter_count
+                , fps.condition_count
+                , fps.total_cost
+                , fps.unique_providers
+            from main_marts.fct_patient_summary fps
+            cross join averages a
+            where fps.year_actual = 2024
+                and fps.encounter_count > a.avg_encounters * 2
+                and fps.condition_count > a.avg_conditions
+            order by fps.total_cost desc
+            limit 25
+
+    data_tests:
+      # Grain test: enforce unique combination
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - patient_id
+              - year_actual
+          config:
+            severity: error
+    columns:
+      - name: patient_summary_key
+        description: Surrogate key (MD5 hash of patient_id + year_actual)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: patient_key
+        description: Foreign key to dim_patients
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_patients')
+                field: patient_key
+
+      - name: patient_id
+        description: Natural patient identifier
+        data_tests:
+          - not_null
+
+      - name: year_actual
+        description: Calendar year of the summary
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1900
+                max_value: 2100
+              config:
+                severity: warn
+
+      - name: patient_age_at_year_end
+        description: Patient age as of December 31 of the year
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 150
+              config:
+                severity: warn
+
+      - name: encounter_count
+        description: Number of encounters in the year
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 10000
+              config:
+                severity: error
+
+      - name: procedure_count
+        description: Number of procedures in the year
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: condition_count
+        description: Number of distinct conditions diagnosed in the year
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: total_cost
+        description: Total claim cost for the year
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 10000000
+              config:
+                severity: error
+
+      - name: payer_coverage
+        description: Amount covered by insurance
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: patient_responsibility
+        description: Amount owed by patient (copay + coinsurance)
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: payer_coverage_pct
+        description: Percentage of costs covered by insurance (0-100)
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 100
+              config:
+                severity: error
+
+      - name: unique_providers
+        description: Number of distinct providers seen
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1
+                max_value: 1000
+              config:
+                severity: error
+
+      - name: unique_organizations
+        description: Number of distinct organizations visited
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded
+
+  - name: fct_provider_metrics
+    description: |
+      Monthly provider-level utilization and performance metrics.
+      One row per provider per calendar month with patient volumes, costs, and efficiency metrics.
+      Grain: (provider_id, year_actual, month_actual)
+
+      Use cases:
+      - Provider performance tracking
+      - Workload distribution analysis
+      - Cost efficiency comparisons
+      - Capacity planning and staffing
+      - Quality improvement initiatives
+
+    config:
+      tags: ['analytics', 'marts', 'fact']
+    meta:
+      grain: provider_id + year_month_str
+      owner: healthcare_analytics
+      uses:
+        - "Provider productivity reporting"
+        - "Workload balancing"
+        - "Cost efficiency analysis"
+        - "Capacity planning"
+      example_queries:
+        - name: "Top providers by patient volume"
+          description: "Identify highest-volume providers for capacity planning"
+          sql: |
+            select
+                p.provider_id
+                , p.name as provider_name
+                , p.specialty
+                , sum(fpm.encounter_count) as total_encounters
+                , sum(fpm.unique_patient_count) as total_patients
+                , round(avg(fpm.avg_cost_per_encounter), 2) as avg_cost_per_encounter
+            from main_marts.fct_provider_metrics fpm
+            join main_marts.dim_providers p
+                on fpm.provider_key = p.provider_key
+            where fpm.year_actual = 2024
+            group by 1, 2, 3
+            order by total_encounters desc
+            limit 15
+
+        - name: "Provider metrics trend by month"
+          description: "Track provider productivity over time"
+          sql: |
+            select
+                fpm.year_month_str
+                , count(distinct fpm.provider_id) as active_providers
+                , sum(fpm.encounter_count) as total_encounters
+                , sum(fpm.unique_patient_count) as total_patients
+                , round(avg(fpm.avg_cost_per_encounter), 2) as avg_cost_per_encounter
+                , round(avg(fpm.avg_encounter_duration_minutes), 2) as avg_duration_minutes
+            from main_marts.fct_provider_metrics fpm
+            where fpm.year_actual >= 2023
+            group by fpm.year_month_str
+            order by fpm.year_month_str desc
+
+        - name: "Provider efficiency comparison"
+          description: "Compare providers by cost and volume efficiency"
+          sql: |
+            select
+                p.provider_id
+                , p.name as provider_name
+                , p.specialty
+                , sum(fpm.encounter_count) as total_encounters
+                , round(sum(fpm.total_cost), 2) as total_cost
+                , round(avg(fpm.avg_cost_per_encounter), 2) as avg_cost_per_encounter
+                , round(avg(fpm.encounters_per_patient_avg), 2) as avg_encounters_per_patient
+                , round(sum(fpm.total_procedures) * 1.0 / sum(fpm.encounter_count), 2) as procedures_per_encounter
+            from main_marts.fct_provider_metrics fpm
+            join main_marts.dim_providers p
+                on fpm.provider_key = p.provider_key
+            where fpm.year_actual = 2024
+            group by 1, 2, 3
+            having sum(fpm.encounter_count) >= 10
+            order by avg_cost_per_encounter
+
+    data_tests:
+      # Grain test: enforce unique combination
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - provider_id
+              - year_actual
+              - month_actual
+          config:
+            severity: error
+    columns:
+      - name: provider_metrics_key
+        description: Surrogate key (MD5 hash of provider_id + year_month_str)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: provider_key
+        description: Foreign key to dim_providers
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_providers')
+                field: provider_key
+
+      - name: provider_id
+        description: Natural provider identifier
+        data_tests:
+          - not_null
+
+      - name: organization_key
+        description: Foreign key to dim_organizations
+
+      - name: organization_id
+        description: Natural organization identifier
+
+      - name: year_actual
+        description: Calendar year
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1900
+                max_value: 2100
+              config:
+                severity: warn
+
+      - name: month_actual
+        description: Calendar month (1-12)
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1
+                max_value: 12
+              config:
+                severity: error
+
+      - name: year_month_str
+        description: Year-month string (YYYY-MM)
+
+      - name: encounter_count
+        description: Number of encounters in the month
+        data_tests:
+          - not_null
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: unique_patient_count
+        description: Number of distinct patients seen
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: avg_patient_age
+        description: Average age of patients seen
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 150
+              config:
+                severity: warn
+
+      - name: avg_encounter_duration_minutes
+        description: Average encounter duration in minutes
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: total_procedures
+        description: Total procedures performed
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: total_cost
+        description: Total claim cost for the month
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: total_payer_coverage
+        description: Amount covered by insurance
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: avg_cost_per_encounter
+        description: Average cost per encounter
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: encounters_per_patient_avg
+        description: Average encounters per patient
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded
+
+  - name: fct_condition_cohorts
+    description: |
+      Patient-condition cohort analysis for disease management and population health.
+      One row per unique patient-condition combination with timeline and encounter details.
+      Grain: (patient_id, condition_code)
+
+      Use cases:
+      - Disease management program enrollment
+      - Cohort identification for clinical trials
+      - Chronic condition tracking
+      - Care gap analysis
+      - Risk stratification by condition
+
+    config:
+      tags: ['analytics', 'marts', 'fact']
+    meta:
+      grain: patient_id + condition_code
+      owner: healthcare_analytics
+      uses:
+        - "Disease management programs"
+        - "Cohort identification"
+        - "Chronic condition tracking"
+        - "Care gap analysis"
+      example_queries:
+        - name: "Largest condition cohorts"
+          description: "Find conditions with the most patients for population health programs"
+          sql: |
+            select
+                fcc.condition_code
+                , fcc.condition_description
+                , count(distinct fcc.patient_id) as patient_count
+                , sum(fcc.encounter_count) as total_encounters
+                , round(avg(fcc.months_with_condition), 1) as avg_months_with_condition
+                , sum(case when fcc.is_active then 1 else 0 end) as active_patients
+            from main_marts.fct_condition_cohorts fcc
+            group by 1, 2
+            order by patient_count desc
+            limit 15
+
+        - name: "Chronic condition patients (long duration)"
+          description: "Identify patients with long-standing conditions for care management"
+          sql: |
+            select
+                p.patient_id
+                , p.first_name || ' ' || p.last_name as patient_name
+                , fcc.condition_description
+                , fcc.first_diagnosis_date
+                , fcc.months_with_condition
+                , fcc.encounter_count
+                , fcc.is_active
+            from main_marts.fct_condition_cohorts fcc
+            join main_marts.dim_patients p
+                on fcc.patient_key = p.patient_key
+            where fcc.months_with_condition >= 24
+                and fcc.is_active = true
+            order by fcc.months_with_condition desc
+            limit 50
+
+        - name: "Patients with multiple conditions"
+          description: "Find patients with comorbidities for complex care programs"
+          sql: |
+            with patient_condition_counts as (
+                select
+                    patient_id
+                    , patient_key
+                    , count(distinct condition_code) as condition_count
+                    , sum(case when is_active then 1 else 0 end) as active_condition_count
+                from main_marts.fct_condition_cohorts
+                group by 1, 2
+            )
+            select
+                p.patient_id
+                , p.first_name || ' ' || p.last_name as patient_name
+                , pcc.condition_count
+                , pcc.active_condition_count
+            from patient_condition_counts pcc
+            join main_marts.dim_patients p
+                on pcc.patient_key = p.patient_key
+            where pcc.condition_count >= 3
+            order by pcc.condition_count desc
+            limit 25
+
+    data_tests:
+      # Grain test: enforce unique combination
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - patient_id
+              - condition_code
+          config:
+            severity: error
+    columns:
+      - name: condition_cohort_key
+        description: Surrogate key (MD5 hash of patient_id + condition_code)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: patient_key
+        description: Foreign key to dim_patients
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_patients')
+                field: patient_key
+
+      - name: patient_id
+        description: Natural patient identifier
+        data_tests:
+          - not_null
+
+      - name: condition_key
+        description: Foreign key to dim_conditions
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_conditions')
+                field: condition_key
+
+      - name: condition_code
+        description: ICD/SNOMED condition code
+        data_tests:
+          - not_null
+
+      - name: condition_description
+        description: Full condition name
+
+      - name: first_diagnosis_date
+        description: Date of first diagnosis
+        data_tests:
+          - not_null
+
+      - name: last_diagnosis_date
+        description: Date of most recent diagnosis (null if first occurrence only)
+
+      - name: first_diagnosis_year
+        description: Year of first diagnosis
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1900
+                max_value: 2100
+              config:
+                severity: warn
+
+      - name: months_with_condition
+        description: Months between first and last diagnosis (0 if single occurrence)
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: encounter_count
+        description: Number of encounters with this condition
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: is_active
+        description: True if condition has no end date (currently active)
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [true, false]
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded
+
+  - name: fct_cost_analysis
+    description: |
+      Detailed cost breakdown for financial analysis and revenue cycle management.
+      One row per encounter with cost allocation details across payer and patient.
+      Grain: encounter_id
+
+      Use cases:
+      - Financial performance reporting
+      - Payer mix analysis
+      - Patient out-of-pocket tracking
+      - Cost driver identification
+      - Revenue cycle optimization
+
+    config:
+      tags: ['analytics', 'marts', 'fact']
+    meta:
+      grain: encounter_id
+      owner: healthcare_analytics
+      uses:
+        - "Financial reporting"
+        - "Payer mix analysis"
+        - "Cost allocation tracking"
+        - "Revenue cycle management"
+      example_queries:
+        - name: "Cost breakdown by payer"
+          description: "Analyze cost distribution across different insurance payers"
+          sql: |
+            select
+                py.payer_name
+                , count(distinct fca.encounter_id) as encounter_count
+                , round(sum(fca.total_cost), 2) as total_cost
+                , round(sum(fca.payer_coverage), 2) as total_payer_coverage
+                , round(sum(fca.patient_responsibility), 2) as total_patient_responsibility
+                , round(avg(fca.coverage_pct), 2) as avg_coverage_pct
+            from main_marts.fct_cost_analysis fca
+            join main_marts.dim_payers py
+                on fca.payer_key = py.payer_key
+            group by py.payer_name
+            order by total_cost desc
+
+        - name: "Monthly cost trends"
+          description: "Track cost trends over time for financial forecasting"
+          sql: |
+            select
+                strftime(fca.encounter_date, '%Y-%m') as year_month
+                , count(distinct fca.encounter_id) as encounter_count
+                , round(sum(fca.total_cost), 2) as total_cost
+                , round(avg(fca.total_cost), 2) as avg_cost_per_encounter
+                , round(sum(fca.payer_coverage), 2) as total_payer_coverage
+                , round(avg(fca.coverage_pct), 2) as avg_coverage_pct
+            from main_marts.fct_cost_analysis fca
+            where fca.year_actual >= 2023
+            group by 1
+            order by 1 desc
+
+        - name: "Cost by encounter type"
+          description: "Compare costs across different encounter classes"
+          sql: |
+            select
+                fca.encounter_class
+                , count(distinct fca.encounter_id) as encounter_count
+                , round(sum(fca.total_cost), 2) as total_cost
+                , round(avg(fca.total_cost), 2) as avg_cost
+                , round(avg(fca.procedure_count), 2) as avg_procedures
+                , round(avg(fca.cost_per_procedure), 2) as avg_cost_per_procedure
+                , round(avg(fca.coverage_pct), 2) as avg_coverage_pct
+            from main_marts.fct_cost_analysis fca
+            group by fca.encounter_class
+            order by total_cost desc
+
+        - name: "High-cost encounters"
+          description: "Identify individual high-cost encounters for review"
+          sql: |
+            select
+                fca.encounter_id
+                , fca.encounter_date
+                , fca.encounter_class
+                , p.first_name || ' ' || p.last_name as patient_name
+                , py.payer_name
+                , fca.total_cost
+                , fca.payer_coverage
+                , fca.patient_responsibility
+                , fca.procedure_count
+            from main_marts.fct_cost_analysis fca
+            join main_marts.dim_patients p
+                on fca.patient_key = p.patient_key
+            join main_marts.dim_payers py
+                on fca.payer_key = py.payer_key
+            order by fca.total_cost desc
+            limit 25
+
+    columns:
+      - name: cost_analysis_key
+        description: Surrogate key (MD5 hash of encounter_id)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: encounter_key
+        description: Foreign key to fct_encounters
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fct_encounters')
+                field: encounter_key
+
+      - name: encounter_id
+        description: Natural encounter identifier
+        data_tests:
+          - unique
+          - not_null
+
+      - name: patient_key
+        description: Foreign key to dim_patients
+
+      - name: patient_id
+        description: Natural patient identifier
+
+      - name: payer_key
+        description: Foreign key to dim_payers
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_payers')
+                field: payer_key
+
+      - name: payer_id
+        description: Natural payer identifier
+
+      - name: provider_key
+        description: Foreign key to dim_providers
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_providers')
+                field: provider_key
+
+      - name: provider_id
+        description: Natural provider identifier
+
+      - name: encounter_date_key
+        description: Foreign key to dim_date
+
+      - name: encounter_date
+        description: Date of the encounter
+
+      - name: year_actual
+        description: Calendar year of encounter
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 1900
+                max_value: 2100
+              config:
+                severity: warn
+
+      - name: encounter_class
+        description: Type of encounter (ambulatory, wellness, etc.)
+
+      - name: total_cost
+        description: Total claim cost
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: payer_coverage
+        description: Amount covered by insurance
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: patient_responsibility
+        description: Amount owed by patient
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: coverage_pct
+        description: Percentage covered by insurance (0-100)
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 100
+              config:
+                severity: error
+
+      - name: patient_cost_pct
+        description: Percentage owed by patient (0-100)
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+                max_value: 100
+              config:
+                severity: error
+
+      - name: procedure_count
+        description: Number of procedures in the encounter
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: cost_per_procedure
+        description: Average cost per procedure (null if no procedures)
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded
+
+  # ============================================================================
+  # OPERATIONAL VIEWS
+  # ============================================================================
+
+  - name: v_patient_current_conditions
+    description: |
+      Current (active) conditions for each patient, filtered from fct_condition_cohorts.
+      Use for patient panels, disease management dashboards, and care gap identification.
+      Grain: (patient_id, condition_code) - only active conditions
+
+      Use cases:
+      - Patient panel management
+      - Active disease registries
+      - Care gap identification
+      - Real-time patient condition views
+
+    config:
+      materialized: table
+      tags: ['analytics', 'marts', 'view']
+    meta:
+      grain: patient_id + condition_code
+      owner: healthcare_analytics
+      uses:
+        - "Patient panel displays"
+        - "Active condition registries"
+        - "Care gap dashboards"
+      example_queries:
+        - name: "Patient active conditions lookup"
+          description: "Get all active conditions for a specific patient"
+          sql: |
+            select
+                vpcc.patient_id
+                , vpcc.condition_code
+                , vpcc.condition_description
+                , vpcc.first_diagnosis_date
+                , vpcc.months_with_condition
+                , vpcc.encounter_count
+            from main_marts.v_patient_current_conditions vpcc
+            where vpcc.patient_id = 'patient-uuid-here'
+            order by vpcc.first_diagnosis_date
+
+        - name: "Active condition summary"
+          description: "Count of patients by active condition for disease registries"
+          sql: |
+            select
+                vpcc.condition_code
+                , vpcc.condition_description
+                , count(distinct vpcc.patient_id) as active_patient_count
+                , round(avg(vpcc.months_with_condition), 1) as avg_duration_months
+                , round(avg(vpcc.encounter_count), 1) as avg_encounters
+            from main_marts.v_patient_current_conditions vpcc
+            group by 1, 2
+            order by active_patient_count desc
+            limit 20
+
+    columns:
+      - name: patient_key
+        description: Foreign key to dim_patients
+
+      - name: patient_id
+        description: Natural patient identifier
+
+      - name: condition_key
+        description: Foreign key to dim_conditions
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_conditions')
+                field: condition_key
+
+      - name: condition_code
+        description: ICD/SNOMED condition code
+
+      - name: condition_description
+        description: Full condition name
+
+      - name: first_diagnosis_date
+        description: Date of first diagnosis
+
+      - name: months_with_condition
+        description: Duration of condition in months
+
+      - name: encounter_count
+        description: Number of encounters with this condition
+
+  - name: v_provider_active_patients
+    description: |
+      Active patient count per provider for panel management and workload analysis.
+      Aggregates patients with active conditions by their treating provider.
+      Grain: provider_id
+
+      Use cases:
+      - Provider panel size management
+      - Workload distribution analysis
+      - Capacity planning
+      - Provider assignment optimization
+
+    config:
+      materialized: table
+      tags: ['analytics', 'marts', 'view']
+    meta:
+      grain: provider_id
+      owner: healthcare_analytics
+      uses:
+        - "Provider panel management"
+        - "Workload balancing"
+        - "Capacity planning"
+      example_queries:
+        - name: "Provider panel sizes"
+          description: "View provider workload by active patient and condition counts"
+          sql: |
+            select
+                vpap.provider_id
+                , vpap.provider_name
+                , vpap.active_patient_count
+                , vpap.total_active_conditions
+                , vpap.avg_conditions_per_patient
+            from main_marts.v_provider_active_patients vpap
+            where vpap.active_patient_count > 0
+            order by vpap.active_patient_count desc
+            limit 25
+
+        - name: "Provider workload distribution"
+          description: "Analyze distribution of patient panels across providers"
+          sql: |
+            select
+                case
+                    when vpap.active_patient_count = 0 then '0'
+                    when vpap.active_patient_count <= 10 then '1-10'
+                    when vpap.active_patient_count <= 50 then '11-50'
+                    when vpap.active_patient_count <= 100 then '51-100'
+                    else '100+'
+                end as panel_size_bucket
+                , count(*) as provider_count
+                , sum(vpap.active_patient_count) as total_patients
+            from main_marts.v_provider_active_patients vpap
+            group by 1
+            order by 1
+
+    columns:
+      - name: provider_key
+        description: Foreign key to dim_providers
+        data_tests:
+          - unique
+          - not_null
+
+      - name: provider_id
+        description: Natural provider identifier
+        data_tests:
+          - unique
+          - not_null
+
+      - name: provider_name
+        description: Full name of the provider
+
+      - name: organization_key
+        description: Foreign key to dim_organizations
+
+      - name: organization_id
+        description: Natural organization identifier
+
+      - name: active_patient_count
+        description: Number of patients with active conditions
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: total_active_conditions
+        description: Total number of active conditions managed
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+      - name: avg_conditions_per_patient
+        description: Average number of active conditions per patient
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              arguments:
+                min_value: 0
+              config:
+                severity: error
+
+  - name: v_encounter_summary
+    description: |
+      Enriched encounter view with dimension attributes for ad-hoc analysis.
+      Ephemeral (not persisted) - used as a building block for other queries.
+      Joins encounters with patient, provider, organization, and payer details.
+
+      Use cases:
+      - Ad-hoc encounter analysis
+      - Building block for custom reports
+      - Quick encounter lookups with full context
+
+    config:
+      materialized: ephemeral
+      tags: ['analytics', 'marts', 'view']
+    columns:
+      - name: encounter_id
+        description: Unique encounter identifier
+
+      - name: encounter_date
+        description: Date of the encounter
+
+      - name: patient_id
+        description: Patient identifier
+
+      - name: patient_name
+        description: Full patient name
+
+      - name: provider_id
+        description: Provider identifier
+
+      - name: provider_name
+        description: Full provider name
+
+      - name: organization_id
+        description: Organization identifier
+
+      - name: organization_name
+        description: Organization name
+
+      - name: payer_id
+        description: Payer identifier
+
+      - name: payer_name
+        description: Payer name
+
+      - name: encounter_class
+        description: Type of encounter
+
+      - name: total_cost
+        description: Total claim cost
+
+      - name: payer_coverage
+        description: Amount covered by insurance
+
+      - name: patient_responsibility
+        description: Amount owed by patient
+
+  - name: mart_dq_summary
+    description: |
+      Data quality summary metrics for monitoring quarantine rates and validation failures.
+      One row per entity type (encounters, medications) with quarantine counts and failure breakdowns.
+      Grain: entity_type
+
+      Use cases:
+      - Data quality monitoring dashboards
+      - Quarantine rate trending
+      - Validation failure root cause analysis
+      - Data quality SLA tracking
+
+    config:
+      tags: ['analytics', 'data_quality', 'marts']
+    meta:
+      grain: entity_type
+      owner: healthcare_analytics
+      uses:
+        - "Data quality dashboards"
+        - "Quarantine monitoring"
+        - "Data quality alerting"
+
+    columns:
+      - name: entity_type
+        description: "Type of entity being measured (encounters, medications)"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['encounters', 'medications']
+
+      - name: quarantined_count
+        description: "Number of records failing data quality validations"
+        tests:
+          - not_null
+
+      - name: total_count
+        description: "Total number of records (valid + quarantined)"
+        tests:
+          - not_null
+
+      - name: quarantine_rate_pct
+        description: "Percentage of records quarantined (quarantined_count / total_count * 100)"
+        tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              max_value: 100
+
+      - name: failed_timestamp_validations
+        description: "Count of records failing timestamp/date sequence validations"
+
+      - name: failed_future_date_validations
+        description: "Count of records with future dates"
+
+      - name: failed_historical_end_validations
+        description: "Count of records with end dates before 1900"
+
+      - name: failed_historical_start_validations
+        description: "Count of records with start dates before 1900"
+
+      - name: _generated_at
+        description: "Timestamp when summary was generated"
+
+
+# ============================================================================
+# UNIT TESTS
+# ============================================================================
+# These unit_tests are authored to exercise the cute-dbt unit-test explorer
+# (https://github.com/breezy-bays-labs/cute-dbt) against this playground's
+# UNION-bearing analytics mart. They intentionally exercise different
+# fixture formats for `given` (and `expect` where relevant): one csv,
+# one sql. dim_payers (_core__models.yml) covers the dict format.
+# Together the three tests pin cute-dbt's renderer against every dbt
+# 1.8+ unit_test fixture format. See `_core__models.yml` for the third
+# test (test_dim_payers_injects_unknown_sentinel).
+#
+# **Test-execution prerequisite**: dict and csv given formats introspect
+# the upstream model's schema (to NULL-fill unspecified columns). Run
+# `dbt run-operation load_synthea_sources` against a persistent DuckDB
+# target (see `playground README.md`) before `dbt test --select
+# test_type:unit`.
+
+unit_tests:
+  - name: test_mart_dq_summary_combines_encounter_and_medication_metrics
+    description: |
+      mart_dq_summary UNION-ALLs metrics from stg_synthea__encounters
+      and stg_synthea__medications. This test mocks two encounter rows
+      (one invalid) and two medication rows (both invalid), then asserts
+      the per-entity counts + quarantine rate. Uses csv format for both
+      GIVEN and EXPECT — compact tabular form across many boolean
+      dq-flag columns.
+    model: mart_dq_summary
+    given:
+      - input: ref('stg_synthea__encounters')
+        format: csv
+        rows: |
+          is_dq_valid,valid_encounter_timestamps,no_future_encounter_dates,end_after_1900,start_after_1900
+          false,false,true,true,true
+          true,true,true,true,true
+      - input: ref('stg_synthea__medications')
+        format: csv
+        rows: |
+          is_dq_valid,valid_medication_dates,no_future_medication_dates,start_after_1900,end_after_1900_if_present
+          false,false,true,true,true
+          false,true,false,true,true
+    expect:
+      format: csv
+      rows: |
+        entity_type,quarantined_count,total_count,quarantine_rate_pct,failed_timestamp_validations
+        encounters,1,2,50.00,1
+        medications,2,2,100.00,1
+
+  - name: test_mart_dq_summary_zero_quarantined_when_all_valid
+    description: |
+      mart_dq_summary should report zero quarantined_count and 0.00
+      quarantine_rate_pct when every upstream row passes data-quality
+      validations. Uses sql format for the GIVEN mocks and dict format
+      for the EXPECT — dict expects only compare listed columns, so
+      non-deterministic outputs (`_generated_at` from
+      `current_timestamp`) are excluded from comparison.
+    model: mart_dq_summary
+    given:
+      - input: ref('stg_synthea__encounters')
+        format: sql
+        rows: |
+          select
+            true as is_dq_valid
+            , true as valid_encounter_timestamps
+            , true as no_future_encounter_dates
+            , true as end_after_1900
+            , true as start_after_1900
+      - input: ref('stg_synthea__medications')
+        format: sql
+        rows: |
+          select
+            true as is_dq_valid
+            , true as valid_medication_dates
+            , true as no_future_medication_dates
+            , true as start_after_1900
+            , true as end_after_1900_if_present
+    expect:
+      format: dict
+      rows:
+        - entity_type: 'encounters'
+          quarantined_count: 0
+          total_count: 1
+          quarantine_rate_pct: 0.00
+        - entity_type: 'medications'
+          quarantined_count: 0
+          total_count: 1
+          quarantine_rate_pct: 0.00

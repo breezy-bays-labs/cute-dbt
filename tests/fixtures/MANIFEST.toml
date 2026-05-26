@@ -209,6 +209,41 @@ design.\
 """
 
 [[fixture]]
+path = "playground-source/models/marts/core/_core__models.yml"
+origin = "dbt-playground"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/a0976b5"
+sha256 = "66276db3053dcc5fc073cb2c88eea7319726b55bf21fa1f8f584a0a1a53ba865"
+synthetic_only = true
+license = "MIT"
+description = """
+Source YAML for the playground `core` mart — pairs with \
+`playground-current.json` via the manifest \
+`unit_tests.<id>.original_file_path` field. The `example-report-check` \
+matrix CI job invokes cute-dbt with \
+`--project-root tests/fixtures/playground-source` so the renderer \
+slices the `test_dim_payers_injects_unknown_sentinel` block out of \
+this file and surfaces it in the example report's Authoring YAML \
+drawer (cute-dbt#69). Synthetic Synthea-only — pure synthetic data \
+(see playground-current.json's provenance note).\
+"""
+
+[[fixture]]
+path = "playground-source/models/marts/analytics/_analytics__models.yml"
+origin = "dbt-playground"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/a0976b5"
+sha256 = "ffe325fc50af87d795dd366e2ee7fe70aea9916641e6aab6f414b9909da2fdf5"
+synthetic_only = true
+license = "MIT"
+description = """
+Source YAML for the playground `analytics` mart — paired source for \
+the two `mart_dq_summary` unit_tests (`test_mart_dq_summary_combines_\
+encounter_and_medication_metrics` csv format, \
+`test_mart_dq_summary_zero_quarantined_when_all_valid` sql format). \
+Same provenance + CI matrix wiring as the core file above. Pure \
+synthetic.\
+"""
+
+[[fixture]]
 path = "source-yaml/manifest-current.json"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/69"

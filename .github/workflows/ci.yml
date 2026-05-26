@@ -494,10 +494,18 @@ jobs:
             current: tests/fixtures/jaffle-shop-current.json
             baseline: tests/fixtures/jaffle-shop-baseline.json
             output: examples/jaffle-shop-report.html
+            project_root: ""
           - name: playground
             current: tests/fixtures/playground-current.json
             baseline: tests/fixtures/playground-baseline.json
             output: examples/playground-report.html
+            # Playground unit_tests reference source YAML via
+            # `original_file_path`; cute-dbt#69's authoring-YAML drawer
+            # slices each `- name:` block out of the paired source files
+            # under tests/fixtures/playground-source/. The matrix row
+            # passes `--project-root` so the regenerated example matches
+            # the committed one byte-for-byte.
+            project_root: tests/fixtures/playground-source
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -513,17 +521,29 @@ jobs:
           CURRENT_MANIFEST: ${{ matrix.current }}
           BASELINE_MANIFEST: ${{ matrix.baseline }}
           OUTPUT_PATH: ${{ matrix.output }}
+          PROJECT_ROOT: ${{ matrix.project_root }}
         run: |
           set -euo pipefail
           mkdir -p target/example-check
           rendered="target/example-check/$(basename "$OUTPUT_PATH")"
+          # Build the optional --project-root arg only when the matrix
+          # row sets one (jaffle-shop omits it; playground points at
+          # tests/fixtures/playground-source so the YAML drawer
+          # populates per cute-dbt#69).
+          project_root_args=()
+          regen_hint=""
+          if [ -n "$PROJECT_ROOT" ]; then
+            project_root_args=(--project-root "$PROJECT_ROOT")
+            regen_hint=" --project-root $PROJECT_ROOT"
+          fi
           cargo run --quiet --locked --bin cute-dbt -- \
             --manifest "$CURRENT_MANIFEST" \
             --baseline-manifest "$BASELINE_MANIFEST" \
+            "${project_root_args[@]}" \
             --out "$rendered"
           if ! diff -q "$rendered" "$OUTPUT_PATH" >/dev/null; then
             echo "::error::example-report-up-to-date: $OUTPUT_PATH does not match the renderer output ($EXAMPLE_NAME). Regenerate with:"
-            echo "  cargo run --bin cute-dbt -- --manifest $CURRENT_MANIFEST --baseline-manifest $BASELINE_MANIFEST --out $OUTPUT_PATH"
+            echo "  cargo run --bin cute-dbt -- --manifest $CURRENT_MANIFEST --baseline-manifest $BASELINE_MANIFEST$regen_hint --out $OUTPUT_PATH"
             echo "Sizes:"
             ls -l "$rendered" "$OUTPUT_PATH"
             exit 1
