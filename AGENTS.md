@@ -84,6 +84,26 @@ The `non-mirror-guard` CI job rejects:
 - `bans.deny.wrappers` in `deny.toml`
 - `pub use crate::…::…` re-export shim pattern in `src/lib.rs`
 
+### dbt engine payload divergence (load-bearing)
+
+Both dbt-core 1.8+ and dbt-fusion 2.0-preview emit manifest schema
+v12, so cute-dbt's ingestion is engine-agnostic at the type level.
+The engines **diverge on `unit_tests` payload normalization**,
+verified 2026-05-26:
+
+| format | dbt-core 1.11+    | dbt-fusion 2.0-preview |
+|--------|-------------------|------------------------|
+| dict   | array of dicts    | array of dicts         |
+| csv    | array of dicts    | raw CSV string         |
+| sql    | raw SELECT string | raw SELECT string      |
+
+cute-dbt's JS renderer parses csv at render time so reports look
+identical regardless of which engine compiled the manifest
+(cute-dbt#66 — hand-rolled RFC 4180 parser, unit-tested via
+`tests/headless_csv_parser.rs`). The real engine-divergent surface
+elsewhere is YAML strictness: fusion rejects deprecated test-args
+that core only warns about.
+
 ## Working rules
 
 - **Branch + PR for everything** after the genesis commit. The genesis
