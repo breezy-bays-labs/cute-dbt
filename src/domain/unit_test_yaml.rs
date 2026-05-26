@@ -201,7 +201,7 @@ fn find_named_list_item(
     None
 }
 
-/// Whether the unit_test list item starting at `item_start` carries a
+/// Whether the `unit_test` list item starting at `item_start` carries a
 /// `name:` field matching `test_name`. The field can be on the `- `
 /// line itself or on any subsequent line at the item's canonical
 /// field-indent. `item_start` MUST be a line whose `trim_start()`
