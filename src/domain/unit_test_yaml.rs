@@ -158,12 +158,21 @@ fn find_list_item_indent(lines: &[&str], start_idx: usize) -> Option<(usize, usi
     None
 }
 
-/// Find the `- name: <test_name>` line at `list_indent` on or after
-/// `start_idx`. Returns the 0-based line index, or `None`.
+/// Find the list item under `unit_tests:` whose `name:` field matches
+/// `test_name`. Returns the 0-based line index of the `- ` line that
+/// starts the item, or `None`.
 ///
-/// Accepts the name unquoted (`- name: foo`), single-quoted
-/// (`- name: 'foo'`), or double-quoted (`- name: "foo"`). Trailing
-/// whitespace and inline comments on the line are tolerated.
+/// YAML allows dict keys in any order inside a list item, so `name:`
+/// may appear on the `- ` line itself (`- name: foo`) or on any
+/// subsequent line at the canonical field-indent for that item
+/// (Gemini code-review on cute-dbt#70 surfaced this — the previous
+/// impl required `- name:` to be the first field, which is convention
+/// in dbt YAML but not enforced). Block-scalar continuation lines
+/// (e.g. lines under `description: |-`) are skipped because their
+/// indent exceeds the field-indent.
+///
+/// Accepts the name unquoted (`name: foo`), single-quoted
+/// (`name: 'foo'`), or double-quoted (`name: "foo"`).
 fn find_named_list_item(
     lines: &[&str],
     start_idx: usize,
@@ -172,33 +181,79 @@ fn find_named_list_item(
 ) -> Option<usize> {
     for (offset, line) in lines.iter().enumerate().skip(start_idx) {
         let trimmed = line.trim_start();
+        let cur_indent = line.len() - trimmed.len();
 
         // A line at indent < list_indent that is non-blank, non-comment
         // means we've left the `unit_tests:` list — stop.
-        let cur_indent = line.len() - trimmed.len();
         if cur_indent < list_indent && !trimmed.is_empty() && !trimmed.starts_with('#') {
             return None;
         }
 
-        if cur_indent != list_indent {
-            continue;
-        }
-        if !trimmed.starts_with("- ") {
+        // Only consider `- ` list items at the canonical list indent.
+        if cur_indent != list_indent || !trimmed.starts_with("- ") {
             continue;
         }
 
-        // `- name: <scalar>` — strip the dash + space, then look for
-        // `name:` then the scalar value.
-        let after_dash = &trimmed[2..];
-        let after_dash = after_dash.trim_start();
-        if let Some(rest) = after_dash.strip_prefix("name:") {
-            let value = parse_yaml_scalar(rest);
-            if value == test_name {
-                return Some(offset);
-            }
+        if list_item_name_matches(lines, offset, list_indent, test_name) {
+            return Some(offset);
         }
     }
     None
+}
+
+/// Whether the unit_test list item starting at `item_start` carries a
+/// `name:` field matching `test_name`. The field can be on the `- `
+/// line itself or on any subsequent line at the item's canonical
+/// field-indent. `item_start` MUST be a line whose `trim_start()`
+/// begins with `"- "`.
+fn list_item_name_matches(
+    lines: &[&str],
+    item_start: usize,
+    list_indent: usize,
+    test_name: &str,
+) -> bool {
+    let first = lines[item_start];
+    let trimmed = first.trim_start();
+    // Safe because caller verified `starts_with("- ")`.
+    let after_dash_full = &trimmed[2..];
+    let after_dash = after_dash_full.trim_start();
+    // The canonical field-indent for this item is the column where
+    // the first field after the dash starts. Equivalent to:
+    // list_indent + 2 (for "- ") + any extra spaces between the dash
+    // and the first non-space character on the same line.
+    let field_indent = list_indent + 2 + (after_dash_full.len() - after_dash.len());
+
+    // Case 1: `name:` is the first field on the `- ` line.
+    if let Some(rest) = after_dash.strip_prefix("name:") {
+        if parse_yaml_scalar(rest) == test_name {
+            return true;
+        }
+    }
+
+    // Case 2: `name:` is on a subsequent line at the field-indent.
+    // Stop scanning when we hit the next list item (indent <=
+    // list_indent) or the end of the file.
+    for line in lines.iter().skip(item_start + 1) {
+        let t = line.trim_start();
+        let ci = line.len() - t.len();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if ci <= list_indent {
+            break;
+        }
+        // Lines deeper than field_indent are nested values (block
+        // scalars, given/expect bodies). They cannot carry a top-level
+        // field of THIS item.
+        if ci != field_indent {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("name:") {
+            return parse_yaml_scalar(rest) == test_name;
+        }
+    }
+
+    false
 }
 
 /// Strip leading whitespace, optional quote, then read the scalar up to
@@ -676,5 +731,55 @@ unit_tests:
         );
         let block = extract_unit_test_block(&src, "test_b").expect("test_b present");
         assert!(!block.raw.contains("over-indented comment"));
+    }
+
+    // Regression: Gemini code-review on cute-dbt#70 flagged that the
+    // initial slicer impl required `- name:` to be the first field of
+    // a unit_test list item. YAML allows dict keys in any order, so
+    // a user could write `- description:` (or any other key) first
+    // and the slicer would fail to locate the test by name.
+    #[test]
+    fn name_field_not_on_first_line_is_still_found() {
+        let src = yaml(
+            "
+unit_tests:
+  - description: \"docs\"
+    model: foo
+    name: my_test
+    given:
+      - input: ref('raw_users')
+        rows: []
+    expect:
+      rows: []
+  - name: other
+    model: bar
+",
+        );
+        let block =
+            extract_unit_test_block(&src, "my_test").expect("slicer must locate name-not-first");
+        assert!(block.raw.contains("description: \"docs\""));
+        assert!(block.raw.contains("name: my_test"));
+        // And it must not bleed into the next item.
+        assert!(!block.raw.contains("name: other"));
+    }
+
+    // Regression: a `name:` token at a deeper indent than the canonical
+    // field-indent (e.g. inside a `description: |-` block scalar)
+    // must NOT be treated as the item's name field — that would let
+    // sentence text accidentally name a test.
+    #[test]
+    fn name_token_inside_block_scalar_is_ignored() {
+        let src = yaml(
+            "
+unit_tests:
+  - description: |-
+      A long description that mentions name: not_a_test inside the prose.
+    name: real_test
+    model: foo
+",
+        );
+        assert!(extract_unit_test_block(&src, "not_a_test").is_none());
+        let block = extract_unit_test_block(&src, "real_test").expect("real_test present");
+        assert!(block.raw.contains("name: real_test"));
     }
 }

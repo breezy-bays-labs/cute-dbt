@@ -375,4 +375,181 @@ mod tests {
             "carries the cause: {msg}"
         );
     }
+
+    // -----------------------------------------------------------------
+    // gather_authoring_yaml_with_reader — covers every branch of the
+    // soft-failure pipeline (cute-dbt#69 / crap4rs scorecard for #70).
+    // -----------------------------------------------------------------
+
+    use std::collections::HashMap as StdHashMap;
+
+    use crate::domain::{DependsOn, Manifest, ManifestMetadata, NodeId, UnitTest, UnitTestExpect};
+
+    enum StubResult {
+        Ok(String),
+        Err(io::ErrorKind, &'static str),
+    }
+
+    struct StubReader {
+        entries: StdHashMap<String, StubResult>,
+    }
+
+    impl SourceYamlReader for StubReader {
+        fn read(&self, project_relative: &str) -> io::Result<String> {
+            match self.entries.get(project_relative) {
+                Some(StubResult::Ok(s)) => Ok(s.clone()),
+                Some(StubResult::Err(kind, msg)) => Err(io::Error::new(*kind, *msg)),
+                None => Err(io::Error::new(io::ErrorKind::NotFound, "stub: missing")),
+            }
+        }
+    }
+
+    fn unit_test_with_path(name: &str, original_file_path: Option<&str>) -> UnitTest {
+        UnitTest::new(
+            name.to_owned(),
+            NodeId::new("model.shop.dim_users"),
+            Vec::new(),
+            UnitTestExpect::new(serde_json::Value::Null, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            original_file_path.map(str::to_owned),
+        )
+    }
+
+    fn manifest_with(test_id: &str, unit_test: UnitTest) -> Manifest {
+        let mut unit_tests = StdHashMap::new();
+        unit_tests.insert(test_id.to_owned(), unit_test);
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            StdHashMap::new(),
+            unit_tests,
+            StdHashMap::new(),
+        )
+    }
+
+    fn in_scope_of(ids: &[&str]) -> InScopeSet {
+        ids.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn gather_authoring_yaml_returns_block_when_reader_resolves() {
+        let test_id = "unit_test.shop.dim_users.test_demo";
+        let manifest = manifest_with(
+            test_id,
+            unit_test_with_path("test_demo", Some("models/_ut.yml")),
+        );
+        let mut entries = StdHashMap::new();
+        entries.insert(
+            "models/_ut.yml".to_owned(),
+            StubResult::Ok("unit_tests:\n  - name: test_demo\n    model: dim_users\n".to_owned()),
+        );
+        let reader = StubReader { entries };
+
+        let result =
+            gather_authoring_yaml_with_reader(&reader, &manifest, &in_scope_of(&[test_id]));
+
+        assert_eq!(result.len(), 1);
+        let block = result.get(test_id).expect("block stored under test id");
+        assert!(block.raw.contains("name: test_demo"));
+    }
+
+    #[test]
+    fn gather_authoring_yaml_skips_test_with_no_original_file_path() {
+        let test_id = "unit_test.shop.dim_users.test_demo";
+        let manifest = manifest_with(test_id, unit_test_with_path("test_demo", None));
+        let reader = StubReader {
+            entries: StdHashMap::new(),
+        };
+
+        let result =
+            gather_authoring_yaml_with_reader(&reader, &manifest, &in_scope_of(&[test_id]));
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn gather_authoring_yaml_skips_test_when_reader_returns_not_found() {
+        let test_id = "unit_test.shop.dim_users.test_demo";
+        let manifest = manifest_with(
+            test_id,
+            unit_test_with_path("test_demo", Some("models/missing.yml")),
+        );
+        // Empty stub returns NotFound by default.
+        let reader = StubReader {
+            entries: StdHashMap::new(),
+        };
+
+        let result =
+            gather_authoring_yaml_with_reader(&reader, &manifest, &in_scope_of(&[test_id]));
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn gather_authoring_yaml_skips_test_when_reader_returns_other_error() {
+        let test_id = "unit_test.shop.dim_users.test_demo";
+        let manifest = manifest_with(
+            test_id,
+            unit_test_with_path("test_demo", Some("models/locked.yml")),
+        );
+        let mut entries = StdHashMap::new();
+        entries.insert(
+            "models/locked.yml".to_owned(),
+            StubResult::Err(io::ErrorKind::PermissionDenied, "stub: permission denied"),
+        );
+        let reader = StubReader { entries };
+
+        // The stage warns to stderr but does NOT propagate the error.
+        let result =
+            gather_authoring_yaml_with_reader(&reader, &manifest, &in_scope_of(&[test_id]));
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn gather_authoring_yaml_skips_test_when_name_not_in_source() {
+        let test_id = "unit_test.shop.dim_users.test_demo";
+        let manifest = manifest_with(
+            test_id,
+            unit_test_with_path("test_demo", Some("models/_ut.yml")),
+        );
+        let mut entries = StdHashMap::new();
+        // Source file exists and parses, but contains a different test.
+        entries.insert(
+            "models/_ut.yml".to_owned(),
+            StubResult::Ok("unit_tests:\n  - name: some_other_test\n    model: foo\n".to_owned()),
+        );
+        let reader = StubReader { entries };
+
+        let result =
+            gather_authoring_yaml_with_reader(&reader, &manifest, &in_scope_of(&[test_id]));
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn gather_authoring_yaml_skips_id_absent_from_manifest_unit_tests() {
+        // In-scope id with no matching entry in manifest.unit_tests —
+        // can happen during a transient diff-vs-manifest mismatch and
+        // must be a silent skip, not a panic.
+        let manifest = Manifest::new(
+            ManifestMetadata::new("v12"),
+            StdHashMap::new(),
+            StdHashMap::new(),
+            StdHashMap::new(),
+        );
+        let reader = StubReader {
+            entries: StdHashMap::new(),
+        };
+
+        let result = gather_authoring_yaml_with_reader(
+            &reader,
+            &manifest,
+            &in_scope_of(&["unit_test.shop.dim_users.ghost"]),
+        );
+
+        assert!(result.is_empty());
+    }
 }
