@@ -120,9 +120,11 @@ fn report_contains_unit_test(world: &mut World, test_name: String) {
                 .collect::<Vec<_>>(),
         )
     });
-    // Stash the owning model so the next And step can verify the
-    // test's `model:` binding without restating the name verbatim.
+    // Stash the owning model + the test name so follow-on And steps
+    // can verify the test's `model:` binding and per-fixture shape
+    // without restating the name verbatim.
     world.last_named_model = Some(owner);
+    world.last_named_unit_test = Some(test_name);
 }
 
 #[then(regex = r#"^that unit test names the target model "([^"]+)"$"#)]
@@ -180,4 +182,131 @@ fn model_section_indicates_empty_state(world: &mut World) {
             .map(|t| t.get("name").and_then(Value::as_str).unwrap_or("?"))
             .collect::<Vec<_>>(),
     );
+}
+
+/// Locate the most-recently-named unit test inside the rendered
+/// payload — used by the per-fixture shape-assertion steps below.
+fn find_named_unit_test<'p>(world: &mut World, payload: &'p Value) -> &'p Value {
+    let test_name = world
+        .last_named_unit_test
+        .clone()
+        .expect("a previous step named the unit test");
+    for model in payload["models"]
+        .as_array()
+        .expect("payload.models is an array")
+    {
+        for test in model_tests(model) {
+            if test.get("name").and_then(Value::as_str) == Some(&test_name) {
+                return test;
+            }
+        }
+    }
+    panic!("unit test {test_name} disappeared from payload between steps")
+}
+
+/// Translate the BDD wording ("array" / "string") to the structural
+/// assertion. Returns the assertion failure message if the shape
+/// doesn't match — keeps the calling step a single expression.
+fn rows_kind_matches(rows: &Value, kind: &str) -> Result<(), String> {
+    match kind {
+        "array" => {
+            if rows.is_array() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "expected rows shape `array`; payload carries {kind_actual}",
+                    kind_actual = json_kind(rows),
+                ))
+            }
+        }
+        "string" => {
+            if rows.is_string() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "expected rows shape `string`; payload carries {kind_actual}",
+                    kind_actual = json_kind(rows),
+                ))
+            }
+        }
+        other => Err(format!(
+            "unsupported rows-kind {other:?}; the .feature step grammar accepts only \"array\" or \"string\""
+        )),
+    }
+}
+
+fn json_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+#[then(
+    regex = r#"^the unit test's given fixture for input "([^"]+)" has format "([^"]+)" with rows as an? (array|string)$"#
+)]
+fn given_fixture_shape(world: &mut World, input: String, format: String, kind: String) {
+    let html = world
+        .report_html
+        .as_ref()
+        .expect("report.html was written by the subprocess")
+        .clone();
+    let payload = extract_payload(&html);
+    let test = find_named_unit_test(world, &payload);
+    let given_arr = test
+        .get("given")
+        .and_then(Value::as_array)
+        .expect("unit test has a `given` array");
+    let given = given_arr
+        .iter()
+        .find(|g| g.get("input").and_then(Value::as_str) == Some(&input))
+        .unwrap_or_else(|| {
+            panic!(
+                "given fixture for input {input} not found; available inputs: {:?}",
+                given_arr
+                    .iter()
+                    .filter_map(|g| g.get("input").and_then(Value::as_str))
+                    .collect::<Vec<_>>(),
+            )
+        });
+    let actual_format = given.get("format").and_then(Value::as_str).unwrap_or("");
+    assert_eq!(
+        actual_format, &format,
+        "given fixture for input {input} has format {actual_format:?}; expected {format:?}"
+    );
+    let rows = given.get("rows").expect("given fixture has a `rows` field");
+    rows_kind_matches(rows, &kind).unwrap_or_else(|msg| {
+        panic!("given fixture for input {input}: {msg}");
+    });
+}
+
+#[then(
+    regex = r#"^the unit test's expected fixture has format "([^"]+)" with rows as an? (array|string)$"#
+)]
+fn expected_fixture_shape(world: &mut World, format: String, kind: String) {
+    let html = world
+        .report_html
+        .as_ref()
+        .expect("report.html was written by the subprocess")
+        .clone();
+    let payload = extract_payload(&html);
+    let test = find_named_unit_test(world, &payload);
+    let expected = test
+        .get("expected")
+        .expect("unit test has an `expected` block");
+    let actual_format = expected.get("format").and_then(Value::as_str).unwrap_or("");
+    assert_eq!(
+        actual_format, &format,
+        "expected fixture has format {actual_format:?}; expected {format:?}"
+    );
+    let rows = expected
+        .get("rows")
+        .expect("expected fixture has a `rows` field");
+    rows_kind_matches(rows, &kind).unwrap_or_else(|msg| {
+        panic!("expected fixture: {msg}");
+    });
 }
