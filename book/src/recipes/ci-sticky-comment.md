@@ -27,8 +27,8 @@ The template assumes:
   parsed project) and a **baseline** dbt manifest (the PR base ref's
   parsed project) somewhere on disk by the time the job runs.
 - `cargo install --git https://github.com/breezy-bays-labs/cute-dbt --rev <sha>`
-  is acceptable until cute-dbt v0.1.0 publishes to crates.io (after
-  which `cargo binstall cute4dbt` is faster).
+  works while cute-dbt is unpublished. Once cute-dbt is available on
+  crates.io, prefer `cargo binstall cute4dbt` for a faster install.
 
 If both assumptions hold, the template ships as-is. If you need to
 produce the manifest pair in the same workflow, see the next section.

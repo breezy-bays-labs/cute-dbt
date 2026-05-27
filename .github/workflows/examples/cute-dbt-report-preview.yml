@@ -53,13 +53,13 @@ jobs:
           test -f "$MANIFEST_CURRENT" || { echo "::error::manifest-current not found at $MANIFEST_CURRENT"; exit 1; }
           test -f "$MANIFEST_BASELINE" || { echo "::error::manifest-baseline not found at $MANIFEST_BASELINE"; exit 1; }
 
-      # 3. Install cute-dbt. After v0.1.0 publishes to crates.io,
+      # 3. Install cute-dbt. Once cute-dbt is available on crates.io,
       #    prefer:
       #      cargo binstall cute4dbt
-      #    Until then, install from a tagged commit on the cute-dbt
-      #    repo's main branch (set CUTE_DBT_REV to a commit SHA you
-      #    trust — pinning is mandatory per workflow-hardening per
-      #    cute-dbt#27).
+      #    While unpublished, install from a tagged commit on the
+      #    cute-dbt repo's main branch (set CUTE_DBT_REV to a commit
+      #    SHA you trust — pinning is mandatory per workflow-hardening
+      #    per cute-dbt#27).
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cute-dbt
         env:
