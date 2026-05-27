@@ -1155,6 +1155,11 @@ models:
 # and asserts the SQL transformation produces the expected shape.
 
 unit_tests:
+  # cute-dbt's authoring-YAML drawer (since #69) attaches contiguous
+  # `#`-comment lines at the SAME indent as `- name:` immediately above
+  # the test to the test's authored slice. This block demonstrates the
+  # LEADING bracket — useful for stating the test's intent before the
+  # reader sees the assertion (cute-dbt#73).
   - name: test_dim_payers_injects_unknown_sentinel
     description: |
       dim_payers UNION-ALLs an unknown-member sentinel row (payer_key = -1)
@@ -1165,6 +1170,9 @@ unit_tests:
       outputs (`_loaded_at` via `current_timestamp`) are excluded from
       assertion automatically.
     model: dim_payers
+    # The INSIDE bracket — comments at deeper indent than `- name:` ride
+    # along with the body slice as raw text. Cute-dbt preserves them
+    # verbatim in the Authoring YAML drawer (cute-dbt#73).
     given:
       - input: ref('stg_synthea__payers')
         format: dict
@@ -1199,3 +1207,7 @@ unit_tests:
         - payer_key: 1
           payer_id: 'a00000aa-0000-0000-0000-000000000001'
           payer_name: 'Acme Health'
+  # The TRAILING bracket — contiguous `#`-comment lines at the SAME
+  # indent as `- name:`, immediately following the test body and
+  # terminated by EOF or a blank line, are attached to this test's
+  # slice. Useful for cross-references and follow-up notes (cute-dbt#73).

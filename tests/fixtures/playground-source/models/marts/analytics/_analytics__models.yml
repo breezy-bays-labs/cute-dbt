@@ -1308,6 +1308,10 @@ models:
 # test_type:unit`.
 
 unit_tests:
+  # LEADING bracket for test 1 — the slicer attaches contiguous
+  # `#`-comment lines at the SAME indent as `- name:` immediately above
+  # the test (no blank-line gap below) to this test's authored slice
+  # (cute-dbt#69 / #73).
   - name: test_mart_dq_summary_combines_encounter_and_medication_metrics
     description: |
       mart_dq_summary UNION-ALLs metrics from stg_synthea__encounters
@@ -1317,6 +1321,9 @@ unit_tests:
       GIVEN and EXPECT — compact tabular form across many boolean
       dq-flag columns.
     model: mart_dq_summary
+    # INSIDE bracket for test 1 — comments at deeper indent than
+    # `- name:` ride along with the body slice as raw text (cute-dbt#69
+    # / #73).
     given:
       - input: ref('stg_synthea__encounters')
         format: csv
@@ -1336,7 +1343,13 @@ unit_tests:
         entity_type,quarantined_count,total_count,quarantine_rate_pct,failed_timestamp_validations
         encounters,1,2,50.00,1
         medications,2,2,100.00,1
+  # TRAILING bracket for test 1 — the comment block butts against the
+  # body above (no blank-line gap) and is terminated below by the blank
+  # line separating the two tests (cute-dbt#69 / #73).
 
+  # LEADING bracket for test 2 — sits between the blank-line
+  # terminator above and `- name:` below with no further gap, so the
+  # leading-wins tiebreaker is moot here (cute-dbt#69 / #73).
   - name: test_mart_dq_summary_zero_quarantined_when_all_valid
     description: |
       mart_dq_summary should report zero quarantined_count and 0.00
@@ -1346,6 +1359,9 @@ unit_tests:
       non-deterministic outputs (`_generated_at` from
       `current_timestamp`) are excluded from comparison.
     model: mart_dq_summary
+    # INSIDE bracket for test 2 — same rule as test 1 (cute-dbt#69 /
+    # #73). Demonstrates that the slicer ride-along applies to every
+    # unit_test, not just the first in the file.
     given:
       - input: ref('stg_synthea__encounters')
         format: sql
@@ -1376,3 +1392,5 @@ unit_tests:
           quarantined_count: 0
           total_count: 1
           quarantine_rate_pct: 0.00
+  # TRAILING bracket for test 2 — terminated by EOF (cute-dbt#69 /
+  # #73).

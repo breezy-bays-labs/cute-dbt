@@ -14,7 +14,7 @@
 //! the contract; these step defs are thin glue over the existing
 //! proof.
 
-use cucumber::then;
+use cucumber::{then, when};
 use serde_json::Value;
 
 use super::super::common;
@@ -65,6 +65,95 @@ fn then_embeds_payload_with_models(world: &mut World, payload_id: String) {
         "expected at least one model in the rendered payload; got 0 — the modified-set \
          selection is not surfacing any models, which would defeat the sticky-comment \
          affordance for the reviewer",
+    );
+}
+
+/// Re-runs cute-dbt against the playground fixture pair WITH
+/// `--project-root` pointing at the committed playground source YAML.
+/// Required for the cute-dbt#73 substring scenarios because the default
+/// playground When step (`when_run_against_playground` in
+/// `unit_test_format_coverage.rs`) doesn't surface the Authoring YAML
+/// drawer (no `--project-root`). Mirrors the CI matrix's playground
+/// invocation so the BDD layer exercises the same path reviewers see in
+/// the rendered example.
+#[when(
+    "I run cute-dbt against the playground fixture pair with --project-root \
+     pointing at the committed playground source"
+)]
+fn when_run_against_playground_with_project_root(world: &mut World) {
+    let manifest = common::fixture("playground-current.json");
+    let baseline = common::fixture("playground-baseline.json");
+    let project_root = common::fixture("playground-source");
+    let project_root_arg = common::s(&project_root).to_owned();
+    let out = common::tmp("bdd_consumer_report_drawer_substring.html");
+    common::clear(&out);
+
+    let output = common::run_cli(&[
+        "--manifest",
+        common::s(&manifest),
+        "--baseline-manifest",
+        common::s(&baseline),
+        "--project-root",
+        &project_root_arg,
+        "--out",
+        common::s(&out),
+    ]);
+    world.last_exit_code = output.status.code();
+    world.last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    world.report_html = std::fs::read_to_string(&out).ok();
+    world.out_path = Some(out);
+}
+
+#[then(
+    regex = r#"^the Authoring YAML drawer for at least one unit test contains the substring "([^"]+)"$"#
+)]
+fn then_drawer_contains_substring(world: &mut World, substring: String) {
+    assert_eq!(
+        world.last_exit_code,
+        Some(0),
+        "cute-dbt failed; stderr={}",
+        world.last_stderr,
+    );
+    let html = world
+        .report_html
+        .as_ref()
+        .expect("report.html was written by the subprocess");
+    let dom = tl::parse(html, tl::ParserOptions::default()).expect("report HTML must parse");
+    let parser = dom.parser();
+    let node = dom
+        .get_element_by_id("cute-dbt-data")
+        .expect("report must include <script id=\"cute-dbt-data\">")
+        .get(parser)
+        .expect("payload node resolves");
+    let raw = node.inner_text(parser);
+    let payload: Value = serde_json::from_str(&raw).expect("embedded payload must be valid JSON");
+
+    let mut found = false;
+    let empty = Vec::new();
+    for model in payload["models"].as_array().unwrap_or(&empty) {
+        let tests = model
+            .get("tests")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty);
+        for test in tests {
+            if let Some(yaml) = test.get("authoring_yaml").and_then(Value::as_str) {
+                if yaml.contains(&substring) {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if found {
+            break;
+        }
+    }
+    assert!(
+        found,
+        "expected at least one unit test's authoring_yaml to contain {substring:?}; \
+         no test in the rendered payload carried that substring. This typically means \
+         the slicer didn't surface the playground YAML's bracket comments — verify \
+         tests/fixtures/playground-source/ matches the source-of-truth in \
+         cmbays/dbt-playground (see MANIFEST.toml origin_url SHA).",
     );
 }
 

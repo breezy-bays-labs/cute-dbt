@@ -35,3 +35,15 @@ Feature: Rendered report is suitable for CI sticky-comment delivery
   Scenario: Rendered report fits within the GitHub Actions artifact budget
     When I run cute-dbt against the playground fixture pair
     Then the resulting HTML file size is under 10 megabytes
+
+  # cute-dbt#73: the rendered playground report's Authoring YAML drawer
+  # carries the leading/inside/trailing comments authored in the source
+  # YAML for at least one unit test. Without this gate, a slicer
+  # regression that silently drops comments would still pass every
+  # other scenario in this feature — the drawer would render structure
+  # but lose authored context.
+  Scenario: Rendered playground report's Authoring YAML drawer carries source-YAML comments in all three bracket positions
+    When I run cute-dbt against the playground fixture pair with --project-root pointing at the committed playground source
+    Then the Authoring YAML drawer for at least one unit test contains the substring "LEADING bracket"
+    And the Authoring YAML drawer for at least one unit test contains the substring "INSIDE bracket"
+    And the Authoring YAML drawer for at least one unit test contains the substring "TRAILING bracket"

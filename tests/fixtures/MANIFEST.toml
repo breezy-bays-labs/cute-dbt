@@ -150,13 +150,13 @@ the `messy_shop` package name and node names are fictitious.\
 [[fixture]]
 path = "playground-baseline.json"
 origin = "dbt-playground"
-origin_url = "https://github.com/cmbays/dbt-playground/commit/a0976b5"
-sha256 = "4f9c88d2c9e5effd7c5b66e72458c12a8592730a96bcedeba129f9f0ec892f6c"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"
+sha256 = "84a7656dad1b415a40fd67ca1ba9efdb86e441b4edaead18a39b70064377d921"
 synthetic_only = true
 license = "MIT"
 description = """
 Compiled dbt-core 1.11.11 manifest (schema v12) for cmbays/dbt-playground \
-at main HEAD (post-#291). Pristine model bodies + 3 unit_tests re-authored \
+at main HEAD (post-#292). Pristine model bodies + 3 unit_tests re-authored \
 to exercise all three dbt fixture formats (dict, csv, sql) for cute-dbt's \
 format-coverage rendering: \
 test_dim_payers_injects_unknown_sentinel uses dict given + dict expect; \
@@ -166,14 +166,17 @@ uses sql given + dict expect. Synthetic Synthea healthcare data only — \
 the playground is itself synthetic (Synthea is a deterministic patient- \
 generator with no real PHI). Acts as the BASELINE of the diff-scoping \
 pair for cute-dbt's richer example. Source: cmbays/dbt-playground#291 \
-(private repo; URL provided for provenance audit, not public retrieval).\
+(unit_test format coverage) + #292 (cute-dbt#73 — bracket-demo \
+comments added to each unit_test in marts/core + marts/analytics). \
+Private repo; URL provided for provenance audit, not public \
+retrieval.\
 """
 
 [[fixture]]
 path = "playground-current.json"
 origin = "dbt-playground"
-origin_url = "https://github.com/cmbays/dbt-playground/commit/a0976b5"
-sha256 = "35ee73058d9bb4f2e045195316942335a22b27b07bd602e3f2b2c15d4972dbec"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"
+sha256 = "54da72c96a4eb37fd359aa6afbc98a85a0dc9479d97ec9ee4f3820e8f64bef73"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -189,7 +192,8 @@ empty-state card (int_dq_quarantine__encounters is modified but carries \
 no unit_tests). The comment-only modifications are NOT committed to the \
 playground — they exist only in this committed manifest snapshot as the \
 right-hand side of cute-dbt's hypothetical PR diff. Source: \
-cmbays/dbt-playground#291.\
+cmbays/dbt-playground#291 (format coverage) + #292 (cute-dbt#73 — \
+bracket-demo YAML comments).\
 """
 
 [[fixture]]
@@ -211,8 +215,8 @@ design.\
 [[fixture]]
 path = "playground-source/models/marts/core/_core__models.yml"
 origin = "dbt-playground"
-origin_url = "https://github.com/cmbays/dbt-playground/commit/a0976b5"
-sha256 = "66276db3053dcc5fc073cb2c88eea7319726b55bf21fa1f8f584a0a1a53ba865"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"
+sha256 = "27bd8a85e4a9589f4b07d33cde5bf2e561ad64f472e0c16b8a1343f682938724"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -223,15 +227,19 @@ matrix CI job invokes cute-dbt with \
 `--project-root tests/fixtures/playground-source` so the renderer \
 slices the `test_dim_payers_injects_unknown_sentinel` block out of \
 this file and surfaces it in the example report's Authoring YAML \
-drawer (cute-dbt#69). Synthetic Synthea-only — pure synthetic data \
+drawer (cute-dbt#69). cmbays/dbt-playground#292 added contiguous \
+`#`-comment lines around the unit_test in three bracket positions \
+(leading + inside + trailing) so the drawer demonstrates the \
+slicer's contiguous-comment-bracketing rule end-to-end \
+(cute-dbt#73). Synthetic Synthea-only — pure synthetic data \
 (see playground-current.json's provenance note).\
 """
 
 [[fixture]]
 path = "playground-source/models/marts/analytics/_analytics__models.yml"
 origin = "dbt-playground"
-origin_url = "https://github.com/cmbays/dbt-playground/commit/a0976b5"
-sha256 = "ffe325fc50af87d795dd366e2ee7fe70aea9916641e6aab6f414b9909da2fdf5"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"
+sha256 = "a4549ad6fe54c4c68f0822d9913f2f1372b35bae81e6b121c6e79ad896f45236"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -239,8 +247,11 @@ Source YAML for the playground `analytics` mart — paired source for \
 the two `mart_dq_summary` unit_tests (`test_mart_dq_summary_combines_\
 encounter_and_medication_metrics` csv format, \
 `test_mart_dq_summary_zero_quarantined_when_all_valid` sql format). \
-Same provenance + CI matrix wiring as the core file above. Pure \
-synthetic.\
+Same provenance + CI matrix wiring as the core file above. \
+cmbays/dbt-playground#292 added contiguous `#`-comment lines around \
+both unit_tests in three bracket positions (leading + inside + \
+trailing), separated by a blank line to demonstrate the slicer's \
+per-test bracket termination rule (cute-dbt#73). Pure synthetic.\
 """
 
 [[fixture]]
@@ -282,17 +293,20 @@ Pure synthetic.\
 path = "source-yaml/project/models/_unit_tests.yml"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/69"
-sha256 = "a6686506d0d2515bf75ba8f1f1e1b81b7da0387f16232544e44eda328bc96b7f"
+sha256 = "1a76143a182efe5a17e404f0ac170879ce30466b232fce05d444c910e2911889"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "Apache-2.0"
 description = """
-Synthetic source YAML for cute-dbt#69 — pairs with \
+Synthetic source YAML for cute-dbt#69 / #73 — pairs with \
 `source-yaml/manifest-{current,baseline}.json` via the manifest \
 `unit_tests.<id>.original_file_path` field. Hand-crafted so the slicer \
-exercises leading-comment capture, the body block, and trailing-comment \
-capture in a single fixture. Layout mirrors the dbt convention of \
-`<project_root>/models/_unit_tests.yml`; the BDD scenarios invoke \
-cute-dbt with `--project-root tests/fixtures/source-yaml/project` so \
-the relative path resolves. Pure synthetic.\
+exercises leading-comment capture, inside-the-body comment ride-along, \
+the body block itself, and trailing-comment capture in a single \
+fixture (the inside-the-body comment was added in cute-dbt#73 to \
+complete the bracketing demonstration). Layout mirrors the dbt \
+convention of `<project_root>/models/_unit_tests.yml`; the BDD \
+scenarios invoke cute-dbt with `--project-root \
+tests/fixtures/source-yaml/project` so the relative path resolves. \
+Pure synthetic.\
 """

@@ -37,6 +37,7 @@ Feature: cute-dbt surfaces the raw authoring YAML for each in-scope unit test
     Then the source-yaml report contains the unit test "test_dim_users_basic"
     And the unit test "test_dim_users_basic" carries authoring YAML containing "- name: test_dim_users_basic"
     And the unit test "test_dim_users_basic" carries authoring YAML containing "Leading comment for test_dim_users_basic"
+    And the unit test "test_dim_users_basic" carries authoring YAML containing "Inside-the-body comment for test_dim_users_basic"
     And the unit test "test_dim_users_basic" carries authoring YAML containing "Trailing comment for test_dim_users_basic"
 
   Scenario: No --project-root and no derive-from-manifest fallback resolves
