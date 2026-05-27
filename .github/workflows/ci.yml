@@ -288,9 +288,14 @@ jobs:
           fi
 
   feature-count:
-    # Pins the 6-feature invariant (was 5 pre-PR 14; bumped when --config
-    # landed and `config.feature` joined the contract — cute-dbt#24).
-    # The README is not a feature.
+    # Pins the .feature-count invariant. Tracks the contract:
+    #   - 5 pre-PR 14, 6 after --config (cute-dbt#24)
+    #   - 7 after unit_test_format_coverage (cute-dbt#39)
+    #   - 8 after unit_test_yaml (cute-dbt#69)
+    #   - 9 after consumer_report_contract (cute-dbt#71)
+    # The README is not a feature. Display-label drift (`==6`) is
+    # tracked by cute-dbt#68 (rename coordination with branch protection
+    # required).
     name: Feature file count (==6)
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -302,8 +307,8 @@ jobs:
         run: |
           set -euo pipefail
           count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
-          if [ "$count" != "8" ]; then
-            echo "::error::feature-count: expected 8 .feature files, found $count"
+          if [ "$count" != "9" ]; then
+            echo "::error::feature-count: expected 9 .feature files, found $count"
             exit 1
           fi
 

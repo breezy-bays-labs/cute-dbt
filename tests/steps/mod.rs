@@ -10,6 +10,7 @@
 
 pub mod builders;
 pub mod config;
+pub mod consumer_report_contract;
 pub mod cte_rendering;
 pub mod diff_scoping;
 pub mod fail_closed;

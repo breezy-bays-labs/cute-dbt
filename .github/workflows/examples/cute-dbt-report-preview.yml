@@ -1,0 +1,157 @@
+# Templated cute-dbt report-preview workflow — copy this file into your
+# repo's `.github/workflows/` directory, edit the marked input paths to
+# match your dbt project's layout, push, done.
+#
+# This file lives at `.github/workflows/examples/` (subdirectory) so
+# GitHub Actions does NOT auto-trigger it inside the cute-dbt repo.
+# Workflow triggers only fire for files DIRECTLY under
+# `.github/workflows/` — subdirectories are documentation. The cute-dbt
+# repo's own dogfood lives at `.github/workflows/report-preview.yml`,
+# invoking the same shape against committed example fixtures.
+#
+# Walkthrough + variations (dbt-parse-in-CI, fork-PR workarounds, Pages
+# preview) live at
+# https://breezy-bays-labs.github.io/cute-dbt/recipes/ci-sticky-comment.html
+
+name: cute-dbt report preview
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cute-dbt-report-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  report-preview:
+    name: Render + post sticky preview comment
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      # actions: read — required for the `gh api .../actions/runs/<id>/artifacts`
+      # call below under least-privilege GITHUB_TOKEN defaults.
+      actions: read
+      contents: read
+      pull-requests: write   # for sticky comment (see fork-PR caveat below)
+    steps:
+      # 1. Check out the PR head.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      # 2. Make sure your CI has produced the manifest pair somewhere
+      #    on disk before this job runs (or in a prior step, parse them
+      #    here via `dbt parse` against your project — see the recipe
+      #    page § Producing the manifest pair for a worked example).
+      #    The two paths below are placeholders — edit them.
+      - name: Verify manifest pair
+        env:
+          MANIFEST_CURRENT: path/to/manifest-current.json    # edit
+          MANIFEST_BASELINE: path/to/manifest-baseline.json  # edit
+        run: |
+          set -euo pipefail
+          test -f "$MANIFEST_CURRENT" || { echo "::error::manifest-current not found at $MANIFEST_CURRENT"; exit 1; }
+          test -f "$MANIFEST_BASELINE" || { echo "::error::manifest-baseline not found at $MANIFEST_BASELINE"; exit 1; }
+
+      # 3. Install cute-dbt. Once cute-dbt is available on crates.io,
+      #    prefer:
+      #      cargo binstall cute4dbt
+      #    While unpublished, install from a tagged commit on the
+      #    cute-dbt repo's main branch (set CUTE_DBT_REV to a commit
+      #    SHA you trust — pinning is mandatory per workflow-hardening
+      #    per cute-dbt#27).
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install cute-dbt
+        env:
+          CUTE_DBT_REV: 'PUT_COMMIT_SHA_HERE'   # edit: pin to a cute-dbt main SHA
+        run: cargo install --locked --git https://github.com/breezy-bays-labs/cute-dbt --rev "$CUTE_DBT_REV"
+
+      # 4. Render the report.
+      - name: Render report
+        env:
+          MANIFEST_CURRENT: path/to/manifest-current.json    # edit (same as step 2)
+          MANIFEST_BASELINE: path/to/manifest-baseline.json  # edit (same as step 2)
+        run: |
+          set -euo pipefail
+          mkdir -p target/preview
+          cute-dbt \
+            --manifest "$MANIFEST_CURRENT" \
+            --baseline-manifest "$MANIFEST_BASELINE" \
+            --out target/preview/report.html
+
+      # 5. Upload as workflow artifact.
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cute-dbt-report
+          path: target/preview/report.html
+          retention-days: 7
+
+      # 6. Build the sticky comment body. Reads the just-uploaded
+      #    artifact's id via the GH API to produce a clickable
+      #    per-artifact download link.
+      - name: Build comment body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/sticky
+          artifact_id=$(gh api -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
+            --jq '.artifacts[] | select(.name == "cute-dbt-report") | .id' \
+            || echo "")
+          if [ -z "$artifact_id" ]; then
+            link="_(artifact upload pending or failed — see [run log](${RUN_URL}))_"
+          else
+            link="[Download](https://github.com/${REPO}/actions/runs/${RUN_ID}/artifacts/${artifact_id})"
+          fi
+          cat > target/sticky/body.md <<MARKDOWN
+          ## 📄 cute-dbt report preview
+
+          | Report | Artifact |
+          |---|---|
+          | \`report.html\` | ${link} |
+
+          The report is a single self-contained HTML file (zero external
+          resources). Click **Download**, extract the zip, open the HTML
+          in any browser.
+
+          <sub>Posted by \`cute-dbt-report-preview.yml\`. ([View run](${RUN_URL}))</sub>
+          MARKDOWN
+
+      # 7. Post the sticky comment.
+      - name: Post sticky comment
+        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
+        with:
+          header: cute-dbt-report-preview
+          path: target/sticky/body.md
+
+# ----------------------------------------------------------------------
+# Fork-PR caveat
+# ----------------------------------------------------------------------
+#
+# GitHub issues a read-only GITHUB_TOKEN for pull_request events
+# triggered from forks regardless of the permissions: block. The
+# sticky-comment step silently no-ops on fork PRs in this workflow.
+# Same-repo branches are unaffected.
+#
+# Two well-trodden workarounds (see the recipe page for full examples):
+#
+# A. pull_request_target for the comment step only — runs in
+#    base-repo context with write permissions. Safe when the comment
+#    step does NOT check out PR code.
+#
+# B. Separate workflow_run-triggered comment workflow — this
+#    workflow uploads artifacts on pull_request; a second workflow
+#    triggered on workflow_run: completed posts the comment in
+#    base-repo context with its own writable token. Canonical pattern.
+#
+# Most projects pick "no fork-PR sticky comments" until they have a
+# concrete need.
