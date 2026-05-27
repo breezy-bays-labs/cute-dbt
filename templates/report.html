@@ -64,8 +64,11 @@ table.given-table th, table.expected-table th {
    selected test has no description), suppress the banner entirely so
    the relocated layout (DAG → description → inspect/expected) stays
    tight. The JS write path empties `.text("")` instead of removing
-   the element, so `:empty` is the correct selector here. */
-.test-description:empty { display: none; }
+   the <p>, so hide the parent <section> via `:has()` to also drop
+   the aria-labeled landmark region from the accessibility tree —
+   otherwise screen readers announce an empty "Test description"
+   region when no test is selected. */
+.test-description-section:has(.test-description:empty) { display: none; }
 .test-selector-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem 1rem; }
 .selector-field { display: flex; flex-direction: column; min-width: 16rem; }
 .selector-arrow { padding-bottom: 0.9rem; color: #6a6a72; }
