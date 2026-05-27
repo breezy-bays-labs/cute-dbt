@@ -14,6 +14,10 @@
 - [Examples](./examples.md)
 - [Release discipline](./release-discipline.md)
 
+# Recipes
+
+- [CI sticky-comment report preview](./recipes/ci-sticky-comment.md)
+
 ----------
 
 [Privacy property — zero egress](./zero-egress.md)

@@ -1,0 +1,200 @@
+# Sticky-PR-comment report preview (cute-dbt#71).
+#
+# On every PR, regenerates the committed example HTML reports against
+# their fixture pairs, uploads each as a workflow artifact, and posts a
+# sticky PR comment with clickable download links. The comment updates
+# in place on subsequent pushes (single sticky per PR, keyed by
+# `header: cute-dbt-report-preview`).
+#
+# This workflow is structurally separate from `ci.yml`'s
+# `example-report-check` matrix + `example-report-up-to-date`
+# aggregator: that pair is the byte-identity GATE (required check); this
+# workflow is the human-validation AFFORDANCE (never required, never
+# blocks merge, runs with `if: always()` so byte-identity failures still
+# leave the artifact + comment accessible).
+#
+# Fork-PR caveat: GitHub issues a read-only `GITHUB_TOKEN` for
+# `pull_request` events triggered from forks regardless of the
+# `permissions:` block, so the sticky-comment step silently no-ops on
+# fork PRs. Same-repo branches are unaffected. To get fork-PR coverage,
+# split this into a `pull_request` regenerate workflow + a
+# `workflow_run`-triggered comment workflow with its own writable
+# token (see `book/src/recipes/ci-sticky-comment.md` § Fork PRs for the
+# two well-trodden workarounds).
+#
+# Consumer-recipe copy lives at
+# `.github/workflows/examples/cute-dbt-report-preview.yml` (subdirectory
+# convention prevents it from auto-triggering inside this repo).
+
+name: Report preview
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Use github.ref (refs/pull/<n>/merge on pull_request events) — PR-scoped,
+  # avoids the security-hook-flagged github.head_ref input even though
+  # `concurrency:` keys are not interpolated into `run:` blocks.
+  group: report-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regenerate:
+    # Per-example matrix worker. Regenerates each committed example
+    # against its fixture pair, then uploads the rendered HTML as a
+    # workflow artifact. Duplicates the matrix shape in `ci.yml`'s
+    # `example-report-check` (workflow YAML cannot import the Rust
+    # `COMMITTED_EXAMPLES` constant); the two stay in sync by review.
+    name: Regenerate example report (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: jaffle-shop
+            current: tests/fixtures/jaffle-shop-current.json
+            baseline: tests/fixtures/jaffle-shop-baseline.json
+            project_root: ""
+          - name: playground
+            current: tests/fixtures/playground-current.json
+            baseline: tests/fixtures/playground-baseline.json
+            # Mirrors ci.yml's `example-report-check` playground row.
+            # Source YAML lives in-repo so the regenerated report
+            # populates the Authoring-YAML drawer (cute-dbt#69).
+            project_root: tests/fixtures/playground-source
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Regenerate example report
+        env:
+          # Matrix values are workflow-controlled (defined above), not
+          # user-controlled inputs — but passing through env: is the
+          # official safe pattern for any `${{ }}` interpolation in
+          # `run:` blocks.
+          NAME: ${{ matrix.name }}
+          CURRENT: ${{ matrix.current }}
+          BASELINE: ${{ matrix.baseline }}
+          PROJECT_ROOT: ${{ matrix.project_root }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/report-preview
+          out="target/report-preview/${NAME}-report.html"
+          # Build optional --project-root arg (jaffle-shop omits it;
+          # playground points at the committed source YAML so the drawer
+          # populates).
+          project_root_args=()
+          if [ -n "$PROJECT_ROOT" ]; then
+            project_root_args=(--project-root "$PROJECT_ROOT")
+          fi
+          cargo run --quiet --locked --bin cute-dbt -- \
+            --manifest "$CURRENT" \
+            --baseline-manifest "$BASELINE" \
+            "${project_root_args[@]}" \
+            --out "$out"
+          # Emit a size breadcrumb in the log so the sticky-comment body
+          # builder doesn't need a second probe.
+          ls -l "$out"
+      - name: Upload report artifact
+        # `if: always()` so a non-zero regenerate exit still uploads
+        # whatever HTML the renderer produced — partial output is more
+        # useful than nothing for the reviewer.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: report-preview-${{ matrix.name }}
+          path: target/report-preview/${{ matrix.name }}-report.html
+          retention-days: 7
+          if-no-files-found: warn
+
+  sticky-comment:
+    # Builds and posts the sticky PR comment. Reads the upstream matrix
+    # artifacts via the GitHub API to assemble per-artifact clickable
+    # download links. Fails loudly on sticky-comment errors (the locked
+    # decision from the issue body — sticky-comment failure typically
+    # indicates a real permission misconfig that should surface).
+    name: Post sticky preview comment
+    runs-on: ubuntu-latest
+    needs: [regenerate]
+    if: always() && github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Build comment body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MATRIX_RESULT: ${{ needs.regenerate.result }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/sticky
+          # Query this run's artifacts via the REST API. Per-artifact
+          # browser-clickable URLs use the pattern
+          # https://github.com/{owner}/{repo}/actions/runs/{run_id}/artifacts/{artifact_id}
+          # which authenticated reviewers can click to download.
+          artifacts_json=$(gh api \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
+            --jq '[.artifacts[] | select(.name | startswith("report-preview-"))]' \
+            || echo '[]')
+          rows=$(printf '%s' "$artifacts_json" \
+            | jq -r --arg repo "$REPO" --arg run "$RUN_ID" '
+                if length == 0 then
+                  "| _(no artifacts uploaded — see [run log](https://github.com/\($repo)/actions/runs/\($run)) for details)_ | — |"
+                else
+                  map(
+                    "| `" + (.name | sub("^report-preview-"; "")) + "-report.html`"
+                    + " | [Download](https://github.com/" + $repo + "/actions/runs/" + $run + "/artifacts/" + (.id | tostring) + ") |"
+                  ) | join("\n")
+                end
+              ')
+          # Surface the regenerate result so the reviewer knows whether
+          # the byte-identity gate (in ci.yml) is independently passing.
+          status_line=$(case "$MATRIX_RESULT" in
+            success) echo "All examples regenerated cleanly." ;;
+            failure) echo "⚠️ At least one regenerate matrix worker failed — the rendered HTML may be partial. See \`Example report check\` in the [run log](${RUN_URL}) for details." ;;
+            cancelled) echo "Run cancelled (likely superseded by a newer push)." ;;
+            *) echo "Regenerate result: \`${MATRIX_RESULT}\`." ;;
+          esac)
+          cat > target/sticky/body.md <<MARKDOWN
+          ## 📄 Rendered report preview
+
+          ${status_line}
+
+          | Example | Artifact |
+          |---|---|
+          ${rows}
+
+          Click **Download** to fetch the rendered HTML. Each artifact
+          is a zip containing the single-file report — extract and open
+          in any browser. Reports are fully self-contained (zero
+          external resource requests).
+
+          <details>
+          <summary>Alternative: GitHub CLI</summary>
+
+          \`\`\`bash
+          gh run download ${RUN_ID} -R ${REPO} -n report-preview-playground
+          open playground-report.html
+          \`\`\`
+          </details>
+
+          ---
+
+          <sub>Posted by [\`report-preview.yml\`](https://github.com/${REPO}/blob/${HEAD_SHA}/.github/workflows/report-preview.yml) for [\`${HEAD_SHA}\`](https://github.com/${REPO}/commit/${HEAD_SHA}). Affordance only — never blocks merge.</sub>
+          MARKDOWN
+      - name: Post sticky comment
+        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
+        with:
+          header: cute-dbt-report-preview
+          path: target/sticky/body.md
