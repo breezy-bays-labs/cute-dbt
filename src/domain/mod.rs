@@ -41,6 +41,7 @@ pub mod manifest;
 pub mod preflight;
 pub mod state;
 pub mod unit_test;
+pub mod unit_test_yaml;
 
 pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};
@@ -51,3 +52,4 @@ pub use state::{
     ModifierKind, StateComparator, StateModifier, resolve_target_model,
 };
 pub use unit_test::{UnitTest, UnitTestExpect, UnitTestGiven};
+pub use unit_test_yaml::{UnitTestYamlBlock, extract_unit_test_block};

@@ -1,0 +1,1201 @@
+version: 2
+
+models:
+  # ============================================================================
+  # DIMENSION TABLES
+  # ============================================================================
+
+  - name: dim_date
+    description: >
+      Calendar dimension covering 1909-01-01 to 2025-12-31.
+      Provides date attributes, day/week/month/quarter/year hierarchies,
+      weekend flags, and US holiday identification.
+    data_tests:
+      # Row count validation - covers 117 years of dates (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 42000
+          config:
+            severity: warn
+    columns:
+      - name: date_key
+        description: Surrogate key in YYYYMMDD integer format (e.g., 20240115)
+        data_tests:
+          - unique
+          - not_null
+          # Date key must be positive (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 19090101
+              max_value: 20251231
+              config:
+                severity: warn
+
+      - name: date_actual
+        description: The actual date value
+        data_tests:
+          - unique
+          - not_null
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1909-01-01'::date"
+              max_value: "'2025-12-31'::date"
+              config:
+                severity: warn
+
+      - name: day_of_week
+        description: Day of week number (US convention - Sunday=1, Saturday=7)
+        data_tests:
+          - not_null
+          # Day of week must be 1-7 (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 7
+              config:
+                severity: warn
+
+      - name: day_name
+        description: Full day name (e.g., Monday, Tuesday)
+        data_tests:
+          - not_null
+
+      - name: day_name_short
+        description: Abbreviated day name (e.g., Mon, Tue)
+        data_tests:
+          - not_null
+
+      - name: day_of_month
+        description: Day of the month (1-31)
+        data_tests:
+          - not_null
+          # Day of month must be 1-31 (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 31
+              config:
+                severity: warn
+
+      - name: day_of_year
+        description: Day of the year (1-366)
+        data_tests:
+          - not_null
+          # Day of year must be 1-366 (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 366
+              config:
+                severity: warn
+
+      - name: week_of_year
+        description: Week of the year (1-53)
+        data_tests:
+          - not_null
+          # Week of year must be 1-53 (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 53
+              config:
+                severity: warn
+
+      - name: month_actual
+        description: Month number (1-12)
+        data_tests:
+          - not_null
+          # Month must be 1-12 (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 12
+              config:
+                severity: warn
+
+      - name: month_name
+        description: Full month name (e.g., January, February)
+        data_tests:
+          - not_null
+
+      - name: month_name_short
+        description: Abbreviated month name (e.g., Jan, Feb)
+        data_tests:
+          - not_null
+
+      - name: quarter_actual
+        description: Quarter number (1-4)
+        data_tests:
+          - not_null
+          # Quarter must be 1-4 (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 4
+              config:
+                severity: warn
+
+      - name: quarter_name
+        description: Quarter name (Q1, Q2, Q3, Q4)
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['Q1', 'Q2', 'Q3', 'Q4']
+
+      - name: year_actual
+        description: Year number
+        data_tests:
+          - not_null
+          # Year range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1909
+              max_value: 2025
+              config:
+                severity: warn
+
+      - name: is_weekend
+        description: Boolean flag indicating if date falls on Saturday or Sunday
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: [true, false]
+              quote: false
+
+      - name: is_us_holiday
+        description: Boolean flag indicating if date is a recognized US holiday
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: [true, false]
+              quote: false
+
+      - name: holiday_name
+        description: Name of the US holiday (null if not a holiday)
+
+  - name: dim_patients
+    description: >
+      Patient dimension with SCD Type 2 history tracking.
+      Each row represents a specific version of a patient's record.
+      Includes an unknown member row (patient_key = -1) for handling missing lookups.
+
+      SCD Type 2 columns: patient_key (surrogate), patient_id (natural),
+      valid_from, valid_to, is_current.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 900
+          config:
+            severity: warn
+    columns:
+      - name: patient_key
+        description: Surrogate key (unique per version, -1 for unknown member)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: patient_id
+        description: Natural patient identifier (UUID), same across SCD2 versions
+        data_tests:
+          - not_null
+
+      - name: first_name
+        description: Patient's first name
+        data_tests:
+          - not_null
+
+      - name: last_name
+        description: Patient's last name
+        data_tests:
+          - not_null
+
+      - name: full_name
+        description: Patient's full name (first + last)
+        data_tests:
+          - not_null
+
+      - name: name_prefix
+        description: Name prefix (Mr., Mrs., Ms., etc.)
+
+      - name: name_suffix
+        description: Name suffix (Jr., Sr., III, etc.)
+
+      - name: birth_date
+        description: Patient date of birth
+        data_tests:
+          # Date range validation - exclude unknown member (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::date"
+              max_value: "current_date"
+              row_condition: "birth_date is not null and patient_key != -1"
+              config:
+                severity: warn
+
+      - name: death_date
+        description: Patient date of death (null if alive)
+        data_tests:
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::date"
+              max_value: "current_date"
+              row_condition: "death_date is not null"
+              config:
+                severity: warn
+
+      - name: age_years
+        description: Current age or age at death (in years)
+        data_tests:
+          # Age must be reasonable 0-150 years (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              max_value: 150
+              row_condition: "age_years is not null"
+              config:
+                severity: warn
+
+      - name: is_deceased
+        description: Boolean flag indicating if patient has died
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: [true, false]
+              quote: false
+
+      - name: gender
+        description: Patient gender (M or F)
+        data_tests:
+          - accepted_values:
+              values: ['M', 'F']
+              config:
+                where: "patient_key != -1"
+
+      - name: race
+        description: Patient race
+
+      - name: ethnicity
+        description: Patient ethnicity (hispanic or nonhispanic)
+
+      - name: marital_status
+        description: Marital status (M=Married, S=Single, or blank)
+
+      - name: address
+        description: Street address
+
+      - name: city
+        description: City of residence
+
+      - name: state
+        description: State of residence (full state name)
+
+      - name: county
+        description: County of residence
+
+      - name: zip_code
+        description: ZIP code
+
+      - name: latitude
+        description: Latitude coordinate of residence
+
+      - name: longitude
+        description: Longitude coordinate of residence
+
+      - name: healthcare_expenses
+        description: Total healthcare expenses incurred
+        data_tests:
+          # Value must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "healthcare_expenses is not null"
+              config:
+                severity: warn
+
+      - name: healthcare_coverage
+        description: Total healthcare coverage received
+        data_tests:
+          # Value must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "healthcare_coverage is not null"
+              config:
+                severity: warn
+
+      - name: valid_from
+        description: Date when this SCD2 version became active
+        data_tests:
+          - not_null
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::date"
+              max_value: "current_date"
+              config:
+                severity: warn
+
+      - name: valid_to
+        description: Date when this SCD2 version was superseded (null = current)
+        data_tests:
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::date"
+              max_value: "current_date"
+              row_condition: "valid_to is not null"
+              config:
+                severity: warn
+
+      - name: is_current
+        description: Boolean flag indicating if this is the current version
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: [true, false]
+              quote: false
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded
+
+  - name: dim_providers
+    description: >
+      Provider dimension containing healthcare providers (doctors, nurses, etc.).
+      Includes an unknown member row (provider_key = -1) for handling missing lookups.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 4000
+          config:
+            severity: warn
+    columns:
+      - name: provider_key
+        description: Surrogate key (-1 for unknown member)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: provider_id
+        description: Natural provider identifier (UUID)
+        data_tests:
+          - not_null
+
+      - name: organization_key
+        description: Foreign key to dim_organizations (-1 for unknown)
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_organizations')
+              field: organization_key
+
+      - name: organization_id
+        description: Natural organization identifier
+        data_tests:
+          - not_null
+
+      - name: provider_name
+        description: Full name of the provider
+        data_tests:
+          - not_null
+
+      - name: gender
+        description: Provider gender (M or F)
+        data_tests:
+          - accepted_values:
+              values: ['M', 'F']
+              config:
+                where: "provider_key != -1"
+
+      - name: specialty
+        description: Medical specialty
+
+      - name: address
+        description: Street address
+
+      - name: city
+        description: City
+
+      - name: state
+        description: State (full state name)
+
+      - name: zip_code
+        description: ZIP code
+
+      - name: latitude
+        description: Latitude coordinate
+
+      - name: longitude
+        description: Longitude coordinate
+
+      - name: utilization
+        description: Total utilization count
+        data_tests:
+          # Value must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "utilization is not null"
+              config:
+                severity: warn
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded
+
+  - name: dim_organizations
+    description: >
+      Organization dimension containing healthcare facilities.
+      Includes an unknown member row (organization_key = -1) for handling missing lookups.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 800
+          config:
+            severity: warn
+    columns:
+      - name: organization_key
+        description: Surrogate key (-1 for unknown member)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: organization_id
+        description: Natural organization identifier (UUID)
+        data_tests:
+          - not_null
+
+      - name: organization_name
+        description: Name of the healthcare organization
+        data_tests:
+          - not_null
+
+      - name: address
+        description: Street address
+
+      - name: city
+        description: City
+
+      - name: state
+        description: State (full state name)
+
+      - name: zip_code
+        description: ZIP code
+
+      - name: phone
+        description: Phone number
+
+      - name: latitude
+        description: Latitude coordinate
+
+      - name: longitude
+        description: Longitude coordinate
+
+      - name: revenue
+        description: Total revenue
+        data_tests:
+          # Value must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "revenue is not null"
+              config:
+                severity: warn
+
+      - name: utilization
+        description: Total utilization count
+        data_tests:
+          # Value must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "utilization is not null"
+              config:
+                severity: warn
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded
+
+  - name: dim_payers
+    description: >
+      Payer dimension containing insurance payers.
+      Includes an unknown member row (payer_key = -1) for handling missing lookups.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 5
+          config:
+            severity: warn
+    columns:
+      - name: payer_key
+        description: Surrogate key (-1 for unknown member)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: payer_id
+        description: Natural payer identifier (UUID)
+        data_tests:
+          - not_null
+
+      - name: payer_name
+        description: Name of the insurance payer
+        data_tests:
+          - not_null
+
+      - name: address
+        description: Street address
+
+      - name: city
+        description: City
+
+      - name: state
+        description: State
+
+      - name: zip_code
+        description: ZIP code
+
+      - name: phone
+        description: Phone number
+
+      - name: amount_covered
+        description: Total amount covered by payer
+        data_tests:
+          # Value must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "amount_covered is not null"
+              config:
+                severity: warn
+
+      - name: amount_uncovered
+        description: Total amount not covered by payer
+
+      - name: revenue
+        description: Total revenue collected
+        data_tests:
+          # Value must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "revenue is not null"
+              config:
+                severity: warn
+
+      - name: covered_encounters
+        description: Number of encounters covered
+
+      - name: uncovered_encounters
+        description: Number of encounters not covered
+
+      - name: covered_medications
+        description: Number of medications covered
+
+      - name: uncovered_medications
+        description: Number of medications not covered
+
+      - name: covered_procedures
+        description: Number of procedures covered
+
+      - name: uncovered_procedures
+        description: Number of procedures not covered
+
+      - name: covered_immunizations
+        description: Number of immunizations covered
+
+      - name: uncovered_immunizations
+        description: Number of immunizations not covered
+
+      - name: unique_customers
+        description: Number of unique customers
+
+      - name: average_quality_of_life_score
+        description: Average quality of life score for members
+
+      - name: member_months
+        description: Total member months
+
+      - name: coverage_rate
+        description: Derived coverage rate (amount_covered / total amount)
+        data_tests:
+          # Coverage rate must be 0-1 (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              max_value: 1
+              row_condition: "coverage_rate is not null"
+              config:
+                severity: warn
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded
+
+  # ============================================================================
+  # FACT TABLES
+  # ============================================================================
+
+  - name: fct_encounters
+    description: >
+      Encounter fact table containing healthcare visits/encounters.
+      Links to patient, provider, organization, and payer dimensions.
+      Includes date keys, costs, and derived duration.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 40000
+          config:
+            severity: warn
+    columns:
+      - name: encounter_key
+        description: Surrogate key for the encounter
+        data_tests:
+          - unique
+          - not_null
+
+      - name: encounter_id
+        description: Natural encounter identifier (UUID)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: patient_key
+        description: Foreign key to dim_patients (-1 for unknown)
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_patients')
+              field: patient_key
+
+      - name: patient_id
+        description: Natural patient identifier
+        data_tests:
+          - not_null
+
+      - name: provider_key
+        description: Foreign key to dim_providers (-1 for unknown)
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_providers')
+              field: provider_key
+
+      - name: provider_id
+        description: Natural provider identifier
+        data_tests:
+          - not_null
+
+      - name: organization_key
+        description: Foreign key to dim_organizations (-1 for unknown)
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_organizations')
+              field: organization_key
+
+      - name: organization_id
+        description: Natural organization identifier
+        data_tests:
+          - not_null
+
+      - name: payer_key
+        description: Foreign key to dim_payers (-1 for unknown)
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_payers')
+              field: payer_key
+
+      - name: payer_id
+        description: Natural payer identifier
+        data_tests:
+          - not_null
+
+      - name: encounter_start_date_key
+        description: Foreign key to dim_date for encounter start
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_date')
+              field: date_key
+              config:
+                where: "encounter_start_date_key != -1"
+
+      - name: encounter_end_date_key
+        description: Foreign key to dim_date for encounter end
+
+      - name: encounter_class
+        description: Type of encounter (ambulatory, wellness, emergency, etc.)
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['ambulatory', 'wellness', 'emergency', 'urgentcare', 'outpatient', 'inpatient']
+
+      - name: encounter_code
+        description: SNOMED CT code for the encounter type
+
+      - name: encounter_description
+        description: Description of the encounter type
+
+      - name: reason_code
+        description: SNOMED CT code for the reason of visit
+
+      - name: reason_description
+        description: Description of the reason for visit
+
+      - name: encounter_start_at
+        description: Start timestamp of the encounter
+        data_tests:
+          - not_null
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::timestamp"
+              max_value: "current_timestamp"
+              config:
+                severity: warn
+
+      - name: encounter_end_at
+        description: End timestamp of the encounter
+        data_tests:
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::timestamp"
+              max_value: "current_timestamp"
+              row_condition: "encounter_end_at is not null"
+              config:
+                severity: warn
+
+      - name: duration_minutes
+        description: Duration of encounter in minutes
+        data_tests:
+          # Duration must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "duration_minutes is not null"
+              config:
+                severity: warn
+
+      - name: base_encounter_cost
+        description: Base cost of the encounter
+        data_tests:
+          # Cost must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "base_encounter_cost is not null"
+              config:
+                severity: warn
+
+      - name: total_claim_cost
+        description: Total claim cost
+        data_tests:
+          # Cost must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "total_claim_cost is not null"
+              config:
+                severity: warn
+
+      - name: payer_coverage
+        description: Amount covered by payer
+        data_tests:
+          # Coverage must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "payer_coverage is not null"
+              config:
+                severity: warn
+
+      - name: patient_responsibility
+        description: Amount patient is responsible for (total_claim_cost - payer_coverage)
+        data_tests:
+          # Patient responsibility must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "patient_responsibility is not null"
+              config:
+                severity: warn
+
+      - name: patient_age_at_encounter
+        description: Patient's age at the time of the encounter
+        data_tests:
+          # Age must be reasonable 0-150 years (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              max_value: 150
+              row_condition: "patient_age_at_encounter is not null"
+              config:
+                severity: warn
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded
+
+  - name: fct_encounters_monthly
+    description: >
+      Monthly aggregated encounter statistics by encounter class.
+      Provides counts, costs, and patient metrics grouped by year-month and encounter type.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 100
+          config:
+            severity: warn
+    columns:
+      - name: year_month
+        description: Year-month string (YYYY-MM format)
+        data_tests:
+          - not_null
+          # Pattern validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_match_regex:
+              regex: "^\\d{4}-\\d{2}$"
+              config:
+                severity: warn
+
+      - name: year_actual
+        description: Year number
+        data_tests:
+          - not_null
+          # Year range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1909
+              max_value: 2025
+              config:
+                severity: warn
+
+      - name: month_actual
+        description: Month number (1-12)
+        data_tests:
+          - not_null
+          # Month must be 1-12 (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              max_value: 12
+              config:
+                severity: warn
+
+      - name: encounter_class
+        description: Type of encounter
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['ambulatory', 'wellness', 'emergency', 'urgentcare', 'outpatient', 'inpatient']
+
+      - name: encounter_count
+        description: Number of encounters in the month
+        data_tests:
+          - not_null
+          # Count must be positive (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              config:
+                severity: warn
+
+      - name: unique_patients
+        description: Number of unique patients with encounters
+        data_tests:
+          - not_null
+          # Count must be positive (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              config:
+                severity: warn
+
+      - name: total_claim_cost
+        description: Sum of total claim costs
+        data_tests:
+          # Cost must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "total_claim_cost is not null"
+              config:
+                severity: warn
+
+      - name: total_payer_coverage
+        description: Sum of payer coverage amounts
+        data_tests:
+          # Coverage must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "total_payer_coverage is not null"
+              config:
+                severity: warn
+
+      - name: total_patient_responsibility
+        description: Sum of patient responsibility amounts
+        data_tests:
+          # Patient responsibility must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "total_patient_responsibility is not null"
+              config:
+                severity: warn
+
+      - name: avg_duration_minutes
+        description: Average encounter duration in minutes
+        data_tests:
+          # Duration must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "avg_duration_minutes is not null"
+              config:
+                severity: warn
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded
+
+  - name: fct_encounters_yearly
+    description: >
+      Yearly aggregated encounter statistics by encounter class.
+      Provides counts, costs, patient metrics, and encounters per patient ratio.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 10
+          config:
+            severity: warn
+    columns:
+      - name: year_actual
+        description: Year number
+        data_tests:
+          - not_null
+          # Year range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1909
+              max_value: 2025
+              config:
+                severity: warn
+
+      - name: encounter_class
+        description: Type of encounter
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['ambulatory', 'wellness', 'emergency', 'urgentcare', 'outpatient', 'inpatient']
+
+      - name: encounter_count
+        description: Number of encounters in the year
+        data_tests:
+          - not_null
+          # Count must be positive (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              config:
+                severity: warn
+
+      - name: unique_patients
+        description: Number of unique patients with encounters
+        data_tests:
+          - not_null
+          # Count must be positive (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              config:
+                severity: warn
+
+      - name: total_claim_cost
+        description: Sum of total claim costs
+        data_tests:
+          # Cost must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "total_claim_cost is not null"
+              config:
+                severity: warn
+
+      - name: total_payer_coverage
+        description: Sum of payer coverage amounts
+        data_tests:
+          # Coverage must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "total_payer_coverage is not null"
+              config:
+                severity: warn
+
+      - name: total_patient_responsibility
+        description: Sum of patient responsibility amounts
+        data_tests:
+          # Patient responsibility must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "total_patient_responsibility is not null"
+              config:
+                severity: warn
+
+      - name: avg_duration_minutes
+        description: Average encounter duration in minutes
+        data_tests:
+          # Duration must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "avg_duration_minutes is not null"
+              config:
+                severity: warn
+
+      - name: encounters_per_patient
+        description: Average number of encounters per patient
+        data_tests:
+          # Ratio must be positive (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "encounters_per_patient is not null"
+              config:
+                severity: warn
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded
+
+  - name: fct_clinical_events
+    description: >
+      Unified clinical events fact table combining conditions, medications, and procedures.
+      Each row represents a single clinical event with standardized structure.
+      Links to patient and encounter dimensions.
+    data_tests:
+      # Row count validation - should be sum of conditions + medications + procedures (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 60000
+          config:
+            severity: warn
+    columns:
+      - name: clinical_event_key
+        description: Surrogate key for the clinical event
+        data_tests:
+          - unique
+          - not_null
+
+      - name: event_type
+        description: Type of clinical event (CONDITION, MEDICATION, PROCEDURE)
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['CONDITION', 'MEDICATION', 'PROCEDURE']
+
+      - name: event_id
+        description: Natural event identifier (condition_id, medication_id, or procedure_id)
+        data_tests:
+          - not_null
+
+      - name: patient_key
+        description: Foreign key to dim_patients (-1 for unknown)
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_patients')
+              field: patient_key
+
+      - name: patient_id
+        description: Natural patient identifier
+        data_tests:
+          - not_null
+
+      - name: encounter_key
+        description: Foreign key to fct_encounters (-1 for unknown)
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('fct_encounters')
+              field: encounter_key
+
+      - name: encounter_id
+        description: Natural encounter identifier
+        data_tests:
+          - not_null
+
+      - name: event_date_key
+        description: Foreign key to dim_date for event start
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('dim_date')
+              field: date_key
+              config:
+                where: "event_date_key != -1"
+
+      - name: event_start_date
+        description: Start date of the clinical event
+        data_tests:
+          - not_null
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::date"
+              max_value: "current_date"
+              config:
+                severity: warn
+
+      - name: event_end_date
+        description: End date of the clinical event (null if ongoing or one-time)
+        data_tests:
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::date"
+              max_value: "current_date"
+              row_condition: "event_end_date is not null"
+              config:
+                severity: warn
+
+      - name: code
+        description: Clinical code (SNOMED-CT or RxNorm)
+        data_tests:
+          - not_null
+
+      - name: code_system
+        description: Code system (SNOMED-CT or RXNORM)
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['SNOMED-CT', 'RXNORM']
+
+      - name: description
+        description: Description of the clinical event
+        data_tests:
+          - not_null
+
+      - name: reason_code
+        description: Clinical code for the reason of the event
+
+      - name: reason_description
+        description: Description of the reason for the event
+
+      - name: event_cost
+        description: Cost of the clinical event
+        data_tests:
+          # Cost must be non-negative (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "event_cost is not null"
+              config:
+                severity: warn
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded
+
+
+# ============================================================================
+# UNIT TESTS
+# ============================================================================
+# These unit_tests are authored to exercise the cute-dbt unit-test explorer
+# (https://github.com/breezy-bays-labs/cute-dbt) against this playground's
+# UNION-bearing mart models. Each test mocks a small set of upstream rows
+# and asserts the SQL transformation produces the expected shape.
+
+unit_tests:
+  - name: test_dim_payers_injects_unknown_sentinel
+    description: |
+      dim_payers UNION-ALLs an unknown-member sentinel row (payer_key = -1)
+      with the sequenced source rows. This test verifies the sentinel
+      survives the union and the sequenced rows are surrogate-keyed
+      starting at 1. Uses dbt's dict format for both GIVEN and EXPECT —
+      dict format only compares listed columns, so non-deterministic
+      outputs (`_loaded_at` via `current_timestamp`) are excluded from
+      assertion automatically.
+    model: dim_payers
+    given:
+      - input: ref('stg_synthea__payers')
+        format: dict
+        rows:
+          - payer_id: 'a00000aa-0000-0000-0000-000000000001'
+            payer_name: 'Acme Health'
+            address: '1 Acme Way'
+            city: 'Boston'
+            state: 'MA'
+            zip_code: '02101'
+            phone: '555-0100'
+            amount_covered: 1000.0
+            amount_uncovered: 250.0
+            revenue: 1250.0
+            covered_encounters: 10
+            uncovered_encounters: 2
+            covered_medications: 5
+            uncovered_medications: 1
+            covered_procedures: 3
+            uncovered_procedures: 0
+            covered_immunizations: 4
+            uncovered_immunizations: 0
+            unique_customers: 8
+            average_quality_of_life_score: 0.85
+            member_months: 96
+    expect:
+      format: dict
+      rows:
+        - payer_key: -1
+          payer_id: 'UNKNOWN'
+          payer_name: 'Unknown Payer'
+        - payer_key: 1
+          payer_id: 'a00000aa-0000-0000-0000-000000000001'
+          payer_name: 'Acme Health'

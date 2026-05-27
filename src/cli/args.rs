@@ -47,6 +47,25 @@ pub struct Cli {
     /// (exit 2) — never a `PreflightError`.
     #[arg(long, value_name = "PATH", value_parser = parse_config_file)]
     pub config: Option<AnalysisConfig>,
+
+    /// Optional dbt project root — the directory that contains
+    /// `dbt_project.yml` and is the anchor for the manifest's
+    /// `original_file_path` entries.
+    ///
+    /// When supplied, cute-dbt reads each in-scope `unit_test`'s source
+    /// YAML and surfaces an "Authoring YAML" drawer in the report
+    /// (cute-dbt#69). When absent, cute-dbt attempts to derive the
+    /// project root from `--manifest` (by stripping a trailing
+    /// `target/manifest.json`) before silently skipping the YAML
+    /// extraction.
+    ///
+    /// An explicit `--project-root` that does not exist or is not a
+    /// directory is a clap usage error (exit 2). The implicit-derive
+    /// path is soft-failing: if no `dbt_project.yml` is found at the
+    /// derived location, no error fires — the report still renders
+    /// without the authoring-YAML drawer.
+    #[arg(long, value_name = "PATH", value_parser = parse_project_root)]
+    pub project_root: Option<PathBuf>,
 }
 
 /// clap value-parser: read + deserialize the TOML at `--config <PATH>`.
@@ -55,6 +74,67 @@ pub struct Cli {
 /// [`AnalysisConfig`] is stored in [`Cli::config`].
 fn parse_config_file(s: &str) -> Result<AnalysisConfig, String> {
     load_config(Path::new(s)).map_err(|err| err.to_string())
+}
+
+/// clap value-parser: validate that an explicit `--project-root` points
+/// at an existing directory. The implicit-derive path (when no flag is
+/// passed) is handled in the run loop via [`resolve_project_root`];
+/// this value-parser only runs when the operator typed the flag, so
+/// silent-fallback semantics are intentionally absent here.
+fn parse_project_root(s: &str) -> Result<PathBuf, String> {
+    let p = PathBuf::from(s);
+    if !p.exists() {
+        return Err(format!("project root does not exist: {s}"));
+    }
+    if !p.is_dir() {
+        return Err(format!("project root is not a directory: {s}"));
+    }
+    Ok(p)
+}
+
+/// Resolve the effective dbt project root.
+///
+/// Resolution policy:
+/// 1. If `explicit` is `Some(p)`, return it unchanged. clap's
+///    value-parser already validated that `p` exists and is a directory.
+/// 2. Otherwise try to derive from `manifest_path` by stripping a
+///    trailing `target/manifest.json` — the standard dbt layout. If the
+///    derived directory exists, return it.
+/// 3. Otherwise return `None` — cute-dbt continues silently without
+///    the authoring-YAML drawer.
+///
+/// Returns the resolved root and a boolean: `true` if the result was
+/// derived (rather than explicit). The caller may want to emit a
+/// stderr breadcrumb noting that a derived root is being used.
+#[must_use]
+pub fn resolve_project_root(
+    explicit: Option<&Path>,
+    manifest_path: &Path,
+) -> (Option<PathBuf>, bool) {
+    if let Some(p) = explicit {
+        return (Some(p.to_path_buf()), false);
+    }
+    if let Some(derived) = derive_project_root_from_manifest(manifest_path) {
+        if derived.is_dir() {
+            return (Some(derived), true);
+        }
+    }
+    (None, false)
+}
+
+/// Strip the conventional `target/manifest.json` suffix from a manifest
+/// path. Returns the parent of `target/`, which is the dbt project root
+/// in the standard layout. Returns `None` for any other shape.
+fn derive_project_root_from_manifest(manifest_path: &Path) -> Option<PathBuf> {
+    // The suffix we recognize is exactly: <root>/target/manifest.json.
+    if manifest_path.file_name()? != "manifest.json" {
+        return None;
+    }
+    let target_dir = manifest_path.parent()?;
+    if target_dir.file_name()? != "target" {
+        return None;
+    }
+    target_dir.parent().map(Path::to_path_buf)
 }
 
 #[cfg(test)]
@@ -270,5 +350,133 @@ tilte = "typo'd"
         .expect_err("typo'd config key is a usage error");
         assert_eq!(err.kind(), ErrorKind::ValueValidation);
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn unique_temp_dir(stem: &str) -> std::path::PathBuf {
+        let nonce = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros());
+        let pid = std::process::id();
+        let p = std::env::temp_dir().join(format!("cute-dbt-args-{pid}-{micros}-{nonce}-{stem}"));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).expect("create temp dir");
+        p
+    }
+
+    #[test]
+    fn project_root_is_optional_when_omitted() {
+        let cli = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+        ])
+        .expect("no --project-root parses");
+        assert!(cli.project_root.is_none());
+    }
+
+    #[test]
+    fn explicit_project_root_is_validated_to_exist_and_be_a_dir() {
+        let dir = unique_temp_dir("valid-root");
+        let cli = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+            "--project-root",
+            dir.to_str().expect("temp dir utf-8"),
+        ])
+        .expect("an existing directory parses");
+        assert_eq!(cli.project_root, Some(dir.clone()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_project_root_directory_is_a_usage_error() {
+        let path = unique_temp_path("missing-root");
+        // Deliberately do NOT create the directory.
+        let err = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+            "--project-root",
+            path.to_str().expect("temp path utf-8"),
+        ])
+        .expect_err("missing --project-root is a usage error");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        assert!(
+            err.to_string().contains("does not exist"),
+            "error names the missing directory: {err}"
+        );
+    }
+
+    #[test]
+    fn a_file_supplied_as_project_root_is_a_usage_error() {
+        // A non-directory path that DOES exist (a file) is still
+        // wrong — the project root must be a directory.
+        let file = write_fixture("not-a-dir", "irrelevant");
+        let err = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+            "--project-root",
+            file.to_str().expect("temp path utf-8"),
+        ])
+        .expect_err("non-dir --project-root is a usage error");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        assert!(
+            err.to_string().contains("not a directory"),
+            "error names the not-a-directory condition: {err}"
+        );
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn resolve_uses_explicit_root_when_supplied() {
+        let dir = unique_temp_dir("explicit");
+        let (resolved, derived) = resolve_project_root(Some(&dir), Path::new("/tmp/no.json"));
+        assert_eq!(resolved.as_deref(), Some(dir.as_path()));
+        assert!(!derived, "explicit is not derived");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_derives_from_manifest_path_with_target_layout() {
+        // Set up a synthetic <root>/target/manifest.json layout.
+        let project_root = unique_temp_dir("project-with-target");
+        let target = project_root.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        let manifest = target.join("manifest.json");
+        std::fs::write(&manifest, "{}").unwrap();
+
+        let (resolved, derived) = resolve_project_root(None, &manifest);
+        assert_eq!(resolved.as_deref(), Some(project_root.as_path()));
+        assert!(derived, "resolved-via-derive is flagged");
+
+        let _ = std::fs::remove_dir_all(&project_root);
+    }
+
+    #[test]
+    fn resolve_returns_none_when_manifest_path_is_unconventional() {
+        // A manifest not under `target/manifest.json` — no derive
+        // is possible. The result is `None` for both fields.
+        let resolved = resolve_project_root(None, Path::new("/tmp/arbitrary/foo.json"));
+        assert_eq!(resolved.0, None);
+        assert!(!resolved.1);
     }
 }

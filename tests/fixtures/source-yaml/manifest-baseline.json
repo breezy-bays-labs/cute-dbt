@@ -1,0 +1,53 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "1.11.9",
+    "generated_at": "1970-01-01T00:00:00Z",
+    "invocation_id": "00000000-0000-0000-0000-000000000002",
+    "project_name": "yaml_demo",
+    "project_id": "0000000000000000000000000000000000000000",
+    "user_id": "00000000-0000-0000-0000-000000000000",
+    "send_anonymous_usage_stats": false,
+    "adapter_type": "duckdb"
+  },
+  "nodes": {
+    "model.yaml_demo.dim_users": {
+      "database": "yaml_demo",
+      "schema": "main",
+      "name": "dim_users",
+      "resource_type": "model",
+      "package_name": "yaml_demo",
+      "path": "dim_users.sql",
+      "original_file_path": "models/dim_users.sql",
+      "unique_id": "model.yaml_demo.dim_users",
+      "fqn": ["yaml_demo", "dim_users"],
+      "alias": "dim_users",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "YAML_DEMO_DIM_USERS_BASELINE_SYNTHETIC_0001"
+      },
+      "raw_code": "select id from {{ ref('raw_users') }}",
+      "compiled_code": "select id from \"yaml_demo\".\"main\".\"raw_users\"",
+      "depends_on": {"nodes": []}
+    }
+  },
+  "unit_tests": {
+    "unit_test.yaml_demo.dim_users.test_dim_users_basic": {
+      "name": "test_dim_users_basic",
+      "model": "dim_users",
+      "package_name": "yaml_demo",
+      "resource_type": "unit_test",
+      "unique_id": "unit_test.yaml_demo.dim_users.test_dim_users_basic",
+      "original_file_path": "models/_unit_tests.yml",
+      "given": [
+        {
+          "input": "ref('raw_users')",
+          "rows": [{"id": 1}]
+        }
+      ],
+      "expect": {
+        "rows": [{"id": 1}]
+      }
+    }
+  }
+}

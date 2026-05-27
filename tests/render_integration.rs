@@ -8,6 +8,7 @@
 //! guard alongside the headless-browser network-block test tracked
 //! separately).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cute4dbt::adapters::asset_embed::{
@@ -48,6 +49,7 @@ fn render_jaffle_shop(out: &Path) {
         &current,
         &in_scope,
         &models_in_scope,
+        &HashMap::new(),
         "jaffle-shop-baseline.json",
         DEFAULT_REPORT_TITLE,
         None,

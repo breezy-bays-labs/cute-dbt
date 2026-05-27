@@ -19,6 +19,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use cute4dbt::adapters::manifest::FileManifestSource;
@@ -96,6 +97,7 @@ fn rendered_report_skeleton() {
         &current,
         &in_scope,
         &models_in_scope,
+        &HashMap::new(),
         "jaffle-shop-baseline.json",
         DEFAULT_REPORT_TITLE,
         None,

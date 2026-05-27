@@ -166,6 +166,20 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
 .sql-comment { color: #6a6a72; font-style: italic; }
 .sql-jinja   { color: #982c61; }
 
+/* cute-dbt#69 — Authoring YAML drawer: nested <details> inside the
+   "Test details" drawer, surfacing the raw YAML block as authored
+   (with leading + trailing comments). Reuses .sql-block-wrap +
+   .fixture-sql-block-wrap shells so visual style stays consistent
+   with the compiled-SQL and fixture-sql drawers. The yaml-* palette
+   mirrors the sql-* color values so all three highlighter modes
+   (compiled SQL, fixture SQL, authoring YAML) sit in the same
+   visual language. */
+.yaml-key     { color: #1d7484; font-weight: 700; }
+.yaml-string  { color: #006d3a; }
+.yaml-comment { color: #6a6a72; font-style: italic; }
+.authoring-yaml { margin-top: 0.75rem; }
+.authoring-yaml > summary { cursor: pointer; font-weight: 600; }
+
 /* cute-dbt#47 — Model SQL expandable section (raw Jinja, model-level).
    Sits between test-selection and the CTE DAG. Collapsed by default. */
 .model-sql { margin-bottom: 1rem; }
@@ -510,6 +524,23 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
           .append($("<span>").addClass("td-label").text("Defined in "))
           .append($("<code>").addClass("td-defined-in").text(t.defined_in))
       );
+    }
+    // cute-dbt#69 — Authoring YAML drawer. Source-of-truth: the raw
+    // unit_test block sliced by the domain layer (UnitTestYamlBlock),
+    // populated by the gather_authoring_yaml run-loop stage when a
+    // project root is resolvable AND the source file is readable.
+    // Absent → undefined → drawer omitted entirely (no empty-state
+    // copy: the panel above already surfaces tags/meta/defined-in).
+    if (t.authoring_yaml) {
+      var $yamlDet = $("<details>").addClass("authoring-yaml").attr("open", "open");
+      $yamlDet.append($("<summary>").text("Authoring YAML"));
+      var $yamlWrap = $("<div>").addClass("sql-block-wrap fixture-sql-block-wrap");
+      var $yamlPre = $("<pre>").addClass("sql-block").append(
+        $("<code>").html(highlightYaml(t.authoring_yaml))
+      );
+      $yamlWrap.append($yamlPre);
+      $yamlDet.append($yamlWrap);
+      $body.append($yamlDet);
     }
   }
 
@@ -1042,6 +1073,41 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
       return _match;
     });
   }
+
+  // cute-dbt#69 — YAML highlighter for the Authoring YAML drawer.
+  // Mirrors `highlightSql`: escape-first, then tokenize.
+  // `escapeHtmlForBody` does NOT escape `"` or `'`, so the regex's
+  // `"..."` and `'...'` branches match the original quote chars
+  // verbatim — and any `&`, `<`, `>` inside a quoted YAML scalar is
+  // already escaped to `&amp;` / `&lt;` / `&gt;` before tokenization,
+  // so the rendered HTML stays well-formed.
+  //
+  // Alternation order matters: comments and strings are matched
+  // first as opaque blobs so a `#` inside a quoted string never
+  // trips the comment arm, and a `key:` lookalike inside a string
+  // never trips the key arm. The key arm anchors on `(^|\n)` so it
+  // only fires at the start of a line, matching real YAML mapping
+  // keys (including the `- name:` list-item form).
+  var YAML_TOKEN_RE = new RegExp(
+    "(#[^\\n]*)" +                                                  // 1: # line comment
+    "|('(?:[^'\\\\]|\\\\.|'')*')" +                                  // 2: 'string'
+    "|(\"(?:[^\"\\\\]|\\\\.)*\")" +                                  // 3: "string"
+    "|(^|\\n)(\\s*(?:-\\s+)?)([A-Za-z_][A-Za-z0-9_\\-]*)(?=\\s*:)",  // 4=sep, 5=indent, 6=key
+    "g"
+  );
+  function highlightYaml(yaml) {
+    var s = escapeHtmlForBody(yaml);
+    return s.replace(YAML_TOKEN_RE, function (_match, c, sq, dq, sep, indent, key) {
+      if (c)                 return '<span class="yaml-comment">' + c + '</span>';
+      if (sq)                return '<span class="yaml-string">'  + sq + '</span>';
+      if (dq)                return '<span class="yaml-string">'  + dq + '</span>';
+      if (key !== undefined) return sep + indent + '<span class="yaml-key">' + key + '</span>';
+      return _match;
+    });
+  }
+  // Expose for headless JS unit tests (cute-dbt#69 — parallels the
+  // `__cuteParseCsv` seam introduced in cute-dbt#66).
+  window.__cuteHighlightYaml = highlightYaml;
 
   function copySql(text, $btn) {
     function done(ok) {
