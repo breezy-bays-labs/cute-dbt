@@ -13,6 +13,10 @@ unit_tests:
   - name: test_dim_users_basic
     description: "Verifies basic id+name mapping from raw_users to dim_users"
     model: dim_users
+    # Inside-the-body comment for test_dim_users_basic — comments at
+    # deeper indent than `- name:` ride along with the body slice as
+    # raw text (added for cute-dbt#73 — completes leading/inside/
+    # trailing demonstration in the synthetic source-yaml fixture).
     given:
       - input: ref('raw_users')
         rows:
