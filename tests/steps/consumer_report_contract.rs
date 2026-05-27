@@ -170,17 +170,21 @@ fn then_description_between_dag_and_panels(world: &mut World) {
         .report_html
         .as_ref()
         .expect("report.html was written by the subprocess");
+    // Match the class attribute substring (no trailing `"`) so the
+    // assertion is robust to additional classes on the element (the
+    // test-description-section gains `is-hidden` via JS, but the BDD
+    // is asserting structural DOM order, not the empty-state class).
     let dag_pos = html
-        .find(r#"<section class="cte-dag""#)
+        .find(r#"<section class="cte-dag"#)
         .expect("rendered HTML must include <section class=\"cte-dag\">");
     let desc_pos = html
-        .find(r#"<section class="test-description-section""#)
+        .find(r#"<section class="test-description-section"#)
         .expect(
             "rendered HTML must include <section class=\"test-description-section\"> \
          (cute-dbt#74 relocated the description banner there)",
         );
     let panel_pos = html
-        .find(r#"<div class="panel-row""#)
+        .find(r#"<div class="panel-row"#)
         .expect("rendered HTML must include <div class=\"panel-row\">");
     assert!(
         dag_pos < desc_pos,

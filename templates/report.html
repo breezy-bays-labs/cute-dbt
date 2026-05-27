@@ -63,12 +63,14 @@ table.given-table th, table.expected-table th {
 /* cute-dbt#74 — when the description is empty (no test selected or
    selected test has no description), suppress the banner entirely so
    the relocated layout (DAG → description → inspect/expected) stays
-   tight. The JS write path empties `.text("")` instead of removing
-   the <p>, so hide the parent <section> via `:has()` to also drop
-   the aria-labeled landmark region from the accessibility tree —
-   otherwise screen readers announce an empty "Test description"
-   region when no test is selected. */
-.test-description-section:has(.test-description:empty) { display: none; }
+   tight AND the aria-labeled landmark region drops from the
+   accessibility tree (screen readers would otherwise announce an
+   empty "Test description" region). The JS toggles `.is-hidden` on
+   the section based on description presence — explicit class toggle
+   rather than `:empty`/`:has()` selectors so the rule is whitespace-
+   robust against future template formatting (Gemini-disposition on
+   PR#77). */
+.test-description-section.is-hidden { display: none; }
 .test-selector-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem 1rem; }
 .selector-field { display: flex; flex-direction: column; min-width: 16rem; }
 .selector-arrow { padding-bottom: 0.9rem; color: #6a6a72; }
@@ -281,12 +283,14 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
 <!-- cute-dbt#74 — Description banner relocated between CTE DAG and
      inspect/expected sections. Reduces cognitive scroll for reviewers
      (context lives next to the test substance they're evaluating) and
-     nudges analytics engineers to author better descriptions. Empty
-     banner is suppressed via `.test-description:empty { display: none }`
-     so the layout stays tight when description is missing. Full
-     long-form context remains surfaced in the Authoring YAML drawer
-     above (catch-all). -->
-<section class="test-description-section" aria-label="Test description">
+     nudges analytics engineers to author better descriptions. The
+     section starts with `.is-hidden`; the JS toggles the class based
+     on whether the selected test carries a description so the
+     aria-labeled landmark drops from both the DOM and the
+     accessibility tree on empty (class-based toggle is whitespace-
+     robust per Gemini-disposition on PR#77). Full long-form context
+     remains surfaced in the Authoring YAML drawer above (catch-all). -->
+<section class="test-description-section is-hidden" aria-label="Test description">
   <p class="test-description"></p>
 </section>
 
@@ -491,11 +495,19 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     renderDag();
     renderSegmentedToggle();
     if (t) {
-      $(".test-description").text(t.description || "");
+      var desc = t.description || "";
+      $(".test-description").text(desc);
+      // cute-dbt#74 — toggle the section's `.is-hidden` class so the
+      // aria-labeled landmark drops from the accessibility tree when
+      // the test carries no description (Gemini-disposition on PR#77:
+      // class-based toggle is whitespace-robust where `:empty` /
+      // `:has(:empty)` selectors are not).
+      $(".test-description-section").toggleClass("is-hidden", !desc);
       renderLeftPanel();
       renderExpectedPanel(t);
     } else {
       $(".test-description").text("");
+      $(".test-description-section").addClass("is-hidden");
       $(".left-panel-body").empty().append(
         $("<div>").addClass("no-tests-empty")
           .text("This model is modified but has no unit tests — consider adding one.")
