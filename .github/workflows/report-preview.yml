@@ -124,6 +124,9 @@ jobs:
     needs: [regenerate]
     if: always() && github.event_name == 'pull_request'
     permissions:
+      # actions: read — GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts
+      # needs the actions scope under least-privilege GITHUB_TOKEN defaults.
+      actions: read
       contents: read
       pull-requests: write
     steps:
@@ -184,8 +187,9 @@ jobs:
           <summary>Alternative: GitHub CLI</summary>
 
           \`\`\`bash
+          # gh CLI >= 2.63 extracts into ./report-preview-playground/.
           gh run download ${RUN_ID} -R ${REPO} -n report-preview-playground
-          open playground-report.html
+          open report-preview-playground/playground-report.html
           \`\`\`
           </details>
 

@@ -31,6 +31,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
+      # actions: read — required for the `gh api .../actions/runs/<id>/artifacts`
+      # call below under least-privilege GITHUB_TOKEN defaults.
+      actions: read
       contents: read
       pull-requests: write   # for sticky comment (see fork-PR caveat below)
     steps:
