@@ -46,7 +46,6 @@ expression: skeleton
       <select id="test-select"></select>
     </div>
   </div>
-  <p class="test-description">…</p>
 
   <details class="test-details">
     <summary>Test details</summary>
@@ -83,6 +82,18 @@ expression: skeleton
       <span class="dag-legend-joins"></span>
     </div>
   </div>
+</section>
+
+<!-- cute-dbt#74 — Description banner relocated between CTE DAG and
+     inspect/expected sections. Reduces cognitive scroll for reviewers
+     (context lives next to the test substance they're evaluating) and
+     nudges analytics engineers to author better descriptions. Empty
+     banner is suppressed via `.test-description:empty { display: none }`
+     so the layout stays tight when description is missing. Full
+     long-form context remains surfaced in the Authoring YAML drawer
+     above (catch-all). -->
+<section class="test-description-section" aria-label="Test description">
+  <p class="test-description"></p>
 </section>
 
 <div class="panel-row">
