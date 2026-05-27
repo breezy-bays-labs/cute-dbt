@@ -157,6 +157,47 @@ fn then_drawer_contains_substring(world: &mut World, substring: String) {
     );
 }
 
+/// cute-dbt#74: pin the structural ordering of the relocated description
+/// banner. The byte-identity insta snapshot also catches a regression,
+/// but snapshots get rebaselined reflexively; this scenario fails loudly
+/// with a load-bearing message if the description drifts back to the top
+/// of the page.
+#[then(
+    "the rendered HTML places the test-description section between the cte-dag section and the panel-row"
+)]
+fn then_description_between_dag_and_panels(world: &mut World) {
+    let html = world
+        .report_html
+        .as_ref()
+        .expect("report.html was written by the subprocess");
+    let dag_pos = html
+        .find(r#"<section class="cte-dag""#)
+        .expect("rendered HTML must include <section class=\"cte-dag\">");
+    let desc_pos = html
+        .find(r#"<section class="test-description-section""#)
+        .expect(
+            "rendered HTML must include <section class=\"test-description-section\"> \
+         (cute-dbt#74 relocated the description banner there)",
+        );
+    let panel_pos = html
+        .find(r#"<div class="panel-row""#)
+        .expect("rendered HTML must include <div class=\"panel-row\">");
+    assert!(
+        dag_pos < desc_pos,
+        "test-description-section should appear AFTER cte-dag section in DOM order; \
+         cte-dag at byte {dag_pos}, test-description-section at byte {desc_pos}. \
+         cute-dbt#74's relocation invariant is broken — the description banner moved \
+         back above the CTE DAG.",
+    );
+    assert!(
+        desc_pos < panel_pos,
+        "test-description-section should appear BEFORE panel-row in DOM order; \
+         test-description-section at byte {desc_pos}, panel-row at byte {panel_pos}. \
+         cute-dbt#74's relocation invariant is broken — the description banner moved \
+         below the inspect/expected panels.",
+    );
+}
+
 #[then("the resulting HTML file size is under 10 megabytes")]
 fn then_under_artifact_size_budget(world: &mut World) {
     let path = world

@@ -91,6 +91,34 @@ outbound requests — is the **load-bearing trait** of the tool. See
 [the zero-egress page](./zero-egress.md) for how this is mechanically
 guaranteed and how you can re-verify it.
 
+### Per-test layout
+
+When a reviewer selects a unit test in the rendered report, the
+page lays out as:
+
+1. **Header chrome** — model + unit-test selectors.
+2. **CTE dependency graph** — the Mermaid panel mapping how the unit
+   test's target model composes its CTEs.
+3. **Description banner** — the test's `description:` from the
+   authoring YAML, surfaced in a clearly-bounded banner directly
+   above the inspect/expected substance. Authored descriptions are
+   the analytics-engineer's hypothesis statement ("this test asserts
+   that the join produces no nulls in the foreign key column"); the
+   banner lives here so reviewers read it next to the rows that
+   prove it. An empty description suppresses the banner entirely.
+4. **Inspect / Expected panels** — the unit test's `given` fixture(s)
+   alongside the `expected` rows.
+5. **Authoring YAML drawer** — the raw `unit_test` slice from the
+   source `.yml` (collapsible, defaults open). The drawer carries
+   leading + inside + trailing `#`-comment lines per the slicer's
+   bracketing rule, plus the full description as authored.
+
+The description banner started life at the top of the test-selection
+section. It moved to between the CTE DAG and the inspect/expected
+panels (cute-dbt#74) so reviewers don't scroll back and forth between
+hypothesis and proof. The Authoring YAML drawer below remains the
+catch-all home for long-form context.
+
 ## What cute-dbt is NOT doing
 
 - **Not** running dbt. You compile; cute-dbt reads the artifact.
