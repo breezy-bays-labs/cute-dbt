@@ -8,8 +8,8 @@
 //!   `state:modified` semantics flow through unchanged.
 //! - [`ScopeInput::PrDiff`] — the new `--scope-from-pr-diff` path.
 //!   Matches the changed-files list (typically a PR's `git diff
-//!   --name-only`) against [`Node::original_file_path`] and
-//!   [`UnitTest::original_file_path`].
+//!   --name-only`) against [`crate::domain::manifest::Node::original_file_path`]
+//!   and [`crate::domain::unit_test::UnitTest::original_file_path`].
 //!
 //! Two scope sources is a deliberate ADR-1 judgment call: free function
 //! over trait until a third source arrives (a v0.2+ refactor moment).
