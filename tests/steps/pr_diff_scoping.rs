@@ -199,8 +199,15 @@ fn run_scope_from_pr_diff(world: &mut World, scope_token: String, project_root: 
     // sub-directory project-root scenario needs the directory to exist on
     // disk. Run from a temp workdir and create the project-root sub-dir
     // there; `--manifest`/`--out` are absolute, so cwd doesn't affect them.
+    // Create `workdir` itself first; only join the sub-dir for a non-"."
+    // root — `workdir.join(".")` builds a `…/workdir/.` path whose trailing
+    // `.` component makes `create_dir_all` fail with NotFound on Linux
+    // (macOS tolerates it), which is why this passed locally but not in CI.
     let workdir = common::tmp("pr_diff_workdir");
-    std::fs::create_dir_all(workdir.join(&project_root)).expect("create project-root dir");
+    std::fs::create_dir_all(&workdir).expect("create workdir");
+    if project_root != "." {
+        std::fs::create_dir_all(workdir.join(&project_root)).expect("create project-root dir");
+    }
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"))
         .args([
             "--manifest",
