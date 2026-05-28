@@ -85,6 +85,10 @@ struct WireManifest {
 /// No `id` field: dbt keys the `nodes` map by `unique_id`, and the map
 /// key is the authoritative identity that [`WireManifest::into_domain`]
 /// folds into [`Node`].
+///
+/// `original_file_path` is a top-level dbt-emitted field
+/// (e.g. `models/marts/core/dim_payers.sql`); ADR-5-tolerant default to
+/// `None` for older or synthetic manifests.
 #[derive(Debug, Deserialize)]
 struct WireNode {
     resource_type: String,
@@ -95,6 +99,8 @@ struct WireNode {
     raw_code: Option<String>,
     #[serde(default)]
     depends_on: DependsOn,
+    #[serde(default)]
+    original_file_path: Option<String>,
 }
 
 /// Wire projection of one `macros` entry — only the body is consumed.
@@ -181,6 +187,7 @@ impl WireManifest {
                     wire.compiled_code,
                     wire.raw_code,
                     wire.depends_on,
+                    wire.original_file_path,
                 );
                 (id, node)
             })
