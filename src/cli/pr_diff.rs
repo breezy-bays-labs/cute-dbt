@@ -57,7 +57,7 @@ pub fn parse_arg_value(s: &str) -> Result<ChangedFiles, String> {
         Ok(ChangedFiles { paths })
     } else {
         Ok(ChangedFiles {
-            paths: split_trim_drop(s, &[',', '\n']),
+            paths: split_literal_list(s),
         })
     }
 }
@@ -74,18 +74,22 @@ pub fn parse_arg_value(s: &str) -> Result<ChangedFiles, String> {
 /// is not valid UTF-8.
 pub fn read_file_list(path: &Path) -> io::Result<Vec<String>> {
     let contents = fs::read_to_string(path)?;
-    // `lines()` splits on `\n` and strips a trailing `\r`, so CRLF is
-    // handled; the per-line trim removes any residual whitespace.
-    Ok(split_trim_drop(&contents, &['\n']))
+    // A changed-files file is line-oriented: `lines()` splits on `\n` and
+    // strips a trailing `\r` (so CRLF is handled), and the per-line trim
+    // removes any residual whitespace before empties are dropped.
+    Ok(contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 
-/// Split `s` on any of `seps`, trim each segment, and drop empties.
-///
-/// Shared by both `--scope-from-pr-diff` forms: the literal list splits
-/// on `,` and `\n`; the `@file` form splits on `\n` only (commas are
-/// valid inside a single path on a line).
-fn split_trim_drop(s: &str, seps: &[char]) -> Vec<String> {
-    s.split(seps)
+/// Split a literal `--scope-from-pr-diff` value on `,` and newlines, trim
+/// each segment, and drop empties. The `@file` form is line-oriented and
+/// uses [`str::lines`] in [`read_file_list`] instead.
+fn split_literal_list(s: &str) -> Vec<String> {
+    s.split([',', '\n'])
         .map(str::trim)
         .filter(|segment| !segment.is_empty())
         .map(str::to_owned)
