@@ -358,7 +358,8 @@ While cute-dbt is **unpublished**, install from a pinned commit:
 (set `CUTE_DBT_REV` to a `main` SHA you trust — pinning is mandatory per
 the [workflow-hardening convention](../release-discipline.md)). Once
 cute-dbt is on crates.io, replace those two steps with the faster
-`cargo binstall cute4dbt --version 0.1.x --no-confirm`.
+`cargo binstall cute4dbt --version 0.1 --no-confirm` (the `0.1` requirement
+resolves to the latest compatible `0.1.x` patch).
 
 ## 10. v0.1 fidelity limits
 

@@ -55,7 +55,7 @@ jobs:
 
       # --- Install cute-dbt. While unpublished, pin a main commit SHA.
       #     Once cute-dbt is on crates.io, replace these two steps with:
-      #       cargo binstall cute4dbt --version 0.1.x --no-confirm ---
+      #       cargo binstall cute4dbt --version 0.1 --no-confirm ---
       - uses: cargo-bins/cargo-binstall@aaa84a43aec4955a42c5ffc65d258961e39f276e # v1.19.1
       - name: Install cute-dbt
         env:
