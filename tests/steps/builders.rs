@@ -17,6 +17,7 @@
 //! relationships.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use cute4dbt::domain::{
     Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeId, UnitTest, UnitTestExpect,
@@ -120,4 +121,71 @@ pub fn with_unit_test(mut manifest: Manifest, unit_test: UnitTest) -> Manifest {
     let macros = manifest.macros().clone();
     manifest = Manifest::new(manifest.metadata().clone(), nodes, unit_tests, macros);
     manifest
+}
+
+// ---------------------------------------------------------------------
+// PR-diff scoping builders (pr_diff_scoping.feature — cute-dbt#84).
+//
+// The PR-diff path matches a changed-file list against each node's
+// `original_file_path`, so these builders carry an explicit
+// `original_file_path` (unlike `model_node` / `unit_test_for`, which
+// leave it `None` for the baseline-comparison scenarios). The synthetic
+// manifest is serialized to a temp file and re-read by the `cute-dbt`
+// subprocess, exercising the real `resolve_scope_input → select_in_scope
+// → render` run-loop end to end.
+// ---------------------------------------------------------------------
+
+/// Construct a model `Node` with an explicit `original_file_path` (the
+/// dbt-emitted on-disk location the PR-diff path matches against). Bare
+/// name + checksum + optional compiled SQL otherwise mirror
+/// [`model_node`].
+#[must_use]
+pub fn model_node_with_original_file_path(
+    bare: &str,
+    checksum: &str,
+    compiled: Option<&str>,
+    original_file_path: &str,
+) -> Node {
+    Node::new(
+        model_id(bare),
+        "model",
+        Checksum::new("sha256", checksum),
+        compiled.map(str::to_owned),
+        None,
+        DependsOn::default(),
+        Some(original_file_path.to_owned()),
+    )
+}
+
+/// Construct a `UnitTest` targeting `target_bare` with an explicit
+/// `original_file_path` (the declaring `.yml` file the PR-diff path
+/// matches against). Given/expect blocks are empty — the PR-diff
+/// scenarios assert scoping membership, not fixture content.
+#[must_use]
+pub fn unit_test_with_path(name: &str, target_bare: &str, original_file_path: &str) -> UnitTest {
+    UnitTest::new(
+        name,
+        NodeId::new(target_bare),
+        Vec::<UnitTestGiven>::new(),
+        UnitTestExpect::new(Value::Array(Vec::new()), None),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        Some(original_file_path.to_owned()),
+    )
+}
+
+/// Serialize a synthetic `Manifest` to `CARGO_TARGET_TMPDIR/{name}.json`
+/// and return the path. The `cute-dbt` subprocess re-reads it through the
+/// Stage-1 manifest adapter, so the domain→JSON→wire round-trip is
+/// exercised for real (empty macros + no `config.tags`/`meta` keep the
+/// two wire-shape divergences out of play). `bdd.rs` runs
+/// `max_concurrent_scenarios(1)`, so the shared temp dir is collision-free.
+#[must_use]
+pub fn serialize_to_tmp(manifest: &Manifest, name: &str) -> PathBuf {
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.json"));
+    let json = serde_json::to_string(manifest).expect("synthetic manifest serializes");
+    std::fs::write(&path, json).expect("write synthetic manifest to temp file");
+    path
 }

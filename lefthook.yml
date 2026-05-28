@@ -50,9 +50,11 @@ pre-push:
       timeout: 30s
     baseline-required-grep:
       # Mirror the `baseline-required-grep` CI job. Every feature line
-      # invoking the CLI must pass --baseline-manifest unless explicitly
-      # tagged @no-baseline-usage-error (the one intentional exception).
-      # Makes the locked gate decision a structural invariant.
+      # invoking the CLI must pass exactly one scope source
+      # (--baseline-manifest OR --scope-from-pr-diff, cute-dbt#85) unless
+      # explicitly tagged @no-baseline-usage-error (the deliberate
+      # neither-source case). Makes the locked gate decision a structural
+      # invariant.
       run: |
         set -euo pipefail
         # Gherkin tag semantics: a tag line applies to the NEXT scenario.
@@ -61,27 +63,28 @@ pre-push:
           /^[[:space:]]*@no-baseline-usage-error([[:space:]]|$)/ { pending_skip=1; next }
           /^[[:space:]]*Scenario(:|[[:space:]]+Outline)/ { skip=pending_skip; pending_skip=0; next }
           /cute-dbt with --manifest/ && !skip {
-            if ($0 !~ /--baseline-manifest/) {
+            if ($0 !~ /--baseline-manifest/ && $0 !~ /--scope-from-pr-diff/) {
               print FILENAME ":" NR ": " $0
               found=1
             }
           }
           END { exit (found ? 1 : 0) }
         ' features/*.feature; then
-          echo "baseline-required-grep: scenarios invoking the CLI without --baseline-manifest must be tagged @no-baseline-usage-error"
+          echo "baseline-required-grep: scenarios invoking the CLI without a scope source (--baseline-manifest or --scope-from-pr-diff) must be tagged @no-baseline-usage-error"
           exit 1
         fi
       timeout: 15s
     feature-count:
-      # Asserts the 9-feature invariant (bumped from 8 in cute-dbt#71 when
-      # consumer_report_contract.feature joined the contract; previously
-      # bumped from 7 in cute-dbt#69 when unit_test_yaml.feature joined).
+      # Asserts the 10-feature invariant (bumped from 9 in cute-dbt#84 when
+      # pr_diff_scoping.feature joined the contract; previously bumped from
+      # 8 in cute-dbt#71 when consumer_report_contract.feature joined, and
+      # from 7 in cute-dbt#69 when unit_test_yaml.feature joined).
       # Mirrors the `feature-count` CI job; the README is not a feature.
       run: |
         set -euo pipefail
         count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
-        if [ "$count" != "9" ]; then
-          echo "feature-count: expected 9 .feature files, found $count"
+        if [ "$count" != "10" ]; then
+          echo "feature-count: expected 10 .feature files, found $count"
           exit 1
         fi
       timeout: 5s

@@ -14,6 +14,7 @@ pub mod consumer_report_contract;
 pub mod cte_rendering;
 pub mod diff_scoping;
 pub mod fail_closed;
+pub mod pr_diff_scoping;
 pub mod report_generation;
 pub mod unit_test_format_coverage;
 pub mod unit_test_yaml;

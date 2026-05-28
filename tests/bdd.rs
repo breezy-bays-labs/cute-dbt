@@ -9,7 +9,7 @@
 //! enumerates the kill-detection test targets so `bdd` is excluded
 //! from per-mutant runs.
 //!
-//! The feature files under `features/` are pinned at 5 by the
+//! The feature-file count under `features/` is pinned by the
 //! `feature-count` CI job; every scenario in those files has a step
 //! definition here, organised one module per feature file under
 //! `tests/steps/`.
