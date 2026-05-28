@@ -134,3 +134,46 @@ fn literal_comma_separated_list_is_accepted_exit_0() {
     );
     assert!(out.exists(), "the report is written");
 }
+
+#[test]
+fn changed_unit_test_yaml_path_puts_that_test_in_scope_exit_0() {
+    // The behavior the flag exists for: a changed path that maps to a
+    // manifest node brings it into scope. Uses playground-current.json
+    // (whose unit_tests carry `original_file_path`, unlike the
+    // jaffle-shop fixture used by the exit-contract cases above).
+    // `_core__models.yml` is the source file declaring
+    // `test_dim_payers_injects_unknown_sentinel`; with no --project-root
+    // the strip is `None`, so the path matches the manifest entry
+    // directly via the test_yaml_changed arm. This is the end-to-end
+    // happy path through resolve_scope_input → select_in_scope → render
+    // that the empty-scope cases above cannot exercise; broader
+    // scope-content coverage lives in scope.rs units + the
+    // pr_diff_scoping.feature BDD (cute-dbt#84).
+    let current = fixture("playground-current.json");
+    let out = tmp("cfp-scoped-report.html");
+    clear(&out);
+
+    let output = run_cli(&[
+        "--manifest",
+        s(&current),
+        "--scope-from-pr-diff",
+        "models/marts/core/_core__models.yml",
+        "--out",
+        s(&out),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "a changed unit-test YAML path renders a scoped report; stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let html = fs::read_to_string(&out).expect("report is readable");
+    assert!(
+        html.contains("test_dim_payers_injects_unknown_sentinel"),
+        "the test declared in the changed YAML is in the rendered report",
+    );
+    assert!(
+        html.contains("from PR file diff"),
+        "the banner states PR-diff provenance",
+    );
+}
