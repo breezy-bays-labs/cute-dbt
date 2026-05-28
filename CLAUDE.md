@@ -18,7 +18,7 @@ operating notes.
 - **`src/adapters/`** — serde manifest reader, sqlparser CTE engine,
   askama renderer, asset-inlining infra.
 - **`src/cli/`** — clap derive, ExitCode mapping, the named run loop:
-  `scope → preflight_compiled → parse_ctes → render`.
+  `resolve_scope_input → select_in_scope → preflight_compiled → parse_ctes → render`.
 - **`src/main.rs`** — thin entry; parses args, calls `cli::run`, maps
   `ExitCode`.
 
@@ -43,21 +43,21 @@ adr:             closeout:
 ## Run-loop sketch (the v0.1 vertical)
 
 ```text
-1. cli::parse_args                       -> AnalysisConfig
-2. adapters::manifest::load              -> Manifest          (Stage-1 preflight)
-3. adapters::manifest::load_baseline     -> Manifest
-4. domain::state::modified_set           -> ModifiedSet       (StateComparator)
-5. domain::scope::in_scope_unit_tests    -> Vec<UnitTest>
-6. domain::preflight::compiled_required  -> ()                (Stage-2 preflight)
-7. adapters::cte_engine::extract         -> CteGraph (per in-scope model)
-8. adapters::render::report              -> Html
-9. cli::write_out                        -> ExitCode 0 | non-zero with remediation
+1. cli::parse_args                       -> Cli  (scope_source ArgGroup: --baseline-manifest XOR --scope-from-pr-diff)
+2. cli::load_current                     -> Manifest          (Stage-1 preflight; the --manifest)
+3. cli::resolve_scope_input              -> ScopeInput        (baseline arm runs load_baseline; pr-diff arm wraps @file/literal)
+4. domain::scope::select_in_scope        -> (InScopeSet, ModelInScopeSet)
+5. domain::preflight::compiled_required  -> ()                (Stage-2 preflight)
+6. adapters::cte_engine::extract         -> CteGraph (per in-scope model)
+7. adapters::render::report              -> Html
+8. cli::write_out                        -> ExitCode 0 | non-zero with remediation
 ```
 
-Steps 2–3 raise `PreflightError::{Unreadable,SchemaUnsupported,BaselineUnusable}`.
-Step 6 raises `PreflightError::NotCompiled { node_id, unit_test }`. Missing
-`--baseline-manifest` is a **clap usage error** raised before step 1 returns,
-not a `PreflightError`.
+Steps 2–3 raise `PreflightError::{Unreadable,SchemaUnsupported,BaselineUnusable}`
+(`BaselineUnusable` only on the `--baseline-manifest` arm). Step 5 raises
+`PreflightError::NotCompiled { node_id, unit_test }`. Supplying neither or both
+scope sources is a **clap usage error** (the `scope_source` ArgGroup) raised at
+parse time (step 1), not a `PreflightError`.
 
 ## Property test invariants
 

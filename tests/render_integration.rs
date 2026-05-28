@@ -15,7 +15,7 @@ use cute4dbt::adapters::asset_embed::{
     DATATABLES_CSS, DATATABLES_JS, JQUERY_JS, MERMAID_JS, SAKURA_CSS,
 };
 use cute4dbt::adapters::manifest::FileManifestSource;
-use cute4dbt::adapters::render::render_report;
+use cute4dbt::adapters::render::{ScopeSource, render_report};
 use cute4dbt::domain::{DEFAULT_REPORT_TITLE, Manifest, StateComparator};
 use cute4dbt::ports::ManifestSource;
 
@@ -51,6 +51,7 @@ fn render_jaffle_shop(out: &Path) {
         &models_in_scope,
         &HashMap::new(),
         "jaffle-shop-baseline.json",
+        ScopeSource::Baseline,
         DEFAULT_REPORT_TITLE,
         None,
     )

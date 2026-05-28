@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use cute4dbt::adapters::manifest::FileManifestSource;
-use cute4dbt::adapters::render::render_report;
+use cute4dbt::adapters::render::{ScopeSource, render_report};
 use cute4dbt::domain::{DEFAULT_REPORT_TITLE, Manifest, StateComparator};
 use cute4dbt::ports::ManifestSource;
 
@@ -99,6 +99,7 @@ fn rendered_report_skeleton() {
         &models_in_scope,
         &HashMap::new(),
         "jaffle-shop-baseline.json",
+        ScopeSource::Baseline,
         DEFAULT_REPORT_TITLE,
         None,
     )

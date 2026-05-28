@@ -340,6 +340,21 @@ pub struct ReportPayload {
     pub models: Vec<ModelPayload>,
 }
 
+/// Which scope source produced this report — selects the diff-scope
+/// banner's provenance clause.
+///
+/// [`ScopeSource::Baseline`] renders "vs baseline manifest `<label>`";
+/// [`ScopeSource::PrDiff`] renders "from PR file diff" (there is no
+/// baseline manifest to name on the PR-diff path — naming one would be a
+/// false statement, cute-dbt#85).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScopeSource {
+    /// Scoped via `--baseline-manifest` (dbt `state:modified`).
+    Baseline,
+    /// Scoped via `--scope-from-pr-diff` (PR changed-files list).
+    PrDiff,
+}
+
 /// askama template binding for the v0.1 report.
 ///
 /// Asset values are pinned `&'static str` constants from
@@ -375,8 +390,13 @@ struct ReportTemplate<'a> {
     banner_text: &'a str,
     /// Human-readable baseline reference (the `--baseline-manifest`
     /// path verbatim in v0.1) — rendered as plain text inside the
-    /// diff-scope banner's `.diff-scope-baseline` element.
+    /// diff-scope banner's `.diff-scope-baseline` element. Empty on the
+    /// PR-diff path (the banner omits the baseline clause entirely).
     baseline_label: &'a str,
+    /// `true` when the report was scoped from a PR file diff. Selects the
+    /// banner's provenance clause: PR-diff → "from PR file diff";
+    /// baseline → "vs baseline manifest `<label>`" (cute-dbt#85).
+    is_pr_diff: bool,
     /// JSON payload, pre-escaped for safe interpolation inside
     /// `<script type="application/json">` via [`payload_json_for_html_script`].
     /// The template emits this with `|safe`; the safety property is the
@@ -496,6 +516,7 @@ pub fn render_report(
     models_in_scope: &ModelInScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     baseline_label: &str,
+    scope_source: ScopeSource,
     report_title: &str,
     report_subtitle: Option<&str>,
 ) -> io::Result<()> {
@@ -520,6 +541,7 @@ pub fn render_report(
         report_subtitle,
         banner_text: &banner_text,
         baseline_label,
+        is_pr_diff: scope_source == ScopeSource::PrDiff,
         payload_json: &payload_json,
     };
     let html = template
@@ -1662,6 +1684,7 @@ mod tests {
             &models,
             &HashMap::new(),
             "b",
+            ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
             None,
         )
@@ -1698,6 +1721,7 @@ mod tests {
             &models,
             &HashMap::new(),
             "b",
+            ScopeSource::Baseline,
             "Q3 unit test review",
             None,
         )
@@ -1734,6 +1758,7 @@ mod tests {
             &models,
             &HashMap::new(),
             "b",
+            ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
             None,
         )
@@ -1760,6 +1785,7 @@ mod tests {
             &models,
             &HashMap::new(),
             "b",
+            ScopeSource::Baseline,
             "Q3 review",
             Some("PR 1234 / staging diff"),
         )
@@ -1792,6 +1818,7 @@ mod tests {
             &models,
             &HashMap::new(),
             "b",
+            ScopeSource::Baseline,
             "<script>alert(1)</script>",
             None,
         )
@@ -1831,6 +1858,72 @@ mod tests {
         let _ = std::fs::remove_file(&tmp);
     }
 
+    // ===== render_report: diff-scope banner provenance (cute-dbt#85) =====
+
+    #[test]
+    fn render_report_baseline_banner_names_the_baseline_manifest() {
+        let node = model_node("model.shop.x", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let tmp = std::env::temp_dir().join("cute_dbt_render_banner_baseline_test.html");
+        let _ = std::fs::remove_file(&tmp);
+        render_report(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            "baseline.json",
+            ScopeSource::Baseline,
+            DEFAULT_REPORT_TITLE,
+            None,
+        )
+        .expect("render writes the report");
+        let html = std::fs::read_to_string(&tmp).expect("report exists");
+        assert!(
+            html.contains("vs baseline manifest"),
+            "baseline banner names the baseline manifest",
+        );
+        assert!(
+            !html.contains("from PR file diff"),
+            "baseline banner does not claim a PR-diff provenance",
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn render_report_pr_diff_banner_omits_the_baseline_manifest_clause() {
+        // On the PR-diff path there is no baseline manifest — rendering
+        // "vs baseline manifest …" would be a false statement (cute-dbt#85).
+        let node = model_node("model.shop.x", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let tmp = std::env::temp_dir().join("cute_dbt_render_banner_pr_diff_test.html");
+        let _ = std::fs::remove_file(&tmp);
+        render_report(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            "",
+            ScopeSource::PrDiff,
+            DEFAULT_REPORT_TITLE,
+            None,
+        )
+        .expect("render writes the report");
+        let html = std::fs::read_to_string(&tmp).expect("report exists");
+        assert!(
+            !html.contains("vs baseline manifest"),
+            "PR-diff banner must NOT name a baseline manifest",
+        );
+        assert!(
+            html.contains("from PR file diff"),
+            "PR-diff banner states its provenance",
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
     // ===== render_report end-to-end =====
 
     #[test]
@@ -1848,6 +1941,7 @@ mod tests {
             &models,
             &HashMap::new(),
             "baseline.json",
+            ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
             None,
         )
@@ -1881,6 +1975,7 @@ mod tests {
             &models,
             &HashMap::new(),
             "lab1@aaaaaaa",
+            ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
             None,
         )
@@ -1923,6 +2018,7 @@ mod tests {
             &models,
             &HashMap::new(),
             "b",
+            ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
             None,
         )
@@ -1986,6 +2082,7 @@ mod tests {
             &models,
             &HashMap::new(),
             "b",
+            ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
             None,
         )

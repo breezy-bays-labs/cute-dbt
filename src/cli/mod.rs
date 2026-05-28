@@ -1,9 +1,12 @@
 //! CLI surface: clap argument parsing, the named run loop, and the
 //! mapping from a run outcome to a process [`ExitCode`].
 //!
-//! The run loop is composed here as five named stages —
-//! `scope` → `preflight_compiled` → `parse_ctes` →
-//! `gather_authoring_yaml` → `render` (`ARCHITECTURE.md` §3, §6).
+//! The run loop is composed here as named stages —
+//! `load_current` → `resolve_scope_input` → `select_in_scope` →
+//! `preflight_compiled` → `parse_ctes` → `gather_authoring_yaml` →
+//! `render` (`ARCHITECTURE.md` §3, §6). `resolve_scope_input` picks
+//! between the `--baseline-manifest` and `--scope-from-pr-diff` scope
+//! sources and loads the baseline only on the former path (cute-dbt#85).
 //! Composition lives in `cli` by deliberate single-crate design: there
 //! is no separate `app` / `usecase` crate. `parse_ctes` is a named
 //! no-op call site: each in-scope model parses its own `compiled_code`
@@ -19,10 +22,12 @@
 //! Three exit codes: `0` success, `1` a run-time failure (a fail-closed
 //! manifest or an unwritable output path — no partial report is ever
 //! written), `2` an operator usage error (clap rejected the arguments,
-//! including a missing required `--baseline-manifest`).
+//! including supplying neither or both scope sources —
+//! `--baseline-manifest` / `--scope-from-pr-diff`).
 
 mod args;
 mod exit;
+mod pr_diff;
 
 use std::collections::HashMap;
 use std::io;
@@ -32,11 +37,11 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::adapters::manifest::{FileManifestSource, load_baseline};
-use crate::adapters::render::render_report;
+use crate::adapters::render::{ScopeSource, render_report};
 use crate::adapters::source_yaml::FsSourceYamlReader;
 use crate::domain::{
-    DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, PreflightError, StateComparator,
-    UnitTestYamlBlock, extract_unit_test_block, preflight_compiled,
+    DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, PreflightError, ScopeInput,
+    UnitTestYamlBlock, extract_unit_test_block, preflight_compiled, select_in_scope,
 };
 use crate::ports::{ManifestSource, SourceYamlReader};
 
@@ -114,25 +119,31 @@ impl RunError {
     }
 }
 
-/// The named run loop — `scope` → `preflight_compiled` → `parse_ctes` →
-/// `render`.
+/// The named run loop — `load_current` → `resolve_scope_input` →
+/// `select_in_scope` → `preflight_compiled` → `parse_ctes` →
+/// `gather_authoring_yaml` → `render`.
 ///
-/// `?` short-circuits before `render`, so a fail-closed manifest never
-/// produces a partial `report.html`.
+/// `resolve_scope_input` runs Stage-1 pre-flight on the baseline manifest
+/// only on the `--baseline-manifest` path; the `--scope-from-pr-diff`
+/// path needs no baseline. `?` short-circuits before `render`, so a
+/// fail-closed manifest never produces a partial `report.html`.
 fn execute(cli: &Cli) -> Result<(), RunError> {
-    let (current, baseline) = load(cli)?;
-    let (in_scope, models_in_scope) = scope(&current, &baseline);
+    let current = load_current(cli)?;
+    let scope_input = resolve_scope_input(cli)?;
+    let (in_scope, models_in_scope) = select_in_scope(&current, &scope_input);
     preflight_compiled(&current, &in_scope, &models_in_scope)?;
     parse_ctes();
     let authoring_yaml = gather_authoring_yaml(cli, &current, &in_scope);
     let (report_title, report_subtitle) = resolve_report_strings(cli);
+    let (baseline_label, scope_source) = scope_banner(cli, &scope_input);
     render(
         &cli.out,
         &current,
         &in_scope,
         &models_in_scope,
         &authoring_yaml,
-        &cli.baseline_manifest,
+        &baseline_label,
+        scope_source,
         &report_title,
         report_subtitle.as_deref(),
     )?;
@@ -222,30 +233,66 @@ fn resolve_report_strings(cli: &Cli) -> (String, Option<String>) {
     (title, subtitle)
 }
 
-/// Stage-1 pre-flight: load the primary and baseline manifests through
-/// the file-backed [`ManifestSource`].
+/// Stage-1 pre-flight: load the primary `--manifest` through the
+/// file-backed [`ManifestSource`].
 ///
-/// A primary load failure is `Unreadable` / `SchemaUnsupported`; a
-/// baseline load failure is remapped to `BaselineUnusable` by
-/// [`load_baseline`].
-fn load(cli: &Cli) -> Result<(Manifest, Manifest), RunError> {
+/// A load failure is `Unreadable` / `SchemaUnsupported`. The baseline
+/// manifest (when scoping via `--baseline-manifest`) is loaded separately
+/// in [`resolve_scope_input`] so the `--scope-from-pr-diff` path can skip
+/// it entirely.
+fn load_current(cli: &Cli) -> Result<Manifest, RunError> {
     let source = FileManifestSource;
     let current = source.load(&cli.manifest)?;
-    let baseline = load_baseline(&source, &cli.baseline_manifest)?;
-    Ok((current, baseline))
+    Ok(current)
 }
 
-/// The `scope` stage: select the unit tests and models in scope for this
-/// diff (dbt `state:modified`, body-checksum fidelity — ADR-3).
+/// Resolve the scope source the operator selected into a [`ScopeInput`].
 ///
-/// Returns `(unit_tests_in_scope, models_in_scope)`. `models_in_scope`
-/// is the explorer-mode set: every model targeted by an in-scope unit
-/// test plus every modified model with zero unit tests (PR C / #30).
-fn scope(current: &Manifest, baseline: &Manifest) -> (InScopeSet, ModelInScopeSet) {
-    let comparator = StateComparator::body_only();
-    let in_scope = comparator.in_scope_unit_tests(current, baseline);
-    let models_in_scope = comparator.models_in_scope(current, baseline);
-    (in_scope, models_in_scope)
+/// - `--baseline-manifest` → load the baseline (Stage-1 pre-flight; a
+///   failure is remapped to `BaselineUnusable` by [`load_baseline`]) and
+///   wrap it in [`ScopeInput::Baseline`].
+/// - `--scope-from-pr-diff` → wrap the already-parsed changed-files list
+///   in [`ScopeInput::PrDiff`], rebasing PR-diff paths against the
+///   manifest's project-relative `original_file_path` via
+///   `--project-root`.
+///
+/// clap's `scope_source` [`ArgGroup`](clap::ArgGroup) (`required`,
+/// single) guarantees exactly one arm is set, so the trailing branch is
+/// unreachable.
+fn resolve_scope_input(cli: &Cli) -> Result<ScopeInput, RunError> {
+    if let Some(baseline_path) = cli.baseline_manifest.as_deref() {
+        let source = FileManifestSource;
+        let baseline = load_baseline(&source, baseline_path)?;
+        Ok(ScopeInput::Baseline { manifest: baseline })
+    } else if let Some(changed) = cli.scope_from_pr_diff.as_ref() {
+        Ok(ScopeInput::PrDiff {
+            changed_files: changed.paths.clone(),
+            project_root_strip: cli.project_root.clone(),
+        })
+    } else {
+        unreachable!(
+            "clap's scope_source ArgGroup guarantees exactly one of \
+             --baseline-manifest / --scope-from-pr-diff is provided"
+        )
+    }
+}
+
+/// The diff-scope banner inputs for the selected scope source.
+///
+/// Returns `(baseline_label, scope_source)`. The baseline arm carries the
+/// `--baseline-manifest` path verbatim (rendered in the banner's
+/// `.diff-scope-baseline` element); the PR-diff arm carries an empty
+/// label — its banner names no baseline manifest (cute-dbt#85).
+fn scope_banner(cli: &Cli, scope_input: &ScopeInput) -> (String, ScopeSource) {
+    match scope_input {
+        ScopeInput::Baseline { .. } => (
+            cli.baseline_manifest
+                .as_ref()
+                .map_or_else(String::new, |p| p.display().to_string()),
+            ScopeSource::Baseline,
+        ),
+        ScopeInput::PrDiff { .. } => (String::new(), ScopeSource::PrDiff),
+    }
 }
 
 /// The `parse_ctes` stage — a named no-op call site.
@@ -261,26 +308,29 @@ fn parse_ctes() {}
 ///
 /// `render` is the last stage: an earlier fail-closed `?` short-circuits
 /// before this is reached, so no `report.html` is ever partially written.
-/// `baseline_label` is the human-readable reference shown in the
-/// diff-scope banner; v0.1 uses the `--baseline-manifest` path verbatim.
+/// `baseline_label` + `scope_source` drive the diff-scope banner:
+/// `ScopeSource::Baseline` names the baseline manifest (the
+/// `--baseline-manifest` path verbatim); `ScopeSource::PrDiff` omits the
+/// baseline clause (`baseline_label` is then empty).
 fn render(
     out: &Path,
     current: &Manifest,
     in_scope: &InScopeSet,
     models_in_scope: &ModelInScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
-    baseline_path: &Path,
+    baseline_label: &str,
+    scope_source: ScopeSource,
     report_title: &str,
     report_subtitle: Option<&str>,
 ) -> Result<(), io::Error> {
-    let baseline_label = baseline_path.display().to_string();
     render_report(
         out,
         current,
         in_scope,
         models_in_scope,
         authoring_yaml,
-        &baseline_label,
+        baseline_label,
+        scope_source,
         report_title,
         report_subtitle,
     )
@@ -293,10 +343,11 @@ mod tests {
     fn cli(out: &str) -> Cli {
         Cli {
             manifest: "current.json".into(),
-            baseline_manifest: "baseline.json".into(),
+            baseline_manifest: Some("baseline.json".into()),
             out: out.into(),
             config: None,
             project_root: None,
+            scope_from_pr_diff: None,
         }
     }
 

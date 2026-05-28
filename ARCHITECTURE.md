@@ -137,15 +137,20 @@ compatible per the *enums-yes-structs-no* rule for public pattern-matched
 types). Remediation strings live with the CLI exit-code mapping, not on
 the enum.
 
-### Baseline-missing is NOT a `PreflightError` variant
+### Scope-source / baseline-missing is NOT a `PreflightError` variant
 
-`--baseline-manifest` is a **required CLI argument**, declared on the clap
-parser. Omitting it is a **clap usage error** — raised **before any
-manifest is read** — not a `PreflightError`. Conflating usage-time errors
-(the operator misused the CLI) with runtime preflight errors (the input
-data is unusable) would muddy the contract and add a fifth enum variant
-that the CLI exit-code mapping would have to route differently from the
-other four. Don't add it.
+`--baseline-manifest` is one of **two mutually-exclusive scope sources**
+(`--baseline-manifest` XOR `--scope-from-pr-diff`, cute-dbt#85), enforced
+by a required clap `ArgGroup` (`scope_source`, `required(true)`,
+`multiple(false)`). Supplying **neither** (a `MissingRequiredArgument`) or
+**both** (an `ArgumentConflict`) is a **clap usage error** — raised
+**before any manifest is read** — not a `PreflightError`. A bad
+`--scope-from-pr-diff @file` (missing / non-UTF-8) is likewise a clap
+usage error (`ValueValidation`), the same path as `--config`. Conflating
+usage-time errors (the operator misused the CLI) with runtime preflight
+errors (the input data is unusable) would muddy the contract and add a
+fifth enum variant that the CLI exit-code mapping would have to route
+differently from the other four. Don't add it.
 
 ### `--config` errors are NOT a `PreflightError` variant either
 
@@ -183,11 +188,16 @@ Locked policy consequences:
 
 ### The named run loop
 
-The composition lives in `cli` as four named call-sites:
+The composition lives in `cli` as named call-sites:
 
 ```
-scope → preflight_compiled → parse_ctes → render
+resolve_scope_input → select_in_scope → preflight_compiled → parse_ctes → render
 ```
+
+`resolve_scope_input` picks between the `--baseline-manifest` and
+`--scope-from-pr-diff` scope sources (loading the baseline only on the
+former path); `select_in_scope` is the domain entry point shared by both
+(cute-dbt#85).
 
 Each stage is greppable. The fail-closed contract has clean seams the
 `.feature` scenarios can assert against without depending on internal
