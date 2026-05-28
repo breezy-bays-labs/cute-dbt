@@ -11,28 +11,57 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 
 use crate::adapters::config_reader::load_config;
+use crate::cli::pr_diff::ChangedFiles;
 use crate::domain::AnalysisConfig;
 
 /// cute-dbt — render a diff-scoped, self-contained HTML report of a dbt
 /// project's unit tests.
 #[derive(Debug, Parser)]
 #[command(name = "cute-dbt", version, about)]
+// Exactly one scope source is required: `--baseline-manifest` (dbt
+// `state:modified`) XOR `--scope-from-pr-diff` (PR changed-files list).
+// `required(true)` + `multiple(false)` makes "neither" a
+// MissingRequiredArgument and "both" an ArgumentConflict — both clap
+// usage errors (exit 2), never a `PreflightError` (cute-dbt#85, ADR-2
+// precedent). This preserves the v0.1 baseline-required UX: a full
+// unscoped run still diffs against an empty/genesis baseline.
+#[command(group = ArgGroup::new("scope_source")
+    .required(true)
+    .multiple(false)
+    .args(["baseline_manifest", "scope_from_pr_diff"]))]
 pub struct Cli {
     /// Path to the compiled dbt `manifest.json` to visualise.
     #[arg(long, value_name = "PATH")]
     pub manifest: PathBuf,
 
-    /// Path to the baseline `manifest.json` to diff against.
+    /// Path to the baseline `manifest.json` to diff against (dbt
+    /// `state:modified` scope source).
     ///
-    /// Required: cute-dbt v0.1 is PR-review-first, so the report is
-    /// scoped to the unit tests whose model changed relative to this
-    /// baseline. For a full-manifest report, diff against an empty or
-    /// genesis baseline.
+    /// One of the two mutually-exclusive scope sources (the other is
+    /// `--scope-from-pr-diff`); exactly one must be supplied. cute-dbt
+    /// v0.1 is PR-review-first, so the report is scoped to the unit
+    /// tests whose model changed relative to this baseline. For a
+    /// full-manifest report, diff against an empty or genesis baseline.
     #[arg(long, value_name = "PATH")]
-    pub baseline_manifest: PathBuf,
+    pub baseline_manifest: Option<PathBuf>,
+
+    /// PR changed-files scope source (CI/PR-review path) — no baseline
+    /// manifest needed.
+    ///
+    /// Accepts either a literal comma/newline-separated list
+    /// (`models/a.sql,models/b.yml`) or an `@file` reference
+    /// (`@changed.txt`, one path per line). The workflow / Action
+    /// computes the list — `git diff --name-only
+    /// ${base.sha}...${head.sha}` — and passes it here; cute-dbt does
+    /// not shell out to `git` or read `GITHUB_EVENT_PATH`.
+    ///
+    /// Mutually exclusive with `--baseline-manifest`. A bad `@file`
+    /// (missing / non-UTF-8) is a clap usage error (exit 2).
+    #[arg(long, value_name = "LIST|@FILE", value_parser = crate::cli::pr_diff::parse_arg_value)]
+    pub scope_from_pr_diff: Option<ChangedFiles>,
 
     /// Path the generated `report.html` is written to.
     #[arg(long, value_name = "PATH")]
@@ -180,22 +209,84 @@ mod tests {
         ])
         .expect("a complete argument set parses");
         assert_eq!(cli.manifest, PathBuf::from("current.json"));
-        assert_eq!(cli.baseline_manifest, PathBuf::from("baseline.json"));
+        assert_eq!(cli.baseline_manifest, Some(PathBuf::from("baseline.json")));
         assert_eq!(cli.out, PathBuf::from("report.html"));
         // --config absent: the field is None.
         assert!(cli.config.is_none());
+        // --scope-from-pr-diff absent: the field is None (baseline path).
+        assert!(cli.scope_from_pr_diff.is_none());
     }
 
     #[test]
     fn a_missing_baseline_manifest_is_a_usage_error() {
-        // The locked baseline-required policy: omitting --baseline-manifest
-        // is a clap usage error, never a PreflightError.
+        // Passing NEITHER scope source: the `scope_source` ArgGroup is
+        // required, so omitting both --baseline-manifest and
+        // --scope-from-pr-diff is a clap usage error, never a
+        // PreflightError (cute-dbt#85).
         let err = parse(&["cute-dbt", "--manifest", "m.json", "--out", "o.html"])
-            .expect_err("--baseline-manifest is required");
+            .expect_err("a scope source is required");
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
         assert!(
             err.to_string().contains("--baseline-manifest"),
-            "the error names the missing argument: {err}"
+            "the error names the missing scope source: {err}"
+        );
+    }
+
+    #[test]
+    fn passing_both_scope_sources_is_an_argument_conflict() {
+        // The `scope_source` group is `multiple(false)` — supplying both
+        // --baseline-manifest and --scope-from-pr-diff is a conflict.
+        let err = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "current.json",
+            "--baseline-manifest",
+            "baseline.json",
+            "--scope-from-pr-diff",
+            "models/a.sql",
+            "--out",
+            "report.html",
+        ])
+        .expect_err("both scope sources is a conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn scope_from_pr_diff_alone_parses_without_a_baseline() {
+        let cli = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "current.json",
+            "--scope-from-pr-diff",
+            "models/a.sql,models/b.yml",
+            "--out",
+            "report.html",
+        ])
+        .expect("pr-diff-only is a complete argument set");
+        assert!(cli.baseline_manifest.is_none());
+        let changed = cli.scope_from_pr_diff.expect("scope_from_pr_diff is Some");
+        assert_eq!(changed.paths, vec!["models/a.sql", "models/b.yml"]);
+    }
+
+    #[test]
+    fn scope_from_pr_diff_at_missing_file_is_a_value_validation_error() {
+        let path = unique_temp_path("missing-changed-list");
+        // Deliberately do NOT create the file.
+        let arg = format!("@{}", path.display());
+        let err = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "current.json",
+            "--scope-from-pr-diff",
+            &arg,
+            "--out",
+            "report.html",
+        ])
+        .expect_err("a missing @file is a usage error");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        assert!(
+            err.to_string().contains("could not read"),
+            "error explains the read failure: {err}"
         );
     }
 
