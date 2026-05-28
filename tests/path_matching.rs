@@ -96,6 +96,30 @@ fn project_root_strip_does_not_match_substring() {
 }
 
 #[test]
+fn project_root_strip_requires_full_segment_match() {
+    // Bot-review finding (Gemini + CodeRabbit on cute-dbt#86): a directory
+    // whose name STARTS WITH the prefix (e.g. `dbt_project_notes/x.sql`
+    // with prefix `dbt_project`) must NOT be stripped — that would
+    // produce `_notes/x.sql` and wrongly match a manifest path like
+    // `_notes/x.sql`. Prefix matching is segment-aware: `prefix` or
+    // `prefix/` only.
+    assert_eq!(
+        normalize_path("dbt_project_notes/x.sql", Some(Path::new("dbt_project"))),
+        "dbt_project_notes/x.sql"
+    );
+}
+
+#[test]
+fn project_root_strip_handles_exact_prefix_only() {
+    // When the path IS the prefix (no trailing content), strip yields an
+    // empty string — caller's manifest path won't match anything empty.
+    assert_eq!(
+        normalize_path("dbt_project", Some(Path::new("dbt_project"))),
+        ""
+    );
+}
+
+#[test]
 fn empty_project_root_is_treated_as_no_prefix() {
     // `Some(Path::new(""))` is treated identically to `None` — strip a
     // zero-length prefix is a no-op.

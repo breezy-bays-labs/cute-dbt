@@ -100,12 +100,23 @@ pub fn normalize_path(p: &str, strip_prefix: Option<&Path>) -> String {
     }
 
     // Step 2: strip the configured project-root prefix, if present.
+    // Match must be segment-aware (`prefix` or `prefix/…`, never
+    // mid-segment) so `dbt_project_notes/x.sql` is NOT stripped when the
+    // prefix is `dbt_project` — bot-review finding on cute-dbt#86.
     if let Some(prefix) = strip_prefix {
         let prefix_str = prefix.to_string_lossy();
         let prefix_str = prefix_str.trim_end_matches('/');
         if !prefix_str.is_empty() {
-            if let Some(rest) = remaining.strip_prefix(prefix_str) {
-                remaining = rest.strip_prefix('/').unwrap_or(rest);
+            if remaining == prefix_str {
+                remaining = "";
+            } else if let Some(rest) = remaining.strip_prefix(prefix_str) {
+                if let Some(after_slash) = rest.strip_prefix('/') {
+                    remaining = after_slash;
+                }
+                // else: prefix matches at position 0 but is followed by
+                // a non-`/` character (e.g. `dbt_project_notes/...`) —
+                // not a real path-component match, leave `remaining`
+                // unchanged.
             }
         }
     }
