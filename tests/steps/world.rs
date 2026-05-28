@@ -72,6 +72,17 @@ pub struct World {
 
     /// Edge-type currently being checked by the scenario outline.
     pub last_edge_type: Option<EdgeType>,
+
+    // --- PR-diff scoping (pr_diff_scoping) ------------------------------
+    /// Changed-file list configured by a `Given a list of changed files
+    /// containing …` step; resolved into the `--scope-from-pr-diff`
+    /// argument by the When step (comma-joined literal, or written to a
+    /// file for the `@file` form).
+    pub changed_files: Vec<String>,
+
+    /// Path to the changed-files list written to disk (Scenario 14's
+    /// `@file` form). `None` until the "written to a file" Given runs.
+    pub changed_files_path: Option<PathBuf>,
 }
 
 /// Which committed fixture pair the next subprocess `When` step
