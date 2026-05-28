@@ -487,6 +487,7 @@ mod tests {
             Some("select 1".to_owned()),
             None,
             DependsOn::default(),
+            None,
         )
     }
 
@@ -499,6 +500,7 @@ mod tests {
             None,
             None,
             DependsOn::default(),
+            None,
         )
     }
 

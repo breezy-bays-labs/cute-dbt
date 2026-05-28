@@ -312,6 +312,7 @@ mod tests {
             compiled.map(str::to_owned),
             None,
             DependsOn::default(),
+            None,
         )
     }
 

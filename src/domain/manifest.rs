@@ -149,6 +149,14 @@ impl DependsOn {
 /// dbt 1.8+ on every node. The renderer (cute-dbt#47) surfaces it in
 /// the per-model Model SQL section. `None` is tolerated so older
 /// manifests still deserialize.
+///
+/// `original_file_path` is the path of the declaring `.sql` / `.yml`
+/// file relative to the dbt project root (e.g.
+/// `models/marts/core/dim_payers.sql`). Populated by dbt 1.8+ on every
+/// node; tolerated as `None` so older manifests and synthetic test
+/// fixtures still deserialize. The
+/// [`select_in_scope`](crate::domain::scope::select_in_scope) PR-diff
+/// path matches changed file paths against this field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     id: NodeId,
@@ -160,6 +168,8 @@ pub struct Node {
     raw_code: Option<String>,
     #[serde(default)]
     depends_on: DependsOn,
+    #[serde(default)]
+    original_file_path: Option<String>,
 }
 
 impl Node {
@@ -172,6 +182,7 @@ impl Node {
         compiled_code: Option<String>,
         raw_code: Option<String>,
         depends_on: DependsOn,
+        original_file_path: Option<String>,
     ) -> Self {
         Self {
             id,
@@ -180,6 +191,7 @@ impl Node {
             compiled_code,
             raw_code,
             depends_on,
+            original_file_path,
         }
     }
 
@@ -219,6 +231,14 @@ impl Node {
     #[must_use]
     pub fn depends_on(&self) -> &DependsOn {
         &self.depends_on
+    }
+
+    /// Path of the declaring `.sql` (or `.yml` for unit-test-shaped
+    /// nodes) file, relative to the dbt project root, if dbt populated
+    /// it. `None` for synthetic test manifests and pre-1.8 inputs.
+    #[must_use]
+    pub fn original_file_path(&self) -> Option<&str> {
+        self.original_file_path.as_deref()
     }
 }
 
@@ -406,6 +426,7 @@ mod tests {
             Some("select 1".to_owned()),
             Some("{{ config(materialized='view') }} select 1".to_owned()),
             DependsOn::default(),
+            Some("models/staging/stg_orders.sql".to_owned()),
         );
         assert_eq!(n.id(), &id);
         assert_eq!(n.resource_type(), "model");
@@ -416,6 +437,10 @@ mod tests {
             Some("{{ config(materialized='view') }} select 1")
         );
         assert_eq!(n.depends_on(), &DependsOn::default());
+        assert_eq!(
+            n.original_file_path(),
+            Some("models/staging/stg_orders.sql")
+        );
     }
 
     #[test]
@@ -427,6 +452,7 @@ mod tests {
             None,
             None,
             DependsOn::default(),
+            None,
         );
         let json = serde_json::to_string(&n).unwrap();
         let back: Node = serde_json::from_str(&json).unwrap();
@@ -436,7 +462,10 @@ mod tests {
 
     #[test]
     fn node_tolerates_missing_optional_fields() {
-        // Wire shape with only the strictly-required keys present.
+        // Wire shape with only the strictly-required keys present —
+        // critical regression guard: every committed fixture (jaffle-shop,
+        // playground) predates the `original_file_path` field; they must
+        // continue to deserialize without re-baselining golden snapshots.
         let json = r#"{
             "id": "model.shop.stg_orders",
             "resource_type": "model",
@@ -446,6 +475,27 @@ mod tests {
         assert!(n.compiled_code().is_none());
         assert!(n.depends_on().macros().is_empty());
         assert!(n.depends_on().nodes().is_empty());
+        assert!(n.original_file_path().is_none());
+    }
+
+    #[test]
+    fn node_original_file_path_round_trips_through_serde() {
+        let n = Node::new(
+            NodeId::new("model.shop.dim_payers"),
+            "model",
+            sample_checksum(),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            Some("models/marts/core/dim_payers.sql".to_owned()),
+        );
+        let json = serde_json::to_string(&n).unwrap();
+        let back: Node = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, n);
+        assert_eq!(
+            back.original_file_path(),
+            Some("models/marts/core/dim_payers.sql")
+        );
     }
 
     #[test]
@@ -484,6 +534,7 @@ mod tests {
                 Some("select 1".to_owned()),
                 None,
                 DependsOn::default(),
+                None,
             ),
         );
 

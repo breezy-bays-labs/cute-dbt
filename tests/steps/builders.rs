@@ -73,6 +73,7 @@ pub fn model_node(bare: &str, checksum: &str, compiled: Option<&str>) -> Node {
         compiled.map(str::to_owned),
         None,
         DependsOn::default(),
+        None,
     )
 }
 
