@@ -83,6 +83,38 @@ If both sets are empty, the report is a valid empty-scope report with a
 "0 unit tests in scope" banner — exit-0 by design. (Empty scope is
 information, not failure.)
 
+### Updated vs context tests
+
+Within the in-scope set, cute-dbt classifies each test as **updated** or
+**context**:
+
+- **Updated** — this diff changed the test's own definition (the report
+  foregrounds these).
+- **Context** — the test is in scope only because its target model is in
+  scope; the test itself is unchanged.
+
+The report opens in **Updated only** mode by default, so a reviewer sees
+the tests the PR actually touched. A global **Updated only ↔ All tests**
+toggle reveals the context tests (and the per-model count tracks the
+toggle: the updated count in Updated-only mode, the total in All-tests
+mode). When a diff updated *no* tests at all — the common SQL-only PR —
+the report opens in All-tests mode so you land on content rather than an
+empty view.
+
+How "updated" is derived depends on the scope source, and the two
+sources differ in precision:
+
+- **`--baseline-manifest`** — precise. A test is updated when its parsed
+  `unit_test` differs from the baseline (a structural diff), independent
+  of which file it lives in.
+- **`--scope-from-pr-diff`** — file-granular in v0.1. A test is updated
+  when its declaring `.yml` appears in the diff, so a changed multi-test
+  file marks *every* test it declares as updated. Block-precise PR-diff
+  classification (diff-hunk overlap) is tracked as
+  [cute-dbt#96](https://github.com/breezy-bays-labs/cute-dbt/issues/96)
+  and swaps the precise signal underneath this same report UX with zero
+  UI change.
+
 ### v0.1 fidelity limits (PR-diff scoping)
 
 `--scope-from-pr-diff` maps changed **file paths** to nodes; it does not

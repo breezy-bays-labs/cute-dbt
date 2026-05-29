@@ -112,6 +112,14 @@ g.dag-node:focus-visible { outline: 2px dashed #1d7484; outline-offset: 3px; }
 .panel-toggle { display: inline-flex; gap: 4px; }
 .panel-toggle button { font-size: 0.85em; padding: 4px 10px; }
 .panel-toggle button:not(.is-active) { opacity: 0.55; }
+/* cute-dbt#91 — global Updated-only ↔ All-tests toggle. Mirrors the
+   .panel-toggle segmented-control idiom; sits above the model selector. */
+.test-mode-toggle { display: inline-flex; gap: 4px; margin-bottom: 0.75rem; }
+.test-mode-toggle button { font-size: 0.85em; padding: 4px 10px; }
+.test-mode-toggle button:not(.is-active) { opacity: 0.55; }
+/* Inline hint shown when a model has tests but none are updated and the
+   toggle is in Updated-only mode (the empty #test-select case). */
+.zero-updated-hint { margin: 0.5rem 0 0; color: #6a6a72; font-style: italic; font-size: 0.9em; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; }
 .panel-header h2 { margin: 0; }
 .expected-panel { border: 2px solid #1d7484; padding: 0.5rem 1rem 1rem; position: sticky; top: 1rem; align-self: start; }
@@ -234,6 +242,16 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
 </section>
 
 <section class="test-selection" aria-label="Test selection">
+  <!-- cute-dbt#91 — global scope toggle. "Updated only" (default)
+       foregrounds the tests this diff updated; "All tests" reveals every
+       test on the in-scope models. The server marks "Updated only" active;
+       the JS re-syncs at boot (auto-selecting "All tests" when the diff
+       updated zero tests). data-testid handles keep the headless toggle
+       test off brittle class names. -->
+  <div class="test-mode-toggle" role="group" aria-label="Test scope" data-testid="updated-toggle">
+    <button type="button" data-test-mode="updated" class="is-active" aria-pressed="true">Updated only</button>
+    <button type="button" data-test-mode="all" aria-pressed="false">All tests</button>
+  </div>
   <div class="test-selector-row">
     <div class="selector-field">
       <label for="model-select">Model</label>
@@ -245,6 +263,7 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
       <select id="test-select"></select>
     </div>
   </div>
+  <p class="zero-updated-hint" data-testid="zero-updated-hint" hidden></p>
 
   <details class="test-details">
     <summary>Test details</summary>
@@ -320,7 +339,7 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
 
 </div>
 
-<script type="application/json" id="cute-dbt-data">{"baseline":"jaffle-shop-baseline.json","models":[{"name":"stg_customers","dag":{"nodes":[{"id":"source","role":"import"},{"id":"renamed","role":"transform"},{"id":"stg_customers","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"stg_customers","edge_type":"from"}]},"compiled_sql":{"renamed":"renamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)","source":"source as (\n    select * from \"jaffle_shop\".\"main\".\"raw_customers\"\n\n)","stg_customers":"select * from renamed"},"raw_sql":"with source as (\n\n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project. Modified body — adds a trim() pass on names so\n    PR 5's StateComparator sees the body checksum change.\n    #}\n    select * from {{ ref('raw_customers') }}\n\n),\n\nrenamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)\n\nselect * from renamed","tests":[{"id":"unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns","name":"test_stg_customers_renames_columns","target_model":"stg_customers","description":"stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows — no real customer data.\n","tags":["quality","smoke"],"meta":{"owner":"data-eng","priority":"high"},"defined_in":"models/staging/unit_tests.yml","given":[{"input":"ref('raw_customers')","bound_to_node":"source","rows":[{"first_name":"Alice","id":1,"last_name":"A."},{"first_name":"Bob","id":2,"last_name":"B."}],"format":"dict"}],"expected":{"rows":[{"customer_id":1,"first_name":"Alice","last_name":"A."},{"customer_id":2,"first_name":"Bob","last_name":"B."}],"format":"dict"}}],"is_recursive":false}]}</script>
+<script type="application/json" id="cute-dbt-data">{"baseline":"jaffle-shop-baseline.json","models":[{"name":"stg_customers","dag":{"nodes":[{"id":"source","role":"import"},{"id":"renamed","role":"transform"},{"id":"stg_customers","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"stg_customers","edge_type":"from"}]},"compiled_sql":{"renamed":"renamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)","source":"source as (\n    select * from \"jaffle_shop\".\"main\".\"raw_customers\"\n\n)","stg_customers":"select * from renamed"},"raw_sql":"with source as (\n\n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project. Modified body — adds a trim() pass on names so\n    PR 5's StateComparator sees the body checksum change.\n    #}\n    select * from {{ ref('raw_customers') }}\n\n),\n\nrenamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)\n\nselect * from renamed","tests":[{"id":"unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns","name":"test_stg_customers_renames_columns","target_model":"stg_customers","changed":true,"description":"stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows — no real customer data.\n","tags":["quality","smoke"],"meta":{"owner":"data-eng","priority":"high"},"defined_in":"models/staging/unit_tests.yml","given":[{"input":"ref('raw_customers')","bound_to_node":"source","rows":[{"first_name":"Alice","id":1,"last_name":"A."},{"first_name":"Bob","id":2,"last_name":"B."}],"format":"dict"}],"expected":{"rows":[{"customer_id":1,"first_name":"Alice","last_name":"A."},{"customer_id":2,"first_name":"Bob","last_name":"B."}],"format":"dict"}}],"is_recursive":false}]}</script>
 
 <script>
 <<inlined-asset>>
@@ -383,7 +402,11 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     selectedModel:  null,
     selectedTestId: null,
     selectedNodeId: null,
-    leftPanelMode:  "node"
+    leftPanelMode:  "node",
+    // cute-dbt#91 — false: show only updated tests (default); true: show
+    // all tests on the in-scope models. Global + persistent across model
+    // switches. Auto-set to true at boot when the diff updated 0 tests.
+    showAll:        false
   };
 
   $(function () {
@@ -396,9 +419,16 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
       $(".panel-row").hide();
       return;
     }
-    state.selectedModel = DATA.models[0].name;
-    var firstTest = DATA.models[0].tests[0];
-    state.selectedTestId = firstTest ? firstTest.id : null;
+    // cute-dbt#91 — open in All-tests mode when the diff updated zero
+    // tests (the common SQL-only PR), so the reviewer lands on content
+    // rather than the empty 0-updated view.
+    state.showAll = (countUpdated() === 0);
+    // Default model foregrounds the diff's updates: first (deterministic
+    // order) model with >=1 updated test, else the first model.
+    state.selectedModel = defaultModelName();
+    // First VISIBLE test under the resolved mode (so auto-All lands on a
+    // real selected test with content, not the empty panel).
+    state.selectedTestId = firstVisibleTestId(currentModel());
     // Mermaid config is static across model switches — initialize once
     // (cute-dbt#40 CR-4). renderDag() then only invokes mermaid.render.
     window.mermaid.initialize({
@@ -407,11 +437,48 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
       theme: "base",
       fontFamily: 'system-ui,-apple-system,"Segoe UI",sans-serif'
     });
+    renderTestModeToggle();
     renderModelSelector();
     renderTestSelector();
     renderForSelectedModel();
     bindGlobalHandlers();
   });
+
+  // cute-dbt#91 — scope-toggle helpers --------------------------------
+
+  // Count of updated (changed) tests across all in-scope models — the
+  // banner's "X updated" and the auto-All-on-load trigger.
+  function countUpdated() {
+    var n = 0;
+    DATA.models.forEach(function (m) {
+      m.tests.forEach(function (t) { if (t.changed) n += 1; });
+    });
+    return n;
+  }
+
+  // Updated-test count for a single model.
+  function updatedCount(m) {
+    return m.tests.filter(function (t) { return t.changed; }).length;
+  }
+
+  // The tests visible for a model under the current toggle mode.
+  function visibleTests(m) {
+    if (!m) return [];
+    return state.showAll ? m.tests : m.tests.filter(function (t) { return t.changed; });
+  }
+
+  // Default model on load: first model (deterministic order) with >=1
+  // updated test, else the first model.
+  function defaultModelName() {
+    var withUpdated = DATA.models.filter(function (m) { return updatedCount(m) > 0; })[0];
+    return (withUpdated || DATA.models[0]).name;
+  }
+
+  // First visible test id for a model under the resolved mode, or null.
+  function firstVisibleTestId(m) {
+    var vis = visibleTests(m);
+    return vis.length ? vis[0].id : null;
+  }
 
   function initExplainHash() {
     function sync() {
@@ -423,17 +490,25 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
   }
 
   function renderBanner() {
-    // The per-model selector option labels already carry each model's
-    // test count (`stg_customers (1 test)` etc.), so the global banner
-    // only restates the diff-scope total. JS re-writes the server-
-    // rendered text only so swapping DATA in DevTools repaints
-    // consistently without a server round trip.
-    var n = 0;
-    DATA.models.forEach(function (m) { n += m.tests.length; });
-    var noun = n === 1 ? "unit test" : "unit tests";
-    var text = n === 0
-      ? "0 unit tests in scope"
-      : "Showing " + n + " " + noun + " in scope";
+    // cute-dbt#91 — "K models in scope · X unit tests updated". K is the
+    // number of in-scope models; X is the count of updated (changed)
+    // tests across the RENDERED payload (not the domain's changed-set
+    // length — a changed test whose model didn't resolve is never
+    // rendered, so they can legitimately differ). The empty case keeps the
+    // locked BANNER_EMPTY_SCOPE string the server-side contract pins. JS
+    // rewrites the server text so swapping DATA in DevTools repaints
+    // consistently without a round trip (banner wording is JS-only;
+    // compose_banner_text stays untouched).
+    var k = DATA.models.length;
+    var x = countUpdated();
+    var text;
+    if (k === 0) {
+      text = "0 unit tests in scope";
+    } else {
+      var modelNoun = k === 1 ? "model" : "models";
+      var testNoun = x === 1 ? "unit test" : "unit tests";
+      text = k + " " + modelNoun + " in scope · " + x + " " + testNoun + " updated";
+    }
     $(".diff-scope-text").text(text);
     $(".diff-scope-baseline").text(DATA.baseline);
   }
@@ -451,18 +526,16 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
   function renderModelSelector() {
     var $sel = $("#model-select").empty();
     DATA.models.forEach(function (m) {
-      var n = m.tests.length;
-      var label = n === 1
-        ? m.name + "  (1 test)"
-        : m.name + "  (" + n + " tests)";
-      $sel.append($("<option>").val(m.name).text(label));
+      // cute-dbt#91 — the per-model count is toggle-dependent: the updated
+      // count in Updated-only mode, the total in All-tests mode.
+      var n = state.showAll ? m.tests.length : updatedCount(m);
+      $sel.append($("<option>").val(m.name).text(m.name + "  (" + n + ")"));
     });
     $sel.val(state.selectedModel);
     $sel.off("change.cuteDbt").on("change.cuteDbt", function () {
       state.selectedModel = $(this).val();
-      var m = currentModel();
-      var firstForModel = m && m.tests[0];
-      state.selectedTestId = firstForModel ? firstForModel.id : null;
+      // Land on the first VISIBLE test under the (persistent) toggle mode.
+      state.selectedTestId = firstVisibleTestId(currentModel());
       state.selectedNodeId = null;
       state.leftPanelMode = "node";
       renderTestSelector();
@@ -473,7 +546,7 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
   function renderTestSelector() {
     var $sel = $("#test-select").empty();
     var m = currentModel();
-    var tests = m ? m.tests : [];
+    var tests = visibleTests(m);
     tests.forEach(function (t) {
       $sel.append($("<option>").val(t.id).text(t.name));
     });
@@ -484,6 +557,24 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
       state.leftPanelMode = "node";
       renderForSelectedModel();
     });
+    renderZeroUpdatedHint(m, tests);
+  }
+
+  // cute-dbt#91 — inline hint when a model has tests but none are visible
+  // in Updated-only mode (the empty #test-select case). Hidden in
+  // All-tests mode and whenever there are visible tests.
+  function renderZeroUpdatedHint(m, tests) {
+    var $hint = $(".zero-updated-hint");
+    var show = m && !state.showAll && tests.length === 0 && m.tests.length > 0;
+    if (show) {
+      var total = m.tests.length;
+      var noun = total === 1 ? "test" : "tests";
+      $hint
+        .text("0 updated — switch to All tests to see this model’s " + total + " " + noun + ".")
+        .prop("hidden", false);
+    } else {
+      $hint.text("").prop("hidden", true);
+    }
   }
 
   function renderForSelectedModel() {
@@ -509,9 +600,15 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     } else {
       $(".test-description").text("");
       $(".test-description-section").addClass("is-hidden");
+      // cute-dbt#91 — distinguish "model has tests but none are updated
+      // (Updated-only mode hides them)" from the genuine explorer-mode
+      // "model is modified but has zero unit tests" case.
+      var leftMsg = m && m.tests.length > 0
+        ? "No updated tests on this model — switch to All tests to inspect its "
+            + m.tests.length + (m.tests.length === 1 ? " test." : " tests.")
+        : "This model is modified but has no unit tests — consider adding one.";
       $(".left-panel-body").empty().append(
-        $("<div>").addClass("no-tests-empty")
-          .text("This model is modified but has no unit tests — consider adding one.")
+        $("<div>").addClass("no-tests-empty").text(leftMsg)
       );
       $(".expected-panel .expected-rowcount").text("0 rows");
       $(".expected-body").empty().append(
@@ -765,11 +862,41 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     });
   }
 
+  // cute-dbt#91 — sync the Updated-only ↔ All-tests toggle's active state
+  // to state.showAll (mirrors renderSegmentedToggle's idiom).
+  function renderTestModeToggle() {
+    var active = state.showAll ? "all" : "updated";
+    $(".test-mode-toggle [data-test-mode]").each(function () {
+      var mode = $(this).attr("data-test-mode");
+      $(this).attr("aria-pressed", mode === active ? "true" : "false");
+      $(this).toggleClass("is-active", mode === active);
+    });
+  }
+
   function bindGlobalHandlers() {
     $(".panel-toggle").on("click", "[data-mode]", function () {
       state.leftPanelMode = $(this).attr("data-mode");
       renderSegmentedToggle();
       renderLeftPanel();
+    });
+    // cute-dbt#91 — global Updated-only ↔ All-tests toggle. state.showAll
+    // is global and persists across model switches (the model-change
+    // handler never resets it). On flip, keep the selection valid: if the
+    // currently selected test is no longer visible, fall back to the first
+    // visible test (or null).
+    $(".test-mode-toggle").on("click", "[data-test-mode]", function () {
+      var nextShowAll = $(this).attr("data-test-mode") === "all";
+      if (nextShowAll === state.showAll) return;
+      state.showAll = nextShowAll;
+      var vis = visibleTests(currentModel());
+      var stillVisible = vis.some(function (t) { return t.id === state.selectedTestId; });
+      if (!stillVisible) state.selectedTestId = vis.length ? vis[0].id : null;
+      state.selectedNodeId = null;
+      state.leftPanelMode = "node";
+      renderTestModeToggle();
+      renderModelSelector();
+      renderTestSelector();
+      renderForSelectedModel();
     });
   }
 

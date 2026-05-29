@@ -58,21 +58,54 @@ pub enum ScopeInput {
     },
 }
 
-/// Resolve the (unit-test in-scope, model in-scope) pair for the
-/// current manifest and the given [`ScopeInput`].
+/// The resolved scope selection: the in-scope unit tests, the in-scope
+/// models, and the **changed** (PR-updated) subset of the in-scope tests.
 ///
-/// - [`ScopeInput::Baseline`] delegates to [`StateComparator::body_only`].
+/// `changed` is the per-test "this PR updated this test" signal the report
+/// foregrounds (cute-dbt#91). It is a strict subset of `in_scope`
+/// (`changed ⊆ in_scope`) by construction in both arms:
+///
+/// - **`Baseline`** — `changed` is [`StateComparator::changed_unit_tests`]
+///   (the precise `UnitTest` struct diff); a changed test is always in
+///   scope via the `target_modified || test_changed` union.
+/// - **`PrDiff`** — `changed` is the tests whose declaring YAML file
+///   appears in the diff (file-granular in v0.1; cute-dbt#96 refines to
+///   block-precise). Collected in the same traversal as `in_scope`, so the
+///   subset relation cannot drift.
+///
+/// Additive POD (ADR-5): the existing `InScopeSet` / `ModelInScopeSet`
+/// types and their semantics are unchanged — this struct only *surfaces*
+/// the label both arms already compute.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ScopeSelection {
+    /// Unit-test ids the report renders (selection semantics unchanged).
+    pub in_scope: InScopeSet,
+    /// Model node ids the report renders (explorer-mode union, unchanged).
+    pub models_in_scope: ModelInScopeSet,
+    /// The subset of `in_scope` whose definition this diff updated — the
+    /// report's "updated" tests (the rest are "context").
+    pub changed: InScopeSet,
+}
+
+/// Resolve the [`ScopeSelection`] for the current manifest and the given
+/// [`ScopeInput`].
+///
+/// - [`ScopeInput::Baseline`] delegates to [`StateComparator::body_only`]
+///   for the in-scope/model sets and to
+///   [`StateComparator::changed_unit_tests`] for the changed subset.
 /// - [`ScopeInput::PrDiff`] matches changed-file paths against
-///   `original_file_path`.
+///   `original_file_path`, collecting the in-scope and changed sets in one
+///   pass.
 #[must_use]
-pub fn select_in_scope(current: &Manifest, input: &ScopeInput) -> (InScopeSet, ModelInScopeSet) {
+pub fn select_in_scope(current: &Manifest, input: &ScopeInput) -> ScopeSelection {
     match input {
         ScopeInput::Baseline { manifest: baseline } => {
             let cmp = StateComparator::body_only();
-            (
-                cmp.in_scope_unit_tests(current, baseline),
-                cmp.models_in_scope(current, baseline),
-            )
+            ScopeSelection {
+                in_scope: cmp.in_scope_unit_tests(current, baseline),
+                models_in_scope: cmp.models_in_scope(current, baseline),
+                changed: StateComparator::changed_unit_tests(current, baseline),
+            }
         }
         ScopeInput::PrDiff {
             changed_files,
@@ -171,7 +204,7 @@ fn select_in_scope_pr_diff(
     current: &Manifest,
     changed_files: &[String],
     project_root_strip: Option<&Path>,
-) -> (InScopeSet, ModelInScopeSet) {
+) -> ScopeSelection {
     // Materialize the normalized change set once for O(1) lookup.
     let normalized_changes: HashSet<String> = changed_files
         .iter()
@@ -197,26 +230,31 @@ fn select_in_scope_pr_diff(
         })
         .collect();
 
-    // In-scope unit tests: a test is in scope when its target model is
-    // path-modified OR its own `original_file_path` (the declaring YAML
-    // file) is in the change set. Mirrors the dbt OR-semantics of the
-    // baseline path.
-    let in_scope: InScopeSet = current
-        .unit_tests()
-        .iter()
-        .filter_map(|(test_id, ut)| {
-            let target_path_modified = resolve_target_model(current, ut.model())
-                .is_some_and(|model| path_modified_models.contains(model.id()));
-            let test_yaml_changed = ut
-                .original_file_path()
-                .is_some_and(|p| normalized_changes.contains(&normalize_path(p, None)));
-            if target_path_modified || test_yaml_changed {
-                Some(test_id.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
+    // In-scope unit tests + the changed subset, in ONE traversal so
+    // `changed ⊆ in_scope` holds by construction (cute-dbt#91). A test is
+    // in scope when its target model is path-modified OR its own
+    // `original_file_path` (the declaring YAML file) is in the change set
+    // (the dbt OR-semantics of the baseline path). It is *changed* when
+    // that declaring YAML appears in the diff — file-granular in v0.1
+    // (a changed multi-test YAML marks every test it declares; cute-dbt#96
+    // refines this to block-precise via diff-hunk overlap).
+    let mut in_scope_ids: Vec<String> = Vec::new();
+    let mut changed_ids: Vec<String> = Vec::new();
+    for (test_id, ut) in current.unit_tests() {
+        let target_path_modified = resolve_target_model(current, ut.model())
+            .is_some_and(|model| path_modified_models.contains(model.id()));
+        let test_yaml_changed = ut
+            .original_file_path()
+            .is_some_and(|p| normalized_changes.contains(&normalize_path(p, None)));
+        if test_yaml_changed {
+            changed_ids.push(test_id.clone());
+        }
+        if target_path_modified || test_yaml_changed {
+            in_scope_ids.push(test_id.clone());
+        }
+    }
+    let in_scope: InScopeSet = in_scope_ids.into_iter().collect();
+    let changed: InScopeSet = changed_ids.into_iter().collect();
 
     // Models in scope — explorer-mode union:
     //   Arm 1: every model resolved from an in-scope unit test (so the
@@ -248,7 +286,11 @@ fn select_in_scope_pr_diff(
     }
 
     let models_in_scope: ModelInScopeSet = model_ids.into_iter().collect();
-    (in_scope, models_in_scope)
+    ScopeSelection {
+        in_scope,
+        models_in_scope,
+        changed,
+    }
 }
 
 #[cfg(test)]
@@ -382,7 +424,11 @@ mod tests {
         );
 
         let input = ScopeInput::Baseline { manifest: baseline };
-        let (in_scope, models) = select_in_scope(&current, &input);
+        let ScopeSelection {
+            in_scope,
+            models_in_scope: models,
+            ..
+        } = select_in_scope(&current, &input);
 
         assert!(in_scope.contains(test_id));
         assert!(models.contains(&modified_id));
@@ -418,7 +464,11 @@ mod tests {
             changed_files: vec!["models/marts/dim_payers.sql".to_owned()],
             project_root_strip: None,
         };
-        let (in_scope, models) = select_in_scope(&current, &input);
+        let ScopeSelection {
+            in_scope,
+            models_in_scope: models,
+            ..
+        } = select_in_scope(&current, &input);
 
         assert!(in_scope.contains(test_id));
         assert!(models.contains(&dim_payers));
@@ -450,7 +500,11 @@ mod tests {
             ],
             project_root_strip: None,
         };
-        let (in_scope, models) = select_in_scope(&current, &input);
+        let ScopeSelection {
+            in_scope,
+            models_in_scope: models,
+            ..
+        } = select_in_scope(&current, &input);
 
         assert_eq!(in_scope.len(), 0);
         assert_eq!(models.len(), 0);
@@ -483,7 +537,7 @@ mod tests {
             changed_files: vec!["models/marts/_core__models.yml".to_owned()],
             project_root_strip: None,
         };
-        let (in_scope, _models) = select_in_scope(&current, &input);
+        let ScopeSelection { in_scope, .. } = select_in_scope(&current, &input);
 
         assert!(in_scope.contains(test_id));
     }
@@ -507,7 +561,11 @@ mod tests {
             changed_files: vec!["models/staging/stg_payments.sql".to_owned()],
             project_root_strip: None,
         };
-        let (in_scope, models) = select_in_scope(&current, &input);
+        let ScopeSelection {
+            in_scope,
+            models_in_scope: models,
+            ..
+        } = select_in_scope(&current, &input);
 
         assert_eq!(in_scope.len(), 0);
         assert!(models.contains(&stg_payments));
@@ -532,9 +590,83 @@ mod tests {
             changed_files: vec!["dbt_project/models/marts/dim_payers.sql".to_owned()],
             project_root_strip: Some(PathBuf::from("dbt_project")),
         };
-        let (_in_scope, models) = select_in_scope(&current, &input);
+        let ScopeSelection {
+            models_in_scope: models,
+            ..
+        } = select_in_scope(&current, &input);
 
         assert!(models.contains(&dim_payers));
+    }
+
+    // ----- select_in_scope: changed subset (cute-dbt#91) -----
+
+    #[test]
+    fn pr_diff_arm_changed_is_subset_and_distinguishes_updated_from_context() {
+        // The load-bearing invariant for the PrDiff arm: `changed` is a
+        // strict subset of `in_scope`, and it distinguishes updated tests
+        // from context tests.
+        //   - dim_payers.sql changed → its test (declaring YAML untouched)
+        //     is in scope via target_path_modified, but NOT changed →
+        //     context.
+        //   - _changed.yml changed → stg_x's test is in scope AND changed
+        //     (its declaring YAML is in the diff) even though stg_x.sql is
+        //     untouched → updated.
+        let dim_payers = NodeId::new("model.shop.dim_payers");
+        let stg_x = NodeId::new("model.shop.stg_x");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim_payers.clone(),
+            model_node_with_path(&dim_payers, "ck1", "models/marts/dim_payers.sql"),
+        );
+        nodes.insert(
+            stg_x.clone(),
+            model_node_with_path(&stg_x, "ck2", "models/staging/stg_x.sql"),
+        );
+
+        let ctx_id = "unit_test.shop.test_ctx";
+        let upd_id = "unit_test.shop.test_upd";
+        let mut tests = HashMap::new();
+        tests.insert(
+            ctx_id.to_owned(),
+            test_with_path(
+                "test_ctx",
+                "dim_payers",
+                Some("models/marts/_unchanged.yml"),
+            ),
+        );
+        tests.insert(
+            upd_id.to_owned(),
+            test_with_path("test_upd", "stg_x", Some("models/marts/_changed.yml")),
+        );
+
+        let current = Manifest::new(ManifestMetadata::new("v12"), nodes, tests, HashMap::new());
+
+        let input = ScopeInput::PrDiff {
+            changed_files: vec![
+                "models/marts/dim_payers.sql".to_owned(),
+                "models/marts/_changed.yml".to_owned(),
+            ],
+            project_root_strip: None,
+        };
+        let selection = select_in_scope(&current, &input);
+
+        // changed ⊆ in_scope — by construction (single traversal).
+        for id in selection.changed.iter() {
+            assert!(
+                selection.in_scope.contains(id),
+                "changed id {id:?} must be in scope (changed ⊆ in_scope)",
+            );
+        }
+        assert!(selection.in_scope.contains(ctx_id));
+        assert!(selection.in_scope.contains(upd_id));
+        assert!(
+            selection.changed.contains(upd_id),
+            "test_upd is updated (its declaring YAML is in the diff)",
+        );
+        assert!(
+            !selection.changed.contains(ctx_id),
+            "test_ctx is context (in scope via its model's SQL, YAML unchanged)",
+        );
     }
 
     // ----- helpers -----

@@ -285,6 +285,13 @@ pub struct TestPayload {
     pub name: String,
     /// `model:` reference verbatim from the manifest.
     pub target_model: String,
+    /// `true` when this PR/diff **updated** this test (added or edited its
+    /// definition); `false` when it is *context* — rendered only because
+    /// its target model is in scope (cute-dbt#91). Always serialized (the
+    /// report's JS foregrounds updated tests and toggles context on). The
+    /// classifier rides on the existing in-scope selection — selection is
+    /// unchanged; this is an additive label (ADR-3 / ADR-5).
+    pub changed: bool,
     /// Optional human-readable test description from the manifest's
     /// `description:` field.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -461,9 +468,18 @@ pub fn compose_banner_text(in_scope: &InScopeSet) -> String {
 /// `baseline_label` is interpolated verbatim into the diff-scope banner
 /// (e.g. the `--baseline-manifest` path string). The payload's
 /// `models` list mirrors `models_in_scope` order (deterministic
-/// `BTreeSet` traversal). A model not present in `current.nodes()` is
-/// silently skipped — the comparator should not have surfaced it, but
-/// belt-and-braces.
+/// `BTreeSet` traversal). Each in-scope model carries **all** the unit
+/// tests targeting it (via [`index_tests_for_models`]), not just the
+/// in-scope ones — so the report's All-tests mode and per-model total
+/// count work (cute-dbt#91 widening). Each test is tagged `changed`
+/// (updated) when its id is in the `changed` set, else context. A model
+/// not present in `current.nodes()` is silently skipped — the comparator
+/// should not have surfaced it, but belt-and-braces.
+///
+/// `changed` sits in position 2 (where the dropped in-scope set used to
+/// be) so the widening leaves existing call sites textually stable; the
+/// in-scope set is no longer consumed here (the banner reads it in
+/// [`render_report`]).
 #[must_use]
 // `authoring_yaml` is always built by the cli layer with the default
 // hasher; clippy::implicit_hasher would have us generalize over
@@ -471,12 +487,12 @@ pub fn compose_banner_text(in_scope: &InScopeSet) -> String {
 #[allow(clippy::implicit_hasher)]
 pub fn build_payload(
     current: &Manifest,
-    in_scope: &InScopeSet,
+    changed: &InScopeSet,
     models_in_scope: &ModelInScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     baseline_label: &str,
 ) -> ReportPayload {
-    let model_tests = index_in_scope_tests_by_model(current, in_scope);
+    let model_tests = index_tests_for_models(current, models_in_scope);
     let empty: Vec<(&str, &UnitTest)> = Vec::new();
     let mut models = Vec::new();
     for model_id in models_in_scope.iter() {
@@ -484,7 +500,7 @@ pub fn build_payload(
             continue;
         };
         let tests = model_tests.get(model_id).unwrap_or(&empty).as_slice();
-        models.push(build_model_payload(model, tests, authoring_yaml));
+        models.push(build_model_payload(model, tests, changed, authoring_yaml));
     }
     ReportPayload {
         baseline: baseline_label.to_owned(),
@@ -514,6 +530,7 @@ pub fn render_report(
     current: &Manifest,
     in_scope: &InScopeSet,
     models_in_scope: &ModelInScopeSet,
+    changed: &InScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     baseline_label: &str,
     scope_source: ScopeSource,
@@ -522,11 +539,13 @@ pub fn render_report(
 ) -> io::Result<()> {
     let payload = build_payload(
         current,
-        in_scope,
+        changed,
         models_in_scope,
         authoring_yaml,
         baseline_label,
     );
+    // The empty-scope banner contract reads the TRUE in-scope set, not the
+    // widened render set or the changed subset (cute-dbt#91).
     let banner_text = compose_banner_text(in_scope);
     let payload_json = payload_json_for_html_script(&payload)
         .map_err(|err| io::Error::other(format!("payload serialization: {err}")))?;
@@ -554,6 +573,7 @@ pub fn render_report(
 fn build_model_payload(
     model: &Node,
     tests: &[(&str, &UnitTest)],
+    changed: &InScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
 ) -> ModelPayload {
     let bare_name = leaf_segment(model.id().as_str()).to_owned();
@@ -569,7 +589,7 @@ fn build_model_payload(
         .map(str::to_owned);
     let test_payloads = tests
         .iter()
-        .map(|(id, ut)| build_test_payload(id, ut, &graph, authoring_yaml.get(*id)))
+        .map(|(id, ut)| build_test_payload(id, ut, &graph, changed, authoring_yaml.get(*id)))
         .collect();
     ModelPayload {
         name: bare_name,
@@ -661,11 +681,13 @@ fn build_compiled_sql(
 }
 
 /// Build a single test's payload, including import-CTE binding for each
-/// given.
+/// given. `changed` is the set of updated test ids — `id`'s membership
+/// sets [`TestPayload::changed`] (cute-dbt#91).
 fn build_test_payload(
     id: &str,
     unit_test: &UnitTest,
     graph: &CteGraph,
+    changed: &InScopeSet,
     authoring_yaml: Option<&UnitTestYamlBlock>,
 ) -> TestPayload {
     let given = unit_test
@@ -686,6 +708,7 @@ fn build_test_payload(
         id: id.to_owned(),
         name: unit_test.name().to_owned(),
         target_model: unit_test.model().as_str().to_owned(),
+        changed: changed.contains(id),
         description: unit_test.description().map(str::to_owned),
         tags: unit_test.tags().map(<[String]>::to_vec),
         meta: unit_test.meta().cloned(),
@@ -781,27 +804,39 @@ fn is_leaf_binding_candidate(graph: &CteGraph, index: usize) -> bool {
     !graph.edges().iter().any(|edge| edge.to() == index)
 }
 
-/// Build a map from in-scope model id to the unit tests targeting it.
+/// Build a map from in-scope model id to **all** unit tests targeting it
+/// in the current manifest (cute-dbt#91 widening).
 ///
-/// Resolved via [`resolve_target_model`] (the bare `model:` name →
-/// full node id mapping). Order within each list is `InScopeSet`
-/// iteration order, which is `BTreeSet` over the unit-test id —
-/// deterministic for the golden snapshot.
-fn index_in_scope_tests_by_model<'m>(
+/// Resolved via [`resolve_target_model`] (the bare `model:` name → full
+/// node id mapping). Unlike the prior in-scope-only indexer, this
+/// enumerates every unit test whose resolved target is one of
+/// `models_in_scope`, regardless of whether the test is itself in scope —
+/// so a model that entered scope solely via a changed test also carries
+/// its non-updated (context) siblings, making the report's All-tests mode
+/// and per-model total count work.
+///
+/// `current.unit_tests()` is a `HashMap` with no inherent order, so each
+/// model's list is sorted by unit-test id — the deterministic
+/// `BTreeSet`-over-id order the prior indexer produced, which the golden
+/// snapshot and the example byte-identity gate depend on.
+#[must_use]
+pub fn index_tests_for_models<'m>(
     current: &'m Manifest,
-    in_scope: &InScopeSet,
+    models_in_scope: &ModelInScopeSet,
 ) -> HashMap<NodeId, Vec<(&'m str, &'m UnitTest)>> {
     let mut map: HashMap<NodeId, Vec<(&'m str, &'m UnitTest)>> = HashMap::new();
-    for test_id in in_scope.iter() {
-        let Some((id_owned, unit_test)) = current.unit_tests().get_key_value(test_id) else {
-            continue;
-        };
+    for (test_id, unit_test) in current.unit_tests() {
         let Some(model) = resolve_target_model(current, unit_test.model()) else {
             continue;
         };
-        map.entry(model.id().clone())
-            .or_default()
-            .push((id_owned.as_str(), unit_test));
+        if models_in_scope.contains(model.id()) {
+            map.entry(model.id().clone())
+                .or_default()
+                .push((test_id.as_str(), unit_test));
+        }
+    }
+    for tests in map.values_mut() {
+        tests.sort_by(|a, b| a.0.cmp(b.0));
     }
     map
 }
@@ -1166,6 +1201,10 @@ mod tests {
         assert_eq!(model.name, "stg_orders");
         assert_eq!(model.tests.len(), 1);
         assert_eq!(model.tests[0].name, "test_one");
+        assert!(
+            model.tests[0].changed,
+            "test_one is in the changed set → tagged updated",
+        );
     }
 
     #[test]
@@ -1254,18 +1293,49 @@ mod tests {
     }
 
     #[test]
-    fn build_payload_skips_an_in_scope_test_id_missing_from_manifest() {
-        // Defensive `index_in_scope_tests_by_model` path: a test id is
-        // in the InScopeSet but the manifest has no matching unit_test
-        // entry. The indexer skips it; build_payload must not crash and
-        // the model that WOULD have carried it has zero tests.
-        let node = model_node("model.shop.x", "body", Some("select 1"));
-        let manifest = manifest_for(vec![node], vec![]);
-        let in_scope = InScopeSet::from_iter(["unit_test.shop.ghost".to_owned()]);
-        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
-        let payload = build_payload(&manifest, &in_scope, &models, &HashMap::new(), "b");
+    fn build_payload_widens_to_all_tests_on_in_scope_model_tagging_changed() {
+        // cute-dbt#91 widening (replaces the obsolete in-scope-id-missing-
+        // from-manifest test — the indexer is now models-driven, so that
+        // defensive path no longer exists). A model in scope carries EVERY
+        // unit test targeting it — both the updated (changed) ones and the
+        // context (unchanged) siblings — each tagged via the `changed`
+        // set. This is the modest render-scope widening that makes the
+        // report's All-tests mode + per-model total count work.
+        let node = model_node("model.shop.dim_x", "body", Some("select 1"));
+        let updated = simple_unit_test("dim_x", "test_updated");
+        let context = simple_unit_test("dim_x", "test_context");
+        let manifest = manifest_for(
+            vec![node],
+            vec![
+                ("unit_test.shop.test_updated", updated),
+                ("unit_test.shop.test_context", context),
+            ],
+        );
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.dim_x")]);
+        // Only test_updated is changed; test_context is a non-updated
+        // sibling carried purely by the widening.
+        let changed = InScopeSet::from_iter(["unit_test.shop.test_updated".to_owned()]);
+        let payload = build_payload(&manifest, &changed, &models, &HashMap::new(), "b");
         assert_eq!(payload.models.len(), 1);
-        assert!(payload.models[0].tests.is_empty());
+        let tests = &payload.models[0].tests;
+        assert_eq!(
+            tests.len(),
+            2,
+            "both the updated test and its context sibling are carried",
+        );
+        let updated_p = tests
+            .iter()
+            .find(|t| t.name == "test_updated")
+            .expect("updated test present");
+        let context_p = tests
+            .iter()
+            .find(|t| t.name == "test_context")
+            .expect("context sibling present");
+        assert!(updated_p.changed, "the updated test is tagged changed");
+        assert!(
+            !context_p.changed,
+            "the context sibling is tagged not-changed"
+        );
     }
 
     #[test]
@@ -1682,6 +1752,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &InScopeSet::new(),
             &HashMap::new(),
             "b",
             ScopeSource::Baseline,
@@ -1719,6 +1790,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &InScopeSet::new(),
             &HashMap::new(),
             "b",
             ScopeSource::Baseline,
@@ -1756,6 +1828,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &InScopeSet::new(),
             &HashMap::new(),
             "b",
             ScopeSource::Baseline,
@@ -1783,6 +1856,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &InScopeSet::new(),
             &HashMap::new(),
             "b",
             ScopeSource::Baseline,
@@ -1816,6 +1890,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &InScopeSet::new(),
             &HashMap::new(),
             "b",
             ScopeSource::Baseline,
@@ -1872,6 +1947,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &InScopeSet::new(),
             &HashMap::new(),
             "baseline.json",
             ScopeSource::Baseline,
@@ -1905,6 +1981,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &InScopeSet::new(),
             &HashMap::new(),
             "",
             ScopeSource::PrDiff,
@@ -1939,6 +2016,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &InScopeSet::new(),
             &HashMap::new(),
             "baseline.json",
             ScopeSource::Baseline,
@@ -1973,6 +2051,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &InScopeSet::new(),
             &HashMap::new(),
             "lab1@aaaaaaa",
             ScopeSource::Baseline,
@@ -2016,6 +2095,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &InScopeSet::new(),
             &HashMap::new(),
             "b",
             ScopeSource::Baseline,
@@ -2080,6 +2160,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &InScopeSet::new(),
             &HashMap::new(),
             "b",
             ScopeSource::Baseline,

@@ -33,6 +33,7 @@ use std::collections::{BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::manifest::{Manifest, Node, NodeId};
+use crate::domain::unit_test::UnitTest;
 
 /// The set of node ids reported as `state:modified` by the
 /// [`StateComparator`]. Backed by a [`BTreeSet`] for deterministic
@@ -239,7 +240,7 @@ impl StateComparator {
         for (id, unit_test) in current.unit_tests() {
             let target_modified = resolve_target_model(current, unit_test.model())
                 .is_some_and(|node| modified.contains(node.id()));
-            let test_changed = baseline.unit_test(id) != Some(unit_test);
+            let test_changed = unit_test_is_changed(baseline, id, unit_test);
             if target_modified || test_changed {
                 in_scope.ids.insert(id.clone());
             }
@@ -294,6 +295,43 @@ impl StateComparator {
 
         ModelInScopeSet { ids }
     }
+
+    /// Unit-test ids whose **definition changed** relative to the baseline
+    /// — the precise "this PR updated this test" signal (cute-dbt#91).
+    ///
+    /// A test is *changed* when its `UnitTest` differs from the baseline's
+    /// entry (added, or edited in place) — the `unit_test_is_changed`
+    /// predicate.
+    /// This is a strict subset of [`Self::in_scope_unit_tests`]: a changed
+    /// test is always in scope (the `target_modified || test_changed`
+    /// union), so `changed ⊆ in_scope` holds by construction. Modifier-
+    /// independent — a changed test is in scope regardless of which
+    /// `state:modified` sub-selectors are registered — hence an associated
+    /// function, not a `&self` method.
+    #[must_use]
+    pub fn changed_unit_tests(current: &Manifest, baseline: &Manifest) -> InScopeSet {
+        let mut ids: Vec<String> = Vec::new();
+        for (id, unit_test) in current.unit_tests() {
+            if unit_test_is_changed(baseline, id, unit_test) {
+                ids.push(id.clone());
+            }
+        }
+        ids.into_iter().collect()
+    }
+}
+
+/// `true` when `current`'s `unit_test` differs from the baseline's entry
+/// for `id` — the single definition of "this unit test changed".
+///
+/// A test absent from the baseline (`None`) is changed (newly added); a
+/// test present but not byte-equal is changed (edited). Shared by
+/// [`StateComparator::in_scope_unit_tests`] (its branch-B "a changed test
+/// on an unchanged model is in scope") and
+/// [`StateComparator::changed_unit_tests`] so the two predicates cannot
+/// drift apart (cute-dbt#91).
+#[must_use]
+fn unit_test_is_changed(baseline: &Manifest, id: &str, unit_test: &UnitTest) -> bool {
+    baseline.unit_test(id) != Some(unit_test)
 }
 
 /// Resolve a unit test's `model:` reference to its manifest node.
@@ -898,6 +936,129 @@ mod tests {
         assert_eq!(in_scope.len(), 1);
         assert!(in_scope.contains("unit_test.shop.a.t"));
         assert!(!in_scope.contains("unit_test.shop.b.t"));
+    }
+
+    // ===== StateComparator::changed_unit_tests (cute-dbt#91) =====
+
+    #[test]
+    fn changed_unit_tests_includes_an_edited_test() {
+        // A test whose definition changed (description differs) is in the
+        // changed set even though its model body is identical.
+        let current = manifest(
+            vec![model("model.shop.stg_customers", "same")],
+            vec![(
+                "unit_test.shop.stg_customers.t",
+                unit_test_for("stg_customers", Some("revised assertion")),
+            )],
+        );
+        let baseline = manifest(
+            vec![model("model.shop.stg_customers", "same")],
+            vec![(
+                "unit_test.shop.stg_customers.t",
+                unit_test_for("stg_customers", Some("original assertion")),
+            )],
+        );
+        let changed = StateComparator::changed_unit_tests(&current, &baseline);
+        assert!(changed.contains("unit_test.shop.stg_customers.t"));
+    }
+
+    #[test]
+    fn changed_unit_tests_includes_a_newly_added_test() {
+        // A test absent from the baseline is changed (added by this diff).
+        let current = manifest(
+            vec![model("model.shop.stg_customers", "same")],
+            vec![(
+                "unit_test.shop.stg_customers.fresh",
+                unit_test_for("stg_customers", None),
+            )],
+        );
+        let baseline = manifest(vec![model("model.shop.stg_customers", "same")], vec![]);
+        let changed = StateComparator::changed_unit_tests(&current, &baseline);
+        assert!(changed.contains("unit_test.shop.stg_customers.fresh"));
+    }
+
+    #[test]
+    fn changed_unit_tests_excludes_an_identical_test_on_a_modified_model() {
+        // The context case: the model body changed (so the test is IN
+        // SCOPE via target_modified) but the test definition is byte-equal
+        // in both manifests — it is NOT changed. This is the distinction
+        // the report's updated-vs-context classification rides on.
+        let test = unit_test_for("stg_orders", None);
+        let current = manifest(
+            vec![model("model.shop.stg_orders", "new")],
+            vec![("unit_test.shop.stg_orders.t", test.clone())],
+        );
+        let baseline = manifest(
+            vec![model("model.shop.stg_orders", "old")],
+            vec![("unit_test.shop.stg_orders.t", test)],
+        );
+        let cmp = StateComparator::body_only();
+        let in_scope = cmp.in_scope_unit_tests(&current, &baseline);
+        let changed = StateComparator::changed_unit_tests(&current, &baseline);
+        assert!(
+            in_scope.contains("unit_test.shop.stg_orders.t"),
+            "an identical test on a modified model is in scope (target_modified)",
+        );
+        assert!(
+            !changed.contains("unit_test.shop.stg_orders.t"),
+            "but it is NOT changed — it is context, not updated",
+        );
+    }
+
+    #[test]
+    fn changed_unit_tests_is_a_subset_of_in_scope() {
+        // The load-bearing invariant `changed ⊆ in_scope` for the baseline
+        // arm: every changed id must also be in scope. Mixed manifest —
+        // one edited test on an unchanged model, one identical test on a
+        // modified model, one untouched test on an untouched model.
+        let current = manifest(
+            vec![
+                model("model.shop.edited_test_model", "same"),
+                model("model.shop.changed_body_model", "new"),
+                model("model.shop.untouched", "same"),
+            ],
+            vec![
+                (
+                    "unit_test.shop.edited",
+                    unit_test_for("edited_test_model", Some("after")),
+                ),
+                (
+                    "unit_test.shop.context",
+                    unit_test_for("changed_body_model", None),
+                ),
+                ("unit_test.shop.untouched", unit_test_for("untouched", None)),
+            ],
+        );
+        let baseline = manifest(
+            vec![
+                model("model.shop.edited_test_model", "same"),
+                model("model.shop.changed_body_model", "old"),
+                model("model.shop.untouched", "same"),
+            ],
+            vec![
+                (
+                    "unit_test.shop.edited",
+                    unit_test_for("edited_test_model", Some("before")),
+                ),
+                (
+                    "unit_test.shop.context",
+                    unit_test_for("changed_body_model", None),
+                ),
+                ("unit_test.shop.untouched", unit_test_for("untouched", None)),
+            ],
+        );
+        let cmp = StateComparator::body_only();
+        let in_scope = cmp.in_scope_unit_tests(&current, &baseline);
+        let changed = StateComparator::changed_unit_tests(&current, &baseline);
+        for id in changed.iter() {
+            assert!(
+                in_scope.contains(id),
+                "changed id {id:?} must be in scope (changed ⊆ in_scope)",
+            );
+        }
+        assert!(changed.contains("unit_test.shop.edited"));
+        assert!(!changed.contains("unit_test.shop.context"));
+        assert!(!changed.contains("unit_test.shop.untouched"));
     }
 
     // ===== ModelInScopeSet =====

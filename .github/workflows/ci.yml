@@ -638,6 +638,11 @@ jobs:
       # and isolates failure modes (a parser regression is unrelated
       # to a network regression).
       - run: cargo test --test headless_csv_parser --locked -- --ignored
+      # Updated-only ↔ All-tests toggle interaction (cute-dbt#91) — drives
+      # the inlined report JS in a real browser (selector visibility,
+      # toggle-dependent counts, 0-updated hint, auto-All landing). Reuses
+      # the Chrome install above; `#[ignore]` by default like its siblings.
+      - run: cargo test --test headless_toggle --locked -- --ignored
 
   bdd:
     # ATDD outer loop — the executable acceptance contract for the

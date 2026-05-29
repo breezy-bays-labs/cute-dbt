@@ -90,6 +90,7 @@ fn rendered_report_skeleton() {
     let comparator = StateComparator::body_only();
     let in_scope = comparator.in_scope_unit_tests(&current, &baseline);
     let models_in_scope = comparator.models_in_scope(&current, &baseline);
+    let changed = StateComparator::changed_unit_tests(&current, &baseline);
     let out = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("golden_report.html");
     let _ = std::fs::remove_file(&out);
     render_report(
@@ -97,6 +98,7 @@ fn rendered_report_skeleton() {
         &current,
         &in_scope,
         &models_in_scope,
+        &changed,
         &HashMap::new(),
         "jaffle-shop-baseline.json",
         ScopeSource::Baseline,

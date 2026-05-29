@@ -44,11 +44,13 @@ fn render_jaffle_shop(out: &Path) {
     let comparator = StateComparator::body_only();
     let in_scope = comparator.in_scope_unit_tests(&current, &baseline);
     let models_in_scope = comparator.models_in_scope(&current, &baseline);
+    let changed = StateComparator::changed_unit_tests(&current, &baseline);
     render_report(
         out,
         &current,
         &in_scope,
         &models_in_scope,
+        &changed,
         &HashMap::new(),
         "jaffle-shop-baseline.json",
         ScopeSource::Baseline,
@@ -178,6 +180,21 @@ fn the_real_renderer_payload_carries_an_in_scope_model_with_its_tests() {
     assert!(
         test_count >= 1,
         "model {model_name} carries {test_count} in-scope unit test(s) — expected ≥1",
+    );
+    // cute-dbt#91 — every rendered test carries the additive boolean
+    // `changed` (updated-vs-context) flag. Fixture-agnostic: assert the
+    // field's presence + type, not a specific value (the manifest pair is
+    // a maintained-elsewhere artifact).
+    let tests_arr = with_tests
+        .get("tests")
+        .and_then(|t| t.as_array())
+        .expect("tests array");
+    assert!(
+        tests_arr.iter().all(|t| t
+            .get("changed")
+            .and_then(serde_json::Value::as_bool)
+            .is_some()),
+        "every rendered test carries a boolean `changed` flag (cute-dbt#91)",
     );
 }
 

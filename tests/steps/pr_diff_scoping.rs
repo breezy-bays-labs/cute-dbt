@@ -404,6 +404,78 @@ fn no_test_row_for(world: &mut World, test: String) {
     );
 }
 
+// --- cute-dbt#91: updated-vs-context classification (payload-asserted) ---
+
+/// Find a test object by `name` across every model's `tests` array.
+///
+/// Fails loud on an ambiguous match: if two rendered models ever carry a
+/// test with the same `name`, returning the first would silently assert
+/// against the wrong row, so this panics instead (CodeRabbit on #97).
+/// Today's scenarios put all of a scenario's tests on one model, so a
+/// match is unique; the guard protects future multi-model scenarios.
+fn find_test<'p>(payload: &'p Value, name: &str) -> Option<&'p Value> {
+    let matches: Vec<&Value> = payload["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["tests"].as_array())
+        .flatten()
+        .filter(|t| t["name"].as_str() == Some(name))
+        .collect();
+    match matches.as_slice() {
+        [] => None,
+        [test] => Some(*test),
+        _ => panic!(
+            "test name {name:?} is ambiguous across models — key the BDD lookup by id or model+name"
+        ),
+    }
+}
+
+#[then(regex = r#"^the test "([^"]+)" is marked updated$"#)]
+fn test_marked_updated(world: &mut World, name: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let test = find_test(&p, &name)
+        .unwrap_or_else(|| panic!("test {name:?} not in payload; got {:?}", test_names(&p)));
+    assert_eq!(
+        test["changed"].as_bool(),
+        Some(true),
+        "test {name:?} should be marked updated (changed:true); got {test:?}",
+    );
+}
+
+#[then(regex = r#"^the test "([^"]+)" is marked context$"#)]
+fn test_marked_context(world: &mut World, name: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let test = find_test(&p, &name)
+        .unwrap_or_else(|| panic!("test {name:?} not in payload; got {:?}", test_names(&p)));
+    assert_eq!(
+        test["changed"].as_bool(),
+        Some(false),
+        "test {name:?} should be marked context (changed:false); got {test:?}",
+    );
+}
+
+#[then(regex = r#"^the model "([^"]+)" carries (\d+) unit tests$"#)]
+fn model_carries_n_tests(world: &mut World, name: String, n: usize) {
+    require_exit_0(world);
+    let p = payload(world);
+    let model = p["models"]
+        .as_array()
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|m| m["name"].as_str() == Some(name.as_str()))
+        })
+        .unwrap_or_else(|| panic!("model {name:?} not in payload; got {:?}", model_names(&p)));
+    let count = model["tests"].as_array().map_or(0, Vec::len);
+    assert_eq!(
+        count, n,
+        "model {name:?} should carry {n} unit tests; got {count}",
+    );
+}
+
 #[then(
     regex = r#"^the rendered report shows "([^"]+)" with the "no unit tests wired" empty state$"#
 )]
