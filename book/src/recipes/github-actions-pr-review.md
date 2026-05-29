@@ -12,21 +12,21 @@ CI counterpart to the local [`--baseline-manifest`][diff] flow.
 
 [diff]: ../how-it-works.md
 
-Two variants:
+Two delivery options:
 
-- **Variant 2A — Pages preview** (public repos): publishes the report to
-  a per-PR GitHub Pages subdirectory and posts a clickable link. ≤2-click
-  reviewer UX.
-- **Variant 2B — Artifact link** (private repos / Pages-less): uploads
-  the report as a workflow artifact and links to it.
+- **Pages preview** (public repos): publishes the report to a per-PR
+  GitHub Pages subdirectory and posts a clickable link. ≤2-click reviewer
+  UX.
+- **Artifact link** (private repos / Pages-less): uploads the report as a
+  workflow artifact and links to it.
 
-> ⚠️ **Privacy — read this before choosing a variant.** GitHub Pages on a
+> ⚠️ **Privacy — read this before choosing.** GitHub Pages on a
 > **private** repository is **still publicly reachable by URL** — Pages
 > does not authenticate visitors on the Free or Pro tier. If your dbt
-> models, fixtures, or column names are sensitive, **use Variant 2B**
-> (artifacts are gated behind repo-read auth). Variant 2A is only safe for
-> data you would publish openly. cute-dbt does not detect this mismatch
-> for you in v0.1 — the choice is yours to make.
+> models, fixtures, or column names are sensitive, **use the artifact
+> link** (artifacts are gated behind repo-read auth). The Pages preview is
+> only safe for data you would publish openly. cute-dbt does not detect
+> this mismatch for you in v0.1 — the choice is yours to make.
 
 ## 1. What this gives you
 
@@ -53,20 +53,29 @@ in any browser.
   with **no external warehouse and no secrets** and is the easiest CI
   choice; cloud adapters (Snowflake, BigQuery, …) need credentials wired
   as repository secrets and a CI `profiles.yml` target.
+- **A dbt profile CI can find.** dbt reads connection config from a
+  `profiles.yml` whose top-level key matches `profile:` in your
+  `dbt_project.yml`. Setup is adopter-specific: either commit a
+  `profiles.yml` and pass `--profiles-dir`, or write a throwaway CI
+  profile to `~/.dbt/profiles.yml` (dbt's default location) as the
+  workflow below does. The DuckDB `:memory:` profile shown needs no
+  secrets. Likewise, install dbt however your project does — `pip`,
+  `uv`, or `poetry` all work; the recipe shows `pip`.
 - **`fetch-depth: 0`** on `actions/checkout` — the SHA-based diff needs
   both the base and head commits present locally.
-- **For Variant 2A only:** GitHub Pages enabled for the repo, publishing
+- **For the Pages preview only:** GitHub Pages enabled for the repo, publishing
   from the `gh-pages` branch (Settings → Pages → Source: *Deploy from a
   branch* → `gh-pages`). The first run creates the branch; enable Pages
   to point at it.
 
 ## 3. The shared cute-dbt invocation
 
-Both variants share the same diff + render core. The diff uses the PR
+Both options share the same diff + render core. The diff uses the PR
 event's **base and head SHAs** (deterministic, fork-safe — it does not
 depend on `origin` remote semantics or branch-name resolution):
 
 ```bash
+mkdir -p _site
 git diff --name-only \
   "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
   > changed_files.txt
@@ -75,7 +84,7 @@ cute-dbt \
   --manifest dbt_project/target/manifest.json \
   --scope-from-pr-diff @changed_files.txt \
   --project-root dbt_project \
-  --out report.html
+  --out _site/report.html
 ```
 
 `--scope-from-pr-diff @changed_files.txt` reads the changed-file list (one
@@ -86,7 +95,12 @@ cute-dbt computes the diff itself from **facts you hand it** — it never
 shells out to `git` or reads `GITHUB_EVENT_PATH`, so the workflow stays in
 control of *how* the file list is produced.
 
-## 4. Variant 2A — Pages preview (public repos)
+cute-dbt writes only `report.html`; isolating it in a dedicated `_site/`
+dir (hence `mkdir -p _site` + `--out _site/report.html`) keeps the Pages
+publish in § 4 from pushing your **whole checkout** to the `gh-pages`
+branch — `publish_dir` points at `_site/`, not `.`.
+
+## 4. Pages preview (public repos)
 
 Copy this into `.github/workflows/cute-dbt-pr-review.yml`. Edit
 `dbt_project`, the dbt adapter, and `CUTE_DBT_REV` (see § 6 install note).
@@ -118,13 +132,27 @@ jobs:
           fetch-depth: 0           # base + head SHAs must be present
           persist-credentials: false
 
-      # --- Compile the dbt project at the PR head ---
+      # --- Compile the dbt project at the PR head. `dbt compile` (not
+      #     `dbt parse`) so compiled_code is populated. Adapter, toolchain,
+      #     and profile are adopter-specific — see § 2. ---
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.11'
-      - run: pip install dbt-core dbt-duckdb   # edit: your adapter
+      - run: pip install dbt-core dbt-duckdb   # edit: your adapter (uv/poetry work too)
+      - name: Write a CI dbt profile
+        run: |
+          mkdir -p ~/.dbt
+          cat > ~/.dbt/profiles.yml <<'PROFILE'
+          my_dbt_profile:        # edit: must match `profile:` in dbt_project.yml
+            target: ci
+            outputs:
+              ci:
+                type: duckdb     # edit: your adapter; cloud adapters read secrets from env
+                path: ':memory:'
+                threads: 4
+          PROFILE
       - run: dbt deps --project-dir dbt_project
-      - run: dbt compile --project-dir dbt_project --profiles-dir dbt_project
+      - run: dbt compile --project-dir dbt_project
 
       # --- Install cute-dbt (see § 6 for the binstall form once published) ---
       - uses: cargo-bins/cargo-binstall@aaa84a43aec4955a42c5ffc65d258961e39f276e # v1.19.1
@@ -137,6 +165,7 @@ jobs:
       - name: Render diff-scoped report
         run: |
           set -euo pipefail
+          mkdir -p _site
           git diff --name-only \
             "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
             > changed_files.txt
@@ -144,13 +173,15 @@ jobs:
             --manifest dbt_project/target/manifest.json \
             --scope-from-pr-diff @changed_files.txt \
             --project-root dbt_project \
-            --out report.html
+            --out _site/report.html
 
-      # --- Publish to a per-PR Pages subdirectory ---
+      # --- Publish ONLY the report dir to a per-PR Pages subdirectory.
+      #     publish_dir: ./_site (NOT .) so the whole checkout never lands
+      #     on the gh-pages branch. ---
       - uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: .
+          publish_dir: ./_site
           keep_files: true
           destination_dir: pr-${{ github.event.pull_request.number }}
 
@@ -166,9 +197,10 @@ jobs:
             Scoped to the models + unit tests this PR changed.
 ```
 
-## 5. Variant 2B — Artifact link (private repos / Pages-less)
+## 5. Artifact link (private repos / Pages-less)
 
-**Identical to 2A** except: the job needs no `contents: write`, and the
+**Identical to the Pages preview** except: the job needs no
+`contents: write`, and the
 `peaceiris/actions-gh-pages` step is replaced by an artifact upload + a
 download link in the comment.
 
@@ -178,12 +210,12 @@ download link in the comment.
       actions: read          # for the artifacts API call below
       pull-requests: write
 
-    # ... same checkout / dbt compile / install / render steps as 2A ...
+    # ... same checkout / dbt compile / install / render steps as above ...
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cute-dbt-report
-          path: report.html
+          path: _site/report.html    # render step writes here (same as above)
           retention-days: 30
 
       - uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
@@ -199,8 +231,8 @@ download link in the comment.
 ```
 
 Artifact download requires the reviewer to be logged in with repo read
-access — which is exactly the auth gate that makes 2B the safe choice for
-private data.
+access — which is exactly the auth gate that makes the artifact link the
+safe choice for private data.
 
 ## 6. Trigger patterns (opt-in vs. always-on)
 
@@ -301,7 +333,7 @@ re-run button) is common.
 - **Branch protection:** make the `review` job a required status check so
   a PR can't merge until the report renders.
 
-## 8. Cleanup on PR close (Variant 2A)
+## 8. Cleanup on PR close (Pages preview)
 
 The Pages `pr-<N>/` subdirectories accumulate. A small companion workflow
 removes each when its PR closes:
@@ -338,16 +370,24 @@ jobs:
 - **An in-scope model fails with `NotCompiled` / "run dbt compile"** — the
   manifest was produced by `dbt parse`, not `dbt compile`. Use `dbt
   compile` (§ 2) so `compiled_code` is populated.
+- **`dbt compile` fails: "Could not find profile" / credentials error** —
+  the `profiles.yml` top-level key must match `profile:` in your
+  `dbt_project.yml`, and cloud adapters need their credential env vars set
+  (§ 2). The CI-profile step writes to `~/.dbt/profiles.yml`, dbt's default
+  location, so no `--profiles-dir` is needed.
 - **Empty report ("0 unit tests in scope")** — the PR changed no files
   that map to a model `.sql` or a unit-test `.yml`. Confirm `--project-root`
   matches your layout (repo-relative diff paths vs. project-relative
   manifest paths) and that `fetch-depth: 0` is set so the diff resolves.
 - **Pages link 404s** — Pages isn't enabled, or it's pointed at the wrong
-  branch. Enable it on `gh-pages` (§ 2), or switch to Variant 2B.
+  branch. Enable it on `gh-pages` (§ 2), or switch to the artifact link.
 - **Fork PRs:** with `pull_request` (not `pull_request_target`), forks get
-  a read-only `GITHUB_TOKEN`. The Pages-publish and sticky-comment steps
-  silently no-op on fork PRs. Same-repo branches are unaffected. This
-  mirrors the [sticky-comment recipe's fork note](./ci-sticky-comment.md).
+  a read-only `GITHUB_TOKEN`, so the Pages-publish and sticky-comment steps
+  silently no-op on fork PRs (same-repo branches are unaffected). If you
+  need fork coverage, either run *only the comment step* under
+  `pull_request_target` (never checking out PR code), or split the workflow
+  so a [`workflow_run`](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#workflow_run)-triggered
+  job posts the comment in base-repo context.
 - **Comment trigger (T3) not firing** — check the `author_association`
   gate and that the comment contains `/cute-dbt` verbatim.
 
@@ -358,7 +398,7 @@ While cute-dbt is **unpublished**, install from a pinned commit:
 (set `CUTE_DBT_REV` to a `main` SHA you trust — pinning is mandatory per
 the [workflow-hardening convention](../release-discipline.md)). Once
 cute-dbt is on crates.io, replace those two steps with the faster
-`cargo binstall cute4dbt --version 0.1 --no-confirm` (the `0.1` requirement
+`cargo binstall cute-dbt --version 0.1 --no-confirm` (the `0.1` requirement
 resolves to the latest compatible `0.1.x` patch).
 
 ## 10. v0.1 fidelity limits

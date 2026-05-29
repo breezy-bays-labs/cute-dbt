@@ -16,7 +16,6 @@
 
 # Recipes
 
-- [CI sticky-comment report preview](./recipes/ci-sticky-comment.md)
 - [GitHub Actions PR review](./recipes/github-actions-pr-review.md)
 
 ----------
