@@ -35,6 +35,16 @@ expression: skeleton
 </section>
 
 <section class="test-selection" aria-label="Test selection">
+  <!-- cute-dbt#91 — global scope toggle. "Updated only" (default)
+       foregrounds the tests this diff updated; "All tests" reveals every
+       test on the in-scope models. The server marks "Updated only" active;
+       the JS re-syncs at boot (auto-selecting "All tests" when the diff
+       updated zero tests). data-testid handles keep the headless toggle
+       test off brittle class names. -->
+  <div class="test-mode-toggle" role="group" aria-label="Test scope" data-testid="updated-toggle">
+    <button type="button" data-test-mode="updated" class="is-active" aria-pressed="true">Updated only</button>
+    <button type="button" data-test-mode="all" aria-pressed="false">All tests</button>
+  </div>
   <div class="test-selector-row">
     <div class="selector-field">
       <label for="model-select">Model</label>
@@ -46,6 +56,7 @@ expression: skeleton
       <select id="test-select"></select>
     </div>
   </div>
+  <p class="zero-updated-hint" data-testid="zero-updated-hint" hidden></p>
 
   <details class="test-details">
     <summary>Test details</summary>

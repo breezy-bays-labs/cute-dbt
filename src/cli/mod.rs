@@ -37,11 +37,12 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::adapters::manifest::{FileManifestSource, load_baseline};
-use crate::adapters::render::{ScopeSource, render_report};
+use crate::adapters::render::{ScopeSource, index_tests_for_models, render_report};
 use crate::adapters::source_yaml::FsSourceYamlReader;
 use crate::domain::{
     DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, PreflightError, ScopeInput,
-    UnitTestYamlBlock, extract_unit_test_block, preflight_compiled, select_in_scope,
+    ScopeSelection, UnitTestYamlBlock, extract_unit_test_block, preflight_compiled,
+    select_in_scope,
 };
 use crate::ports::{ManifestSource, SourceYamlReader};
 
@@ -130,10 +131,21 @@ impl RunError {
 fn execute(cli: &Cli) -> Result<(), RunError> {
     let current = load_current(cli)?;
     let scope_input = resolve_scope_input(cli)?;
-    let (in_scope, models_in_scope) = select_in_scope(&current, &scope_input);
+    let ScopeSelection {
+        in_scope,
+        models_in_scope,
+        changed,
+    } = select_in_scope(&current, &scope_input);
+    // Stage-2 fail-closed reads the TRUE in-scope set (cute-dbt#91): the
+    // widened render set is only for what the report displays.
     preflight_compiled(&current, &in_scope, &models_in_scope)?;
     parse_ctes();
-    let authoring_yaml = gather_authoring_yaml(cli, &current, &in_scope);
+    // The widened render set — every unit test on an in-scope model, not
+    // just the in-scope ones — drives BOTH the Authoring-YAML gather and
+    // the render payload, so context siblings keep their YAML drawer
+    // (cute-dbt#91).
+    let render_test_ids = render_test_ids(&current, &models_in_scope);
+    let authoring_yaml = gather_authoring_yaml(cli, &current, &render_test_ids);
     let (report_title, report_subtitle) = resolve_report_strings(cli);
     let (baseline_label, scope_source) = scope_banner(cli, &scope_input);
     render(
@@ -141,6 +153,7 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
         &current,
         &in_scope,
         &models_in_scope,
+        &changed,
         &authoring_yaml,
         &baseline_label,
         scope_source,
@@ -148,6 +161,19 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
         report_subtitle.as_deref(),
     )?;
     Ok(())
+}
+
+/// The widened render set (cute-dbt#91): the ids of every current unit
+/// test whose resolved target model is in scope — a superset of the
+/// in-scope set that adds the context siblings on a model that entered
+/// scope solely via a changed test. Both [`gather_authoring_yaml`] and the
+/// render payload consume this so the rendered tests and their
+/// Authoring-YAML drawers stay in lockstep.
+fn render_test_ids(current: &Manifest, models_in_scope: &ModelInScopeSet) -> InScopeSet {
+    index_tests_for_models(current, models_in_scope)
+        .values()
+        .flat_map(|tests| tests.iter().map(|(id, _)| (*id).to_owned()))
+        .collect()
 }
 
 /// The `gather_authoring_yaml` stage — read each in-scope `unit_test`'s
@@ -317,6 +343,7 @@ fn render(
     current: &Manifest,
     in_scope: &InScopeSet,
     models_in_scope: &ModelInScopeSet,
+    changed: &InScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     baseline_label: &str,
     scope_source: ScopeSource,
@@ -328,6 +355,7 @@ fn render(
         current,
         in_scope,
         models_in_scope,
+        changed,
         authoring_yaml,
         baseline_label,
         scope_source,

@@ -404,6 +404,63 @@ fn no_test_row_for(world: &mut World, test: String) {
     );
 }
 
+// --- cute-dbt#91: updated-vs-context classification (payload-asserted) ---
+
+/// Find a test object by `name` across every model's `tests` array.
+fn find_test<'p>(payload: &'p Value, name: &str) -> Option<&'p Value> {
+    payload["models"].as_array()?.iter().find_map(|m| {
+        m["tests"]
+            .as_array()?
+            .iter()
+            .find(|t| t["name"].as_str() == Some(name))
+    })
+}
+
+#[then(regex = r#"^the test "([^"]+)" is marked updated$"#)]
+fn test_marked_updated(world: &mut World, name: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let test = find_test(&p, &name)
+        .unwrap_or_else(|| panic!("test {name:?} not in payload; got {:?}", test_names(&p)));
+    assert_eq!(
+        test["changed"].as_bool(),
+        Some(true),
+        "test {name:?} should be marked updated (changed:true); got {test:?}",
+    );
+}
+
+#[then(regex = r#"^the test "([^"]+)" is marked context$"#)]
+fn test_marked_context(world: &mut World, name: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let test = find_test(&p, &name)
+        .unwrap_or_else(|| panic!("test {name:?} not in payload; got {:?}", test_names(&p)));
+    assert_eq!(
+        test["changed"].as_bool(),
+        Some(false),
+        "test {name:?} should be marked context (changed:false); got {test:?}",
+    );
+}
+
+#[then(regex = r#"^the model "([^"]+)" carries (\d+) unit tests$"#)]
+fn model_carries_n_tests(world: &mut World, name: String, n: usize) {
+    require_exit_0(world);
+    let p = payload(world);
+    let model = p["models"]
+        .as_array()
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|m| m["name"].as_str() == Some(name.as_str()))
+        })
+        .unwrap_or_else(|| panic!("model {name:?} not in payload; got {:?}", model_names(&p)));
+    let count = model["tests"].as_array().map_or(0, Vec::len);
+    assert_eq!(
+        count, n,
+        "model {name:?} should carry {n} unit tests; got {count}",
+    );
+}
+
 #[then(
     regex = r#"^the rendered report shows "([^"]+)" with the "no unit tests wired" empty state$"#
 )]

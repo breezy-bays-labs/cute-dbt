@@ -179,3 +179,82 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
   # / leading-"./" / project-root-strip cases (cute-dbt#81). The BDD asserts
   # the user-visible behavior (model X appears in scope); the Rust suite
   # kills mutants on the path-matching function.
+
+  # --- cute-dbt#91 (slice A): foreground updated unit tests + toggle ---
+  #
+  # Classification rides on the existing in-scope selection — selection is
+  # unchanged; each in-scope test is additionally labeled updated vs context,
+  # and the report foregrounds the updated ones. In PR-diff mode "updated" is
+  # file-granular (a changed YAML marks every test it declares as updated);
+  # slice B (tracked: cute-dbt#96) makes this block-precise via diff-hunk
+  # overlap. Baseline-mode precise classification is covered by the
+  # `changed_unit_tests` / `test_changed` unit tests in src/domain/state.rs
+  # plus the `changed ⊆ in_scope` tests in src/domain/{state,scope}.rs.
+
+  Scenario: A test whose declaring YAML changed is marked updated
+    Given a list of changed files containing "models/marts/core/_core__models.yml"
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel" declared in "models/marts/core/_core__models.yml"
+    When I run cute-dbt with --manifest current.json --scope-from-pr-diff <changed-files> --project-root . --out report.html
+    Then the exit code is 0
+    And the test "test_dim_payers_injects_unknown_sentinel" is marked updated
+
+  Scenario: A test in scope only because its model's SQL changed is marked context
+    Given a list of changed files containing "models/marts/core/dim_payers.sql"
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel" declared in "models/marts/core/_core__models.yml"
+    When I run cute-dbt with --manifest current.json --scope-from-pr-diff <changed-files> --project-root . --out report.html
+    Then the exit code is 0
+    And the test "test_dim_payers_injects_unknown_sentinel" is marked context
+
+  Scenario: A changed model carries its tests with updated/context marks
+    # dim_payers.sql changed (model in scope; its tests are context unless their
+    # own YAML changed); test_a's YAML changed (updated); test_b's YAML untouched
+    # (context). The payload carries both → the toggle-dependent count
+    # (1 updated / 2 total) is derivable in JS.
+    Given a list of changed files containing "models/marts/core/dim_payers.sql" and "models/marts/core/_core__models.yml"
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
+    And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_extra_tests.yml"
+    When I run cute-dbt with --manifest current.json --scope-from-pr-diff <changed-files> --project-root . --out report.html
+    Then the exit code is 0
+    And the test "test_a" is marked updated
+    And the test "test_b" is marked context
+    And the model "dim_payers" carries 2 unit tests
+
+  # The interactive layer — the global "Updated only ↔ All tests" toggle, the
+  # default-visibility, the toggle-dependent model-selector count, and the
+  # 0-updated inline hint — is JS over the inlined payload. It is verified by
+  # tests/headless_toggle.rs in a real browser, NOT as cucumber payload
+  # scenarios (those would need a browser). The payload facts the interactive
+  # layer relies on (per-test `changed`, all-tests-per-model present) are
+  # pinned by the scenarios here.
+
+  Scenario: A changed model with no updated tests is in scope with all tests marked context
+    # The common SQL-only PR: model edited, no test YAML touched → every test is
+    # context (0 updated). The model is still in scope and carries its tests (it
+    # shows selectable with count (0) in Updated mode — verified at headless).
+    Given a list of changed files containing "models/marts/core/dim_payers.sql"
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
+    And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
+    When I run cute-dbt with --manifest current.json --scope-from-pr-diff <changed-files> --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report's models-in-scope listing contains "dim_payers"
+    And the test "test_a" is marked context
+    And the test "test_b" is marked context
+
+  Scenario: A model in scope only via a changed test still carries its non-updated siblings
+    # Render-all widening: dim_payers.sql is NOT changed; the model is in scope
+    # only because test_a's YAML changed. test_b (declared in an untouched YAML)
+    # is carried into the report so All-tests mode + the total count work — but
+    # it is marked context (non-updated).
+    Given a list of changed files containing "models/marts/core/_core__models.yml"
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
+    And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_other_unchanged.yml"
+    When I run cute-dbt with --manifest current.json --scope-from-pr-diff <changed-files> --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report's test rows include "test_b"
+    And the test "test_a" is marked updated
+    And the test "test_b" is marked context
