@@ -43,19 +43,32 @@ jobs:
 
       # --- Compile the dbt project at the PR head. `dbt compile` (not
       #     `dbt parse`) is required so compiled_code is populated — cute-dbt
-      #     fail-closes on an in-scope model with null compiled_code. DuckDB
-      #     compiles with no external warehouse / no secrets; swap the adapter
-      #     + wire credentials as secrets for a cloud warehouse. ---
+      #     fail-closes on an in-scope model with null compiled_code. The
+      #     adapter, toolchain (pip/uv/poetry), and profile are
+      #     adopter-specific — see the recipe's Prerequisites. The DuckDB
+      #     :memory: profile below needs no warehouse / no secrets. ---
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.11'
       - run: pip install dbt-core dbt-duckdb         # edit: your adapter
+      - name: Write a CI dbt profile
+        run: |
+          mkdir -p ~/.dbt
+          cat > ~/.dbt/profiles.yml <<'PROFILE'
+          my_dbt_profile:        # edit: must match `profile:` in dbt_project.yml
+            target: ci
+            outputs:
+              ci:
+                type: duckdb     # edit: your adapter; cloud adapters read secrets from env
+                path: ':memory:'
+                threads: 4
+          PROFILE
       - run: dbt deps --project-dir dbt_project       # edit: your project path
-      - run: dbt compile --project-dir dbt_project --profiles-dir dbt_project
+      - run: dbt compile --project-dir dbt_project
 
       # --- Install cute-dbt. While unpublished, pin a main commit SHA.
       #     Once cute-dbt is on crates.io, replace these two steps with:
-      #       cargo binstall cute4dbt --version 0.1 --no-confirm ---
+      #       cargo binstall cute-dbt --version 0.1 --no-confirm ---
       - uses: cargo-bins/cargo-binstall@aaa84a43aec4955a42c5ffc65d258961e39f276e # v1.19.1
       - name: Install cute-dbt
         env:
@@ -66,6 +79,7 @@ jobs:
       - name: Render diff-scoped report
         run: |
           set -euo pipefail
+          mkdir -p _site
           git diff --name-only \
             "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
             > changed_files.txt
@@ -73,13 +87,15 @@ jobs:
             --manifest dbt_project/target/manifest.json \
             --scope-from-pr-diff @changed_files.txt \
             --project-root dbt_project \
-            --out report.html
+            --out _site/report.html
 
-      # --- Publish the report to a per-PR Pages subdirectory. ---
+      # --- Publish ONLY the report dir to a per-PR Pages subdirectory.
+      #     publish_dir: ./_site (NOT .) so the whole checkout never lands
+      #     on the gh-pages branch. ---
       - uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: .
+          publish_dir: ./_site
           keep_files: true
           destination_dir: pr-${{ github.event.pull_request.number }}
 

@@ -9,16 +9,17 @@ in the repo.)
 ## The pipeline
 
 ```text
-┌─────────────────────┐    ┌─────────────────────┐
-│ current manifest    │    │ baseline manifest   │
-│ (your PR's diff)    │    │ (target branch)     │
-└──────────┬──────────┘    └──────────┬──────────┘
-           │                          │
-           └────────────┬─────────────┘
-                        ▼
+┌─────────────────────┐    ┌─────────────────────────────┐
+│ current manifest    │    │ one scope source:           │
+│ (your PR's diff)    │    │  • baseline manifest, OR    │
+│                     │    │  • PR changed-file list     │
+└──────────┬──────────┘    └──────────────┬──────────────┘
+           │                              │
+           └──────────────┬───────────────┘
+                          ▼
               ┌───────────────────┐
-              │ Diff-scope        │ ← state:modified.body
-              │ selection         │   (body checksum diff)
+              │ Diff-scope        │ ← baseline: state:modified.body
+              │ selection         │   pr-diff: changed paths → nodes
               └─────────┬─────────┘
                         ▼
               ┌───────────────────┐
@@ -39,26 +40,66 @@ in the repo.)
               └───────────────────┘
 ```
 
-## Diff-scope selection (`state:modified.body`)
+## Diff-scope selection
 
-cute-dbt's first-class workflow is reviewing a **diff**, not the
-whole project. The diff-scope selector identifies which models the
-current manifest has *meaningfully* changed since the baseline.
+cute-dbt's first-class workflow is reviewing a **diff**, not the whole
+project. You give it the current manifest plus **one scope source**
+naming which models the diff touched. There are two.
 
-In v0.1, "meaningfully changed" = `state:modified.body`: the model's
-SQL body checksum differs between current and baseline. This is the
-same selector `dbt run --select state:modified` recognizes — cute-dbt
-mirrors it.
+### Source 1 — baseline manifest (`--baseline-manifest`)
 
-A unit test is in scope if:
+For local dev. cute-dbt diffs the current manifest against a baseline
+you supply and selects models whose SQL **body checksum** differs —
+`state:modified.body`, the same selector `dbt run --select
+state:modified` recognizes. cute-dbt mirrors it.
 
-- Its **target model** is in the modified set, OR
-- Its **own body** is in the modified set (a changed test on an
-  unchanged model is still in scope).
+### Source 2 — PR changed files (`--scope-from-pr-diff`)
 
-If both sets are empty, the report is a valid empty-scope report with
-a "0 unit tests in scope" banner — exit-0 by design. (Empty scope is
+For CI / PR review. The workflow computes the PR's changed-file list and
+hands it to cute-dbt, which maps each path to its manifest node via
+`original_file_path`. No baseline to publish or cache — the diff GitHub
+already computed *is* the scope signal. cute-dbt never shells out to
+`git` or reads the GitHub event itself; the workflow owns *how* the file
+list is produced. The [GitHub Actions PR-review
+recipe](./recipes/github-actions-pr-review.md) wires this up copy-paste.
+
+### Which scope source?
+
+| | `--baseline-manifest` | `--scope-from-pr-diff` |
+|---|---|---|
+| **Use for** | local dev, ad-hoc review | CI / pull-request review |
+| **Needs** | a baseline manifest to diff against | the PR's changed-file list |
+| **Detects change by** | body-checksum diff (`state:modified.body`) | changed file paths → manifest nodes |
+| **Setup cost** | snapshot/publish a baseline | none — reuse GitHub's diff |
+
+Exactly one is required; passing neither or both is a usage error
+(exit 2). Whichever you pick, a unit test is in scope if:
+
+- Its **target model** is in the in-scope set, OR
+- Its **own definition** changed (a changed test on an unchanged model
+  is still in scope).
+
+If both sets are empty, the report is a valid empty-scope report with a
+"0 unit tests in scope" banner — exit-0 by design. (Empty scope is
 information, not failure.)
+
+### v0.1 fidelity limits (PR-diff scoping)
+
+`--scope-from-pr-diff` maps changed **file paths** to nodes; it does not
+read the *contents* of a diff. So in v0.1:
+
+- A changed `.yml` brings in **every unit test that file declares** —
+  the path can't distinguish a one-test edit from a whole-file rewrite.
+- A change to only a YAML **config block** (not a `unit_tests:` block)
+  isn't path-distinguished from a test change.
+- A `packages.yml` / `dbt deps` change that alters compiled output
+  without touching a model `.sql` / `.yml` is not detected.
+- A **renamed** model shows as deleted-path + added-path; the deleted
+  path maps to no current node.
+
+Need any of these? Use `--baseline-manifest`, which compares compiled
+bodies directly. The [recipe](./recipes/github-actions-pr-review.md)
+carries the same list at its adopter-facing layer.
 
 ## CTE graph extraction
 

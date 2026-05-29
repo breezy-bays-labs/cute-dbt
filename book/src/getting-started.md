@@ -11,12 +11,8 @@
 Once `v0.1.0` is published:
 
 ```sh
-cargo install cute4dbt
+cargo install cute-dbt
 ```
-
-This installs a binary named **`cute-dbt`** (the crate name `cute4dbt`
-disambiguates the package from a hypothetical future family of
-`cute-dbt`-prefixed crates; the binary keeps the readable name).
 
 Verify:
 
@@ -26,9 +22,16 @@ cute-dbt --help
 
 ## Generate a report
 
-cute-dbt reads two manifest files: a **current** manifest (the diff
-you want to review) and a **baseline** manifest (what you're comparing
-against). The diff drives `state:modified.body` scope selection.
+cute-dbt always reads a **current** `manifest.json`, plus exactly one
+**scope source** telling it what changed:
+
+- **Local dev** (this page): a `--baseline-manifest` to diff against.
+- **CI / PR review**: `--scope-from-pr-diff` with the PR's changed
+  files — see the [GitHub Actions PR-review
+  recipe](./recipes/github-actions-pr-review.md), the headline team
+  path. ([Which should I use?](./how-it-works.md#which-scope-source))
+
+The local flow below uses a baseline manifest.
 
 ```sh
 cute-dbt \
@@ -110,7 +113,7 @@ mapped to a non-zero exit code:
 | Pre-1.8 dbt schema | non-zero | Upgrade dbt (cute-dbt requires `metadata.dbt_schema_version` ≥ 1.8) |
 | Baseline path missing or mismatched | non-zero | Verify `--baseline-manifest` resolves |
 | In-scope unit test targets a model with `compiled_code: null` | non-zero | Compile fully (`dbt compile`, not `dbt parse`) |
-| Missing `--baseline-manifest` flag | clap usage error (exit 2) | Pass `--baseline-manifest` (it's required) |
+| No scope source — neither `--baseline-manifest` nor `--scope-from-pr-diff`, or both at once | clap usage error (exit 2) | Pass exactly one scope source |
 
 There is never a partial report. Either you get a complete report or
 a non-zero exit explaining what's missing.

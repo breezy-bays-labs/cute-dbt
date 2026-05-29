@@ -3,13 +3,15 @@
 A single static, local, single-binary tool. The form factor:
 
 ```text
-manifest.json + baseline-manifest.json
-              │
-              ▼
-         cute-dbt
-              │
-              ▼
-         report.html  ← open via file://
+manifest.json  +  one scope source
+                  ├─ --baseline-manifest    (local dev)
+                  └─ --scope-from-pr-diff    (CI / PR review)
+                       │
+                       ▼
+                   cute-dbt
+                       │
+                       ▼
+              report.html  ← open via file://
 ```
 
 ## Three properties that matter
@@ -44,9 +46,9 @@ section:
 
 ## What it does NOT do
 
-- It does not run dbt for you. You bring `manifest.json` and a
-  baseline. (See [Getting started](./getting-started.md) for ways to
-  produce both.)
+- It does not run dbt for you. You bring a compiled `manifest.json`
+  plus one scope source — a baseline manifest (local) or the PR's
+  changed-file list (CI). (See [Getting started](./getting-started.md).)
 - It does not execute SQL or talk to a warehouse.
 - It does not detect every kind of model change in v0.x. Today's
   in-scope detector is `state:modified.body` — body-checksum diffs.
@@ -57,15 +59,18 @@ section:
 
 ## Scope discipline
 
-cute-dbt is a **PR-review tool**. The first-class workflow is:
+cute-dbt is a **PR-review tool**. The first-class workflow:
 
 1. A reviewer opens the PR.
-2. A baseline manifest is available (the target branch's compiled
-   manifest, or a cached snapshot).
-3. cute-dbt runs against the PR's compiled manifest + baseline.
-4. The report shows the reviewer **only the tests in scope for this
-   diff** — with their CTE context, fixture data, and expected
-   results, in one HTML file they can open offline.
+2. CI compiles the PR head and runs cute-dbt, scoping the report to the
+   PR's changed files via `--scope-from-pr-diff` — no baseline-manifest
+   publishing job to maintain. (Locally, you scope the same report with
+   a `--baseline-manifest` instead.)
+3. The report shows **only the tests in scope for this diff** — with
+   their CTE context, fixture data, and expected results, in one HTML
+   file that opens offline.
 
-The diff-scope banner makes it unambiguous which baseline the
-report is against and how many tests are in scope.
+The diff-scope banner names the scope source and the in-scope test
+count, so what the report covers is unambiguous. The
+[GitHub Actions PR-review recipe](./recipes/github-actions-pr-review.md)
+wires this into any dbt repo with a copy-paste workflow.

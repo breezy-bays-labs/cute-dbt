@@ -1,7 +1,7 @@
 # Introduction
 
 > **Status: v0.x — unstable.** cute-dbt is available on crates.io from
-> `v0.1.0` (`cargo install cute4dbt` installs the `cute-dbt` binary).
+> `v0.1.0` (`cargo install cute-dbt`).
 > v0.x follows Cargo SemVer convention: every minor bump (`0.1 → 0.2`)
 > MAY carry breaking changes. v1.0 ships the first stability commitment.
 
@@ -37,14 +37,25 @@ For each in-scope unit test, the report renders:
   Mermaid diagram whose edges are colored by edge type
   (`from` / `inner` / `left` / `right` / `full` / `cross` /
   `union_all` / `union_distinct`).
-- A diff-scope banner naming the baseline and the in-scope test count.
+- A diff-scope banner naming the scope source and the in-scope test
+  count.
 
-In-scope = `state:modified.body`. cute-dbt diffs the current manifest
-against a baseline manifest you supply, identifies models whose
-**body** changed (the `checksum` differs), and surfaces every unit
-test that targets those models — plus tests whose own body changed,
-even if the target model didn't.
+In-scope means **changed by this diff**. cute-dbt learns what changed
+in one of two ways:
+
+- **Local dev** — supply a `--baseline-manifest`; cute-dbt diffs the
+  current manifest against it and selects models whose **body** changed
+  (`state:modified.body` — the `checksum` differs).
+- **CI / PR review** — supply `--scope-from-pr-diff` with the PR's
+  changed-file list; cute-dbt maps those paths to manifest nodes, with
+  no baseline-manifest publishing job to maintain.
+
+Either way, the report surfaces every unit test that targets an
+in-scope model — plus tests whose own definition changed, even if the
+target model didn't.
 
 This page is the introduction. The next chapter sketches [what
-cute-dbt is at a glance](./the-solution.md); after that, [Getting
-started](./getting-started.md) walks the install + first-report path.
+cute-dbt is at a glance](./the-solution.md); [Getting
+started](./getting-started.md) walks the install + first-report path;
+and teams wiring cute-dbt into pull-request CI can jump straight to the
+[GitHub Actions PR-review recipe](./recipes/github-actions-pr-review.md).
