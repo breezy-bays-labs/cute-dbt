@@ -20,7 +20,8 @@ this document is the *structural* contract that supports them.
 
 ## 1. Single-crate hexagonal layout
 
-cute-dbt is a **single-crate** Rust CLI (`cute-dbt`, lib + bin). `Cargo.toml`
+cute-dbt is a **single-crate** Rust CLI (package `cute-dbt`; bin `cute-dbt`,
+lib `cute_dbt`). `Cargo.toml`
 declares one package and one set of dependencies; there is no `[workspace]`
 table.
 

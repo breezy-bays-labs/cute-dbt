@@ -3,7 +3,8 @@
 # CLAUDE.md — cute-dbt
 
 Zero-compute dbt unit-test HTML visualizer. Single-crate Rust CLI
-(`cute-dbt`, lib + bin). The full architecture invariants and the
+(package `cute-dbt`; bin `cute-dbt`, lib `cute_dbt`). The full
+architecture invariants and the
 load-bearing decisions are in [`AGENTS.md`](AGENTS.md) (imported above)
 and [`ARCHITECTURE.md`](ARCHITECTURE.md). This file adds Claude-specific
 operating notes.

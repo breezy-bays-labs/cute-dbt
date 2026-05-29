@@ -5,7 +5,8 @@ this before touching code.
 
 ## Repo identity
 
-- `cute-dbt` is a **single-crate** Rust CLI (`cute-dbt`, lib + bin) in the
+- `cute-dbt` is a **single-crate** Rust CLI (package `cute-dbt`; bin
+  `cute-dbt`, lib `cute_dbt`) in the
   `breezy-bays-labs` org. Public visibility from day one. **crates.io
   publish is enabled at v0.1.0+** via `release-plz` + OIDC trusted
   publishing; v0.x is explicitly unstable (per Cargo SemVer convention:
@@ -30,7 +31,7 @@ gate. Operational summary for external contributors:
   renames, output-shape changes, exit-code changes). v0.x patch
   (`0.1.0 → 0.1.1`) is bug-fix / additive only. v1.0+ minor is
   backward-compatible.
-- **Library surface**: the `cute-dbt` lib crate is internal-only in
+- **Library surface**: the `cute_dbt` lib crate is internal-only in
   v0.x. Promoting any of it to the public API at v1.0 warrants its own
   ADR (and is currently blocked by the `non-mirror-guard` against the
   `pub use crate::…::…` re-export shim pattern).
