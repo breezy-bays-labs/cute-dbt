@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use cute4dbt::domain::{
+use cute_dbt::domain::{
     Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeId, UnitTest, UnitTestExpect,
     UnitTestGiven,
 };

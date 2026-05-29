@@ -15,9 +15,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use cute4dbt::adapters::manifest::{FileManifestSource, load_baseline};
-use cute4dbt::domain::{Manifest, NodeId, PreflightError, UnitTest};
-use cute4dbt::ports::ManifestSource;
+use cute_dbt::adapters::manifest::{FileManifestSource, load_baseline};
+use cute_dbt::domain::{Manifest, NodeId, PreflightError, UnitTest};
+use cute_dbt::ports::ManifestSource;
 
 /// Absolute path to a committed fixture under `tests/fixtures/`.
 fn fixture(name: &str) -> PathBuf {

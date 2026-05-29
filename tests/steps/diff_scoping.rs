@@ -5,7 +5,7 @@
 //! manifests (no fixture file I/O).
 
 use cucumber::{given, then, when};
-use cute4dbt::domain::{
+use cute_dbt::domain::{
     DependsOn, NodeId, StateComparator, UnitTest, UnitTestExpect, UnitTestGiven,
 };
 

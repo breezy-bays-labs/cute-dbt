@@ -20,7 +20,7 @@ this document is the *structural* contract that supports them.
 
 ## 1. Single-crate hexagonal layout
 
-cute-dbt is a **single-crate** Rust CLI (`cute4dbt`, lib + bin). `Cargo.toml`
+cute-dbt is a **single-crate** Rust CLI (`cute-dbt`, lib + bin). `Cargo.toml`
 declares one package and one set of dependencies; there is no `[workspace]`
 table.
 
@@ -84,7 +84,7 @@ machinery that guards no invariant here.
 
 | # | Apparatus | cute-dbt | Why N/A | Enforcement |
 |---|---|---|---|---|
-| 1 | Multi-crate Cargo workspace + per-crate `Cargo.toml` | Single crate `cute4dbt` (lib + bin) | No second linkage-level consumer in the v0.x horizon. A workspace exists to serve >1 crate; importing the apparatus here would be a project-value violation (R7: "not overly complex"). | **CI:** `non-mirror-guard` job rejects a `[workspace]` table in `Cargo.toml`. |
+| 1 | Multi-crate Cargo workspace + per-crate `Cargo.toml` | Single crate `cute-dbt` (lib + bin) | No second linkage-level consumer in the v0.x horizon. A workspace exists to serve >1 crate; importing the apparatus here would be a project-value violation (R7: "not overly complex"). | **CI:** `non-mirror-guard` job rejects a `[workspace]` table in `Cargo.toml`. |
 | 2 | Per-crate independent versioning | Single artifact version | Moot — one crate, one version. The release cadence is whole-product, not per-component. | Absence (no second crate to version independently). |
 | 3 | `public-api-shim` re-export pattern (`pub use crate::…::…` from `lib.rs` curating a stable surface for library consumers) | None | The binary is the product; there are no library consumers to shield from internal renames. An API shim with no consumer would add indirection that guards nothing. | **CI:** `non-mirror-guard` job rejects `pub use crate::…::…` in `src/lib.rs`. |
 | 4 | AST-purity `cargo-deny` bans + `ast-purity` CI grep (keep adapter AST libraries out of a shared core) | None | The AST-purity invariant exists to protect a *shared* core crate from adapter parser dependencies when several adapter crates each pull in different AST libraries. cute-dbt has exactly one parser (`sqlparser-rs`) and one consumer of it; there is no shared core and no rival AST surface — no invariant to enforce. (Bonus: `bans.deny.wrappers` is fragile under proc-macro dependency chains; this project never needs to depend on that mechanism.) | **CI:** `non-mirror-guard` job rejects `bans.deny.wrappers` in `deny.toml`. |

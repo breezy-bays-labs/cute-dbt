@@ -22,10 +22,10 @@ mod common;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use cute4dbt::adapters::manifest::FileManifestSource;
-use cute4dbt::adapters::render::{ScopeSource, render_report};
-use cute4dbt::domain::{DEFAULT_REPORT_TITLE, Manifest, StateComparator};
-use cute4dbt::ports::ManifestSource;
+use cute_dbt::adapters::manifest::FileManifestSource;
+use cute_dbt::adapters::render::{ScopeSource, render_report};
+use cute_dbt::domain::{DEFAULT_REPORT_TITLE, Manifest, StateComparator};
+use cute_dbt::ports::ManifestSource;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

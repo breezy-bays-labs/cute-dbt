@@ -58,7 +58,7 @@ jobs:
 
       # 3. Install cute-dbt. Once cute-dbt is available on crates.io,
       #    prefer:
-      #      cargo binstall cute4dbt
+      #      cargo binstall cute-dbt
       #    While unpublished, install from a tagged commit on the
       #    cute-dbt repo's main branch (set CUTE_DBT_REV to a commit
       #    SHA you trust — pinning is mandatory per workflow-hardening

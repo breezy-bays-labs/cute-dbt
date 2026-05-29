@@ -14,9 +14,9 @@
 //!   reads from `edge_payload.edge_type`).
 
 use cucumber::{given, then, when};
-use cute4dbt::adapters::cte_engine::parse_cte_graph;
-use cute4dbt::adapters::render::edge_type_wire_key;
-use cute4dbt::domain::EdgeType;
+use cute_dbt::adapters::cte_engine::parse_cte_graph;
+use cute_dbt::adapters::render::edge_type_wire_key;
+use cute_dbt::domain::EdgeType;
 
 use super::World;
 

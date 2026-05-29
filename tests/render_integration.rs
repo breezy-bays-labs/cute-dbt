@@ -11,13 +11,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use cute4dbt::adapters::asset_embed::{
+use cute_dbt::adapters::asset_embed::{
     DATATABLES_CSS, DATATABLES_JS, JQUERY_JS, MERMAID_JS, SAKURA_CSS,
 };
-use cute4dbt::adapters::manifest::FileManifestSource;
-use cute4dbt::adapters::render::{ScopeSource, render_report};
-use cute4dbt::domain::{DEFAULT_REPORT_TITLE, Manifest, StateComparator};
-use cute4dbt::ports::ManifestSource;
+use cute_dbt::adapters::manifest::FileManifestSource;
+use cute_dbt::adapters::render::{ScopeSource, render_report};
+use cute_dbt::domain::{DEFAULT_REPORT_TITLE, Manifest, StateComparator};
+use cute_dbt::ports::ManifestSource;
 
 /// Absolute path to a committed fixture under `tests/fixtures/`.
 fn fixture(name: &str) -> PathBuf {

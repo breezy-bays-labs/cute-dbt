@@ -9,9 +9,9 @@
 
 use std::path::{Path, PathBuf};
 
-use cute4dbt::adapters::manifest::FileManifestSource;
-use cute4dbt::domain::{Manifest, NodeId, StateComparator, resolve_target_model};
-use cute4dbt::ports::ManifestSource;
+use cute_dbt::adapters::manifest::FileManifestSource;
+use cute_dbt::domain::{Manifest, NodeId, StateComparator, resolve_target_model};
+use cute_dbt::ports::ManifestSource;
 
 /// Absolute path to a committed fixture under `tests/fixtures/`.
 fn fixture(name: &str) -> PathBuf {

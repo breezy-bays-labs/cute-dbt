@@ -1,7 +1,7 @@
 # cute-dbt
 
-[![Crates.io](https://img.shields.io/crates/v/cute4dbt.svg)](https://crates.io/crates/cute4dbt)
-[![Documentation](https://docs.rs/cute4dbt/badge.svg)](https://docs.rs/cute4dbt)
+[![Crates.io](https://img.shields.io/crates/v/cute-dbt.svg)](https://crates.io/crates/cute-dbt)
+[![Documentation](https://docs.rs/cute-dbt/badge.svg)](https://docs.rs/cute-dbt)
 [![Book](https://img.shields.io/badge/book-mdbook-blue.svg)](https://breezy-bays-labs.github.io/cute-dbt/)
 [![CI](https://github.com/breezy-bays-labs/cute-dbt/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/breezy-bays-labs/cute-dbt/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -26,7 +26,7 @@ requests**, and is *trivially auditable*: open it offline with DevTools →
 Network and observe nothing.
 
 > **Status: v0.x — unstable.** Available on crates.io from `v0.1.0`
-> (`cargo install cute4dbt` installs the `cute-dbt` binary). v0.x follows
+> (`cargo install cute-dbt` installs the `cute-dbt` binary). v0.x follows
 > Cargo SemVer convention: every minor bump (`0.1 → 0.2`) MAY carry
 > breaking changes (CLI flag renames, output-shape changes, exit-code
 > changes); v1.0 ships the first stability commitment. Full release-
