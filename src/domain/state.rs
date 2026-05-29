@@ -299,8 +299,9 @@ impl StateComparator {
     /// Unit-test ids whose **definition changed** relative to the baseline
     /// — the precise "this PR updated this test" signal (cute-dbt#91).
     ///
-    /// A test is *changed* when [`unit_test_is_changed`] reports its
-    /// `UnitTest` differs from the baseline (added, or edited in place).
+    /// A test is *changed* when its `UnitTest` differs from the baseline's
+    /// entry (added, or edited in place) — the `unit_test_is_changed`
+    /// predicate.
     /// This is a strict subset of [`Self::in_scope_unit_tests`]: a changed
     /// test is always in scope (the `target_modified || test_changed`
     /// union), so `changed ⊆ in_scope` holds by construction. Modifier-
