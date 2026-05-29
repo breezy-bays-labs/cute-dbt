@@ -41,7 +41,7 @@ fn bare_from_ofp(ofp: &str) -> String {
 
 /// Take the current synthetic manifest, seeding an empty (valid v12) one
 /// when no model-building Given has run yet (zero-scope scenarios).
-fn take_current(world: &mut World) -> cute4dbt::domain::Manifest {
+fn take_current(world: &mut World) -> cute_dbt::domain::Manifest {
     world.current_manifest.take().unwrap_or_else(empty_manifest)
 }
 

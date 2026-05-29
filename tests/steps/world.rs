@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use cute4dbt::domain::{CteGraph, EdgeType, InScopeSet, Manifest, ModelInScopeSet};
+use cute_dbt::domain::{CteGraph, EdgeType, InScopeSet, Manifest, ModelInScopeSet};
 
 #[derive(Debug, Default, cucumber::World)]
 pub struct World {

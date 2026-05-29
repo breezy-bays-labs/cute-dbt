@@ -1,5 +1,5 @@
 [package]
-name = "cute4dbt"
+name = "cute-dbt"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
@@ -25,7 +25,7 @@ name = "cute-dbt"
 path = "src/main.rs"
 
 [lib]
-name = "cute4dbt"
+name = "cute_dbt"
 path = "src/lib.rs"
 
 # v0.1 seed deps only. Feature deps land with their PRs — adding each dep
