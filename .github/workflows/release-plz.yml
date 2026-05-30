@@ -1,0 +1,166 @@
+name: release-plz
+
+# Drives crates.io publishing for cute-dbt (single crate) via
+# release-plz + OIDC trusted publishing. On every push to `main`,
+# release-plz opens (or updates) a release PR carrying the next
+# version bump + the CHANGELOG entry; merging that PR triggers the
+# crates.io publish + signed annotated tag creation. There is NO
+# long-lived `CARGO_REGISTRY_TOKEN` — the publish authenticates with a
+# short-lived OIDC token that crates.io verifies against a trusted-
+# publisher binding configured out-of-band on crates.io.
+#
+# Governing decision: ops/decisions/cute-dbt/adr-release-discipline.md
+#   D1 publish-from-v0.1.0 / OIDC; D3 signed annotated tags; D4
+#   event-driven cadence via auto-PR on main.
+# Proven recipe: breezy-bays-labs/crap-rs#270 (this is the single-crate
+#   reduction of that workflow — no cdylib/npm/binary/binstall jobs,
+#   which cute-dbt has no surface for in v0.1).
+#
+# Identity / why the App token:
+#   `main` carries branch protection with required status checks and
+#   `enforce_admins: true`. release-plz pushes the release PR's branch
+#   under whatever token opens it. Pushes from the default
+#   `GITHUB_TOKEN` do NOT trigger workflow runs (GitHub's recursion
+#   guard) — so the required checks would never report and the release
+#   PR would be permanently unmergeable, with no admin override. The
+#   org `release-plz-app-token` composite mints a short-lived GitHub
+#   App installation token; pushes signed by that App identity DO fire
+#   the downstream required checks. The workflow's own `GITHUB_TOKEN`
+#   stays read-only; all git/PR writes go through the App token.
+#
+# Companion file:
+#   release-plz.toml — single-crate release-plz config (tag shape,
+#   release-commit filter, semver_check off per ADR D2).
+#
+# PREREQUISITES (human-gated, NOT satisfied by this workflow — see the
+# migration PR body):
+#   1. crates.io "Trusted Publishers" binding registered for the
+#      `cute-dbt` crate, pointing at this repo + this workflow file +
+#      the `release-plz` environment. Until then the publish step
+#      cannot mint a valid OIDC token. The FIRST publish is a separate
+#      human-gated event (ADR "Decision boundaries").
+#   2. The `release-plz` GitHub App installed on this repo, with the
+#      `RELEASE_PLZ_APP_ID` + `RELEASE_PLZ_APP_PRIVATE_KEY` secrets
+#      scoped to a `release-plz` deployment environment on this repo.
+
+on:
+  push:
+    branches: [main]
+
+# Least-privilege default; per-job permissions elevate as needed.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-plz-pr:
+    name: Open/update release PR
+    runs-on: ubuntu-latest
+    # Scopes the App secrets (RELEASE_PLZ_APP_ID +
+    # RELEASE_PLZ_APP_PRIVATE_KEY) to this deployment environment so
+    # other workflows in this repo can't read them by accident.
+    environment: release-plz
+    concurrency:
+      # Serialize release-PR opens so two concurrent push events don't
+      # race to create two competing release PRs against the same ref.
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      # The workflow's own GITHUB_TOKEN is intentionally read-only —
+      # all writes (release-PR branch push, PR open/update) happen via
+      # the App token minted below.
+      contents: read
+    steps:
+      # `persist-credentials: false` — release-plz authenticates with
+      # the App token directly; the checkout token is not consumed by
+      # subsequent steps and must not linger in the runner.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Mint release-plz App token
+        id: app-token
+        uses: breezy-bays-labs/.github/actions/release-plz-app-token@97eb083e81d600e08e0754adc2cb6debedebf020 # release-plz-app-token-v0.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: release-plz/action@064f4d1e36c843611ddf013be726beaa4ad804db # v0.5
+        with:
+          command: release-pr
+        env:
+          # release-plz/action's git-config substep reads GITHUB_TOKEN
+          # to query the viewer endpoint and configure the commit
+          # author identity for the auto-opened release PR. The App
+          # token carries the write scopes; the workflow's own token
+          # remains read-only.
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  release-plz-release:
+    name: Publish + tag
+    runs-on: ubuntu-latest
+    # Scopes the App secrets to this deployment environment.
+    environment: release-plz
+    concurrency:
+      # Serialize publishes so two near-simultaneous pushes to `main`
+      # (e.g. a release-PR merge landing right behind another commit)
+      # don't race the crates.io publish + annotated-tag creation. A
+      # distinct group from release-plz-pr so the PR and release jobs
+      # never block each other. `cancel-in-progress: false` is
+      # deliberate — a publish must never be cancelled mid-crates.io
+      # upload, and tag deletion is forbidden by the release discipline
+      # (ADR), so an interrupted publish is awkward to recover from.
+      group: release-plz-release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      # Workflow GITHUB_TOKEN stays read-only — the App token (minted
+      # below) does the git tag pushes and gh release creates. The
+      # id-token mint must happen at the workflow-runner level for
+      # crates.io OIDC; pull-requests:read lets release-plz/action read
+      # the merged release PR when that path isn't App-token-mediated.
+      contents: read
+      id-token: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Mint release-plz App token
+        id: app-token
+        uses: breezy-bays-labs/.github/actions/release-plz-app-token@97eb083e81d600e08e0754adc2cb6debedebf020 # release-plz-app-token-v0.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_PLZ_APP_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: read
+
+      - id: release-plz
+        uses: release-plz/action@064f4d1e36c843611ddf013be726beaa4ad804db # v0.5
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        with:
+          command: release
+          # CARGO_REGISTRY_TOKEN is intentionally absent: with
+          # `id-token: write` granted above, release-plz mints a
+          # short-lived OIDC token that crates.io verifies against the
+          # trusted-publisher binding configured out-of-band on
+          # crates.io (see PREREQUISITES at the top of this file).
+          # `dry_run` is gated by an Actions variable so a canary run
+          # can be staged without editing this workflow: set repo var
+          # `RELEASE_PLZ_DRY_RUN=true` to have release-plz validate the
+          # publish path without actually pushing to crates.io. Unset
+          # the variable after the canary is green. An empty/unset
+          # value passes through as an empty string, which release-plz's
+          # `dry_run` input treats as falsy.
+          dry_run: ${{ vars.RELEASE_PLZ_DRY_RUN }}

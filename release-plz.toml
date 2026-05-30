@@ -1,0 +1,74 @@
+# release-plz configuration for cute-dbt (single-crate).
+#
+# release-plz drives crates.io publishing via OIDC trusted publishing
+# (no long-lived `CARGO_REGISTRY_TOKEN` in CI), opens a release PR with
+# conventional-commit-driven version bumps, and creates a signed
+# annotated git tag on merge. cute-dbt ships ONE crate (`cute-dbt`,
+# binary `cute-dbt` + internal lib `cute_dbt`), so this config is
+# deliberately single-crate — no per-crate matrix, no per-crate tag
+# prefix. The `non-mirror-guard` CI job forbids a `[workspace]` table
+# in *Cargo.toml*; the `[workspace]` section below is release-plz's own
+# global config namespace (it lives in THIS file, not Cargo.toml) and
+# is unrelated to a Cargo workspace.
+#
+# Governing decision: ops/decisions/cute-dbt/adr-release-discipline.md
+# (D1–D6). Proven recipe: breezy-bays-labs/crap-rs#270.
+#
+# Companion file:
+#   .github/workflows/release-plz.yml — invokes release-plz with
+#     `command: release-pr` (opens/updates the release PR) and
+#     `command: release` (publishes + tags on merge), both under
+#     OIDC trusted publishing.
+
+[workspace]
+# Single git tag for the lone published crate. Plain `v{{ version }}`
+# (e.g. `v0.1.0`) — NOT a `{{ package }}-v` prefix; that shape only
+# earns its keep in a multi-crate repo where one tag must map back to
+# one package. ADR D3 and the README/install docs both use the plain
+# `v0.1.0` form.
+git_tag_name = "v{{ version }}"
+
+# Create an annotated release tag on publish. NOTE: this key only
+# controls WHETHER a tag is created (true is also the default); it does
+# NOT make the tag *signed*. ADR D3 requires *signed* annotated tags —
+# whether release-plz's tag creation under the App identity satisfies
+# that (App-pushed tags are not GPG/SSH-signed in the git sense) is
+# UNVERIFIED and is a tracked follow-up before the first publish, not a
+# claim this config delivers.
+git_tag_enable = true
+
+# A release PR opens only when a publishable bump is pending.
+# `release_always = false` keeps the PR queue quiet on commits that
+# don't trip the conventional-commit filter below.
+release_always = false
+
+# cargo-semver-checks is intentionally OFF. It validates the Rust
+# *library* public API — but per ADR D2 the `cute_dbt` lib surface is
+# INTERNAL-ONLY in v0.x and is explicitly NOT cute-dbt's
+# SemVer contract. The SemVer surface is the binary's CLI flag set,
+# the exit-code mapping, the zero-egress proof, and the `explore`
+# external-drive JS contract (D2 + the 2026-05-29 amendment) — none of
+# which cargo-semver-checks can see. Gating releases on internal `pub`
+# churn would contradict the policy. Revisit at v1.0 only if a library
+# surface is ever promoted to public API (which warrants its own ADR).
+semver_check = false
+
+# Only commits matching this regex contribute a release section and
+# force a release PR. Conventional-commit types `feat` / `fix` /
+# `perf` / `refactor` (with optional `(scope)` and optional `!` for a
+# breaking change) drive bumps; `chore` / `docs` / `test` / `ci` /
+# `adr` / `closeout` commits land in history without opening a release
+# PR. This matches the cute-dbt commit convention (CLAUDE.md / AGENTS.md
+# §Release discipline). NOTE: `features_always_increment_minor` is
+# intentionally left OFF (its default) so the v0.x Cargo-SemVer mapping
+# holds — `feat` → patch in v0.x (ADR D-constraints; the release-plz
+# docs note the override "violates the Cargo SemVer rules").
+release_commits = "^(feat|fix|perf|refactor)(\\(.+\\))?!?:"
+
+[[package]]
+name = "cute-dbt"
+# Root CHANGELOG (single crate → single changelog). The existing
+# CHANGELOG.md already declares the Keep-a-Changelog format and an
+# `## [Unreleased]` section release-plz appends released sections under.
+changelog_path = "CHANGELOG.md"
+changelog_update = true
