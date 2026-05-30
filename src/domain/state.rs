@@ -193,10 +193,14 @@ impl StateModifier for BodyChecksumModifier {
 /// stored as a `BTreeMap` so a reordering of keys between two manifests
 /// is *not* a change. A new node (absent from the baseline) is modified.
 ///
-/// dbt's own `.configs` selector diffs the *unrendered* config; cute-dbt
-/// v0.2 diffs the resolved `config` dict the manifest carries. This
-/// over-reports nothing relative to a body change and detects the pure
-/// config-only changes [`BodyChecksumModifier`] misses.
+/// dbt's own `.configs` selector diffs the *unrendered* config; this
+/// modifier diffs the **resolved** `config` dict the manifest carries.
+/// The resolved dict is broader, so this can over-report relative to dbt
+/// (e.g. an environment-driven config value that resolved differently
+/// flags as a change where dbt's unrendered diff would not). That is an
+/// accepted trade for the opt-in wider scope — it never *misses* a config
+/// change, and it catches the pure config-only changes
+/// [`BodyChecksumModifier`] cannot see.
 #[derive(Debug, Clone, Copy)]
 pub struct ConfigsModifier;
 

@@ -48,13 +48,15 @@ PR-review is the first-class use case), the report renders:
 A diff-scope banner names the baseline reference and the in-scope test
 count.
 
-**v0.1 scope = `state:modified.body`.** cute-dbt detects model **body**
-changes (a model's `checksum` differs between the current and baseline
-manifests). Pure `.configs`-only / `.contract`-only / `.relation`-only /
-`.macros`-only changes leave the body checksum identical, so they are
-**not** detected in v0.1 — a documented, named limit, not a defect; the
-missing sub-selectors arrive as additive `impl StateModifier` blocks in
-v0.x.
+**Default scope = `state:modified.body`.** Out of the box cute-dbt
+detects model **body** changes (a model's `checksum` differs between the
+current and baseline manifests). Pure `.configs`-only / `.contract`-only
+/ `.relation`-only / `.macros`-only changes leave the body checksum
+identical, so they are **not** detected by the default scope. The four
+sub-selector modifiers (`.configs` / `.relation` / `.macros` /
+`.contract`) now exist as additive `impl StateModifier` blocks
+(cute-dbt#17), composable via `StateComparator::with_sub_selectors()`;
+wiring a CLI selector flag to opt into the wider fidelity is a follow-up.
 
 ## Why your data stays on your machine
 
@@ -96,13 +98,17 @@ narrow.
 
 ## Known v0.1 fidelity limits
 
-- **Body-only state-modified scoping.** Pure `.configs` / `.contract` /
-  `.relation` / `.macros` changes leave the model body checksum
-  identical and are **not** detected in v0.1 — a documented limit, not
-  a defect. Tracked:
-  [`cute-dbt#14`](https://github.com/breezy-bays-labs/cute-dbt/issues/14)
-  → sub-selectors land as additive `impl StateModifier` blocks in v0.2+
-  ([`cute-dbt#15`](https://github.com/breezy-bays-labs/cute-dbt/issues/15)).
+- **Default state-modified scoping is body-only.** The default
+  comparator detects model body changes only; a pure `.configs` /
+  `.contract` / `.relation` / `.macros` change leaves the model body
+  checksum identical and is not flagged by default. The four
+  sub-selector modifiers now exist as additive `impl StateModifier`
+  blocks and compose via `StateComparator::with_sub_selectors()`
+  ([`cute-dbt#17`](https://github.com/breezy-bays-labs/cute-dbt/issues/17),
+  fulfilling the originally-tracked
+  [`cute-dbt#14`](https://github.com/breezy-bays-labs/cute-dbt/issues/14)).
+  A CLI flag to select the wider fidelity is a follow-up; until then the
+  default path stays body-only.
 - **`source()` references are not bound to fixtures.** dbt resolves
   `source('package', 'name')` to a relation name at `dbt compile`
   time, so the compiled SQL the renderer sees no longer carries the

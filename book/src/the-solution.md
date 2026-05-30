@@ -50,11 +50,13 @@ section:
   plus one scope source — a baseline manifest (local) or the PR's
   changed-file list (CI). (See [Getting started](./getting-started.md).)
 - It does not execute SQL or talk to a warehouse.
-- It does not detect every kind of model change in v0.x. Today's
-  in-scope detector is `state:modified.body` — body-checksum diffs.
-  Pure config / contract / relation / macros changes are not
-  detected in v0.1 (a documented v0.x limit; sub-selectors arrive
-  as additive `StateModifier` impls in later v0.x minors).
+- Its **default** in-scope detector is `state:modified.body` —
+  body-checksum diffs — so a pure config / contract / relation / macros
+  change is not flagged by default. The four sub-selector modifiers
+  (`.configs` / `.relation` / `.macros` / `.contract`) now exist as
+  additive `StateModifier` impls and compose via
+  `StateComparator::with_sub_selectors()`; a CLI flag to opt into the
+  wider scope is a follow-up, so the default path stays body-only.
 - It does not (yet) export markdown or JSON. v0.1 ships HTML only.
 
 ## Scope discipline
