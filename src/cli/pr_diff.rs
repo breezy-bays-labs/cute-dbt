@@ -76,69 +76,99 @@ fn parse_unified_diff(s: &str) -> Result<PrDiff, String> {
         if line.starts_with("diff --git") {
             saw_structure = true;
             in_hunk = false;
-            if let Some(f) = current.take() {
-                files.push(f);
-            }
+            flush(&mut current, &mut files);
             continue;
         }
         // Hunk header — `@@ -old[,c] +new[,c] @@ [section]`.
         if let Some(rest) = line.strip_prefix("@@") {
             saw_structure = true;
-            let hunk = parse_hunk_header(rest)?;
-            in_hunk = true;
-            if let Some(f) = current.as_mut() {
-                f.hunks.push(hunk);
-            }
+            open_hunk(rest, current.as_mut(), &mut in_hunk)?;
             continue;
         }
+        // Inside a hunk body, `consume_body_line` appends `+`/`-` bodies (and
+        // ignores `\ No newline…`); a non-body line ends the hunk and falls
+        // through to the header checks below.
         if in_hunk {
-            // Inside a hunk body: `+`/`-` are added/removed lines (sigil
-            // stripped); `\ No newline at end of file` is ignored; any
-            // other line ends the body.
-            if line.starts_with('\\') {
+            if consume_body_line(line, current.as_mut()) {
                 continue;
             }
-            if let Some(body) = line.strip_prefix('+') {
-                if let Some(h) = current.as_mut().and_then(|f| f.hunks.last_mut()) {
-                    h.added_lines.push(body.to_owned());
-                }
-                continue;
-            }
-            if let Some(body) = line.strip_prefix('-') {
-                if let Some(h) = current.as_mut().and_then(|f| f.hunks.last_mut()) {
-                    h.removed_lines.push(body.to_owned());
-                }
-                continue;
-            }
-            // Not a body line — the hunk ended.
             in_hunk = false;
         }
-        // Header block (in_hunk == false).
-        if let Some(rest) = line.strip_prefix("--- ") {
+        // Header block (in_hunk == false). `--- ` (old-side path) is ignored;
+        // `+++ ` starts a new file. `index`, mode, `rename …`, blank → ignored.
+        if line.starts_with("--- ") {
             saw_structure = true;
-            let _ = rest; // old-side path — ignored.
             continue;
         }
         if let Some(rest) = line.strip_prefix("+++ ") {
             saw_structure = true;
-            if let Some(f) = current.take() {
-                files.push(f);
-            }
-            current = parse_plus_path(rest).map(|path| FileHunks {
-                path,
-                hunks: Vec::new(),
-            });
+            start_file(rest, &mut current, &mut files);
         }
-        // `index`, mode, `rename from/to`, `similarity`, blank — ignored.
     }
-    if let Some(f) = current.take() {
-        files.push(f);
-    }
+    flush(&mut current, &mut files);
 
     if !s.trim().is_empty() && !saw_structure {
         return Err(not_a_diff("no diff headers or hunks found"));
     }
     Ok(PrDiff { files })
+}
+
+/// Parse a `@@ … @@` header (everything after the `@@`) and open the hunk
+/// on the current file, flagging `in_hunk` so subsequent `+`/`-` lines
+/// attach to it. A malformed header is a usage error (propagated).
+fn open_hunk(
+    rest: &str,
+    current: Option<&mut FileHunks>,
+    in_hunk: &mut bool,
+) -> Result<(), String> {
+    let hunk = parse_hunk_header(rest)?;
+    *in_hunk = true;
+    if let Some(f) = current {
+        f.hunks.push(hunk);
+    }
+    Ok(())
+}
+
+/// Flush the in-progress file and begin a new one from a `+++ ` header
+/// (`/dev/null` — a deleted file's new side — yields no new file).
+fn start_file(rest: &str, current: &mut Option<FileHunks>, files: &mut Vec<FileHunks>) {
+    flush(current, files);
+    *current = parse_plus_path(rest).map(|path| FileHunks {
+        path,
+        hunks: Vec::new(),
+    });
+}
+
+/// Move `current` (if any) onto `files`, leaving `current` empty.
+fn flush(current: &mut Option<FileHunks>, files: &mut Vec<FileHunks>) {
+    if let Some(f) = current.take() {
+        files.push(f);
+    }
+}
+
+/// Classify one line while inside a hunk body. Appends a `+`/`-` body
+/// (sigil stripped) to the current hunk and returns `true`; treats a
+/// `\ No newline at end of file` marker as a consumed no-op (`true`).
+/// Returns `false` when the line is not a body line — the hunk has ended
+/// and the caller re-classifies it as a header.
+fn consume_body_line(line: &str, current: Option<&mut FileHunks>) -> bool {
+    if line.starts_with('\\') {
+        return true;
+    }
+    let Some(hunk) = current.and_then(|f| f.hunks.last_mut()) else {
+        // No open hunk to attach to (defensive): a `+`/`-` is still body-
+        // shaped and consumed; anything else ends the body.
+        return line.starts_with('+') || line.starts_with('-');
+    };
+    if let Some(body) = line.strip_prefix('+') {
+        hunk.added_lines.push(body.to_owned());
+        return true;
+    }
+    if let Some(body) = line.strip_prefix('-') {
+        hunk.removed_lines.push(body.to_owned());
+        return true;
+    }
+    false
 }
 
 /// Parse a `+++ ` header's path: strip an optional `b/` prefix and a

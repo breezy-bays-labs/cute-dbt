@@ -76,16 +76,21 @@ jobs:
         run: cargo install --locked --git https://github.com/breezy-bays-labs/cute-dbt --rev "$CUTE_DBT_REV"
 
       # --- Diff (SHA-based: deterministic + fork-safe) + render. ---
+      #     `--unified=0` so cute-dbt sees the exact changed hunks (block-
+      #     precise updated-test detection + the inline YAML diff drawer key
+      #     off hunk spans, not just changed filenames). The diff is taken
+      #     base...head and the manifest was compiled at head above, so the
+      #     hunks line up with the working tree (same-revision contract).
       - name: Render diff-scoped report
         run: |
           set -euo pipefail
           mkdir -p _site
-          git diff --name-only \
+          git diff --unified=0 \
             "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
-            > changed_files.txt
+            > diff.patch
           cute-dbt \
             --manifest dbt_project/target/manifest.json \
-            --scope-from-pr-diff @changed_files.txt \
+            --pr-diff @diff.patch \
             --project-root dbt_project \
             --out _site/report.html
 

@@ -776,6 +776,19 @@ mod tests {
     }
 
     #[test]
+    fn block_aligns_checks_each_added_line_at_its_own_offset() {
+        let block = block_at(ALIGN_RAW, 2); // [2, 4]
+        // A two-line hunk whose added bodies match the working tree at
+        // lines 3 AND 4. The second body is verified at offset `new_start +
+        // 1`, not `new_start - 1` — pins the per-line index arithmetic
+        // (`file_line = new_start + k`) so a `+`→`-` slip on `k` is caught.
+        assert!(block_aligns_with_hunks(
+            &block,
+            &[repl(3, &["    model: m", "    given: []"])]
+        ));
+    }
+
+    #[test]
     fn block_misaligns_when_added_line_offset_is_wrong() {
         let block = block_at(ALIGN_RAW, 2); // [2, 4]
         // Claims "    model: m" at line 2, but line 2 is "  - name: t".

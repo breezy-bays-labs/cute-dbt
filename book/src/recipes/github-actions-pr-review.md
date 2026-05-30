@@ -5,10 +5,11 @@ a **diff-scoped** unit-test report — scoped to the models and tests the
 PR actually changed, with no baseline-manifest publishing job to
 maintain. Reviewers open the report in one or two clicks.
 
-This recipe uses the `--scope-from-pr-diff` flag (cute-dbt v0.1.x): the
-workflow computes the PR's changed-file list and hands it to cute-dbt,
-which scopes the report to the models/tests those files touch. It is the
-CI counterpart to the local [`--baseline-manifest`][diff] flow.
+This recipe uses the `--pr-diff` flag (cute-dbt v0.1.x): the workflow runs
+`git diff --unified=0 <base>...<head>` and hands the resulting patch to
+cute-dbt, which scopes the report to the models/tests those changed paths
+touch and uses the diff's hunks to flag the tests the PR actually edited.
+It is the CI counterpart to the local [`--baseline-manifest`][diff] flow.
 
 [diff]: ../how-it-works.md
 
@@ -72,28 +73,40 @@ in any browser.
 
 Both options share the same diff + render core. The diff uses the PR
 event's **base and head SHAs** (deterministic, fork-safe — it does not
-depend on `origin` remote semantics or branch-name resolution):
+depend on `origin` remote semantics or branch-name resolution), with
+`--unified=0` so cute-dbt sees the exact changed hunks:
 
 ```bash
 mkdir -p _site
-git diff --name-only \
+git diff --unified=0 \
   "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
-  > changed_files.txt
+  > diff.patch
 
 cute-dbt \
   --manifest dbt_project/target/manifest.json \
-  --scope-from-pr-diff @changed_files.txt \
+  --pr-diff @diff.patch \
   --project-root dbt_project \
   --out _site/report.html
 ```
 
-`--scope-from-pr-diff @changed_files.txt` reads the changed-file list (one
-path per line). `--project-root dbt_project` rewrites the repo-relative
-diff paths so they match the manifest's project-relative
+`--pr-diff @diff.patch` reads the unified diff (the leading `@` means
+"read from this file"). cute-dbt parses the diff's `+++ b/<path>` headers
+to pick the in-scope set and its `@@ … @@` hunks to flag which tests the
+PR actually edited (block-precise updated detection + the inline YAML diff
+drawer key off the hunk spans). `--project-root dbt_project` rewrites the
+repo-relative diff paths so they match the manifest's project-relative
 `original_file_path`s (drop it if your dbt project is at the repo root).
-cute-dbt computes the diff itself from **facts you hand it** — it never
-shells out to `git` or reads `GITHUB_EVENT_PATH`, so the workflow stays in
-control of *how* the file list is produced.
+cute-dbt parses the diff you hand it — it never shells out to `git` or
+reads `GITHUB_EVENT_PATH`, so the workflow stays in control of *how* the
+diff is produced.
+
+**Same-revision contract.** Take the diff `base...head` and compile the
+manifest at `head` (the recipe below does both). Then the diff hunks line
+up with the working-tree YAML, which is what makes block precision and the
+inline diff trustworthy. If you feed cute-dbt a diff that no longer
+matches the compiled head (revision drift), it degrades gracefully — it
+keeps the file-granular "updated" mark and drops the inline diff rather
+than mislabel a test.
 
 cute-dbt writes only `report.html`; isolating it in a dedicated `_site/`
 dir (hence `mkdir -p _site` + `--out _site/report.html`) keeps the Pages
@@ -161,17 +174,23 @@ jobs:
           CUTE_DBT_REV: PUT_A_CUTE_DBT_MAIN_SHA_HERE   # edit: pin a commit
         run: cargo install --locked --git https://github.com/breezy-bays-labs/cute-dbt --rev "$CUTE_DBT_REV"
 
-      # --- Diff + render ---
+      # --- Diff (SHA-based: deterministic + fork-safe) + render.
+      #     `--unified=0` so cute-dbt sees the exact changed hunks
+      #     (block-precise updated-test detection + the inline YAML diff
+      #     drawer key off hunk spans, not just changed filenames). The
+      #     diff is taken base...head and the manifest was compiled at head
+      #     above, so the hunks line up with the working tree
+      #     (same-revision contract). ---
       - name: Render diff-scoped report
         run: |
           set -euo pipefail
           mkdir -p _site
-          git diff --name-only \
+          git diff --unified=0 \
             "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
-            > changed_files.txt
+            > diff.patch
           cute-dbt \
             --manifest dbt_project/target/manifest.json \
-            --scope-from-pr-diff @changed_files.txt \
+            --pr-diff @diff.patch \
             --project-root dbt_project \
             --out _site/report.html
 
@@ -403,15 +422,20 @@ resolves to the latest compatible `0.1.x` patch).
 
 ## 10. v0.1 fidelity limits
 
-PR-diff scoping maps **changed file paths** to manifest nodes. It does not
-parse the *contents* of a diff, so a few cases are out of scope by design
-(use `--baseline-manifest` if you need them):
+PR-diff scoping picks the in-scope set from the diff's **changed file
+paths**; scope selection stays path-granular even though the diff's hunks
+now drive block-precise updated-test detection. A few cases are out of
+scope by design (use `--baseline-manifest` if you need them):
 
-- A change to only a YAML **config block** (not the `unit_tests:` block)
-  in a file cute-dbt can't tell apart from a test change at the path level.
 - A `packages.yml` / `dbt deps` change that alters compiled output without
-  touching a `.sql`/`.yml` model file.
+  touching a `.sql`/`.yml` model file — the diff carries no path that maps
+  to an affected node.
 - A **renamed** model (the diff shows a deleted path + an added path; the
   deleted path maps to no current-manifest node).
+
+A YAML **config-block** edit no longer mislabels a sibling test as
+updated: block precision flags only the tests whose block a diff hunk
+actually touched, so a change confined to a `config:` block won't mark the
+`unit_tests:` in the same file as updated.
 
 See [Features](../features/index.md) for the full fidelity matrix.

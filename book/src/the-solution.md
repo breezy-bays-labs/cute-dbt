@@ -5,7 +5,7 @@ A single static, local, single-binary tool. The form factor:
 ```text
 manifest.json  +  one scope source
                   ├─ --baseline-manifest    (local dev)
-                  └─ --scope-from-pr-diff    (CI / PR review)
+                  └─ --pr-diff               (CI / PR review)
                        │
                        ▼
                    cute-dbt
@@ -48,7 +48,8 @@ section:
 
 - It does not run dbt for you. You bring a compiled `manifest.json`
   plus one scope source — a baseline manifest (local) or the PR's
-  changed-file list (CI). (See [Getting started](./getting-started.md).)
+  unified diff (`git diff --unified=0`, CI). (See [Getting
+  started](./getting-started.md).)
 - It does not execute SQL or talk to a warehouse.
 - Its **default** in-scope detector is `state:modified.body` —
   body-checksum diffs — so a pure config / contract / relation / macros
@@ -65,9 +66,9 @@ cute-dbt is a **PR-review tool**. The first-class workflow:
 
 1. A reviewer opens the PR.
 2. CI compiles the PR head and runs cute-dbt, scoping the report to the
-   PR's changed files via `--scope-from-pr-diff` — no baseline-manifest
-   publishing job to maintain. (Locally, you scope the same report with
-   a `--baseline-manifest` instead.)
+   PR's diff via `--pr-diff` (the `git diff --unified=0` output) — no
+   baseline-manifest publishing job to maintain. (Locally, you scope the
+   same report with a `--baseline-manifest` instead.)
 3. The report shows **only the tests in scope for this diff** — with
    their CTE context, fixture data, and expected results, in one HTML
    file that opens offline.

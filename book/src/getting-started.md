@@ -26,8 +26,8 @@ cute-dbt always reads a **current** `manifest.json`, plus exactly one
 **scope source** telling it what changed:
 
 - **Local dev** (this page): a `--baseline-manifest` to diff against.
-- **CI / PR review**: `--scope-from-pr-diff` with the PR's changed
-  files — see the [GitHub Actions PR-review
+- **CI / PR review**: `--pr-diff` with the PR's unified diff (`git diff
+  --unified=0`) — see the [GitHub Actions PR-review
   recipe](./recipes/github-actions-pr-review.md), the headline team
   path. ([Which should I use?](./how-it-works.md#which-scope-source))
 
@@ -113,7 +113,7 @@ mapped to a non-zero exit code:
 | Pre-1.8 dbt schema | non-zero | Upgrade dbt (cute-dbt requires `metadata.dbt_schema_version` ≥ 1.8) |
 | Baseline path missing or mismatched | non-zero | Verify `--baseline-manifest` resolves |
 | In-scope unit test targets a model with `compiled_code: null` | non-zero | Compile fully (`dbt compile`, not `dbt parse`) |
-| No scope source — neither `--baseline-manifest` nor `--scope-from-pr-diff`, or both at once | clap usage error (exit 2) | Pass exactly one scope source |
+| No scope source — neither `--baseline-manifest` nor `--pr-diff`, or both at once | clap usage error (exit 2) | Pass exactly one scope source |
 
 There is never a partial report. Either you get a complete report or
 a non-zero exit explaining what's missing.

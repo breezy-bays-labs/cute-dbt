@@ -16,9 +16,9 @@ dependency graph.
 
 Scopes the report to what a change actually touched — via a
 `--baseline-manifest` diff (`state:modified.body`) for local dev, or the
-PR's changed files (`--scope-from-pr-diff`) for CI / PR review. An empty
-scope is a valid exit-0 report, not an error. See
-[How it works](../how-it-works.md).
+PR's unified diff (`--pr-diff`, the `git diff --unified=0` output) for
+CI / PR review. An empty scope is a valid exit-0 report, not an error.
+See [How it works](../how-it-works.md).
 
 ## CTE dependency graph
 
