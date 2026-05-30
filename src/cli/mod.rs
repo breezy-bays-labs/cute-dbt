@@ -42,7 +42,7 @@ use crate::adapters::source_yaml::FsSourceYamlReader;
 use crate::domain::{
     DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NormalizedDiffIndex,
     PreflightError, ScopeInput, ScopeSelection, UnitTestYamlBlock, extract_unit_test_block,
-    preflight_compiled, select_in_scope,
+    preflight_compiled, refine_changed_by_hunks, select_in_scope,
 };
 use crate::ports::{ManifestSource, SourceYamlReader};
 
@@ -146,6 +146,18 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
     // (cute-dbt#91).
     let render_test_ids = render_test_ids(&current, &models_in_scope);
     let authoring_yaml = gather_authoring_yaml(cli, &current, &render_test_ids);
+    // Block-precise narrowing (cute-dbt#96): on the PR-diff path, narrow the
+    // file-granular `changed` label down to the tests whose sliced YAML block
+    // a diff hunk actually touches. The slice spans (`authoring_yaml`) are
+    // already in hand, and `changed′ ⊆ changed` holds because refine only
+    // removes ids. Baseline-mode `changed` is already precise (a
+    // `StateComparator` struct diff), so refine runs ONLY on the PrDiff arm.
+    let changed = match &scope_input {
+        ScopeInput::PrDiff { index } => {
+            refine_changed_by_hunks(&current, &changed, &authoring_yaml, index)
+        }
+        ScopeInput::Baseline { .. } => changed,
+    };
     let (report_title, report_subtitle) = resolve_report_strings(cli);
     let (baseline_label, scope_source) = scope_banner(cli, &scope_input);
     render(

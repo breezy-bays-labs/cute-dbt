@@ -42,6 +42,7 @@ use super::builders::{
     empty_manifest, model_node_with_original_file_path, serialize_to_tmp, unit_test_for,
     unit_test_with_path, with_node, with_unit_test,
 };
+use super::world::{BlockTarget, BlockTargetKind};
 
 /// Synthetic compiled SQL with one import CTE, so a rendered model card
 /// carries a non-empty CTE DAG (the `contains a CTE diagram for …`
@@ -109,12 +110,132 @@ fn synth_yaml(tests: &[String]) -> String {
     s
 }
 
+// [`synth_yaml`]'s layout: a fixed header then a fixed-size block per test
+// (no blank lines between blocks). The block-targeting synthesizer places
+// hunks by arithmetic on these, so a hunk lands exactly where the #69
+// slicer computes the block span (the revision-alignment the whole feature
+// rests on). KEEP IN SYNC with `synth_yaml`.
+const SYNTH_HEADER_LINES: usize = 7; // version / "" / models / -name / desc / "" / unit_tests:
+const SYNTH_BLOCK_LINES: usize = 5; // - name / model / given / expect / rows
+
+/// 1-based inclusive `[block_start, block_end]` of the test at sorted index
+/// `i` in a [`synth_yaml`]-shaped file — matches the slicer's span.
+fn block_range(i: usize) -> (usize, usize) {
+    let start = SYNTH_HEADER_LINES + 1 + i * SYNTH_BLOCK_LINES;
+    (start, start + SYNTH_BLOCK_LINES - 1)
+}
+
+/// The `diff --git` + `---`/`+++` file header real `git diff` precedes each
+/// file's hunks with. Without it the parser, still in a prior file's hunk,
+/// would eat this file's `--- a/…` line as a removed body line (Step 1 note).
+fn push_file_header(patch: &mut String, changed: &str) {
+    patch.push_str(&format!(
+        "diff --git a/{changed} b/{changed}\n--- a/{changed}\n+++ b/{changed}\n"
+    ));
+}
+
+/// Append one unified-diff hunk: the `@@` header then the `-`/`+` bodies.
+/// `old_start` is cosmetic — refine reads only the new side.
+fn push_hunk(
+    patch: &mut String,
+    old_start: usize,
+    new_start: usize,
+    removed: &[String],
+    added: &[String],
+) {
+    patch.push_str(&format!(
+        "@@ -{old_start},{} +{new_start},{} @@\n",
+        removed.len(),
+        added.len(),
+    ));
+    for r in removed {
+        patch.push_str(&format!("-{r}\n"));
+    }
+    for a in added {
+        patch.push_str(&format!("+{a}\n"));
+    }
+}
+
+/// Emit block-targeted hunks for a YAML file (cute-dbt#96 Step 2). `tests`
+/// is the sorted declared-test list `synth_yaml` wrote, so each target's
+/// block index is its position in `tests`.
+fn emit_targeted_hunks(
+    patch: &mut String,
+    content: &str,
+    tests: &[String],
+    targets: &[BlockTargetKind],
+) {
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Stale is exclusive: a whole-file hunk whose `+` lines drift from the
+    // working tree → every block's N7b alignment fails → file-granular keep.
+    if targets.iter().any(|k| matches!(k, BlockTargetKind::Stale)) {
+        let removed: Vec<String> = lines.iter().map(|l| (*l).to_owned()).collect();
+        let added: Vec<String> = lines
+            .iter()
+            .map(|l| format!("{l}  # STALE-DRIFT"))
+            .collect();
+        push_hunk(patch, 1, 1, &removed, &added);
+        return;
+    }
+
+    // Collect (new_start, removed, added) per target, then emit ascending by
+    // new_start (unified-diff hunks within a file are ordered).
+    let block_index = |name: &str| {
+        tests
+            .iter()
+            .position(|t| t == name)
+            .expect("targeted test is declared in this YAML")
+    };
+    let mut hunks: Vec<(usize, Vec<String>, Vec<String>)> = Vec::new();
+    for kind in targets {
+        match kind {
+            BlockTargetKind::EditsTest(name) => {
+                let (bs, _be) = block_range(block_index(name));
+                let model_line = bs + 1; // `    model: synthetic_model`
+                let working = lines[model_line - 1].to_owned();
+                // A real edit: old content differs; new == working tree (so
+                // the block stays N7b-aligned and the hunk touches the block).
+                hunks.push((model_line, vec![format!("{working}  # was")], vec![working]));
+            }
+            BlockTargetKind::DeletesFromTest(name) => {
+                let (bs, _be) = block_range(block_index(name));
+                let del_line = bs + 2; // the `    given: []` line, inside the block
+                let working = lines[del_line - 1].to_owned();
+                // Pure deletion: 1 line removed, 0 added; the new-side gap
+                // sits after `del_line - 1` (a zero-count point-touch).
+                hunks.push((del_line - 1, vec![working], Vec::new()));
+            }
+            BlockTargetKind::EditsOutside => {
+                // The `description:` line in the `models:` region (line 5),
+                // above every test block (block_start ≥ 8) → touches none.
+                let outside_line = 5;
+                let working = lines[outside_line - 1].to_owned();
+                hunks.push((
+                    outside_line,
+                    vec![format!("{working}  # was")],
+                    vec![working],
+                ));
+            }
+            BlockTargetKind::Stale => unreachable!("handled above"),
+        }
+    }
+    hunks.sort_by_key(|(new_start, _, _)| *new_start);
+    for (new_start, removed, added) in &hunks {
+        push_hunk(patch, *new_start, *new_start, removed, added);
+    }
+}
+
 /// Synthesize a `git diff --unified=0` patch from `world.changed_files`,
-/// writing it to a temp file and returning its path. For a YAML file that
-/// declares tests, also writes the working-tree YAML under
-/// `<workdir>/<project-root>/` (= `workdir.join(changed)`, since the
-/// changed path is repo-relative and mirrors the working tree) and emits
-/// a whole-file hunk spanning every declared block (note #7). SQL /
+/// writing it to a temp file and returning its path.
+///
+/// For a YAML file that declares tests, the working-tree YAML is written
+/// under `<workdir>/<project-root>/` (= `workdir.join(changed)`, since the
+/// changed path is repo-relative and mirrors the working tree) so the #69
+/// slicer can compute block spans. If the file has no block-targeting
+/// directives ([`World::block_targets`]) the synthesizer emits a whole-file
+/// hunk spanning every declared block (note #7 — the slice-A footprint);
+/// otherwise it emits block-targeted hunks (cute-dbt#96 Step 2). SQL /
 /// non-dbt files get a minimal hunk and no working-tree file.
 fn synthesize_pr_diff(
     manifest: &Manifest,
@@ -126,31 +247,34 @@ fn synthesize_pr_diff(
     for changed in &world.changed_files {
         let is_yaml = changed.ends_with(".yml") || changed.ends_with(".yaml");
         let tests = tests_declared_in(manifest, changed, project_root);
+        let targets: Vec<BlockTargetKind> = world
+            .block_targets
+            .iter()
+            .filter(|t| &t.yaml == changed)
+            .map(|t| t.kind.clone())
+            .collect();
+
         if is_yaml && !tests.is_empty() {
             let content = synth_yaml(&tests);
-            let n = content.lines().count();
             let abs = workdir.join(changed);
             if let Some(parent) = abs.parent() {
                 std::fs::create_dir_all(parent).expect("create YAML parent dir");
             }
             std::fs::write(&abs, &content).expect("write working-tree YAML");
-            // `diff --git` precedes each file's headers exactly as real
-            // `git diff` emits it — without it the parser, still in a
-            // prior file's hunk, would eat this file's `--- a/…` line as a
-            // removed body line (it starts with `-`).
-            patch.push_str(&format!(
-                "diff --git a/{changed} b/{changed}\n--- a/{changed}\n+++ b/{changed}\n@@ -1,{n} +1,{n} @@\n"
-            ));
-            for line in content.lines() {
-                patch.push_str(&format!("-{line}\n"));
-            }
-            for line in content.lines() {
-                patch.push_str(&format!("+{line}\n"));
+
+            push_file_header(&mut patch, changed);
+            if targets.is_empty() {
+                // Whole-file footprint: every block touched, every `+` line
+                // == working-tree content (N7b-aligned), so file-granular
+                // and block-level overlap coincide (slice-A scenarios).
+                let lines: Vec<String> = content.lines().map(str::to_owned).collect();
+                push_hunk(&mut patch, 1, 1, &lines, &lines);
+            } else {
+                emit_targeted_hunks(&mut patch, &content, &tests, &targets);
             }
         } else {
-            patch.push_str(&format!(
-                "diff --git a/{changed} b/{changed}\n--- a/{changed}\n+++ b/{changed}\n@@ -1 +1 @@\n-old\n+new\n"
-            ));
+            push_file_header(&mut patch, changed);
+            push_hunk(&mut patch, 1, 1, &["old".to_owned()], &["new".to_owned()]);
         }
     }
     let patch_path = common::tmp("pr_diff.patch");
@@ -176,6 +300,72 @@ fn pr_diff_malformed(world: &mut World) {
     std::fs::write(&path, "this is not a unified diff\njust some prose\n")
         .expect("write malformed patch");
     world.explicit_patch = Some(path);
+}
+
+// --- Given: block-targeting PR diffs (cute-dbt#96 Step 2) ------------
+//
+// These record where in a YAML file the synthesized diff places its hunks.
+// The file is added to `changed_files` (so the When synthesizes it) and a
+// `BlockTarget` directs hunk placement; the harness writes the full
+// working-tree YAML either way, so the #69 slicer always finds block spans.
+
+/// Mark `yaml` as a changed file (idempotent — a scenario may target the
+/// same file twice, e.g. both-edited).
+fn push_changed_yaml(world: &mut World, yaml: &str) {
+    if !world.changed_files.iter().any(|f| f == yaml) {
+        world.changed_files.push(yaml.to_owned());
+    }
+}
+
+#[given(regex = r#"^a PR diff that edits the definition of "([^"]+)" in "([^"]+)"$"#)]
+fn pr_diff_edits_test(world: &mut World, test: String, yaml: String) {
+    push_changed_yaml(world, &yaml);
+    world.block_targets.push(BlockTarget {
+        yaml,
+        kind: BlockTargetKind::EditsTest(test),
+    });
+}
+
+#[given(
+    regex = r#"^a PR diff that edits the definitions of "([^"]+)" and "([^"]+)" in "([^"]+)"$"#
+)]
+fn pr_diff_edits_two_tests(world: &mut World, a: String, b: String, yaml: String) {
+    push_changed_yaml(world, &yaml);
+    world.block_targets.push(BlockTarget {
+        yaml: yaml.clone(),
+        kind: BlockTargetKind::EditsTest(a),
+    });
+    world.block_targets.push(BlockTarget {
+        yaml,
+        kind: BlockTargetKind::EditsTest(b),
+    });
+}
+
+#[given(regex = r#"^a PR diff that edits "([^"]+)" outside any test definition$"#)]
+fn pr_diff_edits_outside(world: &mut World, yaml: String) {
+    push_changed_yaml(world, &yaml);
+    world.block_targets.push(BlockTarget {
+        yaml,
+        kind: BlockTargetKind::EditsOutside,
+    });
+}
+
+#[given(regex = r#"^a PR diff that deletes lines from the definition of "([^"]+)" in "([^"]+)"$"#)]
+fn pr_diff_deletes_from_test(world: &mut World, test: String, yaml: String) {
+    push_changed_yaml(world, &yaml);
+    world.block_targets.push(BlockTarget {
+        yaml,
+        kind: BlockTargetKind::DeletesFromTest(test),
+    });
+}
+
+#[given(regex = r#"^a PR diff whose hunks no longer line up with "([^"]+)"$"#)]
+fn pr_diff_stale(world: &mut World, yaml: String) {
+    push_changed_yaml(world, &yaml);
+    world.block_targets.push(BlockTarget {
+        yaml,
+        kind: BlockTargetKind::Stale,
+    });
 }
 
 // --- Given: synthetic manifest construction -------------------------

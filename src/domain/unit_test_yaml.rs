@@ -83,13 +83,33 @@ pub struct UnitTestYamlBlock {
     pub raw: String,
     /// 1-based line number of the `- name: <test>` line in the source.
     pub line_of_name: usize,
+    /// 1-based source line of the slice's FIRST line — the first leading
+    /// comment, or the `- name:` line when there are none. The inclusive
+    /// lower edge of the span cute-dbt#96 overlaps against a diff hunk to
+    /// decide block-precise `changed`.
+    pub block_start: usize,
+    /// 1-based source line of the slice's LAST line — the last trailing
+    /// comment, or the last body line. The inclusive upper edge.
+    ///
+    /// Two invariants hold by construction (pinned by the slicer tests):
+    /// `block_start <= line_of_name <= block_end`, and
+    /// `block_end - block_start + 1 == raw.split('\n').count()`.
+    pub block_end: usize,
 }
 
 impl UnitTestYamlBlock {
     /// Construct from owned parts. Reserved for tests and the slicer.
+    ///
+    /// `block_start` / `block_end` are 1-based inclusive source-line
+    /// bounds of `raw` (see the field docs for the two invariants).
     #[must_use]
-    pub fn new(raw: String, line_of_name: usize) -> Self {
-        Self { raw, line_of_name }
+    pub fn new(raw: String, line_of_name: usize, block_start: usize, block_end: usize) -> Self {
+        Self {
+            raw,
+            line_of_name,
+            block_start,
+            block_end,
+        }
     }
 }
 
@@ -135,7 +155,16 @@ pub fn extract_unit_test_block(file_contents: &str, test_name: &str) -> Option<U
     let trailing_end = find_trailing_end(&lines, body_end, list_indent);
 
     let raw = lines[leading_start..=trailing_end].join("\n");
-    Some(UnitTestYamlBlock::new(raw, name_idx + 1))
+    // 1-based, inclusive: the slice spans source lines
+    // `leading_start..=trailing_end` (0-based), so the block bounds are
+    // those + 1. cute-dbt#96 overlaps [block_start, block_end] against the
+    // diff's hunks to decide block-precise `changed`.
+    Some(UnitTestYamlBlock::new(
+        raw,
+        name_idx + 1,
+        leading_start + 1,
+        trailing_end + 1,
+    ))
 }
 
 /// Locate the first `- ` list item at any indent on or after `start_idx`.
@@ -781,5 +810,114 @@ unit_tests:
         assert!(extract_unit_test_block(&src, "not_a_test").is_none());
         let block = extract_unit_test_block(&src, "real_test").expect("real_test present");
         assert!(block.raw.contains("name: real_test"));
+    }
+
+    // ----- cute-dbt#96: block_start / block_end exposure -----
+    //
+    // Every block-precise off-by-one in #96 Step 2 (`hunk_touches_block`,
+    // the N7b alignment offset) is anchored on these two 1-based line
+    // numbers, so pin them exactly — plus the span↔raw consistency
+    // invariant — BEFORE any overlap logic layers on. A one-off here is
+    // silently wrong-but-plausible downstream; caught here it's a single
+    // arithmetic fix.
+
+    #[test]
+    fn block_span_pins_first_and_last_line_for_a_plain_block() {
+        let src = yaml(
+            "
+unit_tests:
+  - name: test_a
+    model: foo
+    given: []
+    expect:
+      rows: []
+",
+        );
+        let block = extract_unit_test_block(&src, "test_a").expect("test_a present");
+        // 1-based lines: 1 `unit_tests:` / 2 `- name:` / 3 model / 4 given
+        // / 5 expect / 6 rows. No leading/trailing comments → the span is
+        // the body, `- name:` through `rows: []`.
+        assert_eq!(block.block_start, 2, "first slice line is `- name:`");
+        assert_eq!(block.block_end, 6, "last slice line is `rows: []`");
+        assert_eq!(block.line_of_name, 2);
+    }
+
+    #[test]
+    fn block_span_includes_leading_comments_in_block_start() {
+        let src = yaml(
+            "
+unit_tests:
+  # leading comment one
+  # leading comment two
+  - name: test_a
+    model: foo
+",
+        );
+        let block = extract_unit_test_block(&src, "test_a").expect("test_a present");
+        // 1-based lines: 1 `unit_tests:` / 2 #c1 / 3 #c2 / 4 `- name:` / 5 model.
+        assert_eq!(
+            block.block_start, 2,
+            "block_start is the first leading comment, not `- name:`",
+        );
+        assert_eq!(block.line_of_name, 4);
+        assert_eq!(block.block_end, 5);
+    }
+
+    #[test]
+    fn block_span_includes_trailing_comments_in_block_end() {
+        let src = yaml(
+            "
+unit_tests:
+  - name: test_a
+    model: foo
+  # trailing of test_a
+
+  - name: test_b
+    model: bar
+",
+        );
+        let block = extract_unit_test_block(&src, "test_a").expect("test_a present");
+        // 1-based: 1 `unit_tests:` / 2 `- name:` / 3 model / 4 #trailing /
+        // 5 blank / 6 `- name: test_b`. The trailing comment (line 4) is
+        // the last slice line; the blank gap stops the trailing scan.
+        assert_eq!(block.block_start, 2);
+        assert_eq!(
+            block.block_end, 4,
+            "the trailing comment is the last line of the slice",
+        );
+    }
+
+    // The span↔raw consistency invariant the overlap math depends on:
+    // `block_end - block_start + 1` equals the raw slice's line count, and
+    // the name line lies within the span. Swept across representative
+    // shapes (plain, leading comment, block scalar, combined schema file)
+    // so a one-off in either edge is caught here, not downstream.
+    #[test]
+    fn block_span_is_consistent_with_raw_across_fixtures() {
+        let fixtures = [
+            "\nunit_tests:\n  - name: t\n    model: m\n",
+            "\nunit_tests:\n  # lead\n  - name: t\n    model: m\n    given: []\n",
+            "\nunit_tests:\n  - name: t\n    description: |\n      line one\n      line two\n    model: m\n",
+            "\nversion: 2\n\nmodels:\n  - name: m\n\nunit_tests:\n  - name: t\n    model: m\n",
+        ];
+        for src in fixtures {
+            let s = yaml(src);
+            let block = extract_unit_test_block(&s, "t").expect("t present");
+            let line_count = block.raw.split('\n').count();
+            assert_eq!(
+                block.block_end - block.block_start + 1,
+                line_count,
+                "span [{}, {}] must match the {line_count}-line raw slice for {src:?}",
+                block.block_start,
+                block.block_end,
+            );
+            assert!(
+                block.block_start <= block.line_of_name && block.line_of_name <= block.block_end,
+                "name line {} must lie within span [{}, {}]",
+                block.line_of_name,
+                block.block_start,
+                block.block_end,
+            );
+        }
     }
 }

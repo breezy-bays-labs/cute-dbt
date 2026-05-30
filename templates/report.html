@@ -116,6 +116,9 @@ g.dag-node:focus-visible { outline: 2px dashed #1d7484; outline-offset: 3px; }
 /* Inline hint shown when a model has tests but none are updated and the
    toggle is in Updated-only mode (the empty #test-select case). */
 .zero-updated-hint { margin: 0.5rem 0 0; color: #6a6a72; font-style: italic; font-size: 0.9em; }
+/* cute-dbt#96 — diff-level affirmation when block-precision narrowed every
+   test to context (0 updated). Subtle, like the per-model hint. */
+.zero-updated-affirm { margin: 0.35rem 0 0; color: #6a6a72; font-style: italic; font-size: 0.9em; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; }
 .panel-header h2 { margin: 0; }
 .expected-panel { border: 2px solid #1d7484; padding: 0.5rem 1rem 1rem; position: sticky; top: 1rem; align-self: start; }
@@ -227,6 +230,13 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     <span class="diff-scope-text">{{ banner_text }}</span> —{% if is_pr_diff %} from PR file diff{% else %}
     vs baseline manifest <code class="diff-scope-baseline">{{ baseline_label }}</code>{% endif %}.
   </p>
+  {%- if is_pr_diff %}
+  {# cute-dbt#96 (CPO Finding A): the LOCKED block-precision affirmation,
+     toggled visible by JS only when the diff updated 0 test definitions
+     (never a scoping failure). The leading `{%-` trims the inter-tag
+     whitespace so baseline-mode output stays byte-identical (#85 contract). #}
+  <p class="zero-updated-affirm" data-testid="zero-updated-affirm" hidden>no unit-test definitions changed in this diff</p>
+  {%- endif %}
 </section>
 
 <section class="error-card" role="alert" aria-label="Manifest error">
@@ -510,6 +520,11 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     }
     $(".diff-scope-text").text(text);
     $(".diff-scope-baseline").text(DATA.baseline);
+    // cute-dbt#96 — affirm block-precision ran when it narrowed every test
+    // to context (k models in scope, 0 updated). The element exists only on
+    // the PR-diff path (absent in baseline mode); jQuery no-ops if absent.
+    // Copy is static in the template (LOCKED, CPO Finding A) — toggle only.
+    $(".zero-updated-affirm").prop("hidden", !(k > 0 && x === 0));
   }
 
   function currentModel() {

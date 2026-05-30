@@ -92,14 +92,16 @@ fn tmp(name: &str) -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join(name)
 }
 
-/// Render a report for `(nodes, tests, models_in_scope, changed)` to a
-/// temp file and return its `file://` URL.
-fn render_to_file(
+/// Render a report for `(nodes, tests, models_in_scope, changed)` under
+/// `scope` to a temp file and return its `file://` URL.
+fn render_with_scope(
     filename: &str,
     nodes: Vec<Node>,
     tests: Vec<(&str, UnitTest)>,
     model_ids: &[&str],
     changed_ids: &[&str],
+    scope: ScopeSource,
+    baseline_label: &str,
 ) -> String {
     let all_ids: Vec<String> = tests.iter().map(|(id, _)| (*id).to_owned()).collect();
     let m = manifest(nodes, tests);
@@ -115,14 +117,53 @@ fn render_to_file(
         &models,
         &changed,
         &HashMap::new(),
-        "baseline.json",
-        ScopeSource::Baseline,
+        baseline_label,
+        scope,
         DEFAULT_REPORT_TITLE,
         None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
     format!("file://{p}")
+}
+
+/// Baseline-mode render (the #91 toggle tests).
+fn render_to_file(
+    filename: &str,
+    nodes: Vec<Node>,
+    tests: Vec<(&str, UnitTest)>,
+    model_ids: &[&str],
+    changed_ids: &[&str],
+) -> String {
+    render_with_scope(
+        filename,
+        nodes,
+        tests,
+        model_ids,
+        changed_ids,
+        ScopeSource::Baseline,
+        "baseline.json",
+    )
+}
+
+/// PR-diff-mode render (cute-dbt#96 — the block-precision affirmation lives
+/// on this path only). No baseline manifest, so the label is empty.
+fn render_pr_diff_to_file(
+    filename: &str,
+    nodes: Vec<Node>,
+    tests: Vec<(&str, UnitTest)>,
+    model_ids: &[&str],
+    changed_ids: &[&str],
+) -> String {
+    render_with_scope(
+        filename,
+        nodes,
+        tests,
+        model_ids,
+        changed_ids,
+        ScopeSource::PrDiff,
+        "",
+    )
 }
 
 // --- headless evaluation helpers ------------------------------------
@@ -178,6 +219,29 @@ fn hint_hidden(tab: &Tab) -> bool {
     eval_bool(
         tab,
         "document.querySelector('[data-testid=\"zero-updated-hint\"]').hidden",
+    )
+}
+
+/// `true` when the PR-diff block-precision affirmation element is in the DOM
+/// at all (it is server-rendered only on the PR-diff path; cute-dbt#96).
+fn affirm_present(tab: &Tab) -> bool {
+    eval_bool(
+        tab,
+        "document.querySelector('[data-testid=\"zero-updated-affirm\"]') !== null",
+    )
+}
+
+fn affirm_hidden(tab: &Tab) -> bool {
+    eval_bool(
+        tab,
+        "document.querySelector('[data-testid=\"zero-updated-affirm\"]').hidden",
+    )
+}
+
+fn affirm_text(tab: &Tab) -> String {
+    eval_string(
+        tab,
+        "document.querySelector('[data-testid=\"zero-updated-affirm\"]').textContent.trim()",
     )
 }
 
@@ -353,6 +417,91 @@ fn updated_toggle_drives_visibility_counts_hint_and_auto_all() {
     assert!(
         hint_hidden(&tab),
         "no 0-updated hint under auto-All (All-tests mode)",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn pr_diff_zero_updated_affirms_block_precision() {
+    // cute-dbt#96 (CPO Finding A): when block-precision narrows every test to
+    // context (0 updated — the common SQL-only / outside-the-block PR), the
+    // PR-diff report must AFFIRM that block-precision ran with the LOCKED copy
+    // "no unit-test definitions changed in this diff" — never a scoping-failure
+    // phrasing. The copy is PR-diff-specific; baseline mode must not show it.
+
+    // PR-diff, 0 updated → the affirmation is visible.
+    let pr_zero = render_pr_diff_to_file(
+        "headless_affirm_pr_zero.html",
+        vec![model_node("model.shop.dim_z")],
+        vec![("unit_test.shop.dim_z.only", unit_test("only", "dim_z"))],
+        &["model.shop.dim_z"],
+        &[],
+    );
+    // PR-diff, 1 updated → the affirmation is present but hidden.
+    let pr_updated = render_pr_diff_to_file(
+        "headless_affirm_pr_updated.html",
+        vec![model_node("model.shop.dim_y")],
+        vec![("unit_test.shop.dim_y.upd", unit_test("upd", "dim_y"))],
+        &["model.shop.dim_y"],
+        &["unit_test.shop.dim_y.upd"],
+    );
+    // Baseline mode, 0 updated → the affirmation element is absent entirely.
+    let baseline_zero = render_to_file(
+        "headless_affirm_baseline_zero.html",
+        vec![model_node("model.shop.dim_z")],
+        vec![("unit_test.shop.dim_z.only", unit_test("only", "dim_z"))],
+        &["model.shop.dim_z"],
+        &[],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+
+    // ===== PR-diff, 0 updated =====
+    tab.navigate_to(&pr_zero).expect("navigate pr_zero");
+    tab.wait_until_navigated()
+        .expect("await pr_zero navigation");
+    assert!(
+        all_mode_active(&tab),
+        "a 0-updated PR-diff auto-opens in All-tests mode",
+    );
+    assert!(
+        affirm_present(&tab),
+        "the PR-diff path server-renders the affirmation element",
+    );
+    assert!(
+        !affirm_hidden(&tab),
+        "the affirmation is visible when the diff updated zero tests",
+    );
+    assert_eq!(
+        affirm_text(&tab),
+        "no unit-test definitions changed in this diff",
+        "the LOCKED block-precision affirmation copy (CPO Finding A)",
+    );
+
+    // ===== PR-diff, 1 updated =====
+    tab.navigate_to(&pr_updated).expect("navigate pr_updated");
+    tab.wait_until_navigated()
+        .expect("await pr_updated navigation");
+    assert!(
+        affirm_present(&tab),
+        "the element is server-rendered on the PR-diff path regardless of count",
+    );
+    assert!(
+        affirm_hidden(&tab),
+        "the affirmation is hidden when at least one test is updated",
+    );
+
+    // ===== Baseline, 0 updated =====
+    tab.navigate_to(&baseline_zero)
+        .expect("navigate baseline_zero");
+    tab.wait_until_navigated()
+        .expect("await baseline_zero navigation");
+    assert!(
+        !affirm_present(&tab),
+        "baseline mode never renders the PR-diff-specific affirmation",
     );
 
     let _ = tab.close(true);

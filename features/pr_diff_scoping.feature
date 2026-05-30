@@ -257,3 +257,85 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the rendered report's test rows include "test_b"
     And the test "test_a" is marked updated
     And the test "test_b" is marked context
+
+  # --- cute-dbt#96 (slice B): block-precise `updated` via diff-hunk overlap ---
+  #
+  # Slice A marked `updated` file-granular: a changed multi-test YAML marked
+  # EVERY test it declares. Slice B narrows that to block precision — a test is
+  # `updated` iff a changed diff hunk overlaps its YAML block span. The harness
+  # places hunks at specific blocks (computing each block's line range from the
+  # synthesized YAML layout, which mirrors the #69 slicer's spans). When the
+  # diff has drifted from the working tree (hunks no longer line up), cute-dbt
+  # degrades to the slice-A file-granular label rather than misclassify. The
+  # interior-hunk arithmetic (exact edges, off-by-one, zero-count point-touch)
+  # is mutation-killed by the `hunk_touches_block` / `block_aligns_with_hunks`
+  # boundary tables in src/domain/pr_diff.rs; these scenarios pin the
+  # user-visible updated/context outcome end-to-end.
+
+  Scenario: Editing one test's block marks only that test updated
+    Given a PR diff that edits the definition of "test_a" in "models/marts/core/_core__models.yml"
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
+    And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
+    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the test "test_a" is marked updated
+    And the test "test_b" is marked context
+
+  Scenario: Editing two tests' blocks marks both updated (no over-narrowing)
+    Given a PR diff that edits the definitions of "test_a" and "test_b" in "models/marts/core/_core__models.yml"
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
+    And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
+    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the test "test_a" is marked updated
+    And the test "test_b" is marked updated
+
+  Scenario: A change outside any test definition marks every test context
+    # The narrowing that proves block-precision does something: only the
+    # surrounding `models:` region changed, so no test's block is touched.
+    Given a PR diff that edits "models/marts/core/_core__models.yml" outside any test definition
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
+    And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
+    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report's test rows include "test_a"
+    And the test "test_a" is marked context
+    And the test "test_b" is marked context
+
+  Scenario: Deleting lines from a test's block marks that test updated
+    # The zero-count point-touch path: a pure deletion inside a block still
+    # counts as touching it.
+    Given a PR diff that deletes lines from the definition of "test_a" in "models/marts/core/_core__models.yml"
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
+    And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
+    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the test "test_a" is marked updated
+    And the test "test_b" is marked context
+
+  Scenario: Block-precise updated detection works under a sub-directory project root
+    Given a PR diff that edits the definition of "test_a" in "dbt_project/models/marts/core/_core__models.yml"
+    And the manifest (compiled with project root "dbt_project") contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
+    And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
+    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root dbt_project --out report.html
+    Then the exit code is 0
+    And the test "test_a" is marked updated
+    And the test "test_b" is marked context
+
+  Scenario: A diff that no longer lines up with the working tree degrades to file-granular updated
+    # Revision drift (N7b): the hunks' added lines don't match the working-tree
+    # block, so cute-dbt can't trust block-precision and falls back to marking
+    # every declared test updated (and Step 3 drops the inline diff).
+    Given a PR diff whose hunks no longer line up with "models/marts/core/_core__models.yml"
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
+    And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
+    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the test "test_a" is marked updated
+    And the test "test_b" is marked updated
