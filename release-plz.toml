@@ -28,9 +28,13 @@
 # `v0.1.0` form.
 git_tag_name = "v{{ version }}"
 
-# Sign the annotated release tag (ADR D3 — signed annotated tags for
-# non-repudiation of releases). release-plz creates the tag in CI under
-# the App identity; the App's commits/tags are signed by GitHub.
+# Create an annotated release tag on publish. NOTE: this key only
+# controls WHETHER a tag is created (true is also the default); it does
+# NOT make the tag *signed*. ADR D3 requires *signed* annotated tags —
+# whether release-plz's tag creation under the App identity satisfies
+# that (App-pushed tags are not GPG/SSH-signed in the git sense) is
+# UNVERIFIED and is a tracked follow-up before the first publish, not a
+# claim this config delivers.
 git_tag_enable = true
 
 # A release PR opens only when a publishable bump is pending.
