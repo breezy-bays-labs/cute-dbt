@@ -1,12 +1,25 @@
 //! Step definitions for `features/pr_diff_scoping.feature` — the
-//! `--scope-from-pr-diff` CI/PR-review path (cute-dbt#84).
+//! `--pr-diff` CI/PR-review path (cute-dbt#84; renamed from
+//! `--scope-from-pr-diff` + reshaped to a raw `git diff --unified=0`
+//! patch at cute-dbt#96).
 //!
 //! Each scenario builds a synthetic in-memory `Manifest` via the builders
 //! (no committed fixture files — the synthetic-only-fixture invariant is
-//! satisfied trivially), serializes it to a temp file, runs the real
-//! `cute-dbt` subprocess with `--scope-from-pr-diff`, and asserts against
-//! the embedded `cute-dbt-data` JSON payload (the same parse strategy as
+//! satisfied trivially), serializes it to a temp file, **synthesizes a
+//! `git diff --unified=0` patch** (and the working-tree YAML it
+//! references) from the changed-file Givens, runs the real `cute-dbt`
+//! subprocess with `--pr-diff @<patch>`, and asserts against the embedded
+//! `cute-dbt-data` JSON payload (the same parse strategy as
 //! `consumer_report_contract.rs`).
+//!
+//! The diff + the working-tree YAML are generated together in the When
+//! (the revision-alignment invariant enforced inside the harness): a
+//! changed YAML file that declares tests gets multi-block content written
+//! under `<workdir>/<project-root>/` and a **whole-file hunk** spanning
+//! every block (the note-#7 footprint, so a migrated `updated` scenario
+//! stays green once cute-dbt#96 Step 2's block-precision lands). A
+//! changed SQL / non-dbt file gets a minimal hunk and no working-tree
+//! file.
 //!
 //! Step partition (cucumber-rs has one global step namespace):
 //! - REUSE — `the exit code is {0,non-zero}`, `no file "report.html" is
@@ -16,8 +29,12 @@
 //! - NEW/RENAME — every Given/When/Then below uses pr-diff-unique wording
 //!   so it routes here, not to the baseline-comparison impls.
 
+use std::path::{Path, PathBuf};
+
 use cucumber::{given, then, when};
 use serde_json::Value;
+
+use cute_dbt::domain::{Manifest, normalize_path};
 
 use super::super::common;
 use super::World;
@@ -45,23 +62,120 @@ fn take_current(world: &mut World) -> cute_dbt::domain::Manifest {
     world.current_manifest.take().unwrap_or_else(empty_manifest)
 }
 
-// --- Given: changed-file list ---------------------------------------
+// --- PR-diff synthesis (the revision-aligned harness) ---------------
 
-#[given(regex = r#"^a list of changed files containing (?:only )?"([^"]+)"$"#)]
-fn changed_files_single(world: &mut World, path: String) {
+/// The project-root strip for matching changed (repo-relative) paths
+/// against manifest (project-relative) `original_file_path`s. `"."` is
+/// the identity strip.
+fn strip_of(project_root: &str) -> Option<&Path> {
+    if project_root == "." {
+        None
+    } else {
+        Some(Path::new(project_root))
+    }
+}
+
+/// The test names a changed YAML file declares, in stable (sorted) order
+/// — found by matching the manifest's `original_file_path`s against the
+/// changed path under the same normalization the binary uses.
+fn tests_declared_in(manifest: &Manifest, changed: &str, project_root: &str) -> Vec<String> {
+    let changed_norm = normalize_path(changed, strip_of(project_root));
+    let mut names: Vec<String> = manifest
+        .unit_tests()
+        .values()
+        .filter(|ut| {
+            ut.original_file_path()
+                .is_some_and(|p| normalize_path(p, None) == changed_norm)
+        })
+        .map(|ut| ut.name().to_owned())
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// Deterministic multi-block YAML for `tests` (declaration-ordered),
+/// preceded by a top-level `models:` region so a hunk has somewhere
+/// out-of-block to land (cute-dbt#96 Step 2's `outside` scenario). Each
+/// block is multi-line so a hunk can fall inside vs outside it.
+fn synth_yaml(tests: &[String]) -> String {
+    let mut s = String::from(
+        "version: 2\n\nmodels:\n  - name: synthetic_model\n    description: synthetic out-of-block region\n\nunit_tests:\n",
+    );
+    for t in tests {
+        s.push_str(&format!(
+            "  - name: {t}\n    model: synthetic_model\n    given: []\n    expect:\n      rows: []\n"
+        ));
+    }
+    s
+}
+
+/// Synthesize a `git diff --unified=0` patch from `world.changed_files`,
+/// writing it to a temp file and returning its path. For a YAML file that
+/// declares tests, also writes the working-tree YAML under
+/// `<workdir>/<project-root>/` (= `workdir.join(changed)`, since the
+/// changed path is repo-relative and mirrors the working tree) and emits
+/// a whole-file hunk spanning every declared block (note #7). SQL /
+/// non-dbt files get a minimal hunk and no working-tree file.
+fn synthesize_pr_diff(
+    manifest: &Manifest,
+    world: &World,
+    workdir: &Path,
+    project_root: &str,
+) -> PathBuf {
+    let mut patch = String::new();
+    for changed in &world.changed_files {
+        let is_yaml = changed.ends_with(".yml") || changed.ends_with(".yaml");
+        let tests = tests_declared_in(manifest, changed, project_root);
+        if is_yaml && !tests.is_empty() {
+            let content = synth_yaml(&tests);
+            let n = content.lines().count();
+            let abs = workdir.join(changed);
+            if let Some(parent) = abs.parent() {
+                std::fs::create_dir_all(parent).expect("create YAML parent dir");
+            }
+            std::fs::write(&abs, &content).expect("write working-tree YAML");
+            // `diff --git` precedes each file's headers exactly as real
+            // `git diff` emits it — without it the parser, still in a
+            // prior file's hunk, would eat this file's `--- a/…` line as a
+            // removed body line (it starts with `-`).
+            patch.push_str(&format!(
+                "diff --git a/{changed} b/{changed}\n--- a/{changed}\n+++ b/{changed}\n@@ -1,{n} +1,{n} @@\n"
+            ));
+            for line in content.lines() {
+                patch.push_str(&format!("-{line}\n"));
+            }
+            for line in content.lines() {
+                patch.push_str(&format!("+{line}\n"));
+            }
+        } else {
+            patch.push_str(&format!(
+                "diff --git a/{changed} b/{changed}\n--- a/{changed}\n+++ b/{changed}\n@@ -1 +1 @@\n-old\n+new\n"
+            ));
+        }
+    }
+    let patch_path = common::tmp("pr_diff.patch");
+    std::fs::write(&patch_path, &patch).expect("write synthesized patch");
+    patch_path
+}
+
+// --- Given: the PR diff ---------------------------------------------
+
+#[given(regex = r#"^a PR diff that changes (?:only )?"([^"]+)"$"#)]
+fn pr_diff_changes_one(world: &mut World, path: String) {
     world.changed_files = vec![path];
 }
 
-#[given(regex = r#"^a list of changed files containing (?:only )?"([^"]+)" and "([^"]+)"$"#)]
-fn changed_files_two(world: &mut World, a: String, b: String) {
+#[given(regex = r#"^a PR diff that changes (?:only )?"([^"]+)" and "([^"]+)"$"#)]
+fn pr_diff_changes_two(world: &mut World, a: String, b: String) {
     world.changed_files = vec![a, b];
 }
 
-#[given(regex = r#"^the changed-files list is written to a file "([^"]+)" one path per line$"#)]
-fn changed_files_written(world: &mut World, name: String) {
-    let path = common::tmp(&format!("pr_diff_{name}"));
-    std::fs::write(&path, world.changed_files.join("\n")).expect("write changed-files list");
-    world.changed_files_path = Some(path);
+#[given("a PR diff file whose contents are not a valid unified diff")]
+fn pr_diff_malformed(world: &mut World) {
+    let path = common::tmp("pr_diff_malformed.patch");
+    std::fs::write(&path, "this is not a unified diff\njust some prose\n")
+        .expect("write malformed patch");
+    world.explicit_patch = Some(path);
 }
 
 // --- Given: synthetic manifest construction -------------------------
@@ -161,21 +275,6 @@ fn manifest_has_no_node(world: &mut World, _ofp: String) {
 
 // --- When: run the subprocess ---------------------------------------
 
-/// Resolve the `--scope-from-pr-diff` argument from the harness
-/// placeholder: `<changed-files>` → a literal comma-joined list;
-/// `@changed.txt` → the `@`-prefixed path of the file a prior Given wrote.
-fn resolve_scope_arg(world: &World, token: &str) -> String {
-    if token.starts_with('@') {
-        let path = world
-            .changed_files_path
-            .as_ref()
-            .expect("the @file scenario wrote a changed-files list");
-        format!("@{}", common::s(path))
-    } else {
-        world.changed_files.join(",")
-    }
-}
-
 fn capture(world: &mut World, output: std::process::Output, out: std::path::PathBuf) {
     world.last_exit_code = output.status.code();
     world.last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -184,14 +283,12 @@ fn capture(world: &mut World, output: std::process::Output, out: std::path::Path
 }
 
 #[when(
-    regex = r#"^I run cute-dbt with --manifest current\.json --scope-from-pr-diff (\S+) --project-root (\S+) --out report\.html$"#
+    regex = r#"^I run cute-dbt with --manifest current\.json --pr-diff @diff\.patch --project-root (\S+) --out report\.html$"#
 )]
-fn run_scope_from_pr_diff(world: &mut World, scope_token: String, project_root: String) {
+fn run_pr_diff(world: &mut World, project_root: String) {
     let manifest = take_current(world);
     let manifest_path = serialize_to_tmp(&manifest, "pr_diff_current");
-    world.current_manifest = Some(manifest);
 
-    let scope_arg = resolve_scope_arg(world, &scope_token);
     let out = common::tmp("pr_diff_report.html");
     common::clear(&out);
 
@@ -208,11 +305,23 @@ fn run_scope_from_pr_diff(world: &mut World, scope_token: String, project_root: 
     if project_root != "." {
         std::fs::create_dir_all(workdir.join(&project_root)).expect("create project-root dir");
     }
+
+    // Synthesize the patch (+ the working-tree YAML it references) from
+    // the changed-file Givens, unless a Given wrote an explicit patch
+    // (the malformed-diff case — and, cute-dbt#96 Step 2, the stale-diff
+    // case).
+    let patch_path = world
+        .explicit_patch
+        .clone()
+        .unwrap_or_else(|| synthesize_pr_diff(&manifest, world, &workdir, &project_root));
+    world.current_manifest = Some(manifest);
+    let scope_arg = format!("@{}", common::s(&patch_path));
+
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"))
         .args([
             "--manifest",
             common::s(&manifest_path),
-            "--scope-from-pr-diff",
+            "--pr-diff",
             &scope_arg,
             "--project-root",
             &project_root,
@@ -226,25 +335,32 @@ fn run_scope_from_pr_diff(world: &mut World, scope_token: String, project_root: 
 }
 
 #[when(
-    regex = r#"^I run cute-dbt with --manifest current\.json --baseline-manifest baseline\.json --scope-from-pr-diff <changed-files> --project-root \. --out report\.html$"#
+    regex = r#"^I run cute-dbt with --manifest current\.json --baseline-manifest baseline\.json --pr-diff @diff\.patch --project-root \. --out report\.html$"#
 )]
 fn run_both_scope_sources(world: &mut World) {
-    // clap rejects the conflicting scope sources at parse time, before
-    // either manifest is read — the baseline path need not exist.
+    // clap rejects the conflicting scope sources at parse time. The
+    // --pr-diff value must still PARSE (value-parser runs before group
+    // validation), so synthesize a valid patch; the baseline path need
+    // not exist (it is never read).
     let manifest = take_current(world);
     let manifest_path = serialize_to_tmp(&manifest, "pr_diff_both");
-    world.current_manifest = Some(manifest);
 
     let baseline = common::tmp("pr_diff_baseline_unread.json");
     let out = common::tmp("pr_diff_both_report.html");
     common::clear(&out);
+    let workdir = common::tmp("pr_diff_both_workdir");
+    std::fs::create_dir_all(&workdir).expect("create workdir");
+    let patch_path = synthesize_pr_diff(&manifest, world, &workdir, ".");
+    world.current_manifest = Some(manifest);
+    let scope_arg = format!("@{}", common::s(&patch_path));
+
     let output = common::run_cli(&[
         "--manifest",
         common::s(&manifest_path),
         "--baseline-manifest",
         common::s(&baseline),
-        "--scope-from-pr-diff",
-        &world.changed_files.join(","),
+        "--pr-diff",
+        &scope_arg,
         "--project-root",
         ".",
         "--out",
@@ -517,14 +633,31 @@ fn no_cte_diagrams(world: &mut World) {
     );
 }
 
-#[then(
-    "stderr explains exactly one of --scope-from-pr-diff or --baseline-manifest must be provided"
-)]
+#[then("stderr explains exactly one of --pr-diff or --baseline-manifest must be provided")]
 fn stderr_explains_one_scope_source(world: &mut World) {
     let stderr = &world.last_stderr;
     assert!(
-        stderr.contains("--scope-from-pr-diff") && stderr.contains("--baseline-manifest"),
+        stderr.contains("--pr-diff") && stderr.contains("--baseline-manifest"),
         "expected stderr to name both scope-source flags; got: {stderr}",
+    );
+}
+
+#[then("the exit code is 2")]
+fn exit_code_is_2(world: &mut World) {
+    assert_eq!(
+        world.last_exit_code,
+        Some(2),
+        "expected exit 2 (clap usage error); stderr={}",
+        world.last_stderr,
+    );
+}
+
+#[then("stderr explains the --pr-diff argument could not be parsed as a unified diff")]
+fn stderr_explains_malformed_pr_diff(world: &mut World) {
+    let stderr = &world.last_stderr;
+    assert!(
+        stderr.contains("--pr-diff") && stderr.contains("could not be parsed as a unified diff"),
+        "expected stderr to explain the unparseable --pr-diff; got: {stderr}",
     );
 }
 

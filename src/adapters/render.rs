@@ -358,7 +358,7 @@ pub struct ReportPayload {
 pub enum ScopeSource {
     /// Scoped via `--baseline-manifest` (dbt `state:modified`).
     Baseline,
-    /// Scoped via `--scope-from-pr-diff` (PR changed-files list).
+    /// Scoped via `--pr-diff` (a PR's `git diff --unified=0`).
     PrDiff,
 }
 

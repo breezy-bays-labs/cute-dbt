@@ -74,15 +74,19 @@ pub struct World {
     pub last_edge_type: Option<EdgeType>,
 
     // --- PR-diff scoping (pr_diff_scoping) ------------------------------
-    /// Changed-file list configured by a `Given a list of changed files
-    /// containing …` step; resolved into the `--scope-from-pr-diff`
-    /// argument by the When step (comma-joined literal, or written to a
-    /// file for the `@file` form).
+    /// Changed-file paths configured by a `Given a PR diff that changes …`
+    /// step. The When step synthesizes a `git diff --unified=0` patch
+    /// covering them (a whole-file hunk for a YAML file that declares
+    /// tests — plus the working-tree YAML written under
+    /// `<workdir>/<project-root>/` — and a minimal hunk for SQL / non-dbt
+    /// files), then passes `--pr-diff @<patch>` (cute-dbt#96).
     pub changed_files: Vec<String>,
 
-    /// Path to the changed-files list written to disk (Scenario 14's
-    /// `@file` form). `None` until the "written to a file" Given runs.
-    pub changed_files_path: Option<PathBuf>,
+    /// An explicit patch file written by a Given (the malformed-diff and,
+    /// cute-dbt#96 Step 2, the stale-diff scenarios) that the When passes
+    /// verbatim as `@<path>` instead of synthesizing one. `None` ⇒
+    /// synthesize from `changed_files`.
+    pub explicit_patch: Option<PathBuf>,
 }
 
 /// Which committed fixture pair the next subprocess `When` step

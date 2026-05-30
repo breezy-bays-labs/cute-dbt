@@ -38,6 +38,8 @@
 pub mod config;
 pub mod cte;
 pub mod manifest;
+pub mod path;
+pub mod pr_diff;
 pub mod preflight;
 pub mod scope;
 pub mod state;
@@ -47,8 +49,10 @@ pub mod unit_test_yaml;
 pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};
 pub use manifest::{Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId};
+pub use path::{match_changed_path, normalize_path};
+pub use pr_diff::{FileHunks, Hunk, NormalizedDiffIndex, PrDiff};
 pub use preflight::{PreflightError, preflight_compiled};
-pub use scope::{ScopeInput, ScopeSelection, match_changed_path, normalize_path, select_in_scope};
+pub use scope::{ScopeInput, ScopeSelection, select_in_scope};
 pub use state::{
     BANNER_EMPTY_SCOPE, BodyChecksumModifier, ConfigsModifier, ContractModifier, InScopeSet,
     MacrosModifier, ModelInScopeSet, ModifiedSet, ModifierKind, RelationModifier, StateComparator,

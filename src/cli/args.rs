@@ -14,15 +14,14 @@ use std::path::{Path, PathBuf};
 use clap::{ArgGroup, Parser};
 
 use crate::adapters::config_reader::load_config;
-use crate::cli::pr_diff::ChangedFiles;
-use crate::domain::AnalysisConfig;
+use crate::domain::{AnalysisConfig, PrDiff};
 
 /// cute-dbt — render a diff-scoped, self-contained HTML report of a dbt
 /// project's unit tests.
 #[derive(Debug, Parser)]
 #[command(name = "cute-dbt", version, about)]
 // Exactly one scope source is required: `--baseline-manifest` (dbt
-// `state:modified`) XOR `--scope-from-pr-diff` (PR changed-files list).
+// `state:modified`) XOR `--pr-diff` (a raw `git diff --unified=0` patch).
 // `required(true)` + `multiple(false)` makes "neither" a
 // MissingRequiredArgument and "both" an ArgumentConflict — both clap
 // usage errors (exit 2), never a `PreflightError` (cute-dbt#85, ADR-2
@@ -31,7 +30,7 @@ use crate::domain::AnalysisConfig;
 #[command(group = ArgGroup::new("scope_source")
     .required(true)
     .multiple(false)
-    .args(["baseline_manifest", "scope_from_pr_diff"]))]
+    .args(["baseline_manifest", "pr_diff"]))]
 pub struct Cli {
     /// Path to the compiled dbt `manifest.json` to visualise.
     #[arg(long, value_name = "PATH")]
@@ -48,20 +47,22 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub baseline_manifest: Option<PathBuf>,
 
-    /// PR changed-files scope source (CI/PR-review path) — no baseline
-    /// manifest needed.
+    /// PR-diff scope source (CI/PR-review path) — no baseline manifest
+    /// needed.
     ///
-    /// Accepts either a literal comma/newline-separated list
-    /// (`models/a.sql,models/b.yml`) or an `@file` reference
-    /// (`@changed.txt`, one path per line). The workflow / Action
-    /// computes the list — `git diff --name-only
-    /// ${base.sha}...${head.sha}` — and passes it here; cute-dbt does
+    /// Takes a raw `git diff --unified=0` patch via `@file`
+    /// (`--pr-diff @diff.patch`). The workflow / Action computes the diff
+    /// — `git diff --unified=0 ${base.sha}...${head.sha} > diff.patch` —
+    /// and passes the file here; cute-dbt parses it (the changed-file set
+    /// from each `+++ b/<path>` header, plus the per-file hunks that drive
+    /// block-precise `updated` detection — cute-dbt#96). cute-dbt does
     /// not shell out to `git` or read `GITHUB_EVENT_PATH`.
     ///
     /// Mutually exclusive with `--baseline-manifest`. A bad `@file`
-    /// (missing / non-UTF-8) is a clap usage error (exit 2).
-    #[arg(long, value_name = "LIST|@FILE", value_parser = crate::cli::pr_diff::parse_arg_value)]
-    pub scope_from_pr_diff: Option<ChangedFiles>,
+    /// (missing / non-UTF-8) or a value that is not a unified diff is a
+    /// clap usage error (exit 2).
+    #[arg(long, value_name = "@FILE", value_parser = crate::cli::pr_diff::parse_diff)]
+    pub pr_diff: Option<PrDiff>,
 
     /// Path the generated `report.html` is written to.
     #[arg(long, value_name = "PATH")]
@@ -213,9 +214,18 @@ mod tests {
         assert_eq!(cli.out, PathBuf::from("report.html"));
         // --config absent: the field is None.
         assert!(cli.config.is_none());
-        // --scope-from-pr-diff absent: the field is None (baseline path).
-        assert!(cli.scope_from_pr_diff.is_none());
+        // --pr-diff absent: the field is None (baseline path).
+        assert!(cli.pr_diff.is_none());
     }
+
+    /// A minimal valid `git diff --unified=0` patch for the @file-form
+    /// tests (a multi-line diff cannot be a clap value — it would parse
+    /// as flags — so the CLI surface always reads `@file`).
+    const VALID_DIFF: &str = "--- a/models/marts/core/_core__models.yml\n\
++++ b/models/marts/core/_core__models.yml\n\
+@@ -5 +5 @@\n\
+-      rows: []\n\
++      rows: [{id: 1}]\n";
 
     #[test]
     fn a_missing_baseline_manifest_is_a_usage_error() {
@@ -235,49 +245,58 @@ mod tests {
     #[test]
     fn passing_both_scope_sources_is_an_argument_conflict() {
         // The `scope_source` group is `multiple(false)` — supplying both
-        // --baseline-manifest and --scope-from-pr-diff is a conflict.
+        // --baseline-manifest and --pr-diff is a conflict. The --pr-diff
+        // value must PARSE (clap runs the value-parser before group
+        // validation), so it points at a valid diff @file.
+        let diff = write_fixture("both-conflict", VALID_DIFF);
+        let arg = format!("@{}", diff.display());
         let err = parse(&[
             "cute-dbt",
             "--manifest",
             "current.json",
             "--baseline-manifest",
             "baseline.json",
-            "--scope-from-pr-diff",
-            "models/a.sql",
+            "--pr-diff",
+            &arg,
             "--out",
             "report.html",
         ])
         .expect_err("both scope sources is a conflict");
         assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        let _ = std::fs::remove_file(&diff);
     }
 
     #[test]
-    fn scope_from_pr_diff_alone_parses_without_a_baseline() {
+    fn pr_diff_alone_parses_without_a_baseline() {
+        let diff = write_fixture("alone", VALID_DIFF);
+        let arg = format!("@{}", diff.display());
         let cli = parse(&[
             "cute-dbt",
             "--manifest",
             "current.json",
-            "--scope-from-pr-diff",
-            "models/a.sql,models/b.yml",
+            "--pr-diff",
+            &arg,
             "--out",
             "report.html",
         ])
         .expect("pr-diff-only is a complete argument set");
         assert!(cli.baseline_manifest.is_none());
-        let changed = cli.scope_from_pr_diff.expect("scope_from_pr_diff is Some");
-        assert_eq!(changed.paths, vec!["models/a.sql", "models/b.yml"]);
+        let parsed = cli.pr_diff.expect("pr_diff is Some");
+        assert_eq!(parsed.files.len(), 1);
+        assert_eq!(parsed.files[0].path, "models/marts/core/_core__models.yml");
+        let _ = std::fs::remove_file(&diff);
     }
 
     #[test]
-    fn scope_from_pr_diff_at_missing_file_is_a_value_validation_error() {
-        let path = unique_temp_path("missing-changed-list");
+    fn pr_diff_at_missing_file_is_a_value_validation_error() {
+        let path = unique_temp_path("missing-diff");
         // Deliberately do NOT create the file.
         let arg = format!("@{}", path.display());
         let err = parse(&[
             "cute-dbt",
             "--manifest",
             "current.json",
-            "--scope-from-pr-diff",
+            "--pr-diff",
             &arg,
             "--out",
             "report.html",
@@ -288,6 +307,29 @@ mod tests {
             err.to_string().contains("could not read"),
             "error explains the read failure: {err}"
         );
+    }
+
+    #[test]
+    fn pr_diff_with_malformed_contents_is_a_value_validation_error() {
+        let path = write_fixture("malformed", "this is not a unified diff\n");
+        let arg = format!("@{}", path.display());
+        let err = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "current.json",
+            "--pr-diff",
+            &arg,
+            "--out",
+            "report.html",
+        ])
+        .expect_err("a non-diff @file is a usage error");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        assert!(
+            err.to_string()
+                .contains("could not be parsed as a unified diff"),
+            "error explains the parse failure: {err}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

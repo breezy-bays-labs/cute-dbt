@@ -1,5 +1,7 @@
 //! Mutation-kill suite for the path-matching free functions in
-//! `cute_dbt::domain::scope` (per cute-dbt#81 + CQO audit obligation).
+//! `cute_dbt::domain::path` (per cute-dbt#81 + CQO audit obligation;
+//! moved out of `scope` at cute-dbt#96 to break the `scope ⇄ pr_diff`
+//! cycle).
 //!
 //! `tests/steps/diff_scoping.rs` and the cucumber BDD outer loop assert
 //! the user-visible behavior (model X appears in scope when PR file Y
@@ -13,7 +15,7 @@
 
 use std::path::Path;
 
-use cute_dbt::domain::scope::{match_changed_path, normalize_path};
+use cute_dbt::domain::path::{match_changed_path, normalize_path};
 
 // =====================================================================
 // normalize_path — exhaustive case set

@@ -51,7 +51,7 @@ pre-push:
     baseline-required-grep:
       # Mirror the `baseline-required-grep` CI job. Every feature line
       # invoking the CLI must pass exactly one scope source
-      # (--baseline-manifest OR --scope-from-pr-diff, cute-dbt#85) unless
+      # (--baseline-manifest OR --pr-diff, cute-dbt#85) unless
       # explicitly tagged @no-baseline-usage-error (the deliberate
       # neither-source case). Makes the locked gate decision a structural
       # invariant.
@@ -63,14 +63,14 @@ pre-push:
           /^[[:space:]]*@no-baseline-usage-error([[:space:]]|$)/ { pending_skip=1; next }
           /^[[:space:]]*Scenario(:|[[:space:]]+Outline)/ { skip=pending_skip; pending_skip=0; next }
           /cute-dbt with --manifest/ && !skip {
-            if ($0 !~ /--baseline-manifest/ && $0 !~ /--scope-from-pr-diff/) {
+            if ($0 !~ /--baseline-manifest/ && $0 !~ /--pr-diff/) {
               print FILENAME ":" NR ": " $0
               found=1
             }
           }
           END { exit (found ? 1 : 0) }
         ' features/*.feature; then
-          echo "baseline-required-grep: scenarios invoking the CLI without a scope source (--baseline-manifest or --scope-from-pr-diff) must be tagged @no-baseline-usage-error"
+          echo "baseline-required-grep: scenarios invoking the CLI without a scope source (--baseline-manifest or --pr-diff) must be tagged @no-baseline-usage-error"
           exit 1
         fi
       timeout: 15s
