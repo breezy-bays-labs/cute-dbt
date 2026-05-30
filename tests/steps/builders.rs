@@ -16,12 +16,12 @@
 //! module is consistent with how the production code routes the same
 //! relationships.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use cute_dbt::domain::{
-    Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeId, UnitTest, UnitTestExpect,
-    UnitTestGiven,
+    Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, UnitTest,
+    UnitTestExpect, UnitTestGiven,
 };
 use serde_json::Value;
 
@@ -75,6 +75,9 @@ pub fn model_node(bare: &str, checksum: &str, compiled: Option<&str>) -> Node {
         None,
         DependsOn::default(),
         None,
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
     )
 }
 
@@ -154,6 +157,9 @@ pub fn model_node_with_original_file_path(
         None,
         DependsOn::default(),
         Some(original_file_path.to_owned()),
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
     )
 }
 

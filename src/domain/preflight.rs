@@ -184,9 +184,12 @@ fn first_in_scope_test_for_model(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::manifest::{Checksum, DependsOn, ManifestMetadata, Node, NodeId};
+    use crate::domain::manifest::{
+        Checksum, DependsOn, ManifestMetadata, Node, NodeConfig, NodeId,
+    };
     use crate::domain::state::ModelInScopeSet;
     use crate::domain::unit_test::{UnitTest, UnitTestExpect};
+    use std::collections::BTreeMap;
     use std::collections::HashMap;
 
     #[test]
@@ -313,6 +316,9 @@ mod tests {
             None,
             DependsOn::default(),
             None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
         )
     }
 

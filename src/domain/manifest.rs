@@ -24,7 +24,8 @@
 //! manifest-format quirk inside one adapter file.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 /// Stable identifier for a dbt node (model, seed, snapshot, source, test,
@@ -132,6 +133,59 @@ impl DependsOn {
     }
 }
 
+/// dbt's per-node `config` sub-object — the v0.2 `state:modified`
+/// sub-selector inputs (cute-dbt#17).
+///
+/// dbt nests a model's resolved configuration under `config`. Two
+/// `state:modified` sub-selectors read from it:
+///
+/// - **`.configs`** ([`ConfigsModifier`](crate::domain::state::ConfigsModifier))
+///   — the whole config dict (key set + value set). Stored as a
+///   [`BTreeMap`] so the comparison is order-independent and
+///   deterministic: two manifests that serialize the same keys in a
+///   different order still compare equal.
+/// - **`.contract`** ([`ContractModifier`](crate::domain::state::ContractModifier))
+///   — `config.contract.enforced` (whether the model enforces a data
+///   contract). The column-set half of the contract diff lives on
+///   [`Node::columns`] (a top-level sibling of `config` in the wire
+///   manifest, not nested under it).
+///
+/// Tolerant per ADR-5: every field defaults (`config` → empty map,
+/// `contract_enforced` → `false`) so older or synthetic manifests
+/// without a `config` block still deserialize. The map values are
+/// `serde_json::Value` passthrough — `.configs` compares them verbatim,
+/// never interpreting individual config keys.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NodeConfig {
+    config: BTreeMap<String, Value>,
+    contract_enforced: bool,
+}
+
+impl NodeConfig {
+    /// Canonical constructor.
+    #[must_use]
+    pub fn new(config: BTreeMap<String, Value>, contract_enforced: bool) -> Self {
+        Self {
+            config,
+            contract_enforced,
+        }
+    }
+
+    /// The resolved config dict (key set + value set), in deterministic
+    /// [`BTreeMap`] key order. Compared verbatim by `ConfigsModifier`.
+    #[must_use]
+    pub fn config(&self) -> &BTreeMap<String, Value> {
+        &self.config
+    }
+
+    /// `config.contract.enforced` — `true` when the model enforces a
+    /// data contract. Compared by `ContractModifier`.
+    #[must_use]
+    pub fn contract_enforced(&self) -> bool {
+        self.contract_enforced
+    }
+}
+
 /// A dbt node (model / seed / snapshot / source / test / `unit_test`).
 ///
 /// Field set is the v0.1 consumption subset — see ADR-5 ("tolerant
@@ -157,6 +211,20 @@ impl DependsOn {
 /// fixtures still deserialize. The
 /// [`select_in_scope`](crate::domain::scope::select_in_scope) PR-diff
 /// path matches changed file paths against this field.
+///
+/// `config`, `relation_name`, and `columns` are the v0.2 `state:modified`
+/// sub-selector inputs (cute-dbt#17), all ADR-5-tolerant additive fields:
+///
+/// - `config` ([`NodeConfig`]) feeds `.configs` (the config dict) and
+///   `.contract` (`config.contract.enforced`).
+/// - `relation_name` is dbt's fully-qualified `"database"."schema"."identifier"`
+///   string — the single field `.relation` compares (it encodes
+///   database / schema / alias / identifier together, mirroring dbt's
+///   own relation diff). `None` for non-relational or synthetic nodes.
+/// - `columns` is the model's column set (name → declared `data_type`),
+///   the column-set half of the `.contract` diff. A top-level wire
+///   sibling of `config`, stored as a [`BTreeMap`] for deterministic
+///   comparison.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     id: NodeId,
@@ -170,11 +238,18 @@ pub struct Node {
     depends_on: DependsOn,
     #[serde(default)]
     original_file_path: Option<String>,
+    #[serde(default)]
+    config: NodeConfig,
+    #[serde(default)]
+    relation_name: Option<String>,
+    #[serde(default)]
+    columns: BTreeMap<String, Option<String>>,
 }
 
 impl Node {
     /// Canonical constructor — every field is owned and explicit.
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: NodeId,
         resource_type: impl Into<String>,
@@ -183,6 +258,9 @@ impl Node {
         raw_code: Option<String>,
         depends_on: DependsOn,
         original_file_path: Option<String>,
+        config: NodeConfig,
+        relation_name: Option<String>,
+        columns: BTreeMap<String, Option<String>>,
     ) -> Self {
         Self {
             id,
@@ -192,6 +270,9 @@ impl Node {
             raw_code,
             depends_on,
             original_file_path,
+            config,
+            relation_name,
+            columns,
         }
     }
 
@@ -239,6 +320,32 @@ impl Node {
     #[must_use]
     pub fn original_file_path(&self) -> Option<&str> {
         self.original_file_path.as_deref()
+    }
+
+    /// The node's resolved `config` block (cute-dbt#17). Read by the
+    /// `.configs` and `.contract` `state:modified` sub-selectors.
+    #[must_use]
+    pub fn config(&self) -> &NodeConfig {
+        &self.config
+    }
+
+    /// dbt's fully-qualified relation name
+    /// (`"database"."schema"."identifier"`), if the node is relational.
+    /// The single field the `.relation` sub-selector compares (it
+    /// encodes database / schema / alias / identifier together). `None`
+    /// for non-relational or synthetic nodes.
+    #[must_use]
+    pub fn relation_name(&self) -> Option<&str> {
+        self.relation_name.as_deref()
+    }
+
+    /// The node's column set — name → declared `data_type` (`None` when
+    /// the column has no declared type). The column-set half of the
+    /// `.contract` sub-selector diff. Empty for nodes without a columns
+    /// block.
+    #[must_use]
+    pub fn columns(&self) -> &BTreeMap<String, Option<String>> {
+        &self.columns
     }
 }
 
@@ -427,6 +534,9 @@ mod tests {
             Some("{{ config(materialized='view') }} select 1".to_owned()),
             DependsOn::default(),
             Some("models/staging/stg_orders.sql".to_owned()),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
         );
         assert_eq!(n.id(), &id);
         assert_eq!(n.resource_type(), "model");
@@ -453,6 +563,9 @@ mod tests {
             None,
             DependsOn::default(),
             None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
         );
         let json = serde_json::to_string(&n).unwrap();
         let back: Node = serde_json::from_str(&json).unwrap();
@@ -476,6 +589,80 @@ mod tests {
         assert!(n.depends_on().macros().is_empty());
         assert!(n.depends_on().nodes().is_empty());
         assert!(n.original_file_path().is_none());
+        // cute-dbt#17 sub-selector inputs all tolerate absence (ADR-5).
+        assert!(n.config().config().is_empty());
+        assert!(!n.config().contract_enforced());
+        assert!(n.relation_name().is_none());
+        assert!(n.columns().is_empty());
+    }
+
+    #[test]
+    fn node_config_constructor_and_getters() {
+        let mut map = BTreeMap::new();
+        map.insert("materialized".to_owned(), Value::from("table"));
+        let cfg = NodeConfig::new(map, true);
+        assert_eq!(
+            cfg.config().get("materialized"),
+            Some(&Value::from("table"))
+        );
+        assert!(cfg.contract_enforced());
+    }
+
+    #[test]
+    fn node_config_default_is_empty_and_unenforced() {
+        let cfg = NodeConfig::default();
+        assert!(cfg.config().is_empty());
+        assert!(!cfg.contract_enforced());
+    }
+
+    #[test]
+    fn node_sub_selector_getters_return_populated_values() {
+        let mut config_map = BTreeMap::new();
+        config_map.insert("materialized".to_owned(), Value::from("view"));
+        let mut columns = BTreeMap::new();
+        columns.insert("id".to_owned(), Some("integer".to_owned()));
+        let n = Node::new(
+            NodeId::new("model.shop.dim_payers"),
+            "model",
+            sample_checksum(),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(config_map, true),
+            Some("\"db\".\"main\".\"dim_payers\"".to_owned()),
+            columns,
+        );
+        assert_eq!(
+            n.config().config().get("materialized"),
+            Some(&Value::from("view"))
+        );
+        assert!(n.config().contract_enforced());
+        assert_eq!(n.relation_name(), Some("\"db\".\"main\".\"dim_payers\""));
+        assert_eq!(n.columns().get("id"), Some(&Some("integer".to_owned())));
+    }
+
+    #[test]
+    fn node_sub_selector_fields_round_trip_through_serde() {
+        let mut config_map = BTreeMap::new();
+        config_map.insert("materialized".to_owned(), Value::from("table"));
+        let mut columns = BTreeMap::new();
+        columns.insert("id".to_owned(), Some("bigint".to_owned()));
+        columns.insert("name".to_owned(), None);
+        let n = Node::new(
+            NodeId::new("model.shop.x"),
+            "model",
+            sample_checksum(),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(config_map, false),
+            Some("\"db\".\"main\".\"x\"".to_owned()),
+            columns,
+        );
+        let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
+        assert_eq!(back, n);
     }
 
     #[test]
@@ -488,6 +675,9 @@ mod tests {
             None,
             DependsOn::default(),
             Some("models/marts/core/dim_payers.sql".to_owned()),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
         );
         let json = serde_json::to_string(&n).unwrap();
         let back: Node = serde_json::from_str(&json).unwrap();
@@ -535,6 +725,9 @@ mod tests {
                 None,
                 DependsOn::default(),
                 None,
+                NodeConfig::default(),
+                None,
+                BTreeMap::new(),
             ),
         );
 
