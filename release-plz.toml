@@ -43,8 +43,8 @@ git_tag_enable = true
 release_always = false
 
 # cargo-semver-checks is intentionally OFF. It validates the Rust
-# *library* public API — but per ADR D2 the `cute4dbt`/`cute_dbt` lib
-# surface is INTERNAL-ONLY in v0.x and is explicitly NOT cute-dbt's
+# *library* public API — but per ADR D2 the `cute_dbt` lib surface is
+# INTERNAL-ONLY in v0.x and is explicitly NOT cute-dbt's
 # SemVer contract. The SemVer surface is the binary's CLI flag set,
 # the exit-code mapping, the zero-egress proof, and the `explore`
 # external-drive JS contract (D2 + the 2026-05-29 amendment) — none of

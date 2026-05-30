@@ -108,6 +108,17 @@ jobs:
     runs-on: ubuntu-latest
     # Scopes the App secrets to this deployment environment.
     environment: release-plz
+    concurrency:
+      # Serialize publishes so two near-simultaneous pushes to `main`
+      # (e.g. a release-PR merge landing right behind another commit)
+      # don't race the crates.io publish + annotated-tag creation. A
+      # distinct group from release-plz-pr so the PR and release jobs
+      # never block each other. `cancel-in-progress: false` is
+      # deliberate — a publish must never be cancelled mid-crates.io
+      # upload, and tag deletion is forbidden by the release discipline
+      # (ADR), so an interrupted publish is awkward to recover from.
+      group: release-plz-release-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       # Workflow GITHUB_TOKEN stays read-only — the App token (minted
       # below) does the git tag pushes and gh release creates. The
