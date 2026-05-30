@@ -46,12 +46,13 @@ pub mod unit_test_yaml;
 
 pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};
-pub use manifest::{Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeId};
+pub use manifest::{Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId};
 pub use preflight::{PreflightError, preflight_compiled};
 pub use scope::{ScopeInput, ScopeSelection, match_changed_path, normalize_path, select_in_scope};
 pub use state::{
-    BANNER_EMPTY_SCOPE, BodyChecksumModifier, InScopeSet, ModelInScopeSet, ModifiedSet,
-    ModifierKind, StateComparator, StateModifier, resolve_target_model,
+    BANNER_EMPTY_SCOPE, BodyChecksumModifier, ConfigsModifier, ContractModifier, InScopeSet,
+    MacrosModifier, ModelInScopeSet, ModifiedSet, ModifierKind, RelationModifier, StateComparator,
+    StateModifier, resolve_target_model,
 };
 pub use unit_test::{UnitTest, UnitTestExpect, UnitTestGiven};
 pub use unit_test_yaml::{UnitTestYamlBlock, extract_unit_test_block};

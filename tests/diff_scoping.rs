@@ -84,3 +84,41 @@ fn a_manifest_compared_against_itself_scopes_nothing() {
             .is_empty(),
     );
 }
+
+#[test]
+fn with_sub_selectors_has_no_false_positives_on_an_identical_real_manifest() {
+    // cute-dbt#17 — the full v0.1 + v0.2 comparator over a real manifest
+    // compared against itself: the `.configs` / `.relation` / `.macros` /
+    // `.contract` modifiers parse the real config / relation_name /
+    // depends_on.macros / columns blocks and flag NOTHING when nothing
+    // changed. Guards against a modifier that spuriously reports identity
+    // as a change (e.g. an unstable map ordering leaking through).
+    let baseline = load("jaffle-shop-baseline.json");
+    let comparator = StateComparator::with_sub_selectors();
+    assert!(
+        comparator.modified_set(&baseline, &baseline).is_empty(),
+        "no sub-selector fires on a manifest compared against itself",
+    );
+}
+
+#[test]
+fn with_sub_selectors_is_a_superset_of_body_only_on_the_real_diff() {
+    // Union semantics over the real diff pair: registering the four v0.2
+    // sub-selectors alongside the body modifier can only ADD to (never
+    // remove from) the modified set body_only() produces. Every node
+    // body_only flags is still flagged with sub-selectors registered.
+    let baseline = load("jaffle-shop-baseline.json");
+    let current = load("jaffle-shop-current.json");
+
+    let body = StateComparator::body_only().modified_set(&current, &baseline);
+    let wide = StateComparator::with_sub_selectors().modified_set(&current, &baseline);
+
+    for id in body.iter() {
+        assert!(
+            wide.contains(id),
+            "with_sub_selectors must be a superset of body_only ({id} dropped)",
+        );
+    }
+    // The body-modified stg_customers stays in scope under the wider set.
+    assert!(wide.contains(&NodeId::new("model.jaffle_shop.stg_customers")));
+}

@@ -208,9 +208,12 @@ implementation detail.
 
 dbt's `state:modified` is the diff-scope selector — cute-dbt is PR-review-
 first, so output is scoped to the unit tests whose target model body
-changed (or whose test definition itself changed). v0.1 ships honest
-body-checksum fidelity; sub-selectors (`.configs` / `.relation` /
-`.macros` / `.contract`) arrive in v0.2+ as additive trait impls.
+changed (or whose test definition itself changed). The **default**
+comparator ships honest body-checksum fidelity; the four sub-selectors
+(`.configs` / `.relation` / `.macros` / `.contract`) have landed as
+additive trait impls (cute-dbt#17), composable via
+`StateComparator::with_sub_selectors()` and opt-in (the default path
+stays body-only until a CLI selector flag wires them).
 
 **`StateComparator` is a domain strategy, not a port.** It is pure
 computation over two already-parsed domain manifests with no I/O. Putting
@@ -225,13 +228,20 @@ pub trait StateModifier {                       // object-safe; NOT Send + Sync
     fn is_modified(&self, current: &Node, baseline: Option<&Node>) -> bool;
 }
 
-pub struct BodyChecksumModifier;                // the ONLY v0.1 impl
+pub struct BodyChecksumModifier;                // the v0.1 default impl
+pub struct ConfigsModifier;                     // .configs  (cute-dbt#17)
+pub struct RelationModifier;                    // .relation (cute-dbt#17)
+pub struct MacrosModifier;                      // .macros   (cute-dbt#17)
+pub struct ContractModifier;                    // .contract (cute-dbt#17)
 pub struct StateComparator { modifiers: Vec<Box<dyn StateModifier>> }
 ```
 
-`StateComparator::body_only()` constructs the v0.1 default. `modified_set()`
-applies **OR-union semantics** across registered modifiers (matching dbt's
-behavior across sub-selectors).
+`StateComparator::body_only()` constructs the default (body modifier
+only); `StateComparator::with_sub_selectors()` registers the body modifier
+plus all four sub-selectors. `modified_set()` applies **OR-union
+semantics** across registered modifiers (matching dbt's behavior across
+sub-selectors), so the choice of constructor only widens what counts as
+modified — it never restructures the comparator.
 
 **Object-safe, deliberately not `Send + Sync`.** v0.1 scoping is single-
 threaded; bounds add at a call site if parallelism ever arrives. A
@@ -243,17 +253,24 @@ build, not review.
 `modified_set`, **unioned with** unit tests whose own node is in
 `modified_set` (a changed test on an unchanged model is in scope).
 
-### v0.1 fidelity limit (named, not silent)
+### Default-scope fidelity limit (named, not silent)
 
-Body-checksum misses a pure `.configs` or `.contract` change. The README,
-the diff-scope banner, and a tracking issue at the `StateComparator` site
-all name this limit. It is not a defect — it is the v0.1 scope. Adding a
-sub-selector is a single additive `impl StateModifier` block plus
-registration in a `StateComparator::with_sub_selectors(...)` constructor;
-the comparator, the domain model, and the scoping step do not change.
+The default body-checksum comparator misses a pure `.configs` /
+`.relation` / `.macros` / `.contract` change; the README and the
+diff-scope banner name this limit. It is not a defect — it is the default
+scope. The four sub-selector modifiers (cute-dbt#17) lift it when
+composed via `with_sub_selectors()`, each landing exactly as ADR-3's
+revisit condition predicted: a single additive `impl StateModifier` block
+plus registration in the constructor — the comparator, the domain model,
+and the scoping step did not change. The `.macros` selector compares the
+depended-on macro *set* only, not macro *bodies* (a `StateModifier` sees
+two `Node`s, never the two manifests); that is a permanent trait-signature
+boundary, documented at the modifier site, not a tracked exclusion.
 
-If a sub-selector ever needs data the parsed `Node` does not carry, that
-is a manifest-ingestion additive change, not a `StateComparator` redesign.
+Manifest ingestion widened additively to feed the new selectors (`Node`
+gained `config` / `relation_name` / `columns`) — exactly the
+"manifest-ingestion additive change, not a `StateComparator` redesign"
+the revisit condition anticipated.
 
 ## 5. Asset embedding (zero-egress gate)
 

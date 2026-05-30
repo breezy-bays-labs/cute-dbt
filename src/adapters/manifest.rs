@@ -36,15 +36,15 @@
 //! embedded-in-`nodes` shape is not produced by dbt ≥1.8 and is not
 //! handled.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
 
 use crate::domain::{
-    Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeId, PreflightError, UnitTest,
-    UnitTestExpect, UnitTestGiven,
+    Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, PreflightError,
+    UnitTest, UnitTestExpect, UnitTestGiven,
 };
 use crate::ports::ManifestSource;
 use serde_json::Value;
@@ -89,6 +89,15 @@ struct WireManifest {
 /// `original_file_path` is a top-level dbt-emitted field
 /// (e.g. `models/marts/core/dim_payers.sql`); ADR-5-tolerant default to
 /// `None` for older or synthetic manifests.
+///
+/// `config`, `relation_name`, and `columns` are the v0.2 `state:modified`
+/// sub-selector inputs (cute-dbt#17). The nested wire `config` block is
+/// lifted into the domain [`NodeConfig`] by [`WireNodeConfig::into_domain`]
+/// (the config dict passes through; `config.contract.enforced` is hoisted
+/// to a flat bool). `columns` is the model's column map; only each
+/// column's declared `data_type` is consumed (the contract column-set
+/// diff). All ADR-5-tolerant: each defaults so older / synthetic
+/// manifests still deserialize.
 #[derive(Debug, Deserialize)]
 struct WireNode {
     resource_type: String,
@@ -101,6 +110,53 @@ struct WireNode {
     depends_on: DependsOn,
     #[serde(default)]
     original_file_path: Option<String>,
+    #[serde(default)]
+    config: WireNodeConfig,
+    #[serde(default)]
+    relation_name: Option<String>,
+    #[serde(default)]
+    columns: BTreeMap<String, WireColumn>,
+}
+
+/// Tolerant wire projection of a node's `config` sub-object.
+///
+/// The **whole** config dict is captured verbatim (`#[serde(flatten)]`
+/// into a `BTreeMap<String, Value>`) so `.configs` diffs the complete key
+/// set + value set dbt emitted, the nested `contract` sub-object included.
+/// `config.contract.enforced` is then read back out of the captured dict
+/// and hoisted to a flat bool for `.contract`. No `deny_unknown_fields`
+/// (ADR-5).
+#[derive(Debug, Default, Deserialize)]
+struct WireNodeConfig {
+    #[serde(flatten)]
+    config: BTreeMap<String, Value>,
+}
+
+/// Tolerant wire projection of one `columns` map entry — only the
+/// declared `data_type` is consumed for the `.contract` column-set diff.
+#[derive(Debug, Default, Deserialize)]
+struct WireColumn {
+    #[serde(default)]
+    data_type: Option<String>,
+}
+
+impl WireNodeConfig {
+    /// Fold the captured config dict into the domain [`NodeConfig`],
+    /// reading `config.contract.enforced` out of the dict and hoisting it
+    /// to the flat `contract_enforced` bool.
+    ///
+    /// The dict itself is kept whole — `.configs` sees the complete
+    /// config block dbt emitted (the full `contract` sub-object included),
+    /// not a lossy reconstruction.
+    fn into_domain(self) -> NodeConfig {
+        let enforced = self
+            .config
+            .get("contract")
+            .and_then(|c| c.get("enforced"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        NodeConfig::new(self.config, enforced)
+    }
 }
 
 /// Wire projection of one `macros` entry — only the body is consumed.
@@ -180,6 +236,12 @@ impl WireManifest {
             .into_iter()
             .map(|(key, wire)| {
                 let id = NodeId::new(key);
+                let columns = wire
+                    .columns
+                    .into_iter()
+                    .map(|(name, col)| (name, col.data_type))
+                    .collect();
+                let config = wire.config.into_domain();
                 let node = Node::new(
                     id.clone(),
                     wire.resource_type,
@@ -188,6 +250,9 @@ impl WireManifest {
                     wire.raw_code,
                     wire.depends_on,
                     wire.original_file_path,
+                    config,
+                    wire.relation_name,
+                    columns,
                 );
                 (id, node)
             })
@@ -511,6 +576,88 @@ mod tests {
             node.raw_code(),
             Some("{# header #}\nselect * from {{ ref('upstream') }}")
         );
+    }
+
+    #[test]
+    fn parse_manifest_translates_sub_selector_fields() {
+        // cute-dbt#17 — the `.configs` / `.relation` / `.contract` inputs.
+        // The wire `config` dict flattens into NodeConfig::config (with
+        // `config.contract` re-inserted), `config.contract.enforced` hoists
+        // to a flat bool, `relation_name` passes through, and each
+        // `columns` entry reduces to its `data_type`.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.dim_x": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "abc" }},
+                  "relation_name": "\"db\".\"main\".\"dim_x\"",
+                  "config": {{
+                    "materialized": "table",
+                    "enabled": true,
+                    "contract": {{ "enforced": true, "alias_types": true }}
+                  }},
+                  "columns": {{
+                    "id": {{ "name": "id", "data_type": "integer" }},
+                    "label": {{ "name": "label" }}
+                  }}
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid v12 manifest");
+        let node = manifest
+            .node(&NodeId::new("model.shop.dim_x"))
+            .expect("dim_x present");
+
+        // .relation
+        assert_eq!(node.relation_name(), Some("\"db\".\"main\".\"dim_x\""));
+
+        // .configs — the flattened dict carries every config key including
+        // the whole `contract` sub-object dbt emitted (verbatim, not
+        // reduced).
+        let config = node.config().config();
+        assert_eq!(config.get("materialized"), Some(&Value::from("table")));
+        assert_eq!(config.get("enabled"), Some(&Value::from(true)));
+        assert_eq!(
+            config.get("contract"),
+            Some(&serde_json::json!({ "enforced": true, "alias_types": true })),
+            "the whole contract sub-object is preserved so .configs sees it",
+        );
+
+        // .contract — enforced hoisted to a flat bool out of the config
+        // dict; columns reduced to name → data_type (a column without a
+        // declared type → None).
+        assert!(node.config().contract_enforced());
+        assert_eq!(node.columns().get("id"), Some(&Some("integer".to_owned())));
+        assert_eq!(node.columns().get("label"), Some(&None));
+    }
+
+    #[test]
+    fn parse_manifest_tolerates_a_node_missing_sub_selector_fields() {
+        // ADR-5: a node without `config` / `relation_name` / `columns`
+        // (older or synthetic manifests) deserializes to the empty
+        // defaults rather than failing closed.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.bare": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "abc" }}
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid v12 manifest");
+        let node = manifest
+            .node(&NodeId::new("model.shop.bare"))
+            .expect("bare present");
+        assert!(node.config().config().is_empty());
+        assert!(!node.config().contract_enforced());
+        assert!(node.relation_name().is_none());
+        assert!(node.columns().is_empty());
     }
 
     #[test]

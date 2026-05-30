@@ -35,7 +35,7 @@
 //!
 //! Tracked: breezy-bays-labs/cute-dbt#91.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -45,7 +45,7 @@ use headless_chrome::{Browser, LaunchOptionsBuilder, Tab};
 use cute_dbt::adapters::render::{ScopeSource, render_report};
 use cute_dbt::domain::{
     Checksum, DEFAULT_REPORT_TITLE, DependsOn, InScopeSet, Manifest, ManifestMetadata,
-    ModelInScopeSet, Node, NodeId, UnitTest, UnitTestExpect,
+    ModelInScopeSet, Node, NodeConfig, NodeId, UnitTest, UnitTestExpect,
 };
 
 // --- synthetic manifest builders ------------------------------------
@@ -59,6 +59,9 @@ fn model_node(full_id: &str) -> Node {
         None,
         DependsOn::default(),
         None,
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
     )
 }
 

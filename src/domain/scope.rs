@@ -296,9 +296,9 @@ fn select_in_scope_pr_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::manifest::{Checksum, DependsOn, ManifestMetadata, Node};
+    use crate::domain::manifest::{Checksum, DependsOn, ManifestMetadata, Node, NodeConfig};
     use crate::domain::unit_test::{UnitTest, UnitTestExpect};
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     // ----- normalize_path -----
 
@@ -684,6 +684,9 @@ mod tests {
             None,
             DependsOn::default(),
             ofp.map(str::to_owned),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
         )
     }
 

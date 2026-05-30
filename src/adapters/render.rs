@@ -851,10 +851,10 @@ mod tests {
     use super::*;
     use crate::domain::{
         Checksum, CteEdge, CteNode, DEFAULT_REPORT_TITLE, DependsOn, EdgeType, Manifest,
-        ManifestMetadata, NodeId, UnitTest, UnitTestExpect, UnitTestGiven,
+        ManifestMetadata, NodeConfig, NodeId, UnitTest, UnitTestExpect, UnitTestGiven,
     };
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     // ===== parse_ref_name =====
 
@@ -1136,6 +1136,9 @@ mod tests {
             raw.map(str::to_owned),
             DependsOn::default(),
             None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
         )
     }
 

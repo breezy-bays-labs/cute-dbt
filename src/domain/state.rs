@@ -109,16 +109,28 @@ impl<'a> IntoIterator for &'a ModifiedSet {
 
 /// The dbt `state:modified` sub-selector a [`StateModifier`] implements.
 ///
-/// v0.1 defines only [`ModifierKind::Body`] — the body-checksum subset.
-/// dbt's other sub-selectors (`.configs`, `.relation`, `.macros`,
-/// `.contract`) become additional variants when their
-/// `impl StateModifier`s land (ADR-3); the enum is `#[non_exhaustive]`
-/// so that growth is additive for any external matcher.
+/// v0.1 shipped only [`ModifierKind::Body`] — the body-checksum subset.
+/// The v0.2 sub-selectors (`.configs`, `.relation`, `.macros`,
+/// `.contract`) land here as additional variants alongside their
+/// `impl StateModifier`s (ADR-3, cute-dbt#17); the enum is
+/// `#[non_exhaustive]` so that growth is additive for any external
+/// matcher.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModifierKind {
     /// `state:modified.body` — the model body checksum changed.
     Body,
+    /// `state:modified.configs` — the resolved config block changed.
+    Configs,
+    /// `state:modified.relation` — the fully-qualified relation name
+    /// (database / schema / alias / identifier) changed.
+    Relation,
+    /// `state:modified.macros` — the set of upstream macros the node
+    /// depends on changed.
+    Macros,
+    /// `state:modified.contract` — the data contract changed
+    /// (`config.contract.enforced` or the column set).
+    Contract,
 }
 
 /// A single dbt `state:modified` sub-selector.
@@ -142,19 +154,21 @@ pub trait StateModifier {
     fn is_modified(&self, current: &Node, baseline: Option<&Node>) -> bool;
 }
 
-/// The only v0.1 [`StateModifier`]: a node is modified when its
-/// `checksum` differs from the baseline (ADR-3, `state:modified.body`).
+/// The v0.1 [`StateModifier`]: a node is modified when its `checksum`
+/// differs from the baseline (ADR-3, `state:modified.body`).
 ///
-/// # v0.1 fidelity limit
+/// # Sub-selector companions (cute-dbt#17)
 ///
-/// Body-checksum scoping detects model **body** changes only. A pure
+/// Body-checksum scoping detects model **body** changes only — a pure
 /// `.configs` / `.contract` / `.relation` / `.macros` change leaves the
-/// body checksum identical, so it is **not** reported as modified. This
-/// is a documented, named limit — not a defect; the missing sub-selectors
-/// arrive as additive `impl StateModifier`s.
-//
-// tracked: breezy-bays-labs/cute-dbt#14 — v0.1 body-only scoping;
-// .configs and .contract sub-selectors land with #15
+/// body checksum identical, so [`BodyChecksumModifier`] alone does not
+/// report it. The v0.1 fidelity limit that tracked (cute-dbt#14, now
+/// resolved) is lifted by the four additive companion modifiers below —
+/// [`ConfigsModifier`], [`RelationModifier`], [`MacrosModifier`],
+/// [`ContractModifier`] — registered via
+/// [`StateComparator::with_sub_selectors`]. The default
+/// [`StateComparator::body_only`] comparator is unchanged: callers opt in
+/// to the wider fidelity explicitly.
 #[derive(Debug, Clone, Copy)]
 pub struct BodyChecksumModifier;
 
@@ -171,6 +185,145 @@ impl StateModifier for BodyChecksumModifier {
     }
 }
 
+/// `state:modified.configs` — a node is modified when its resolved
+/// `config` block differs from the baseline (cute-dbt#17).
+///
+/// The comparison is over the whole config dict: the **key set and value
+/// set** of [`NodeConfig::config`](crate::domain::manifest::NodeConfig::config),
+/// stored as a `BTreeMap` so a reordering of keys between two manifests
+/// is *not* a change. A new node (absent from the baseline) is modified.
+///
+/// dbt's own `.configs` selector diffs the *unrendered* config; this
+/// modifier diffs the **resolved** `config` dict the manifest carries.
+/// The resolved dict is broader, so this can over-report relative to dbt
+/// (e.g. an environment-driven config value that resolved differently
+/// flags as a change where dbt's unrendered diff would not). That is an
+/// accepted trade for the opt-in wider scope — it never *misses* a config
+/// change, and it catches the pure config-only changes
+/// [`BodyChecksumModifier`] cannot see.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigsModifier;
+
+impl StateModifier for ConfigsModifier {
+    fn kind(&self) -> ModifierKind {
+        ModifierKind::Configs
+    }
+
+    fn is_modified(&self, current: &Node, baseline: Option<&Node>) -> bool {
+        match baseline {
+            None => true,
+            Some(baseline) => current.config().config() != baseline.config().config(),
+        }
+    }
+}
+
+/// `state:modified.relation` — a node is modified when its
+/// fully-qualified relation name changed (cute-dbt#17).
+///
+/// dbt records the relation as a single
+/// `"database"."schema"."identifier"` string
+/// ([`Node::relation_name`](crate::domain::manifest::Node::relation_name))
+/// that encodes all four of database / schema / alias / identifier
+/// together — so comparing the one field detects a change in *any* of
+/// them, matching dbt's own relation diff. A new node (absent from the
+/// baseline) is modified.
+#[derive(Debug, Clone, Copy)]
+pub struct RelationModifier;
+
+impl StateModifier for RelationModifier {
+    fn kind(&self) -> ModifierKind {
+        ModifierKind::Relation
+    }
+
+    fn is_modified(&self, current: &Node, baseline: Option<&Node>) -> bool {
+        match baseline {
+            None => true,
+            Some(baseline) => current.relation_name() != baseline.relation_name(),
+        }
+    }
+}
+
+/// `state:modified.macros` — a node is modified when the set of upstream
+/// macros it depends on diverges from the baseline (cute-dbt#17).
+///
+/// The comparison is over
+/// [`DependsOn::macros`](crate::domain::manifest::DependsOn::macros) — the
+/// macro ids the node references — compared as a **set** (order- and
+/// duplicate-independent). A new node (absent from the baseline) is
+/// modified.
+///
+/// # v0.2 fidelity limit
+///
+/// A [`StateModifier`] sees two [`Node`]s, never the two manifests, so it
+/// cannot compare macro **bodies** (which live in `Manifest.macros`). dbt
+/// proper re-flags a node when a depended-on macro's *body* changes even
+/// if the dependency set is identical; cute-dbt v0.2 detects only a
+/// change in the depended-on macro *set*. This is a documented, named
+/// limit — not a defect — and lifting it would require widening the
+/// trait signature, the comparator/scoping rewrite ADR-3 forbids.
+#[derive(Debug, Clone, Copy)]
+pub struct MacrosModifier;
+
+impl StateModifier for MacrosModifier {
+    fn kind(&self) -> ModifierKind {
+        ModifierKind::Macros
+    }
+
+    fn is_modified(&self, current: &Node, baseline: Option<&Node>) -> bool {
+        match baseline {
+            None => true,
+            Some(baseline) => {
+                let current_macros: BTreeSet<&str> = current
+                    .depends_on()
+                    .macros()
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                let baseline_macros: BTreeSet<&str> = baseline
+                    .depends_on()
+                    .macros()
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                current_macros != baseline_macros
+            }
+        }
+    }
+}
+
+/// `state:modified.contract` — a node is modified when its data contract
+/// changed (cute-dbt#17).
+///
+/// "The contract changed" is two diffs, OR'd:
+///
+/// 1. `config.contract.enforced`
+///    ([`NodeConfig::contract_enforced`](crate::domain::manifest::NodeConfig::contract_enforced))
+///    flipped — the model started or stopped enforcing a contract.
+/// 2. The **column set** ([`Node::columns`](crate::domain::manifest::Node::columns),
+///    name → declared `data_type`) changed — a column added, removed,
+///    renamed, or re-typed.
+///
+/// A new node (absent from the baseline) is modified. The column set is a
+/// `BTreeMap`, so the comparison is order-independent.
+#[derive(Debug, Clone, Copy)]
+pub struct ContractModifier;
+
+impl StateModifier for ContractModifier {
+    fn kind(&self) -> ModifierKind {
+        ModifierKind::Contract
+    }
+
+    fn is_modified(&self, current: &Node, baseline: Option<&Node>) -> bool {
+        match baseline {
+            None => true,
+            Some(baseline) => {
+                current.config().contract_enforced() != baseline.config().contract_enforced()
+                    || current.columns() != baseline.columns()
+            }
+        }
+    }
+}
+
 /// Strategy holder for `state:modified` scoping (ADR-3).
 ///
 /// Registers a `Vec<Box<dyn StateModifier>>` and reports a node modified
@@ -183,10 +336,38 @@ pub struct StateComparator {
 
 impl StateComparator {
     /// The v0.1 comparator — a single [`BodyChecksumModifier`].
+    ///
+    /// This is the default scoping fidelity and the one the run loop
+    /// wires; the wider [`Self::with_sub_selectors`] comparator is opt-in.
     #[must_use]
     pub fn body_only() -> Self {
         Self {
             modifiers: vec![Box::new(BodyChecksumModifier)],
+        }
+    }
+
+    /// The full v0.1 + v0.2 comparator (cute-dbt#17) — registers
+    /// [`BodyChecksumModifier`] plus the four v0.2 sub-selectors
+    /// ([`ConfigsModifier`], [`RelationModifier`], [`MacrosModifier`],
+    /// [`ContractModifier`]). Union semantics are preserved: a node is
+    /// modified when **any** registered modifier flags it (dbt's OR
+    /// across `state:modified` sub-selectors).
+    ///
+    /// This is the additive extension ADR-3's revisit condition locks: a
+    /// new sub-selector is a new `impl StateModifier` registered here,
+    /// never a comparator / domain / scoping rewrite. It does **not**
+    /// replace [`Self::body_only`] — callers opt in to the wider fidelity
+    /// explicitly; the default run-loop scoping is unchanged.
+    #[must_use]
+    pub fn with_sub_selectors() -> Self {
+        Self {
+            modifiers: vec![
+                Box::new(BodyChecksumModifier),
+                Box::new(ConfigsModifier),
+                Box::new(RelationModifier),
+                Box::new(MacrosModifier),
+                Box::new(ContractModifier),
+            ],
         }
     }
 
@@ -501,10 +682,10 @@ impl FromIterator<NodeId> for ModelInScopeSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::manifest::{Checksum, DependsOn, ManifestMetadata};
+    use crate::domain::manifest::{Checksum, DependsOn, ManifestMetadata, NodeConfig};
     use crate::domain::unit_test::{UnitTest, UnitTestExpect};
     use serde_json::Value;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     // Object-safety pin. `StateComparator`'s `Vec<Box<dyn StateModifier>>`
     // field already requires this; the const states the intent explicitly
@@ -526,6 +707,9 @@ mod tests {
             None,
             DependsOn::default(),
             None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
         )
     }
 
@@ -539,6 +723,9 @@ mod tests {
             None,
             DependsOn::default(),
             None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
         )
     }
 
@@ -673,6 +860,586 @@ mod tests {
         let current = model("model.shop.x", "new");
         let baseline = model("model.shop.x", "old");
         assert!(BodyChecksumModifier.is_modified(&current, Some(&baseline)));
+    }
+
+    // ===== v0.2 sub-selector modifiers (cute-dbt#17) =====
+    //
+    // Each modifier mirrors the BodyChecksumModifier example-test set:
+    //   1. None baseline ⇒ modified (a new node is always modified).
+    //   2. Reflexive — is_modified(n, Some(n)) == false.
+    //   3. Symmetric in equality — two distinct-but-equal nodes agree in
+    //      both directions, and a differing field flags modified.
+
+    /// A `model` node carrying an explicit [`NodeConfig`], relation name,
+    /// and column set — the sub-selector inputs.
+    fn rich_model(
+        full_id: &str,
+        checksum: &str,
+        config: NodeConfig,
+        relation_name: Option<&str>,
+        columns: BTreeMap<String, Option<String>>,
+    ) -> Node {
+        Node::new(
+            NodeId::new(full_id),
+            "model",
+            Checksum::new("sha256", checksum),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            config,
+            relation_name.map(str::to_owned),
+            columns,
+        )
+    }
+
+    /// A [`NodeConfig`] from `(key, json-value)` pairs, contract not
+    /// enforced.
+    fn config_of(pairs: &[(&str, Value)]) -> NodeConfig {
+        let map: BTreeMap<String, Value> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), v.clone()))
+            .collect();
+        NodeConfig::new(map, false)
+    }
+
+    /// A column set from `(name, data_type)` pairs.
+    fn columns_of(pairs: &[(&str, Option<&str>)]) -> BTreeMap<String, Option<String>> {
+        pairs
+            .iter()
+            .map(|(n, t)| ((*n).to_owned(), t.map(str::to_owned)))
+            .collect()
+    }
+
+    /// A `model` node depending on the given macro ids.
+    fn macro_model(full_id: &str, macros: &[&str]) -> Node {
+        Node::new(
+            NodeId::new(full_id),
+            "model",
+            Checksum::new("sha256", "same"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::new(macros.iter().map(|m| (*m).to_owned()).collect(), Vec::new()),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    // ----- ConfigsModifier -----
+
+    #[test]
+    fn configs_modifier_kind_is_configs() {
+        assert_eq!(ConfigsModifier.kind(), ModifierKind::Configs);
+    }
+
+    #[test]
+    fn configs_modifier_treats_a_node_absent_from_baseline_as_modified() {
+        let current = rich_model(
+            "model.shop.new",
+            "same",
+            config_of(&[("materialized", Value::from("table"))]),
+            None,
+            BTreeMap::new(),
+        );
+        assert!(ConfigsModifier.is_modified(&current, None));
+    }
+
+    #[test]
+    fn configs_modifier_is_reflexive() {
+        let node = rich_model(
+            "model.shop.x",
+            "same",
+            config_of(&[("materialized", Value::from("view"))]),
+            None,
+            BTreeMap::new(),
+        );
+        assert!(!ConfigsModifier.is_modified(&node, Some(&node)));
+    }
+
+    #[test]
+    fn configs_modifier_agrees_symmetrically_on_equal_configs() {
+        // Two distinct nodes whose config dicts are equal (even with keys
+        // inserted in a different order) compare unmodified in both
+        // directions. The body checksum DIFFERS to prove ConfigsModifier
+        // reads config, not checksum.
+        let a = rich_model(
+            "model.shop.x",
+            "aaa",
+            config_of(&[
+                ("materialized", Value::from("table")),
+                ("enabled", Value::from(true)),
+            ]),
+            None,
+            BTreeMap::new(),
+        );
+        let b = rich_model(
+            "model.shop.x",
+            "bbb",
+            config_of(&[
+                ("enabled", Value::from(true)),
+                ("materialized", Value::from("table")),
+            ]),
+            None,
+            BTreeMap::new(),
+        );
+        assert!(!ConfigsModifier.is_modified(&a, Some(&b)));
+        assert!(!ConfigsModifier.is_modified(&b, Some(&a)));
+    }
+
+    #[test]
+    fn configs_modifier_detects_a_value_set_change() {
+        let current = rich_model(
+            "model.shop.x",
+            "same",
+            config_of(&[("materialized", Value::from("table"))]),
+            None,
+            BTreeMap::new(),
+        );
+        let baseline = rich_model(
+            "model.shop.x",
+            "same",
+            config_of(&[("materialized", Value::from("view"))]),
+            None,
+            BTreeMap::new(),
+        );
+        assert!(ConfigsModifier.is_modified(&current, Some(&baseline)));
+        assert!(ConfigsModifier.is_modified(&baseline, Some(&current)));
+    }
+
+    #[test]
+    fn configs_modifier_detects_a_key_set_change() {
+        let current = rich_model(
+            "model.shop.x",
+            "same",
+            config_of(&[
+                ("materialized", Value::from("table")),
+                ("tags", Value::from("nightly")),
+            ]),
+            None,
+            BTreeMap::new(),
+        );
+        let baseline = rich_model(
+            "model.shop.x",
+            "same",
+            config_of(&[("materialized", Value::from("table"))]),
+            None,
+            BTreeMap::new(),
+        );
+        assert!(ConfigsModifier.is_modified(&current, Some(&baseline)));
+    }
+
+    #[test]
+    fn configs_modifier_ignores_a_pure_body_change() {
+        // A body-only change (same config) is NOT a config change.
+        let current = rich_model(
+            "model.shop.x",
+            "new_body",
+            config_of(&[("materialized", Value::from("table"))]),
+            None,
+            BTreeMap::new(),
+        );
+        let baseline = rich_model(
+            "model.shop.x",
+            "old_body",
+            config_of(&[("materialized", Value::from("table"))]),
+            None,
+            BTreeMap::new(),
+        );
+        assert!(!ConfigsModifier.is_modified(&current, Some(&baseline)));
+    }
+
+    // ----- RelationModifier -----
+
+    #[test]
+    fn relation_modifier_kind_is_relation() {
+        assert_eq!(RelationModifier.kind(), ModifierKind::Relation);
+    }
+
+    #[test]
+    fn relation_modifier_treats_a_node_absent_from_baseline_as_modified() {
+        let current = rich_model(
+            "model.shop.new",
+            "same",
+            NodeConfig::default(),
+            Some("\"db\".\"main\".\"new\""),
+            BTreeMap::new(),
+        );
+        assert!(RelationModifier.is_modified(&current, None));
+    }
+
+    #[test]
+    fn relation_modifier_is_reflexive() {
+        let node = rich_model(
+            "model.shop.x",
+            "same",
+            NodeConfig::default(),
+            Some("\"db\".\"main\".\"x\""),
+            BTreeMap::new(),
+        );
+        assert!(!RelationModifier.is_modified(&node, Some(&node)));
+    }
+
+    #[test]
+    fn relation_modifier_agrees_symmetrically_on_equal_relations() {
+        let a = rich_model(
+            "model.shop.x",
+            "aaa",
+            NodeConfig::default(),
+            Some("\"db\".\"main\".\"x\""),
+            BTreeMap::new(),
+        );
+        let b = rich_model(
+            "model.shop.x",
+            "bbb",
+            NodeConfig::default(),
+            Some("\"db\".\"main\".\"x\""),
+            BTreeMap::new(),
+        );
+        assert!(!RelationModifier.is_modified(&a, Some(&b)));
+        assert!(!RelationModifier.is_modified(&b, Some(&a)));
+    }
+
+    #[test]
+    fn relation_modifier_detects_a_schema_change() {
+        // Database / schema / alias / identifier all live in relation_name;
+        // a schema rename flips the fully-qualified string.
+        let current = rich_model(
+            "model.shop.x",
+            "same",
+            NodeConfig::default(),
+            Some("\"db\".\"analytics\".\"x\""),
+            BTreeMap::new(),
+        );
+        let baseline = rich_model(
+            "model.shop.x",
+            "same",
+            NodeConfig::default(),
+            Some("\"db\".\"main\".\"x\""),
+            BTreeMap::new(),
+        );
+        assert!(RelationModifier.is_modified(&current, Some(&baseline)));
+        assert!(RelationModifier.is_modified(&baseline, Some(&current)));
+    }
+
+    #[test]
+    fn relation_modifier_detects_an_alias_change() {
+        let current = rich_model(
+            "model.shop.x",
+            "same",
+            NodeConfig::default(),
+            Some("\"db\".\"main\".\"renamed\""),
+            BTreeMap::new(),
+        );
+        let baseline = rich_model(
+            "model.shop.x",
+            "same",
+            NodeConfig::default(),
+            Some("\"db\".\"main\".\"x\""),
+            BTreeMap::new(),
+        );
+        assert!(RelationModifier.is_modified(&current, Some(&baseline)));
+    }
+
+    // ----- MacrosModifier -----
+
+    #[test]
+    fn macros_modifier_kind_is_macros() {
+        assert_eq!(MacrosModifier.kind(), ModifierKind::Macros);
+    }
+
+    #[test]
+    fn macros_modifier_treats_a_node_absent_from_baseline_as_modified() {
+        let current = macro_model("model.shop.new", &["macro.shop.helper"]);
+        assert!(MacrosModifier.is_modified(&current, None));
+    }
+
+    #[test]
+    fn macros_modifier_is_reflexive() {
+        let node = macro_model("model.shop.x", &["macro.shop.a", "macro.shop.b"]);
+        assert!(!MacrosModifier.is_modified(&node, Some(&node)));
+    }
+
+    #[test]
+    fn macros_modifier_agrees_symmetrically_on_equal_macro_sets() {
+        // Same set, different order ⇒ NOT modified (set comparison).
+        let a = macro_model("model.shop.x", &["macro.shop.a", "macro.shop.b"]);
+        let b = macro_model("model.shop.x", &["macro.shop.b", "macro.shop.a"]);
+        assert!(!MacrosModifier.is_modified(&a, Some(&b)));
+        assert!(!MacrosModifier.is_modified(&b, Some(&a)));
+    }
+
+    #[test]
+    fn macros_modifier_detects_an_added_macro_dependency() {
+        let current = macro_model("model.shop.x", &["macro.shop.a", "macro.shop.b"]);
+        let baseline = macro_model("model.shop.x", &["macro.shop.a"]);
+        assert!(MacrosModifier.is_modified(&current, Some(&baseline)));
+        assert!(MacrosModifier.is_modified(&baseline, Some(&current)));
+    }
+
+    #[test]
+    fn macros_modifier_detects_a_removed_macro_dependency() {
+        let current = macro_model("model.shop.x", &[]);
+        let baseline = macro_model("model.shop.x", &["macro.shop.a"]);
+        assert!(MacrosModifier.is_modified(&current, Some(&baseline)));
+    }
+
+    // ----- ContractModifier -----
+
+    #[test]
+    fn contract_modifier_kind_is_contract() {
+        assert_eq!(ContractModifier.kind(), ModifierKind::Contract);
+    }
+
+    #[test]
+    fn contract_modifier_treats_a_node_absent_from_baseline_as_modified() {
+        let current = rich_model(
+            "model.shop.new",
+            "same",
+            NodeConfig::new(BTreeMap::new(), true),
+            None,
+            columns_of(&[("id", Some("integer"))]),
+        );
+        assert!(ContractModifier.is_modified(&current, None));
+    }
+
+    #[test]
+    fn contract_modifier_is_reflexive() {
+        let node = rich_model(
+            "model.shop.x",
+            "same",
+            NodeConfig::new(BTreeMap::new(), true),
+            None,
+            columns_of(&[("id", Some("integer")), ("name", Some("varchar"))]),
+        );
+        assert!(!ContractModifier.is_modified(&node, Some(&node)));
+    }
+
+    #[test]
+    fn contract_modifier_agrees_symmetrically_on_equal_contracts() {
+        let a = rich_model(
+            "model.shop.x",
+            "aaa",
+            NodeConfig::new(BTreeMap::new(), true),
+            None,
+            columns_of(&[("id", Some("integer"))]),
+        );
+        let b = rich_model(
+            "model.shop.x",
+            "bbb",
+            NodeConfig::new(BTreeMap::new(), true),
+            None,
+            columns_of(&[("id", Some("integer"))]),
+        );
+        assert!(!ContractModifier.is_modified(&a, Some(&b)));
+        assert!(!ContractModifier.is_modified(&b, Some(&a)));
+    }
+
+    #[test]
+    fn contract_modifier_detects_an_enforcement_flip() {
+        let current = rich_model(
+            "model.shop.x",
+            "same",
+            NodeConfig::new(BTreeMap::new(), true),
+            None,
+            columns_of(&[("id", Some("integer"))]),
+        );
+        let baseline = rich_model(
+            "model.shop.x",
+            "same",
+            NodeConfig::new(BTreeMap::new(), false),
+            None,
+            columns_of(&[("id", Some("integer"))]),
+        );
+        assert!(ContractModifier.is_modified(&current, Some(&baseline)));
+        assert!(ContractModifier.is_modified(&baseline, Some(&current)));
+    }
+
+    #[test]
+    fn contract_modifier_detects_a_column_type_change() {
+        let current = rich_model(
+            "model.shop.x",
+            "same",
+            NodeConfig::new(BTreeMap::new(), true),
+            None,
+            columns_of(&[("id", Some("bigint"))]),
+        );
+        let baseline = rich_model(
+            "model.shop.x",
+            "same",
+            NodeConfig::new(BTreeMap::new(), true),
+            None,
+            columns_of(&[("id", Some("integer"))]),
+        );
+        assert!(ContractModifier.is_modified(&current, Some(&baseline)));
+    }
+
+    #[test]
+    fn contract_modifier_detects_an_added_column() {
+        let current = rich_model(
+            "model.shop.x",
+            "same",
+            NodeConfig::new(BTreeMap::new(), true),
+            None,
+            columns_of(&[("id", Some("integer")), ("name", Some("varchar"))]),
+        );
+        let baseline = rich_model(
+            "model.shop.x",
+            "same",
+            NodeConfig::new(BTreeMap::new(), true),
+            None,
+            columns_of(&[("id", Some("integer"))]),
+        );
+        assert!(ContractModifier.is_modified(&current, Some(&baseline)));
+    }
+
+    // ----- StateComparator::with_sub_selectors (union semantics) -----
+
+    #[test]
+    fn with_sub_selectors_detects_a_pure_config_change_body_only_misses() {
+        // The headline win: a config-only change (identical body checksum)
+        // is invisible to body_only() but caught by with_sub_selectors().
+        let current = manifest(
+            vec![rich_model(
+                "model.shop.stg_orders",
+                "identical",
+                config_of(&[("materialized", Value::from("table"))]),
+                Some("\"db\".\"main\".\"stg_orders\""),
+                BTreeMap::new(),
+            )],
+            vec![],
+        );
+        let baseline = manifest(
+            vec![rich_model(
+                "model.shop.stg_orders",
+                "identical",
+                config_of(&[("materialized", Value::from("view"))]),
+                Some("\"db\".\"main\".\"stg_orders\""),
+                BTreeMap::new(),
+            )],
+            vec![],
+        );
+        let id = id("model.shop.stg_orders");
+        assert!(
+            !StateComparator::body_only()
+                .modified_set(&current, &baseline)
+                .contains(&id),
+            "body_only misses a config-only change (the v0.1 limit)",
+        );
+        assert!(
+            StateComparator::with_sub_selectors()
+                .modified_set(&current, &baseline)
+                .contains(&id),
+            "with_sub_selectors catches the config-only change",
+        );
+    }
+
+    #[test]
+    fn with_sub_selectors_still_detects_a_body_change() {
+        // Union semantics: the body modifier is still registered, so a
+        // body-only change (same config/relation/columns) is still caught.
+        let current = manifest(vec![model("model.shop.stg_orders", "new")], vec![]);
+        let baseline = manifest(vec![model("model.shop.stg_orders", "old")], vec![]);
+        assert!(
+            StateComparator::with_sub_selectors()
+                .modified_set(&current, &baseline)
+                .contains(&id("model.shop.stg_orders")),
+        );
+    }
+
+    #[test]
+    fn with_sub_selectors_is_empty_when_nothing_changed() {
+        // No modifier fires when every sub-selector input is identical.
+        let node = rich_model(
+            "model.shop.stg_orders",
+            "same",
+            config_of(&[("materialized", Value::from("table"))]),
+            Some("\"db\".\"main\".\"stg_orders\""),
+            columns_of(&[("id", Some("integer"))]),
+        );
+        let current = manifest(vec![node.clone()], vec![]);
+        let baseline = manifest(vec![node], vec![]);
+        assert!(
+            StateComparator::with_sub_selectors()
+                .modified_set(&current, &baseline)
+                .is_empty(),
+        );
+    }
+
+    #[test]
+    fn with_sub_selectors_detects_a_relation_only_change() {
+        let current = manifest(
+            vec![rich_model(
+                "model.shop.x",
+                "same",
+                NodeConfig::default(),
+                Some("\"db\".\"prod\".\"x\""),
+                BTreeMap::new(),
+            )],
+            vec![],
+        );
+        let baseline = manifest(
+            vec![rich_model(
+                "model.shop.x",
+                "same",
+                NodeConfig::default(),
+                Some("\"db\".\"dev\".\"x\""),
+                BTreeMap::new(),
+            )],
+            vec![],
+        );
+        assert!(
+            StateComparator::with_sub_selectors()
+                .modified_set(&current, &baseline)
+                .contains(&id("model.shop.x")),
+        );
+    }
+
+    #[test]
+    fn with_sub_selectors_detects_a_macros_only_change() {
+        let current = manifest(
+            vec![macro_model(
+                "model.shop.x",
+                &["macro.shop.a", "macro.shop.b"],
+            )],
+            vec![],
+        );
+        let baseline = manifest(vec![macro_model("model.shop.x", &["macro.shop.a"])], vec![]);
+        assert!(
+            StateComparator::with_sub_selectors()
+                .modified_set(&current, &baseline)
+                .contains(&id("model.shop.x")),
+        );
+    }
+
+    #[test]
+    fn with_sub_selectors_detects_a_contract_only_change() {
+        let current = manifest(
+            vec![rich_model(
+                "model.shop.x",
+                "same",
+                NodeConfig::new(BTreeMap::new(), true),
+                None,
+                columns_of(&[("id", Some("integer"))]),
+            )],
+            vec![],
+        );
+        let baseline = manifest(
+            vec![rich_model(
+                "model.shop.x",
+                "same",
+                NodeConfig::new(BTreeMap::new(), false),
+                None,
+                columns_of(&[("id", Some("integer"))]),
+            )],
+            vec![],
+        );
+        assert!(
+            StateComparator::with_sub_selectors()
+                .modified_set(&current, &baseline)
+                .contains(&id("model.shop.x")),
+        );
     }
 
     // ===== StateComparator::modified_set =====
