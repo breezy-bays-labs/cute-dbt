@@ -763,6 +763,44 @@ fn test_marked_context(world: &mut World, name: String) {
     );
 }
 
+#[then(
+    regex = r#"^the test "([^"]+)" carries an inline YAML diff with a removed and an added line$"#
+)]
+fn test_carries_inline_diff(world: &mut World, name: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let test = find_test(&p, &name)
+        .unwrap_or_else(|| panic!("test {name:?} not in payload; got {:?}", test_names(&p)));
+    let lines = test["yaml_diff"]["lines"].as_array().unwrap_or_else(|| {
+        panic!("test {name:?} should carry a yaml_diff with lines; got {test:?}")
+    });
+    let kinds: Vec<&str> = lines.iter().filter_map(|l| l["kind"].as_str()).collect();
+    assert!(
+        kinds.contains(&"removed"),
+        "yaml_diff for {name:?} should include a removed line; got kinds {kinds:?}",
+    );
+    assert!(
+        kinds.contains(&"added"),
+        "yaml_diff for {name:?} should include an added line; got kinds {kinds:?}",
+    );
+}
+
+#[then(regex = r#"^the test "([^"]+)" carries no inline YAML diff$"#)]
+fn test_carries_no_inline_diff(world: &mut World, name: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let test = find_test(&p, &name)
+        .unwrap_or_else(|| panic!("test {name:?} not in payload; got {:?}", test_names(&p)));
+    // `skip_serializing_if` omits the key entirely when there is no diff
+    // (absent block / stale / untouched), so the drawer falls back to the
+    // plain authored YAML.
+    assert!(
+        test.get("yaml_diff").is_none_or(Value::is_null),
+        "test {name:?} should carry no yaml_diff; got {:?}",
+        test.get("yaml_diff"),
+    );
+}
+
 #[then(regex = r#"^the model "([^"]+)" carries (\d+) unit tests$"#)]
 fn model_carries_n_tests(world: &mut World, name: String, n: usize) {
     require_exit_0(world);

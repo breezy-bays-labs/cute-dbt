@@ -44,8 +44,9 @@ use headless_chrome::{Browser, LaunchOptionsBuilder, Tab};
 
 use cute_dbt::adapters::render::{ScopeSource, render_report};
 use cute_dbt::domain::{
-    Checksum, DEFAULT_REPORT_TITLE, DependsOn, InScopeSet, Manifest, ManifestMetadata,
-    ModelInScopeSet, Node, NodeConfig, NodeId, UnitTest, UnitTestExpect,
+    Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, InScopeSet, Manifest,
+    ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId, UnitTest, UnitTestExpect,
+    UnitTestYamlBlock, YamlBlockDiff,
 };
 
 // --- synthetic manifest builders ------------------------------------
@@ -116,6 +117,7 @@ fn render_with_scope(
         &in_scope,
         &models,
         &changed,
+        &HashMap::new(),
         &HashMap::new(),
         baseline_label,
         scope,
@@ -502,6 +504,208 @@ fn pr_diff_zero_updated_affirms_block_precision() {
     assert!(
         !affirm_present(&tab),
         "baseline mode never renders the PR-diff-specific affirmation",
+    );
+
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#96 concern 2: inline YAML diff drawer -----------------
+
+/// PR-diff render that injects an authoring-YAML map and an inline-diff map
+/// so the Authored↔Diff drawer renders. `authoring` is `(test_id, raw)`;
+/// `diffs` is `(test_id, YamlBlockDiff)`. The block span is irrelevant to
+/// the JS drawer (only `raw` + the diff lines are surfaced), so it is pinned
+/// to `[1, line_count]`.
+fn render_pr_diff_with_diffs(
+    filename: &str,
+    nodes: Vec<Node>,
+    tests: Vec<(&str, UnitTest)>,
+    model_ids: &[&str],
+    changed_ids: &[&str],
+    authoring: Vec<(&str, &str)>,
+    diffs: Vec<(&str, YamlBlockDiff)>,
+) -> String {
+    let all_ids: Vec<String> = tests.iter().map(|(id, _)| (*id).to_owned()).collect();
+    let m = manifest(nodes, tests);
+    let in_scope: InScopeSet = all_ids.into_iter().collect();
+    let models: ModelInScopeSet = model_ids.iter().map(|id| NodeId::new(*id)).collect();
+    let changed: InScopeSet = changed_ids.iter().map(|s| (*s).to_owned()).collect();
+    let authoring_yaml: HashMap<String, UnitTestYamlBlock> = authoring
+        .into_iter()
+        .map(|(id, raw)| {
+            let n = raw.split('\n').count();
+            (
+                id.to_owned(),
+                UnitTestYamlBlock::new(raw.to_owned(), 1, 1, n),
+            )
+        })
+        .collect();
+    let yaml_diffs: HashMap<String, YamlBlockDiff> = diffs
+        .into_iter()
+        .map(|(id, d)| (id.to_owned(), d))
+        .collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &changed,
+        &authoring_yaml,
+        &yaml_diffs,
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    format!("file://{p}")
+}
+
+fn dl(kind: DiffLineKind, text: &str, emphasis: Option<(usize, usize)>) -> DiffLine {
+    DiffLine {
+        kind,
+        text: text.to_owned(),
+        emphasis,
+    }
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn yaml_diff_drawer_defaults_to_diff_and_toggles_to_authored() {
+    // dim_a's `upd` test was edited (model: payments → orders); the run loop
+    // attaches an inline diff. PR-diff mode auto-selects the updated test, so
+    // its drawer is built on load.
+    let diff = YamlBlockDiff {
+        lines: vec![
+            dl(DiffLineKind::Context, "  - name: upd", None),
+            dl(DiffLineKind::Removed, "    model: payments", Some((11, 18))),
+            dl(DiffLineKind::Added, "    model: orders", Some((11, 16))),
+            dl(DiffLineKind::Context, "    given: []", None),
+        ],
+    };
+    let url = render_pr_diff_with_diffs(
+        "headless_yaml_diff.html",
+        vec![model_node("model.shop.dim_a")],
+        vec![("unit_test.shop.dim_a.upd", unit_test("upd", "dim_a"))],
+        &["model.shop.dim_a"],
+        &["unit_test.shop.dim_a.upd"],
+        vec![(
+            "unit_test.shop.dim_a.upd",
+            "  - name: upd\n    model: orders\n    given: []",
+        )],
+        vec![("unit_test.shop.dim_a.upd", diff)],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // The edited test's drawer summary names the diff, and the Diff view is
+    // the default (Authored hidden).
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.authoring-yaml > summary').textContent.trim()"
+        ),
+        "Authoring YAML — diff",
+        "an edited test's drawer summary is 'Authoring YAML — diff'",
+    );
+    assert!(
+        eval_bool(&tab, "document.querySelector('.yaml-diff-toggle') !== null"),
+        "the Authored↔Diff toggle is present",
+    );
+    assert!(
+        !eval_bool(&tab, "document.querySelector('.yaml-diff-view').hidden"),
+        "the Diff view is the default (visible)",
+    );
+    assert!(
+        eval_bool(&tab, "document.querySelector('.yaml-authored-view').hidden"),
+        "the Authored view starts hidden",
+    );
+    // Intra-line emphasis renders as <strong>; both change lines present.
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.yaml-diff-view .diff-removed strong') !== null"
+        ),
+        "the removed line carries an intra-line emphasis <strong>",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.yaml-diff-view .diff-added') !== null"
+        ),
+        "the diff renders the added line",
+    );
+
+    // Clicking "Authored" flips the two views.
+    let _ = eval(
+        &tab,
+        "document.querySelector('.yaml-view-btn[data-view=\"authored\"]').click()",
+    );
+    assert!(
+        eval_bool(&tab, "document.querySelector('.yaml-diff-view').hidden"),
+        "the Diff view hides after switching to Authored",
+    );
+    assert!(
+        !eval_bool(&tab, "document.querySelector('.yaml-authored-view').hidden"),
+        "the Authored view shows after the toggle",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn render_yaml_diff_js_emits_classes_sigils_and_codepoint_emphasis() {
+    // Exercises the `__cuteRenderYamlDiff` JS seam directly (parallels
+    // `__cuteHighlightYaml`). Any rendered report carries the function; the
+    // emphasis offsets are codepoint indices, so a multibyte line must slice
+    // on `Array.from`, not UTF-16 — `café x` → emphasis (5,6) marks `x`.
+    let url = render_pr_diff_to_file(
+        "headless_yaml_diff_js.html",
+        vec![model_node("model.shop.dim_a")],
+        vec![("unit_test.shop.dim_a.t", unit_test("t", "dim_a"))],
+        &["model.shop.dim_a"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    let html = eval_string(
+        &tab,
+        "window.__cuteRenderYamlDiff({lines:[\
+         {kind:'context',text:'  ctx',emphasis:null},\
+         {kind:'removed',text:'café x',emphasis:[5,6]},\
+         {kind:'added',text:'café y',emphasis:[5,6]}\
+         ]})",
+    );
+    // Line classes + sigils.
+    assert!(
+        html.contains("diff-context")
+            && html.contains("diff-removed")
+            && html.contains("diff-added"),
+        "all three line kinds map to their classes: {html}",
+    );
+    assert!(
+        html.contains("diff-sigil\">+"),
+        "the added line carries a '+' sigil: {html}",
+    );
+    // Codepoint-correct emphasis: the multibyte prefix `café ` (5 codepoints)
+    // is preserved and only `x` / `y` is wrapped in <strong>.
+    assert!(
+        html.contains("café <strong>x</strong>"),
+        "removed emphasis wraps exactly the changed codepoint after the café prefix: {html}",
+    );
+    assert!(
+        html.contains("café <strong>y</strong>"),
+        "added emphasis wraps exactly the changed codepoint: {html}",
     );
 
     let _ = tab.close(true);

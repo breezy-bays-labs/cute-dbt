@@ -50,7 +50,10 @@ pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};
 pub use manifest::{Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId};
 pub use path::{match_changed_path, normalize_path};
-pub use pr_diff::{FileHunks, Hunk, NormalizedDiffIndex, PrDiff, refine_changed_by_hunks};
+pub use pr_diff::{
+    DiffLine, DiffLineKind, FileHunks, Hunk, NormalizedDiffIndex, PrDiff, YamlBlockDiff,
+    reconstruct_block_diffs, refine_changed_by_hunks,
+};
 pub use preflight::{PreflightError, preflight_compiled};
 pub use scope::{ScopeInput, ScopeSelection, select_in_scope};
 pub use state::{

@@ -301,6 +301,227 @@ pub fn refine_changed_by_hunks(
         .collect()
 }
 
+// ---------------------------------------------------------------------
+// Inline YAML block diff reconstruction (cute-dbt#96 concern 2)
+// ---------------------------------------------------------------------
+
+/// The kind of a reconstructed diff line.
+///
+/// Serializes lowercase (`"context"` / `"removed"` / `"added"`) — the exact
+/// tokens the report's `renderYamlDiff` JS switches on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffLineKind {
+    /// Unchanged line, present on both sides of the edit.
+    Context,
+    /// Removed line (`-`), present only on the pre-edit side.
+    Removed,
+    /// Added line (`+`), present only on the post-edit (working-tree) side.
+    Added,
+}
+
+/// One line of a reconstructed inline YAML-block diff.
+///
+/// Additive POD (ADR-5), `Serialize`/`Deserialize` so it inlines into the
+/// report payload alongside [`crate::domain::unit_test_yaml::UnitTestYamlBlock`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffLine {
+    /// Whether the line is context, removed, or added.
+    pub kind: DiffLineKind,
+    /// The line text — `\r`-trimmed, no `\n`, no `+`/`-` sigil. Offsets in
+    /// [`emphasis`](Self::emphasis) are codepoint indices into this string,
+    /// so the report's JS must slice on codepoints (`Array.from`), not
+    /// UTF-16 units, to stay aligned.
+    pub text: String,
+    /// Optional intra-line emphasis: the codepoint `[start, end)` range of
+    /// [`text`](Self::text) that actually changed in a single-line
+    /// replacement (common-prefix/suffix trimmed). `None` (serialized as
+    /// JSON `null`) for context lines, multi-line edits, and the unchanged
+    /// side of a pure insertion/deletion. Serialized as a two-element array
+    /// `[start, end]` otherwise — the `<strong>` span `renderYamlDiff` wraps.
+    pub emphasis: Option<(usize, usize)>,
+}
+
+/// A reconstructed inline diff of one `unit_test`'s authored YAML block.
+///
+/// Additive POD (ADR-5). The full block is rendered as ordered
+/// [`DiffLine`]s (context + added from the working-tree block, removed
+/// spliced in from the diff hunks), so the drawer can show the edit in
+/// place rather than just the post-edit text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct YamlBlockDiff {
+    /// The block's diff lines, top to bottom.
+    pub lines: Vec<DiffLine>,
+}
+
+/// The codepoint `[start, end)` span of `line` that differs from `other`,
+/// found by trimming the common prefix and common suffix.
+///
+/// Returns `None` when the two are equal, or when `line` contributes no
+/// changed codepoints (e.g. it is the shorter side of a pure
+/// insertion/deletion — all of its content is shared affix). Symmetric in
+/// its inputs only up to the start offset: `intra_line_span(a, b)` and
+/// `intra_line_span(b, a)` share the prefix but end at each argument's own
+/// length-minus-suffix, so a 1:1 replacement calls it once per side.
+///
+/// Callers pass `\r`-trimmed strings (the working-tree block line and the
+/// diff body): the block slicer keeps a trailing `\r` (`split('\n')`) while
+/// the diff parser strips it (`str::lines`), and an untrimmed `\r` on one
+/// side alone would shrink the common suffix and inflate the span by one.
+#[must_use]
+pub fn intra_line_span(line: &str, other: &str) -> Option<(usize, usize)> {
+    if line == other {
+        return None;
+    }
+    let a: Vec<char> = line.chars().collect();
+    let b: Vec<char> = other.chars().collect();
+    let mut prefix = 0;
+    while prefix < a.len() && prefix < b.len() && a[prefix] == b[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < a.len() - prefix
+        && suffix < b.len() - prefix
+        && a[a.len() - 1 - suffix] == b[b.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let (start, end) = (prefix, a.len() - suffix);
+    (start != end).then_some((start, end))
+}
+
+/// Reconstruct an inline diff of each updated test's authored YAML block.
+///
+/// For every id in `changed`, resolve its sliced block (`blocks`) and the
+/// hunks touching its declaring file ([`NormalizedDiffIndex::hunks_for`]).
+/// Emit a [`YamlBlockDiff`] **only** when the block is present, the hunks
+/// still align with it ([`block_aligns_with_hunks`]), and at least one hunk
+/// touches it ([`hunk_touches_block`]) — i.e. this test's own definition was
+/// edited in the diff. Absent / stale / untouched ids get no entry, so the
+/// drawer falls back to the plain authored-YAML view (the entry's presence
+/// is therefore exactly "this test's own block changed"). Runs only on the
+/// `PrDiff` arm — baseline mode has no hunks to reconstruct from.
+///
+/// The run loop always passes the default-hasher `authoring_yaml` map, so
+/// generalizing `blocks` over the hasher (`clippy::implicit_hasher`) buys
+/// nothing — same rationale as [`refine_changed_by_hunks`].
+#[allow(clippy::implicit_hasher)]
+#[must_use]
+pub fn reconstruct_block_diffs(
+    current: &Manifest,
+    changed: &InScopeSet,
+    blocks: &HashMap<String, UnitTestYamlBlock>,
+    index: &NormalizedDiffIndex,
+) -> HashMap<String, YamlBlockDiff> {
+    let mut out = HashMap::new();
+    for id in changed.iter() {
+        let Some(block) = blocks.get(id) else {
+            continue; // no slice → plain drawer
+        };
+        let hunks = current
+            .unit_test(id)
+            .and_then(UnitTest::original_file_path)
+            .map_or(&[][..], |ofp| index.hunks_for(ofp));
+        if !block_aligns_with_hunks(block, hunks) {
+            continue; // stale diff → plain drawer
+        }
+        let touching: Vec<&Hunk> = hunks
+            .iter()
+            .filter(|h| hunk_touches_block(block.block_start, block.block_end, h))
+            .collect();
+        if touching.is_empty() {
+            continue; // change is elsewhere in the file → plain drawer
+        }
+        out.insert(id.to_owned(), reconstruct_one(block, &touching));
+    }
+    out
+}
+
+/// Reconstruct one block's diff from its working-tree slice + the hunks
+/// already filtered to those touching it. See [`reconstruct_block_diffs`].
+fn reconstruct_one(block: &UnitTestYamlBlock, touching: &[&Hunk]) -> YamlBlockDiff {
+    fn trim_cr(s: &str) -> String {
+        s.trim_end_matches('\r').to_owned()
+    }
+    let block_lines: Vec<String> = block.raw.split('\n').map(trim_cr).collect();
+    let (bs, be) = (block.block_start, block.block_end);
+
+    // Removed-line groups to splice immediately before a given new-side
+    // line. Anchored before `new_start` for a replacement (new_len >= 1) and
+    // after it for a pure deletion (new_len == 0), then clamped into the
+    // block so leading/trailing edits render at the block's top/bottom.
+    // Per-line intra-line emphasis for the single added line of a clean 1:1
+    // replacement (one removed + one added line).
+    let mut splice_before: HashMap<usize, Vec<DiffLine>> = HashMap::new();
+    let mut added_emphasis: HashMap<usize, (usize, usize)> = HashMap::new();
+    for h in touching {
+        let clean_1to1 = h.new_len == 1 && h.removed_lines.len() == 1;
+        let anchor = if h.new_len == 0 {
+            h.new_start + 1
+        } else {
+            h.new_start
+        }
+        .clamp(bs, be + 1);
+        let removed: Vec<DiffLine> = h
+            .removed_lines
+            .iter()
+            .enumerate()
+            .map(|(i, r)| DiffLine {
+                kind: DiffLineKind::Removed,
+                text: trim_cr(r),
+                emphasis: if clean_1to1 && i == 0 {
+                    intra_line_span(&trim_cr(r), &trim_cr(&h.added_lines[0]))
+                } else {
+                    None
+                },
+            })
+            .collect();
+        splice_before.entry(anchor).or_default().extend(removed);
+        if clean_1to1 && (bs..=be).contains(&h.new_start) {
+            if let Some(e) =
+                intra_line_span(&trim_cr(&h.added_lines[0]), &trim_cr(&h.removed_lines[0]))
+            {
+                added_emphasis.insert(h.new_start, e);
+            }
+        }
+    }
+
+    // A new-side line is Added when some replacement/insertion hunk covers
+    // it; otherwise it is Context.
+    let is_added = |l: usize| {
+        touching
+            .iter()
+            .any(|h| h.new_len >= 1 && h.new_start <= l && l < h.new_start + h.new_len)
+    };
+
+    let mut lines: Vec<DiffLine> = Vec::new();
+    for (i, text) in block_lines.into_iter().enumerate() {
+        let l = bs + i; // 1-based new-side line number
+        if let Some(group) = splice_before.remove(&l) {
+            lines.extend(group);
+        }
+        lines.push(if is_added(l) {
+            DiffLine {
+                kind: DiffLineKind::Added,
+                text,
+                emphasis: added_emphasis.get(&l).copied(),
+            }
+        } else {
+            DiffLine {
+                kind: DiffLineKind::Context,
+                text,
+                emphasis: None,
+            }
+        });
+    }
+    // Trailing deletions clamped to just past the block's last line.
+    if let Some(group) = splice_before.remove(&(be + 1)) {
+        lines.extend(group);
+    }
+
+    YamlBlockDiff { lines }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -779,5 +1000,403 @@ mod tests {
                 "changed id {id} must resolve to ≥1 hunk via hunks_for",
             );
         }
+    }
+
+    // =================================================================
+    // Inline YAML block diff reconstruction (cute-dbt#96 concern 2)
+    // =================================================================
+
+    // A replacement hunk carrying BOTH sides' bodies (the reconstruction
+    // needs `removed_lines`, unlike the touch/alignment `repl` helper).
+    fn replace(new_start: usize, removed: &[&str], added: &[&str]) -> Hunk {
+        Hunk {
+            new_start,
+            new_len: added.len(),
+            removed_lines: removed.iter().map(|s| (*s).to_owned()).collect(),
+            added_lines: added.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    // A pure deletion at `new_start` carrying explicit removed bodies.
+    fn delete(new_start: usize, removed: &[&str]) -> Hunk {
+        Hunk {
+            new_start,
+            new_len: 0,
+            removed_lines: removed.iter().map(|s| (*s).to_owned()).collect(),
+            added_lines: Vec::new(),
+        }
+    }
+
+    fn ctx(text: &str) -> DiffLine {
+        DiffLine {
+            kind: DiffLineKind::Context,
+            text: text.to_owned(),
+            emphasis: None,
+        }
+    }
+    fn rem(text: &str) -> DiffLine {
+        DiffLine {
+            kind: DiffLineKind::Removed,
+            text: text.to_owned(),
+            emphasis: None,
+        }
+    }
+    fn add(text: &str) -> DiffLine {
+        DiffLine {
+            kind: DiffLineKind::Added,
+            text: text.to_owned(),
+            emphasis: None,
+        }
+    }
+    fn rem_e(text: &str, e: (usize, usize)) -> DiffLine {
+        DiffLine {
+            kind: DiffLineKind::Removed,
+            text: text.to_owned(),
+            emphasis: Some(e),
+        }
+    }
+    fn add_e(text: &str, e: (usize, usize)) -> DiffLine {
+        DiffLine {
+            kind: DiffLineKind::Added,
+            text: text.to_owned(),
+            emphasis: Some(e),
+        }
+    }
+
+    // ----- intra_line_span: common-affix codepoint range -----
+
+    #[test]
+    fn intra_line_span_identical_lines_have_no_emphasis() {
+        assert_eq!(
+            intra_line_span("    model: orders", "    model: orders"),
+            None
+        );
+    }
+
+    #[test]
+    fn intra_line_span_marks_the_changed_middle_per_side() {
+        // Shared prefix "    model: " (11) + shared suffix "s" (1).
+        let removed = "    model: payments";
+        let added = "    model: orders";
+        // removed side: [11, 19-1) = "payment"
+        assert_eq!(intra_line_span(removed, added), Some((11, 18)));
+        // added side:   [11, 17-1) = "order"
+        assert_eq!(intra_line_span(added, removed), Some((11, 16)));
+    }
+
+    #[test]
+    fn intra_line_span_pure_append_emphasizes_only_the_longer_side() {
+        assert_eq!(intra_line_span("abc", "abcd"), None); // shorter side: nothing of its own changed
+        assert_eq!(intra_line_span("abcd", "abc"), Some((3, 4))); // the trailing "d"
+    }
+
+    #[test]
+    fn intra_line_span_prepend_emphasizes_the_leading_diff() {
+        assert_eq!(intra_line_span("abc", "bc"), Some((0, 1))); // leading "a"
+    }
+
+    #[test]
+    fn intra_line_span_counts_codepoints_not_bytes() {
+        // "café " is 5 codepoints (é is 2 bytes); the changed char is at 5.
+        assert_eq!(intra_line_span("café x", "café y"), Some((5, 6)));
+    }
+
+    // ----- reconstruct_one: the ordered DiffLine table -----
+
+    #[test]
+    fn reconstruct_single_line_replacement_carries_intra_line_emphasis() {
+        let block = block_at(
+            "  - name: test_orders\n    model: payments\n    given: []",
+            10,
+        ); // [10,12]
+        let hunks = [replace(
+            11,
+            &["    model: payments"],
+            &["    model: orders"],
+        )];
+        // raw already holds the post-edit (working-tree) line at 11, so the
+        // hunk's added body matches it. Old "payments" → new "orders".
+        let block = UnitTestYamlBlock {
+            raw: "  - name: test_orders\n    model: orders\n    given: []".to_owned(),
+            ..block
+        };
+        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        assert_eq!(
+            got.lines,
+            vec![
+                ctx("  - name: test_orders"),
+                rem_e("    model: payments", (11, 18)),
+                add_e("    model: orders", (11, 16)),
+                ctx("    given: []"),
+            ],
+        );
+    }
+
+    #[test]
+    fn reconstruct_trims_cr_on_both_sides_keeping_offsets_correct() {
+        // CRLF working tree: the slicer keeps `\r` (split('\n')), the diff
+        // parser strips it (str::lines). Without trimming BOTH, the added
+        // line text would carry `\r` and the emphasis suffix would collapse
+        // (off-by-one span). Block raw lines end in `\r`; hunk bodies don't.
+        let block = UnitTestYamlBlock {
+            raw: "  - name: t\r\n    model: orders\r\n    given: []\r".to_owned(),
+            line_of_name: 20,
+            block_start: 20,
+            block_end: 22,
+        };
+        let hunks = [replace(
+            21,
+            &["    model: payments"],
+            &["    model: orders"],
+        )];
+        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        assert_eq!(
+            got.lines,
+            vec![
+                ctx("  - name: t"),
+                rem_e("    model: payments", (11, 18)),
+                add_e("    model: orders", (11, 16)),
+                ctx("    given: []"),
+            ],
+            "text must be \\r-trimmed and emphasis offsets unaffected by line endings",
+        );
+    }
+
+    #[test]
+    fn reconstruct_pure_deletion_splices_removed_after_its_line() {
+        let block = block_at("  - name: t\n    model: m\n    given: []", 10); // [10,12]
+        // Deletion gap after new-side line 11 → removed renders between 11 and 12.
+        let hunks = [delete(11, &["      # note"])];
+        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        assert_eq!(
+            got.lines,
+            vec![
+                ctx("  - name: t"),
+                ctx("    model: m"),
+                rem("      # note"),
+                ctx("    given: []"),
+            ],
+        );
+    }
+
+    #[test]
+    fn reconstruct_leading_edge_deletion_renders_removed_first() {
+        // new_start = block_start - 1 → anchor clamps to the top.
+        let block = block_at("  - name: t\n    model: m\n    given: []", 10); // [10,12]
+        let hunks = [delete(9, &["  # leading"])];
+        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        assert_eq!(
+            got.lines,
+            vec![
+                rem("  # leading"),
+                ctx("  - name: t"),
+                ctx("    model: m"),
+                ctx("    given: []"),
+            ],
+        );
+    }
+
+    #[test]
+    fn reconstruct_trailing_edge_deletion_renders_removed_last() {
+        // new_start = block_end → anchor clamps just past the last line.
+        let block = block_at("  - name: t\n    model: m\n    given: []", 10); // [10,12]
+        let hunks = [delete(12, &["  # trailing"])];
+        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        assert_eq!(
+            got.lines,
+            vec![
+                ctx("  - name: t"),
+                ctx("    model: m"),
+                ctx("    given: []"),
+                rem("  # trailing"),
+            ],
+        );
+    }
+
+    #[test]
+    fn reconstruct_replacement_straddling_the_top_edge_clamps_removed_to_top() {
+        // new_start (9) < block_start (10) ≤ new_end (10): line 10 is Added,
+        // the removed pair clamps to the block top.
+        let block = block_at("    model: m2\n    given: []\n      rows: []", 10); // [10,12]
+        let hunks = [replace(9, &["old8", "old9"], &["new9", "    model: m2"])];
+        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        assert_eq!(
+            got.lines,
+            vec![
+                rem("old8"),
+                rem("old9"),
+                add("    model: m2"), // line 10, inside the hunk's added range
+                ctx("    given: []"),
+                ctx("      rows: []"),
+            ],
+        );
+    }
+
+    #[test]
+    fn reconstruct_two_hunks_in_one_block_render_in_ascending_order() {
+        let block = block_at("  - name: t\nnewA\n    given: []\nnewB\n      rows: []", 10); // [10,14]
+        // hunks_for returns diff order (ascending new_start); one forward pass.
+        let hunks = [
+            replace(11, &["oldA"], &["newA"]),
+            replace(13, &["oldB"], &["newB"]),
+        ];
+        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        assert_eq!(
+            got.lines,
+            vec![
+                ctx("  - name: t"),
+                rem_e("oldA", (0, 3)),
+                add_e("newA", (0, 3)),
+                ctx("    given: []"),
+                rem_e("oldB", (0, 3)),
+                add_e("newB", (0, 3)),
+                ctx("      rows: []"),
+            ],
+        );
+    }
+
+    #[test]
+    fn reconstruct_multi_line_replacement_has_no_intra_line_emphasis() {
+        // new_len = 2 (not a clean 1:1) → line-level +/- only, no <strong>.
+        let block = block_at("  - name: t\nnewA\nnewB\n    given: []", 10); // [10,13]
+        let hunks = [replace(11, &["oldA", "oldB"], &["newA", "newB"])];
+        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        assert_eq!(
+            got.lines,
+            vec![
+                ctx("  - name: t"),
+                rem("oldA"),
+                rem("oldB"),
+                add("newA"),
+                add("newB"),
+                ctx("    given: []"),
+            ],
+        );
+    }
+
+    // ----- reconstruct_block_diffs: the gating (present AND aligned AND touched) -----
+
+    #[test]
+    fn reconstruct_block_diffs_emits_only_for_edited_own_blocks() {
+        let edit_id = "unit_test.shop.m.t_edit";
+        let absent_id = "unit_test.shop.m.t_absent";
+        let stale_id = "unit_test.shop.m.t_stale";
+        let untouched_id = "unit_test.shop.m.t_untouched";
+
+        let mut tests = HashMap::new();
+        tests.insert(edit_id.to_owned(), ut("t_edit", "models/_a.yml"));
+        tests.insert(absent_id.to_owned(), ut("t_absent", "models/_b.yml"));
+        tests.insert(stale_id.to_owned(), ut("t_stale", "models/_c.yml"));
+        tests.insert(untouched_id.to_owned(), ut("t_untouched", "models/_d.yml"));
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            tests,
+            HashMap::new(),
+        );
+
+        let diff = PrDiff {
+            files: vec![
+                // _a.yml: hunk replaces line 2 with t_edit's working-tree
+                // body line → aligned + touches block [1,3].
+                FileHunks {
+                    path: "models/_a.yml".to_owned(),
+                    hunks: vec![replace(2, &["    model: was"], &["    model: m"])],
+                },
+                // _b.yml: a hunk exists (so t_absent stays `changed`), but no
+                // block is sliced for t_absent.
+                FileHunks {
+                    path: "models/_b.yml".to_owned(),
+                    hunks: vec![replace(2, &["    model: was"], &["    model: m"])],
+                },
+                // _c.yml: hunk's added body does NOT match t_stale's block
+                // line at that position → misaligned (stale diff).
+                FileHunks {
+                    path: "models/_c.yml".to_owned(),
+                    hunks: vec![replace(2, &["    model: was"], &["    model: DRIFTED"])],
+                },
+                // _d.yml: the only hunk is outside t_untouched's block [10,12].
+                FileHunks {
+                    path: "models/_d.yml".to_owned(),
+                    hunks: vec![replace(2, &["    model: was"], &["    model: m"])],
+                },
+            ],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+
+        let mut blocks = HashMap::new();
+        blocks.insert(
+            edit_id.to_owned(),
+            block_at("  - name: t_edit\n    model: m\n    given: []", 1), // [1,3]
+        );
+        // t_absent: intentionally NO block.
+        blocks.insert(
+            stale_id.to_owned(),
+            block_at("  - name: t_stale\n    model: m\n    given: []", 1), // [1,3]
+        );
+        blocks.insert(
+            untouched_id.to_owned(),
+            block_at("  - name: t_untouched\n    model: m\n    given: []", 10), // [10,12]
+        );
+
+        let changed: InScopeSet = [
+            edit_id.to_owned(),
+            absent_id.to_owned(),
+            stale_id.to_owned(),
+            untouched_id.to_owned(),
+        ]
+        .into_iter()
+        .collect();
+
+        let diffs = reconstruct_block_diffs(&current, &changed, &blocks, &index);
+
+        assert!(
+            diffs.contains_key(edit_id),
+            "edited own block → diff emitted"
+        );
+        assert!(
+            !diffs.contains_key(absent_id),
+            "absent block → no diff (plain drawer)"
+        );
+        assert!(
+            !diffs.contains_key(stale_id),
+            "misaligned (stale) diff → no diff"
+        );
+        assert!(
+            !diffs.contains_key(untouched_id),
+            "change outside the block → no diff",
+        );
+
+        // The emitted diff shows the in-place edit of line 2.
+        assert_eq!(
+            diffs[edit_id].lines,
+            vec![
+                ctx("  - name: t_edit"),
+                rem_e("    model: was", (11, 14)), // "was"
+                add_e("    model: m", (11, 12)),   // "m"
+                ctx("    given: []"),
+            ],
+        );
+    }
+
+    // ----- YamlBlockDiff serde: the exact JS wire shape -----
+
+    #[test]
+    fn yaml_block_diff_serializes_to_the_exact_renderyamldiff_contract() {
+        let diff = YamlBlockDiff {
+            lines: vec![
+                ctx("  - name: t"),
+                rem_e("    model: payments", (11, 18)),
+                add_e("    model: orders", (11, 16)),
+            ],
+        };
+        let json = serde_json::to_string(&diff).unwrap();
+        assert_eq!(
+            json,
+            r#"{"lines":[{"kind":"context","text":"  - name: t","emphasis":null},{"kind":"removed","text":"    model: payments","emphasis":[11,18]},{"kind":"added","text":"    model: orders","emphasis":[11,16]}]}"#,
+        );
+        // wire-shape round-trips back to the same POD.
+        let back: YamlBlockDiff = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, diff);
     }
 }

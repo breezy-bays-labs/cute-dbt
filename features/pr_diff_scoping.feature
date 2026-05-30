@@ -339,3 +339,19 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Then the exit code is 0
     And the test "test_a" is marked updated
     And the test "test_b" is marked updated
+    And the test "test_a" carries no inline YAML diff
+
+  # cute-dbt#96 concern 2 — the inline YAML diff drawer. The edited test's
+  # payload carries a reconstructed diff (a removed + an added line, the
+  # change pair); the untouched sibling carries none, so its drawer shows the
+  # plain authored YAML. Content (not just presence) is asserted because a
+  # flipped removed↔added or empty reconstruction would still be "present".
+  Scenario: An updated test carries an inline YAML diff of its block; a context sibling does not
+    Given a PR diff that edits the definition of "test_a" in "models/marts/core/_core__models.yml"
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
+    And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
+    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the test "test_a" carries an inline YAML diff with a removed and an added line
+    And the test "test_b" carries no inline YAML diff

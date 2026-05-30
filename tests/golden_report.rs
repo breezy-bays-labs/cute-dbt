@@ -100,6 +100,7 @@ fn rendered_report_skeleton() {
         &models_in_scope,
         &changed,
         &HashMap::new(),
+        &HashMap::new(),
         "jaffle-shop-baseline.json",
         ScopeSource::Baseline,
         DEFAULT_REPORT_TITLE,

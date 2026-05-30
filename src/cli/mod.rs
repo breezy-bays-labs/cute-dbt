@@ -41,8 +41,9 @@ use crate::adapters::render::{ScopeSource, index_tests_for_models, render_report
 use crate::adapters::source_yaml::FsSourceYamlReader;
 use crate::domain::{
     DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NormalizedDiffIndex,
-    PreflightError, ScopeInput, ScopeSelection, UnitTestYamlBlock, extract_unit_test_block,
-    preflight_compiled, refine_changed_by_hunks, select_in_scope,
+    PreflightError, ScopeInput, ScopeSelection, UnitTestYamlBlock, YamlBlockDiff,
+    extract_unit_test_block, preflight_compiled, reconstruct_block_diffs, refine_changed_by_hunks,
+    select_in_scope,
 };
 use crate::ports::{ManifestSource, SourceYamlReader};
 
@@ -158,6 +159,17 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
         }
         ScopeInput::Baseline { .. } => changed,
     };
+    // Inline YAML block diffs (cute-dbt#96 concern 2): reconstruct an
+    // in-place diff for each test whose own YAML block the diff edited.
+    // PrDiff arm only — baseline mode has no hunks to reconstruct from, so
+    // the drawer shows the plain authored YAML. Threaded into render
+    // exactly like `authoring_yaml` (the slice spans are already in hand).
+    let yaml_diffs: HashMap<String, YamlBlockDiff> = match &scope_input {
+        ScopeInput::PrDiff { index } => {
+            reconstruct_block_diffs(&current, &changed, &authoring_yaml, index)
+        }
+        ScopeInput::Baseline { .. } => HashMap::new(),
+    };
     let (report_title, report_subtitle) = resolve_report_strings(cli);
     let (baseline_label, scope_source) = scope_banner(cli, &scope_input);
     render(
@@ -167,6 +179,7 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
         &models_in_scope,
         &changed,
         &authoring_yaml,
+        &yaml_diffs,
         &baseline_label,
         scope_source,
         &report_title,
@@ -353,6 +366,9 @@ fn parse_ctes() {}
 /// `ScopeSource::Baseline` names the baseline manifest (the
 /// `--baseline-manifest` path verbatim); `ScopeSource::PrDiff` omits the
 /// baseline clause (`baseline_label` is then empty).
+// Thin pass-through to `render_report`; mirrors its argument list (the
+// composition-root rationale lives there).
+#[allow(clippy::too_many_arguments)]
 fn render(
     out: &Path,
     current: &Manifest,
@@ -360,6 +376,7 @@ fn render(
     models_in_scope: &ModelInScopeSet,
     changed: &InScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
+    yaml_diffs: &HashMap<String, YamlBlockDiff>,
     baseline_label: &str,
     scope_source: ScopeSource,
     report_title: &str,
@@ -372,6 +389,7 @@ fn render(
         models_in_scope,
         changed,
         authoring_yaml,
+        yaml_diffs,
         baseline_label,
         scope_source,
         report_title,
