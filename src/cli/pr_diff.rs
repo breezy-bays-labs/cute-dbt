@@ -147,12 +147,19 @@ fn flush(current: &mut Option<FileHunks>, files: &mut Vec<FileHunks>) {
 }
 
 /// Classify one line while inside a hunk body. Appends a `+`/`-` body
-/// (sigil stripped) to the current hunk and returns `true`; treats a
-/// `\ No newline at end of file` marker as a consumed no-op (`true`).
-/// Returns `false` when the line is not a body line — the hunk has ended
-/// and the caller re-classifies it as a header.
+/// (sigil stripped) to the current hunk and returns `true`; a
+/// `\ No newline at end of file` marker, a ` `-prefixed context line, or a
+/// blank line is a consumed no-op (`true`). Returns `false` only when the
+/// line is not body-shaped — the hunk has ended and the caller
+/// re-classifies it as a header.
+///
+/// Context/blank lines never occur in the documented `git diff --unified=0`
+/// input, but consuming them (rather than ending the hunk) keeps the parser
+/// robust if a non-zero-context diff is supplied: the interleaved context
+/// lines are skipped and the hunk's `+`/`-` bodies still accumulate
+/// correctly (cute-dbt#110 review).
 fn consume_body_line(line: &str, current: Option<&mut FileHunks>) -> bool {
-    if line.starts_with('\\') {
+    if line.starts_with('\\') || line.starts_with(' ') || line.is_empty() {
         return true;
     }
     let Some(hunk) = current.and_then(|f| f.hunks.last_mut()) else {
@@ -486,5 +493,33 @@ index 3333333..4444444 100644\n\
         let diff = parse_diff(&arg).expect("@empty file is Ok, not an error");
         assert!(diff.files.is_empty());
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn context_lines_do_not_prematurely_end_a_hunk() {
+        // Off-contract (a non-`--unified=0` diff): a ` `-context line between
+        // the `-` and `+` bodies must NOT end the hunk — the `+` after it is
+        // still captured (CodeRabbit #110). Without the fix `added_lines`
+        // would be empty.
+        // `concat!` (not a `\`-continued literal) so the ` context` line
+        // keeps its leading space — continuation would eat it.
+        let diff = concat!(
+            "diff --git a/m.sql b/m.sql\n",
+            "--- a/m.sql\n",
+            "+++ b/m.sql\n",
+            "@@ -1,3 +1,3 @@\n",
+            "-old\n",
+            " context\n",
+            "+new\n",
+        );
+        let pr = parse_diff(diff).expect("parses");
+        assert_eq!(pr.files.len(), 1);
+        let h = &pr.files[0].hunks[0];
+        assert_eq!(h.removed_lines, vec!["old".to_owned()]);
+        assert_eq!(
+            h.added_lines,
+            vec!["new".to_owned()],
+            "the `+new` after a context line is still captured",
+        );
     }
 }

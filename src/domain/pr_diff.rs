@@ -455,7 +455,13 @@ fn reconstruct_one(block: &UnitTestYamlBlock, touching: &[&Hunk]) -> YamlBlockDi
     let mut splice_before: HashMap<usize, Vec<DiffLine>> = HashMap::new();
     let mut added_emphasis: HashMap<usize, (usize, usize)> = HashMap::new();
     for h in touching {
-        let clean_1to1 = h.new_len == 1 && h.removed_lines.len() == 1;
+        // A clean 1:1 line replacement carries exactly one removed AND one
+        // added body. The `added_lines.len() == 1` guard is load-bearing,
+        // not just `new_len == 1`: a malformed diff can declare `new_len: 1`
+        // with an empty `+` body, and the emphasis branch indexes
+        // `added_lines[0]` — without it, `reconstruct_one` would panic on
+        // that input (cute-dbt#110 review). cute-dbt never panics on a bad diff.
+        let clean_1to1 = h.new_len == 1 && h.removed_lines.len() == 1 && h.added_lines.len() == 1;
         let anchor = if h.new_len == 0 {
             h.new_start + 1
         } else {
@@ -1282,6 +1288,31 @@ mod tests {
                 rem("oldB"),
                 add("newA"),
                 add("newB"),
+                ctx("    given: []"),
+            ],
+        );
+    }
+
+    #[test]
+    fn reconstruct_does_not_panic_on_a_malformed_hunk_with_an_empty_added_body() {
+        // A diff can declare `new_len: 1` yet carry no `+` body (malformed).
+        // The clean-1:1 emphasis path indexes `added_lines[0]`, so the
+        // `added_lines.len() == 1` guard is what keeps this from panicking
+        // (CodeRabbit #110): it degrades to a line-level Added, no emphasis.
+        let block = block_at("  - name: t\n    model: m\n    given: []", 10); // [10,12]
+        let hunk = Hunk {
+            new_start: 11,
+            new_len: 1,
+            removed_lines: vec!["    model: was".to_owned()],
+            added_lines: Vec::new(),
+        };
+        let got = reconstruct_one(&block, &[&hunk]);
+        assert_eq!(
+            got.lines,
+            vec![
+                ctx("  - name: t"),
+                rem("    model: was"),
+                add("    model: m"),
                 ctx("    given: []"),
             ],
         );
