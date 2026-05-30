@@ -52,6 +52,7 @@ fn render_jaffle_shop(out: &Path) {
         &models_in_scope,
         &changed,
         &HashMap::new(),
+        &HashMap::new(),
         "jaffle-shop-baseline.json",
         ScopeSource::Baseline,
         DEFAULT_REPORT_TITLE,

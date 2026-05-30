@@ -5,7 +5,7 @@
 //! `load_current` → `resolve_scope_input` → `select_in_scope` →
 //! `preflight_compiled` → `parse_ctes` → `gather_authoring_yaml` →
 //! `render` (`ARCHITECTURE.md` §3, §6). `resolve_scope_input` picks
-//! between the `--baseline-manifest` and `--scope-from-pr-diff` scope
+//! between the `--baseline-manifest` and `--pr-diff` scope
 //! sources and loads the baseline only on the former path (cute-dbt#85).
 //! Composition lives in `cli` by deliberate single-crate design: there
 //! is no separate `app` / `usecase` crate. `parse_ctes` is a named
@@ -23,7 +23,7 @@
 //! manifest or an unwritable output path — no partial report is ever
 //! written), `2` an operator usage error (clap rejected the arguments,
 //! including supplying neither or both scope sources —
-//! `--baseline-manifest` / `--scope-from-pr-diff`).
+//! `--baseline-manifest` / `--pr-diff`).
 
 mod args;
 mod exit;
@@ -40,8 +40,9 @@ use crate::adapters::manifest::{FileManifestSource, load_baseline};
 use crate::adapters::render::{ScopeSource, index_tests_for_models, render_report};
 use crate::adapters::source_yaml::FsSourceYamlReader;
 use crate::domain::{
-    DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, PreflightError, ScopeInput,
-    ScopeSelection, UnitTestYamlBlock, extract_unit_test_block, preflight_compiled,
+    DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NormalizedDiffIndex,
+    PreflightError, ScopeInput, ScopeSelection, UnitTestYamlBlock, YamlBlockDiff,
+    extract_unit_test_block, preflight_compiled, reconstruct_block_diffs, refine_changed_by_hunks,
     select_in_scope,
 };
 use crate::ports::{ManifestSource, SourceYamlReader};
@@ -125,7 +126,7 @@ impl RunError {
 /// `gather_authoring_yaml` → `render`.
 ///
 /// `resolve_scope_input` runs Stage-1 pre-flight on the baseline manifest
-/// only on the `--baseline-manifest` path; the `--scope-from-pr-diff`
+/// only on the `--baseline-manifest` path; the `--pr-diff`
 /// path needs no baseline. `?` short-circuits before `render`, so a
 /// fail-closed manifest never produces a partial `report.html`.
 fn execute(cli: &Cli) -> Result<(), RunError> {
@@ -146,6 +147,29 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
     // (cute-dbt#91).
     let render_test_ids = render_test_ids(&current, &models_in_scope);
     let authoring_yaml = gather_authoring_yaml(cli, &current, &render_test_ids);
+    // Block-precise narrowing (cute-dbt#96): on the PR-diff path, narrow the
+    // file-granular `changed` label down to the tests whose sliced YAML block
+    // a diff hunk actually touches. The slice spans (`authoring_yaml`) are
+    // already in hand, and `changed′ ⊆ changed` holds because refine only
+    // removes ids. Baseline-mode `changed` is already precise (a
+    // `StateComparator` struct diff), so refine runs ONLY on the PrDiff arm.
+    let changed = match &scope_input {
+        ScopeInput::PrDiff { index } => {
+            refine_changed_by_hunks(&current, &changed, &authoring_yaml, index)
+        }
+        ScopeInput::Baseline { .. } => changed,
+    };
+    // Inline YAML block diffs (cute-dbt#96 concern 2): reconstruct an
+    // in-place diff for each test whose own YAML block the diff edited.
+    // PrDiff arm only — baseline mode has no hunks to reconstruct from, so
+    // the drawer shows the plain authored YAML. Threaded into render
+    // exactly like `authoring_yaml` (the slice spans are already in hand).
+    let yaml_diffs: HashMap<String, YamlBlockDiff> = match &scope_input {
+        ScopeInput::PrDiff { index } => {
+            reconstruct_block_diffs(&current, &changed, &authoring_yaml, index)
+        }
+        ScopeInput::Baseline { .. } => HashMap::new(),
+    };
     let (report_title, report_subtitle) = resolve_report_strings(cli);
     let (baseline_label, scope_source) = scope_banner(cli, &scope_input);
     render(
@@ -155,6 +179,7 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
         &models_in_scope,
         &changed,
         &authoring_yaml,
+        &yaml_diffs,
         &baseline_label,
         scope_source,
         &report_title,
@@ -264,7 +289,7 @@ fn resolve_report_strings(cli: &Cli) -> (String, Option<String>) {
 ///
 /// A load failure is `Unreadable` / `SchemaUnsupported`. The baseline
 /// manifest (when scoping via `--baseline-manifest`) is loaded separately
-/// in [`resolve_scope_input`] so the `--scope-from-pr-diff` path can skip
+/// in [`resolve_scope_input`] so the `--pr-diff` path can skip
 /// it entirely.
 fn load_current(cli: &Cli) -> Result<Manifest, RunError> {
     let source = FileManifestSource;
@@ -277,10 +302,10 @@ fn load_current(cli: &Cli) -> Result<Manifest, RunError> {
 /// - `--baseline-manifest` → load the baseline (Stage-1 pre-flight; a
 ///   failure is remapped to `BaselineUnusable` by [`load_baseline`]) and
 ///   wrap it in [`ScopeInput::Baseline`].
-/// - `--scope-from-pr-diff` → wrap the already-parsed changed-files list
-///   in [`ScopeInput::PrDiff`], rebasing PR-diff paths against the
-///   manifest's project-relative `original_file_path` via
-///   `--project-root`.
+/// - `--pr-diff` → build the single [`NormalizedDiffIndex`] from the
+///   parsed diff and the `--project-root` strip, and wrap it in
+///   [`ScopeInput::PrDiff`]. The index rebases the diff's repo-relative
+///   paths onto the manifest's project-relative `original_file_path`.
 ///
 /// clap's `scope_source` [`ArgGroup`](clap::ArgGroup) (`required`,
 /// single) guarantees exactly one arm is set, so the trailing branch is
@@ -290,15 +315,18 @@ fn resolve_scope_input(cli: &Cli) -> Result<ScopeInput, RunError> {
         let source = FileManifestSource;
         let baseline = load_baseline(&source, baseline_path)?;
         Ok(ScopeInput::Baseline { manifest: baseline })
-    } else if let Some(changed) = cli.scope_from_pr_diff.as_ref() {
-        Ok(ScopeInput::PrDiff {
-            changed_files: changed.paths.clone(),
-            project_root_strip: cli.project_root.clone(),
-        })
+    } else if let Some(diff) = cli.pr_diff.as_ref() {
+        // Build the single NormalizedDiffIndex ONCE here and thread the
+        // one instance through scope selection (and cute-dbt#96's
+        // block-precise refinement + inline diff). It is the sole
+        // normalization authority — the `--project-root` strip is baked
+        // in as its diff-side strip (CAO plan-audit Decision 2).
+        let index = NormalizedDiffIndex::new(diff, cli.project_root.as_deref());
+        Ok(ScopeInput::PrDiff { index })
     } else {
         unreachable!(
             "clap's scope_source ArgGroup guarantees exactly one of \
-             --baseline-manifest / --scope-from-pr-diff is provided"
+             --baseline-manifest / --pr-diff is provided"
         )
     }
 }
@@ -338,6 +366,9 @@ fn parse_ctes() {}
 /// `ScopeSource::Baseline` names the baseline manifest (the
 /// `--baseline-manifest` path verbatim); `ScopeSource::PrDiff` omits the
 /// baseline clause (`baseline_label` is then empty).
+// Thin pass-through to `render_report`; mirrors its argument list (the
+// composition-root rationale lives there).
+#[allow(clippy::too_many_arguments)]
 fn render(
     out: &Path,
     current: &Manifest,
@@ -345,6 +376,7 @@ fn render(
     models_in_scope: &ModelInScopeSet,
     changed: &InScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
+    yaml_diffs: &HashMap<String, YamlBlockDiff>,
     baseline_label: &str,
     scope_source: ScopeSource,
     report_title: &str,
@@ -357,6 +389,7 @@ fn render(
         models_in_scope,
         changed,
         authoring_yaml,
+        yaml_diffs,
         baseline_label,
         scope_source,
         report_title,
@@ -375,7 +408,7 @@ mod tests {
             out: out.into(),
             config: None,
             project_root: None,
-            scope_from_pr_diff: None,
+            pr_diff: None,
         }
     }
 

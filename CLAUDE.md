@@ -44,7 +44,7 @@ adr:             closeout:
 ## Run-loop sketch (the v0.1 vertical)
 
 ```text
-1. cli::parse_args                       -> Cli  (scope_source ArgGroup: --baseline-manifest XOR --scope-from-pr-diff)
+1. cli::parse_args                       -> Cli  (scope_source ArgGroup: --baseline-manifest XOR --pr-diff)
 2. cli::load_current                     -> Manifest          (Stage-1 preflight; the --manifest)
 3. cli::resolve_scope_input              -> ScopeInput        (baseline arm runs load_baseline; pr-diff arm wraps @file/literal)
 4. domain::scope::select_in_scope        -> (InScopeSet, ModelInScopeSet)

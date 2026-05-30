@@ -67,7 +67,7 @@ use crate::adapters::asset_embed::{
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
     BANNER_EMPTY_SCOPE, CteGraph, EdgeType, InScopeSet, Manifest, ModelInScopeSet, Node, NodeId,
-    UnitTest, UnitTestGiven, UnitTestYamlBlock, resolve_target_model,
+    UnitTest, UnitTestGiven, UnitTestYamlBlock, YamlBlockDiff, resolve_target_model,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -317,6 +317,14 @@ pub struct TestPayload {
     /// contains).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authoring_yaml: Option<String>,
+    /// Inline diff of this test's authored YAML block (cute-dbt#96
+    /// concern 2) — present only when the diff edited this test's own
+    /// block (PR-diff mode, block present + aligned + touched). `None`
+    /// (key omitted) for context tests, baseline mode, and edits that
+    /// fall outside the block, so the drawer falls back to the plain
+    /// authored-YAML view. Mirrors `authoring_yaml`'s threading exactly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub yaml_diff: Option<YamlBlockDiff>,
     /// Ordered list of fixture inputs for the test (`given[…]`).
     pub given: Vec<GivenPayload>,
     /// Expected result block (`expect`).
@@ -358,7 +366,7 @@ pub struct ReportPayload {
 pub enum ScopeSource {
     /// Scoped via `--baseline-manifest` (dbt `state:modified`).
     Baseline,
-    /// Scoped via `--scope-from-pr-diff` (PR changed-files list).
+    /// Scoped via `--pr-diff` (a PR's `git diff --unified=0`).
     PrDiff,
 }
 
@@ -490,6 +498,7 @@ pub fn build_payload(
     changed: &InScopeSet,
     models_in_scope: &ModelInScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
+    yaml_diffs: &HashMap<String, YamlBlockDiff>,
     baseline_label: &str,
 ) -> ReportPayload {
     let model_tests = index_tests_for_models(current, models_in_scope);
@@ -500,7 +509,13 @@ pub fn build_payload(
             continue;
         };
         let tests = model_tests.get(model_id).unwrap_or(&empty).as_slice();
-        models.push(build_model_payload(model, tests, changed, authoring_yaml));
+        models.push(build_model_payload(
+            model,
+            tests,
+            changed,
+            authoring_yaml,
+            yaml_diffs,
+        ));
     }
     ReportPayload {
         baseline: baseline_label.to_owned(),
@@ -524,7 +539,11 @@ pub fn build_payload(
 /// branch is unreachable in v0.1 — the explicit mapping exists to keep
 /// the run-loop signature monomorphic on `io::Error`.
 // See `build_payload` for the rationale on the implicit-hasher allow.
-#[allow(clippy::implicit_hasher)]
+// `too_many_arguments`: the render composition root threads the run-loop's
+// already-built artifacts (manifest, scope sets, authoring YAML, inline
+// diffs, banner) straight through; a params struct would add indirection
+// that buys nothing at this single call site.
+#[allow(clippy::implicit_hasher, clippy::too_many_arguments)]
 pub fn render_report(
     out: &Path,
     current: &Manifest,
@@ -532,6 +551,7 @@ pub fn render_report(
     models_in_scope: &ModelInScopeSet,
     changed: &InScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
+    yaml_diffs: &HashMap<String, YamlBlockDiff>,
     baseline_label: &str,
     scope_source: ScopeSource,
     report_title: &str,
@@ -542,6 +562,7 @@ pub fn render_report(
         changed,
         models_in_scope,
         authoring_yaml,
+        yaml_diffs,
         baseline_label,
     );
     // The empty-scope banner contract reads the TRUE in-scope set, not the
@@ -575,6 +596,7 @@ fn build_model_payload(
     tests: &[(&str, &UnitTest)],
     changed: &InScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
+    yaml_diffs: &HashMap<String, YamlBlockDiff>,
 ) -> ModelPayload {
     let bare_name = leaf_segment(model.id().as_str()).to_owned();
     let compiled_code = model.compiled_code().unwrap_or_default();
@@ -589,7 +611,16 @@ fn build_model_payload(
         .map(str::to_owned);
     let test_payloads = tests
         .iter()
-        .map(|(id, ut)| build_test_payload(id, ut, &graph, changed, authoring_yaml.get(*id)))
+        .map(|(id, ut)| {
+            build_test_payload(
+                id,
+                ut,
+                &graph,
+                changed,
+                authoring_yaml.get(*id),
+                yaml_diffs.get(*id),
+            )
+        })
         .collect();
     ModelPayload {
         name: bare_name,
@@ -689,6 +720,7 @@ fn build_test_payload(
     graph: &CteGraph,
     changed: &InScopeSet,
     authoring_yaml: Option<&UnitTestYamlBlock>,
+    yaml_diff: Option<&YamlBlockDiff>,
 ) -> TestPayload {
     let given = unit_test
         .given()
@@ -714,6 +746,7 @@ fn build_test_payload(
         meta: unit_test.meta().cloned(),
         defined_in: unit_test.original_file_path().map(str::to_owned),
         authoring_yaml: authoring_yaml.map(|b| b.raw.clone()),
+        yaml_diff: yaml_diff.cloned(),
         given,
         expected: ExpectedPayload {
             rows: unit_test.expect().rows().clone(),
@@ -1177,6 +1210,7 @@ mod tests {
             &InScopeSet::new(),
             &ModelInScopeSet::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "main@a1f3c7e",
         );
         assert_eq!(payload.baseline, "main@a1f3c7e");
@@ -1196,6 +1230,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             "baseline.json",
         );
@@ -1225,6 +1260,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(payload.models.len(), 1);
@@ -1243,6 +1279,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             "baseline.json",
         );
@@ -1263,6 +1300,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(payload.models.len(), 1);
@@ -1281,6 +1319,7 @@ mod tests {
             &in_scope,
             &models,
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(payload.models.len(), 1);
@@ -1291,7 +1330,14 @@ mod tests {
     fn build_payload_skips_a_model_missing_from_manifest_nodes() {
         let manifest = manifest_for(vec![], vec![]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.ghost")]);
-        let payload = build_payload(&manifest, &InScopeSet::new(), &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         assert!(payload.models.is_empty());
     }
 
@@ -1318,7 +1364,14 @@ mod tests {
         // Only test_updated is changed; test_context is a non-updated
         // sibling carried purely by the widening.
         let changed = InScopeSet::from_iter(["unit_test.shop.test_updated".to_owned()]);
-        let payload = build_payload(&manifest, &changed, &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &changed,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         assert_eq!(payload.models.len(), 1);
         let tests = &payload.models[0].tests;
         assert_eq!(
@@ -1360,7 +1413,14 @@ mod tests {
         let manifest = manifest_for(vec![], vec![("unit_test.shop.test_ghost", ut)]);
         let in_scope = InScopeSet::from_iter(["unit_test.shop.test_ghost".to_owned()]);
         let models = ModelInScopeSet::new();
-        let payload = build_payload(&manifest, &in_scope, &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         // No models in scope → no payload entries; the indexer's None
         // branch simply doesn't contribute.
         assert!(payload.models.is_empty());
@@ -1372,7 +1432,14 @@ mod tests {
         let node = model_node("model.shop.final_one", "body", Some(compiled));
         let manifest = manifest_for(vec![node], vec![]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.final_one")]);
-        let payload = build_payload(&manifest, &InScopeSet::new(), &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         let model = &payload.models[0];
         let terminal = model
             .dag
@@ -1389,7 +1456,14 @@ mod tests {
         let node = model_node("model.shop.x", "body", Some(compiled));
         let manifest = manifest_for(vec![node], vec![]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
-        let payload = build_payload(&manifest, &InScopeSet::new(), &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         let model = &payload.models[0];
         assert!(
             model.compiled_sql.contains_key("stg_x_src"),
@@ -1411,7 +1485,14 @@ mod tests {
         let node = model_node("model.shop.flat", "body", Some(compiled));
         let manifest = manifest_for(vec![node], vec![]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.flat")]);
-        let payload = build_payload(&manifest, &InScopeSet::new(), &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         assert_eq!(
             payload.models[0].compiled_sql.get("flat").unwrap(),
             compiled
@@ -1426,7 +1507,14 @@ mod tests {
         let node = model_node("model.shop.broken", "body", Some("not valid sql {"));
         let manifest = manifest_for(vec![node], vec![]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.broken")]);
-        let payload = build_payload(&manifest, &InScopeSet::new(), &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         assert_eq!(payload.models.len(), 1);
         // Empty graph → empty nodes/edges, but compiled_sql carries the
         // original body keyed by bare name.
@@ -1445,7 +1533,14 @@ mod tests {
         let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
         let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.m")]);
-        let payload = build_payload(&manifest, &in_scope, &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         let test = &payload.models[0].tests[0];
         assert_eq!(test.description.as_deref(), Some("a description"));
         assert_eq!(test.tags.as_ref().unwrap(), &vec!["finance".to_owned()]);
@@ -1472,7 +1567,14 @@ mod tests {
         let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
         let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.stg_orders")]);
-        let payload = build_payload(&manifest, &in_scope, &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         let test = &payload.models[0].tests[0];
         assert_eq!(
             test.given[0].bound_to_node.as_deref(),
@@ -1505,7 +1607,14 @@ mod tests {
         let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
         let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.stg_customers")]);
-        let payload = build_payload(&manifest, &in_scope, &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         let test = &payload.models[0].tests[0];
         assert_eq!(
             test.given[0].bound_to_node.as_deref(),
@@ -1545,7 +1654,14 @@ mod tests {
         let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
         let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.union_model")]);
-        let payload = build_payload(&manifest, &in_scope, &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         let test = &payload.models[0].tests[0];
         assert_eq!(
             test.given[0].bound_to_node.as_deref(),
@@ -1591,7 +1707,14 @@ mod tests {
         let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
         let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.join_model")]);
-        let payload = build_payload(&manifest, &in_scope, &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         let test = &payload.models[0].tests[0];
         assert_eq!(test.given[0].bound_to_node.as_deref(), Some("joined_src"));
         assert_eq!(test.given[1].bound_to_node.as_deref(), Some("joined_src"));
@@ -1628,7 +1751,14 @@ mod tests {
         let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
         let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
-        let payload = build_payload(&manifest, &in_scope, &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         let test = &payload.models[0].tests[0];
         assert!(
             test.given[0].bound_to_node.is_none(),
@@ -1656,7 +1786,14 @@ mod tests {
         let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
         let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.flat")]);
-        let payload = build_payload(&manifest, &in_scope, &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         let test = &payload.models[0].tests[0];
         assert!(test.given[0].bound_to_node.is_none());
     }
@@ -1671,7 +1808,14 @@ mod tests {
         let node = model_node("model.shop.rec", "body", Some(compiled));
         let manifest = manifest_for(vec![node], vec![]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.rec")]);
-        let payload = build_payload(&manifest, &InScopeSet::new(), &models, &HashMap::new(), "b");
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
         assert!(payload.models[0].is_recursive);
     }
 
@@ -1757,6 +1901,7 @@ mod tests {
             &models,
             &InScopeSet::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -1794,6 +1939,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             "b",
             ScopeSource::Baseline,
@@ -1833,6 +1979,7 @@ mod tests {
             &models,
             &InScopeSet::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -1860,6 +2007,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             "b",
             ScopeSource::Baseline,
@@ -1894,6 +2042,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             "b",
             ScopeSource::Baseline,
@@ -1952,6 +2101,7 @@ mod tests {
             &models,
             &InScopeSet::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -1985,6 +2135,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             "",
             ScopeSource::PrDiff,
@@ -2021,6 +2172,7 @@ mod tests {
             &models,
             &InScopeSet::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -2055,6 +2207,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             "lab1@aaaaaaa",
             ScopeSource::Baseline,
@@ -2099,6 +2252,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             "b",
             ScopeSource::Baseline,
@@ -2164,6 +2318,7 @@ mod tests {
             &in_scope,
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             "b",
             ScopeSource::Baseline,

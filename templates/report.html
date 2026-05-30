@@ -116,6 +116,9 @@ g.dag-node:focus-visible { outline: 2px dashed #1d7484; outline-offset: 3px; }
 /* Inline hint shown when a model has tests but none are updated and the
    toggle is in Updated-only mode (the empty #test-select case). */
 .zero-updated-hint { margin: 0.5rem 0 0; color: #6a6a72; font-style: italic; font-size: 0.9em; }
+/* cute-dbt#96 — diff-level affirmation when block-precision narrowed every
+   test to context (0 updated). Subtle, like the per-model hint. */
+.zero-updated-affirm { margin: 0.35rem 0 0; color: #6a6a72; font-style: italic; font-size: 0.9em; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; }
 .panel-header h2 { margin: 0; }
 .expected-panel { border: 2px solid #1d7484; padding: 0.5rem 1rem 1rem; position: sticky; top: 1rem; align-self: start; }
@@ -195,6 +198,32 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
 .authoring-yaml { margin-top: 0.75rem; }
 .authoring-yaml > summary { cursor: pointer; font-weight: 600; }
 
+/* cute-dbt#96 — inline YAML block diff (Authored↔Diff drawer view). */
+.yaml-diff-toggle { display: flex; margin: 0.5rem 0 0; }
+.yaml-view-btn { font: inherit; font-size: 0.85em; padding: 0.15rem 0.6rem; border: 1px solid #d0d0d8; background: #f4f4f6; color: #4a4a52; cursor: pointer; }
+.yaml-view-btn:first-child { border-radius: 4px 0 0 4px; }
+.yaml-view-btn:last-child { border-radius: 0 4px 4px 0; border-left: none; }
+.yaml-view-btn.active { background: #2a2a32; color: #fff; border-color: #2a2a32; }
+/* Block rows so the tint fills the whole line; `fit-content`+`min-width`
+   keeps the fill flush to the right edge even when a long line scrolls. */
+.diff-line { display: block; width: fit-content; min-width: 100%; }
+.diff-sigil { display: inline-block; width: 1ch; margin-right: 0.5ch; opacity: 0.7; font-weight: 700; user-select: none; }
+/* Full-width muted row tint delineates added/removed lines at a glance — a
+   translucent fill + inset left-accent that read over both light and dark
+   Sakura backgrounds. The body text stays the normal foreground so it no
+   longer competes with the YAML syntax-highlight green; the colored sigil
+   keeps a hue cue. */
+.diff-added   { background: rgba(46, 160, 67, 0.06); box-shadow: inset 3px 0 0 rgba(46, 160, 67, 0.8); }
+.diff-removed { background: rgba(244, 63, 94, 0.06); box-shadow: inset 3px 0 0 rgba(244, 63, 94, 0.85); }
+.diff-added .diff-sigil   { color: #1a7f37; }
+.diff-removed .diff-sigil { color: #be123c; }
+/* The emphasis marks the exact changed characters. It is a solid light
+   pastel with a forced dark ink (not a translucent wash) so the text reads
+   crisply over the row tint — dark-on-light-marker works in both light and
+   dark Sakura themes, where the row's own text would otherwise be light. */
+.diff-added strong   { font-weight: 700; background: #a6f0b8; color: #04260f; border-radius: 2px; padding: 0 1px; }
+.diff-removed strong { font-weight: 700; background: #ffabd6; color: #26000a; border-radius: 2px; padding: 0 1px; }
+
 /* cute-dbt#47 — Model SQL expandable section (raw Jinja, model-level).
    Sits between test-selection and the CTE DAG. Collapsed by default. */
 .model-sql { margin-bottom: 1rem; }
@@ -227,6 +256,13 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     <span class="diff-scope-text">{{ banner_text }}</span> —{% if is_pr_diff %} from PR file diff{% else %}
     vs baseline manifest <code class="diff-scope-baseline">{{ baseline_label }}</code>{% endif %}.
   </p>
+  {%- if is_pr_diff %}
+  {# cute-dbt#96 (CPO Finding A): the LOCKED block-precision affirmation,
+     toggled visible by JS only when the diff updated 0 test definitions
+     (never a scoping failure). The leading `{%-` trims the inter-tag
+     whitespace so baseline-mode output stays byte-identical (#85 contract). #}
+  <p class="zero-updated-affirm" data-testid="zero-updated-affirm" hidden>no unit-test definitions changed in this diff</p>
+  {%- endif %}
 </section>
 
 <section class="error-card" role="alert" aria-label="Manifest error">
@@ -510,6 +546,11 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     }
     $(".diff-scope-text").text(text);
     $(".diff-scope-baseline").text(DATA.baseline);
+    // cute-dbt#96 — affirm block-precision ran when it narrowed every test
+    // to context (k models in scope, 0 updated). The element exists only on
+    // the PR-diff path (absent in baseline mode); jQuery no-ops if absent.
+    // Copy is static in the template (LOCKED, CPO Finding A) — toggle only.
+    $(".zero-updated-affirm").prop("hidden", !(k > 0 && x === 0));
   }
 
   function currentModel() {
@@ -660,13 +701,42 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     // Absent → undefined → drawer omitted entirely (no empty-state
     // copy: the panel above already surfaces tags/meta/defined-in).
     if (t.authoring_yaml) {
+      // cute-dbt#96 concern 2 — when this test's own YAML block was edited
+      // in the diff, the renderer attaches a reconstructed inline diff
+      // (t.yaml_diff). The drawer then offers an Authored↔Diff toggle and
+      // defaults to the Diff view; absent a diff it shows the plain
+      // authored YAML exactly as cute-dbt#69 did.
+      var hasDiff = t.yaml_diff && t.yaml_diff.lines && t.yaml_diff.lines.length;
       var $yamlDet = $("<details>").addClass("authoring-yaml").attr("open", "open");
-      $yamlDet.append($("<summary>").text("Authoring YAML"));
+      $yamlDet.append($("<summary>").text(hasDiff ? "Authoring YAML — diff" : "Authoring YAML"));
       var $yamlWrap = $("<div>").addClass("sql-block-wrap fixture-sql-block-wrap");
-      var $yamlPre = $("<pre>").addClass("sql-block").append(
-        $("<code>").html(highlightYaml(t.authoring_yaml))
-      );
-      $yamlWrap.append($yamlPre);
+      if (hasDiff) {
+        var $authPre = $("<pre>").addClass("sql-block yaml-authored-view").prop("hidden", true).append(
+          $("<code>").html(highlightYaml(t.authoring_yaml))
+        );
+        var $diffPre = $("<pre>").addClass("sql-block yaml-diff-view").append(
+          $("<code>").html(renderYamlDiff(t.yaml_diff))
+        );
+        var $toggle = $("<div>").addClass("yaml-diff-toggle");
+        var $diffBtn = $("<button>").attr("type", "button")
+          .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
+        var $authBtn = $("<button>").attr("type", "button")
+          .addClass("yaml-view-btn").attr("data-view", "authored").text("Authored");
+        $toggle.append($diffBtn).append($authBtn);
+        $toggle.on("click", ".yaml-view-btn", function () {
+          var view = $(this).attr("data-view");
+          $toggle.find(".yaml-view-btn").removeClass("active");
+          $(this).addClass("active");
+          $diffPre.prop("hidden", view !== "diff");
+          $authPre.prop("hidden", view !== "authored");
+        });
+        $yamlWrap.append($toggle).append($diffPre).append($authPre);
+      } else {
+        var $yamlPre = $("<pre>").addClass("sql-block").append(
+          $("<code>").html(highlightYaml(t.authoring_yaml))
+        );
+        $yamlWrap.append($yamlPre);
+      }
       $yamlDet.append($yamlWrap);
       $body.append($yamlDet);
     }
@@ -1266,6 +1336,42 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
   // Expose for headless JS unit tests (cute-dbt#69 — parallels the
   // `__cuteParseCsv` seam introduced in cute-dbt#66).
   window.__cuteHighlightYaml = highlightYaml;
+
+  // cute-dbt#96 concern 2 — render a reconstructed inline YAML block diff
+  // (domain::pr_diff::YamlBlockDiff) as HTML for a <pre><code>. Each line is
+  // a block-level `.diff-line` span (so a full-width add/remove row tint fills
+  // the line) — block layout provides the breaks, so the spans are joined with
+  // "" (a literal "\n" would render as a blank row between blocks in a <pre>);
+  // each is prefixed by a +/-/space sigil.
+  // Context lines reuse the YAML highlighter; changed lines render escaped
+  // text with the intra-line `emphasis` range wrapped in <strong>. The
+  // emphasis offsets are CODEPOINT indices (Rust `chars()`), so the slice
+  // goes through `Array.from` — UTF-16 `.slice` would drift on astral chars.
+  function renderYamlDiff(diff) {
+    return diff.lines.map(function (ln) {
+      var cls = ln.kind === "added" ? "diff-added"
+              : ln.kind === "removed" ? "diff-removed"
+              : "diff-context";
+      var sigil = ln.kind === "added" ? "+" : ln.kind === "removed" ? "-" : " ";
+      var body;
+      if (ln.kind === "context") {
+        body = highlightYaml(ln.text);
+      } else if (ln.emphasis) {
+        var cps = Array.from(ln.text);
+        var a = ln.emphasis[0], b = ln.emphasis[1];
+        body = escapeHtmlForBody(cps.slice(0, a).join(""))
+             + "<strong>" + escapeHtmlForBody(cps.slice(a, b).join("")) + "</strong>"
+             + escapeHtmlForBody(cps.slice(b).join(""));
+      } else {
+        body = escapeHtmlForBody(ln.text);
+      }
+      return '<span class="diff-line ' + cls + '">'
+           + '<span class="diff-sigil">' + sigil + '</span>' + body
+           + '</span>';
+    }).join("");
+  }
+  // Expose for headless JS unit tests (parallels __cuteHighlightYaml).
+  window.__cuteRenderYamlDiff = renderYamlDiff;
 
   function copySql(text, $btn) {
     function done(ok) {

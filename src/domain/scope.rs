@@ -6,34 +6,34 @@
 //! - [`ScopeInput::Baseline`] — the v0.1 `--baseline-manifest` path.
 //!   Delegates to [`StateComparator::body_only`] so the existing dbt
 //!   `state:modified` semantics flow through unchanged.
-//! - [`ScopeInput::PrDiff`] — the new `--scope-from-pr-diff` path.
-//!   Matches the changed-files list (typically a PR's `git diff
-//!   --name-only`) against [`crate::domain::manifest::Node::original_file_path`]
-//!   and [`crate::domain::unit_test::UnitTest::original_file_path`].
+//! - [`ScopeInput::PrDiff`] — the `--pr-diff` path (cute-dbt#85 renamed
+//!   from `--scope-from-pr-diff` at cute-dbt#96). Carries a
+//!   [`NormalizedDiffIndex`] built once from the parsed
+//!   `git diff --unified=0`; the index is the single normalization
+//!   authority that matches changed-file paths against
+//!   [`crate::domain::manifest::Node::original_file_path`] and
+//!   [`crate::domain::unit_test::UnitTest::original_file_path`].
 //!
 //! Two scope sources is a deliberate ADR-1 judgment call: free function
 //! over trait until a third source arrives (a v0.2+ refactor moment).
 //!
-//! Path normalization: leading `./` is stripped; an optional
-//! `project_root` prefix is stripped from changed paths (a dbt sub-tree
-//! workflow lives under `<repo-root>/dbt_project/`, the manifest
-//! records `models/...` relative to `dbt_project/`); double slashes
-//! collapse. Windows-style `\` separators are explicitly **not**
-//! supported in v0.1 — dbt manifests on macOS/Linux emit forward
-//! slashes. Promoting to cross-platform path-set semantics is a v0.2+
-//! follow-up.
+//! Path normalization lives in the [`crate::domain::path`] leaf and is
+//! owned end-to-end by [`NormalizedDiffIndex`] (module DAG
+//! `scope → pr_diff → path`) — `scope` no longer normalizes paths
+//! directly, so the diff-side keyset and the declaring-side lookup
+//! cannot diverge.
 // tracked: cute-dbt#80 — git-rename detection layer on top of `git diff
 // --name-only` (a rename appears as one deleted path + one added path
 // today; the deleted path maps to no current-manifest node).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
 
 use crate::domain::manifest::{Manifest, NodeId};
+use crate::domain::pr_diff::NormalizedDiffIndex;
 use crate::domain::state::{InScopeSet, ModelInScopeSet, StateComparator, resolve_target_model};
 
 /// Source of the in-scope set: either a baseline manifest (dbt
-/// `state:modified` semantics) or a PR-diff file list (CI/PR-review path).
+/// `state:modified` semantics) or a parsed PR diff (CI/PR-review path).
 #[derive(Debug, Clone)]
 pub enum ScopeInput {
     /// Compare against a baseline manifest — v0.1 default, ADR-2 +
@@ -44,17 +44,16 @@ pub enum ScopeInput {
         manifest: Manifest,
     },
     /// Scope to nodes whose `original_file_path` appears in the PR's
-    /// changed-file list. CI/PR-review path — no baseline needed.
+    /// parsed diff. CI/PR-review path — no baseline needed.
     PrDiff {
-        /// Paths from `git diff --name-only ${base.sha}...${head.sha}`
-        /// or equivalent. Typically includes non-dbt files (README,
-        /// workflow YAML, `dbt_project.yml`) which silently miss.
-        changed_files: Vec<String>,
-        /// dbt project root relative to the repo root, used to rebase
-        /// changed paths against manifest `original_file_path` (which
-        /// is project-relative). `None` when `project_root` ==
-        /// `repo_root`.
-        project_root_strip: Option<PathBuf>,
+        /// The single normalization authority, built once from the
+        /// parsed `git diff --unified=0` and the `--project-root` strip.
+        /// Owns the changed-file keyset (diff-side, strip-applied) and
+        /// the per-file hunks (consumed by cute-dbt#96's block-precise
+        /// `changed` refinement and inline YAML diff). Typically the
+        /// diff includes non-dbt files (README, workflow YAML,
+        /// `dbt_project.yml`) which silently miss.
+        index: NormalizedDiffIndex,
     },
 }
 
@@ -69,9 +68,9 @@ pub enum ScopeInput {
 ///   (the precise `UnitTest` struct diff); a changed test is always in
 ///   scope via the `target_modified || test_changed` union.
 /// - **`PrDiff`** — `changed` is the tests whose declaring YAML file
-///   appears in the diff (file-granular in v0.1; cute-dbt#96 refines to
-///   block-precise). Collected in the same traversal as `in_scope`, so the
-///   subset relation cannot drift.
+///   appears in the diff (file-granular here; cute-dbt#96 refines it to
+///   block-precise as a post-scope run-loop narrowing). Collected in the
+///   same traversal as `in_scope`, so the subset relation cannot drift.
 ///
 /// Additive POD (ADR-5): the existing `InScopeSet` / `ModelInScopeSet`
 /// types and their semantics are unchanged — this struct only *surfaces*
@@ -94,8 +93,8 @@ pub struct ScopeSelection {
 ///   for the in-scope/model sets and to
 ///   [`StateComparator::changed_unit_tests`] for the changed subset.
 /// - [`ScopeInput::PrDiff`] matches changed-file paths against
-///   `original_file_path`, collecting the in-scope and changed sets in one
-///   pass.
+///   `original_file_path` via the [`NormalizedDiffIndex`], collecting the
+///   in-scope and changed sets in one pass.
 #[must_use]
 pub fn select_in_scope(current: &Manifest, input: &ScopeInput) -> ScopeSelection {
     match input {
@@ -107,113 +106,20 @@ pub fn select_in_scope(current: &Manifest, input: &ScopeInput) -> ScopeSelection
                 changed: StateComparator::changed_unit_tests(current, baseline),
             }
         }
-        ScopeInput::PrDiff {
-            changed_files,
-            project_root_strip,
-        } => select_in_scope_pr_diff(current, changed_files, project_root_strip.as_deref()),
+        ScopeInput::PrDiff { index } => select_in_scope_pr_diff(current, index),
     }
-}
-
-/// Normalize a file path for matching:
-/// - Strip leading `./`.
-/// - Strip `strip_prefix` (with optional trailing slash) if the path
-///   starts with it.
-/// - Collapse runs of `/` into a single `/`.
-///
-/// Returns the normalized path as a `String` (cheap — most fixtures are
-/// short). Windows-style `\` separators are passed through unchanged
-/// (v0.1 limitation; tracked: cute-dbt#80 deferred follow-ups).
-#[must_use]
-pub fn normalize_path(p: &str, strip_prefix: Option<&Path>) -> String {
-    let mut remaining = p;
-
-    // Step 1: strip leading "./".
-    while let Some(rest) = remaining.strip_prefix("./") {
-        remaining = rest;
-    }
-
-    // Step 2: strip the configured project-root prefix, if present.
-    // Match must be segment-aware (`prefix` or `prefix/…`, never
-    // mid-segment) so `dbt_project_notes/x.sql` is NOT stripped when the
-    // prefix is `dbt_project` — bot-review finding on cute-dbt#86.
-    if let Some(prefix) = strip_prefix {
-        let prefix_str = prefix.to_string_lossy();
-        let prefix_str = prefix_str.trim_end_matches('/');
-        if !prefix_str.is_empty() {
-            if remaining == prefix_str {
-                remaining = "";
-            } else if let Some(rest) = remaining.strip_prefix(prefix_str) {
-                if let Some(after_slash) = rest.strip_prefix('/') {
-                    remaining = after_slash;
-                }
-                // else: prefix matches at position 0 but is followed by
-                // a non-`/` character (e.g. `dbt_project_notes/...`) —
-                // not a real path-component match, leave `remaining`
-                // unchanged.
-            }
-        }
-    }
-
-    // Step 3: collapse "//" runs into "/".
-    if remaining.contains("//") {
-        let mut out = String::with_capacity(remaining.len());
-        let mut prev_slash = false;
-        for ch in remaining.chars() {
-            if ch == '/' {
-                if !prev_slash {
-                    out.push('/');
-                }
-                prev_slash = true;
-            } else {
-                out.push(ch);
-                prev_slash = false;
-            }
-        }
-        return out;
-    }
-
-    remaining.to_owned()
-}
-
-/// `true` when `manifest_path` (after normalization) equals any of
-/// `changed_paths` (after the same normalization with `project_root_strip`
-/// applied). The manifest path is project-root-relative; the changed
-/// paths are repo-root-relative — `project_root_strip` bridges the gap.
-///
-/// Designed for callers that need the boolean without first materializing
-/// the normalized change set. For bulk lookups, prefer building a
-/// `HashSet<String>` of normalized changed paths via [`normalize_path`]
-/// once and consulting it directly.
-#[must_use]
-pub fn match_changed_path(
-    manifest_path: &str,
-    changed_paths: &[String],
-    project_root_strip: Option<&Path>,
-) -> bool {
-    let manifest_norm = normalize_path(manifest_path, None);
-    changed_paths
-        .iter()
-        .any(|changed| normalize_path(changed, project_root_strip) == manifest_norm)
 }
 
 // ---------------------------------------------------------------------
 // PrDiff arm
 // ---------------------------------------------------------------------
 
-fn select_in_scope_pr_diff(
-    current: &Manifest,
-    changed_files: &[String],
-    project_root_strip: Option<&Path>,
-) -> ScopeSelection {
-    // Materialize the normalized change set once for O(1) lookup.
-    let normalized_changes: HashSet<String> = changed_files
-        .iter()
-        .map(|p| normalize_path(p, project_root_strip))
-        .collect();
-
+fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> ScopeSelection {
     // Identify path-modified models — the PrDiff analog of the baseline
     // `modified_set`. Only `model` nodes participate (other resource
-    // types do not host unit tests in v0.1).
+    // types do not host unit tests in v0.1). The index owns the
+    // changed-file keyset, so this consults it rather than normalizing
+    // paths here (single normalization authority).
     let path_modified_models: HashSet<NodeId> = current
         .nodes()
         .iter()
@@ -222,7 +128,7 @@ fn select_in_scope_pr_diff(
                 return None;
             }
             let ofp = node.original_file_path()?;
-            if normalized_changes.contains(&normalize_path(ofp, None)) {
+            if index.contains_changed(ofp) {
                 Some(id.clone())
             } else {
                 None
@@ -235,9 +141,10 @@ fn select_in_scope_pr_diff(
     // in scope when its target model is path-modified OR its own
     // `original_file_path` (the declaring YAML file) is in the change set
     // (the dbt OR-semantics of the baseline path). It is *changed* when
-    // that declaring YAML appears in the diff — file-granular in v0.1
-    // (a changed multi-test YAML marks every test it declares; cute-dbt#96
-    // refines this to block-precise via diff-hunk overlap).
+    // that declaring YAML appears in the diff — file-granular here (a
+    // changed multi-test YAML marks every test it declares; cute-dbt#96
+    // narrows this to block-precise via diff-hunk overlap in a post-scope
+    // run-loop step, leaving `changed ⊆ in_scope` intact).
     let mut in_scope_ids: Vec<String> = Vec::new();
     let mut changed_ids: Vec<String> = Vec::new();
     for (test_id, ut) in current.unit_tests() {
@@ -245,7 +152,7 @@ fn select_in_scope_pr_diff(
             .is_some_and(|model| path_modified_models.contains(model.id()));
         let test_yaml_changed = ut
             .original_file_path()
-            .is_some_and(|p| normalized_changes.contains(&normalize_path(p, None)));
+            .is_some_and(|p| index.contains_changed(p));
         if test_yaml_changed {
             changed_ids.push(test_id.clone());
         }
@@ -297,83 +204,39 @@ fn select_in_scope_pr_diff(
 mod tests {
     use super::*;
     use crate::domain::manifest::{Checksum, DependsOn, ManifestMetadata, Node, NodeConfig};
+    use crate::domain::pr_diff::{FileHunks, Hunk, PrDiff};
     use crate::domain::unit_test::{UnitTest, UnitTestExpect};
     use std::collections::{BTreeMap, HashMap};
+    use std::path::Path;
 
-    // ----- normalize_path -----
+    // ----- PrDiff test builders -----
 
-    #[test]
-    fn normalize_path_strips_leading_dot_slash() {
-        assert_eq!(normalize_path("./models/x.sql", None), "models/x.sql");
+    /// Build a file-granular [`PrDiff`] from changed-file paths (one
+    /// minimal hunk each — block precision is exercised separately by the
+    /// `pr_diff` overlap tests; here only the changed-file keyset matters).
+    fn prdiff_from_paths(paths: &[&str]) -> PrDiff {
+        PrDiff {
+            files: paths
+                .iter()
+                .map(|p| FileHunks {
+                    path: (*p).to_owned(),
+                    hunks: vec![Hunk {
+                        new_start: 1,
+                        new_len: 1,
+                        removed_lines: Vec::new(),
+                        added_lines: Vec::new(),
+                    }],
+                })
+                .collect(),
+        }
     }
 
-    #[test]
-    fn normalize_path_strips_repeated_leading_dot_slash() {
-        assert_eq!(normalize_path("././models/x.sql", None), "models/x.sql");
-    }
-
-    #[test]
-    fn normalize_path_strips_project_root_prefix() {
-        assert_eq!(
-            normalize_path("dbt_project/models/x.sql", Some(Path::new("dbt_project"))),
-            "models/x.sql"
-        );
-    }
-
-    #[test]
-    fn normalize_path_strips_project_root_prefix_with_trailing_slash() {
-        assert_eq!(
-            normalize_path("dbt_project/models/x.sql", Some(Path::new("dbt_project/"))),
-            "models/x.sql"
-        );
-    }
-
-    #[test]
-    fn normalize_path_collapses_double_slash() {
-        assert_eq!(normalize_path("models//x.sql", None), "models/x.sql");
-    }
-
-    #[test]
-    fn normalize_path_leaves_unrelated_paths_unchanged() {
-        assert_eq!(normalize_path("README.md", None), "README.md");
-    }
-
-    #[test]
-    fn normalize_path_does_not_strip_prefix_when_not_present() {
-        assert_eq!(
-            normalize_path("models/x.sql", Some(Path::new("dbt_project"))),
-            "models/x.sql"
-        );
-    }
-
-    // ----- match_changed_path -----
-
-    #[test]
-    fn match_changed_path_finds_exact_match() {
-        let changed = vec!["models/x.sql".to_owned()];
-        assert!(match_changed_path("models/x.sql", &changed, None));
-    }
-
-    #[test]
-    fn match_changed_path_finds_match_after_leading_dot_slash_strip() {
-        let changed = vec!["./models/x.sql".to_owned()];
-        assert!(match_changed_path("models/x.sql", &changed, None));
-    }
-
-    #[test]
-    fn match_changed_path_finds_match_after_project_root_strip() {
-        let changed = vec!["dbt_project/models/x.sql".to_owned()];
-        assert!(match_changed_path(
-            "models/x.sql",
-            &changed,
-            Some(Path::new("dbt_project"))
-        ));
-    }
-
-    #[test]
-    fn match_changed_path_no_match_for_unrelated_path() {
-        let changed = vec!["README.md".to_owned()];
-        assert!(!match_changed_path("models/x.sql", &changed, None));
+    /// A [`ScopeInput::PrDiff`] wrapping the index built from `paths` and
+    /// an optional project-root strip.
+    fn pr_diff_input(paths: &[&str], strip: Option<&Path>) -> ScopeInput {
+        ScopeInput::PrDiff {
+            index: NormalizedDiffIndex::new(&prdiff_from_paths(paths), strip),
+        }
     }
 
     // ----- select_in_scope: Baseline arm -----
@@ -460,10 +323,7 @@ mod tests {
 
         let current = Manifest::new(ManifestMetadata::new("v12"), nodes, tests, HashMap::new());
 
-        let input = ScopeInput::PrDiff {
-            changed_files: vec!["models/marts/dim_payers.sql".to_owned()],
-            project_root_strip: None,
-        };
+        let input = pr_diff_input(&["models/marts/dim_payers.sql"], None);
         let ScopeSelection {
             in_scope,
             models_in_scope: models,
@@ -490,16 +350,16 @@ mod tests {
             HashMap::new(),
         );
 
-        let input = ScopeInput::PrDiff {
-            changed_files: vec![
-                "README.md".to_owned(),
-                ".github/workflows/ci.yml".to_owned(),
-                "packages.yml".to_owned(),
-                "dbt_project.yml".to_owned(),
-                "models/deleted_model.sql".to_owned(),
+        let input = pr_diff_input(
+            &[
+                "README.md",
+                ".github/workflows/ci.yml",
+                "packages.yml",
+                "dbt_project.yml",
+                "models/deleted_model.sql",
             ],
-            project_root_strip: None,
-        };
+            None,
+        );
         let ScopeSelection {
             in_scope,
             models_in_scope: models,
@@ -533,10 +393,7 @@ mod tests {
         let current = Manifest::new(ManifestMetadata::new("v12"), nodes, tests, HashMap::new());
 
         // Only the YAML file changed — model SQL untouched.
-        let input = ScopeInput::PrDiff {
-            changed_files: vec!["models/marts/_core__models.yml".to_owned()],
-            project_root_strip: None,
-        };
+        let input = pr_diff_input(&["models/marts/_core__models.yml"], None);
         let ScopeSelection { in_scope, .. } = select_in_scope(&current, &input);
 
         assert!(in_scope.contains(test_id));
@@ -557,10 +414,7 @@ mod tests {
             HashMap::new(),
         );
 
-        let input = ScopeInput::PrDiff {
-            changed_files: vec!["models/staging/stg_payments.sql".to_owned()],
-            project_root_strip: None,
-        };
+        let input = pr_diff_input(&["models/staging/stg_payments.sql"], None);
         let ScopeSelection {
             in_scope,
             models_in_scope: models,
@@ -586,10 +440,10 @@ mod tests {
             HashMap::new(),
         );
 
-        let input = ScopeInput::PrDiff {
-            changed_files: vec!["dbt_project/models/marts/dim_payers.sql".to_owned()],
-            project_root_strip: Some(PathBuf::from("dbt_project")),
-        };
+        let input = pr_diff_input(
+            &["dbt_project/models/marts/dim_payers.sql"],
+            Some(Path::new("dbt_project")),
+        );
         let ScopeSelection {
             models_in_scope: models,
             ..
@@ -641,13 +495,10 @@ mod tests {
 
         let current = Manifest::new(ManifestMetadata::new("v12"), nodes, tests, HashMap::new());
 
-        let input = ScopeInput::PrDiff {
-            changed_files: vec![
-                "models/marts/dim_payers.sql".to_owned(),
-                "models/marts/_changed.yml".to_owned(),
-            ],
-            project_root_strip: None,
-        };
+        let input = pr_diff_input(
+            &["models/marts/dim_payers.sql", "models/marts/_changed.yml"],
+            None,
+        );
         let selection = select_in_scope(&current, &input);
 
         // changed ⊆ in_scope — by construction (single traversal).

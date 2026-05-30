@@ -12,7 +12,7 @@ in the repo.)
 ┌─────────────────────┐    ┌─────────────────────────────┐
 │ current manifest    │    │ one scope source:           │
 │ (your PR's diff)    │    │  • baseline manifest, OR    │
-│                     │    │  • PR changed-file list     │
+│                     │    │  • PR unified diff          │
 └──────────┬──────────┘    └──────────────┬──────────────┘
            │                              │
            └──────────────┬───────────────┘
@@ -53,22 +53,26 @@ you supply and selects models whose SQL **body checksum** differs —
 `state:modified.body`, the same selector `dbt run --select
 state:modified` recognizes. cute-dbt mirrors it.
 
-### Source 2 — PR changed files (`--scope-from-pr-diff`)
+### Source 2 — PR unified diff (`--pr-diff`)
 
-For CI / PR review. The workflow computes the PR's changed-file list and
-hands it to cute-dbt, which maps each path to its manifest node via
-`original_file_path`. No baseline to publish or cache — the diff GitHub
-already computed *is* the scope signal. cute-dbt never shells out to
-`git` or reads the GitHub event itself; the workflow owns *how* the file
-list is produced. The [GitHub Actions PR-review
+For CI / PR review. The workflow runs `git diff --unified=0 <base>...<head>`
+and hands cute-dbt the resulting patch (the `@<path>` value-parser reads
+the diff from a file — the leading `@` means "read from this file"; an
+inline literal also works). cute-dbt parses the diff's `+++ b/<path>`
+headers — mapping each changed path to its manifest node via
+`original_file_path` — and the per-block `@@ … @@` hunks, which drive
+block-precise updated-test detection (below). No baseline to publish or
+cache — the diff GitHub already computed *is* the scope signal. cute-dbt
+never shells out to `git` or reads the GitHub event itself; the workflow
+owns *how* the diff is produced. The [GitHub Actions PR-review
 recipe](./recipes/github-actions-pr-review.md) wires this up copy-paste.
 
 ### Which scope source?
 
-| | `--baseline-manifest` | `--scope-from-pr-diff` |
+| | `--baseline-manifest` | `--pr-diff` |
 |---|---|---|
 | **Use for** | local dev, ad-hoc review | CI / pull-request review |
-| **Needs** | a baseline manifest to diff against | the PR's changed-file list |
+| **Needs** | a baseline manifest to diff against | the PR's unified diff (`git diff --unified=0`) |
 | **Detects change by** | body-checksum diff (`state:modified.body`) | changed file paths → manifest nodes |
 | **Setup cost** | snapshot/publish a baseline | none — reuse GitHub's diff |
 
@@ -101,31 +105,46 @@ mode). When a diff updated *no* tests at all — the common SQL-only PR —
 the report opens in All-tests mode so you land on content rather than an
 empty view.
 
-How "updated" is derived depends on the scope source, and the two
-sources differ in precision:
+How "updated" is derived depends on the scope source. Both are precise,
+but they read different inputs:
 
-- **`--baseline-manifest`** — precise. A test is updated when its parsed
-  `unit_test` differs from the baseline (a structural diff), independent
-  of which file it lives in.
-- **`--scope-from-pr-diff`** — file-granular in v0.1. A test is updated
-  when its declaring `.yml` appears in the diff, so a changed multi-test
-  file marks *every* test it declares as updated. Block-precise PR-diff
-  classification (diff-hunk overlap) is tracked as
-  [cute-dbt#96](https://github.com/breezy-bays-labs/cute-dbt/issues/96)
-  and swaps the precise signal underneath this same report UX with zero
-  UI change.
+- **`--baseline-manifest`** — a test is updated when its parsed
+  `unit_test` differs from the baseline (a structural `StateComparator`
+  diff over the two manifests), independent of which file it lives in.
+- **`--pr-diff`** — **block-precise**: a test is updated **iff a changed
+  diff hunk overlaps that test's YAML block span**. A changed multi-test
+  file no longer marks *every* test it declares as updated — only the
+  tests whose block a `@@ … @@` hunk actually touched. The other tests in
+  that file stay in scope as **context** (their target model is still
+  changed); they're just not flagged as updated.
+
+Two conservative fallbacks keep the block-precise signal honest:
+
+- A pure **deletion** inside a block counts as touching it — the test
+  stays updated even though the hunk only removed lines.
+- If the supplied diff no longer lines up with the working-tree YAML
+  (revision drift — the diff was taken against a different head), **or** a
+  block moved but is itself unchanged, cute-dbt **degrades gracefully**:
+  it keeps the file-granular "updated" mark for that file and drops the
+  inline diff, rather than risk mislabeling a test. The
+  [same-revision contract](./recipes/github-actions-pr-review.md) in the
+  CI recipe (diff taken `base...head`, manifest compiled at `head`) is
+  what keeps the hunks lined up so this fallback rarely fires.
 
 ### v0.1 fidelity limits (PR-diff scoping)
 
-`--scope-from-pr-diff` maps changed **file paths** to nodes; it does not
-read the *contents* of a diff. So in v0.1:
+`--pr-diff` reads the diff's changed **paths** to pick the in-scope set
+and its **hunks** to flag updated tests — but **scope selection stays
+path-granular**. So in v0.1:
 
-- A changed `.yml` brings in **every unit test that file declares** —
-  the path can't distinguish a one-test edit from a whole-file rewrite.
-- A change to only a YAML **config block** (not a `unit_tests:` block)
-  isn't path-distinguished from a test change.
+- A changed `.yml` still brings **every unit test that file declares**
+  into scope as **context** (the path can't, on its own, tell which test
+  changed body semantics). Block precision then flags only the
+  hunk-overlapping tests as **updated**, so the multi-test-file
+  false-positive that used to mark every test as updated is gone.
 - A `packages.yml` / `dbt deps` change that alters compiled output
-  without touching a model `.sql` / `.yml` is not detected.
+  without touching a model `.sql` / `.yml` is not detected — the diff
+  carries no path that maps to an affected node.
 - A **renamed** model shows as deleted-path + added-path; the deleted
   path maps to no current node.
 
@@ -184,7 +203,16 @@ page lays out as:
 5. **Authoring YAML drawer** — the raw `unit_test` slice from the
    source `.yml` (collapsible, defaults open). The drawer carries
    leading + inside + trailing `#`-comment lines per the slicer's
-   bracketing rule, plus the full description as authored.
+   bracketing rule, plus the full description as authored. For an
+   **updated** test under `--pr-diff`, the drawer adds an **Authored ↔
+   Diff** toggle and opens on the **Diff** view (its summary reads
+   "Authoring YAML — diff"), showing the inline YAML diff of just that
+   test's block. When a test has no inline diff — it's a context test,
+   the supplied diff is stale, or the change landed outside the test's
+   block — the drawer shows the plain authored YAML exactly as before.
+   The inline diff is **`--pr-diff`-only**: baseline mode computes
+   `changed` from a structural manifest diff with no hunks, so it has no
+   inline YAML diff and the drawer always shows the authored YAML.
 
 The description banner started life at the top of the test-selection
 section. It moved to between the CTE DAG and the inspect/expected

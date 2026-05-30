@@ -46,9 +46,9 @@ in one of two ways:
 - **Local dev** — supply a `--baseline-manifest`; cute-dbt diffs the
   current manifest against it and selects models whose **body** changed
   (`state:modified.body` — the `checksum` differs).
-- **CI / PR review** — supply `--scope-from-pr-diff` with the PR's
-  changed-file list; cute-dbt maps those paths to manifest nodes, with
-  no baseline-manifest publishing job to maintain.
+- **CI / PR review** — supply `--pr-diff` with the PR's unified diff
+  (`git diff --unified=0`); cute-dbt maps the changed paths to manifest
+  nodes, with no baseline-manifest publishing job to maintain.
 
 Either way, the report surfaces every unit test that targets an
 in-scope model — plus tests whose own definition changed, even if the

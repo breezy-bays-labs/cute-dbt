@@ -53,6 +53,15 @@ threshold = 15
 pattern ="src/adapters/render.rs"
 threshold = 15
 
+[[overrides]]
+# PR-diff facts + the single normalization authority + block-precise
+# `changed` narrowing + inline YAML diff reconstruction (cute-dbt#96).
+# The overlap / drift-guard / splice arithmetic is the most correctness-
+# load-bearing code in #96 — a silent off-by-one mis-marks a test or
+# mis-renders its diff, never crashes.
+pattern ="src/domain/pr_diff.rs"
+threshold = 15
+
 # crap4rs v0.4.0's [[overrides]] schema accepts only `pattern` and
 # `threshold`. There is no top-level `exclude` array; to exclude a file
 # from gating, add an [[overrides]] entry with a very high threshold
