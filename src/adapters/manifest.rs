@@ -92,7 +92,7 @@ struct WireManifest {
 ///
 /// `config`, `relation_name`, and `columns` are the v0.2 `state:modified`
 /// sub-selector inputs (cute-dbt#17). The nested wire `config` block is
-/// lifted into the domain [`NodeConfig`] by [`WireNode::into_node_config`]
+/// lifted into the domain [`NodeConfig`] by [`WireNodeConfig::into_domain`]
 /// (the config dict passes through; `config.contract.enforced` is hoisted
 /// to a flat bool). `columns` is the model's column map; only each
 /// column's declared `data_type` is consumed (the contract column-set
