@@ -355,3 +355,57 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Then the exit code is 0
     And the test "test_a" carries an inline YAML diff with a removed and an added line
     And the test "test_b" carries no inline YAML diff
+
+  # --- cute-dbt#111: inline SQL diff for a changed model's raw_code ---
+  #
+  # The same line-diff substrate (#96) applied to a model's RAW SQL
+  # (`raw_code`), rendered in the Model SQL section with a Raw↔Diff toggle.
+  # `raw_code` is read from the MANIFEST (not the filesystem), so the SQL
+  # diff fires on a changed `.sql` without a `--project-root` source read.
+  # Reconstruction reuses the N7b drift guard + the whitespace-as-standard
+  # rule, so a stale diff or a pure re-indent shows the plain SQL view.
+  # The interior reconstruction arithmetic is mutation-killed by the
+  # `reconstruct_model_sql_diffs` / `reconstruct_one` boundary tables in
+  # src/domain/pr_diff.rs; these scenarios pin the user-visible outcome.
+
+  Scenario: A changed model's SQL carries an inline diff in the Model SQL section
+    Given a PR diff that changes the SQL of "models/marts/core/dim_payers.sql"
+    And the manifest contains a model with raw SQL at "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel"
+    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report's models-in-scope listing contains "dim_payers"
+    And the model "dim_payers" carries an inline SQL diff with a removed and an added line
+
+  Scenario: A model in scope only via a changed test shows the plain SQL view (no diff)
+    # dim_payers.sql is NOT changed; the model is in scope only because its
+    # test's YAML changed. Its raw_code is untouched ⇒ no SQL hunk ⇒ no diff.
+    Given a PR diff that changes "models/marts/core/_core__models.yml"
+    And the manifest contains a model with raw SQL at "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
+    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report's models-in-scope listing contains "dim_payers"
+    And the model "dim_payers" carries no inline SQL diff
+
+  Scenario: A stale SQL diff degrades to the plain SQL view
+    # Revision drift: the hunk's `+` lines don't match the model's raw_code,
+    # so N7b fails and cute-dbt shows the plain SQL rather than a wrong diff.
+    Given a PR diff whose SQL hunks no longer line up with "models/marts/core/dim_payers.sql"
+    And the manifest contains a model with raw SQL at "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel"
+    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report's models-in-scope listing contains "dim_payers"
+    And the model "dim_payers" carries no inline SQL diff
+
+  Scenario: A whitespace-only SQL change shows the plain SQL view (no diff)
+    # Re-indenting the model SQL with no substantive change: whitespace is
+    # ignored as standard, so the change-pair is suppressed ⇒ no SQL diff.
+    Given a PR diff that re-indents the SQL of "models/marts/core/dim_payers.sql" (whitespace only)
+    And the manifest contains a model with raw SQL at "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel"
+    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report's models-in-scope listing contains "dim_payers"
+    And the model "dim_payers" carries no inline SQL diff

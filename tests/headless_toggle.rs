@@ -44,9 +44,9 @@ use headless_chrome::{Browser, LaunchOptionsBuilder, Tab};
 
 use cute_dbt::adapters::render::{ScopeSource, render_report};
 use cute_dbt::domain::{
-    Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, InScopeSet, Manifest,
-    ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId, UnitTest, UnitTestExpect,
-    UnitTestYamlBlock, YamlBlockDiff,
+    BlockDiff, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, InScopeSet,
+    Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId, UnitTest,
+    UnitTestExpect, UnitTestYamlBlock,
 };
 
 // --- synthetic manifest builders ------------------------------------
@@ -58,6 +58,23 @@ fn model_node(full_id: &str) -> Node {
         Checksum::new("sha256", "ck"),
         Some("select 1".to_owned()),
         None,
+        DependsOn::default(),
+        None,
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+}
+
+/// A `model` node carrying `raw_code` (so the Model SQL section renders)
+/// — cute-dbt#111.
+fn model_node_with_raw(full_id: &str, raw_code: &str) -> Node {
+    Node::new(
+        NodeId::new(full_id),
+        "model",
+        Checksum::new("sha256", "ck"),
+        Some("select 1".to_owned()),
+        Some(raw_code.to_owned()),
         DependsOn::default(),
         None,
         NodeConfig::default(),
@@ -117,6 +134,7 @@ fn render_with_scope(
         &in_scope,
         &models,
         &changed,
+        &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
         baseline_label,
@@ -513,7 +531,7 @@ fn pr_diff_zero_updated_affirms_block_precision() {
 
 /// PR-diff render that injects an authoring-YAML map and an inline-diff map
 /// so the Authored↔Diff drawer renders. `authoring` is `(test_id, raw)`;
-/// `diffs` is `(test_id, YamlBlockDiff)`. The block span is irrelevant to
+/// `diffs` is `(test_id, BlockDiff)`. The block span is irrelevant to
 /// the JS drawer (only `raw` + the diff lines are surfaced), so it is pinned
 /// to `[1, line_count]`.
 fn render_pr_diff_with_diffs(
@@ -523,7 +541,7 @@ fn render_pr_diff_with_diffs(
     model_ids: &[&str],
     changed_ids: &[&str],
     authoring: Vec<(&str, &str)>,
-    diffs: Vec<(&str, YamlBlockDiff)>,
+    diffs: Vec<(&str, BlockDiff)>,
 ) -> String {
     let all_ids: Vec<String> = tests.iter().map(|(id, _)| (*id).to_owned()).collect();
     let m = manifest(nodes, tests);
@@ -540,7 +558,7 @@ fn render_pr_diff_with_diffs(
             )
         })
         .collect();
-    let yaml_diffs: HashMap<String, YamlBlockDiff> = diffs
+    let yaml_diffs: HashMap<String, BlockDiff> = diffs
         .into_iter()
         .map(|(id, d)| (id.to_owned(), d))
         .collect();
@@ -554,6 +572,7 @@ fn render_pr_diff_with_diffs(
         &changed,
         &authoring_yaml,
         &yaml_diffs,
+        &HashMap::new(),
         "",
         ScopeSource::PrDiff,
         DEFAULT_REPORT_TITLE,
@@ -578,7 +597,7 @@ fn yaml_diff_drawer_defaults_to_diff_and_toggles_to_authored() {
     // dim_a's `upd` test was edited (model: payments → orders); the run loop
     // attaches an inline diff. PR-diff mode auto-selects the updated test, so
     // its drawer is built on load.
-    let diff = YamlBlockDiff {
+    let diff = BlockDiff {
         lines: vec![
             dl(DiffLineKind::Context, "  - name: upd", None),
             dl(DiffLineKind::Removed, "    model: payments", Some((11, 18))),
@@ -706,6 +725,202 @@ fn render_yaml_diff_js_emits_classes_sigils_and_codepoint_emphasis() {
     assert!(
         html.contains("café <strong>y</strong>"),
         "added emphasis wraps exactly the changed codepoint: {html}",
+    );
+
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#111: inline model SQL diff (Raw↔Diff toggle) ----------
+
+/// PR-diff render that injects a model-SQL-diff map so the Model SQL
+/// section's Raw↔Diff toggle renders. `sql_diffs` is `(model_id,
+/// BlockDiff)`. Every model carries `raw_code` so the section is shown.
+fn render_pr_diff_with_sql_diffs(
+    filename: &str,
+    nodes: Vec<Node>,
+    tests: Vec<(&str, UnitTest)>,
+    model_ids: &[&str],
+    sql_diffs: Vec<(&str, BlockDiff)>,
+) -> String {
+    let all_ids: Vec<String> = tests.iter().map(|(id, _)| (*id).to_owned()).collect();
+    let m = manifest(nodes, tests);
+    let in_scope: InScopeSet = all_ids.into_iter().collect();
+    let models: ModelInScopeSet = model_ids.iter().map(|id| NodeId::new(*id)).collect();
+    let sql_diff_map: HashMap<String, BlockDiff> = sql_diffs
+        .into_iter()
+        .map(|(id, d)| (id.to_owned(), d))
+        .collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &sql_diff_map,
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    format!("file://{p}")
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn model_sql_section_defaults_to_diff_and_toggles_to_raw() {
+    // dim_a's .sql changed (from t → from u); the run loop attaches an
+    // inline SQL diff. The Model SQL section defaults to the Diff view and
+    // flips to Raw on the toggle.
+    let diff = BlockDiff {
+        lines: vec![
+            dl(DiffLineKind::Context, "select id", None),
+            dl(DiffLineKind::Removed, "from t", Some((5, 6))),
+            dl(DiffLineKind::Added, "from u", Some((5, 6))),
+        ],
+    };
+    let url = render_pr_diff_with_sql_diffs(
+        "headless_sql_diff.html",
+        vec![model_node_with_raw("model.shop.dim_a", "select id\nfrom u")],
+        vec![("unit_test.shop.dim_a.t", unit_test("t", "dim_a"))],
+        &["model.shop.dim_a"],
+        vec![("model.shop.dim_a", diff)],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // The Model SQL section is shown with the Raw↔Diff toggle and the Diff
+    // view default; the summary hint reads "diff".
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-sql').style.display !== 'none'"
+        ),
+        "the Model SQL section is shown for a model with raw_code",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql-summary-hint').textContent.trim()"
+        ),
+        "diff",
+        "the summary hint names the diff view",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-sql .model-sql-toggle') !== null"
+        ),
+        "the Raw↔Diff toggle is present in the Model SQL section",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('.model-sql .sql-diff-view').hidden"
+        ),
+        "the Diff view is the default (visible)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-sql .sql-raw-view').hidden"
+        ),
+        "the Raw view starts hidden",
+    );
+    // The diff renders the change pair with intra-line emphasis.
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-sql .sql-diff-view .diff-removed strong') !== null"
+        ),
+        "the removed SQL line carries intra-line emphasis <strong>",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-sql .sql-diff-view .diff-added') !== null"
+        ),
+        "the diff renders the added SQL line",
+    );
+
+    // Clicking "Raw" flips to the plain SQL view.
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-sql .yaml-view-btn[data-view=\"raw\"]').click()",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-sql .sql-diff-view').hidden"
+        ),
+        "the Diff view hides after switching to Raw",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('.model-sql .sql-raw-view').hidden"
+        ),
+        "the Raw view shows after the toggle",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn model_sql_section_shows_plain_sql_when_no_diff() {
+    // No sql_diff for the model (in scope via a changed test, or baseline):
+    // the Model SQL section shows the plain raw SQL with no toggle.
+    let url = render_pr_diff_with_sql_diffs(
+        "headless_sql_no_diff.html",
+        vec![model_node_with_raw("model.shop.dim_b", "select id\nfrom t")],
+        vec![("unit_test.shop.dim_b.t", unit_test("t", "dim_b"))],
+        &["model.shop.dim_b"],
+        vec![], // no SQL diff
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-sql').style.display !== 'none'"
+        ),
+        "the Model SQL section is shown",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-sql .model-sql-toggle') === null"
+        ),
+        "no Raw↔Diff toggle when the model has no SQL diff",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql-summary-hint').textContent.trim()"
+        ),
+        "raw, with Jinja",
+        "the summary hint reads the plain-raw label",
+    );
+    // The raw SQL is highlighted in the (only) <pre>.
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-sql .model-sql-code') !== null"
+        ),
+        "the plain Model SQL code block renders",
     );
 
     let _ = tab.close(true);

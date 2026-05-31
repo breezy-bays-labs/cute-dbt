@@ -51,8 +51,8 @@ pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};
 pub use manifest::{Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId};
 pub use path::{match_changed_path, normalize_path};
 pub use pr_diff::{
-    DiffLine, DiffLineKind, FileHunks, Hunk, NormalizedDiffIndex, PrDiff, YamlBlockDiff,
-    reconstruct_block_diffs, refine_changed_by_hunks,
+    BlockDiff, DiffLine, DiffLineKind, FileHunks, Hunk, NormalizedDiffIndex, PrDiff,
+    reconstruct_block_diffs, reconstruct_model_sql_diffs, refine_changed_by_hunks, ws_equal,
 };
 pub use preflight::{PreflightError, preflight_compiled};
 pub use scope::{ScopeInput, ScopeSelection, select_in_scope};

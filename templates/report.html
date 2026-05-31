@@ -742,11 +742,17 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
     }
   }
 
-  // cute-dbt#47 — populate (or hide) the per-model Model SQL section.
-  // The askama template emits one static <section class="model-sql">; JS
-  // rebinds its <code> body and Copy handler each time the user selects a
+  // cute-dbt#47 / cute-dbt#111 — populate (or hide) the per-model Model SQL
+  // section. The askama template emits one static <section class="model-sql">;
+  // JS rebinds its body and Copy handler each time the user selects a
   // different model. When `raw_sql` is missing, hide the whole section
   // (defensive — dbt 1.8+ populates raw_code on every node).
+  //
+  // cute-dbt#111: when the selected model carries an inline SQL diff
+  // (m.sql_diff — PR-diff mode, the model's .sql changed), the section shows
+  // a Raw↔Diff toggle defaulting to Diff (rendered via renderBlockDiff with
+  // the SQL highlighter on context lines only). Absent a diff it renders the
+  // plain raw SQL exactly as cute-dbt#47 did. Copy always copies the raw SQL.
   function renderModelSql(m) {
     var $section = $(".model-sql");
     var raw = m && m.raw_sql;
@@ -755,13 +761,47 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
       return;
     }
     $section.show();
-    $section.find(".model-sql-code").html(highlightSql(raw));
-    var $copy = $section.find(".model-sql-copy");
-    $copy.off("click.cuteDbtModelSql").on("click.cuteDbtModelSql", function (e) {
+    var hasDiff = m.sql_diff && m.sql_diff.lines && m.sql_diff.lines.length;
+    $section.find(".model-sql-summary-hint").text(hasDiff ? "diff" : "raw, with Jinja");
+    var $wrap = $section.find(".model-sql-wrap");
+    // Rebuild the wrap body each model switch so a prior model's toggle/diff
+    // never leaks; the Copy button is re-created here too.
+    $wrap.empty();
+    var $copy = $("<button>").attr("type", "button")
+      .addClass("sql-copy model-sql-copy").text("Copy");
+    $copy.on("click.cuteDbtModelSql", function (e) {
       e.preventDefault();
       e.stopPropagation();
       copySql(raw, $(this));
     });
+    $wrap.append($copy);
+    if (hasDiff) {
+      var $diffPre = $("<pre>").addClass("sql-block model-sql-block sql-diff-view").append(
+        $("<code>").addClass("model-sql-code").html(renderBlockDiff(m.sql_diff, highlightSql))
+      );
+      var $rawPre = $("<pre>").addClass("sql-block model-sql-block sql-raw-view").prop("hidden", true).append(
+        $("<code>").addClass("model-sql-code").html(highlightSql(raw))
+      );
+      var $toggle = $("<div>").addClass("yaml-diff-toggle model-sql-toggle");
+      var $diffBtn = $("<button>").attr("type", "button")
+        .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
+      var $rawBtn = $("<button>").attr("type", "button")
+        .addClass("yaml-view-btn").attr("data-view", "raw").text("Raw");
+      $toggle.append($diffBtn).append($rawBtn);
+      $toggle.on("click", ".yaml-view-btn", function () {
+        var view = $(this).attr("data-view");
+        $toggle.find(".yaml-view-btn").removeClass("active");
+        $(this).addClass("active");
+        $diffPre.prop("hidden", view !== "diff");
+        $rawPre.prop("hidden", view !== "raw");
+      });
+      $wrap.append($toggle).append($diffPre).append($rawPre);
+    } else {
+      var $pre = $("<pre>").addClass("sql-block model-sql-block").append(
+        $("<code>").addClass("model-sql-code").html(highlightSql(raw))
+      );
+      $wrap.append($pre);
+    }
   }
 
   function renderDagLegend() {
@@ -1337,17 +1377,20 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
   // `__cuteParseCsv` seam introduced in cute-dbt#66).
   window.__cuteHighlightYaml = highlightYaml;
 
-  // cute-dbt#96 concern 2 — render a reconstructed inline YAML block diff
-  // (domain::pr_diff::YamlBlockDiff) as HTML for a <pre><code>. Each line is
-  // a block-level `.diff-line` span (so a full-width add/remove row tint fills
+  // cute-dbt#96 concern 2 / cute-dbt#111 — render a reconstructed inline
+  // block diff (domain::pr_diff::BlockDiff) as HTML for a <pre><code>.
+  // Content-agnostic: `highlightFn` highlights CONTEXT lines only (YAML
+  // for the test drawer, SQL for the Model SQL section). Each line is a
+  // block-level `.diff-line` span (so a full-width add/remove row tint fills
   // the line) — block layout provides the breaks, so the spans are joined with
   // "" (a literal "\n" would render as a blank row between blocks in a <pre>);
   // each is prefixed by a +/-/space sigil.
-  // Context lines reuse the YAML highlighter; changed lines render escaped
-  // text with the intra-line `emphasis` range wrapped in <strong>. The
-  // emphasis offsets are CODEPOINT indices (Rust `chars()`), so the slice
-  // goes through `Array.from` — UTF-16 `.slice` would drift on astral chars.
-  function renderYamlDiff(diff) {
+  // Changed lines BYPASS `highlightFn` (the cute-dbt#96 lesson): they render
+  // escaped text with the intra-line `emphasis` range wrapped in <strong>, so
+  // the emphasis offsets land on the RAW text. The offsets are CODEPOINT
+  // indices (Rust `chars()`), so the slice goes through `Array.from` — UTF-16
+  // `.slice` would drift on astral chars.
+  function renderBlockDiff(diff, highlightFn) {
     return diff.lines.map(function (ln) {
       var cls = ln.kind === "added" ? "diff-added"
               : ln.kind === "removed" ? "diff-removed"
@@ -1355,7 +1398,7 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
       var sigil = ln.kind === "added" ? "+" : ln.kind === "removed" ? "-" : " ";
       var body;
       if (ln.kind === "context") {
-        body = highlightYaml(ln.text);
+        body = highlightFn(ln.text);
       } else if (ln.emphasis) {
         var cps = Array.from(ln.text);
         var a = ln.emphasis[0], b = ln.emphasis[1];
@@ -1370,7 +1413,11 @@ table.given-table td, table.expected-table td { white-space: nowrap; }
            + '</span>';
     }).join("");
   }
-  // Expose for headless JS unit tests (parallels __cuteHighlightYaml).
+  // Expose for headless JS unit tests (parallels __cuteHighlightYaml). The
+  // #96 name is kept as a thin alias so existing headless assertions and the
+  // YAML call site stay byte-stable; new SQL callers pass `highlightSql`.
+  function renderYamlDiff(diff) { return renderBlockDiff(diff, highlightYaml); }
+  window.__cuteRenderBlockDiff = renderBlockDiff;
   window.__cuteRenderYamlDiff = renderYamlDiff;
 
   function copySql(text, $btn) {

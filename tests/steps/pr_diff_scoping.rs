@@ -42,7 +42,7 @@ use super::builders::{
     empty_manifest, model_node_with_original_file_path, serialize_to_tmp, unit_test_for,
     unit_test_with_path, with_node, with_unit_test,
 };
-use super::world::{BlockTarget, BlockTargetKind};
+use super::world::{BlockTarget, BlockTargetKind, ModelSqlTarget, ModelSqlTargetKind};
 
 /// Synthetic compiled SQL with one import CTE, so a rendered model card
 /// carries a non-empty CTE DAG (the `contains a CTE diagram for …`
@@ -226,6 +226,70 @@ fn emit_targeted_hunks(
     }
 }
 
+/// Emit a hunk over a changed model's `.sql` whose `+` lines match the
+/// model's manifest `raw_code` (cute-dbt#111). The SQL diff reconstructs
+/// from `raw_code` (not disk), so for N7b to align the hunk's new side
+/// must equal the model's stripped `raw_code` frame.
+///
+/// All three kinds edit line 2 of `raw_code` (the
+/// `select * from {{ ref('upstream') }}` line):
+/// - `Edit` — a real value change: `-` differs substantively, `+` ==
+///   working `raw_code` line 2 ⇒ a real SQL diff.
+/// - `Whitespace` — a pure re-indent: `-` differs only in leading
+///   whitespace, `+` == working line 2 ⇒ no SQL diff (plain view).
+/// - `Stale` — the `+` drifts from `raw_code` ⇒ N7b fails ⇒ no SQL diff.
+fn emit_model_sql_hunk(
+    patch: &mut String,
+    manifest: &Manifest,
+    changed: &str,
+    project_root: &str,
+    kind: &ModelSqlTargetKind,
+) {
+    let changed_norm = normalize_path(changed, strip_of(project_root));
+    // The model node whose original_file_path matches the changed .sql.
+    let raw_code = manifest
+        .nodes()
+        .values()
+        .find(|n| {
+            n.original_file_path()
+                .is_some_and(|p| normalize_path(p, None) == changed_norm)
+        })
+        .and_then(cute_dbt::domain::Node::raw_code)
+        .expect("a model-SQL-diff scenario builds a model with raw_code at the changed .sql");
+    // git's line frame: raw_code with a single trailing newline stripped
+    // (dbt-core ships it already stripped; the production code strips one).
+    let raw = raw_code.strip_suffix('\n').unwrap_or(raw_code);
+    let lines: Vec<&str> = raw.split('\n').collect();
+    // Edit line 2 (1-based), the `select * from {{ ref(...) }}` line.
+    let new_start = 2;
+    let working = lines[new_start - 1].to_owned(); // current raw_code line 2
+    let (removed, added) = match kind {
+        ModelSqlTargetKind::Edit => {
+            // Real change: old line referenced a different ref; new == working.
+            (
+                vec![working.replace("upstream", "old_upstream")],
+                vec![working],
+            )
+        }
+        ModelSqlTargetKind::Whitespace => {
+            // Pure re-indent: old line had different leading whitespace; the
+            // non-whitespace content is identical to working ⇒ ws_equal.
+            (
+                vec![format!("        {}", working.trim_start())],
+                vec![working],
+            )
+        }
+        ModelSqlTargetKind::Stale => {
+            // The `+` line drifts from raw_code ⇒ N7b alignment fails.
+            (
+                vec![working.clone()],
+                vec![format!("{working}  -- DRIFTED")],
+            )
+        }
+    };
+    push_hunk(patch, new_start, new_start, &removed, &added);
+}
+
 /// Synthesize a `git diff --unified=0` patch from `world.changed_files`,
 /// writing it to a temp file and returning its path.
 ///
@@ -272,6 +336,15 @@ fn synthesize_pr_diff(
             } else {
                 emit_targeted_hunks(&mut patch, &content, &tests, &targets);
             }
+        } else if let Some(target) = world.model_sql_targets.iter().find(|t| {
+            normalize_path(&t.ofp, None) == normalize_path(changed, strip_of(project_root))
+        }) {
+            // cute-dbt#111: a changed model `.sql` whose model carries
+            // `raw_code`. The SQL diff reads `raw_code` from the MANIFEST
+            // (no working-tree file), so the synthesized hunk's `+` lines
+            // must match the model's stripped `raw_code` frame.
+            push_file_header(&mut patch, changed);
+            emit_model_sql_hunk(&mut patch, manifest, changed, project_root, &target.kind);
         } else {
             push_file_header(&mut patch, changed);
             push_hunk(&mut patch, 1, 1, &["old".to_owned()], &["new".to_owned()]);
@@ -366,6 +439,65 @@ fn pr_diff_stale(world: &mut World, yaml: String) {
         yaml,
         kind: BlockTargetKind::Stale,
     });
+}
+
+// --- Given: model-SQL-diff PR diffs (cute-dbt#111) ------------------
+//
+// These mark a model's `.sql` changed and record how the synthesized hunk
+// edits the model's manifest `raw_code`. The model is built with `raw_code`
+// (via `manifest_contains_model_with_sql`), and the synthesizer matches the
+// hunk's `+` lines to that `raw_code` so N7b aligns.
+
+/// Mark `sql` as a changed file (idempotent).
+fn push_changed_sql(world: &mut World, sql: &str) {
+    if !world.changed_files.iter().any(|f| f == sql) {
+        world.changed_files.push(sql.to_owned());
+    }
+}
+
+#[given(regex = r#"^a PR diff that changes the SQL of "([^"]+)"$"#)]
+fn pr_diff_changes_model_sql(world: &mut World, sql: String) {
+    push_changed_sql(world, &sql);
+    world.model_sql_targets.push(ModelSqlTarget {
+        ofp: sql,
+        kind: ModelSqlTargetKind::Edit,
+    });
+}
+
+#[given(regex = r#"^a PR diff that re-indents the SQL of "([^"]+)" \(whitespace only\)$"#)]
+fn pr_diff_reindents_model_sql(world: &mut World, sql: String) {
+    push_changed_sql(world, &sql);
+    world.model_sql_targets.push(ModelSqlTarget {
+        ofp: sql,
+        kind: ModelSqlTargetKind::Whitespace,
+    });
+}
+
+#[given(regex = r#"^a PR diff whose SQL hunks no longer line up with "([^"]+)"$"#)]
+fn pr_diff_stale_model_sql(world: &mut World, sql: String) {
+    push_changed_sql(world, &sql);
+    world.model_sql_targets.push(ModelSqlTarget {
+        ofp: sql,
+        kind: ModelSqlTargetKind::Stale,
+    });
+}
+
+#[given(regex = r#"^the manifest contains a model with raw SQL at "([^"]+)"$"#)]
+fn manifest_contains_model_with_sql(world: &mut World, ofp: String) {
+    let bare = bare_from_ofp(&ofp);
+    let manifest = take_current(world);
+    let manifest = with_node(
+        manifest,
+        super::builders::model_node_with_raw_code(
+            &bare,
+            "ck-sql",
+            Some(COMPILED_WITH_CTE),
+            &ofp,
+            super::builders::MODEL_SQL_RAW_CODE,
+        ),
+    );
+    world.current_manifest = Some(manifest);
+    world.last_named_model = Some(bare);
 }
 
 // --- Given: synthetic manifest construction -------------------------
@@ -798,6 +930,54 @@ fn test_carries_no_inline_diff(world: &mut World, name: String) {
         test.get("yaml_diff").is_none_or(Value::is_null),
         "test {name:?} should carry no yaml_diff; got {:?}",
         test.get("yaml_diff"),
+    );
+}
+
+// --- cute-dbt#111: model SQL diff (payload-asserted) ----------------
+
+/// Find a model object by `name` in the rendered payload.
+fn find_model<'p>(payload: &'p Value, name: &str) -> Option<&'p Value> {
+    payload["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|m| m["name"].as_str() == Some(name))
+}
+
+#[then(
+    regex = r#"^the model "([^"]+)" carries an inline SQL diff with a removed and an added line$"#
+)]
+fn model_carries_sql_diff(world: &mut World, name: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let model = find_model(&p, &name)
+        .unwrap_or_else(|| panic!("model {name:?} not in payload; got {:?}", model_names(&p)));
+    let lines = model["sql_diff"]["lines"].as_array().unwrap_or_else(|| {
+        panic!("model {name:?} should carry a sql_diff with lines; got {model:?}")
+    });
+    let kinds: Vec<&str> = lines.iter().filter_map(|l| l["kind"].as_str()).collect();
+    assert!(
+        kinds.contains(&"removed"),
+        "sql_diff for {name:?} should include a removed line; got kinds {kinds:?}",
+    );
+    assert!(
+        kinds.contains(&"added"),
+        "sql_diff for {name:?} should include an added line; got kinds {kinds:?}",
+    );
+}
+
+#[then(regex = r#"^the model "([^"]+)" carries no inline SQL diff$"#)]
+fn model_carries_no_sql_diff(world: &mut World, name: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let model = find_model(&p, &name)
+        .unwrap_or_else(|| panic!("model {name:?} not in payload; got {:?}", model_names(&p)));
+    // `skip_serializing_if` omits the key entirely when there is no diff
+    // (in-scope-via-test-only, stale, whitespace-only) → plain SQL view.
+    assert!(
+        model.get("sql_diff").is_none_or(Value::is_null),
+        "model {name:?} should carry no sql_diff; got {:?}",
+        model.get("sql_diff"),
     );
 }
 

@@ -35,9 +35,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::manifest::Manifest;
+use crate::domain::manifest::{Manifest, Node};
 use crate::domain::path::normalize_path;
-use crate::domain::state::InScopeSet;
+use crate::domain::state::{InScopeSet, ModelInScopeSet};
 use crate::domain::unit_test::UnitTest;
 use crate::domain::unit_test_yaml::UnitTestYamlBlock;
 
@@ -209,16 +209,34 @@ pub fn hunk_touches_block(block_start: usize, block_end: usize, hunk: &Hunk) -> 
 /// Added lines whose new-side position falls outside the block are ignored
 /// (a hunk may straddle the block edge); a hunk with no `+` lines (a pure
 /// deletion) is vacuously aligned.
+///
+/// The block is addressed by `(raw, block_start, block_end)` — the
+/// content-agnostic shape (cute-dbt#111) [`hunk_touches_block`] already
+/// uses, so the same drift guard serves the `unit_test` YAML block (#96)
+/// and a model's SQL `raw_code` (#111). YAML callers pass
+/// `(&block.raw, block.block_start, block.block_end)`.
+///
+/// **Whitespace-EXACT by design.** This is the N7b revision-staleness
+/// check (does the diff's new side still describe the working tree?), so a
+/// whitespace divergence here is *genuine* drift and must NOT be
+/// normalized. Whitespace-insensitivity ([`ws_equal`]) applies only
+/// downstream of N7b, to the removed-vs-added change test in
+/// `reconstruct_one`.
 #[must_use]
-pub fn block_aligns_with_hunks(block: &UnitTestYamlBlock, hunks: &[Hunk]) -> bool {
-    let block_lines: Vec<&str> = block.raw.split('\n').collect();
+pub fn block_aligns_with_hunks(
+    raw: &str,
+    block_start: usize,
+    block_end: usize,
+    hunks: &[Hunk],
+) -> bool {
+    let block_lines: Vec<&str> = raw.split('\n').collect();
     for hunk in hunks {
         for (k, added) in hunk.added_lines.iter().enumerate() {
             let file_line = hunk.new_start + k; // 1-based new-side line
-            if file_line < block.block_start || file_line > block.block_end {
+            if file_line < block_start || file_line > block_end {
                 continue; // outside this block — not this block's concern
             }
-            let offset = file_line - block.block_start; // 0-based into raw
+            let offset = file_line - block_start; // 0-based into raw
             let Some(actual) = block_lines.get(offset) else {
                 return false; // claims a line the block doesn't have
             };
@@ -228,6 +246,22 @@ pub fn block_aligns_with_hunks(block: &UnitTestYamlBlock, hunks: &[Hunk]) -> boo
         }
     }
     true
+}
+
+/// Whether two lines carry identical non-whitespace content — the
+/// `git --ignore-all-space` change test (cute-dbt#111).
+///
+/// `true` when the two lines tokenize to the same sequence of
+/// whitespace-separated runs, so a re-indentation, a trailing-whitespace
+/// edit, or a blank-line churn that leaves the substantive content
+/// untouched is NOT treated as a change. Applied ONLY to the
+/// removed-vs-added comparison inside `reconstruct_one` (downstream of
+/// the whitespace-EXACT N7b guard, [`block_aligns_with_hunks`]), so a
+/// removed/added pair that is `ws_equal` renders as Context — no removed
+/// splice, no intra-line emphasis. std-only.
+#[must_use]
+pub fn ws_equal(a: &str, b: &str) -> bool {
+    a.split_whitespace().eq(b.split_whitespace())
 }
 
 /// The pure per-test decision: should a `changed` test STAY changed after
@@ -255,7 +289,7 @@ pub fn block_changed_by_hunks(block: Option<&UnitTestYamlBlock>, hunks: &[Hunk])
     let Some(block) = block else {
         return true; // absent block → conservative keep
     };
-    if !block_aligns_with_hunks(block, hunks) {
+    if !block_aligns_with_hunks(&block.raw, block.block_start, block.block_end, hunks) {
         return true; // stale diff (N7b mismatch) → conservative keep
     }
     hunks
@@ -342,16 +376,40 @@ pub struct DiffLine {
     pub emphasis: Option<(usize, usize)>,
 }
 
-/// A reconstructed inline diff of one `unit_test`'s authored YAML block.
+/// A reconstructed inline diff of one contiguous source block.
+///
+/// Content-agnostic by construction — the lines are plain `&str`
+/// [`DiffLine`]s, so the same POD serves both the `unit_test` authored
+/// YAML block (cute-dbt#96) and a changed model's SQL `raw_code`
+/// (cute-dbt#111). The JSON field that carries it on a `unit_test` is
+/// still named `yaml_diff` (the #96 wire contract is unchanged); a model
+/// carries it under `sql_diff`. Renamed from `YamlBlockDiff` at
+/// cute-dbt#111 — the rename is internal (the lib is internal-only in
+/// v0.x) and the wire shape is identical.
 ///
 /// Additive POD (ADR-5). The full block is rendered as ordered
 /// [`DiffLine`]s (context + added from the working-tree block, removed
-/// spliced in from the diff hunks), so the drawer can show the edit in
+/// spliced in from the diff hunks), so the view can show the edit in
 /// place rather than just the post-edit text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct YamlBlockDiff {
+pub struct BlockDiff {
     /// The block's diff lines, top to bottom.
     pub lines: Vec<DiffLine>,
+}
+
+impl BlockDiff {
+    /// Whether this diff carries at least one substantive (non-context)
+    /// line — an Added or Removed [`DiffLine`].
+    ///
+    /// A reconstruction whose touching hunks were all whitespace-only
+    /// (cute-dbt#111) leaves an all-Context diff: the callers
+    /// ([`reconstruct_block_diffs`] / [`reconstruct_model_sql_diffs`]) test
+    /// this and emit no `BlockDiff` for it, so the view falls back to plain
+    /// text rather than showing an identical-looking "diff".
+    #[must_use]
+    pub fn has_real_change(&self) -> bool {
+        self.lines.iter().any(|l| l.kind != DiffLineKind::Context)
+    }
 }
 
 /// The codepoint `[start, end)` span of `line` that differs from `other`,
@@ -394,7 +452,7 @@ pub fn intra_line_span(line: &str, other: &str) -> Option<(usize, usize)> {
 ///
 /// For every id in `changed`, resolve its sliced block (`blocks`) and the
 /// hunks touching its declaring file ([`NormalizedDiffIndex::hunks_for`]).
-/// Emit a [`YamlBlockDiff`] **only** when the block is present, the hunks
+/// Emit a [`BlockDiff`] **only** when the block is present, the hunks
 /// still align with it ([`block_aligns_with_hunks`]), and at least one hunk
 /// touches it ([`hunk_touches_block`]) — i.e. this test's own definition was
 /// edited in the diff. Absent / stale / untouched ids get no entry, so the
@@ -412,7 +470,7 @@ pub fn reconstruct_block_diffs(
     changed: &InScopeSet,
     blocks: &HashMap<String, UnitTestYamlBlock>,
     index: &NormalizedDiffIndex,
-) -> HashMap<String, YamlBlockDiff> {
+) -> HashMap<String, BlockDiff> {
     let mut out = HashMap::new();
     for id in changed.iter() {
         let Some(block) = blocks.get(id) else {
@@ -422,7 +480,7 @@ pub fn reconstruct_block_diffs(
             .unit_test(id)
             .and_then(UnitTest::original_file_path)
             .map_or(&[][..], |ofp| index.hunks_for(ofp));
-        if !block_aligns_with_hunks(block, hunks) {
+        if !block_aligns_with_hunks(&block.raw, block.block_start, block.block_end, hunks) {
             continue; // stale diff → plain drawer
         }
         let touching: Vec<&Hunk> = hunks
@@ -432,100 +490,270 @@ pub fn reconstruct_block_diffs(
         if touching.is_empty() {
             continue; // change is elsewhere in the file → plain drawer
         }
-        out.insert(id.to_owned(), reconstruct_one(block, &touching));
+        let diff = reconstruct_one(&block.raw, block.block_start, block.block_end, &touching);
+        // A purely-whitespace edit (every touching hunk dropped by
+        // `reconstruct_one`) leaves an all-Context diff → no drawer diff
+        // (cute-dbt#111). The change-pair still kept the test `updated` via
+        // `refine_changed_by_hunks` (N7b is whitespace-EXACT); only the
+        // inline highlight is suppressed.
+        if diff.has_real_change() {
+            out.insert(id.to_owned(), diff);
+        }
     }
     out
 }
 
-/// Reconstruct one block's diff from its working-tree slice + the hunks
-/// already filtered to those touching it. See [`reconstruct_block_diffs`].
-fn reconstruct_one(block: &UnitTestYamlBlock, touching: &[&Hunk]) -> YamlBlockDiff {
-    fn trim_cr(s: &str) -> String {
-        s.trim_end_matches('\r').to_owned()
+/// Reconstruct an inline SQL diff of each in-scope model whose `.sql`
+/// changed in the PR diff (cute-dbt#111).
+///
+/// The sibling of [`reconstruct_block_diffs`] for a model's RAW Jinja
+/// `raw_code` (the diffable source — compiled SQL is generated and
+/// un-diffable). For each model in `models_in_scope` that carries
+/// `raw_code` + `original_file_path`:
+///
+/// 1. Normalize `raw_code` to git's line frame — strip **exactly one**
+///    trailing `\n` ([`str::strip_suffix`], not `trim_end_matches`). dbt
+///    engines diverge here (verified 2026-05-31): dbt-core ships
+///    `raw_code` already stripped, dbt-fusion ships it byte-identical but
+///    retaining the file's trailing `\n`. Stripping one terminator
+///    normalizes both to the same content frame, so `raw.split('\n')`
+///    lines up with the diff's new-side numbering and the reconstruction
+///    is engine-independent. A real blank line at EOF (`"a\n\n"`) survives
+///    — only the single terminator is removed.
+/// 2. Take the whole-file span `(raw, 1, raw.split('\n').count())` and the
+///    hunks touching the model's declaring file
+///    ([`NormalizedDiffIndex::hunks_for`]).
+/// 3. Emit a [`BlockDiff`] (keyed by the model's full node id) **only**
+///    when the diff still aligns ([`block_aligns_with_hunks`]), at least
+///    one hunk touches the file ([`hunk_touches_block`]), and the
+///    reconstruction carries a substantive change
+///    ([`BlockDiff::has_real_change`] — a whitespace-only edit emits
+///    nothing, cute-dbt#111). A model in scope only via a changed *test*
+///    (its own `.sql` untouched) resolves to no hunks → no entry → the
+///    template shows the plain SQL view.
+///
+/// Runs only on the [`crate::domain::scope::ScopeInput::PrDiff`] arm —
+/// baseline mode has no hunks to reconstruct from (the cli threads
+/// `HashMap::new()` there). ADR-3 scope selection is untouched: this only
+/// *reads* `models_in_scope` and adds a render-payload field.
+///
+/// The run loop passes the default-hasher render set, so generalizing over
+/// the hasher (`clippy::implicit_hasher`) buys nothing — same rationale as
+/// [`reconstruct_block_diffs`].
+#[must_use]
+pub fn reconstruct_model_sql_diffs(
+    current: &Manifest,
+    models_in_scope: &ModelInScopeSet,
+    index: &NormalizedDiffIndex,
+) -> HashMap<String, BlockDiff> {
+    let mut out = HashMap::new();
+    for model_id in models_in_scope.iter() {
+        if let Some(diff) = current
+            .node(model_id)
+            .and_then(|model| model_sql_diff(model, index))
+        {
+            out.insert(model_id.as_str().to_owned(), diff);
+        }
     }
-    let block_lines: Vec<String> = block.raw.split('\n').map(trim_cr).collect();
-    let (bs, be) = (block.block_start, block.block_end);
+    out
+}
+
+/// The inline SQL diff for one model, or `None` when there is nothing to
+/// show (no `raw_code`, no declaring path, the `.sql` not in the diff, a
+/// stale diff, or a whitespace-only change). See [`reconstruct_model_sql_diffs`].
+fn model_sql_diff(model: &Node, index: &NormalizedDiffIndex) -> Option<BlockDiff> {
+    // Empty `raw_code` (some node types ship `raw_code: ""`) is treated as
+    // absent — matches `build_model_payload`'s `raw_sql` filter, so we never
+    // compute a diff the template would not show.
+    let raw_code = model.raw_code().filter(|s| !s.is_empty())?;
+    let ofp = model.original_file_path()?;
+    // Strip git's single trailing terminator (engine-divergent — see the
+    // module-level fn doc). A real blank line at EOF survives.
+    let raw = raw_code.strip_suffix('\n').unwrap_or(raw_code);
+    let (block_start, block_end) = (1, raw.split('\n').count());
+
+    let hunks = index.hunks_for(ofp);
+    if !block_aligns_with_hunks(raw, block_start, block_end, hunks) {
+        return None; // stale diff (N7b) → plain SQL view
+    }
+    let touching: Vec<&Hunk> = hunks
+        .iter()
+        .filter(|h| hunk_touches_block(block_start, block_end, h))
+        .collect();
+    if touching.is_empty() {
+        return None; // .sql not touched (model in scope via a changed test)
+    }
+    let diff = reconstruct_one(raw, block_start, block_end, &touching);
+    // Whitespace-only model edit → all-Context → no diff (plain SQL).
+    diff.has_real_change().then_some(diff)
+}
+
+/// Trim a trailing `\r` (CRLF tolerance — see [`block_aligns_with_hunks`]).
+fn trim_cr(s: &str) -> String {
+    s.trim_end_matches('\r').to_owned()
+}
+
+/// Within an aligned 1:1 replacement hunk (`removed.len() == added.len()`),
+/// the new-side line offset `i` (0-based) is whitespace-only when
+/// `removed[i]` is [`ws_equal`] to `added[i]` (cute-dbt#111).
+///
+/// Whitespace-insensitivity is **per line-pair**, not per-hunk: under
+/// `git --unified=0` a re-indent and a real edit on *adjacent* lines arrive
+/// as ONE hunk, so dropping the whole hunk would either leak the re-indent
+/// as a change or hide the real edit. Pairing line-for-line, a re-indent /
+/// trailing-whitespace / blank-churn pair renders as Context (no removed
+/// splice, no emphasis) while a substantive pair in the same hunk still
+/// diffs. Only meaningful for equal-count hunks; a genuine insertion /
+/// deletion (unequal counts) has no pairing and is always a real change.
+fn pair_is_ws_only(h: &Hunk, i: usize) -> bool {
+    h.removed_lines.len() == h.added_lines.len()
+        && ws_equal(
+            h.removed_lines[i].trim_end_matches('\r'),
+            h.added_lines[i].trim_end_matches('\r'),
+        )
+}
+
+/// The new-side edits a set of touching hunks impose on a block: which
+/// removed-line groups to splice before each 1-based new-side line, which
+/// new-side lines are genuine (non-whitespace) additions, and the
+/// intra-line emphasis span for a clean 1:1 replacement's added line.
+#[derive(Default)]
+struct HunkEdits {
+    splice_before: HashMap<usize, Vec<DiffLine>>,
+    added_real: std::collections::HashSet<usize>,
+    added_emphasis: HashMap<usize, (usize, usize)>,
+}
+
+/// Whether a hunk is a clean 1:1 line replacement (exactly one removed AND
+/// one added body). The `added_lines.len() == 1` guard is load-bearing,
+/// not just `new_len == 1`: a malformed diff can declare `new_len: 1` with
+/// an empty `+` body, and the emphasis branch indexes `added_lines[0]` —
+/// without this guard reconstruction would panic on that input
+/// (cute-dbt#110 review). cute-dbt never panics on a bad diff.
+fn is_clean_1to1(h: &Hunk) -> bool {
+    h.new_len == 1 && h.removed_lines.len() == 1 && h.added_lines.len() == 1
+}
+
+/// The removed [`DiffLine`]s a hunk contributes, with ws-only pairs
+/// dropped (cute-dbt#111) and a clean 1:1 replacement's single removed
+/// line carrying intra-line emphasis.
+fn removed_diff_lines(h: &Hunk) -> Vec<DiffLine> {
+    let clean = is_clean_1to1(h);
+    h.removed_lines
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !pair_is_ws_only(h, *i))
+        .map(|(i, r)| DiffLine {
+            kind: DiffLineKind::Removed,
+            text: trim_cr(r),
+            emphasis: if clean && i == 0 {
+                intra_line_span(&trim_cr(r), &trim_cr(&h.added_lines[0]))
+            } else {
+                None
+            },
+        })
+        .collect()
+}
+
+/// Fold one hunk's edits into `edits`. The removed bodies splice before the
+/// hunk's anchor (clamped into the block); each covered new-side line is a
+/// real addition unless it is the new side of a ws-only pair (cute-dbt#111,
+/// then it stays Context); a clean 1:1 replacement records the added line's
+/// intra-line emphasis.
+fn fold_hunk_edits(edits: &mut HunkEdits, h: &Hunk, bs: usize, be: usize) {
+    let anchor = if h.new_len == 0 {
+        h.new_start + 1
+    } else {
+        h.new_start
+    }
+    .clamp(bs, be + 1);
+    let removed = removed_diff_lines(h);
+    if !removed.is_empty() {
+        edits
+            .splice_before
+            .entry(anchor)
+            .or_default()
+            .extend(removed);
+    }
+    for k in 0..h.new_len {
+        if !pair_is_ws_only(h, k) {
+            edits.added_real.insert(h.new_start + k);
+        }
+    }
+    if is_clean_1to1(h) && !pair_is_ws_only(h, 0) && (bs..=be).contains(&h.new_start) {
+        if let Some(e) = intra_line_span(&trim_cr(&h.added_lines[0]), &trim_cr(&h.removed_lines[0]))
+        {
+            edits.added_emphasis.insert(h.new_start, e);
+        }
+    }
+}
+
+/// Classify one new-side block line into its rendered [`DiffLine`].
+fn block_line_diff(edits: &HunkEdits, line_no: usize, text: String) -> DiffLine {
+    if edits.added_real.contains(&line_no) {
+        DiffLine {
+            kind: DiffLineKind::Added,
+            text,
+            emphasis: edits.added_emphasis.get(&line_no).copied(),
+        }
+    } else {
+        DiffLine {
+            kind: DiffLineKind::Context,
+            text,
+            emphasis: None,
+        }
+    }
+}
+
+/// Reconstruct one block's inline diff from its source slice + the hunks
+/// touching it (cute-dbt#96, generalized to any source block at
+/// cute-dbt#111).
+///
+/// The block is addressed by `(raw, block_start, block_end)` — the
+/// content-agnostic shape, so the same reconstruction serves the
+/// `unit_test` YAML block (#96, `(&block.raw, block.block_start,
+/// block.block_end)`) and a model's SQL `raw_code` (#111, the whole-file
+/// span). Callers pass `raw` already trailing-`\n`-normalized to git's
+/// line frame so `raw.split('\n')` lines up with the hunks' new-side
+/// numbering.
+///
+/// **Whitespace-only line-pairs render as Context** ([`pair_is_ws_only`]):
+/// a re-indentation / trailing-whitespace / blank-churn edit is not a
+/// change (cute-dbt#111, `git --ignore-all-space` semantics) — no removed
+/// splice, no emphasis. When every change in the block is whitespace-only
+/// the result is all-Context; the caller tests [`BlockDiff::has_real_change`]
+/// and emits no [`BlockDiff`] so the view falls back to plain text.
+fn reconstruct_one(
+    raw: &str,
+    block_start: usize,
+    block_end: usize,
+    touching: &[&Hunk],
+) -> BlockDiff {
+    let block_lines: Vec<String> = raw.split('\n').map(trim_cr).collect();
+    let (bs, be) = (block_start, block_end);
 
     // Removed-line groups to splice immediately before a given new-side
-    // line. Anchored before `new_start` for a replacement (new_len >= 1) and
-    // after it for a pure deletion (new_len == 0), then clamped into the
-    // block so leading/trailing edits render at the block's top/bottom.
-    // Per-line intra-line emphasis for the single added line of a clean 1:1
-    // replacement (one removed + one added line).
-    let mut splice_before: HashMap<usize, Vec<DiffLine>> = HashMap::new();
-    let mut added_emphasis: HashMap<usize, (usize, usize)> = HashMap::new();
+    // line; `added_real` marks genuine (non-whitespace) additions;
+    // `added_emphasis` carries the clean-1:1 intra-line span (cute-dbt#111).
+    let mut edits = HunkEdits::default();
     for h in touching {
-        // A clean 1:1 line replacement carries exactly one removed AND one
-        // added body. The `added_lines.len() == 1` guard is load-bearing,
-        // not just `new_len == 1`: a malformed diff can declare `new_len: 1`
-        // with an empty `+` body, and the emphasis branch indexes
-        // `added_lines[0]` — without it, `reconstruct_one` would panic on
-        // that input (cute-dbt#110 review). cute-dbt never panics on a bad diff.
-        let clean_1to1 = h.new_len == 1 && h.removed_lines.len() == 1 && h.added_lines.len() == 1;
-        let anchor = if h.new_len == 0 {
-            h.new_start + 1
-        } else {
-            h.new_start
-        }
-        .clamp(bs, be + 1);
-        let removed: Vec<DiffLine> = h
-            .removed_lines
-            .iter()
-            .enumerate()
-            .map(|(i, r)| DiffLine {
-                kind: DiffLineKind::Removed,
-                text: trim_cr(r),
-                emphasis: if clean_1to1 && i == 0 {
-                    intra_line_span(&trim_cr(r), &trim_cr(&h.added_lines[0]))
-                } else {
-                    None
-                },
-            })
-            .collect();
-        splice_before.entry(anchor).or_default().extend(removed);
-        if clean_1to1 && (bs..=be).contains(&h.new_start) {
-            if let Some(e) =
-                intra_line_span(&trim_cr(&h.added_lines[0]), &trim_cr(&h.removed_lines[0]))
-            {
-                added_emphasis.insert(h.new_start, e);
-            }
-        }
+        fold_hunk_edits(&mut edits, h, bs, be);
     }
-
-    // A new-side line is Added when some replacement/insertion hunk covers
-    // it; otherwise it is Context.
-    let is_added = |l: usize| {
-        touching
-            .iter()
-            .any(|h| h.new_len >= 1 && h.new_start <= l && l < h.new_start + h.new_len)
-    };
 
     let mut lines: Vec<DiffLine> = Vec::new();
     for (i, text) in block_lines.into_iter().enumerate() {
         let l = bs + i; // 1-based new-side line number
-        if let Some(group) = splice_before.remove(&l) {
+        if let Some(group) = edits.splice_before.remove(&l) {
             lines.extend(group);
         }
-        lines.push(if is_added(l) {
-            DiffLine {
-                kind: DiffLineKind::Added,
-                text,
-                emphasis: added_emphasis.get(&l).copied(),
-            }
-        } else {
-            DiffLine {
-                kind: DiffLineKind::Context,
-                text,
-                emphasis: None,
-            }
-        });
+        lines.push(block_line_diff(&edits, l, text));
     }
     // Trailing deletions clamped to just past the block's last line.
-    if let Some(group) = splice_before.remove(&(be + 1)) {
+    if let Some(group) = edits.splice_before.remove(&(be + 1)) {
         lines.extend(group);
     }
 
-    YamlBlockDiff { lines }
+    BlockDiff { lines }
 }
 
 #[cfg(test)]
@@ -776,7 +1004,9 @@ mod tests {
         let block = block_at(ALIGN_RAW, 2); // [2, 4]
         // Replace line 3 with the line that is actually there → aligned.
         assert!(block_aligns_with_hunks(
-            &block,
+            &block.raw,
+            block.block_start,
+            block.block_end,
             &[repl(3, &["    model: m"])]
         ));
     }
@@ -789,7 +1019,9 @@ mod tests {
         // 1`, not `new_start - 1` — pins the per-line index arithmetic
         // (`file_line = new_start + k`) so a `+`→`-` slip on `k` is caught.
         assert!(block_aligns_with_hunks(
-            &block,
+            &block.raw,
+            block.block_start,
+            block.block_end,
             &[repl(3, &["    model: m", "    given: []"])]
         ));
     }
@@ -799,7 +1031,9 @@ mod tests {
         let block = block_at(ALIGN_RAW, 2); // [2, 4]
         // Claims "    model: m" at line 2, but line 2 is "  - name: t".
         assert!(!block_aligns_with_hunks(
-            &block,
+            &block.raw,
+            block.block_start,
+            block.block_end,
             &[repl(2, &["    model: m"])]
         ));
     }
@@ -808,7 +1042,9 @@ mod tests {
     fn block_misaligns_when_added_line_content_is_corrupted() {
         let block = block_at(ALIGN_RAW, 2); // [2, 4]
         assert!(!block_aligns_with_hunks(
-            &block,
+            &block.raw,
+            block.block_start,
+            block.block_end,
             &[repl(3, &["    model: CORRUPTED"])]
         ));
     }
@@ -817,14 +1053,24 @@ mod tests {
     fn block_aligns_ignores_added_lines_outside_the_block() {
         let block = block_at("  - name: t\n    model: m", 8); // [8, 9]
         // A hunk in the file header — entirely above the block → ignored.
-        assert!(block_aligns_with_hunks(&block, &[repl(1, &["version: 3"])]));
+        assert!(block_aligns_with_hunks(
+            &block.raw,
+            block.block_start,
+            block.block_end,
+            &[repl(1, &["version: 3"])]
+        ));
     }
 
     #[test]
     fn block_aligns_vacuously_for_pure_deletion_hunks() {
         let block = block_at("  - name: t\n    model: m", 2);
         // A deletion carries no `+` lines → nothing to verify → aligned.
-        assert!(block_aligns_with_hunks(&block, &[del(2)]));
+        assert!(block_aligns_with_hunks(
+            &block.raw,
+            block.block_start,
+            block.block_end,
+            &[del(2)]
+        ));
     }
 
     #[test]
@@ -833,7 +1079,9 @@ mod tests {
         // (str::lines). A CRLF working tree must not read as stale.
         let block = block_at("  - name: t\r\n    model: m\r", 2); // ["  - name: t\r", "    model: m\r"]
         assert!(block_aligns_with_hunks(
-            &block,
+            &block.raw,
+            block.block_start,
+            block.block_end,
             &[repl(3, &["    model: m"])]
         ));
     }
@@ -1139,7 +1387,12 @@ mod tests {
             raw: "  - name: test_orders\n    model: orders\n    given: []".to_owned(),
             ..block
         };
-        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        let got = reconstruct_one(
+            &block.raw,
+            block.block_start,
+            block.block_end,
+            &hunks.iter().collect::<Vec<_>>(),
+        );
         assert_eq!(
             got.lines,
             vec![
@@ -1168,7 +1421,12 @@ mod tests {
             &["    model: payments"],
             &["    model: orders"],
         )];
-        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        let got = reconstruct_one(
+            &block.raw,
+            block.block_start,
+            block.block_end,
+            &hunks.iter().collect::<Vec<_>>(),
+        );
         assert_eq!(
             got.lines,
             vec![
@@ -1186,7 +1444,12 @@ mod tests {
         let block = block_at("  - name: t\n    model: m\n    given: []", 10); // [10,12]
         // Deletion gap after new-side line 11 → removed renders between 11 and 12.
         let hunks = [delete(11, &["      # note"])];
-        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        let got = reconstruct_one(
+            &block.raw,
+            block.block_start,
+            block.block_end,
+            &hunks.iter().collect::<Vec<_>>(),
+        );
         assert_eq!(
             got.lines,
             vec![
@@ -1203,7 +1466,12 @@ mod tests {
         // new_start = block_start - 1 → anchor clamps to the top.
         let block = block_at("  - name: t\n    model: m\n    given: []", 10); // [10,12]
         let hunks = [delete(9, &["  # leading"])];
-        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        let got = reconstruct_one(
+            &block.raw,
+            block.block_start,
+            block.block_end,
+            &hunks.iter().collect::<Vec<_>>(),
+        );
         assert_eq!(
             got.lines,
             vec![
@@ -1220,7 +1488,12 @@ mod tests {
         // new_start = block_end → anchor clamps just past the last line.
         let block = block_at("  - name: t\n    model: m\n    given: []", 10); // [10,12]
         let hunks = [delete(12, &["  # trailing"])];
-        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        let got = reconstruct_one(
+            &block.raw,
+            block.block_start,
+            block.block_end,
+            &hunks.iter().collect::<Vec<_>>(),
+        );
         assert_eq!(
             got.lines,
             vec![
@@ -1238,7 +1511,12 @@ mod tests {
         // the removed pair clamps to the block top.
         let block = block_at("    model: m2\n    given: []\n      rows: []", 10); // [10,12]
         let hunks = [replace(9, &["old8", "old9"], &["new9", "    model: m2"])];
-        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        let got = reconstruct_one(
+            &block.raw,
+            block.block_start,
+            block.block_end,
+            &hunks.iter().collect::<Vec<_>>(),
+        );
         assert_eq!(
             got.lines,
             vec![
@@ -1259,7 +1537,12 @@ mod tests {
             replace(11, &["oldA"], &["newA"]),
             replace(13, &["oldB"], &["newB"]),
         ];
-        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        let got = reconstruct_one(
+            &block.raw,
+            block.block_start,
+            block.block_end,
+            &hunks.iter().collect::<Vec<_>>(),
+        );
         assert_eq!(
             got.lines,
             vec![
@@ -1279,7 +1562,12 @@ mod tests {
         // new_len = 2 (not a clean 1:1) → line-level +/- only, no <strong>.
         let block = block_at("  - name: t\nnewA\nnewB\n    given: []", 10); // [10,13]
         let hunks = [replace(11, &["oldA", "oldB"], &["newA", "newB"])];
-        let got = reconstruct_one(&block, &hunks.iter().collect::<Vec<_>>());
+        let got = reconstruct_one(
+            &block.raw,
+            block.block_start,
+            block.block_end,
+            &hunks.iter().collect::<Vec<_>>(),
+        );
         assert_eq!(
             got.lines,
             vec![
@@ -1306,7 +1594,7 @@ mod tests {
             removed_lines: vec!["    model: was".to_owned()],
             added_lines: Vec::new(),
         };
-        let got = reconstruct_one(&block, &[&hunk]);
+        let got = reconstruct_one(&block.raw, block.block_start, block.block_end, &[&hunk]);
         assert_eq!(
             got.lines,
             vec![
@@ -1423,11 +1711,11 @@ mod tests {
         );
     }
 
-    // ----- YamlBlockDiff serde: the exact JS wire shape -----
+    // ----- BlockDiff serde: the exact JS wire shape -----
 
     #[test]
     fn yaml_block_diff_serializes_to_the_exact_renderyamldiff_contract() {
-        let diff = YamlBlockDiff {
+        let diff = BlockDiff {
             lines: vec![
                 ctx("  - name: t"),
                 rem_e("    model: payments", (11, 18)),
@@ -1440,7 +1728,400 @@ mod tests {
             r#"{"lines":[{"kind":"context","text":"  - name: t","emphasis":null},{"kind":"removed","text":"    model: payments","emphasis":[11,18]},{"kind":"added","text":"    model: orders","emphasis":[11,16]}]}"#,
         );
         // wire-shape round-trips back to the same POD.
-        let back: YamlBlockDiff = serde_json::from_str(&json).unwrap();
+        let back: BlockDiff = serde_json::from_str(&json).unwrap();
         assert_eq!(back, diff);
+    }
+
+    // =================================================================
+    // Whitespace-insensitivity (cute-dbt#111): ws_equal +
+    // hunk_is_whitespace_only + BlockDiff::has_real_change
+    // =================================================================
+
+    #[test]
+    fn ws_equal_ignores_leading_trailing_and_interior_whitespace() {
+        // Re-indentation, trailing whitespace, collapsed interior runs:
+        // identical non-whitespace content ⇒ equal.
+        assert!(ws_equal("    select id", "        select id"));
+        assert!(ws_equal("select id ", "select id"));
+        assert!(ws_equal("select  id", "select id"));
+        assert!(ws_equal("", "   "));
+        assert!(ws_equal("\tselect\tid\t", "select id"));
+    }
+
+    #[test]
+    fn ws_equal_distinguishes_substantive_content() {
+        assert!(!ws_equal("select id", "select uid"));
+        assert!(!ws_equal("select id", "select id, name"));
+        // Re-ordered tokens are a real change (token SEQUENCE, not set).
+        assert!(!ws_equal("a b", "b a"));
+    }
+
+    #[test]
+    fn pair_is_ws_only_true_per_aligned_pair() {
+        // 1:1 re-indentation: each `+` is ws_equal to its paired `-`.
+        let h = replace(
+            5,
+            &["select id", "  from t"],
+            &["    select id", "        from t"],
+        );
+        assert!(pair_is_ws_only(&h, 0));
+        assert!(pair_is_ws_only(&h, 1));
+    }
+
+    #[test]
+    fn pair_is_ws_only_false_for_a_substantive_pair() {
+        let h = replace(
+            5,
+            &["select id", "from t"],
+            &["    select id", "from u"], // pair 1: t → u (real)
+        );
+        assert!(pair_is_ws_only(&h, 0)); // re-indent
+        assert!(!pair_is_ws_only(&h, 1)); // value change
+    }
+
+    #[test]
+    fn pair_is_ws_only_false_for_unequal_side_counts() {
+        // A genuine insertion / deletion (unequal counts) has no pairing —
+        // adding/removing a line is a real change even when blank. The
+        // count guard short-circuits BEFORE indexing, so no panic.
+        assert!(!pair_is_ws_only(&replace(5, &[], &["   "]), 0));
+        assert!(!pair_is_ws_only(&delete(5, &["   "]), 0));
+        assert!(!pair_is_ws_only(&replace(5, &["a"], &["   a   ", "b"]), 0));
+    }
+
+    #[test]
+    fn reconstruct_one_mixed_adjacent_hunk_keeps_real_drops_ws_pair() {
+        // The single-hunk adjacent case `git --unified=0` produces (advisor
+        // 2026-05-31): line 1 is a pure re-indent (ws-only pair → Context),
+        // line 2 a real value change (kept) — ALL IN ONE HUNK. A whole-hunk
+        // filter would wrongly keep or drop both; per-pair handles it.
+        let raw = "  select a\nfrom u"; // [1,2]
+        let hunks = [replace(
+            1,
+            &["select a", "from t"],
+            &["  select a", "from u"],
+        )];
+        let got = reconstruct_one(raw, 1, 2, &hunks.iter().collect::<Vec<_>>());
+        // The whitespace goal is met: line 1 ("  select a") renders as
+        // CONTEXT (not Added) and only the substantive "from t"→"from u"
+        // pair diffs. The removed line splices at the hunk anchor (its
+        // `new_start`, here clamped to the block top) — the pre-existing
+        // #96 multi-line-replacement placement, not paired to its own
+        // offset. Cosmetic ordering only; the change-set is correct.
+        assert_eq!(
+            got.lines,
+            vec![
+                rem("from t"),     // removed splices at the hunk anchor (line 1)
+                ctx("  select a"), // re-indented line: Context, NOT a change
+                add("from u"),     // the real new-side change
+            ],
+            "the re-indent stays Context; only the substantive pair diffs",
+        );
+        // Critically: the re-indented line is NOT marked Added/Removed.
+        assert!(
+            got.lines
+                .iter()
+                .all(|l| !(l.text == "  select a" && l.kind != DiffLineKind::Context)),
+            "the whitespace-only line must never render as a change",
+        );
+        assert!(got.has_real_change());
+    }
+
+    #[test]
+    fn block_diff_has_real_change_only_with_added_or_removed() {
+        let all_ctx = BlockDiff {
+            lines: vec![ctx("a"), ctx("b")],
+        };
+        assert!(!all_ctx.has_real_change());
+        assert!(
+            BlockDiff {
+                lines: vec![ctx("a"), add("b")]
+            }
+            .has_real_change()
+        );
+        assert!(
+            BlockDiff {
+                lines: vec![rem("a"), ctx("b")]
+            }
+            .has_real_change()
+        );
+    }
+
+    #[test]
+    fn reconstruct_one_renders_whitespace_only_change_as_context() {
+        // A re-indentation of line 2 (working tree == `    model: m`, old
+        // side `model: m`): ws_equal ⇒ no Removed splice, no emphasis, the
+        // new-side line is Context. Frame: 3 context lines, no real change.
+        let raw = "  - name: t\n    model: m\n    given: []"; // [10,12]
+        let hunks = [replace(11, &["model: m"], &["    model: m"])];
+        let got = reconstruct_one(raw, 10, 12, &hunks.iter().collect::<Vec<_>>());
+        assert_eq!(
+            got.lines,
+            vec![
+                ctx("  - name: t"),
+                ctx("    model: m"),
+                ctx("    given: []")
+            ],
+        );
+        assert!(
+            !got.has_real_change(),
+            "ws-only change carries no real diff"
+        );
+    }
+
+    #[test]
+    fn reconstruct_one_keeps_real_change_adjacent_to_a_whitespace_only_change() {
+        // git --unified=0 splits these into two hunks: line 11 is a pure
+        // re-indent (dropped), line 12 is a real value change (kept).
+        let raw = "  - name: t\n    model: m\n    given: [1]"; // [10,12]
+        let hunks = [
+            replace(11, &["model: m"], &["    model: m"]), // ws-only → dropped
+            replace(12, &["    given: []"], &["    given: [1]"]), // real → kept
+        ];
+        let got = reconstruct_one(raw, 10, 12, &hunks.iter().collect::<Vec<_>>());
+        // Common prefix "    given: [" (12); removed "]" has no own changed
+        // span (it is the shorter side's shared suffix → None); added "1]"
+        // contributes "1" at codepoint 12.
+        assert_eq!(
+            got.lines,
+            vec![
+                ctx("  - name: t"),
+                ctx("    model: m"), // the re-indented line, as plain Context
+                rem("    given: []"),
+                add_e("    given: [1]", (12, 13)), // "1"
+            ],
+        );
+        assert!(got.has_real_change());
+    }
+
+    // =================================================================
+    // Model SQL reconstruction (cute-dbt#111):
+    // reconstruct_model_sql_diffs + the trailing-newline frame
+    // =================================================================
+
+    use crate::domain::manifest::{Checksum, NodeConfig};
+
+    /// A `model` node carrying `raw_code` + `original_file_path` — the two
+    /// fields `reconstruct_model_sql_diffs` reads. `compiled` is irrelevant
+    /// to SQL-diff reconstruction (the diff is over RAW Jinja).
+    fn model_with_raw(full_id: &str, raw_code: &str, ofp: &str) -> Node {
+        Node::new(
+            NodeId::new(full_id),
+            "model",
+            Checksum::new("sha256", "ck"),
+            Some("select 1".to_owned()),
+            Some(raw_code.to_owned()),
+            DependsOn::default(),
+            Some(ofp.to_owned()),
+            NodeConfig::default(),
+            None,
+            std::collections::BTreeMap::new(),
+        )
+    }
+
+    fn manifest_with_models(models: Vec<Node>) -> Manifest {
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            models.into_iter().map(|m| (m.id().clone(), m)).collect(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    /// The whole-file span of a `raw_code`, as `reconstruct_model_sql_diffs`
+    /// computes it — trailing-`\n` stripped (git's line frame), then
+    /// `(raw, 1, line_count)`. Pins the off-by-one trap.
+    #[test]
+    fn model_sql_frame_strips_exactly_one_trailing_newline() {
+        // dbt-CORE shape: raw_code already trailing-newline-stripped.
+        let core = "select 1\nfrom t"; // 2 content lines, no trailing \n
+        // dbt-FUSION shape: byte-identical PLUS the trailing \n (verified
+        // 2026-05-31 against a fusion-compiled playground manifest).
+        let fusion = "select 1\nfrom t\n";
+
+        let core_norm = core.strip_suffix('\n').unwrap_or(core);
+        let fusion_norm = fusion.strip_suffix('\n').unwrap_or(fusion);
+        assert_eq!(
+            core_norm, fusion_norm,
+            "both engines normalize to the same frame"
+        );
+        assert_eq!(
+            core_norm.split('\n').count(),
+            2,
+            "git line frame = 2 content lines"
+        );
+
+        // A real blank line at EOF (`"a\n\n"`, git frame = 2) must be KEPT —
+        // strip_suffix removes only the single terminator, not the blank.
+        let blank_eof = "a\n\n";
+        assert_eq!(
+            blank_eof.strip_suffix('\n').unwrap_or(blank_eof),
+            "a\n",
+            "strip exactly one \\n; the real blank line survives",
+        );
+    }
+
+    #[test]
+    fn reconstruct_model_sql_diffs_identical_frame_across_engine_trailing_newline() {
+        // The cross-engine guard: a core-shaped and a fusion-shaped
+        // raw_code of the SAME model produce an IDENTICAL DiffLine frame
+        // (AGENTS.md: reports look identical regardless of compiling
+        // engine). Edit line 2 ("from t" → "from u"); whole-file hunk.
+        let ofp = "models/m.sql";
+        let core_raw = "select id\nfrom u"; // working tree (no trailing \n)
+        let fusion_raw = "select id\nfrom u\n"; // same + trailing \n
+
+        // The diff's `+` lines must match the (stripped) working tree at
+        // their new-side positions for N7b to hold.
+        let diff = PrDiff {
+            files: vec![FileHunks {
+                path: ofp.to_owned(),
+                hunks: vec![replace(2, &["from t"], &["from u"])],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+
+        let core_mf = manifest_with_models(vec![model_with_raw("model.s.m", core_raw, ofp)]);
+        let fusion_mf = manifest_with_models(vec![model_with_raw("model.s.m", fusion_raw, ofp)]);
+        let scope = ModelInScopeSet::from_iter([NodeId::new("model.s.m")]);
+
+        let core_diffs = reconstruct_model_sql_diffs(&core_mf, &scope, &index);
+        let fusion_diffs = reconstruct_model_sql_diffs(&fusion_mf, &scope, &index);
+
+        let expected = vec![
+            ctx("select id"),
+            rem_e("from t", (5, 6)), // "t"
+            add_e("from u", (5, 6)), // "u"
+        ];
+        assert_eq!(core_diffs["model.s.m"].lines, expected, "core frame");
+        assert_eq!(
+            fusion_diffs["model.s.m"].lines, expected,
+            "fusion frame must be byte-identical to core (no phantom trailing line)",
+        );
+    }
+
+    #[test]
+    fn reconstruct_model_sql_diffs_emits_only_for_touched_aligned_models() {
+        let ofp_edit = "models/edit.sql";
+        let ofp_untouched = "models/untouched.sql";
+        let ofp_stale = "models/stale.sql";
+        let ofp_nodiff = "models/nodiff.sql"; // in scope but its file not in the diff
+
+        let edit = model_with_raw("model.s.edit", "select a\nfrom edited", ofp_edit);
+        let untouched = model_with_raw("model.s.untouched", "select a\nfrom u", ofp_untouched);
+        let stale = model_with_raw("model.s.stale", "select a\nfrom s", ofp_stale);
+        let nodiff = model_with_raw("model.s.nodiff", "select a\nfrom n", ofp_nodiff);
+        let current = manifest_with_models(vec![edit, untouched, stale, nodiff]);
+
+        let diff = PrDiff {
+            files: vec![
+                // edit.sql: line 2 replaced, `+` matches working tree → aligned + touched.
+                FileHunks {
+                    path: ofp_edit.to_owned(),
+                    hunks: vec![replace(2, &["from was"], &["from edited"])],
+                },
+                // untouched.sql: change at line 1 only? No — make it a hunk that
+                // does not overlap the file at all by pointing past EOF.
+                FileHunks {
+                    path: ofp_untouched.to_owned(),
+                    hunks: vec![repl(9, &["zzz"])], // line 9 > 2-line file → no touch
+                },
+                // stale.sql: `+` body does not match the working tree → N7b fail.
+                FileHunks {
+                    path: ofp_stale.to_owned(),
+                    hunks: vec![replace(2, &["from was"], &["from DRIFTED"])],
+                },
+                // nodiff.sql intentionally NOT in the diff.
+            ],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        let scope = ModelInScopeSet::from_iter([
+            NodeId::new("model.s.edit"),
+            NodeId::new("model.s.untouched"),
+            NodeId::new("model.s.stale"),
+            NodeId::new("model.s.nodiff"),
+        ]);
+
+        let diffs = reconstruct_model_sql_diffs(&current, &scope, &index);
+
+        assert!(
+            diffs.contains_key("model.s.edit"),
+            "edited model → SQL diff"
+        );
+        assert!(
+            !diffs.contains_key("model.s.untouched"),
+            "hunk outside the file frame → no diff (plain SQL)",
+        );
+        assert!(
+            !diffs.contains_key("model.s.stale"),
+            "stale (N7b-misaligned) diff → no diff",
+        );
+        assert!(
+            !diffs.contains_key("model.s.nodiff"),
+            "model whose .sql is not in the diff → no diff (in scope via a changed test)",
+        );
+
+        assert_eq!(
+            diffs["model.s.edit"].lines,
+            vec![
+                ctx("select a"),
+                rem_e("from was", (5, 8)),     // "was"
+                add_e("from edited", (5, 11)), // "edited"
+            ],
+        );
+    }
+
+    #[test]
+    fn reconstruct_model_sql_diffs_skips_a_whitespace_only_model_change() {
+        // A re-indented model SQL: the whole-file hunk's `+` lines match the
+        // working tree (N7b passes) and touch the block, but every pair is
+        // ws_equal → has_real_change() is false → no BlockDiff (plain SQL).
+        let ofp = "models/reindent.sql";
+        let raw = "select id\n    from t"; // working tree: line 2 indented
+        let m = model_with_raw("model.s.reindent", raw, ofp);
+        let current = manifest_with_models(vec![m]);
+
+        let diff = PrDiff {
+            files: vec![FileHunks {
+                path: ofp.to_owned(),
+                hunks: vec![replace(2, &["from t"], &["    from t"])],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        let scope = ModelInScopeSet::from_iter([NodeId::new("model.s.reindent")]);
+
+        let diffs = reconstruct_model_sql_diffs(&current, &scope, &index);
+        assert!(
+            !diffs.contains_key("model.s.reindent"),
+            "whitespace-only model SQL change → no diff (plain view)",
+        );
+    }
+
+    #[test]
+    fn reconstruct_model_sql_diffs_skips_a_model_without_raw_code() {
+        // Defensive: a model lacking raw_code (None) can carry no SQL diff.
+        let ofp = "models/noraw.sql";
+        let m = Node::new(
+            NodeId::new("model.s.noraw"),
+            "model",
+            Checksum::new("sha256", "ck"),
+            Some("select 1".to_owned()),
+            None, // no raw_code
+            DependsOn::default(),
+            Some(ofp.to_owned()),
+            NodeConfig::default(),
+            None,
+            std::collections::BTreeMap::new(),
+        );
+        let current = manifest_with_models(vec![m]);
+        let diff = PrDiff {
+            files: vec![FileHunks {
+                path: ofp.to_owned(),
+                hunks: vec![replace(1, &["old"], &["new"])],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        let scope = ModelInScopeSet::from_iter([NodeId::new("model.s.noraw")]);
+        assert!(reconstruct_model_sql_diffs(&current, &scope, &index).is_empty());
     }
 }

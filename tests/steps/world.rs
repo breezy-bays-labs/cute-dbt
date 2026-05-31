@@ -96,6 +96,40 @@ pub struct World {
     /// out-of-block (`models:`) region, as a pure deletion, or as a stale
     /// whole-file hunk whose `+` lines drift from the working tree.
     pub block_targets: Vec<BlockTarget>,
+
+    /// cute-dbt#111: model-SQL-diff directives. When a model's `.sql` is a
+    /// changed file, the synthesizer emits a hunk over the model's
+    /// manifest `raw_code` (no working-tree file — the SQL diff reads
+    /// `raw_code` from the manifest, not disk). Keyed by the model's
+    /// `original_file_path`; `kind` says whether the hunk is a real edit,
+    /// a stale (drifted) edit, or a whitespace-only re-indent.
+    pub model_sql_targets: Vec<ModelSqlTarget>,
+}
+
+/// A model-SQL-diff hunk directive for the synthesized diff (cute-dbt#111).
+/// `ofp` is the model's `.sql` `original_file_path`; `kind` says how the
+/// hunk edits the model's `raw_code`.
+#[derive(Debug, Clone)]
+pub struct ModelSqlTarget {
+    /// The model's `.sql` `original_file_path` the hunk lands in.
+    pub ofp: String,
+    /// How the hunk edits the model's `raw_code`.
+    pub kind: ModelSqlTargetKind,
+}
+
+/// How a [`ModelSqlTarget`] edits a model's `raw_code`.
+#[derive(Debug, Clone)]
+pub enum ModelSqlTargetKind {
+    /// A real value change to one `raw_code` line — the `+` matches the
+    /// working `raw_code` (N7b-aligned, touches the file ⇒ a real SQL diff).
+    Edit,
+    /// A whitespace-only re-indent of one `raw_code` line — the `+` matches
+    /// the working `raw_code`, the `-` differs only in leading whitespace
+    /// ⇒ no SQL diff (plain view).
+    Whitespace,
+    /// A hunk whose `+` lines drift from the model's `raw_code` (revision
+    /// drift) ⇒ N7b fails ⇒ no SQL diff (plain view).
+    Stale,
 }
 
 /// A block-precise hunk-placement directive for the synthesized diff

@@ -40,10 +40,10 @@ use crate::adapters::manifest::{FileManifestSource, load_baseline};
 use crate::adapters::render::{ScopeSource, index_tests_for_models, render_report};
 use crate::adapters::source_yaml::FsSourceYamlReader;
 use crate::domain::{
-    DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NormalizedDiffIndex,
-    PreflightError, ScopeInput, ScopeSelection, UnitTestYamlBlock, YamlBlockDiff,
-    extract_unit_test_block, preflight_compiled, reconstruct_block_diffs, refine_changed_by_hunks,
-    select_in_scope,
+    BlockDiff, DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NormalizedDiffIndex,
+    PreflightError, ScopeInput, ScopeSelection, UnitTestYamlBlock, extract_unit_test_block,
+    preflight_compiled, reconstruct_block_diffs, reconstruct_model_sql_diffs,
+    refine_changed_by_hunks, select_in_scope,
 };
 use crate::ports::{ManifestSource, SourceYamlReader};
 
@@ -164,9 +164,21 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
     // PrDiff arm only — baseline mode has no hunks to reconstruct from, so
     // the drawer shows the plain authored YAML. Threaded into render
     // exactly like `authoring_yaml` (the slice spans are already in hand).
-    let yaml_diffs: HashMap<String, YamlBlockDiff> = match &scope_input {
+    let yaml_diffs: HashMap<String, BlockDiff> = match &scope_input {
         ScopeInput::PrDiff { index } => {
             reconstruct_block_diffs(&current, &changed, &authoring_yaml, index)
+        }
+        ScopeInput::Baseline { .. } => HashMap::new(),
+    };
+    // Inline model SQL diffs (cute-dbt#111): reconstruct an in-place diff
+    // of each in-scope model's RAW `raw_code` whose `.sql` the PR diff
+    // changed. PrDiff arm only — baseline mode has no hunks, so the Model
+    // SQL section shows the plain raw view. `raw_code` comes from the
+    // manifest (no filesystem read needed, unlike the YAML drawer), so this
+    // reads `models_in_scope` directly; ADR-3 scope selection is untouched.
+    let sql_diffs: HashMap<String, BlockDiff> = match &scope_input {
+        ScopeInput::PrDiff { index } => {
+            reconstruct_model_sql_diffs(&current, &models_in_scope, index)
         }
         ScopeInput::Baseline { .. } => HashMap::new(),
     };
@@ -180,6 +192,7 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
         &changed,
         &authoring_yaml,
         &yaml_diffs,
+        &sql_diffs,
         &baseline_label,
         scope_source,
         &report_title,
@@ -376,7 +389,8 @@ fn render(
     models_in_scope: &ModelInScopeSet,
     changed: &InScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
-    yaml_diffs: &HashMap<String, YamlBlockDiff>,
+    yaml_diffs: &HashMap<String, BlockDiff>,
+    sql_diffs: &HashMap<String, BlockDiff>,
     baseline_label: &str,
     scope_source: ScopeSource,
     report_title: &str,
@@ -390,6 +404,7 @@ fn render(
         changed,
         authoring_yaml,
         yaml_diffs,
+        sql_diffs,
         baseline_label,
         scope_source,
         report_title,
