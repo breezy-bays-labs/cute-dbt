@@ -1,0 +1,131 @@
+version: 2
+
+models:
+  - name: order_metrics
+    description: >
+      Rich dogfood mart whose transform CTEs reference each other through
+      every cute-dbt v0.1 EdgeType (From / Inner / Left / Right / Full /
+      Cross / UnionAll / UnionDistinct) plus a comma cross-join
+      (cute-dbt#40 heuristic). Built to exercise the CTE DAG + JoinType
+      legend rendering.
+    columns:
+      - name: order_id
+        description: Order identifier (may be null for full-outer non-matches).
+      - name: status
+        description: Order status.
+      - name: amount
+        description: Paid amount in dollars.
+      - name: all_orders_amount
+        description: Grand total of all paid orders (cross-joined constant).
+      - name: amount_share
+        description: This order's amount as a fraction of all_orders_amount.
+      - name: distinct_status_count
+        description: Count of distinct statuses (from the UNION-distinct arm).
+
+unit_tests:
+  # DICT format (given + expect). dict only compares listed columns, so
+  # the derived `amount_share` / `distinct_status_count` are asserted while
+  # the rest ride along. Mocks the three import refs with a single matched
+  # order so the full join chain resolves deterministically.
+  - name: test_order_metrics_computes_amount_share
+    description: |
+      order_metrics crosses each enriched order against the grand total of
+      all paid orders and derives amount_share = amount / all_orders_amount.
+      With one paid order of $10 the grand total is $10, so the single row's
+      share is 1.0. Uses dbt's dict format for both GIVEN and EXPECT.
+    model: order_metrics
+    given:
+      - input: ref('stg_orders')
+        format: dict
+        rows:
+          - order_id: 1
+            customer_id: 1
+            order_date: '2024-01-01'
+            status: 'completed'
+      - input: ref('stg_payments')
+        format: dict
+        rows:
+          - payment_id: 1
+            order_id: 1
+            payment_method: 'credit_card'
+            amount: 10
+      - input: ref('stg_customers')
+        format: dict
+        rows:
+          - customer_id: 1
+            first_name: 'Ada'
+            last_name: 'Lovelace'
+    expect:
+      format: dict
+      rows:
+        - order_id: 1
+          status: 'completed'
+          amount: 10
+          all_orders_amount: 10
+          amount_share: 1.0
+          distinct_status_count: 1
+
+  - name: test_orders_sums_payment_methods
+    description: |
+      orders pivots payments into per-method columns and a total amount.
+      A single order paid once by credit_card for $10 yields
+      credit_card_amount = 10 and amount (total) = 10, with the other
+      method columns zeroed. Uses csv format for GIVEN and EXPECT —
+      compact tabular form across the four payment-method columns.
+    model: orders
+    given:
+      - input: ref('stg_orders')
+        format: csv
+        rows: |
+          order_id,customer_id,order_date,status
+          1,1,2024-01-01,completed
+      - input: ref('stg_payments')
+        format: csv
+        rows: |
+          payment_id,order_id,payment_method,amount
+          1,1,credit_card,10
+    expect:
+      format: csv
+      rows: |
+        order_id,customer_id,order_date,status,credit_card_amount,coupon_amount,bank_transfer_amount,gift_card_amount,amount
+        1,1,2024-01-01,completed,10,0,0,0,10
+
+  - name: test_customers_aggregates_orders_and_payments
+    description: |
+      customers left-joins per-customer order aggregates and payment totals.
+      One customer with one $10 completed order yields number_of_orders = 1
+      and customer_lifetime_value = 10. Uses sql format for the GIVEN mocks
+      and dict format for EXPECT (dict compares only listed columns).
+    model: customers
+    given:
+      - input: ref('stg_customers')
+        format: sql
+        rows: |
+          select
+            1 as customer_id
+            , 'Ada' as first_name
+            , 'Lovelace' as last_name
+      - input: ref('stg_orders')
+        format: sql
+        rows: |
+          select
+            1 as order_id
+            , 1 as customer_id
+            , cast('2024-01-01' as date) as order_date
+            , 'completed' as status
+      - input: ref('stg_payments')
+        format: sql
+        rows: |
+          select
+            1 as payment_id
+            , 1 as order_id
+            , 'credit_card' as payment_method
+            , 10 as amount
+    expect:
+      format: dict
+      rows:
+        - customer_id: 1
+          first_name: 'Ada'
+          last_name: 'Lovelace'
+          number_of_orders: 1
+          customer_lifetime_value: 10

@@ -1,0 +1,15 @@
+# dbt build artifacts — never commit, EXCEPT the committed fusion manifest
+# (target/manifest.json) that cute-dbt consumes directly. The manifest is the
+# dogfood input for the `--pr-diff` preview; downstream consumers never
+# recompile.
+target/*
+!target/manifest.json
+
+dbt_packages/
+logs/
+*.duckdb
+*.duckdb.wal
+
+# fusion per-machine anonymous user id — machine-specific, not project state
+.user.yml
+dbt_internal_packages/
