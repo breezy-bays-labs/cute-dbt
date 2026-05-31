@@ -666,11 +666,9 @@ fn trim_cr(s: &str) -> String {
 /// diffs. Only meaningful for equal-count hunks; a genuine insertion /
 /// deletion (unequal counts) has no pairing and is always a real change.
 fn pair_is_ws_only(h: &Hunk, i: usize) -> bool {
-    h.removed_lines.len() == h.added_lines.len()
-        && ws_equal(
-            h.removed_lines[i].trim_end_matches('\r'),
-            h.added_lines[i].trim_end_matches('\r'),
-        )
+    // No `\r`-trim needed: `ws_equal` compares `split_whitespace()` token
+    // sequences, which already ignore a trailing `\r` (cute-dbt#113 review).
+    h.removed_lines.len() == h.added_lines.len() && ws_equal(&h.removed_lines[i], &h.added_lines[i])
 }
 
 /// The new-side edits a set of touching hunks impose on a block: which
