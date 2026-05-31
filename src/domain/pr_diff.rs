@@ -426,6 +426,13 @@ impl BlockDiff {
 /// diff body): the block slicer keeps a trailing `\r` (`split('\n')`) while
 /// the diff parser strips it (`str::lines`), and an untrimmed `\r` on one
 /// side alone would shrink the common suffix and inflate the span by one.
+///
+/// Mutation note (classified-equivalent): replacing `prefix += 1` /
+/// `suffix += 1` with `*= ` makes the counter stick at 0, so the scan loop
+/// never terminates — an infinite loop, not a wrong answer. A hang is not a
+/// behavioral difference a test can assert, so these two `cargo mutants`
+/// survivors are equivalent by construction (the `+`/`<=` bound mutants ARE
+/// killed — see `intra_line_span_suffix_stops_at_the_prefix_boundary`).
 #[must_use]
 pub fn intra_line_span(line: &str, other: &str) -> Option<(usize, usize)> {
     if line == other {
@@ -1086,6 +1093,23 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn block_misaligns_when_hunk_claims_a_line_the_block_lacks() {
+        // The span claims more lines (`block_end` = 5) than `raw` actually
+        // has (2 lines, offsets 0..=1). A hunk whose added line lands at a
+        // new-side position inside [bs, be] but past `raw`'s last line —
+        // `block_lines.get(offset)` is None → stale (return false). Pins the
+        // `(raw, start, end)` widening's out-of-range guard; with `split('\n')`
+        // model `raw_code` spans this is the engine-mismatch safety net.
+        let raw = "select 1\nfrom t"; // 2 lines, offsets 0..=1
+        // block_end overstated to 5; the hunk claims line 4 (offset 3) which
+        // raw doesn't have.
+        assert!(
+            !block_aligns_with_hunks(raw, 1, 5, &[repl(4, &["phantom"])]),
+            "a hunk claiming a line beyond `raw` is stale, not aligned",
+        );
+    }
+
     // ----- block_changed_by_hunks: the four-branch decision -----
 
     const FOUR_BRANCH_RAW: &str = "  - name: t\n    model: m\n    given: []"; // [8, 10]
@@ -1366,6 +1390,29 @@ mod tests {
     fn intra_line_span_counts_codepoints_not_bytes() {
         // "café " is 5 codepoints (é is 2 bytes); the changed char is at 5.
         assert_eq!(intra_line_span("café x", "café y"), Some((5, 6)));
+    }
+
+    #[test]
+    fn intra_line_span_suffix_stops_at_the_prefix_boundary() {
+        // Shared prefix AND shared suffix with asymmetric middle lengths —
+        // stresses BOTH suffix bounds (`suffix < a.len()-prefix` and
+        // `suffix < b.len()-prefix`). The bounds keep the suffix scan from
+        // overlapping the already-matched prefix on the shorter side.
+        // Kills the suffix-bound mutants (`< → <=`, `a.len()-prefix →
+        // a.len()+prefix`, `b.len()-prefix → b.len()+prefix`): each would
+        // over-extend the suffix and shift the reported span.
+        // prefix "a" (1) + suffix "c" (1); middles "X" vs "YYY".
+        assert_eq!(intra_line_span("aXc", "aYYYc"), Some((1, 2))); // "X"
+        assert_eq!(intra_line_span("aYYYc", "aXc"), Some((1, 4))); // "YYY"
+        // The prefix-exhausts-the-short-side case: "ab" is entirely shared
+        // prefix of "abab"; the suffix bound on the short side is 0, so the
+        // suffix loop must NOT advance into the prefix (a `<=` or `+` mutant
+        // would). Short side → None; long side → the trailing "ab".
+        assert_eq!(intra_line_span("ab", "abab"), None);
+        assert_eq!(intra_line_span("abab", "ab"), Some((2, 4))); // trailing "ab"
+        // Suffix shares the WHOLE short side: "xy" is the suffix of "Axy".
+        assert_eq!(intra_line_span("xy", "Axy"), None);
+        assert_eq!(intra_line_span("Axy", "xy"), Some((0, 1))); // leading "A"
     }
 
     // ----- reconstruct_one: the ordered DiffLine table -----
