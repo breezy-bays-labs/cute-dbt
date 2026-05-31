@@ -151,3 +151,62 @@ fn valid_diff_touching_unit_test_yaml_puts_that_test_in_scope_exit_0() {
         "the banner states PR-diff provenance",
     );
 }
+
+#[test]
+fn a_default_context_git_diff_does_not_panic_and_renders_a_report() {
+    // BLOCKER regression (review 2026-05-31): cute-dbt is contracted on
+    // `--unified=0`, but the parser ACCEPTS a default `git diff` (3 context
+    // lines), yielding hunks whose `new_len` (from the `@@` range) exceeds
+    // `added_lines.len()` (context lines are dropped). The #111
+    // reconstruction must NOT panic on that body/footprint mismatch (the
+    // "cute-dbt never panics on a bad diff" contract) — it degrades the
+    // affected block to the plain view. This drives a default-context diff
+    // touching a real model `.sql` end-to-end through `parse_diff` →
+    // `reconstruct_model_sql_diffs` (+ `reconstruct_block_diffs`) via the
+    // binary, asserting a clean exit 0 + a written report.
+    let current = fixture("jaffle-shop-current.json");
+    let diff = tmp("cfp-default-context.patch");
+    // A default `git diff --unified=3`-shaped hunk: `@@ -1,5 +1,5 @@` claims
+    // 5 new-side lines but records ONE `+` body (the rest are ` `-context).
+    // `customers` is a real compiled model (models/customers.sql, raw_code
+    // begins `with customers as (`).
+    fs::write(
+        &diff,
+        "--- a/models/customers.sql\n\
++++ b/models/customers.sql\n\
+@@ -1,5 +1,5 @@\n\
+ with customers as (\n\
+ \n\
+-    select * from raw.customers\n\
++    select * from raw.customers_v2\n\
+     where 1=1\n\
+ ),\n",
+    )
+    .expect("write default-context patch");
+    let out = tmp("cfp-default-context-report.html");
+    clear(&out);
+
+    let output = run_cli(&[
+        "--manifest",
+        s(&current),
+        "--pr-diff",
+        &format!("@{}", s(&diff)),
+        "--out",
+        s(&out),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "a default-context git diff must render (exit 0), not panic; stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        out.exists(),
+        "a report is written for a default-context diff"
+    );
+    let html = fs::read_to_string(&out).expect("report is readable");
+    assert!(
+        html.contains("from PR file diff"),
+        "the report banner states PR-diff provenance",
+    );
+}

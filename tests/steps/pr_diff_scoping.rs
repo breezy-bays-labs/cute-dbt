@@ -956,13 +956,38 @@ fn model_carries_sql_diff(world: &mut World, name: String) {
         panic!("model {name:?} should carry a sql_diff with lines; got {model:?}")
     });
     let kinds: Vec<&str> = lines.iter().filter_map(|l| l["kind"].as_str()).collect();
+    // Content + ORDER oracle (not just presence): the synthesized Edit hunk
+    // rewrites raw_code line 2 (`select * from {{ ref('upstream') }}`), so the
+    // diff must show a Removed line (the old `..old_upstream..` body)
+    // IMMEDIATELY followed by the Added working-tree line — a flipped
+    // removed↔added or a stray reconstruction would fail here.
+    let removed_idx = lines.iter().position(|l| l["kind"] == "removed");
+    let added_idx = lines.iter().position(|l| l["kind"] == "added");
+    let (Some(ri), Some(ai)) = (removed_idx, added_idx) else {
+        panic!("sql_diff for {name:?} must carry a removed AND an added line; got kinds {kinds:?}");
+    };
+    assert_eq!(
+        ai,
+        ri + 1,
+        "the added line must immediately follow the removed line (change pair); got kinds {kinds:?}",
+    );
+    let removed_text = lines[ri]["text"].as_str().unwrap_or_default();
+    let added_text = lines[ai]["text"].as_str().unwrap_or_default();
     assert!(
-        kinds.contains(&"removed"),
-        "sql_diff for {name:?} should include a removed line; got kinds {kinds:?}",
+        removed_text.contains("old_upstream"),
+        "the removed line is the pre-edit `..old_upstream..` body; got {removed_text:?}",
     );
     assert!(
-        kinds.contains(&"added"),
-        "sql_diff for {name:?} should include an added line; got kinds {kinds:?}",
+        added_text.contains("ref('upstream')") && !added_text.contains("old_upstream"),
+        "the added line is the working-tree raw_code line; got {added_text:?}",
+    );
+    // And the surrounding raw_code lines are Context (line 1 `with src as (`).
+    assert!(
+        lines.iter().any(|l| l["kind"] == "context"
+            && l["text"]
+                .as_str()
+                .is_some_and(|t| t.contains("with src as"))),
+        "the unchanged raw_code lines render as Context; got {kinds:?}",
     );
 }
 

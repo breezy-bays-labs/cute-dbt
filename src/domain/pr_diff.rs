@@ -190,6 +190,38 @@ pub fn hunk_touches_block(block_start: usize, block_end: usize, hunk: &Hunk) -> 
     }
 }
 
+/// A contiguous source block addressed for diff reconstruction: the verbatim
+/// text plus its 1-based inclusive new-side line span.
+///
+/// A borrowed function-argument helper (NOT owned/serialized POD — it never
+/// enters the domain model or the wire payload, so it does not breach the
+/// POD-only-domain rule). Its purpose is purely to bind `raw`,
+/// `block_start`, and `block_end` into one value so the two widened
+/// reconstruction entry points ([`block_aligns_with_hunks`] /
+/// `reconstruct_one`) can't transpose the two adjacent `usize` bounds at a
+/// call site. The `unit_test` YAML block (#96) builds it from
+/// `(&block.raw, block.block_start, block.block_end)`; a model's SQL
+/// `raw_code` (#111) from the whole-file span. `hunk_touches_block` keeps
+/// its `(start, end, hunk)` arity (it takes no `raw`).
+#[derive(Debug, Clone, Copy)]
+pub struct BlockSpan<'a> {
+    /// The block's verbatim text (the slicer keeps `\r`; callers pass it as
+    /// authored, `split('\n')`-framed).
+    pub raw: &'a str,
+    /// 1-based inclusive first new-side line of the block.
+    pub start: usize,
+    /// 1-based inclusive last new-side line of the block.
+    pub end: usize,
+}
+
+impl<'a> BlockSpan<'a> {
+    /// Construct from the verbatim text and its 1-based inclusive span.
+    #[must_use]
+    pub fn new(raw: &'a str, start: usize, end: usize) -> Self {
+        Self { raw, start, end }
+    }
+}
+
 /// Whether the diff's hunks still line up with the working-tree block — the
 /// revision-alignment (N7b) drift guard.
 ///
@@ -210,11 +242,10 @@ pub fn hunk_touches_block(block_start: usize, block_end: usize, hunk: &Hunk) -> 
 /// (a hunk may straddle the block edge); a hunk with no `+` lines (a pure
 /// deletion) is vacuously aligned.
 ///
-/// The block is addressed by `(raw, block_start, block_end)` — the
-/// content-agnostic shape (cute-dbt#111) [`hunk_touches_block`] already
-/// uses, so the same drift guard serves the `unit_test` YAML block (#96)
-/// and a model's SQL `raw_code` (#111). YAML callers pass
-/// `(&block.raw, block.block_start, block.block_end)`.
+/// The block is addressed by a [`BlockSpan`] — the content-agnostic shape
+/// (cute-dbt#111), so the same drift guard serves the `unit_test` YAML
+/// block (#96) and a model's SQL `raw_code` (#111). YAML callers build
+/// `BlockSpan::new(&block.raw, block.block_start, block.block_end)`.
 ///
 /// **Whitespace-EXACT by design.** This is the N7b revision-staleness
 /// check (does the diff's new side still describe the working tree?), so a
@@ -223,20 +254,15 @@ pub fn hunk_touches_block(block_start: usize, block_end: usize, hunk: &Hunk) -> 
 /// downstream of N7b, to the removed-vs-added change test in
 /// `reconstruct_one`.
 #[must_use]
-pub fn block_aligns_with_hunks(
-    raw: &str,
-    block_start: usize,
-    block_end: usize,
-    hunks: &[Hunk],
-) -> bool {
-    let block_lines: Vec<&str> = raw.split('\n').collect();
+pub fn block_aligns_with_hunks(span: &BlockSpan, hunks: &[Hunk]) -> bool {
+    let block_lines: Vec<&str> = span.raw.split('\n').collect();
     for hunk in hunks {
         for (k, added) in hunk.added_lines.iter().enumerate() {
             let file_line = hunk.new_start + k; // 1-based new-side line
-            if file_line < block_start || file_line > block_end {
+            if file_line < span.start || file_line > span.end {
                 continue; // outside this block — not this block's concern
             }
-            let offset = file_line - block_start; // 0-based into raw
+            let offset = file_line - span.start; // 0-based into raw
             let Some(actual) = block_lines.get(offset) else {
                 return false; // claims a line the block doesn't have
             };
@@ -289,7 +315,8 @@ pub fn block_changed_by_hunks(block: Option<&UnitTestYamlBlock>, hunks: &[Hunk])
     let Some(block) = block else {
         return true; // absent block → conservative keep
     };
-    if !block_aligns_with_hunks(&block.raw, block.block_start, block.block_end, hunks) {
+    let span = BlockSpan::new(&block.raw, block.block_start, block.block_end);
+    if !block_aligns_with_hunks(&span, hunks) {
         return true; // stale diff (N7b mismatch) → conservative keep
     }
     hunks
@@ -487,7 +514,8 @@ pub fn reconstruct_block_diffs(
             .unit_test(id)
             .and_then(UnitTest::original_file_path)
             .map_or(&[][..], |ofp| index.hunks_for(ofp));
-        if !block_aligns_with_hunks(&block.raw, block.block_start, block.block_end, hunks) {
+        let span = BlockSpan::new(&block.raw, block.block_start, block.block_end);
+        if !block_aligns_with_hunks(&span, hunks) {
             continue; // stale diff → plain drawer
         }
         let touching: Vec<&Hunk> = hunks
@@ -497,7 +525,7 @@ pub fn reconstruct_block_diffs(
         if touching.is_empty() {
             continue; // change is elsewhere in the file → plain drawer
         }
-        let diff = reconstruct_one(&block.raw, block.block_start, block.block_end, &touching);
+        let diff = reconstruct_one(&span, &touching);
         // A purely-whitespace edit (every touching hunk dropped by
         // `reconstruct_one`) leaves an all-Context diff → no drawer diff
         // (cute-dbt#111). The change-pair still kept the test `updated` via
@@ -577,20 +605,21 @@ fn model_sql_diff(model: &Node, index: &NormalizedDiffIndex) -> Option<BlockDiff
     // Strip git's single trailing terminator (engine-divergent — see the
     // module-level fn doc). A real blank line at EOF survives.
     let raw = raw_code.strip_suffix('\n').unwrap_or(raw_code);
-    let (block_start, block_end) = (1, raw.split('\n').count());
+    // Whole-file span: 1..=line count.
+    let span = BlockSpan::new(raw, 1, raw.split('\n').count());
 
     let hunks = index.hunks_for(ofp);
-    if !block_aligns_with_hunks(raw, block_start, block_end, hunks) {
+    if !block_aligns_with_hunks(&span, hunks) {
         return None; // stale diff (N7b) → plain SQL view
     }
     let touching: Vec<&Hunk> = hunks
         .iter()
-        .filter(|h| hunk_touches_block(block_start, block_end, h))
+        .filter(|h| hunk_touches_block(span.start, span.end, h))
         .collect();
     if touching.is_empty() {
         return None; // .sql not touched (model in scope via a changed test)
     }
-    let diff = reconstruct_one(raw, block_start, block_end, &touching);
+    let diff = reconstruct_one(&span, &touching);
     // Whitespace-only model edit → all-Context → no diff (plain SQL).
     diff.has_real_change().then_some(diff)
 }
@@ -662,11 +691,30 @@ fn removed_diff_lines(h: &Hunk) -> Vec<DiffLine> {
         .collect()
 }
 
+/// Whether a hunk has the `--unified=0` shape the reconstruction is
+/// contracted on: its new-side footprint (`new_len`, from the `@@` range)
+/// equals its recorded `+` body count (`added_lines.len()`).
+///
+/// Under `--unified=0` this always holds — pure insertion `N == N`, pure
+/// deletion `0 == 0`, replacement `N == N`. A default (context-bearing)
+/// `git diff` violates it: the `cli::pr_diff` parser drops the ` `-prefixed
+/// context lines, so `new_len > added_lines.len()`. cute-dbt is spec'd on
+/// `--unified=0`; a context-bearing hunk is not a trustworthy line-precise
+/// diff, so [`reconstruct_one`] degrades the whole block to the plain view
+/// rather than panic on the body/footprint mismatch or mislabel
+/// the uncovered new-side lines as Added ("cute-dbt never panics on a bad
+/// diff"). The check is the per-hunk basis of that whole-block degrade.
+fn hunk_is_unified_zero(h: &Hunk) -> bool {
+    h.new_len == h.added_lines.len()
+}
+
 /// Fold one hunk's edits into `edits`. The removed bodies splice before the
 /// hunk's anchor (clamped into the block); each covered new-side line is a
 /// real addition unless it is the new side of a ws-only pair (cute-dbt#111,
 /// then it stays Context); a clean 1:1 replacement records the added line's
-/// intra-line emphasis.
+/// intra-line emphasis. The caller has already verified every touching hunk
+/// is [`hunk_is_unified_zero`], so iterating `0..h.new_len` indexes
+/// `added_lines`/`removed_lines` only within bounds.
 fn fold_hunk_edits(edits: &mut HunkEdits, h: &Hunk, bs: usize, be: usize) {
     let anchor = if h.new_len == 0 {
         h.new_start + 1
@@ -716,13 +764,12 @@ fn block_line_diff(edits: &HunkEdits, line_no: usize, text: String) -> DiffLine 
 /// touching it (cute-dbt#96, generalized to any source block at
 /// cute-dbt#111).
 ///
-/// The block is addressed by `(raw, block_start, block_end)` — the
-/// content-agnostic shape, so the same reconstruction serves the
-/// `unit_test` YAML block (#96, `(&block.raw, block.block_start,
-/// block.block_end)`) and a model's SQL `raw_code` (#111, the whole-file
-/// span). Callers pass `raw` already trailing-`\n`-normalized to git's
-/// line frame so `raw.split('\n')` lines up with the hunks' new-side
-/// numbering.
+/// The block is addressed by a [`BlockSpan`] — the content-agnostic shape,
+/// so the same reconstruction serves the `unit_test` YAML block (#96,
+/// `BlockSpan::new(&block.raw, block.block_start, block.block_end)`) and a
+/// model's SQL `raw_code` (#111, the whole-file span). Callers pass `raw`
+/// already trailing-`\n`-normalized to git's line frame so `raw.split('\n')`
+/// lines up with the hunks' new-side numbering.
 ///
 /// **Whitespace-only line-pairs render as Context** ([`pair_is_ws_only`]):
 /// a re-indentation / trailing-whitespace / blank-churn edit is not a
@@ -730,21 +777,33 @@ fn block_line_diff(edits: &HunkEdits, line_no: usize, text: String) -> DiffLine 
 /// splice, no emphasis. When every change in the block is whitespace-only
 /// the result is all-Context; the caller tests [`BlockDiff::has_real_change`]
 /// and emits no [`BlockDiff`] so the view falls back to plain text.
-fn reconstruct_one(
-    raw: &str,
-    block_start: usize,
-    block_end: usize,
-    touching: &[&Hunk],
-) -> BlockDiff {
-    let block_lines: Vec<String> = raw.split('\n').map(trim_cr).collect();
-    let (bs, be) = (block_start, block_end);
+///
+/// **Degrades to the plain view on a non-`--unified=0` hunk**
+/// ([`hunk_is_unified_zero`]): cute-dbt is contracted on `--unified=0`, but
+/// the parser accepts a default-context `git diff` (`new_len >
+/// added_lines.len()`). Rather than panic on the body/footprint mismatch or
+/// mislabel uncovered new-side lines as Added, an all-Context diff is
+/// returned (→ `has_real_change()` is false → caller shows plain text),
+/// consistent with the stale-diff degrade.
+fn reconstruct_one(span: &BlockSpan, touching: &[&Hunk]) -> BlockDiff {
+    let block_lines: Vec<String> = span.raw.split('\n').map(trim_cr).collect();
+    let (bs, be) = (span.start, span.end);
+
+    // Contract guard: every touching hunk must be `--unified=0`-shaped
+    // (`new_len == added_lines.len()`). A context-bearing / malformed hunk
+    // makes the line-precise reconstruction untrustworthy (and would index
+    // `added_lines` out of bounds), so degrade the whole block to the plain
+    // view — render every line as Context.
+    let trustworthy = touching.iter().all(|h| hunk_is_unified_zero(h));
 
     // Removed-line groups to splice immediately before a given new-side
     // line; `added_real` marks genuine (non-whitespace) additions;
     // `added_emphasis` carries the clean-1:1 intra-line span (cute-dbt#111).
     let mut edits = HunkEdits::default();
-    for h in touching {
-        fold_hunk_edits(&mut edits, h, bs, be);
+    if trustworthy {
+        for h in touching {
+            fold_hunk_edits(&mut edits, h, bs, be);
+        }
     }
 
     let mut lines: Vec<DiffLine> = Vec::new();
@@ -1011,9 +1070,7 @@ mod tests {
         let block = block_at(ALIGN_RAW, 2); // [2, 4]
         // Replace line 3 with the line that is actually there → aligned.
         assert!(block_aligns_with_hunks(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &[repl(3, &["    model: m"])]
         ));
     }
@@ -1026,9 +1083,7 @@ mod tests {
         // 1`, not `new_start - 1` — pins the per-line index arithmetic
         // (`file_line = new_start + k`) so a `+`→`-` slip on `k` is caught.
         assert!(block_aligns_with_hunks(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &[repl(3, &["    model: m", "    given: []"])]
         ));
     }
@@ -1038,9 +1093,7 @@ mod tests {
         let block = block_at(ALIGN_RAW, 2); // [2, 4]
         // Claims "    model: m" at line 2, but line 2 is "  - name: t".
         assert!(!block_aligns_with_hunks(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &[repl(2, &["    model: m"])]
         ));
     }
@@ -1049,9 +1102,7 @@ mod tests {
     fn block_misaligns_when_added_line_content_is_corrupted() {
         let block = block_at(ALIGN_RAW, 2); // [2, 4]
         assert!(!block_aligns_with_hunks(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &[repl(3, &["    model: CORRUPTED"])]
         ));
     }
@@ -1061,9 +1112,7 @@ mod tests {
         let block = block_at("  - name: t\n    model: m", 8); // [8, 9]
         // A hunk in the file header — entirely above the block → ignored.
         assert!(block_aligns_with_hunks(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &[repl(1, &["version: 3"])]
         ));
     }
@@ -1073,9 +1122,7 @@ mod tests {
         let block = block_at("  - name: t\n    model: m", 2);
         // A deletion carries no `+` lines → nothing to verify → aligned.
         assert!(block_aligns_with_hunks(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &[del(2)]
         ));
     }
@@ -1086,9 +1133,7 @@ mod tests {
         // (str::lines). A CRLF working tree must not read as stale.
         let block = block_at("  - name: t\r\n    model: m\r", 2); // ["  - name: t\r", "    model: m\r"]
         assert!(block_aligns_with_hunks(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &[repl(3, &["    model: m"])]
         ));
     }
@@ -1105,7 +1150,7 @@ mod tests {
         // block_end overstated to 5; the hunk claims line 4 (offset 3) which
         // raw doesn't have.
         assert!(
-            !block_aligns_with_hunks(raw, 1, 5, &[repl(4, &["phantom"])]),
+            !block_aligns_with_hunks(&BlockSpan::new(raw, 1, 5), &[repl(4, &["phantom"])]),
             "a hunk claiming a line beyond `raw` is stale, not aligned",
         );
     }
@@ -1435,9 +1480,7 @@ mod tests {
             ..block
         };
         let got = reconstruct_one(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &hunks.iter().collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -1469,9 +1512,7 @@ mod tests {
             &["    model: orders"],
         )];
         let got = reconstruct_one(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &hunks.iter().collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -1492,9 +1533,7 @@ mod tests {
         // Deletion gap after new-side line 11 → removed renders between 11 and 12.
         let hunks = [delete(11, &["      # note"])];
         let got = reconstruct_one(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &hunks.iter().collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -1514,9 +1553,7 @@ mod tests {
         let block = block_at("  - name: t\n    model: m\n    given: []", 10); // [10,12]
         let hunks = [delete(9, &["  # leading"])];
         let got = reconstruct_one(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &hunks.iter().collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -1536,9 +1573,7 @@ mod tests {
         let block = block_at("  - name: t\n    model: m\n    given: []", 10); // [10,12]
         let hunks = [delete(12, &["  # trailing"])];
         let got = reconstruct_one(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &hunks.iter().collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -1559,9 +1594,7 @@ mod tests {
         let block = block_at("    model: m2\n    given: []\n      rows: []", 10); // [10,12]
         let hunks = [replace(9, &["old8", "old9"], &["new9", "    model: m2"])];
         let got = reconstruct_one(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &hunks.iter().collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -1585,9 +1618,7 @@ mod tests {
             replace(13, &["oldB"], &["newB"]),
         ];
         let got = reconstruct_one(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &hunks.iter().collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -1610,9 +1641,7 @@ mod tests {
         let block = block_at("  - name: t\nnewA\nnewB\n    given: []", 10); // [10,13]
         let hunks = [replace(11, &["oldA", "oldB"], &["newA", "newB"])];
         let got = reconstruct_one(
-            &block.raw,
-            block.block_start,
-            block.block_end,
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
             &hunks.iter().collect::<Vec<_>>(),
         );
         assert_eq!(
@@ -1629,11 +1658,48 @@ mod tests {
     }
 
     #[test]
-    fn reconstruct_does_not_panic_on_a_malformed_hunk_with_an_empty_added_body() {
-        // A diff can declare `new_len: 1` yet carry no `+` body (malformed).
-        // The clean-1:1 emphasis path indexes `added_lines[0]`, so the
-        // `added_lines.len() == 1` guard is what keeps this from panicking
-        // (CodeRabbit #110): it degrades to a line-level Added, no emphasis.
+    fn reconstruct_two_removed_one_added_is_not_clean_1to1_no_emphasis() {
+        // `is_clean_1to1` requires ALL THREE of new_len==1, removed.len()==1,
+        // added.len()==1 (it gates intra-line emphasis). A `@@ -N,2 +N,1 @@`
+        // shape — TWO old lines collapse into ONE new line — is a valid
+        // `--unified=0` hunk (new_len(1) == added.len(1)) but NOT a clean 1:1
+        // (removed.len()==2). The removed lines must carry NO emphasis: a
+        // mutant relaxing `is_clean_1to1`'s `&&` to `||` would qualify this as
+        // clean and emit a spurious <strong> on removed[0] — this pins both
+        // `&&`s (cargo mutants 2026-05-31).
+        let block = block_at("  - name: t\n    model: m\n    given: []", 10); // [10,12]
+        let hunks = [replace(
+            11,
+            &["    model: was", "    extra: gone"],
+            &["    model: m"],
+        )];
+        let got = reconstruct_one(
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
+            &hunks.iter().collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            got.lines,
+            vec![
+                ctx("  - name: t"),
+                rem("    model: was"), // NO emphasis (not a clean 1:1)
+                rem("    extra: gone"),
+                add("    model: m"), // NO emphasis
+                ctx("    given: []"),
+            ],
+            "a 2-removed/1-added replacement carries no intra-line emphasis",
+        );
+    }
+
+    #[test]
+    fn reconstruct_degrades_on_a_malformed_hunk_with_an_empty_added_body() {
+        // A diff that declares `new_len: 1` yet carries no `+` body is
+        // `new_len(1) != added_lines.len(0)` — the same non-`--unified=0`
+        // mismatch as a context-bearing hunk, so it degrades the whole block
+        // to the plain view (all Context). This both avoids the
+        // `added_lines[0]` OOB panic the #110 review flagged AND is honest:
+        // a hunk that claims a new-side line with no recorded `+` body is not
+        // a trustworthy line-precise diff, so cute-dbt shows the plain text
+        // rather than fabricate an Added line from the block content.
         let block = block_at("  - name: t\n    model: m\n    given: []", 10); // [10,12]
         let hunk = Hunk {
             new_start: 11,
@@ -1641,15 +1707,21 @@ mod tests {
             removed_lines: vec!["    model: was".to_owned()],
             added_lines: Vec::new(),
         };
-        let got = reconstruct_one(&block.raw, block.block_start, block.block_end, &[&hunk]);
+        let got = reconstruct_one(
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
+            &[&hunk],
+        );
         assert_eq!(
             got.lines,
             vec![
                 ctx("  - name: t"),
-                rem("    model: was"),
-                add("    model: m"),
+                ctx("    model: m"),
                 ctx("    given: []"),
             ],
+        );
+        assert!(
+            !got.has_real_change(),
+            "malformed hunk degrades to plain view"
         );
     }
 
@@ -1761,7 +1833,7 @@ mod tests {
     // ----- BlockDiff serde: the exact JS wire shape -----
 
     #[test]
-    fn yaml_block_diff_serializes_to_the_exact_renderyamldiff_contract() {
+    fn block_diff_serializes_to_the_exact_renderblockdiff_contract() {
         let diff = BlockDiff {
             lines: vec![
                 ctx("  - name: t"),
@@ -1848,7 +1920,10 @@ mod tests {
             &["select a", "from t"],
             &["  select a", "from u"],
         )];
-        let got = reconstruct_one(raw, 1, 2, &hunks.iter().collect::<Vec<_>>());
+        let got = reconstruct_one(
+            &BlockSpan::new(raw, 1, 2),
+            &hunks.iter().collect::<Vec<_>>(),
+        );
         // The whitespace goal is met: line 1 ("  select a") renders as
         // CONTEXT (not Added) and only the substantive "from t"→"from u"
         // pair diffs. The removed line splices at the hunk anchor (its
@@ -1901,7 +1976,10 @@ mod tests {
         // new-side line is Context. Frame: 3 context lines, no real change.
         let raw = "  - name: t\n    model: m\n    given: []"; // [10,12]
         let hunks = [replace(11, &["model: m"], &["    model: m"])];
-        let got = reconstruct_one(raw, 10, 12, &hunks.iter().collect::<Vec<_>>());
+        let got = reconstruct_one(
+            &BlockSpan::new(raw, 10, 12),
+            &hunks.iter().collect::<Vec<_>>(),
+        );
         assert_eq!(
             got.lines,
             vec![
@@ -1925,7 +2003,10 @@ mod tests {
             replace(11, &["model: m"], &["    model: m"]), // ws-only → dropped
             replace(12, &["    given: []"], &["    given: [1]"]), // real → kept
         ];
-        let got = reconstruct_one(raw, 10, 12, &hunks.iter().collect::<Vec<_>>());
+        let got = reconstruct_one(
+            &BlockSpan::new(raw, 10, 12),
+            &hunks.iter().collect::<Vec<_>>(),
+        );
         // Common prefix "    given: [" (12); removed "]" has no own changed
         // span (it is the shorter side's shared suffix → None); added "1]"
         // contributes "1" at codepoint 12.
@@ -2169,6 +2250,87 @@ mod tests {
         };
         let index = NormalizedDiffIndex::new(&diff, None);
         let scope = ModelInScopeSet::from_iter([NodeId::new("model.s.noraw")]);
+        assert!(reconstruct_model_sql_diffs(&current, &scope, &index).is_empty());
+    }
+
+    #[test]
+    fn reconstruct_model_sql_diffs_skips_a_model_with_empty_raw_code() {
+        // A model shipping `raw_code: ""` (some node types do) is treated as
+        // absent — matches `build_model_payload`'s `raw_sql` filter, so we
+        // never compute a diff the template would not show.
+        let ofp = "models/empty.sql";
+        let m = model_with_raw("model.s.empty", "", ofp);
+        let current = manifest_with_models(vec![m]);
+        let diff = PrDiff {
+            files: vec![FileHunks {
+                path: ofp.to_owned(),
+                hunks: vec![replace(1, &["old"], &["new"])],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        let scope = ModelInScopeSet::from_iter([NodeId::new("model.s.empty")]);
+        assert!(reconstruct_model_sql_diffs(&current, &scope, &index).is_empty());
+    }
+
+    // ----- Non-`--unified=0` (context-bearing) hunk safety -----
+    //
+    // A hunk's `new_len` (from the `@@` header range) is independent of
+    // `added_lines.len()` (the counted `+` bodies). cute-dbt is contracted on
+    // `--unified=0` (`new_len == added_lines.len()`), but the parser ACCEPTS
+    // a default-context `git diff` (`consume_body_line` drops context lines),
+    // yielding `new_len > added_lines.len()`. Reconstruction must never panic
+    // on that (the "cute-dbt never panics on a bad diff" contract) and must
+    // not mislabel context lines as Added — it degrades the block to the
+    // plain view, consistent with the stale→plain-view fallback.
+
+    /// A context-bearing hunk: `new_len` spans more new-side lines than the
+    /// `added_lines` body carries (the default-`git diff` shape the
+    /// `--unified=0` contract excludes).
+    fn context_bearing(new_start: usize, new_len: usize, removed: &[&str], added: &[&str]) -> Hunk {
+        Hunk {
+            new_start,
+            new_len, // deliberately != added.len()
+            removed_lines: removed.iter().map(|s| (*s).to_owned()).collect(),
+            added_lines: added.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn reconstruct_one_degrades_on_a_context_bearing_hunk_without_panicking() {
+        // `new_len = 3` but only one `+` body — a default-context git diff.
+        // Must NOT panic (no `added_lines[k]` OOB) and must NOT label the
+        // uncovered new-side lines as Added.
+        let raw = "select a\nfrom t\nwhere x"; // [1,3]
+        let hunks = [context_bearing(1, 3, &["from was"], &["from t"])];
+        let got = reconstruct_one(
+            &BlockSpan::new(raw, 1, 3),
+            &hunks.iter().collect::<Vec<_>>(),
+        );
+        // Degrade to plain view: a context-bearing hunk is not a trustworthy
+        // line-precise diff, so the block carries no Added/Removed lines.
+        assert!(
+            !got.has_real_change(),
+            "a context-bearing hunk degrades to the plain view; got {:?}",
+            got.lines,
+        );
+    }
+
+    #[test]
+    fn reconstruct_model_sql_diffs_degrades_on_a_context_bearing_hunk() {
+        let ofp = "models/ctx.sql";
+        let m = model_with_raw("model.s.ctx", "select a\nfrom t\nwhere x", ofp);
+        let current = manifest_with_models(vec![m]);
+        // A default-context git diff: the `@@` claims 3 new-side lines but
+        // only one `+` body is recorded (parser drops context lines).
+        let diff = PrDiff {
+            files: vec![FileHunks {
+                path: ofp.to_owned(),
+                hunks: vec![context_bearing(1, 3, &["from was"], &["from t"])],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        let scope = ModelInScopeSet::from_iter([NodeId::new("model.s.ctx")]);
+        // No panic; degrades to plain SQL view (no entry).
         assert!(reconstruct_model_sql_diffs(&current, &scope, &index).is_empty());
     }
 }
