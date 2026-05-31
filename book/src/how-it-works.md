@@ -213,6 +213,47 @@ page lays out as:
    The inline diff is **`--pr-diff`-only**: baseline mode computes
    `changed` from a structural manifest diff with no hunks, so it has no
    inline YAML diff and the drawer always shows the authored YAML.
+6. **Model SQL section** — the model's **raw Jinja source** (`raw_code`
+   from the manifest — the diffable layer; compiled SQL is generated and
+   un-diffable). When the PR diff changed the model's `.sql`, this section
+   adds a **Raw ↔ Diff** toggle and opens on the **Diff** view, showing
+   the inline diff of the model's SQL (cute-dbt#111). The diff reuses the
+   exact line-diff substrate the Authoring YAML drawer uses — same
+   change-pair rendering, same intra-line emphasis, same N7b drift guard.
+   `raw_code` is read straight from the manifest (no `--project-root`
+   filesystem read needed, unlike the YAML drawer), so the SQL diff fires
+   on any changed model `.sql`. When there's no SQL diff — baseline mode,
+   the model is in scope only via a changed *test*, the diff is stale, or
+   the change was whitespace-only — the section shows the plain raw SQL
+   exactly as before. dbt engines differ in one detail cute-dbt
+   normalizes away: dbt-core ships `raw_code` with the file's trailing
+   newline stripped, dbt-fusion ships it byte-identical but keeping the
+   trailing newline; cute-dbt strips a single trailing newline so the SQL
+   diff renders identically regardless of which engine compiled the
+   manifest.
+
+### Whitespace-only changes are ignored (standard)
+
+Both inline diffs (the YAML drawer and the Model SQL diff) **ignore
+whitespace-only differences** as standard behavior — no flag, no opt-in.
+A re-indentation, a trailing-whitespace edit, or a blank-line churn that
+leaves the substantive content unchanged renders as **context**, not as a
+change (`git --ignore-all-space` semantics, compared per line-pair). If
+*every* change in a block is whitespace-only, cute-dbt emits **no inline
+diff** and shows the plain view. The drift guard upstream stays
+whitespace-exact (a whitespace divergence between the diff and the
+working tree is genuine revision drift, not a no-op), so whitespace
+insensitivity applies only to the change/no-change decision, never to the
+staleness check.
+
+This is a best-effort filter over git's pre-computed `--unified=0` hunks,
+not a re-diff: cute-dbt cannot re-pair lines git already split. The
+dominant cases (re-indentation, trailing whitespace, blank-line churn)
+are handled; for a multi-line replacement that mixes a re-indent with a
+real edit, the removed line may render at the hunk's top rather than
+paired to its own offset — the change-set stays correct, only the line
+placement is approximate. For YAML, an indentation change that alters
+*structure* still surfaces via the accompanying value changes.
 
 The description banner started life at the top of the test-selection
 section. It moved to between the CTE DAG and the inspect/expected

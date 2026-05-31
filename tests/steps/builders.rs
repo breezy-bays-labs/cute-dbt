@@ -163,6 +163,39 @@ pub fn model_node_with_original_file_path(
     )
 }
 
+/// A deterministic multi-line `raw_code` (raw Jinja, dbt-core shape:
+/// trailing newline already stripped) for the model-SQL-diff scenarios
+/// (cute-dbt#111). Line 2 is the value a `ModelSqlTargetKind::Edit` /
+/// `Whitespace` hunk rewrites; the synthesizer matches its `+` line to
+/// this content so N7b aligns.
+pub const MODEL_SQL_RAW_CODE: &str =
+    "with src as (\n    select * from {{ ref('upstream') }}\n)\nselect * from src";
+
+/// Construct a model `Node` carrying both `raw_code` (so the Model SQL
+/// section + the cute-dbt#111 SQL diff can render) and an explicit
+/// `original_file_path`. `compiled` keeps the model past Stage-2 preflight.
+#[must_use]
+pub fn model_node_with_raw_code(
+    bare: &str,
+    checksum: &str,
+    compiled: Option<&str>,
+    original_file_path: &str,
+    raw_code: &str,
+) -> Node {
+    Node::new(
+        model_id(bare),
+        "model",
+        Checksum::new("sha256", checksum),
+        compiled.map(str::to_owned),
+        Some(raw_code.to_owned()),
+        DependsOn::default(),
+        Some(original_file_path.to_owned()),
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+}
+
 /// Construct a `UnitTest` targeting `target_bare` with an explicit
 /// `original_file_path` (the declaring `.yml` file the PR-diff path
 /// matches against). Given/expect blocks are empty — the PR-diff

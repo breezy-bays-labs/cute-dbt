@@ -151,3 +151,111 @@ fn valid_diff_touching_unit_test_yaml_puts_that_test_in_scope_exit_0() {
         "the banner states PR-diff provenance",
     );
 }
+
+#[test]
+fn a_default_context_git_diff_does_not_panic_and_renders_a_report() {
+    // BLOCKER regression (review 2026-05-31): cute-dbt is contracted on
+    // `--unified=0`, but the parser ACCEPTS a default `git diff` (3 context
+    // lines), yielding hunks whose `new_len` (from the `@@` range) exceeds
+    // `added_lines.len()` (context lines are dropped). The #111
+    // reconstruction must NOT panic on that body/footprint mismatch (the
+    // "cute-dbt never panics on a bad diff" contract) — it degrades the
+    // affected block to the plain view. This drives a default-context diff
+    // touching a real model `.sql` end-to-end through `parse_diff` →
+    // `reconstruct_model_sql_diffs` (+ `reconstruct_block_diffs`) via the
+    // binary, asserting a clean exit 0 + a written report.
+    let current = fixture("jaffle-shop-current.json");
+    let diff = tmp("cfp-default-context.patch");
+    // A default `git diff --unified=3`-shaped hunk: `@@ -1,5 +1,5 @@` claims
+    // 5 new-side lines but records ONE `+` body (the rest are ` `-context).
+    // `customers` is a real compiled model (models/customers.sql, raw_code
+    // begins `with customers as (`).
+    fs::write(
+        &diff,
+        "--- a/models/customers.sql\n\
++++ b/models/customers.sql\n\
+@@ -1,5 +1,5 @@\n\
+ with customers as (\n\
+ \n\
+-    select * from raw.customers\n\
++    select * from raw.customers_v2\n\
+     where 1=1\n\
+ ),\n",
+    )
+    .expect("write default-context patch");
+    let out = tmp("cfp-default-context-report.html");
+    clear(&out);
+
+    let output = run_cli(&[
+        "--manifest",
+        s(&current),
+        "--pr-diff",
+        &format!("@{}", s(&diff)),
+        "--out",
+        s(&out),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "a default-context git diff must render (exit 0), not panic; stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        out.exists(),
+        "a report is written for a default-context diff"
+    );
+    let html = fs::read_to_string(&out).expect("report is readable");
+    assert!(
+        html.contains("from PR file diff"),
+        "the report banner states PR-diff provenance",
+    );
+    // cute-dbt#111: a one-line stderr note tells the user the diff isn't
+    // `--unified=0` so the plain views aren't mistaken for a broken feature.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not `git diff --unified=0`")
+            && stderr.contains("--unified=0 for inline diffs"),
+        "a context-bearing diff emits the actionable --unified=0 note; stderr: {stderr}",
+    );
+}
+
+#[test]
+fn a_unified_zero_diff_emits_no_context_bearing_note() {
+    // The converse of the above: a clean `--unified=0` diff (every hunk
+    // `new_len == added_lines.len()`) must NOT emit the context-bearing note
+    // — inline diffs work, so the note would be misleading noise.
+    let current = fixture("jaffle-shop-current.json");
+    let diff = tmp("cfp-unified-zero.patch");
+    // `@@ -3,1 +3,1 @@` with exactly one `-`/`+` body, no context lines.
+    fs::write(
+        &diff,
+        "--- a/models/customers.sql\n\
++++ b/models/customers.sql\n\
+@@ -3,1 +3,1 @@\n\
+-    select * from raw.customers\n\
++    select * from raw.customers_v2\n",
+    )
+    .expect("write unified=0 patch");
+    let out = tmp("cfp-unified-zero-report.html");
+    clear(&out);
+
+    let output = run_cli(&[
+        "--manifest",
+        s(&current),
+        "--pr-diff",
+        &format!("@{}", s(&diff)),
+        "--out",
+        s(&out),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "a --unified=0 diff renders (exit 0); stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("not `git diff --unified=0`"),
+        "a clean --unified=0 diff emits no context-bearing note; stderr: {stderr}",
+    );
+}

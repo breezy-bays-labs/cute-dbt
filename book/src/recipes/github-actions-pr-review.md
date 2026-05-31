@@ -93,9 +93,14 @@ cute-dbt \
 "read from this file"). cute-dbt parses the diff's `+++ b/<path>` headers
 to pick the in-scope set and its `@@ … @@` hunks to flag which tests the
 PR actually edited (block-precise updated detection + the inline YAML diff
-drawer key off the hunk spans). `--project-root dbt_project` rewrites the
-repo-relative diff paths so they match the manifest's project-relative
-`original_file_path`s (drop it if your dbt project is at the repo root).
+drawer key off the hunk spans). When a hunk changes a model's `.sql`, the
+Model SQL section also shows an inline **SQL diff** of the model's raw
+Jinja with a Raw ↔ Diff toggle — same diff engine, keyed off the same
+hunks. Both inline diffs ignore whitespace-only edits as standard (a pure
+re-indent shows the plain view, not a noisy diff). `--project-root
+dbt_project` rewrites the repo-relative diff paths so they match the
+manifest's project-relative `original_file_path`s (drop it if your dbt
+project is at the repo root).
 cute-dbt parses the diff you hand it — it never shells out to `git` or
 reads `GITHUB_EVENT_PATH`, so the workflow stays in control of *how* the
 diff is produced.

@@ -66,8 +66,8 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, CteGraph, EdgeType, InScopeSet, Manifest, ModelInScopeSet, Node, NodeId,
-    UnitTest, UnitTestGiven, UnitTestYamlBlock, YamlBlockDiff, resolve_target_model,
+    BANNER_EMPTY_SCOPE, BlockDiff, CteGraph, EdgeType, InScopeSet, Manifest, ModelInScopeSet, Node,
+    NodeId, UnitTest, UnitTestGiven, UnitTestYamlBlock, resolve_target_model,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -204,6 +204,15 @@ pub struct ModelPayload {
     /// stay stable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_sql: Option<String>,
+    /// Inline diff of this model's RAW SQL (`raw_code`) when the PR diff
+    /// changed the model's `.sql` (cute-dbt#111) — present only in PR-diff
+    /// mode, block aligned + touched + a substantive (non-whitespace)
+    /// change. `None` (key omitted) for baseline mode, models in scope
+    /// only via a changed test, stale diffs, and whitespace-only edits, so
+    /// the template's Model SQL section falls back to the plain raw view.
+    /// Mirrors [`TestPayload::yaml_diff`]'s threading exactly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sql_diff: Option<BlockDiff>,
     /// Unit tests targeting this model that are in scope. Empty
     /// `[]` triggers the "0 unit tests wired" empty state.
     pub tests: Vec<TestPayload>,
@@ -324,7 +333,7 @@ pub struct TestPayload {
     /// fall outside the block, so the drawer falls back to the plain
     /// authored-YAML view. Mirrors `authoring_yaml`'s threading exactly.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub yaml_diff: Option<YamlBlockDiff>,
+    pub yaml_diff: Option<BlockDiff>,
     /// Ordered list of fixture inputs for the test (`given[…]`).
     pub given: Vec<GivenPayload>,
     /// Expected result block (`expect`).
@@ -498,7 +507,8 @@ pub fn build_payload(
     changed: &InScopeSet,
     models_in_scope: &ModelInScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
-    yaml_diffs: &HashMap<String, YamlBlockDiff>,
+    yaml_diffs: &HashMap<String, BlockDiff>,
+    sql_diffs: &HashMap<String, BlockDiff>,
     baseline_label: &str,
 ) -> ReportPayload {
     let model_tests = index_tests_for_models(current, models_in_scope);
@@ -515,6 +525,7 @@ pub fn build_payload(
             changed,
             authoring_yaml,
             yaml_diffs,
+            sql_diffs,
         ));
     }
     ReportPayload {
@@ -551,7 +562,8 @@ pub fn render_report(
     models_in_scope: &ModelInScopeSet,
     changed: &InScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
-    yaml_diffs: &HashMap<String, YamlBlockDiff>,
+    yaml_diffs: &HashMap<String, BlockDiff>,
+    sql_diffs: &HashMap<String, BlockDiff>,
     baseline_label: &str,
     scope_source: ScopeSource,
     report_title: &str,
@@ -563,6 +575,7 @@ pub fn render_report(
         models_in_scope,
         authoring_yaml,
         yaml_diffs,
+        sql_diffs,
         baseline_label,
     );
     // The empty-scope banner contract reads the TRUE in-scope set, not the
@@ -596,7 +609,8 @@ fn build_model_payload(
     tests: &[(&str, &UnitTest)],
     changed: &InScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
-    yaml_diffs: &HashMap<String, YamlBlockDiff>,
+    yaml_diffs: &HashMap<String, BlockDiff>,
+    sql_diffs: &HashMap<String, BlockDiff>,
 ) -> ModelPayload {
     let bare_name = leaf_segment(model.id().as_str()).to_owned();
     let compiled_code = model.compiled_code().unwrap_or_default();
@@ -609,6 +623,9 @@ fn build_model_payload(
         .raw_code()
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
+    // SQL diff is keyed by the model's FULL node id (the
+    // `reconstruct_model_sql_diffs` key), not the bare name.
+    let sql_diff = sql_diffs.get(model.id().as_str()).cloned();
     let test_payloads = tests
         .iter()
         .map(|(id, ut)| {
@@ -627,6 +644,7 @@ fn build_model_payload(
         dag: DagPayload { nodes, edges },
         compiled_sql,
         raw_sql,
+        sql_diff,
         tests: test_payloads,
         is_recursive,
     }
@@ -720,7 +738,7 @@ fn build_test_payload(
     graph: &CteGraph,
     changed: &InScopeSet,
     authoring_yaml: Option<&UnitTestYamlBlock>,
-    yaml_diff: Option<&YamlBlockDiff>,
+    yaml_diff: Option<&BlockDiff>,
 ) -> TestPayload {
     let given = unit_test
         .given()
@@ -883,8 +901,9 @@ fn leaf_segment(id: &str) -> &str {
 mod tests {
     use super::*;
     use crate::domain::{
-        Checksum, CteEdge, CteNode, DEFAULT_REPORT_TITLE, DependsOn, EdgeType, Manifest,
-        ManifestMetadata, NodeConfig, NodeId, UnitTest, UnitTestExpect, UnitTestGiven,
+        Checksum, CteEdge, CteNode, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind,
+        EdgeType, Manifest, ManifestMetadata, NodeConfig, NodeId, UnitTest, UnitTestExpect,
+        UnitTestGiven,
     };
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
@@ -1211,6 +1230,7 @@ mod tests {
             &ModelInScopeSet::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "main@a1f3c7e",
         );
         assert_eq!(payload.baseline, "main@a1f3c7e");
@@ -1230,6 +1250,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "baseline.json",
@@ -1261,10 +1282,75 @@ mod tests {
             &models,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(payload.models.len(), 1);
         assert_eq!(payload.models[0].raw_sql.as_deref(), Some(raw));
+    }
+
+    #[test]
+    fn build_payload_carries_sql_diff_keyed_by_full_model_id() {
+        // cute-dbt#111 — a model whose full node id is in the `sql_diffs`
+        // map surfaces `ModelPayload.sql_diff`. Keyed by the FULL id (the
+        // `reconstruct_model_sql_diffs` key), not the bare name.
+        let node = model_node("model.shop.dim_x", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.dim_x")]);
+        let mut sql_diffs = HashMap::new();
+        sql_diffs.insert(
+            "model.shop.dim_x".to_owned(),
+            BlockDiff {
+                lines: vec![DiffLine {
+                    kind: DiffLineKind::Added,
+                    text: "select 1".to_owned(),
+                    emphasis: None,
+                }],
+            },
+        );
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &sql_diffs,
+            "baseline.json",
+        );
+        assert_eq!(payload.models.len(), 1);
+        let sd = payload.models[0]
+            .sql_diff
+            .as_ref()
+            .expect("sql_diff present for the keyed model");
+        assert_eq!(sd.lines.len(), 1);
+        assert_eq!(sd.lines[0].kind, DiffLineKind::Added);
+    }
+
+    #[test]
+    fn build_payload_sql_diff_is_none_when_model_not_in_diff_map() {
+        // No entry for this model → sql_diff omitted (skip_serializing_if).
+        // The baseline path passes an empty map, so baseline reports never
+        // carry a sql_diff key — the manifest-digest snapshot is unmoved.
+        let node = model_node("model.shop.dim_y", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.dim_y")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        assert_eq!(payload.models.len(), 1);
+        assert!(payload.models[0].sql_diff.is_none());
+        // And it is omitted from the JSON wire (not `"sql_diff":null`).
+        let json = serde_json::to_string(&payload.models[0]).expect("serialize");
+        assert!(
+            !json.contains("sql_diff"),
+            "absent sql_diff must be omitted from the wire; got {json}",
+        );
     }
 
     #[test]
@@ -1279,6 +1365,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "baseline.json",
@@ -1301,6 +1388,7 @@ mod tests {
             &models,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(payload.models.len(), 1);
@@ -1320,6 +1408,7 @@ mod tests {
             &models,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(payload.models.len(), 1);
@@ -1334,6 +1423,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -1368,6 +1458,7 @@ mod tests {
             &manifest,
             &changed,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -1419,6 +1510,7 @@ mod tests {
             &models,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         // No models in scope → no payload entries; the indexer's None
@@ -1436,6 +1528,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -1460,6 +1553,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -1491,6 +1585,7 @@ mod tests {
             &models,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         assert_eq!(
@@ -1511,6 +1606,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -1537,6 +1633,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -1571,6 +1668,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -1611,6 +1709,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -1658,6 +1757,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -1713,6 +1813,7 @@ mod tests {
             &models,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         let test = &payload.models[0].tests[0];
@@ -1757,6 +1858,7 @@ mod tests {
             &models,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         let test = &payload.models[0].tests[0];
@@ -1792,6 +1894,7 @@ mod tests {
             &models,
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         let test = &payload.models[0].tests[0];
@@ -1812,6 +1915,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -1902,6 +2006,7 @@ mod tests {
             &InScopeSet::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -1939,6 +2044,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -1980,6 +2086,7 @@ mod tests {
             &InScopeSet::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -2007,6 +2114,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -2042,6 +2150,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -2102,6 +2211,7 @@ mod tests {
             &InScopeSet::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -2135,6 +2245,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "",
@@ -2173,6 +2284,7 @@ mod tests {
             &InScopeSet::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -2207,6 +2319,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "lab1@aaaaaaa",
@@ -2252,6 +2365,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",
@@ -2318,6 +2432,7 @@ mod tests {
             &in_scope,
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             "b",

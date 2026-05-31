@@ -40,10 +40,10 @@ use crate::adapters::manifest::{FileManifestSource, load_baseline};
 use crate::adapters::render::{ScopeSource, index_tests_for_models, render_report};
 use crate::adapters::source_yaml::FsSourceYamlReader;
 use crate::domain::{
-    DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NormalizedDiffIndex,
-    PreflightError, ScopeInput, ScopeSelection, UnitTestYamlBlock, YamlBlockDiff,
-    extract_unit_test_block, preflight_compiled, reconstruct_block_diffs, refine_changed_by_hunks,
-    select_in_scope,
+    BlockDiff, DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NormalizedDiffIndex,
+    PreflightError, ScopeInput, ScopeSelection, UnitTestYamlBlock, extract_unit_test_block,
+    preflight_compiled, reconstruct_block_diffs, reconstruct_model_sql_diffs,
+    refine_changed_by_hunks, select_in_scope,
 };
 use crate::ports::{ManifestSource, SourceYamlReader};
 
@@ -164,12 +164,32 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
     // PrDiff arm only — baseline mode has no hunks to reconstruct from, so
     // the drawer shows the plain authored YAML. Threaded into render
     // exactly like `authoring_yaml` (the slice spans are already in hand).
-    let yaml_diffs: HashMap<String, YamlBlockDiff> = match &scope_input {
+    let yaml_diffs: HashMap<String, BlockDiff> = match &scope_input {
         ScopeInput::PrDiff { index } => {
             reconstruct_block_diffs(&current, &changed, &authoring_yaml, index)
         }
         ScopeInput::Baseline { .. } => HashMap::new(),
     };
+    // Inline model SQL diffs (cute-dbt#111): reconstruct an in-place diff
+    // of each in-scope model's RAW `raw_code` whose `.sql` the PR diff
+    // changed. PrDiff arm only — baseline mode has no hunks, so the Model
+    // SQL section shows the plain raw view. `raw_code` comes from the
+    // manifest (no filesystem read needed, unlike the YAML drawer), so this
+    // reads `models_in_scope` directly; ADR-3 scope selection is untouched.
+    let sql_diffs: HashMap<String, BlockDiff> = match &scope_input {
+        ScopeInput::PrDiff { index } => {
+            reconstruct_model_sql_diffs(&current, &models_in_scope, index)
+        }
+        ScopeInput::Baseline { .. } => HashMap::new(),
+    };
+    // cute-dbt#111: a non-`--unified=0` diff degrades every affected block to
+    // the plain view (the `reconstruct_one` contract guard). Surface that ONCE
+    // on stderr so a user who forgot `--unified=0` isn't left thinking the
+    // inline diffs are broken. PrDiff arm only (baseline mode has no hunks);
+    // the domain predicate is pure — the I/O (`eprintln!`) lives here in cli.
+    if let ScopeInput::PrDiff { index } = &scope_input {
+        warn_if_not_unified_zero(index);
+    }
     let (report_title, report_subtitle) = resolve_report_strings(cli);
     let (baseline_label, scope_source) = scope_banner(cli, &scope_input);
     render(
@@ -180,6 +200,7 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
         &changed,
         &authoring_yaml,
         &yaml_diffs,
+        &sql_diffs,
         &baseline_label,
         scope_source,
         &report_title,
@@ -349,6 +370,28 @@ fn scope_banner(cli: &Cli, scope_input: &ScopeInput) -> (String, ScopeSource) {
     }
 }
 
+/// Emit a single stderr note when the supplied `--pr-diff` is not
+/// `git diff --unified=0` (cute-dbt#111).
+///
+/// A context-bearing diff degrades every affected block to the plain view
+/// (the `reconstruct_one` contract guard in `domain::pr_diff`), so without
+/// this note a user who forgot `--unified=0` would see plain views and
+/// assume the inline diffs are broken. The decision is a pure domain
+/// predicate ([`NormalizedDiffIndex::context_bearing_hunk_count`]); the
+/// `eprintln!` (the only I/O) lives here in cli, not in `domain`. Emitted
+/// once per run on the `PrDiff` arm only.
+fn warn_if_not_unified_zero(index: &NormalizedDiffIndex) {
+    let n = index.context_bearing_hunk_count();
+    if n > 0 {
+        let plural = if n == 1 { "hunk" } else { "hunks" };
+        eprintln!(
+            "cute-dbt: warning: the supplied diff is not `git diff --unified=0` \
+             ({n} context-bearing {plural}); inline diffs are disabled — showing \
+             plain views. Re-run the diff with --unified=0 for inline diffs."
+        );
+    }
+}
+
 /// The `parse_ctes` stage — a named no-op call site.
 ///
 /// Per-model CTE parsing happens inside the renderer's payload
@@ -376,7 +419,8 @@ fn render(
     models_in_scope: &ModelInScopeSet,
     changed: &InScopeSet,
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
-    yaml_diffs: &HashMap<String, YamlBlockDiff>,
+    yaml_diffs: &HashMap<String, BlockDiff>,
+    sql_diffs: &HashMap<String, BlockDiff>,
     baseline_label: &str,
     scope_source: ScopeSource,
     report_title: &str,
@@ -390,6 +434,7 @@ fn render(
         changed,
         authoring_yaml,
         yaml_diffs,
+        sql_diffs,
         baseline_label,
         scope_source,
         report_title,
