@@ -209,4 +209,53 @@ fn a_default_context_git_diff_does_not_panic_and_renders_a_report() {
         html.contains("from PR file diff"),
         "the report banner states PR-diff provenance",
     );
+    // cute-dbt#111: a one-line stderr note tells the user the diff isn't
+    // `--unified=0` so the plain views aren't mistaken for a broken feature.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not `git diff --unified=0`")
+            && stderr.contains("--unified=0 for inline diffs"),
+        "a context-bearing diff emits the actionable --unified=0 note; stderr: {stderr}",
+    );
+}
+
+#[test]
+fn a_unified_zero_diff_emits_no_context_bearing_note() {
+    // The converse of the above: a clean `--unified=0` diff (every hunk
+    // `new_len == added_lines.len()`) must NOT emit the context-bearing note
+    // — inline diffs work, so the note would be misleading noise.
+    let current = fixture("jaffle-shop-current.json");
+    let diff = tmp("cfp-unified-zero.patch");
+    // `@@ -3,1 +3,1 @@` with exactly one `-`/`+` body, no context lines.
+    fs::write(
+        &diff,
+        "--- a/models/customers.sql\n\
++++ b/models/customers.sql\n\
+@@ -3,1 +3,1 @@\n\
+-    select * from raw.customers\n\
++    select * from raw.customers_v2\n",
+    )
+    .expect("write unified=0 patch");
+    let out = tmp("cfp-unified-zero-report.html");
+    clear(&out);
+
+    let output = run_cli(&[
+        "--manifest",
+        s(&current),
+        "--pr-diff",
+        &format!("@{}", s(&diff)),
+        "--out",
+        s(&out),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "a --unified=0 diff renders (exit 0); stderr: {}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("not `git diff --unified=0`"),
+        "a clean --unified=0 diff emits no context-bearing note; stderr: {stderr}",
+    );
 }

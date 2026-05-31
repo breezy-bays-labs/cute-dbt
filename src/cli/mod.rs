@@ -182,6 +182,14 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
         }
         ScopeInput::Baseline { .. } => HashMap::new(),
     };
+    // cute-dbt#111: a non-`--unified=0` diff degrades every affected block to
+    // the plain view (the `reconstruct_one` contract guard). Surface that ONCE
+    // on stderr so a user who forgot `--unified=0` isn't left thinking the
+    // inline diffs are broken. PrDiff arm only (baseline mode has no hunks);
+    // the domain predicate is pure — the I/O (`eprintln!`) lives here in cli.
+    if let ScopeInput::PrDiff { index } = &scope_input {
+        warn_if_not_unified_zero(index);
+    }
     let (report_title, report_subtitle) = resolve_report_strings(cli);
     let (baseline_label, scope_source) = scope_banner(cli, &scope_input);
     render(
@@ -359,6 +367,28 @@ fn scope_banner(cli: &Cli, scope_input: &ScopeInput) -> (String, ScopeSource) {
             ScopeSource::Baseline,
         ),
         ScopeInput::PrDiff { .. } => (String::new(), ScopeSource::PrDiff),
+    }
+}
+
+/// Emit a single stderr note when the supplied `--pr-diff` is not
+/// `git diff --unified=0` (cute-dbt#111).
+///
+/// A context-bearing diff degrades every affected block to the plain view
+/// (the `reconstruct_one` contract guard in `domain::pr_diff`), so without
+/// this note a user who forgot `--unified=0` would see plain views and
+/// assume the inline diffs are broken. The decision is a pure domain
+/// predicate ([`NormalizedDiffIndex::context_bearing_hunk_count`]); the
+/// `eprintln!` (the only I/O) lives here in cli, not in `domain`. Emitted
+/// once per run on the `PrDiff` arm only.
+fn warn_if_not_unified_zero(index: &NormalizedDiffIndex) {
+    let n = index.context_bearing_hunk_count();
+    if n > 0 {
+        let plural = if n == 1 { "hunk" } else { "hunks" };
+        eprintln!(
+            "cute-dbt: warning: the supplied diff is not `git diff --unified=0` \
+             ({n} context-bearing {plural}); inline diffs are disabled — showing \
+             plain views. Re-run the diff with --unified=0 for inline diffs."
+        );
     }
 }
 

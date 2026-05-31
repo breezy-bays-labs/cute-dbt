@@ -151,6 +151,30 @@ impl NormalizedDiffIndex {
             .get(&normalize_path(original_file_path, None))
             .map_or(&[], Vec::as_slice)
     }
+
+    /// How many hunks across all files are **not** `--unified=0`-shaped —
+    /// i.e. carry context lines (cute-dbt#111).
+    ///
+    /// A hunk's `new_len` (from the `@@` range) equals its recorded `+`
+    /// body count (`added_lines.len()`) iff the diff was produced with
+    /// `--unified=0`: pure insertion `N == N`, pure deletion `0 == 0`,
+    /// replacement `N == N` all hold. A default (context-bearing) `git
+    /// diff` drops its ` `-prefixed context lines at parse time, so
+    /// `new_len > added_lines.len()`. This counts exactly those hunks.
+    ///
+    /// Pure computation over the parsed index (std-only, no I/O). The CLI
+    /// reads it once on the `PrDiff` arm to emit a single stderr note when a
+    /// user forgot `--unified=0` — inline diffs degrade to the plain view
+    /// (`reconstruct_one`'s `hunk_is_unified_zero` guard), and this makes
+    /// that silent degrade visible.
+    #[must_use]
+    pub fn context_bearing_hunk_count(&self) -> usize {
+        self.by_path
+            .values()
+            .flatten()
+            .filter(|h| h.new_len != h.added_lines.len())
+            .count()
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -960,6 +984,60 @@ mod tests {
         };
         let index = NormalizedDiffIndex::new(&diff, None);
         assert_eq!(index.hunks_for("models/_ut.yml").len(), 2);
+    }
+
+    #[test]
+    fn context_bearing_hunk_count_counts_only_non_unified_zero_hunks() {
+        // A `--unified=0` diff: replacement (new_len == added.len()) and a
+        // pure deletion (new_len == 0 == added.len()) both satisfy the
+        // predicate → count 0.
+        let unified_zero = PrDiff {
+            files: vec![
+                FileHunks {
+                    path: "models/a.sql".to_owned(),
+                    hunks: vec![repl(3, &["new line"]), del(7)],
+                },
+                FileHunks {
+                    path: "models/b.yml".to_owned(),
+                    hunks: vec![repl(1, &["x", "y"])], // new_len 2 == added 2
+                },
+            ],
+        };
+        assert_eq!(
+            NormalizedDiffIndex::new(&unified_zero, None).context_bearing_hunk_count(),
+            0,
+            "a pure --unified=0 diff (incl. a pure-deletion hunk) has zero context-bearing hunks",
+        );
+
+        // A context-bearing (default `git diff`) shape: `new_len` claims more
+        // new-side lines than the recorded `+` bodies (context lines dropped).
+        // Two such hunks across two files + one clean replacement → count 2.
+        let context_bearing = |new_start, new_len, added: &[&str]| Hunk {
+            new_start,
+            new_len, // > added.len()
+            removed_lines: vec!["was".to_owned()],
+            added_lines: added.iter().map(|s| (*s).to_owned()).collect(),
+        };
+        let mixed = PrDiff {
+            files: vec![
+                FileHunks {
+                    path: "models/a.sql".to_owned(),
+                    hunks: vec![
+                        context_bearing(1, 5, &["one +"]), // 5 != 1 → context-bearing
+                        repl(20, &["clean replacement"]),  // 1 == 1 → unified-zero
+                    ],
+                },
+                FileHunks {
+                    path: "models/b.sql".to_owned(),
+                    hunks: vec![context_bearing(1, 3, &["a", "b"])], // 3 != 2 → context-bearing
+                },
+            ],
+        };
+        assert_eq!(
+            NormalizedDiffIndex::new(&mixed, None).context_bearing_hunk_count(),
+            2,
+            "counts exactly the hunks whose new_len != added_lines.len()",
+        );
     }
 
     // =================================================================
