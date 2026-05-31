@@ -70,6 +70,13 @@ This drops the `dbt` binary in `~/.local/bin`. Confirm it is fusion:
 dbt --version   # → dbt-fusion 2.0.0-preview.NNN
 ```
 
+> `dbt_project.yml` carries `require-dbt-version: [">=1.11.0", "<3.0.0"]`
+> (inherited from upstream jaffle). This example is **deliberately
+> fusion-targeted** — that floor is the version range this dogfood project
+> is pinned to, not a statement about cute-dbt's own engine support
+> (cute-dbt ingests any schema-v12 manifest, which dbt-core 1.8+ and
+> dbt-fusion both emit — see `AGENTS.md`).
+
 ### 2. Compile → `manifest.json`
 
 ```sh
