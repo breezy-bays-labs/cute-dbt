@@ -140,6 +140,13 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    outputs:
+      # Surfaced so `sticky-comment` can tell "PR changed dbt-project/" (a real
+      # dbt-project row was uploaded) from "didn't" (no row). This job has NO
+      # job-level `if:`, so it always runs to completion and its `.result` is
+      # `success` even on non-dbt PRs — `.result` cannot distinguish the two;
+      # `touched` can.
+      touched: ${{ steps.diff.outputs.touched }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -161,7 +168,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/report-preview
-          git diff --unified=0 "${BASE_SHA}...${HEAD_SHA}" -- dbt-project/ \
+          # Exclude the committed `target/` (the manifest cute-dbt consumes):
+          # a PR that touches only the committed manifest has no model/test
+          # SOURCE change to diff, so it should NOT trigger the full
+          # fusion-install + compile + render for an empty-scope report.
+          git diff --unified=0 "${BASE_SHA}...${HEAD_SHA}" \
+            -- dbt-project/ ':(exclude)dbt-project/target/' \
             > target/report-preview/prdiff.patch
           if [ -s target/report-preview/prdiff.patch ]; then
             echo "touched=true" >> "$GITHUB_OUTPUT"
@@ -262,6 +274,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           MATRIX_RESULT: ${{ needs.regenerate.result }}
           PRDIFF_RESULT: ${{ needs.prdiff-preview.result }}
+          PRDIFF_TOUCHED: ${{ needs.prdiff-preview.outputs.touched }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
@@ -305,16 +318,22 @@ jobs:
             cancelled) echo "Run cancelled (likely superseded by a newer push)." ;;
             *) echo "Regenerate result: \`${MATRIX_RESULT}\`." ;;
           esac)
-          # Surface the PrDiff-preview job's fate. It SKIPS (no
-          # dbt-project row uploaded) on PRs that don't touch
-          # `dbt-project/`; succeeds with a dbt-project row when they do.
-          prdiff_line=$(case "$PRDIFF_RESULT" in
-            success) echo "This PR touches \`dbt-project/\` — the **dbt-project (PrDiff)** row below renders this PR's own \`--pr-diff\` diff." ;;
-            skipped) echo "_This PR doesn't touch \`dbt-project/\`, so there's no PrDiff self-preview row._" ;;
-            failure) echo "⚠️ The PrDiff self-preview job failed — see the [run log](${RUN_URL})." ;;
-            cancelled) echo "" ;;
-            *) echo "" ;;
-          esac)
+          # Surface the PrDiff-preview job's fate. The job has NO job-level
+          # `if:`, so it runs to completion even on non-dbt PRs and reports
+          # `result: success` regardless — `.result` cannot tell "touched
+          # dbt-project/" from "didn't". Branch on its `touched` OUTPUT
+          # instead ('true' only when the PR changed dbt-project/ source;
+          # empty string if the job was ever genuinely skipped/cancelled, which
+          # the non-'true' branch absorbs into the no-row message).
+          if [ "${PRDIFF_TOUCHED}" = "true" ]; then
+            prdiff_line=$(case "$PRDIFF_RESULT" in
+              success) echo "This PR touches \`dbt-project/\` — the **dbt-project (PrDiff)** row below renders this PR's own \`--pr-diff\` diff." ;;
+              failure) echo "⚠️ The PrDiff self-preview job failed — see the [run log](${RUN_URL})." ;;
+              *) echo "" ;;
+            esac)
+          else
+            prdiff_line="_This PR doesn't touch \`dbt-project/\`, so there's no PrDiff self-preview row._"
+          fi
           cat > target/sticky/body.md <<MARKDOWN
           ## 📄 Rendered report preview
 
