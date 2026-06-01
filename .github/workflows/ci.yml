@@ -317,11 +317,16 @@ jobs:
   fixture-manifest-gate:
     # Synthetic-only fixture invariant (hard, non-negotiable). Every file
     # under `tests/fixtures/` (except MANIFEST.toml itself) MUST be listed
-    # in `tests/fixtures/MANIFEST.toml` with `synthetic_only = true`. Real
-    # data in the public repo is a release blocker. This job is the
+    # in `tests/fixtures/MANIFEST.toml` with `synthetic_only = true`. As of
+    # cute-dbt#115 the gate ALSO covers the embedded dbt-project/ DATA
+    # carriers (committed manifest + seed CSVs) via the [[project_data]]
+    # table — closing the #114-review gap where seeds sat outside the scan.
+    # Real data in the public repo is a release blocker. This job is the
     # STRUCTURAL gate; `tests/fixture_manifest_listed.rs` +
-    # `tests/fixture_parse.rs` mirror the constraint for fast local signal.
-    # No untrusted GitHub event interpolation in any `run:` block.
+    # `tests/fixture_parse.rs` mirror the constraint for fast local signal,
+    # and `lefthook.yml` mirrors this shell logic in the pre-push hook
+    # (keep all three in sync). No untrusted GitHub event interpolation in
+    # any `run:` block.
     name: Synthetic-only fixture gate (every fixture listed in MANIFEST.toml)
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -340,8 +345,8 @@ jobs:
 
           # Extract every `path = "..."` value inside a [[fixture]] table.
           # We track whether we are inside a `[[fixture]]` block so a
-          # future `path = ...` in some other table does not pollute the
-          # listed set.
+          # `path = ...` in some other table (e.g. [[project_data]]) does
+          # not pollute the listed set.
           listed=$(awk '
             /^[[:space:]]*\[\[fixture\]\][[:space:]]*$/ { in_fixture=1; next }
             /^[[:space:]]*\[/ { in_fixture=0 }
@@ -378,11 +383,47 @@ jobs:
             printf '  - %s\n' $missing
             fail=1
           fi
-          # Every fixture entry must have synthetic_only = true (cheap
-          # structural check; the cargo test does the strict TOML parse).
+
+          # --- dbt-project/ data carriers (cute-dbt#115) ---------------------
+          # Extract every `path = "..."` inside a [[project_data]] table
+          # (repo-root-relative paths), the same way as [[fixture]] above.
+          pd_listed=$(awk '
+            /^[[:space:]]*\[\[project_data\]\][[:space:]]*$/ { in_pd=1; next }
+            /^[[:space:]]*\[/ { in_pd=0 }
+            in_pd && /^[[:space:]]*path[[:space:]]*=/ {
+              line=$0
+              sub(/^[^"]*"/, "", line)
+              sub(/".*$/, "", line)
+              print line
+            }
+          ' "$manifest" | sort -u)
+
+          # Enumerate the git-tracked dbt-project DATA carriers: the seeds
+          # directory (exhaustive) + the one committed manifest. Use
+          # `git ls-files` (NOT find) so a local `dbt compile` leaving junk
+          # under dbt-project/target/ cannot leak in and fail the gate.
+          pd_tracked=$(git ls-files dbt-project/seeds/ dbt-project/target/manifest.json | sort -u)
+
+          pd_unlisted=$(comm -23 <(printf '%s\n' "$pd_tracked") <(printf '%s\n' "$pd_listed") | sed '/^$/d')
+          pd_missing=$(comm -13 <(printf '%s\n' "$pd_tracked") <(printf '%s\n' "$pd_listed") | sed '/^$/d')
+
+          if [ -n "$pd_unlisted" ]; then
+            echo "::error::fixture-manifest-gate: git-tracked dbt-project data carriers are NOT listed in MANIFEST.toml [[project_data]] (synthetic-only invariant):"
+            printf '  - %s\n' $pd_unlisted
+            fail=1
+          fi
+          if [ -n "$pd_missing" ]; then
+            echo "::error::fixture-manifest-gate: MANIFEST.toml [[project_data]] lists paths that are not git-tracked dbt-project data carriers:"
+            printf '  - %s\n' $pd_missing
+            fail=1
+          fi
+
+          # Every entry in EITHER table must have synthetic_only = true
+          # (cheap whole-file structural check; the cargo test does the
+          # strict per-table TOML parse).
           if grep -nE '^[[:space:]]*synthetic_only[[:space:]]*=' "$manifest" \
               | grep -vE '=[[:space:]]*true([[:space:]]*#.*)?$' >&2; then
-            echo "::error::fixture-manifest-gate: every fixture entry must have synthetic_only = true (ADR-5)"
+            echo "::error::fixture-manifest-gate: every fixture / project_data entry must have synthetic_only = true (ADR-5)"
             fail=1
           fi
           exit "$fail"
