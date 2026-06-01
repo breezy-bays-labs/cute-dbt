@@ -353,7 +353,7 @@ re-run button) is common.
   dbt-core 1.8+ and dbt-fusion 2.0-preview emit manifest schema v12, which
   cute-dbt reads identically — see [How it works](../how-it-works.md). To
   compile with **dbt-fusion** instead of dbt-core, see the standalone-binary
-  variant in § 11 below (no pip, no `dbt deps`).
+  variant in § 11 below (no pip).
 - **Custom comment body:** the `message:` is plain markdown; add a model
   count, a CHANGELOG link, whatever your reviewers want.
 - **Branch protection:** make the `review` job a required status check so
@@ -466,9 +466,15 @@ which cute-dbt reads identically.
           FUSION_VERSION: 2.0.0-preview.177   # edit: pin your fusion version
         run: |
           set -euo pipefail
+          # `--version VER` pins the install; `--update` only updates an
+          # existing install (wrong for a fresh CI runner).
           curl -fsSL https://public.cdn.getdbt.com/fs/install/install.sh \
             | sh -s -- --version "$FUSION_VERSION"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # Fail loud if the pin didn't land the intended release (PATH update
+          # above applies only to later steps, so call dbt by full path here).
+          "$HOME/.local/bin/dbt" --version | head -1 | grep -q "$FUSION_VERSION" \
+            || { echo "::error::expected dbt-fusion $FUSION_VERSION"; exit 1; }
 
       # Compile. With an in-project `profiles.yml` (duckdb `:memory:`),
       # compile runs fully offline — no warehouse, no secrets, no network.

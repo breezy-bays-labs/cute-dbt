@@ -201,9 +201,20 @@ jobs:
           FUSION_VERSION: 2.0.0-preview.177
         run: |
           set -euo pipefail
+          # `--version VER` pins the install (installer usage: "--version VER
+          # Install version VER"). `--update` is for updating an existing
+          # install, not a fresh CI runner.
           curl -fsSL https://public.cdn.getdbt.com/fs/install/install.sh \
             | sh -s -- --version "$FUSION_VERSION"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # Fail loud if the pin did not land the intended release (the PATH
+          # update above only applies to LATER steps, so call dbt by full path).
+          installed=$("$HOME/.local/bin/dbt" --version | head -1)
+          echo "installed: $installed"
+          case "$installed" in
+            *"$FUSION_VERSION"*) ;;
+            *) echo "::error::expected dbt-fusion $FUSION_VERSION, got: $installed"; exit 1 ;;
+          esac
 
       - name: Compile dbt-project (ephemeral manifest, offline)
         if: steps.diff.outputs.touched == 'true'
