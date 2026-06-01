@@ -9,9 +9,10 @@
 # repo's own dogfood lives at `.github/workflows/report-preview.yml`,
 # invoking the same shape against committed example fixtures.
 #
-# Walkthrough + variations (dbt-parse-in-CI, fork-PR workarounds, Pages
-# preview) live at
-# https://breezy-bays-labs.github.io/cute-dbt/recipes/ci-sticky-comment.html
+# Walkthrough + variations (dbt-parse-in-CI, dbt-fusion standalone-binary
+# compile, fork-PR workarounds, Pages preview, and the PrDiff-on-the-PR's-
+# own-diff self-dogfood pattern) live at
+# https://breezy-bays-labs.github.io/cute-dbt/recipes/github-actions-pr-review.html
 
 name: cute-dbt report preview
 
