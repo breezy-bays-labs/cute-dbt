@@ -351,7 +351,9 @@ re-run button) is common.
   `--manifest target/manifest.json`.
 - **A different dbt version / engine:** edit the `pip install` line. Both
   dbt-core 1.8+ and dbt-fusion 2.0-preview emit manifest schema v12, which
-  cute-dbt reads identically — see [How it works](../how-it-works.md).
+  cute-dbt reads identically — see [How it works](../how-it-works.md). To
+  compile with **dbt-fusion** instead of dbt-core, see the standalone-binary
+  variant in § 11 below (no pip).
 - **Custom comment body:** the `message:` is plain markdown; add a model
   count, a CHANGELOG link, whatever your reviewers want.
 - **Branch protection:** make the `review` job a required status check so
@@ -444,3 +446,63 @@ actually touched, so a change confined to a `config:` block won't mark the
 `unit_tests:` in the same file as updated.
 
 See [Features](../features/index.md) for the full fidelity matrix.
+
+## 11. Variant: compile with dbt-fusion (standalone binary, no pip)
+
+[dbt-fusion](https://docs.getdbt.com/docs/fusion/about-fusion) is a
+standalone Rust binary — **no Python, no pip, no virtualenv**. If your
+project compiles under fusion, swap the `setup-python` + `pip install` +
+`~/.dbt/profiles.yml` steps in § 4 / § 5 for the installer below. Everything
+else (the diff + render core in § 3, the sticky comment, the trigger
+patterns) is unchanged — fusion and dbt-core both emit manifest schema v12,
+which cute-dbt reads identically.
+
+```yaml
+      # Install dbt-fusion via the official standalone-binary installer,
+      # PINNED to a specific version (never floating `latest`). The
+      # installer drops `dbt` into ~/.local/bin.
+      - name: Install dbt-fusion
+        env:
+          FUSION_VERSION: 2.0.0-preview.177   # edit: pin your fusion version
+        run: |
+          set -euo pipefail
+          # `--version VER` pins the install; `--update` only updates an
+          # existing install (wrong for a fresh CI runner).
+          curl -fsSL https://public.cdn.getdbt.com/fs/install/install.sh \
+            | sh -s -- --version "$FUSION_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # Fail loud if the pin didn't land the intended release (PATH update
+          # above applies only to later steps, so call dbt by full path here).
+          "$HOME/.local/bin/dbt" --version | head -1 | grep -q "$FUSION_VERSION" \
+            || { echo "::error::expected dbt-fusion $FUSION_VERSION"; exit 1; }
+
+      # Compile. With an in-project `profiles.yml` (duckdb `:memory:`),
+      # compile runs fully offline — no warehouse, no secrets, no network.
+      # If your project has no dbt packages there is no `dbt deps` step.
+      - name: Compile dbt project (dbt-fusion)
+        working-directory: dbt_project   # edit: your project dir
+        run: |
+          set -euo pipefail
+          dbt --version
+          dbt compile --profiles-dir .   # profiles.yml committed in-project
+```
+
+Notes:
+
+- **Pin the version.** A floating `latest` makes CI non-reproducible and
+  can break on a fusion release. Pin a `2.0.0-preview.NNN` tag you have
+  tested (the installer takes `--version` via `sh -s -- --version <tag>`,
+  no `v` prefix).
+- **In-project `profiles.yml` + `--profiles-dir .`** is the offline-friendly
+  setup — `compile` only parses and renders SQL, so the duckdb `:memory:`
+  target is never materialized and needs no secrets. (Alternatively keep
+  the `~/.dbt/profiles.yml` approach from § 4.)
+- **Deprecated test-arg format.** Fusion rejects dbt's deprecated
+  generic-test argument format that dbt-core only warns about. If
+  `dbt compile` errors on that, run the official autofix ephemerally (no
+  venv, no pip): `uvx dbt-autofix@latest deprecations --path .`.
+- This is exactly the path the cute-dbt repo's own
+  [`report-preview.yml`](https://github.com/breezy-bays-labs/cute-dbt/blob/main/.github/workflows/report-preview.yml)
+  uses to self-dogfood `--pr-diff` against an embedded fusion example
+  project — CI recompiles an **ephemeral** manifest at the PR head and
+  renders the PR's own diff into the sticky comment.
