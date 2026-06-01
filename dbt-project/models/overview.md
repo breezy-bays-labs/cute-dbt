@@ -6,6 +6,6 @@
 
 This [dbt](https://www.getdbt.com/) project is for testing out code.
 
-The source code can be found [here](https://github.com/dbt-labs/jaffle_shop_duckdb).
+The source code can be found in the [dbt-labs/jaffle_shop_duckdb repository](https://github.com/dbt-labs/jaffle_shop_duckdb).
 
 {% enddocs %}

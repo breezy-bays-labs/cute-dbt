@@ -41,6 +41,7 @@ follow-up PR — see cute-dbt #114.
 - **3 `unit_tests`, all three fixture formats** (the divergent surface
   cute-dbt parses at render time), spread across CTE-carrying models so a
   future PR editing them produces a meaningful diff:
+
   | unit_test | model | given | expect |
   |---|---|---|---|
   | `test_order_metrics_computes_amount_share` | `order_metrics` | dict | dict |
