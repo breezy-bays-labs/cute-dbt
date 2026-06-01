@@ -53,8 +53,8 @@ unit_tests:
         format: dict
         rows:
           - customer_id: 1
-            first_name: 'Ada'
-            last_name: 'Lovelace'
+            first_name: 'Grace'
+            last_name: 'Hopper'
     expect:
       format: dict
       rows:

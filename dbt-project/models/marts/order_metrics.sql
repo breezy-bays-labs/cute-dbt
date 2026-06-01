@@ -156,6 +156,7 @@ final as (
             then round(all_statuses.amount / all_statuses.all_orders_amount, 4)
             else 0
         end as amount_share,
+        round(all_statuses.amount * 100, 2) as amount_cents,
         (select count(*) from status_dim) as distinct_status_count
     from all_statuses
 )
