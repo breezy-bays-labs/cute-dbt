@@ -1,0 +1,11 @@
+# Committed in-project profile so `dbt compile` succeeds fully offline with
+# `--profiles-dir .` — no `~/.dbt/profiles.yml` required, no warehouse, no
+# network. Compile only parses + renders SQL; the in-memory duckdb target is
+# never materialised.
+jaffle_shop:
+  target: ci
+  outputs:
+    ci:
+      type: duckdb
+      path: ':memory:'
+      threads: 4
