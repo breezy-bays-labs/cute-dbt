@@ -86,7 +86,6 @@ fn repo_root() -> PathBuf {
 /// fresh, never committed — cute-dbt#115), so it is not a committed data
 /// carrier and is intentionally not enumerated here.
 fn git_tracked_project_data() -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
     let output = Command::new("git")
         .args(["ls-files", "dbt-project/seeds/"])
         .current_dir(repo_root())
@@ -97,16 +96,12 @@ fn git_tracked_project_data() -> BTreeSet<String> {
         "`git ls-files` failed: {}",
         String::from_utf8_lossy(&output.stderr),
     );
-    for line in String::from_utf8(output.stdout)
-        .expect("git ls-files output is UTF-8")
+    String::from_utf8_lossy(&output.stdout)
         .lines()
-    {
-        let line = line.trim();
-        if !line.is_empty() {
-            out.insert(line.to_string());
-        }
-    }
-    out
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn manifest_path() -> PathBuf {
@@ -236,11 +231,7 @@ fn every_listed_sha256_matches_disk() {
 #[test]
 fn every_dbt_project_data_carrier_is_listed_in_manifest() {
     let manifest = load_manifest();
-    let listed: BTreeSet<String> = manifest
-        .project_data
-        .iter()
-        .map(|f| f.path.clone())
-        .collect();
+    let listed: BTreeSet<String> = manifest.project_data.into_iter().map(|f| f.path).collect();
     let tracked = git_tracked_project_data();
 
     let unlisted: Vec<&String> = tracked.difference(&listed).collect();
