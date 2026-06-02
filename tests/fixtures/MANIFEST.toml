@@ -114,7 +114,7 @@ model node has `compiled_code: null`. Feeds PR 6's Stage-2 fail-closed \
 cute-dbt must exit non-zero, name the node, give remediation. \
 BUCKET-B (cute-dbt#115): kept synthetic — a healthy `dbt compile` \
 ALWAYS populates `compiled_code`, so this `compiled_code: null` fault \
-cannot be derived from the embedded dbt-project's committed manifest. \
+cannot be derived from the embedded dbt-project's compiled manifest. \
 Pure synthetic data only.\
 """
 
@@ -135,7 +135,7 @@ targeting it but lacks compiled SQL must trigger the None-shape \
 `NotCompiled` error. BUCKET-B (cute-dbt#115): kept synthetic — combines \
 two states a healthy `dbt compile` cannot emit (`compiled_code: null` \
 plus a hand-trimmed single-node manifest), so it cannot be derived from \
-the embedded dbt-project's committed manifest. Pure synthetic data only.\
+the embedded dbt-project's compiled manifest. Pure synthetic data only.\
 """
 
 [[fixture]]

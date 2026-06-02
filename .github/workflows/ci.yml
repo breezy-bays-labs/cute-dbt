@@ -319,7 +319,7 @@ jobs:
     # under `tests/fixtures/` (except MANIFEST.toml itself) MUST be listed
     # in `tests/fixtures/MANIFEST.toml` with `synthetic_only = true`. As of
     # cute-dbt#115 the gate ALSO covers the embedded dbt-project/ DATA
-    # carriers (committed manifest + seed CSVs) via the [[project_data]]
+    # carriers (the seed CSVs) via the [[project_data]]
     # table — closing the #114-review gap where seeds sat outside the scan.
     # Real data in the public repo is a release blocker. This job is the
     # STRUCTURAL gate; `tests/fixture_manifest_listed.rs` +
