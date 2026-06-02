@@ -1,23 +1,51 @@
 # Test-fixture provenance (synthetic-only invariant — hard, non-negotiable).
 #
-# Every file committed under `tests/fixtures/` is listed here with its
-# origin, source URL, SHA-256, and an explicit `synthetic_only = true`
-# flag. The PR 4a (#5) gate is structurally enforced by two mechanisms:
+# This file is the SINGLE provenance authority (cute-dbt#115). It carries
+# two tables:
+#
+#   * [[fixture]]      — every file committed under `tests/fixtures/`.
+#   * [[project_data]] — the committed DATA-bearing files of the embedded dbt
+#                        project `dbt-project/` (cute-dbt#114): the seed CSVs
+#                        under `dbt-project/seeds/`. dbt-project's source SQL /
+#                        YAML / config are CODE, not data, so they are
+#                        deliberately NOT listed here. (The compiled
+#                        `target/manifest.json` is gitignored build output —
+#                        never committed, recompiled fresh by CI/local — so it
+#                        is not a data carrier this gate covers; see
+#                        cute-dbt#115.) This closes the #114-review gap: the
+#                        seeds previously sat outside the synthetic-only scan,
+#                        doc-enforced only.
+#
+# Why synthetic test fixtures exist at all (two distinct reasons, so this is
+# not re-litigated): (a) fault-injection fixtures — the `parse-only` and
+# `no-test-uncompiled` cases below — encode manifest shapes a HEALTHY
+# `dbt compile` structurally cannot emit, so they are hand-authored by
+# design and stay. (b) The historical "no real dbt project yet, so hand-roll
+# a manifest" workaround is RETIRED now that `dbt-project/` exists as a real,
+# compilable dogfood project; new happy-path coverage should come from it,
+# not from fresh hand-rolled manifests.
+#
+# Every entry in either table records origin, source URL, SHA-256, and an
+# explicit `synthetic_only = true` flag. The PR 4a (#5) gate is structurally
+# enforced by two mechanisms (both widened in #115 to cover [[project_data]]):
 #
 #   1. `cargo test` (`tests/fixture_manifest_listed.rs` +
 #      `tests/fixture_parse.rs`) parses this file and asserts:
 #        - every regular file under `tests/fixtures/` (excluding
 #          MANIFEST.toml itself) appears in the [[fixture]] table by `path`;
-#        - every entry has `synthetic_only = true`;
+#        - every git-tracked seed under `dbt-project/seeds/` appears in
+#          [[project_data]];
+#        - every entry (both tables) has `synthetic_only = true`;
 #        - SHA-256 of each listed file matches.
 #   2. CI job `fixture-manifest-gate` (.github/workflows/ci.yml) runs the
 #      same constraint as a pure-shell awk-and-comm grep — no cargo
-#      dependency, fails the PR if anything under tests/fixtures/ is
-#      unlisted.
+#      dependency, fails the PR if anything under tests/fixtures/ OR any
+#      dbt-project data carrier is unlisted. The `lefthook.yml` pre-push
+#      hook mirrors the same shell logic (keep all three in sync).
 #
 # Together these enforce the synthetic-only constraint structurally — a
-# fixture containing real data cannot land silently. Real data in this
-# public repo is a release blocker.
+# fixture (or a dbt-project seed) containing real data cannot land silently.
+# Real data in this public repo is a release blocker.
 #
 # Schema for each [[fixture]] entry:
 #   path = "<filename-relative-to-tests/fixtures/>"
@@ -30,6 +58,13 @@
 #   description = "<one-line>"             # why this fixture, what it exercises
 #   synthetic_handcrafted = false          # true only for the last-resort
 #                                          #   hand-crafted v12 stub; defaults false
+#
+# Schema for each [[project_data]] entry (same shape; path is REPO-ROOT
+# relative because these files live outside tests/fixtures/):
+#   path = "dbt-project/seeds/<file>.csv"
+#   origin / origin_url / sha256 / synthetic_only / license / description
+#   as above. (`fixture_parse.rs` does NOT shape-check these — they are CSV
+#   seed data, not manifests.)
 
 [[fixture]]
 path = "jaffle-shop-baseline.json"
@@ -76,8 +111,11 @@ description = """
 `dbt parse` (NOT `dbt compile`) output for the same project — every \
 model node has `compiled_code: null`. Feeds PR 6's Stage-2 fail-closed \
 `NotCompiled` arm (ADR-2): when an in-scope model lacks compiled SQL, \
-cute-dbt must exit non-zero, name the node, give remediation. Pure \
-synthetic data only.\
+cute-dbt must exit non-zero, name the node, give remediation. \
+BUCKET-B (cute-dbt#115): kept synthetic — a healthy `dbt compile` \
+ALWAYS populates `compiled_code`, so this `compiled_code: null` fault \
+cannot be derived from the embedded dbt-project's compiled manifest. \
+Pure synthetic data only.\
 """
 
 [[fixture]]
@@ -94,7 +132,10 @@ contains only `model.jaffle_shop.stg_orders` with a modified body \
 checksum (`compiled_code: null`) and zero unit tests. Exercises PR C \
 (#30) explorer-mode fail-closed: a modified model that has no unit tests \
 targeting it but lacks compiled SQL must trigger the None-shape \
-`NotCompiled` error. Pure synthetic data only.\
+`NotCompiled` error. BUCKET-B (cute-dbt#115): kept synthetic — combines \
+two states a healthy `dbt compile` cannot emit (`compiled_code: null` \
+plus a hand-trimmed single-node manifest), so it cannot be derived from \
+the embedded dbt-project's compiled manifest. Pure synthetic data only.\
 """
 
 [[fixture]]
@@ -309,4 +350,55 @@ convention of `<project_root>/models/_unit_tests.yml`; the BDD \
 scenarios invoke cute-dbt with `--project-root \
 tests/fixtures/source-yaml/project` so the relative path resolves. \
 Pure synthetic.\
+"""
+
+# ---------------------------------------------------------------------------
+# dbt-project/ data carriers (cute-dbt#114 / #115)
+#
+# The committed DATA-bearing files of the embedded dbt project: the seed
+# CSVs under `dbt-project/seeds/`. Brought under the synthetic-only
+# invariant mechanically in #115 (previously doc-enforced only — the
+# #114-review gap). Source SQL / YAML / config under `dbt-project/` is CODE,
+# not data, and is deliberately NOT listed here. The compiled
+# `target/manifest.json` is gitignored BUILD OUTPUT (recompiled fresh by
+# CI/local, never committed — cute-dbt#115), so it is not a committed data
+# carrier and is intentionally absent from this table. Paths are REPO-ROOT
+# relative.
+# ---------------------------------------------------------------------------
+
+[[project_data]]
+path = "dbt-project/seeds/raw_customers.csv"
+origin = "jaffle-shop"
+origin_url = "https://github.com/dbt-labs/jaffle_shop_duckdb"
+sha256 = "24579b4b26098d43265376f3c50be8b10faf8e8fd95f5508074f10f76a12671d"
+synthetic_only = true
+license = "Apache-2.0"
+description = """
+jaffle_shop_duckdb `raw_customers` seed (taken verbatim from dbt Labs' \
+canonical starter project). Faker-style demo customer records — pure \
+synthetic data, no real customers.\
+"""
+
+[[project_data]]
+path = "dbt-project/seeds/raw_orders.csv"
+origin = "jaffle-shop"
+origin_url = "https://github.com/dbt-labs/jaffle_shop_duckdb"
+sha256 = "ee6c68d1639ec2b23a4495ec12475e09b8ed4b61e23ab0411ea7ec76648356f7"
+synthetic_only = true
+license = "Apache-2.0"
+description = """
+jaffle_shop_duckdb `raw_orders` seed (verbatim). Faker-style demo order \
+records — pure synthetic data.\
+"""
+
+[[project_data]]
+path = "dbt-project/seeds/raw_payments.csv"
+origin = "jaffle-shop"
+origin_url = "https://github.com/dbt-labs/jaffle_shop_duckdb"
+sha256 = "03fd407f3135f84456431a923f22fc185a2154079e210c20b690e3ab11687d11"
+synthetic_only = true
+license = "Apache-2.0"
+description = """
+jaffle_shop_duckdb `raw_payments` seed (verbatim). Faker-style demo \
+payment records — pure synthetic data.\
 """

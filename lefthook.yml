@@ -107,13 +107,20 @@ pre-push:
       timeout: 60s
     fixture-manifest-gate:
       # Mirror the `fixture-manifest-gate` CI job (synthetic-only invariant).
-      # The cargo tests `tests/fixture_manifest_listed.rs` cover SHA-256 +
-      # synthetic_only + listed-check exhaustively; this hook is the
-      # fastest "you forgot to list it" signal pre-push.
+      # Covers both [[fixture]] (tests/fixtures/) and [[project_data]] (the
+      # committed embedded dbt-project/ data carriers: the seed CSVs,
+      # cute-dbt#115). The compiled target/manifest.json is gitignored build
+      # output (recompiled fresh, never committed), so it is not a covered
+      # data carrier. The cargo tests `tests/fixture_manifest_listed.rs`
+      # cover SHA-256 + synthetic_only + listed-check exhaustively; this hook
+      # is the fastest "you forgot to list it" signal pre-push.
       #
       # POSIX-sh compatible (lefthook runs `sh -c`, not bash) — no process
       # substitution; uses tmpfiles instead. macOS-portable: `find | sed`
-      # rather than GNU `find -printf`.
+      # rather than GNU `find -printf`. dbt-project data carriers are
+      # enumerated via `git ls-files` (never a filesystem walk) so a local
+      # `dbt compile` leaving build output under dbt-project/target/ cannot
+      # leak in.
       run: |
         set -eu
         manifest="tests/fixtures/MANIFEST.toml"
@@ -146,6 +153,31 @@ pre-push:
         if [ -n "$missing" ]; then
           echo "fixture-manifest-gate: MANIFEST.toml lists missing paths:"
           printf '  - %s\n' $missing
+          fail=1
+        fi
+        # dbt-project/ data carriers (cute-dbt#115).
+        awk '
+          /^[[:space:]]*\[\[project_data\]\][[:space:]]*$/ { in_pd=1; next }
+          /^[[:space:]]*\[/ { in_pd=0 }
+          in_pd && /^[[:space:]]*path[[:space:]]*=/ {
+            line=$0
+            sub(/^[^"]*"/, "", line)
+            sub(/".*$/, "", line)
+            print line
+          }
+        ' "$manifest" | sort -u > "$tmpdir/pd_listed"
+        git ls-files dbt-project/seeds/ \
+          | sort -u > "$tmpdir/pd_tracked"
+        pd_unlisted=$(comm -23 "$tmpdir/pd_tracked" "$tmpdir/pd_listed" | sed '/^$/d')
+        pd_missing=$(comm -13 "$tmpdir/pd_tracked" "$tmpdir/pd_listed" | sed '/^$/d')
+        if [ -n "$pd_unlisted" ]; then
+          echo "fixture-manifest-gate: unlisted dbt-project data carriers ([[project_data]], synthetic-only invariant):"
+          printf '  - %s\n' $pd_unlisted
+          fail=1
+        fi
+        if [ -n "$pd_missing" ]; then
+          echo "fixture-manifest-gate: [[project_data]] lists non-tracked paths:"
+          printf '  - %s\n' $pd_missing
           fail=1
         fi
         if grep -nE '^[[:space:]]*synthetic_only[[:space:]]*=' "$manifest" \
