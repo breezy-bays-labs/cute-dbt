@@ -949,15 +949,14 @@ fn render_pr_diff_with_both_diffs(
     yaml_diffs: Vec<(&str, BlockDiff)>,
     sql_diffs: Vec<(&str, BlockDiff)>,
 ) -> String {
-    let all_ids: Vec<String> = tests.iter().map(|(id, _)| (*id).to_owned()).collect();
+    let in_scope: InScopeSet = tests.iter().map(|(id, _)| (*id).to_owned()).collect();
     let m = manifest(nodes, tests);
-    let in_scope: InScopeSet = all_ids.into_iter().collect();
     let models: ModelInScopeSet = model_ids.iter().map(|id| NodeId::new(*id)).collect();
     let changed: InScopeSet = changed_ids.iter().map(|s| (*s).to_owned()).collect();
     let authoring_yaml: HashMap<String, UnitTestYamlBlock> = authoring
         .into_iter()
         .map(|(id, raw)| {
-            let n = raw.split('\n').count();
+            let n = raw.lines().count();
             (
                 id.to_owned(),
                 UnitTestYamlBlock::new(raw.to_owned(), 1, 1, n),
