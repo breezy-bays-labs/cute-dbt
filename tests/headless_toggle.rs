@@ -925,3 +925,208 @@ fn model_sql_section_shows_plain_sql_when_no_diff() {
 
     let _ = tab.close(true);
 }
+
+// --- cute-dbt#121: each diff drawer renders exactly ONE <pre> ---------
+
+/// PR-diff render that injects BOTH a model-SQL diff AND a unit-test
+/// authoring-YAML diff into the same report — so the Model SQL drawer's
+/// Diff/File toggle AND the Authoring YAML drawer's Diff/File toggle both
+/// render against a single auto-selected (changed) test.
+///
+/// `sql_diffs` is `(model_id, BlockDiff)` keyed by the model's FULL node
+/// id; `authoring` is `(test_id, raw)`; `yaml_diffs` is `(test_id,
+/// BlockDiff)`. Every model carries `raw_code` so the Model SQL section
+/// shows. The changed test is foregrounded + auto-selected by the PR-diff
+/// JS, so its YAML drawer is built on load.
+#[allow(clippy::too_many_arguments)]
+fn render_pr_diff_with_both_diffs(
+    filename: &str,
+    nodes: Vec<Node>,
+    tests: Vec<(&str, UnitTest)>,
+    model_ids: &[&str],
+    changed_ids: &[&str],
+    authoring: Vec<(&str, &str)>,
+    yaml_diffs: Vec<(&str, BlockDiff)>,
+    sql_diffs: Vec<(&str, BlockDiff)>,
+) -> String {
+    let in_scope: InScopeSet = tests.iter().map(|(id, _)| (*id).to_owned()).collect();
+    let m = manifest(nodes, tests);
+    let models: ModelInScopeSet = model_ids.iter().map(|id| NodeId::new(*id)).collect();
+    let changed: InScopeSet = changed_ids.iter().map(|s| (*s).to_owned()).collect();
+    let authoring_yaml: HashMap<String, UnitTestYamlBlock> = authoring
+        .into_iter()
+        .map(|(id, raw)| {
+            let n = raw.lines().count();
+            (
+                id.to_owned(),
+                UnitTestYamlBlock::new(raw.to_owned(), 1, 1, n),
+            )
+        })
+        .collect();
+    let yaml_diff_map: HashMap<String, BlockDiff> = yaml_diffs
+        .into_iter()
+        .map(|(id, d)| (id.to_owned(), d))
+        .collect();
+    let sql_diff_map: HashMap<String, BlockDiff> = sql_diffs
+        .into_iter()
+        .map(|(id, d)| (id.to_owned(), d))
+        .collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &changed,
+        &authoring_yaml,
+        &yaml_diff_map,
+        &sql_diff_map,
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    format!("file://{p}")
+}
+
+/// `true` iff the element matched by `selector` is visually rendered
+/// (`offsetHeight > 0`). This is the load-bearing assertion for
+/// cute-dbt#121: the inactive `<pre>` carries the `hidden` attribute
+/// (so `.hidden === true`) yet still renders, because Sakura's
+/// `pre { display: block }` (author origin) beats the UA
+/// `[hidden] { display: none }`. `.hidden` cannot catch the bug;
+/// `offsetHeight` can.
+fn visible(tab: &Tab, selector: &str) -> bool {
+    eval_bool(
+        tab,
+        &format!("(document.querySelector('{selector}') || {{}}).offsetHeight > 0"),
+    )
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn diff_drawers_render_exactly_one_view_each() {
+    // cute-dbt#121 — a PR-diff report carrying BOTH a model `sql_diff`
+    // (Model SQL Diff/File toggle) AND a unit-test `yaml_diff` (Authoring
+    // YAML Diff/File toggle). The toggle JS sets `hidden` on the inactive
+    // <pre>, but Sakura's bare `pre { display: block }` (author origin)
+    // overrides the UA `[hidden] { display: none }`, so before the fix
+    // BOTH <pre> blocks render at once. Asserted via `offsetHeight > 0`
+    // (the `hidden` property is `true` either way — useless here).
+    let sql_diff = BlockDiff {
+        lines: vec![
+            dl(DiffLineKind::Context, "select id", None),
+            dl(DiffLineKind::Removed, "from t", Some((5, 6))),
+            dl(DiffLineKind::Added, "from u", Some((5, 6))),
+        ],
+    };
+    let yaml_diff = BlockDiff {
+        lines: vec![
+            dl(DiffLineKind::Context, "  - name: upd", None),
+            dl(DiffLineKind::Removed, "    model: payments", Some((11, 18))),
+            dl(DiffLineKind::Added, "    model: orders", Some((11, 16))),
+            dl(DiffLineKind::Context, "    given: []", None),
+        ],
+    };
+    let url = render_pr_diff_with_both_diffs(
+        "headless_both_diffs.html",
+        vec![model_node_with_raw("model.shop.dim_a", "select id\nfrom u")],
+        vec![("unit_test.shop.dim_a.upd", unit_test("upd", "dim_a"))],
+        &["model.shop.dim_a"],
+        &["unit_test.shop.dim_a.upd"],
+        vec![(
+            "unit_test.shop.dim_a.upd",
+            "  - name: upd\n    model: orders\n    given: []",
+        )],
+        vec![("unit_test.shop.dim_a.upd", yaml_diff)],
+        vec![("model.shop.dim_a", sql_diff)],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // The Model SQL section's <details> is collapsed by default (cute-dbt#47);
+    // force it open so the active Diff <pre> can report a real offsetHeight.
+    // The Authoring YAML <details> is created open by the JS, so it needs no
+    // nudge. This isolates the test to display:none vs display:block — not
+    // the collapsed-details ancestor.
+    let _ = eval(
+        &tab,
+        "var d = document.querySelector('.model-sql details'); if (d) d.open = true;",
+    );
+
+    // The non-diff button reads exactly "File" in BOTH drawers (was "Raw"
+    // for SQL, "Authored" for YAML).
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql-toggle .yaml-view-btn[data-view=\"raw\"]')\
+             .textContent.trim()"
+        ),
+        "File",
+        "the Model SQL non-diff button reads 'File'",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.authoring-yaml .yaml-diff-toggle .yaml-view-btn[data-view=\"authored\"]')\
+             .textContent.trim()"
+        ),
+        "File",
+        "the Authoring YAML non-diff button reads 'File'",
+    );
+
+    // ===== Default (Diff view): exactly one <pre> visible per drawer =====
+    assert!(
+        visible(&tab, ".model-sql .sql-diff-view"),
+        "Model SQL: the Diff view is visible by default",
+    );
+    assert!(
+        !visible(&tab, ".model-sql .sql-raw-view"),
+        "Model SQL: the File (raw) view is NOT visible by default \
+         (cute-dbt#121: Sakura pre{{display:block}} must not defeat [hidden])",
+    );
+    assert!(
+        visible(&tab, ".authoring-yaml .yaml-diff-view"),
+        "Authoring YAML: the Diff view is visible by default",
+    );
+    assert!(
+        !visible(&tab, ".authoring-yaml .yaml-authored-view"),
+        "Authoring YAML: the File (authored) view is NOT visible by default \
+         (cute-dbt#121)",
+    );
+
+    // ===== After clicking the non-diff (File) toggle in each drawer =====
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-sql-toggle .yaml-view-btn[data-view=\"raw\"]').click()",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.authoring-yaml .yaml-diff-toggle .yaml-view-btn[data-view=\"authored\"]').click()",
+    );
+
+    assert!(
+        visible(&tab, ".model-sql .sql-raw-view"),
+        "Model SQL: the File view is visible after clicking File",
+    );
+    assert!(
+        !visible(&tab, ".model-sql .sql-diff-view"),
+        "Model SQL: the Diff view is hidden after clicking File (cute-dbt#121)",
+    );
+    assert!(
+        visible(&tab, ".authoring-yaml .yaml-authored-view"),
+        "Authoring YAML: the File view is visible after clicking File",
+    );
+    assert!(
+        !visible(&tab, ".authoring-yaml .yaml-diff-view"),
+        "Authoring YAML: the Diff view is hidden after clicking File (cute-dbt#121)",
+    );
+
+    let _ = tab.close(true);
+}

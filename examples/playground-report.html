@@ -239,6 +239,12 @@ label, legend, fieldset {
 <style>
 /* DENSITY PATCH + report-specific CSS — verbatim from the Claude Design
    hand-back. Dark-mode rules deliberately stripped (YAGNI). */
+/* cute-dbt#121 — make the `hidden` attribute authoritative: Sakura's
+   `pre { display: block }` (author origin) otherwise overrides the UA
+   `[hidden] { display: none }`, so a toggled-off diff/raw <pre> would still
+   render. The diff drawers (#111 Model SQL, #96 Authoring YAML) toggle
+   visibility by setting `hidden` on the inactive <pre>; this rule wins. */
+[hidden] { display: none !important; }
 body {
   font-size: 1.4rem;
   line-height: 1.5;
@@ -4348,7 +4354,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
         var $diffBtn = $("<button>").attr("type", "button")
           .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
         var $authBtn = $("<button>").attr("type", "button")
-          .addClass("yaml-view-btn").attr("data-view", "authored").text("Authored");
+          .addClass("yaml-view-btn").attr("data-view", "authored").text("File");
         $toggle.append($diffBtn).append($authBtn);
         $toggle.on("click", ".yaml-view-btn", function () {
           var view = $(this).attr("data-view");
@@ -4413,7 +4419,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       var $diffBtn = $("<button>").attr("type", "button")
         .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
       var $rawBtn = $("<button>").attr("type", "button")
-        .addClass("yaml-view-btn").attr("data-view", "raw").text("Raw");
+        .addClass("yaml-view-btn").attr("data-view", "raw").text("File");
       $toggle.append($diffBtn).append($rawBtn);
       $toggle.on("click", ".yaml-view-btn", function () {
         var view = $(this).attr("data-view");
