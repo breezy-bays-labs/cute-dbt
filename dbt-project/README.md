@@ -6,10 +6,12 @@ model's `.sql` or a `unit_test`'s YAML here, and the preview job can run
 cute-dbt `--pr-diff` on the PR's *own* git diff — making every PrDiff
 diff feature (cute-dbt #91/#96/#111/#98) validatable from one CI artifact.
 
-This directory holds **project source + the committed fusion
-`manifest.json`**. The sticky-preview-job rewiring (running
-`cute-dbt --pr-diff` against this project on the PR diff) is a separate
-follow-up PR — see cute-dbt #114.
+This directory holds **dbt project source only** — models, tests, seeds,
+config. The compiled `target/manifest.json` is **gitignored build output**:
+it is recompiled fresh by every consumer (the CI preview job runs
+`dbt compile`; local dev does the same) and is **never committed**. The
+sticky-preview job runs `cute-dbt --pr-diff` against this project on the
+PR's own diff — see cute-dbt #114 / #118.
 
 ## Provenance (synthetic-only invariant)
 
@@ -86,7 +88,9 @@ dbt compile --profiles-dir .
 
 `profiles.yml` lives **inside this directory** (duckdb `:memory:`), so
 compile succeeds fully offline — it parses + renders SQL without touching a
-warehouse or any data. Output: `target/manifest.json` (schema v12).
+warehouse or any data. Output: `target/manifest.json` (schema v12) — this
+is **gitignored build output**: feed it to cute-dbt, but never commit it
+(see "The compiled manifest" below).
 
 ### Optionally: run the project end-to-end (to execute the unit tests)
 
@@ -104,24 +108,26 @@ run the official autofix ephemerally, no venv, no pip:
 `uvx dbt-autofix@latest deprecations --path .`. The current source is
 already in the modern `arguments:` format, so this is not needed today.)
 
-## The committed manifest
+## The compiled manifest
 
-`target/manifest.json` is committed (it is the one file un-ignored from
-`target/` in `.gitignore`). cute-dbt and the future preview job **consume
-this manifest directly and never recompile** — so the project is
-effectively offline for every downstream consumer.
+`target/manifest.json` is **gitignored build output** — the whole of
+`target/` is ignored (`.gitignore`), and the manifest is **never
+committed**. Every consumer recompiles it fresh from this project source:
 
-The committed manifest is `dbt compile` (fusion, schema v12) output, with
-one post-process: the seed nodes' `root_path` field — which dbt writes as
-the **absolute** build-machine project path — is scrubbed to `.` so this
-public repo carries no machine-specific path. cute-dbt ignores `root_path`
-entirely (it drives off the relative `original_file_path` + the explicit
-`--project-root`), so the scrub is transparent to rendering. A fresh local
-`dbt compile` therefore yields a manifest that differs from the committed
-one only by that absolute `root_path` and the non-deterministic metadata
-(`invocation_id`, timestamps).
+- **CI** — the `report-preview` job (cute-dbt #118) runs `dbt compile`
+  ephemerally at the PR's HEAD, then feeds that just-compiled manifest to
+  `cute-dbt --pr-diff`. The committed source is the input; the manifest is
+  rebuilt every run.
+- **Local** — run `dbt compile --profiles-dir .` (above), then point
+  cute-dbt at the resulting `target/manifest.json`.
 
-> Whether CI recompiles with fusion vs. consumes this committed manifest is
-> the follow-up preview-rewiring PR's decision (cute-dbt #114). Either way
-> the preview needs a HEAD manifest, and this committed one satisfies it
-> immediately.
+> **NEVER re-commit `target/manifest.json` (root_path leak vector).** dbt
+> writes each node's `root_path` as the **absolute** build-machine project
+> path (e.g. `/Users/you/...`). A committed manifest therefore carries a
+> machine-specific path, and — worse — a later `dbt compile`/`build`/`test`
+> silently re-injects it on every recompile (gitleaks does not catch it).
+> cute-dbt ignores `root_path` entirely (it drives off the relative
+> `original_file_path` + the explicit `--project-root`), so there is **no
+> reason** to commit the manifest and a real privacy reason not to. This is
+> why an earlier `!target/manifest.json` un-ignore exception was retired
+> (cute-dbt #115).

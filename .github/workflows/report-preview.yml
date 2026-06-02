@@ -168,10 +168,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/report-preview
-          # Exclude the committed `target/` (the manifest cute-dbt consumes):
-          # a PR that touches only the committed manifest has no model/test
-          # SOURCE change to diff, so it should NOT trigger the full
-          # fusion-install + compile + render for an empty-scope report.
+          # Exclude `dbt-project/target/` — it is gitignored build output
+          # (the manifest is recompiled fresh below via `dbt compile`, never
+          # consumed from git), so changes there are not a model/test SOURCE
+          # change and must NOT trigger the full fusion-install + compile +
+          # render for an empty-scope report.
           git diff --unified=0 "${BASE_SHA}...${HEAD_SHA}" \
             -- dbt-project/ ':(exclude)dbt-project/target/' \
             > target/report-preview/prdiff.patch

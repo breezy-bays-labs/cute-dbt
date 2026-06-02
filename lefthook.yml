@@ -108,8 +108,10 @@ pre-push:
     fixture-manifest-gate:
       # Mirror the `fixture-manifest-gate` CI job (synthetic-only invariant).
       # Covers both [[fixture]] (tests/fixtures/) and [[project_data]] (the
-      # embedded dbt-project/ data carriers: committed manifest + seeds,
-      # cute-dbt#115). The cargo tests `tests/fixture_manifest_listed.rs`
+      # committed embedded dbt-project/ data carriers: the seed CSVs,
+      # cute-dbt#115). The compiled target/manifest.json is gitignored build
+      # output (recompiled fresh, never committed), so it is not a covered
+      # data carrier. The cargo tests `tests/fixture_manifest_listed.rs`
       # cover SHA-256 + synthetic_only + listed-check exhaustively; this hook
       # is the fastest "you forgot to list it" signal pre-push.
       #
@@ -117,7 +119,8 @@ pre-push:
       # substitution; uses tmpfiles instead. macOS-portable: `find | sed`
       # rather than GNU `find -printf`. dbt-project data carriers are
       # enumerated via `git ls-files` (never a filesystem walk) so a local
-      # `dbt compile` leaving junk under dbt-project/target/ cannot leak in.
+      # `dbt compile` leaving build output under dbt-project/target/ cannot
+      # leak in.
       run: |
         set -eu
         manifest="tests/fixtures/MANIFEST.toml"
@@ -163,7 +166,7 @@ pre-push:
             print line
           }
         ' "$manifest" | sort -u > "$tmpdir/pd_listed"
-        git ls-files dbt-project/seeds/ dbt-project/target/manifest.json \
+        git ls-files dbt-project/seeds/ \
           | sort -u > "$tmpdir/pd_tracked"
         pd_unlisted=$(comm -23 "$tmpdir/pd_tracked" "$tmpdir/pd_listed" | sed '/^$/d')
         pd_missing=$(comm -13 "$tmpdir/pd_tracked" "$tmpdir/pd_listed" | sed '/^$/d')

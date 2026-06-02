@@ -399,10 +399,13 @@ jobs:
           ' "$manifest" | sort -u)
 
           # Enumerate the git-tracked dbt-project DATA carriers: the seeds
-          # directory (exhaustive) + the one committed manifest. Use
-          # `git ls-files` (NOT find) so a local `dbt compile` leaving junk
-          # under dbt-project/target/ cannot leak in and fail the gate.
-          pd_tracked=$(git ls-files dbt-project/seeds/ dbt-project/target/manifest.json | sort -u)
+          # directory (exhaustive). The compiled target/manifest.json is
+          # gitignored build output (recompiled fresh by CI/local, never
+          # committed — cute-dbt#115), so it is not a committed data carrier.
+          # Use `git ls-files` (NOT find) so a local `dbt compile` leaving
+          # build output under dbt-project/target/ cannot leak in and fail
+          # the gate.
+          pd_tracked=$(git ls-files dbt-project/seeds/ | sort -u)
 
           pd_unlisted=$(comm -23 <(printf '%s\n' "$pd_tracked") <(printf '%s\n' "$pd_listed") | sed '/^$/d')
           pd_missing=$(comm -13 <(printf '%s\n' "$pd_tracked") <(printf '%s\n' "$pd_listed") | sed '/^$/d')

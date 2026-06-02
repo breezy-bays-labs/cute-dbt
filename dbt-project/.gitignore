@@ -1,9 +1,13 @@
-# dbt build artifacts — never commit, EXCEPT the committed fusion manifest
-# (target/manifest.json) that cute-dbt consumes directly. The manifest is the
-# dogfood input for the `--pr-diff` preview; downstream consumers never
-# recompile.
-target/*
-!target/manifest.json
+# dbt build artifacts — NEVER commit anything under target/.
+#
+# target/manifest.json is BUILD OUTPUT, recompiled fresh by every consumer:
+# the CI report-preview job runs `dbt compile` to produce an ephemeral
+# manifest at HEAD, and local dev does the same. It is never committed and
+# never read from git. (An earlier design committed it under a
+# `!target/manifest.json` exception — that is retired: a committed fusion
+# manifest re-injects the absolute build-machine `root_path` on every
+# recompile, a private-path leak vector, so it must NEVER be re-added.)
+target/
 
 dbt_packages/
 logs/
