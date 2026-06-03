@@ -28,6 +28,7 @@ additional_cargo_test_args = [
   "--test", "domain_clean_arch",
   "--test", "resource_ref_lint",
   "--test", "golden_report",
+  "--test", "cell_table_diff",
 ]
 
 # Focused scope. Render-glue and POD domain types are NOT in this list —
@@ -37,6 +38,7 @@ examine_globs = [
   "src/domain/preflight.rs",
   "src/domain/pr_diff.rs",
   "src/domain/scope.rs",
+  "src/domain/cell_diff.rs",
   "src/domain/unit_test_table.rs",
   "src/domain/unit_test_yaml.rs",
   "src/adapters/manifest.rs",

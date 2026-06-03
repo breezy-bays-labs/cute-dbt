@@ -35,6 +35,7 @@
 // categories — repetition is intentional, so silence the lint locally.
 #![allow(clippy::module_name_repetitions)]
 
+pub mod cell_diff;
 pub mod config;
 pub mod cte;
 pub mod manifest;
@@ -47,6 +48,10 @@ pub mod unit_test;
 pub mod unit_test_table;
 pub mod unit_test_yaml;
 
+pub use cell_diff::{
+    CellChange, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff, RowChange,
+    RowChangeKind, UnitTestDataDiff, diff_fixture_tables, reconstruct_table_diffs,
+};
 pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};
 pub use manifest::{Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId};

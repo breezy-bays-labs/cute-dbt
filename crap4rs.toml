@@ -72,6 +72,16 @@ threshold = 15
 pattern ="src/domain/unit_test_table.rs"
 threshold = 15
 
+[[overrides]]
+# Cell-level data-table diff algorithm (cute-dbt#98). Multiset row
+# matching + positional residual pairing + the OLD-side YAML region
+# slicer + the reconstruction driver are correctness-load-bearing: a
+# silent alignment or before<->after bug yields a wrong/misleading diff
+# (a false "all changed" on a reorder, or a flipped old/new cell), never
+# a crash. The pre-diff IR + parsers live in unit_test_table.rs above.
+pattern ="src/domain/cell_diff.rs"
+threshold = 15
+
 # crap4rs v0.4.0's [[overrides]] schema accepts only `pattern` and
 # `threshold`. There is no top-level `exclude` array; to exclude a file
 # from gating, add an [[overrides]] entry with a very high threshold

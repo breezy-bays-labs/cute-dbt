@@ -844,6 +844,18 @@ fn reconstruct_one(span: &BlockSpan, touching: &[&Hunk]) -> BlockDiff {
     BlockDiff { lines }
 }
 
+/// Reconstruct one block's inline diff — the crate-internal wrapper the
+/// cell-table diff ([`crate::domain::cell_diff::reconstruct_table_diffs`],
+/// cute-dbt#98) calls to obtain a complete OLD-side block (Context + Removed
+/// lines) without re-implementing the splice algorithm. Delegates verbatim
+/// to the private `reconstruct_one`; the duplication this avoids is the
+/// single largest silent-drift risk between the #96 line diff and the #98
+/// table diff.
+#[must_use]
+pub(crate) fn block_diff_for(span: &BlockSpan, touching: &[&Hunk]) -> BlockDiff {
+    reconstruct_one(span, touching)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
