@@ -1116,6 +1116,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn csv_real_numeric_value_change_still_diffs_after_inference() {
+        // cute-dbt#127 CHECK-1 clause B: value-inference must NOT over-collapse.
+        // A reformat-only change is zero-diff (proved above), but a GENUINE
+        // value change on the same new csv-inference path MUST still diff. Use
+        // a numeric pair (`1` vs `1.5`) — NOT `1` vs `"alice"` — so this guards
+        // the `canonicalize_str_number` path specifically, not mere string
+        // inequality: both sides infer Number, and `Number("1") != Number("1.5")`
+        // must survive all the way through `has_real_change()`.
+        use crate::domain::unit_test_table::{CellValue, table_from_manifest_rows};
+        let old = table_from_manifest_rows(&serde_json::json!([{"id": "1"}]), Some("csv")).unwrap();
+        let new =
+            table_from_manifest_rows(&serde_json::json!([{"id": "1.5"}]), Some("csv")).unwrap();
+        // Both inferred to Number (the inference fired on each side)…
+        assert_eq!(old.rows[0].cells[0].value, CellValue::Number("1".into()));
+        assert_eq!(new.rows[0].cells[0].value, CellValue::Number("1.5".into()));
+        // …and the genuine value change survives to the diff verdict.
+        let diff = diff_fixture_tables(&old, &new);
+        assert!(
+            diff.has_real_change(),
+            "1 → 1.5 is a real value change: must diff even after csv inference"
+        );
+    }
+
     // ----- OLD-side YAML region slicing -----
 
     #[test]
