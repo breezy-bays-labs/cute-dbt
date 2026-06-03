@@ -1094,13 +1094,14 @@ mod tests {
     }
 
     #[test]
-    fn cross_source_empty_csv_cell_divergence_is_documented() {
-        // tracked: cute-dbt#124 — core csv ships empty cell as Str("") while
-        // fusion/OLD-YAML csv map empty → Null, so a core manifest with an
-        // empty csv cell diffs as changed against the OLD-YAML side. No
-        // committed fixture exercises empty csv cells; the real fix lives in
-        // File-1 typing (type_cell_value of an empty Value::String). This
-        // test pins the CURRENT (divergent) behavior so it is visible.
+    fn cross_source_empty_csv_cell_converges_no_change() {
+        // cute-dbt#127 (closes #124): the core csv-as-array-of-string-dicts
+        // NEW path now routes string cells through `type_csv_value` →
+        // `type_csv_token`, so an empty core cell maps to `Null` — the SAME as
+        // the OLD-YAML csv path's empty → `Null`. Both sides converge: `id`
+        // "1" → Number on both, `note` "" → Null on both. The previously-
+        // documented Str("") vs Null divergence is GONE; this now asserts a
+        // true zero-diff (the headline format/engine-convergence guarantee).
         use crate::domain::unit_test_table::table_from_manifest_rows;
         // Core-style: array of string dicts, one empty cell.
         let core = serde_json::json!([{"id": "1", "note": ""}]);
@@ -1108,10 +1109,10 @@ mod tests {
         // OLD csv block-scalar of the same data (empty trailing field).
         let old = table_from_yaml_fragment("        id,note\n        1,", Some("csv")).unwrap();
         let diff = diff_fixture_tables(&old, &new);
-        // Current behavior: the empty cell diverges Str("") vs Null → changed.
         assert!(
-            diff.has_real_change(),
-            "documents the empty-csv divergence (tracked: cute-dbt#124)"
+            !diff.has_real_change(),
+            "core string-dicts and OLD-YAML csv of the same data now converge \
+             (empty → Null both sides, id → Number both sides): zero diff"
         );
     }
 

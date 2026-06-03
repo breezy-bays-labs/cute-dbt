@@ -15,13 +15,17 @@
 //! committed fixture file → no `tests/fixtures/MANIFEST.toml` entry needed).
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
+use cute_dbt::adapters::manifest::FileManifestSource;
 use cute_dbt::domain::cell_diff::{RowChangeKind, reconstruct_table_diffs};
 use cute_dbt::domain::manifest::{Manifest, ManifestMetadata, NodeId};
 use cute_dbt::domain::pr_diff::{FileHunks, Hunk, NormalizedDiffIndex, PrDiff};
 use cute_dbt::domain::state::InScopeSet;
 use cute_dbt::domain::unit_test::{UnitTest, UnitTestExpect, UnitTestGiven};
+use cute_dbt::domain::unit_test_table::{CellValue, table_from_manifest_rows};
 use cute_dbt::domain::unit_test_yaml::UnitTestYamlBlock;
+use cute_dbt::ports::ManifestSource;
 
 // ---------------------------------------------------------------------
 // builders
@@ -486,5 +490,90 @@ fn reconstruction_row_added_is_unchanged_plus_added() {
     assert!(
         kinds.contains(&RowChangeKind::Unchanged) && kinds.contains(&RowChangeKind::Added),
         "row add reconstructs as Unchanged + Added, got {kinds:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// K. fusion csv-as-raw-string NEW path — end-to-end through the real
+//    manifest adapter (the committed fusion-csv-raw-string.json fixture).
+//    Closes the spine's tracked E2E gap: every other csv test here uses
+//    core-style array-of-string-dicts or inline YAML; this is the ONLY
+//    coverage of dbt-fusion's `rows: <raw CSV string>` encoding going
+//    through `FileManifestSource.load` → the IR (cute-dbt#127).
+// ---------------------------------------------------------------------
+
+/// Absolute path to a committed fixture under `tests/fixtures/`.
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+#[test]
+fn fusion_csv_raw_string_new_path_value_infers_through_the_adapter() {
+    // Load the synthetic dbt-fusion manifest through the REAL adapter. Its
+    // unit test's given/expect carry `format: csv` with `rows` as a raw CSV
+    // STRING body (the fusion encoding), not core's array-of-string-dicts.
+    let manifest = FileManifestSource
+        .load(&fixture("fusion-csv-raw-string.json"))
+        .expect("fusion-csv-raw-string fixture loads as a v12 manifest");
+    let ut = manifest
+        .unit_test("unit_test.fusion_demo.test_dq_rollup_csv_raw_string")
+        .expect("the csv-raw-string unit test is present");
+
+    // --- GIVEN side: a raw CSV string `rows` drives the fusion NEW path.
+    let given = &ut.given()[0];
+    assert_eq!(given.format(), Some("csv"));
+    assert!(
+        given.rows().is_string(),
+        "fusion encodes csv rows as a RAW STRING, not an array (got {:?})",
+        given.rows()
+    );
+    let given_tbl = table_from_manifest_rows(given.rows(), given.format())
+        .expect("the raw-string csv body parses into a FixtureTable");
+    assert_eq!(
+        given_tbl.columns,
+        vec![
+            "entity_type".to_string(),
+            "quarantined_count".to_string(),
+            "is_dq_valid".to_string(),
+        ],
+        "the RFC 4180 header is the column order"
+    );
+    assert_eq!(given_tbl.rows.len(), 2);
+    // Value inference (cute-dbt#127) fired on the raw-string fields:
+    // `encounters` → Str, `1` → Number, `false` → Bool.
+    assert_eq!(
+        given_tbl.rows[0].cells[0].value,
+        CellValue::Str("encounters".into())
+    );
+    assert_eq!(
+        given_tbl.rows[0].cells[1].value,
+        CellValue::Number("1".into()),
+        "a fusion csv numeric field infers Number, not Str"
+    );
+    assert_eq!(
+        given_tbl.rows[0].cells[2].value,
+        CellValue::Bool(false),
+        "a fusion csv `false` field infers Bool"
+    );
+    assert_eq!(given_tbl.rows[1].cells[2].value, CellValue::Bool(true));
+
+    // --- EXPECT side: the SAME logical data, reformatted (1 → 1.00, true →
+    // TRUE). Because csv is value-inferred, the expect table is EQUAL to the
+    // given table — a reformat-only change is a zero data diff (the #127
+    // headline guarantee), proven end-to-end on a committed fixture.
+    let expect = ut.expect();
+    assert_eq!(expect.format(), Some("csv"));
+    assert!(
+        expect.rows().is_string(),
+        "fusion expect csv is raw string too"
+    );
+    let expect_tbl = table_from_manifest_rows(expect.rows(), expect.format())
+        .expect("the raw-string csv expect body parses");
+    assert_eq!(
+        given_tbl, expect_tbl,
+        "1 vs 1.00 and false vs TRUE are value-equal: the reformatted expect \
+         table converges with the given table (cute-dbt#127)"
     );
 }

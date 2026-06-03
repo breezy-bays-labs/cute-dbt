@@ -23,12 +23,14 @@
 //! ## Three typing behaviors, not two
 //!
 //! Equality is *semantic*, so cells are typed at construction. There are
-//! three entry points, deliberately:
+//! three entry points, and **`format` is the only discriminator** between the
+//! dict path and the csv path — a `Value::String "1"` infers `Number` under
+//! `format: csv` but stays `Str` under `format: dict` (cute-dbt#127):
 //!
-//! 1. [`type_cell_value`] — the NEW side, an already-typed JSON `Value`. A
-//!    `Value::String` is a *deliberate* string (dbt-core ships csv cells as
-//!    JSON strings `"1"`; a dict author's quoted `"1"` is a string too), so
-//!    it stays [`CellValue::Str`] verbatim — never re-coerced to a number.
+//! 1. [`type_cell_value`] — the NEW side **dict** path, an already-typed JSON
+//!    `Value`. A `Value::String` is a *deliberate* string (a dict author's
+//!    quoted `"1"` is a string), so it stays [`CellValue::Str`] verbatim —
+//!    never re-coerced.
 //! 2. [`type_cell_scalar`] — OLD-side **dict** tokens (block-dict +
 //!    inline-flow YAML): quote-stripped tokens stay `Str`; otherwise
 //!    `true`/`false` → [`Bool`](CellValue::Bool), `null`/`~` →
@@ -36,10 +38,14 @@
 //!    [`Number`](CellValue::Number), else `Str`. Symmetric with
 //!    `type_cell_value`'s dict-number typing.
 //! 3. [`type_csv_token`] — csv cells on **both** engine encodings (fusion's
-//!    raw-string body AND dbt-core's pre-parsed string dicts): a csv field
-//!    stays `Str` (empty → `Null`), with **no** numeric/bool coercion. This
-//!    is what keeps csv `Str`-on-both-sides so the cross-engine table is
-//!    byte-identical.
+//!    raw-string body AND dbt-core's pre-parsed string dicts): a csv field is
+//!    **value-inferred** with fusion's warehouse-numeric ladder (empty →
+//!    `Null`; numeric → `Number`; case-insensitive `true`/`false` → `Bool`;
+//!    else `Str`). This makes a dict↔csv reformat with equal values a zero
+//!    data diff. The csv-format `Value::Array` path routes its string cells
+//!    through [`type_csv_token`] too (via a format-aware `type_fn` thread in
+//!    the array normalizer), so dbt-core's string-dicts and dbt-fusion's
+//!    raw-string body converge to the same typed table.
 //!
 //! ## Domain purity
 //!
@@ -179,7 +185,8 @@ pub enum FixtureFormat {
     /// `format: dict` — row maps (or csv pre-parsed to row maps by core).
     Dict,
     /// `format: csv` — a raw csv body (fusion) or pre-parsed string dicts
-    /// (core); either way the cells stay `Str`.
+    /// (core); either way the cells are value-inferred (cute-dbt#127) so the
+    /// two engine encodings converge.
     Csv,
     /// `format: sql` — a raw `SELECT` string. Opaque: no cells.
     Sql,
@@ -204,16 +211,17 @@ impl FixtureFormat {
 // Cell typing — the three entry points converging on CellValue
 // ---------------------------------------------------------------------
 
-/// Type a NEW-side cell from an already-typed JSON `Value` (the manifest
-/// path).
+/// Type a NEW-side **dict** cell from an already-typed JSON `Value` (the
+/// `format: dict` manifest path).
 ///
 /// - `Null` → [`CellValue::Null`]
 /// - `Bool(b)` → [`CellValue::Bool`]
 /// - `Number(n)` → [`CellValue::Number`] (canonicalized)
-/// - `String(s)` → [`CellValue::Str`] **verbatim** — a manifest string is a
-///   deliberate string (core ships csv cells as `"1"`; a dict author's
-///   quoted `"1"` is a string), so it is NOT re-coerced to a number/bool.
-///   This is the csv-`Str`-on-both-sides guarantee.
+/// - `String(s)` → [`CellValue::Str`] **verbatim** — a dict-format manifest
+///   string is a deliberate string (a dict author's quoted `"1"` is a
+///   string), so it is NOT re-coerced to a number/bool. The csv path infers
+///   instead (see [`type_csv_token`]); `format` is the discriminator
+///   (cute-dbt#127).
 /// - `Array`/`Object` → [`CellValue::Str`] of the value's compact JSON
 ///   (nested values are opaque, rare, and must never panic).
 #[must_use]
@@ -266,16 +274,67 @@ pub fn type_cell_scalar(token: &str) -> CellValue {
 /// Type a csv field token (fusion's raw-string body AND core's pre-parsed
 /// string dicts).
 ///
-/// A csv field stays [`CellValue::Str`] — **no** numeric/bool coercion — so
-/// csv is `Str`-on-both-engine-sides. An empty field maps to
-/// [`CellValue::Null`] (the dbt empty-equals-null convention; the JS twin
-/// half-implements it via the `hi < row.length ? … : ""` fill).
+/// csv equality is **warehouse-numeric**, not textual: dbt-fusion parses a
+/// csv field with a typed ladder (empty→null; numeric→number; case-insensitive
+/// `true`/`false`→bool; else string), renders it to a SQL literal, then
+/// compares *after a warehouse `CAST`* — so `1`≡`1.0`≡`1.00`, `1.50`≡`1.5`,
+/// `1e3`≡`1000`, `-0`≡`0`. cute-dbt mirrors that ladder here, terminating in
+/// [`CellValue`] (cute-dbt#127), so a dict↔csv reformat with equal values is
+/// a zero data diff:
+///
+/// 1. `""` → [`CellValue::Null`] (the dbt empty-equals-null convention; the
+///    JS twin half-implements it via the `hi < row.length ? … : ""` fill).
+/// 2. a fully-numeric token → [`CellValue::Number`] (canonicalized
+///    `i128`-first, so it is **strictly more exact than fusion's lossy
+///    `f64`** on big integers; we deliberately do NOT mirror fusion's
+///    `Number::to_string()`, which would split `1.0` from `1`).
+/// 3. case-insensitive `true`/`false` → [`CellValue::Bool`].
+/// 4. otherwise → [`CellValue::Str`] **verbatim** — no trim, no quote-strip
+///    (the RFC 4180 [`parse_csv_rows`] already handled quoting/whitespace).
+///
+/// ## Documented divergences from dbt-fusion (accepted, not bugs; cute-dbt#127)
+///
+/// 1. **`"null"`/`"NULL"` text stays `Str`.** Fusion coerces the literal text
+///    `null`/`NULL` to SQL NULL in any format (`create_values`); cute-dbt
+///    keeps it as a [`CellValue::Str`] so a diff cell can render the literal
+///    word "null". (The common empty-field→`Null` case is still zero-diff.)
+/// 2. **Ragged rows are tolerated, not an error.** Fusion's `csv` crate
+///    (`flexible=false`) errors on a row with the wrong field count; cute-dbt
+///    pads a short row (`""`→`Null`) and drops long extras — correct for a
+///    render-not-execute diff tool ([`parse_csv_rows`]).
+/// 3. **`i128` vs `f64` wide-integer reach.** The numeric path uses `i128`
+///    (exact to ~1.7e38); a dict integer `> u64::MAX` falls to `f64` — a
+///    known limitation, not a tested-equal case.
 #[must_use]
 pub fn type_csv_token(token: &str) -> CellValue {
     if token.is_empty() {
-        CellValue::Null
-    } else {
-        CellValue::Str(token.to_owned())
+        return CellValue::Null;
+    }
+    if let Some(canon) = canonicalize_str_number(token) {
+        return CellValue::Number(canon);
+    }
+    if token.eq_ignore_ascii_case("true") {
+        return CellValue::Bool(true);
+    }
+    if token.eq_ignore_ascii_case("false") {
+        return CellValue::Bool(false);
+    }
+    CellValue::Str(token.to_owned())
+}
+
+/// Type a NEW-side cell from a csv-format manifest `Value` (dbt-core's
+/// csv-as-array-of-string-dicts encoding). A [`Value::String`] cell — what
+/// core ships for every csv field — routes through [`type_csv_token`] so its
+/// value is inferred (the csv-Array format discriminator, cute-dbt#127 DELTA
+/// 2); any other `Value` shape (a defensive non-string cell) falls back to
+/// [`type_cell_value`]. This is the `type_fn` [`table_from_value_objects`]
+/// threads when `format: csv`, mirroring how `format: dict` threads
+/// [`type_cell_value`] verbatim — `format` is the only discriminator, so a
+/// deliberately-quoted dict `'1'` stays `Str` while a csv `1` infers `Number`.
+fn type_csv_value(v: &Value) -> CellValue {
+    match v {
+        Value::String(s) => type_csv_token(s),
+        other => type_cell_value(other),
     }
 }
 
@@ -690,11 +749,14 @@ fn split_quote_aware(s: &str, sep: char) -> Vec<String> {
 ///   fallback).
 /// - `rows` is an `Array` (dict on both engines, csv-from-core, inline-flow
 ///   after serde): each element is an object; columns are the first-seen
-///   union of keys; each field value routes through [`type_cell_value`]; a
-///   key a row lacks → [`CellValue::Absent`].
+///   union of keys; a key a row lacks → [`CellValue::Absent`]. The per-field
+///   typing is **format-aware** (cute-dbt#127): `format: dict` routes through
+///   [`type_cell_value`] (a quoted `"1"` stays `Str`); `format: csv` (core's
+///   array-of-string-dicts) routes its string cells through [`type_csv_token`]
+///   so a `"1"` cell infers `Number`.
 /// - `rows` is a `String` AND `format: csv` (the fusion csv-as-raw-string
 ///   path): [`parse_csv_rows`] → header-keyed rows → each token through
-///   [`type_csv_token`] (stays `Str`).
+///   [`type_csv_token`] (value-inferred — see its doc for the ladder).
 /// - `rows` is `Null` or an empty array → the empty [`FixtureTable`].
 /// - any other shape → `None` (graceful; the IR is not a validator).
 #[must_use]
@@ -702,7 +764,18 @@ pub fn table_from_manifest_rows(rows: &Value, format: Option<&str>) -> Option<Fi
     let fmt = FixtureFormat::from_opt(format);
     match rows {
         Value::Null => Some(FixtureTable::default()),
-        Value::Array(elems) => Some(table_from_value_objects(elems)),
+        // The Array arm is FORMAT-AWARE (cute-dbt#127 DELTA 2): dbt-core
+        // encodes csv as a `Value::Array` of all-string dicts, so a csv-format
+        // array threads the value-inferring `type_csv_value`; a dict-format
+        // array keeps `type_cell_value` verbatim (a deliberately-quoted dict
+        // `'1'` stays `Str`). `format` is the only discriminator.
+        Value::Array(elems) => {
+            let type_fn: fn(&Value) -> CellValue = match fmt {
+                FixtureFormat::Csv => type_csv_value,
+                FixtureFormat::Dict | FixtureFormat::Sql => type_cell_value,
+            };
+            Some(table_from_value_objects(elems, type_fn))
+        }
         Value::String(s) => match fmt {
             FixtureFormat::Csv => Some(table_from_csv_text(s)),
             // A non-csv string `rows` (a raw sql SELECT, or a malformed
@@ -741,9 +814,15 @@ pub fn table_from_yaml_fragment(rows_region: &str, format: Option<&str>) -> Opti
 }
 
 /// Normalize an array of JSON objects (core dict / csv, fusion dict,
-/// inline-flow-after-serde) into a [`FixtureTable`]. Columns are the
-/// first-seen union of object keys; absent keys → [`CellValue::Absent`].
-fn table_from_value_objects(elems: &[Value]) -> FixtureTable {
+/// inline-flow-after-serde) into a [`FixtureTable`], typing each field value
+/// through `type_fn`. Columns are the first-seen union of object keys; absent
+/// keys → [`CellValue::Absent`].
+///
+/// `type_fn` is the **format discriminator** (cute-dbt#127 DELTA 2): the
+/// caller passes [`type_cell_value`] for `format: dict` (a quoted `'1'` stays
+/// `Str`) and [`type_csv_value`] for `format: csv` (a `"1"` string cell
+/// infers `Number`). Mirrors the `type_fn` thread in [`table_from_keyed_rows`].
+fn table_from_value_objects(elems: &[Value], type_fn: fn(&Value) -> CellValue) -> FixtureTable {
     // First-seen union of keys across all object rows.
     let mut columns: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -763,9 +842,7 @@ fn table_from_value_objects(elems: &[Value]) -> FixtureTable {
                 .iter()
                 .map(|col| {
                     let value = match elem {
-                        Value::Object(map) => {
-                            map.get(col).map_or(CellValue::Absent, type_cell_value)
-                        }
+                        Value::Object(map) => map.get(col).map_or(CellValue::Absent, type_fn),
                         _ => CellValue::Absent,
                     };
                     Cell::new(value)
@@ -777,7 +854,7 @@ fn table_from_value_objects(elems: &[Value]) -> FixtureTable {
     FixtureTable::new(columns, rows)
 }
 
-/// Normalize a raw csv body into a [`FixtureTable`] (cells stay `Str` via
+/// Normalize a raw csv body into a [`FixtureTable`] (cells value-inferred via
 /// [`type_csv_token`]). Shared by the fusion NEW side and the csv OLD side.
 fn table_from_csv_text(text: &str) -> FixtureTable {
     let keyed = parse_csv_rows(text);
@@ -894,15 +971,28 @@ mod tests {
     }
 
     #[test]
-    fn a4_strings_stay_str_never_coerced_to_number() {
-        // NEW Value::String("1") → Str("1"), NOT Number — the core-csv
-        // string-stays-Str guarantee.
+    fn a4_dict_path_strings_stay_str_never_coerced_to_number() {
+        // The DICT-path string-stays-Str guarantee (the format discriminator,
+        // cute-dbt#127): a manifest `Value::String("1")` and a quoted YAML
+        // dict scalar `'1'`/`"1"` are DELIBERATE strings — never re-coerced.
+        // (The csv path now DOES infer — see a4b.)
         assert_eq!(type_cell_value(&json!("1")), CellValue::Str("1".into()));
         // OLD quoted '1' / "1" → Str("1").
         assert_eq!(type_cell_scalar("'1'"), CellValue::Str("1".into()));
         assert_eq!(type_cell_scalar("\"1\""), CellValue::Str("1".into()));
-        // csv token "1" stays Str.
-        assert_eq!(type_csv_token("1"), CellValue::Str("1".into()));
+    }
+
+    #[test]
+    fn a4b_csv_token_infers_number_and_bool_not_str() {
+        // cute-dbt#127: a csv field `1` is warehouse-numeric, so it now types
+        // as Number("1") (NOT Str), matching fusion's csv parse-ladder. The
+        // flipped canonical RED of the old a4.
+        assert_eq!(type_csv_token("1"), CellValue::Number("1".into()));
+        // Bool inference too (case-insensitive — see a6b).
+        assert_eq!(type_csv_token("true"), CellValue::Bool(true));
+        assert_eq!(type_csv_token("false"), CellValue::Bool(false));
+        // A genuine non-numeric/non-bool csv string stays Str verbatim.
+        assert_eq!(type_csv_token("alice"), CellValue::Str("alice".into()));
     }
 
     #[test]
@@ -914,6 +1004,12 @@ mod tests {
         assert_eq!(type_csv_token(""), CellValue::Null);
         // A QUOTED "null" is the literal string, not Null.
         assert_eq!(type_cell_scalar("'null'"), CellValue::Str("null".into()));
+        // DOCUMENTED DIVERGENCE 1 (cute-dbt#127): fusion coerces the csv text
+        // "null"/"NULL" → SQL NULL; cute-dbt keeps it as the literal Str so a
+        // diff cell can render the word "null". (The common empty-field=Null
+        // case is still zero-diff.)
+        assert_eq!(type_csv_token("null"), CellValue::Str("null".into()));
+        assert_eq!(type_csv_token("NULL"), CellValue::Str("NULL".into()));
     }
 
     #[test]
@@ -951,7 +1047,7 @@ mod tests {
         // A sparse dict: row 1 has {a,b}, row 2 has only {a} → row 2's b is
         // Absent, NOT Null. And Absent != Null as CellValues.
         let elems = vec![json!({"a": 1, "b": 2}), json!({"a": 3})];
-        let table = table_from_value_objects(&elems);
+        let table = table_from_value_objects(&elems, type_cell_value);
         assert_eq!(table.columns, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(table.rows[1].cells[1].value, CellValue::Absent);
         assert_ne!(CellValue::Absent, CellValue::Null);
@@ -994,7 +1090,8 @@ mod tests {
     #[test]
     fn b10_csv_fusion_string_vs_core_string_dicts_yields_equal_table() {
         // fusion csv-as-raw-string vs core csv-as-array-of-string-dicts of
-        // identical data → EQUAL FixtureTable (cells Str on both sides).
+        // identical data → EQUAL FixtureTable (cells value-inferred + equal on
+        // both engine encodings; cute-dbt#127).
         let fusion = json!("id,name\n1,alice\n2,bob\n");
         let fusion_tbl = table_from_manifest_rows(&fusion, Some("csv")).unwrap();
 
@@ -1008,11 +1105,195 @@ mod tests {
             fusion_tbl, core_tbl,
             "the two engine encodings of identical csv data must be equal"
         );
-        // And the cells are Str, not Number (the csv-Str guarantee).
+        // cute-dbt#127: the numeric `id` cell now CONVERGES to Number on both
+        // engine encodings (fusion raw-string AND core string-dicts both go
+        // through type_csv_token). The convergence is stronger than the old
+        // both-Str: a format-only reformat is a true no-op.
         assert_eq!(
             fusion_tbl.rows[0].cells[0].value,
-            CellValue::Str("1".into())
+            CellValue::Number("1".into())
         );
+    }
+
+    // ----- B'. cute-dbt#127: dict↔csv reformat is a value no-op -----
+
+    /// The headline acceptance matrix: a single-cell dict fixture and a
+    /// single-cell csv fixture carrying the SAME logical value must produce
+    /// the SAME [`CellValue`], so a dict→csv (or csv→dict) reformat with equal
+    /// values is a zero data diff. Each case pairs a dict-side encoding (an
+    /// already-typed JSON scalar, `format: dict`) against a csv-side encoding
+    /// (an all-string dict, `format: csv`) and asserts both → the expected
+    /// `CellValue`. The negative cases pin where the convergence MUST NOT hold
+    /// (the format discriminator + the documented "null"-text divergence).
+    #[test]
+    fn b127_dict_csv_equality_matrix() {
+        // Build a one-row, one-column table for `id` and pull out cell[0][0].
+        fn cell(rows: &Value, fmt: &str) -> CellValue {
+            let t = table_from_manifest_rows(rows, Some(fmt)).unwrap();
+            t.rows[0].cells[0].value.clone()
+        }
+        // dict side: a typed JSON scalar value for `id`.
+        fn dict(v: Value) -> CellValue {
+            cell(&json!([{ "id": v }]), "dict")
+        }
+        // csv side: dbt-core encodes csv as an all-STRING dict.
+        fn csv(token: &str) -> CellValue {
+            cell(&json!([{ "id": token }]), "csv")
+        }
+
+        // 1–3: 1 / 1.0 / 1.00 all converge to Number("1") on BOTH formats.
+        assert_eq!(dict(json!(1)), CellValue::Number("1".into()));
+        assert_eq!(csv("1"), CellValue::Number("1".into()));
+        assert_eq!(dict(json!(1.0)), CellValue::Number("1".into()));
+        assert_eq!(csv("1.0"), CellValue::Number("1".into()));
+        assert_eq!(csv("1.00"), CellValue::Number("1".into()));
+        // 4–5: 1.50 / 1.5 → Number("1.5").
+        assert_eq!(csv("1.50"), CellValue::Number("1.5".into()));
+        assert_eq!(csv("1.5"), CellValue::Number("1.5".into()));
+        assert_eq!(dict(json!(1.5)), CellValue::Number("1.5".into()));
+        // 6: true / "true" (case-insensitive) → Bool(true) on both.
+        assert_eq!(dict(json!(true)), CellValue::Bool(true));
+        assert_eq!(csv("true"), CellValue::Bool(true));
+        assert_eq!(csv("TRUE"), CellValue::Bool(true));
+        assert_eq!(csv("True"), CellValue::Bool(true));
+        assert_eq!(csv("false"), CellValue::Bool(false));
+        assert_eq!(csv("FALSE"), CellValue::Bool(false));
+        // 7: "" / null → Null on both (csv empty field; dict JSON null).
+        assert_eq!(dict(json!(null)), CellValue::Null);
+        assert_eq!(csv(""), CellValue::Null);
+        // 8: 007 → Number("7") (leading zeros collapse via i128).
+        assert_eq!(csv("007"), CellValue::Number("7".into()));
+        // 9: 1e3 → Number("1000") (scientific notation, finite f64 path).
+        assert_eq!(csv("1e3"), CellValue::Number("1000".into()));
+        assert_eq!(dict(json!(1e3)), CellValue::Number("1000".into()));
+        // 10: -0 → Number("0").
+        assert_eq!(csv("-0"), CellValue::Number("0".into()));
+        assert_eq!(csv("-0.0"), CellValue::Number("0".into()));
+        // 11: 2^63 (i64::MAX + 1 = 9223372036854775808) survives via i128.
+        assert_eq!(
+            csv("9223372036854775808"),
+            CellValue::Number("9223372036854775808".into()),
+        );
+        assert_eq!(
+            dict(json!(9_223_372_036_854_775_808_u64)),
+            CellValue::Number("9223372036854775808".into()),
+        );
+        // 12: a genuine string stays Str on both formats.
+        assert_eq!(dict(json!("alice")), CellValue::Str("alice".into()));
+        assert_eq!(csv("alice"), CellValue::Str("alice".into()));
+
+        // 13a: NEGATIVE — the dict-quoted-numeric safe FALSE positive. A
+        // DICT-format string `"1"` is a DELIBERATE string and must STAY Str —
+        // it must NOT converge with csv Number("1"). Format is the only
+        // discriminator.
+        assert_eq!(dict(json!("1")), CellValue::Str("1".into()));
+        assert_ne!(dict(json!("1")), csv("1"));
+        // 13b: NEGATIVE — the "null"-text divergence (documented). csv text
+        // "null" stays Str (so a diff cell can show the literal word); only an
+        // empty field is Null. A dict JSON string "null" is likewise Str.
+        assert_eq!(csv("null"), CellValue::Str("null".into()));
+        assert_eq!(dict(json!("null")), CellValue::Str("null".into()));
+    }
+
+    /// The load-bearing format discriminator (cute-dbt#127, DELTA 2): the
+    /// EXACT SAME `Value::Array` of string dicts (`[{"id":"1"}]`) routes
+    /// through `table_from_value_objects` and types its `"1"` cell
+    /// DIFFERENTLY by `format` alone — `Some("dict")` → `Str` (deliberate
+    /// string), `Some("csv")` → `Number` (warehouse-numeric inference). Pins
+    /// that the Array arm threads a format-aware `type_fn`, not a fixed one.
+    #[test]
+    fn b127_array_format_discriminator_dict_str_vs_csv_number() {
+        let rows = json!([{ "id": "1" }]);
+        let dict_tbl = table_from_manifest_rows(&rows, Some("dict")).unwrap();
+        let csv_tbl = table_from_manifest_rows(&rows, Some("csv")).unwrap();
+        assert_eq!(
+            dict_tbl.rows[0].cells[0].value,
+            CellValue::Str("1".into()),
+            "a deliberately-quoted dict '1' stays Str"
+        );
+        assert_eq!(
+            csv_tbl.rows[0].cells[0].value,
+            CellValue::Number("1".into()),
+            "the same array under csv format infers Number"
+        );
+        assert_ne!(dict_tbl, csv_tbl, "format is the only discriminator");
+    }
+
+    // ----- B''. cute-dbt#127 mutation kills (one per new branch) -----
+
+    /// Kill the `canonicalize_str_number → Number` branch of the new
+    /// type_csv_token ladder. Were the Number arm dropped, `"50.00"` would
+    /// fall through to `Str("50.00")` and this miscompares.
+    #[test]
+    fn b127_kill_csv_number_branch() {
+        assert_eq!(type_csv_token("50.00"), CellValue::Number("50".into()));
+        assert_eq!(type_csv_token("0.85"), CellValue::Number("0.85".into()));
+        assert_eq!(type_csv_token("-1"), CellValue::Number("-1".into()));
+    }
+
+    /// Kill the `true` Bool arm AND its `eq_ignore_ascii_case` (vs `==`).
+    /// `"TRUE"` only types Bool if the compare is case-insensitive; were it
+    /// `== "true"`, `"TRUE"` would wrongly stay Str.
+    #[test]
+    fn b127_kill_csv_bool_true_branch_is_case_insensitive() {
+        assert_eq!(type_csv_token("true"), CellValue::Bool(true));
+        assert_eq!(type_csv_token("TRUE"), CellValue::Bool(true));
+        assert_eq!(type_csv_token("True"), CellValue::Bool(true));
+        // A non-bool word stays Str (the arm is not over-greedy).
+        assert_eq!(type_csv_token("truee"), CellValue::Str("truee".into()));
+    }
+
+    /// Kill the `false` Bool arm AND its `eq_ignore_ascii_case`. Distinct test
+    /// from the `true` arm so dropping EITHER bool branch is caught.
+    #[test]
+    fn b127_kill_csv_bool_false_branch_is_case_insensitive() {
+        assert_eq!(type_csv_token("false"), CellValue::Bool(false));
+        assert_eq!(type_csv_token("FALSE"), CellValue::Bool(false));
+        assert_eq!(type_csv_token("False"), CellValue::Bool(false));
+        assert_eq!(type_csv_token("falsey"), CellValue::Str("falsey".into()));
+    }
+
+    /// Kill the empty-field `Null` arm: it must fire BEFORE the number ladder
+    /// (an empty token is not numeric, but the early return is the documented
+    /// empty==null rule and the JS-twin contract).
+    #[test]
+    fn b127_kill_csv_empty_null_branch() {
+        assert_eq!(type_csv_token(""), CellValue::Null);
+        assert_ne!(type_csv_token(""), CellValue::Str(String::new()));
+    }
+
+    /// Look up a row's cell by column name (serde_json's `Map` is a
+    /// `BTreeMap`, so the column order is alphabetical, not insertion order).
+    fn cell_by_col(t: &FixtureTable, row: usize, col: &str) -> CellValue {
+        let idx = t.columns.iter().position(|c| c == col).expect("column");
+        t.rows[row].cells[idx].value.clone()
+    }
+
+    /// Kill the csv-Array routing in `table_from_value_objects`: the threaded
+    /// `type_csv_value` must apply `type_csv_token` to a string cell. Were the
+    /// Array arm hardwired to `type_cell_value` (the pre-#127 behavior), a
+    /// core-csv `"1"` string cell would stay `Str`. This drives the routing
+    /// (not just `type_csv_token` in isolation), so a mutant that ignores the
+    /// threaded `type_fn` is caught.
+    #[test]
+    fn b127_kill_csv_value_object_routing() {
+        let core = json!([{ "n": "42", "flag": "true", "label": "ok" }]);
+        let t = table_from_manifest_rows(&core, Some("csv")).unwrap();
+        assert_eq!(cell_by_col(&t, 0, "n"), CellValue::Number("42".into()));
+        assert_eq!(cell_by_col(&t, 0, "flag"), CellValue::Bool(true));
+        assert_eq!(cell_by_col(&t, 0, "label"), CellValue::Str("ok".into()));
+    }
+
+    /// Kill the `type_csv_value` non-string fallback: a non-string cell inside
+    /// a csv-format Array (a JSON number `1`, defensive — core csv ships
+    /// strings, but the shim must not panic or mis-route) routes to
+    /// `type_cell_value` → Number. Pins the `else` arm of the shim.
+    #[test]
+    fn b127_kill_csv_value_object_non_string_fallback() {
+        let mixed = json!([{ "n": 1, "label": "ok" }]);
+        let t = table_from_manifest_rows(&mixed, Some("csv")).unwrap();
+        assert_eq!(cell_by_col(&t, 0, "n"), CellValue::Number("1".into()));
+        assert_eq!(cell_by_col(&t, 0, "label"), CellValue::Str("ok".into()));
     }
 
     // ----- G. Parsers -----
