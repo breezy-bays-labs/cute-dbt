@@ -583,7 +583,7 @@ fn key_rows_by_header(matrix: &[Vec<String>]) -> Vec<Vec<(String, String)>> {
 #[must_use]
 pub fn parse_block_dict_rows(rows_region: &str) -> Vec<Vec<(String, String)>> {
     let mut acc = BlockDictAcc::default();
-    for line in rows_region.split('\n') {
+    for line in rows_region.lines() {
         acc.feed_line(line);
     }
     acc.finish()
@@ -709,12 +709,35 @@ fn split_key_value(s: &str) -> Option<(String, String)> {
 
 /// Split `s` on `sep`, but only when `sep` is NOT inside a single- or
 /// double-quoted run (a quote-state-aware split for inline-flow rows).
+///
+/// Honors YAML's two intra-string quote escapes so a `sep` (or a quote) that
+/// is part of an escaped value never prematurely closes the run:
+/// - inside a **double-quoted** run, a backslash escapes the next char, so
+///   `"a\", b"` stays one value;
+/// - inside a **single-quoted** run, a doubled quote (`''`) is a literal
+///   single quote, so `'it''s, ok'` stays one value.
+///
+/// (The backslash / doubled-quote bytes are kept verbatim here; the later
+/// [`type_cell_scalar`] quote-stripping pass owns unescaping.)
 fn split_quote_aware(s: &str, sep: char) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut quote: Option<char> = None;
-    for c in s.chars() {
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
         match quote {
+            Some('"') if c == '\\' => {
+                // Backslash escape: keep both bytes, never toggle on the next.
+                cur.push(c);
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+            }
+            Some('\'') if c == '\'' && chars.peek() == Some(&'\'') => {
+                // Doubled single-quote = a literal quote; stay in quoted mode.
+                cur.push(c);
+                cur.push(chars.next().expect("peeked quote"));
+            }
             Some(q) => {
                 cur.push(c);
                 if c == q {
@@ -953,6 +976,41 @@ mod tests {
         assert_eq!(type_cell_scalar("1000.0"), CellValue::Number("1000".into()));
         // -0 normalizes to 0.
         assert_eq!(type_cell_scalar("-0.0"), CellValue::Number("0".into()));
+    }
+
+    #[test]
+    fn a2b_canonicalize_float_never_emits_scientific_notation() {
+        // Defensive invariant (Gemini PR #130 review): `canonicalize_float`
+        // builds on `format!("{f}")`, whose `f64` `Display` is ALWAYS
+        // positional decimal — it NEVER emits an `e`/`E` exponent (unlike
+        // `ryu` or the `{:e}` formatter). Therefore the `.contains('.')`-gated
+        // `trim_end_matches('0')` can only ever strip trailing *decimal*
+        // zeros; it can never truncate an exponent. These extreme magnitudes
+        // would round-trip through scientific notation under `{:e}`, so they
+        // pin that the positional-Display assumption holds.
+        for f in [
+            1e-300_f64,
+            1e300_f64,
+            1.5e-20_f64,
+            -1e-300_f64,
+            f64::MIN_POSITIVE,
+        ] {
+            let s = canonicalize_float(f);
+            assert!(
+                !s.contains('e') && !s.contains('E'),
+                "canonicalize_float({f}) = {s:?} must not contain an exponent"
+            );
+            // And it must remain parseable as the same finite magnitude.
+            let back: f64 = s.parse().expect("canonicalized float re-parses");
+            assert_eq!(
+                back, f,
+                "canonicalize_float must not lose magnitude for {f}"
+            );
+        }
+        // A genuinely large whole-valued float prints as a long integer with
+        // no decimal point and no exponent.
+        let whole = canonicalize_float(1e30_f64);
+        assert!(!whole.contains('.') && !whole.contains('e') && !whole.contains('E'));
     }
 
     #[test]
@@ -1487,6 +1545,29 @@ mod tests {
         // Through the normalizer the quoted value strips to Str("a, b").
         let table = table_from_yaml_fragment("      - {note: 'a, b'}", Some("dict")).unwrap();
         assert_eq!(table.rows[0].cells[0].value, CellValue::Str("a, b".into()));
+    }
+
+    #[test]
+    fn g30b_inline_flow_protects_escaped_quotes_inside_values() {
+        // Regression (CodeRabbit PR #130): an escaped quote inside an
+        // inline-flow value must NOT prematurely close the quoted run and
+        // split the row at a following comma into phantom cells.
+
+        // Doubled single-quote (`''` = a literal `'`): `'it''s, ok'` is ONE
+        // value, not two cells.
+        let row = parse_inline_flow_row("      - {note: 'it''s, ok'}");
+        assert_eq!(row, vec![("note".into(), "'it''s, ok'".into())]);
+
+        // Backslash-escaped double-quote: `"a\", b"` is ONE value.
+        let row = parse_inline_flow_row("      - {note: \"a\\\", b\"}");
+        assert_eq!(row, vec![("note".into(), "\"a\\\", b\"".into())]);
+
+        // A sibling key after the escaped value still parses as its own cell.
+        let row = parse_inline_flow_row("      - {note: 'it''s', id: 1}");
+        assert_eq!(
+            row,
+            vec![("note".into(), "'it''s'".into()), ("id".into(), "1".into())]
+        );
     }
 
     #[test]

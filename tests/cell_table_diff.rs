@@ -85,7 +85,7 @@ fn manifest_with(id: &str, ut: UnitTest) -> Manifest {
 /// A `UnitTestYamlBlock` whose `raw` is the working-tree (NEW) block,
 /// starting at 1-based source line `block_start`.
 fn block_at(raw: &str, block_start: usize) -> UnitTestYamlBlock {
-    let n = raw.split('\n').count();
+    let n = raw.lines().count();
     UnitTestYamlBlock::new(
         raw.to_owned(),
         block_start,

@@ -182,6 +182,11 @@ fn run_with_edit(world: &mut World, edit: Edit) {
     world.last_exit_code = output.status.code();
     world.last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     world.report_html = std::fs::read_to_string(&out).ok();
+    // Keep this BDD path under the static zero-egress guard so a regression
+    // reintroducing an external asset ref is caught here too (cute-dbt#98).
+    if let Some(html) = &world.report_html {
+        common::assert_no_external_refs(html);
+    }
     world.out_path = Some(out);
 }
 

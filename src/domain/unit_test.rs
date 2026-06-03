@@ -320,6 +320,55 @@ mod tests {
     }
 
     #[test]
+    fn given_serde_roundtrip_over_fixture_x_rows_matrix() {
+        // CodeRabbit PR #130: the new `fixture`/`rows` wire shapes add
+        // optional/nested permutations that are easy to regress. Exhaust the
+        // {fixture present/absent} × {rows null/inline-array/inline-object}
+        // matrix and assert serialize→deserialize is the identity, pinning
+        // the tolerant-deserialization contract across every combination.
+        let fixtures = [None, Some("ext_fixture".to_owned())];
+        let row_shapes = [
+            Value::Null,
+            json!([{"order_id": 1}, {"order_id": 2}]),
+            json!({"order_id": 1}),
+        ];
+        let formats = [None, Some("dict".to_owned()), Some("csv".to_owned())];
+        for fixture in &fixtures {
+            for rows in &row_shapes {
+                for format in &formats {
+                    let g = UnitTestGiven::new(
+                        "ref('a')",
+                        rows.clone(),
+                        format.clone(),
+                        fixture.clone(),
+                    );
+                    let back: UnitTestGiven =
+                        serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
+                    assert_eq!(back, g, "given round-trip failed for {g:?}");
+
+                    let e = UnitTestExpect::new(rows.clone(), format.clone(), fixture.clone());
+                    let back: UnitTestExpect =
+                        serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+                    assert_eq!(back, e, "expect round-trip failed for {e:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn given_rows_omitted_on_wire_roundtrips_through_null() {
+        // The omitted-vs-null tolerance: a wire payload that omits `rows`
+        // entirely deserializes to `Value::Null`, and re-serializing then
+        // re-deserializing is stable (the omitted key normalizes to null).
+        let wire = r#"{ "input": "ref('a')", "fixture": "ext" }"#;
+        let g: UnitTestGiven = serde_json::from_str(wire).unwrap();
+        assert!(g.rows().is_null());
+        let back: UnitTestGiven =
+            serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
+        assert_eq!(back, g);
+    }
+
+    #[test]
     fn expect_constructor_and_getters() {
         let e = sample_expect();
         assert!(e.rows().is_array());

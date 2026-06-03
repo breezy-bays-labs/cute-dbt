@@ -401,16 +401,30 @@ fn cell_for_column(table: &FixtureTable, row: &TableRow, col: &str) -> CellValue
         .map_or(CellValue::Absent, |cell| cell.value.clone())
 }
 
-/// The canonical row key — each cell's tag+value joined by `|`. Built from
-/// the same [`CellValue`] as the cells, so two rows differing only by
-/// source format hash equal; `Absent` and `Null` serialize to distinct
-/// tokens.
+/// The canonical row key — each cell's tag+value, length-prefixed and
+/// concatenated. Built from the same [`CellValue`] as the cells, so two rows
+/// differing only by source format hash equal; `Absent` and `Null` serialize
+/// to distinct tokens.
+///
+/// The encoding is **injective**: every token is emitted as
+/// `<byte-len>:<token>`, so a literal cell value containing `|` (or a
+/// token-like prefix such as `str:`) can never realign across the cell
+/// boundary and collapse two distinct rows onto one key. A bare separator
+/// join (`token|token`) is ambiguous — e.g. `["a", "x|str:b"]` and
+/// `["a|str:x", "b"]` both flatten to `str:a|str:x|str:b` — which would let
+/// [`match_multiset`] mark unrelated rows `Unchanged` and silently drop a
+/// real cell diff.
 fn row_key(cells: &[CellValue]) -> String {
-    cells
-        .iter()
-        .map(cell_key_token)
-        .collect::<Vec<_>>()
-        .join("|")
+    let mut key = String::new();
+    for cell in cells {
+        let token = cell_key_token(cell);
+        // `<byte-len>:<token>` — the length prefix makes concatenation
+        // unambiguous regardless of what bytes the token carries.
+        key.push_str(&token.len().to_string());
+        key.push(':');
+        key.push_str(&token);
+    }
+    key
 }
 
 /// One cell's key token (`tag:value`, or just the tag for unit variants).
@@ -644,7 +658,7 @@ fn slice_named_region(
     key: &str,
     match_value: Option<&str>,
 ) -> Option<(String, Option<String>)> {
-    let lines: Vec<&str> = old_text.split('\n').collect();
+    let lines: Vec<&str> = old_text.lines().collect();
     let start = find_subblock_start(&lines, key, match_value)?;
     let sub_indent = indent_of(lines[start]);
     let end = subblock_end(&lines, start, sub_indent);
@@ -852,6 +866,42 @@ mod tests {
         assert_eq!(diff.rows[1].kind, RowChangeKind::Removed);
         assert_eq!(diff.rows[1].cells[0].old, n("2"));
         assert_eq!(diff.rows[1].cells[0].new, CellValue::Absent);
+    }
+
+    #[test]
+    fn d_delimiter_bearing_cells_do_not_collide_onto_one_row_key() {
+        // Regression (Gemini PR #130 row_key collision): a bare `token|token`
+        // join is ambiguous when a literal cell value contains `|` or a
+        // token-like prefix. OLD row `["a", "x|str:b"]` and NEW row
+        // `["a|str:x", "b"]` BOTH flatten to `str:a|str:x|str:b` under the
+        // old encoding — so `match_multiset` would mark the NEW row
+        // `Unchanged` and silently drop a real cell diff. With injective
+        // length-prefixed keys the two rows are distinct, so the diff is real.
+        let old = table(&["c1", "c2"], vec![vec![s("a"), s("x|str:b")]]);
+        let new = table(&["c1", "c2"], vec![vec![s("a|str:x"), s("b")]]);
+        let diff = diff_fixture_tables(&old, &new);
+        assert!(
+            diff.has_real_change(),
+            "distinct delimiter-bearing rows must produce a real diff, not collide"
+        );
+        // The one row is Modified: c1 a -> a|str:x, c2 x|str:b -> b.
+        assert_eq!(diff.rows.len(), 1);
+        assert_eq!(diff.rows[0].kind, RowChangeKind::Modified);
+        assert_eq!(diff.rows[0].cells[0].old, s("a"));
+        assert_eq!(diff.rows[0].cells[0].new, s("a|str:x"));
+        assert_eq!(diff.rows[0].cells[1].old, s("x|str:b"));
+        assert_eq!(diff.rows[0].cells[1].new, s("b"));
+    }
+
+    #[test]
+    fn d_delimiter_bearing_identical_rows_still_match_as_unchanged() {
+        // The flip side: a row whose cells legitimately contain `|`/token-like
+        // text, identical on both sides, must still match as Unchanged (the
+        // injective key is deterministic, not merely collision-avoidant).
+        let t = table(&["c1", "c2"], vec![vec![s("a|str:x"), s("3:str:b")]]);
+        let diff = diff_fixture_tables(&t, &t);
+        assert!(!diff.has_real_change(), "identical rows → Unchanged");
+        assert_eq!(diff.rows[0].kind, RowChangeKind::Unchanged);
     }
 
     #[test]
@@ -1356,5 +1406,70 @@ mod tests {
         assert!(d.is_empty());
         assert!(d.given.is_empty());
         assert!(d.expect.is_none());
+    }
+
+    #[test]
+    fn j_data_diff_round_trips_over_cellvalue_x_expect_matrix() {
+        // CodeRabbit PR #130: the new nested `data_diff` payload adds
+        // optional/nested combinations (every CellValue variant, each
+        // RowChangeKind/ColumnStatus, expect present/absent) that are easy to
+        // regress without noticing. Exhaust the variant matrix and assert
+        // serialize→deserialize is the identity so the wire contract — in
+        // particular Absent-vs-Null adjacency (Absent = tag-only, Null =
+        // tag-only, distinct tokens) — can't drift silently.
+        let cell_variants = [
+            CellValue::Null,
+            CellValue::Absent,
+            CellValue::Bool(true),
+            CellValue::Bool(false),
+            CellValue::Number("1.5".into()),
+            CellValue::Str("x|y".into()), // delimiter-bearing literal
+        ];
+        let kinds = [
+            RowChangeKind::Unchanged,
+            RowChangeKind::Added,
+            RowChangeKind::Removed,
+            RowChangeKind::Modified,
+        ];
+        let statuses = [
+            ColumnStatus::Present,
+            ColumnStatus::Added,
+            ColumnStatus::Removed,
+        ];
+        for old in &cell_variants {
+            for new in &cell_variants {
+                for kind in kinds {
+                    for status in statuses {
+                        for expect_present in [false, true] {
+                            let table = FixtureTableDiff {
+                                columns: vec![DiffColumn {
+                                    name: "c".into(),
+                                    status,
+                                }],
+                                rows: vec![RowChange {
+                                    kind,
+                                    cells: vec![CellChange {
+                                        old: old.clone(),
+                                        new: new.clone(),
+                                        changed: old != new,
+                                    }],
+                                }],
+                            };
+                            let diff = UnitTestDataDiff {
+                                given: vec![NamedTableDiff {
+                                    input: "ref('a')".into(),
+                                    diff: table.clone(),
+                                }],
+                                expect: expect_present.then(|| table.clone()),
+                            };
+                            let back: UnitTestDataDiff =
+                                serde_json::from_str(&serde_json::to_string(&diff).unwrap())
+                                    .unwrap();
+                            assert_eq!(back, diff, "data_diff round-trip failed for {diff:?}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

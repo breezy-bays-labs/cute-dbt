@@ -1,5 +1,6 @@
 ---
 source: tests/render_integration.rs
+assertion_line: 218
 expression: chrome
 ---
 <!DOCTYPE html>
@@ -157,6 +158,10 @@ table.given-table, table.expected-table { width: max-content; min-width: 100%; }
 table.given-table th, table.expected-table th { font-weight: 700; border-bottom: 2px solid #1d7484; }
 table.given-table td, table.expected-table td { white-space: nowrap; }
 .cell-null { color: #6a6a72; font-style: italic; }
+/* cute-dbt#98 — an Absent cell (a column the row's source table lacks, only
+   reachable in the unified Diff grid) renders blank, distinct from a literal
+   NULL. */
+.cell-absent { color: #b8b8bf; }
 .cell-num { text-align: right; }
 
 /* cute-dbt#98 — cell-level data-table diff. A per-table Current↔Diff toggle
@@ -1664,10 +1669,16 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
   // Render a single CellValue into a plain value cell, matching `buildTable`'s
   // null/number styling so the Current and Diff views read identically.
   function decorateValueCell($td, cv) {
-    if (!cv || cv.t === "null" || cv.t === "absent") {
-      // A null (or an absent cell on a removed/added column) reads as NULL,
-      // matching the Current grid's `cell === null` styling.
+    if (!cv || cv.t === "null") {
+      // A literal null reads as NULL, matching the Current grid's
+      // `cell === null` styling.
       return $td.addClass("cell-null").text("NULL");
+    }
+    if (cv.t === "absent") {
+      // An absent cell (a unified-diff column the row's source table lacks)
+      // is NOT a null — render it blank so an Absent->Null change stays
+      // visible and added/removed-column cells don't read as literal nulls.
+      return $td.addClass("cell-absent").text("");
     }
     if (cv.t === "number") {
       return $td.addClass("cell-num").attr("data-order", cv.v).text(cv.v);
