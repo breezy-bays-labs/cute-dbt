@@ -1271,6 +1271,31 @@ mod tests {
         assert_eq!(table.rows[0].cells[1].value, CellValue::Str("alice".into()));
     }
 
+    #[test]
+    fn dedent_strips_only_the_common_prefix_and_preserves_deeper_indent() {
+        // `dedent` removes the SMALLEST leading-whitespace prefix shared by
+        // all non-blank lines; lines indented deeper than that minimum keep
+        // their residual indentation. Pins the indent arithmetic in `dedent`:
+        // both `l.len() - l.trim_start().len()` subtractions compute a line's
+        // leading-whitespace width. Were either flipped to `+`, `min_indent`
+        // (or the per-line clamp) would be wildly inflated and every line
+        // would be stripped to flush-left, dropping a deeper line's residual
+        // indentation — a silent over-dedent.
+        //
+        // header at 2-space indent, data row at 4-space indent → common
+        // prefix is 2; the data row must keep 2 residual leading spaces.
+        let region = "  id\n    1";
+        let out = dedent(region);
+        assert_eq!(
+            out, "id\n  1",
+            "common prefix (2) stripped; 2 residual kept"
+        );
+        // A uniform region dedents fully (the min == each line's indent).
+        assert_eq!(dedent("    a\n    b"), "a\nb");
+        // A blank line carries no indent signal and is preserved verbatim.
+        assert_eq!(dedent("    a\n\n    b"), "a\n\nb");
+    }
+
     // ----- Cross-source symmetry guard (the headline kill) -----
 
     #[test]
