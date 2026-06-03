@@ -289,25 +289,72 @@ fn list_item_name_matches(
 /// the first end-of-scalar boundary (matching closing quote, or
 /// whitespace / `#` for unquoted). Returns the scalar with surrounding
 /// whitespace and quotes removed.
-fn parse_yaml_scalar(raw: &str) -> String {
+///
+/// `pub(crate)` so the cell-table IR's block-dict parser
+/// ([`crate::domain::unit_test_table::parse_block_dict_rows`], cute-dbt#98)
+/// reuses the same quote-stripping semantics on the OLD-side YAML tokens
+/// rather than re-deriving them.
+pub(crate) fn parse_yaml_scalar(raw: &str) -> String {
     let s = raw.trim_start();
     if let Some(rest) = s.strip_prefix('"') {
-        if let Some(end) = rest.find('"') {
-            return rest[..end].to_string();
-        }
-        return rest.to_string();
+        return read_double_quoted(rest);
     }
     if let Some(rest) = s.strip_prefix('\'') {
-        if let Some(end) = rest.find('\'') {
-            return rest[..end].to_string();
-        }
-        return rest.to_string();
+        return read_single_quoted(rest);
     }
     // Unquoted scalar: read up to whitespace or `#`.
     let end = s
         .find(|c: char| c.is_whitespace() || c == '#')
         .unwrap_or(s.len());
     s[..end].to_string()
+}
+
+/// Read a double-quoted YAML scalar body (the text after the opening `"`),
+/// up to the first **unescaped** closing `"`. A backslash escapes the next
+/// character (so `a\"b` keeps the inner quote), and the escape byte is
+/// unescaped out of the returned value. An unterminated body is returned
+/// whole. (`CodeRabbit` PR #130 — without this, an escaped inner quote
+/// truncated the value, e.g. `"a\"b"` → `a`.)
+fn read_double_quoted(rest: &str) -> String {
+    let mut out = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            }
+            '"' => return out,
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Read a single-quoted YAML scalar body (the text after the opening `'`),
+/// up to the first **unescaped** closing `'`. A doubled quote (`''`) is the
+/// YAML escape for a literal single quote and collapses to one `'`, staying
+/// inside the scalar. An unterminated body is returned whole. (`CodeRabbit`
+/// PR #130 — without this, `'it''s'` truncated to `it`.)
+fn read_single_quoted(rest: &str) -> String {
+    let mut out = String::new();
+    let mut chars = rest.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\'' {
+            if chars.peek() == Some(&'\'') {
+                // Doubled quote → one literal `'`, stay in the scalar.
+                chars.next();
+                out.push('\'');
+            } else {
+                // A lone quote closes the scalar.
+                return out;
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Walk forward from the `- name:` line collecting all lines that
@@ -414,6 +461,30 @@ mod tests {
     // multi-line string literal.
     fn yaml(s: &str) -> String {
         s.strip_prefix('\n').unwrap_or(s).to_string()
+    }
+
+    #[test]
+    fn parse_yaml_scalar_unquoted_and_simple_quoted() {
+        // Unchanged behavior for the common (unescaped) cases — including
+        // test-name matching: a bare scalar reads to whitespace/`#`, and a
+        // matching quote pair strips to the inner text.
+        assert_eq!(parse_yaml_scalar("dim_payer"), "dim_payer");
+        assert_eq!(parse_yaml_scalar("dim_payer # trailing"), "dim_payer");
+        assert_eq!(parse_yaml_scalar("'quoted name'"), "quoted name");
+        assert_eq!(parse_yaml_scalar("\"quoted name\""), "quoted name");
+        assert_eq!(parse_yaml_scalar("'a, b'"), "a, b");
+    }
+
+    #[test]
+    fn parse_yaml_scalar_honors_escaped_quotes() {
+        // Regression (CodeRabbit PR #130): an escaped inner quote must NOT
+        // truncate the value. Doubled single-quote (`''`) collapses to one
+        // literal `'`; a backslash escapes a double-quote.
+        assert_eq!(parse_yaml_scalar("'it''s'"), "it's");
+        assert_eq!(parse_yaml_scalar("'it''s, ok'"), "it's, ok");
+        assert_eq!(parse_yaml_scalar("\"a\\\"b\""), "a\"b");
+        // An unterminated quoted body returns whole (no panic).
+        assert_eq!(parse_yaml_scalar("'unterminated"), "unterminated");
     }
 
     #[test]

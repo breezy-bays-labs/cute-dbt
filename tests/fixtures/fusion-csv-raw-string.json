@@ -1,0 +1,64 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "2.0.0-preview",
+    "generated_at": "1970-01-01T00:00:00Z",
+    "invocation_id": "00000000-0000-0000-0000-000000000000",
+    "project_name": "fusion_demo",
+    "project_id": "0000000000000000000000000000000000000000",
+    "user_id": "00000000-0000-0000-0000-000000000000",
+    "send_anonymous_usage_stats": false,
+    "adapter_type": "duckdb"
+  },
+  "nodes": {
+    "model.fusion_demo.dq_rollup": {
+      "database": "fusion_demo",
+      "schema": "main",
+      "name": "dq_rollup",
+      "resource_type": "model",
+      "package_name": "fusion_demo",
+      "path": "marts/dq_rollup.sql",
+      "original_file_path": "models/marts/dq_rollup.sql",
+      "unique_id": "model.fusion_demo.dq_rollup",
+      "fqn": ["fusion_demo", "marts", "dq_rollup"],
+      "alias": "dq_rollup",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "FUSION_CSV_RAW_STRING_SYNTHETIC_SENTINEL_0001"
+      },
+      "raw_code": "{# Synthetic dbt-fusion fixture: csv rows ship as a RAW STRING body (cute-dbt#127). #}\nselect entity_type, quarantined_count, is_dq_valid from {{ ref('src_checks') }}",
+      "compiled_code": "select entity_type, quarantined_count, is_dq_valid from \"fusion_demo\".\"main\".\"src_checks\"",
+      "depends_on": {
+        "nodes": [
+          "model.fusion_demo.src_checks"
+        ]
+      }
+    }
+  },
+  "unit_tests": {
+    "unit_test.fusion_demo.test_dq_rollup_csv_raw_string": {
+      "name": "test_dq_rollup_csv_raw_string",
+      "model": "dq_rollup",
+      "package_name": "fusion_demo",
+      "resource_type": "unit_test",
+      "unique_id": "unit_test.fusion_demo.test_dq_rollup_csv_raw_string",
+      "original_file_path": "models/marts/_unit_tests.yml",
+      "given": [
+        {
+          "input": "ref('src_checks')",
+          "format": "csv",
+          "rows": "entity_type,quarantined_count,is_dq_valid\nencounters,1,false\nmedications,2,true\n"
+        }
+      ],
+      "expect": {
+        "format": "csv",
+        "rows": "entity_type,quarantined_count,is_dq_valid\nencounters,1.00,false\nmedications,2,TRUE\n"
+      },
+      "description": "Synthetic dbt-fusion 2.0-preview unit test whose given/expect csv fixtures encode rows as a RAW CSV STRING (the fusion divergence vs dbt-core's array-of-string-dicts). Exercises cute-dbt's fusion-csv NEW path end-to-end: the raw-string body parses via the RFC 4180 parser and each field is value-inferred (cute-dbt#127) so quarantined_count 1 vs 1.00 and is_dq_valid false vs TRUE converge. Pure synthetic data only; fusion_demo, src_checks, and the row values are fictitious (no real data).",
+      "config": {
+        "tags": [],
+        "meta": {}
+      }
+    }
+  }
+}

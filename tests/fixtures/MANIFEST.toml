@@ -189,6 +189,27 @@ the `messy_shop` package name and node names are fictitious.\
 """
 
 [[fixture]]
+path = "fusion-csv-raw-string.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/127"
+sha256 = "a299522b44a906a33ff225fc9477b52930ca10b7d7e7a85553f85768acc512c2"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Synthetic single-model manifest in the dbt-fusion 2.0-preview encoding \
+(cute-dbt#127): the `test_dq_rollup_csv_raw_string` unit test's `given` \
+and `expect` carry `format: csv` with `rows` as a RAW CSV STRING body \
+(`"entity_type,quarantined_count,is_dq_valid\\nencounters,1,false\\n..."`), \
+the fusion divergence vs dbt-core's array-of-string-dicts. This is the \
+end-to-end gate for cute-dbt's fusion-csv NEW path: the raw-string body \
+parses via the RFC 4180 parser and each field is value-inferred so a \
+dict<->csv reformat (and the 1 vs 1.00, false vs TRUE pairs) is a value \
+no-op. Pure synthetic data only — the `fusion_demo` package, `dq_rollup` / \
+`src_checks` node names, and all row values are fictitious.\
+"""
+
+[[fixture]]
 path = "playground-baseline.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"

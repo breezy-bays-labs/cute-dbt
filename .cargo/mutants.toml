@@ -28,6 +28,7 @@ additional_cargo_test_args = [
   "--test", "domain_clean_arch",
   "--test", "resource_ref_lint",
   "--test", "golden_report",
+  "--test", "cell_table_diff",
 ]
 
 # Focused scope. Render-glue and POD domain types are NOT in this list —
@@ -37,6 +38,8 @@ examine_globs = [
   "src/domain/preflight.rs",
   "src/domain/pr_diff.rs",
   "src/domain/scope.rs",
+  "src/domain/cell_diff.rs",
+  "src/domain/unit_test_table.rs",
   "src/domain/unit_test_yaml.rs",
   "src/adapters/manifest.rs",
   "src/adapters/cte_engine.rs",
@@ -58,6 +61,24 @@ exclude_globs = []
 # constructible without violating the domain invariant that a modified model
 # with at least one unit test always has that test in scope.
 # cute-dbt#30 — filed with PR C.
+#
+# Classified-equivalent mutation: `replace - with + in dedent` at
+# unit_test_table.rs:839 (the per-line slice-start clamp
+# `min_indent.min(l.len() - l.trim_start().len())`). `min_indent` is the
+# MINIMUM leading-whitespace width over all non-blank lines, so every
+# non-blank line's own indent is >= min_indent → the `.min()` always returns
+# min_indent; the `+` mutation makes the clamped term strictly larger still,
+# so `.min()` still returns min_indent → byte-identical output for every
+# input. The clamp only guards a slice-overflow panic that min_indent's
+# definition already precludes. The sibling 830 mutant (the min_indent
+# computation) IS discriminating and is killed by
+# `dedent_strips_only_the_common_prefix_and_preserves_deeper_indent`.
+# The exclude_re below pins the line (`:839:`) so it excludes ONLY the
+# equivalent clamp mutant — the sibling `830:26` `- with +` in the
+# min_indent computation shares the same mutant *name* but is discriminating
+# and stays gated (and killed).
+# tracked: cute-dbt#129 — equivalent dedent clamp mutant (#98 mutation gate).
 exclude_re = [
   "delete ! in StateComparator::models_in_scope",
+  "unit_test_table\\.rs:839:.*replace - with \\+ in dedent",
 ]

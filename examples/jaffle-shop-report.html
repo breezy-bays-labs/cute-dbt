@@ -380,8 +380,40 @@ table.given-table, table.expected-table { width: max-content; min-width: 100%; }
 table.given-table th, table.expected-table th { font-weight: 700; border-bottom: 2px solid #1d7484; }
 table.given-table td, table.expected-table td { white-space: nowrap; }
 .cell-null { color: #6a6a72; font-style: italic; }
+/* cute-dbt#98 — an Absent cell (a column the row's source table lacks, only
+   reachable in the unified Diff grid) renders blank, distinct from a literal
+   NULL. */
+.cell-absent { color: #b8b8bf; }
 .cell-num { text-align: right; }
 
+/* cute-dbt#98 — cell-level data-table diff. A per-table Current↔Diff toggle
+   (mirrors the #96 .yaml-diff-toggle / .yaml-view-btn idiom) sits above each
+   given/expect grid; the Diff view tints whole rows by RowChangeKind, marks
+   changed cells inline (old → new), and badges added/removed columns. The
+   palette reuses the #96 diff hues so the structured cell diff reads in the
+   same visual language as the inline YAML/SQL line diffs. */
+.cell-diff-toggle { display: flex; margin: 0.5rem 0 0; }
+/* Whole-row tints for added/removed rows: a translucent fill + an inset
+   left-accent on the first cell, echoing .diff-added / .diff-removed. */
+tr.row-added   td { background: rgba(46, 160, 67, 0.06); }
+tr.row-removed td { background: rgba(244, 63, 94, 0.06); }
+tr.row-added   td:first-child { box-shadow: inset 3px 0 0 rgba(46, 160, 67, 0.8); }
+tr.row-removed td:first-child { box-shadow: inset 3px 0 0 rgba(244, 63, 94, 0.85); }
+/* A row removed from the new table is struck through so the "gone" reading is
+   unambiguous even when the row tint is subtle. */
+tr.row-removed td { text-decoration: line-through; text-decoration-color: rgba(190, 18, 60, 0.6); }
+/* Added/removed COLUMNS get a header badge from DiffColumn.status. */
+th.col-added .col-status,
+th.col-removed .col-status { font-size: 0.7em; font-weight: 700; margin-left: 0.3rem; border-radius: 2px; padding: 0 2px; }
+th.col-added .col-status   { background: #a6f0b8; color: #04260f; }
+th.col-removed .col-status { background: #ffabd6; color: #26000a; }
+th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190, 18, 60, 0.6); }
+/* A changed cell renders old → new inline. The two values reuse the #96
+   strong-mark palette (solid pastel + forced dark ink so it reads crisply in
+   both Sakura themes); the arrow between them is muted. */
+.cell-old { background: #ffabd6; color: #26000a; border-radius: 2px; padding: 0 1px; }
+.cell-new { background: #a6f0b8; color: #04260f; border-radius: 2px; padding: 0 1px; }
+.cell-arrow { color: #6a6a72; margin: 0 0.3ch; }
 .compiled-sql > summary { cursor: pointer; }
 /* padding-top reserves vertical space for the absolute-positioned
    `.sql-copy` button so the first line of SQL is never partially hidden
@@ -4694,7 +4726,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     // nothing extra (most non-import CTEs carry no fixture by design).
     var bound = t.given.filter(function (g) { return g.bound_to_node === node.id; });
     if (bound.length > 0) {
-      bound.forEach(function (g) { $detail.append(renderGivenSection(g)); });
+      bound.forEach(function (g) { $detail.append(renderGivenSection(g, t.data_diff)); });
     } else if (node.role === "import") {
       $detail.append(
         $("<div>").addClass("given-empty")
@@ -4705,7 +4737,18 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     initDataTablesIn($wrap);
   }
 
-  function renderGivenSection(given) {
+  // cute-dbt#98 — the test's cell-level data diff for THIS given input, or
+  // undefined. `data_diff` is present only in PR-diff mode and only when the
+  // test's own block was edited; `given[]` carries an entry only for inputs
+  // whose fixture data carried a real cell change (the domain already gated on
+  // `has_real_change()`), so presence === "default this table to Diff".
+  function givenDataDiff(dataDiff, input) {
+    if (!dataDiff || !dataDiff.given) return undefined;
+    var hit = dataDiff.given.filter(function (g) { return g.input === input; })[0];
+    return hit ? hit.diff : undefined;
+  }
+
+  function renderGivenSection(given, dataDiff) {
     var $sec = $("<section>").addClass("given-section").attr("data-input-name", given.input);
     var $hdr = $("<div>").addClass("table-header");
     $hdr.append($("<h4>").addClass("table-title").text("given · " + given.input));
@@ -4713,6 +4756,18 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       $hdr.append($("<span>").addClass("format-badge").text("format: sql"));
       $sec.append($hdr);
       $sec.append(buildSqlCodeBlock(given.rows));
+      return $sec;
+    }
+    // cute-dbt#98 / #126 — external-fixture guard. When the data lives in an
+    // external fixture file (`fixture:` set AND `rows == null`, so the rows are
+    // NOT in the manifest), render an affordance pointing at the file + a
+    // pointer to the Authoring YAML drawer rather than a silently-empty grid.
+    if (isExternalFixture(given)) {
+      if (given.format) {
+        $hdr.append($("<span>").addClass("format-badge").text("format: " + given.format));
+      }
+      $sec.append($hdr);
+      $sec.append(buildExternalFixtureAffordance(given.fixture));
       return $sec;
     }
     var rows = extractRowsFromFixture(given);
@@ -4723,7 +4778,8 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       .text(rows.length + " row" + (rows.length === 1 ? "" : "s")));
     $sec.append($hdr);
     var cols = collectColumns(rows);
-    $sec.append(buildTable(cols, rows, "given-table"));
+    var diff = givenDataDiff(dataDiff, given.input);
+    $sec.append(buildFixtureView(cols, rows, "given-table", diff));
     return $sec;
   }
 
@@ -4733,7 +4789,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       $wrap.append($("<div>").addClass("empty-hint").text("No fixtures defined for this test."));
       return;
     }
-    t.given.forEach(function (given) { $wrap.append(renderGivenSection(given)); });
+    t.given.forEach(function (given) { $wrap.append(renderGivenSection(given, t.data_diff)); });
     initDataTablesIn($wrap);
   }
 
@@ -4745,10 +4801,20 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       $body.append(buildSqlCodeBlock(t.expected.rows));
       return;
     }
+    // cute-dbt#98 / #126 — external-fixture guard for the expect side.
+    if (isExternalFixture(t.expected)) {
+      $panel.find(".expected-rowcount").text("external fixture");
+      $body.append(buildExternalFixtureAffordance(t.expected.fixture));
+      return;
+    }
     var rows = extractRowsFromFixture(t.expected);
     $panel.find(".expected-rowcount").text(rows.length + " row" + (rows.length === 1 ? "" : "s"));
     var cols = collectColumns(rows);
-    $body.append(buildTable(cols, rows, "expected-table"));
+    // The expect side's cell diff, when the test's expect fixture carried a
+    // real change (cute-dbt#98). `data_diff.expect` already passed
+    // `has_real_change()`, so its presence === "default this table to Diff".
+    var diff = (t.data_diff && t.data_diff.expect) || undefined;
+    $body.append(buildFixtureView(cols, rows, "expected-table", diff));
     initDataTablesIn($body);
   }
 
@@ -5111,8 +5177,189 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     return $wrap;
   }
 
+  // cute-dbt#98 ----------------------------------------------------------
+  //
+  // The structured cell-diff renderer + the per-table Current↔Diff toggle.
+  // Mirrors the #96 Authored↔Diff drawer idiom (a `.cell-diff-toggle` of two
+  // `.yaml-view-btn`s, `data-view`, `.active`, and `prop("hidden", …)` show/
+  // hide reusing the #121 `[hidden]{display:none!important}` rule). When the
+  // test carries no cell diff for this table the view is the plain Current
+  // grid — byte-identical to the historic `buildTable` output, so baseline-
+  // mode reports never drift.
+
+  // True when the fixture's data lives in an external file: dbt's `fixture:`
+  // key is set AND `rows` is null (the manifest does NOT inline the data).
+  function isExternalFixture(obj) {
+    return Boolean(obj && obj.fixture && (obj.rows === null || obj.rows === undefined));
+  }
+
+  // The external-fixture affordance: never a silently-empty grid. Names the
+  // file and points the reader at the Authoring YAML drawer (the #96 view),
+  // which surfaces the authored block including the `fixture:` line.
+  function buildExternalFixtureAffordance(name) {
+    var $box = $("<div>").addClass("given-empty external-fixture-note");
+    $box.append(document.createTextNode("data in external fixture file: "));
+    $box.append($("<code>").addClass("td-defined-in").text(String(name)));
+    $box.append(document.createTextNode(" — see the Authoring YAML drawer above for this test's block."));
+    return $box;
+  }
+
+  // A FixtureTable's cell view: build the Current grid, and — when a cell diff
+  // is present — also build the Diff grid and a Current↔Diff toggle that flips
+  // exactly one view visible at a time (the inactive view carries `hidden`).
+  // Default-Diff when a diff exists, else Current with no toggle.
+  function buildFixtureView(columns, rows, cls, diff) {
+    if (!diff) {
+      // No cell diff for this table → today's behavior, byte-for-byte.
+      return buildTable(columns, rows, cls);
+    }
+    var $wrap = $("<div>").addClass("fixture-view");
+    var $diffView = buildDiffTable(diff, cls);
+    var $currentView = buildTable(columns, rows, cls).prop("hidden", true);
+
+    var $toggle = $("<div>").addClass("cell-diff-toggle");
+    var $diffBtn = $("<button>").attr("type", "button")
+      .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
+    var $curBtn = $("<button>").attr("type", "button")
+      .addClass("yaml-view-btn").attr("data-view", "current").text("Current");
+    $toggle.append($diffBtn).append($curBtn);
+    // Bind to the LOCAL $toggle (not a global `.yaml-view-btn` delegate) so it
+    // can never catch the #96/#111 drawer toggles elsewhere in the document.
+    $toggle.on("click", ".yaml-view-btn", function () {
+      var view = $(this).attr("data-view");
+      $toggle.find(".yaml-view-btn").removeClass("active");
+      $(this).addClass("active");
+      $diffView.prop("hidden", view !== "diff");
+      $currentView.prop("hidden", view !== "current");
+      // Lazy-init + reflow the table just revealed: a DataTable initialized
+      // while `display:none` measures column widths against a 0-width box, so
+      // the Current grid is initialized only on first reveal and any already-
+      // initialized table gets its widths recomputed once it is on-screen.
+      var $shown = view === "diff" ? $diffView : $currentView;
+      initDataTablesIn($shown);
+      adjustDataTablesIn($shown);
+    });
+
+    $wrap.append($toggle).append($diffView).append($currentView);
+    return $wrap;
+  }
+
+  // Build the Diff grid from a FixtureTableDiff: a unified column axis (with
+  // added/removed column badges from DiffColumn.status) and rows tinted by
+  // RowChangeKind. A `Modified` cell whose `changed` is true renders inline
+  // `old → new`; otherwise the cell shows its current value.
+  function buildDiffTable(diff, cls) {
+    var $wrap = $("<div>").addClass("table-fit");
+    var $tbl = $("<table>").addClass(cls).addClass("cell-diff-table");
+    var $thead = $("<thead>").appendTo($tbl);
+    var $hr = $("<tr>").appendTo($thead);
+    diff.columns.forEach(function (c) {
+      var html = escapeHtml(c.name).replace(/_/g, "_<wbr>");
+      var $th = $("<th>").attr("title", c.name).html(html);
+      if (c.status === "added") {
+        $th.addClass("col-added").append($("<span>").addClass("col-status").text("added"));
+      } else if (c.status === "removed") {
+        $th.addClass("col-removed").append($("<span>").addClass("col-status").text("removed"));
+      }
+      $hr.append($th);
+    });
+    var $tbody = $("<tbody>").appendTo($tbl);
+    diff.rows.forEach(function (rc) {
+      var $tr = $("<tr>").appendTo($tbody);
+      if (rc.kind === "added")   $tr.addClass("row-added");
+      if (rc.kind === "removed") $tr.addClass("row-removed");
+      if (rc.kind === "modified") $tr.addClass("row-modified");
+      rc.cells.forEach(function (cell) {
+        $tr.append(buildDiffCell(cell, rc.kind));
+      });
+    });
+    $wrap.append($tbl);
+    return $wrap;
+  }
+
+  // One diff cell. For a Removed row we show the old value; for an Added row
+  // the new value; for an Unchanged row the (shared) value; for a Modified
+  // row, a changed cell renders `old → new` inline, an unchanged cell its
+  // value. `data-order` carries a sort key so DataTables orders the column
+  // sensibly even on the composite old→new rendering.
+  function buildDiffCell(cell, rowKind) {
+    var $td = $("<td>");
+    if (rowKind === "removed") {
+      return decorateValueCell($td, cell.old);
+    }
+    if (rowKind === "added" || rowKind === "unchanged" || !cell.changed) {
+      return decorateValueCell($td, cell.new);
+    }
+    // Modified + changed → inline old → new.
+    $td.addClass("cell-changed").attr("data-order", cellValueText(cell.new));
+    $td.append($("<span>").addClass("cell-old").text(cellValueText(cell.old)));
+    $td.append($("<span>").addClass("cell-arrow").html("&rarr;"));
+    $td.append($("<span>").addClass("cell-new").text(cellValueText(cell.new)));
+    return $td;
+  }
+
+  // Render a single CellValue into a plain value cell, matching `buildTable`'s
+  // null/number styling so the Current and Diff views read identically.
+  function decorateValueCell($td, cv) {
+    if (!cv || cv.t === "null") {
+      // A literal null reads as NULL, matching the Current grid's
+      // `cell === null` styling.
+      return $td.addClass("cell-null").text("NULL");
+    }
+    if (cv.t === "absent") {
+      // An absent cell (a unified-diff column the row's source table lacks)
+      // is NOT a null — render it blank so an Absent->Null change stays
+      // visible and added/removed-column cells don't read as literal nulls.
+      return $td.addClass("cell-absent").text("");
+    }
+    if (cv.t === "number") {
+      return $td.addClass("cell-num").attr("data-order", cv.v).text(cv.v);
+    }
+    return $td.text(cellValueText(cv));
+  }
+
+  // The display text of an adjacently-tagged CellValue ({t, v}). `absent`
+  // renders empty; `null` renders the word NULL; bool/number/str verbatim.
+  function cellValueText(cv) {
+    if (!cv) return "";
+    switch (cv.t) {
+      case "null":   return "NULL";
+      case "absent": return "";
+      case "bool":   return cv.v ? "true" : "false";
+      case "number": return String(cv.v);
+      case "str":    return String(cv.v);
+      default:       return cv.v == null ? "" : String(cv.v);
+    }
+  }
+
+  // Re-measure DataTables column widths for any (now-visible) table under
+  // `$scope`. A no-op for tables not yet wrapped by DataTables. cute-dbt#98 —
+  // a table initialized while `display:none` must be re-adjusted on reveal.
+  function adjustDataTablesIn($scope) {
+    if (!($.fn && $.fn.DataTable)) return;
+    $scope.find("table.given-table, table.expected-table").each(function () {
+      if ($.fn.DataTable.isDataTable(this)) {
+        $(this).DataTable().columns.adjust();
+      }
+    });
+  }
+  // Exposed for headless JS unit tests (cute-dbt#98 — parallels the
+  // `__cuteRenderYamlDiff` / `__cuteParseCsv` seams). Returns the outer
+  // wrapper element so a test can assert the toggle + tinted markup.
+  if (typeof window !== "undefined") {
+    window.__cuteBuildFixtureView = function (columns, rows, cls, diff) {
+      return buildFixtureView(columns, rows, cls, diff)[0];
+    };
+    window.__cuteCellValueText = cellValueText;
+  }
+
   function initDataTablesIn($scope) {
     $scope.find("table.given-table, table.expected-table").each(function () {
+      // cute-dbt#98 — never initialize a DataTable while its host is hidden:
+      // column widths measured against a 0-width box render wrong on reveal.
+      // The Current↔Diff toggle handler lazy-inits the hidden view when first
+      // shown (see buildFixtureView). `offsetParent === null` ⇒ not rendered.
+      if (this.offsetParent === null) return;
       if ($.fn && $.fn.DataTable) {
         if ($.fn.DataTable.isDataTable(this)) return;
         $(this).DataTable({

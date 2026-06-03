@@ -702,7 +702,7 @@ mod tests {
             "t".to_owned(),
             NodeId::new("model.shop.stg_orders"),
             Vec::<UnitTestGiven>::new(),
-            UnitTestExpect::new(serde_json::Value::Null, None),
+            UnitTestExpect::new(serde_json::Value::Null, None, None),
             None,
             DependsOn::default(),
             None,

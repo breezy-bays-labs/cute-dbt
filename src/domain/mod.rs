@@ -35,6 +35,7 @@
 // categories — repetition is intentional, so silence the lint locally.
 #![allow(clippy::module_name_repetitions)]
 
+pub mod cell_diff;
 pub mod config;
 pub mod cte;
 pub mod manifest;
@@ -44,8 +45,13 @@ pub mod preflight;
 pub mod scope;
 pub mod state;
 pub mod unit_test;
+pub mod unit_test_table;
 pub mod unit_test_yaml;
 
+pub use cell_diff::{
+    CellChange, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff, RowChange,
+    RowChangeKind, UnitTestDataDiff, diff_fixture_tables, reconstruct_table_diffs,
+};
 pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};
 pub use manifest::{Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId};
@@ -62,4 +68,9 @@ pub use state::{
     StateModifier, resolve_target_model,
 };
 pub use unit_test::{UnitTest, UnitTestExpect, UnitTestGiven};
+pub use unit_test_table::{
+    Cell, CellValue, FixtureFormat, FixtureTable, TableRow, parse_block_dict_rows, parse_csv_rows,
+    parse_inline_flow_row, table_from_manifest_rows, table_from_yaml_fragment, type_cell_scalar,
+    type_cell_value, type_csv_token,
+};
 pub use unit_test_yaml::{UnitTestYamlBlock, extract_unit_test_block};

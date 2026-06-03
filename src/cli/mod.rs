@@ -41,9 +41,9 @@ use crate::adapters::render::{ScopeSource, index_tests_for_models, render_report
 use crate::adapters::source_yaml::FsSourceYamlReader;
 use crate::domain::{
     BlockDiff, DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NormalizedDiffIndex,
-    PreflightError, ScopeInput, ScopeSelection, UnitTestYamlBlock, extract_unit_test_block,
-    preflight_compiled, reconstruct_block_diffs, reconstruct_model_sql_diffs,
-    refine_changed_by_hunks, select_in_scope,
+    PreflightError, ScopeInput, ScopeSelection, UnitTestDataDiff, UnitTestYamlBlock,
+    extract_unit_test_block, preflight_compiled, reconstruct_block_diffs,
+    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks, select_in_scope,
 };
 use crate::ports::{ManifestSource, SourceYamlReader};
 
@@ -182,6 +182,19 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
         }
         ScopeInput::Baseline { .. } => HashMap::new(),
     };
+    // Cell-level unit-test data-table diffs (cute-dbt#98): the structured
+    // sibling of `yaml_diffs`. For each in-scope changed test whose own YAML
+    // block the diff touched, reconstruct an aligned given/expect cell diff
+    // (NEW from the current manifest, OLD sliced from the reconstructed
+    // pre-edit YAML). PrDiff arm only — baseline mode has no hunks, so the
+    // given/expect grids show the plain "Current" data view. Reuses the same
+    // refined `changed` + `authoring_yaml` block map as `reconstruct_block_diffs`.
+    let data_diffs: HashMap<String, UnitTestDataDiff> = match &scope_input {
+        ScopeInput::PrDiff { index } => {
+            reconstruct_table_diffs(&current, &changed, &authoring_yaml, index)
+        }
+        ScopeInput::Baseline { .. } => HashMap::new(),
+    };
     // cute-dbt#111: a non-`--unified=0` diff degrades every affected block to
     // the plain view (the `reconstruct_one` contract guard). Surface that ONCE
     // on stderr so a user who forgot `--unified=0` isn't left thinking the
@@ -201,6 +214,7 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
         &authoring_yaml,
         &yaml_diffs,
         &sql_diffs,
+        &data_diffs,
         &baseline_label,
         scope_source,
         &report_title,
@@ -421,6 +435,7 @@ fn render(
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     yaml_diffs: &HashMap<String, BlockDiff>,
     sql_diffs: &HashMap<String, BlockDiff>,
+    data_diffs: &HashMap<String, UnitTestDataDiff>,
     baseline_label: &str,
     scope_source: ScopeSource,
     report_title: &str,
@@ -435,6 +450,7 @@ fn render(
         authoring_yaml,
         yaml_diffs,
         sql_diffs,
+        data_diffs,
         baseline_label,
         scope_source,
         report_title,
@@ -566,7 +582,7 @@ mod tests {
             name.to_owned(),
             NodeId::new("model.shop.dim_users"),
             Vec::new(),
-            UnitTestExpect::new(serde_json::Value::Null, None),
+            UnitTestExpect::new(serde_json::Value::Null, None, None),
             None,
             DependsOn::default(),
             None,

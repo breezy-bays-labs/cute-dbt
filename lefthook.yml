@@ -75,16 +75,17 @@ pre-push:
         fi
       timeout: 15s
     feature-count:
-      # Asserts the 10-feature invariant (bumped from 9 in cute-dbt#84 when
-      # pr_diff_scoping.feature joined the contract; previously bumped from
-      # 8 in cute-dbt#71 when consumer_report_contract.feature joined, and
-      # from 7 in cute-dbt#69 when unit_test_yaml.feature joined).
+      # Asserts the 11-feature invariant (bumped from 10 in cute-dbt#98 when
+      # cell_table_diff.feature joined the contract; previously bumped from 9
+      # in cute-dbt#84 when pr_diff_scoping.feature joined, from 8 in
+      # cute-dbt#71 when consumer_report_contract.feature joined, and from 7
+      # in cute-dbt#69 when unit_test_yaml.feature joined).
       # Mirrors the `feature-count` CI job; the README is not a feature.
       run: |
         set -euo pipefail
         count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
-        if [ "$count" != "10" ]; then
-          echo "feature-count: expected 10 .feature files, found $count"
+        if [ "$count" != "11" ]; then
+          echo "feature-count: expected 11 .feature files, found $count"
           exit 1
         fi
       timeout: 5s
