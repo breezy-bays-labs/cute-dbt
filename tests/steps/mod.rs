@@ -9,6 +9,7 @@
 //! Given/When/Then prose.
 
 pub mod builders;
+pub mod cell_table_diff;
 pub mod config;
 pub mod consumer_report_contract;
 pub mod cte_rendering;

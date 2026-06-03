@@ -42,12 +42,15 @@ use std::path::{Path, PathBuf};
 use headless_chrome::protocol::cdp::Runtime;
 use headless_chrome::{Browser, LaunchOptionsBuilder, Tab};
 
+use cute_dbt::adapters::manifest::FileManifestSource;
 use cute_dbt::adapters::render::{ScopeSource, render_report};
 use cute_dbt::domain::{
-    BlockDiff, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, InScopeSet,
-    Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId, UnitTest,
-    UnitTestExpect, UnitTestYamlBlock,
+    BlockDiff, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, FileHunks, Hunk,
+    InScopeSet, Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId,
+    NormalizedDiffIndex, PrDiff, UnitTest, UnitTestDataDiff, UnitTestExpect, UnitTestGiven,
+    UnitTestYamlBlock, reconstruct_table_diffs,
 };
+use cute_dbt::ports::ManifestSource;
 
 // --- synthetic manifest builders ------------------------------------
 
@@ -1130,6 +1133,439 @@ fn diff_drawers_render_exactly_one_view_each() {
     assert!(
         !visible(&tab, ".authoring-yaml .yaml-diff-view"),
         "Authoring YAML: the Diff view is hidden after clicking File (cute-dbt#121)",
+    );
+
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#98: cell-level data-table diff (Current↔Diff toggle) ----
+//
+// The structured sibling of the cute-dbt#96 Authoring-YAML drawer toggle.
+// Each given/expect grid offers a per-table Current↔Diff toggle when the
+// test carries a `data_diff` for that table; the Diff view tints changed
+// cells inline (old → new) and badges added/removed rows + columns. The
+// toggle MUST show exactly one of the two views at a time — the same
+// `[hidden]{display:none!important}` (cute-dbt#121) mechanism the YAML/SQL
+// drawers use. `offsetHeight` is the load-bearing oracle (the `hidden`
+// property is `true` on the inactive view either way; `<table>` has no
+// competing author `display`, but the rule is the same).
+
+/// A `model` node carrying the import CTE `src` so a `ref('src')` given
+/// binds to a node (the cell grid renders inside the Node-detail panel).
+fn model_node_with_src(full_id: &str) -> Node {
+    Node::new(
+        NodeId::new(full_id),
+        "model",
+        Checksum::new("sha256", "ck"),
+        Some("with src as (select 1 as id) select id from src".to_owned()),
+        None,
+        DependsOn::default(),
+        None,
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+}
+
+/// A unit test with one `given` (`ref('src')`) carrying inline dict rows and
+/// an empty `expect` — the Current grid the cell-diff toggle decorates.
+fn unit_test_with_given(name: &str, model_bare: &str, rows: serde_json::Value) -> UnitTest {
+    UnitTest::new(
+        name.to_owned(),
+        NodeId::new(model_bare),
+        vec![UnitTestGiven::new(
+            "ref('src')".to_owned(),
+            rows,
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(serde_json::Value::Null, None, None),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+}
+
+/// PR-diff render that injects a `data_diffs` map so a test's given grid
+/// renders the cell-diff Current↔Diff toggle. `data_diffs` is `(test_id,
+/// UnitTestDataDiff)`. The test is built (by the caller) with given rows so
+/// the Current grid has data, and is the sole in-scope/changed test so the
+/// PR-diff JS auto-selects it and builds its Node-detail panel on load.
+fn render_pr_diff_with_data_diffs(
+    filename: &str,
+    nodes: Vec<Node>,
+    tests: Vec<(&str, UnitTest)>,
+    model_ids: &[&str],
+    changed_ids: &[&str],
+    data_diffs: Vec<(&str, UnitTestDataDiff)>,
+) -> String {
+    let in_scope: InScopeSet = tests.iter().map(|(id, _)| (*id).to_owned()).collect();
+    let m = manifest(nodes, tests);
+    let models: ModelInScopeSet = model_ids.iter().map(|id| NodeId::new(*id)).collect();
+    let changed: InScopeSet = changed_ids.iter().map(|s| (*s).to_owned()).collect();
+    let data_diff_map: HashMap<String, UnitTestDataDiff> = data_diffs
+        .into_iter()
+        .map(|(id, d)| (id.to_owned(), d))
+        .collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &changed,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &data_diff_map,
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    format!("file://{p}")
+}
+
+/// Switch the left panel to "All inputs" mode so the given grid (and its
+/// cell-diff toggle) is on-screen regardless of DAG-node selection — the
+/// Node-detail panel only shows a given once its import-CTE node is clicked,
+/// but the All-inputs panel renders every given unconditionally.
+fn show_all_inputs(tab: &Tab) {
+    let _ = eval(
+        tab,
+        "document.querySelector('.panel-toggle [data-mode=\"inputs\"]').click()",
+    );
+}
+
+/// `data_diff` for a single given input: one row, one Modified cell whose
+/// `id` value goes 1 → 2 (the synthetic toggle fixture).
+fn one_cell_modified_data_diff(input: &str) -> UnitTestDataDiff {
+    use cute_dbt::domain::{
+        CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff,
+        RowChange, RowChangeKind,
+    };
+    UnitTestDataDiff {
+        given: vec![NamedTableDiff {
+            input: input.to_owned(),
+            diff: FixtureTableDiff {
+                columns: vec![DiffColumn {
+                    name: "id".into(),
+                    status: ColumnStatus::Present,
+                }],
+                rows: vec![RowChange {
+                    kind: RowChangeKind::Modified,
+                    cells: vec![CellChange {
+                        old: CellValue::Number("1".into()),
+                        new: CellValue::Number("2".into()),
+                        changed: true,
+                    }],
+                }],
+            },
+        }],
+        expect: None,
+    }
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn cell_diff_toggle_defaults_to_diff_and_shows_exactly_one_view() {
+    // cute-dbt#98 — a changed test carrying a `data_diff` for its given input
+    // renders a per-table Current↔Diff toggle. The Diff view is the default;
+    // EXACTLY one of {Diff, Current} is visible at a time (offsetHeight, the
+    // cute-dbt#121 oracle). Clicking "Current" flips the body: the inline
+    // old → new cell disappears and the plain Current grid shows.
+    let id = "unit_test.shop.dim_a.upd";
+    let url = render_pr_diff_with_data_diffs(
+        "headless_cell_diff_toggle.html",
+        vec![model_node_with_src("model.shop.dim_a")],
+        vec![(
+            id,
+            unit_test_with_given("upd", "dim_a", serde_json::json!([{"id": 2}])),
+        )],
+        &["model.shop.dim_a"],
+        &[id],
+        vec![(id, one_cell_modified_data_diff("ref('src')"))],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // The All-inputs panel renders the given grid unconditionally (no DAG
+    // node click needed). The cell-diff toggle is then in the DOM.
+    show_all_inputs(&tab);
+
+    assert!(
+        eval_bool(&tab, "document.querySelector('.cell-diff-toggle') !== null"),
+        "a test with a data_diff renders the Current↔Diff cell-diff toggle",
+    );
+    // The toggle's active (default) button reads "Diff".
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.cell-diff-toggle .yaml-view-btn.active').textContent.trim()"
+        ),
+        "Diff",
+        "the cell-diff toggle defaults to the Diff view",
+    );
+
+    // ===== Default (Diff view): exactly ONE grid visible =====
+    assert!(
+        visible(&tab, ".fixture-view .cell-diff-table"),
+        "Diff view: the cell-diff grid is visible by default",
+    );
+    // The non-diff (Current) grid is a plain given-table that is NOT the
+    // cell-diff-table; assert exactly one given-table is visible.
+    assert_eq!(
+        eval(
+            &tab,
+            "Array.from(document.querySelectorAll('.fixture-view table.given-table'))\
+             .filter(function(t){return t.offsetHeight > 0;}).length"
+        ),
+        serde_json::json!(1),
+        "exactly ONE given grid is visible in the Diff view (cute-dbt#121 oracle)",
+    );
+    // The default Diff view carries the inline old → new changed cell.
+    assert!(
+        visible(&tab, ".cell-diff-table .cell-changed .cell-old"),
+        "the Diff view renders the inline old value of the changed cell",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.cell-diff-table .cell-changed .cell-old').textContent.trim()"
+        ),
+        "1",
+        "the old value is 1",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.cell-diff-table .cell-changed .cell-new').textContent.trim()"
+        ),
+        "2",
+        "the new value is 2 (old → new)",
+    );
+
+    // ===== Flip to Current: the body changes, exactly one grid visible =====
+    let _ = eval(
+        &tab,
+        "document.querySelector('.cell-diff-toggle .yaml-view-btn[data-view=\"current\"]').click()",
+    );
+    assert!(
+        !visible(&tab, ".fixture-view .cell-diff-table"),
+        "Current view: the Diff grid is hidden after clicking Current (cute-dbt#121)",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "Array.from(document.querySelectorAll('.fixture-view table.given-table'))\
+             .filter(function(t){return t.offsetHeight > 0;}).length"
+        ),
+        serde_json::json!(1),
+        "exactly ONE given grid is visible in the Current view too",
+    );
+    // The plain Current grid carries NO inline old → new cell (the body
+    // changed — a format-only style plain grid).
+    assert!(
+        !visible(&tab, ".cell-old"),
+        "the Current view shows no inline old → new diff cell",
+    );
+
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#98 CENTERPIECE: fusion csv format-only=no-diff ----------
+//
+// The must-prove behavior, end-to-end over the COMMITTED
+// `tests/fixtures/fusion-csv-raw-string.json` (dbt-fusion 2.0-preview's
+// csv-as-RAW-STRING encoding). The NEW given table is value-inferred from
+// the fixture's raw-csv body; the OLD table is reconstructed from a
+// synthesized `--unified=0` hunk. Two reconstructions, ONE manifest:
+//
+//   * a **format-only reformat** of the OLD data row (`1` → `1.00`, both
+//     infer `Number(1)`) → `has_real_change() == false` → NO entry → the
+//     given grid renders the plain Current grid (NO `.cell-diff-toggle`,
+//     NO `.cell-old`). This is the cute-dbt#127 convergence, proven in the
+//     real DOM.
+//   * a **genuine value change** (`9` → `1`) → an entry → the Diff view
+//     tints the changed cell inline `9 → 1` (`.cell-old` / `.cell-new`).
+//
+// Driving through `reconstruct_table_diffs` (not a hand-built POD) ties the
+// DOM assertion to the real value-inference + diff pipeline.
+
+/// The committed fusion-csv fixture's unit test id.
+const FUSION_TEST_ID: &str = "unit_test.fusion_demo.test_dq_rollup_csv_raw_string";
+
+/// Load the committed fusion-csv-raw-string manifest through the REAL adapter.
+fn load_fusion_manifest() -> Manifest {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fusion-csv-raw-string.json");
+    FileManifestSource
+        .load(&path)
+        .expect("fusion-csv-raw-string fixture loads as a v12 manifest")
+}
+
+/// Reconstruct the fusion test's `data_diff` from a working-tree YAML block
+/// whose given `rows: |` csv body's first data row's `quarantined_count`
+/// field is `new_count`, edited from `old_count` by a synthesized
+/// `--unified=0` hunk. `old_count == "1.00"` is the format-only reformat
+/// (converges); `old_count == "9"` is a genuine value change.
+fn reconstruct_fusion_data_diffs(
+    new_count: &str,
+    old_count: &str,
+) -> HashMap<String, UnitTestDataDiff> {
+    let manifest = load_fusion_manifest();
+    // Working-tree (NEW) block. It carries BOTH the given AND the expect
+    // sub-blocks so each side reconstructs its OLD table from the SAME block:
+    // the given `rows: |` csv mirrors the manifest's NEW given (first data row
+    // carries `new_count`); the expect `rows: |` csv mirrors the manifest's
+    // NEW expect verbatim. The hunk touches ONLY the given data row, so the
+    // expect side reconstructs OLD == NEW (Context-only) → no expect change;
+    // the given side is the sole variable. `- name:` is source line 1.
+    let given_data_row = format!("          encounters,{new_count},false");
+    let raw = format!(
+        "  - name: test_dq_rollup_csv_raw_string\n    given:\n      - input: ref('src_checks')\n        format: csv\n        rows: |\n          entity_type,quarantined_count,is_dq_valid\n{given_data_row}\n          medications,2,true\n    expect:\n      format: csv\n      rows: |\n        entity_type,quarantined_count,is_dq_valid\n        encounters,1.00,false\n        medications,2,TRUE"
+    );
+    let n = raw.split('\n').count();
+    let block = UnitTestYamlBlock::new(raw.clone(), 1, 1, n);
+    // The given csv data row is at block line 7 (1: -name, 2: given, 3: -input
+    // ref, 4: format, 5: rows |, 6: header, 7: first data row). The hunk edits
+    // ONLY that row: removed `…,old_count,…`, added `…,new_count,…` (the
+    // working tree), so the block stays aligned and the header + the entire
+    // expect sub-block survive as Context.
+    let hunk = Hunk {
+        new_start: 7,
+        new_len: 1,
+        removed_lines: vec![format!("          encounters,{old_count},false")],
+        added_lines: vec![format!("          encounters,{new_count},false")],
+    };
+    let diff = PrDiff {
+        files: vec![FileHunks {
+            path: "models/marts/_unit_tests.yml".to_owned(),
+            hunks: vec![hunk],
+        }],
+    };
+    let index = NormalizedDiffIndex::new(&diff, None);
+    let changed: InScopeSet = [FUSION_TEST_ID.to_owned()].into_iter().collect();
+    let mut blocks = HashMap::new();
+    blocks.insert(FUSION_TEST_ID.to_owned(), block);
+    reconstruct_table_diffs(&manifest, &changed, &blocks, &index)
+}
+
+/// Render the fusion manifest as a PR-diff report with the reconstructed
+/// `data_diffs` threaded in. The fixture's model + unit test are real; only
+/// the in-scope/changed sets + the data_diffs map are supplied here.
+fn render_fusion_report(filename: &str, data_diffs: HashMap<String, UnitTestDataDiff>) -> String {
+    let manifest = load_fusion_manifest();
+    let in_scope: InScopeSet = [FUSION_TEST_ID.to_owned()].into_iter().collect();
+    let models: ModelInScopeSet = [NodeId::new("model.fusion_demo.dq_rollup")]
+        .into_iter()
+        .collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report(
+        &out,
+        &manifest,
+        &in_scope,
+        &models,
+        &in_scope,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &data_diffs,
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    format!("file://{p}")
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn fusion_csv_format_only_shows_no_diff_cell_but_value_change_shows_old_to_new() {
+    // ===== Format-only reformat: 1 → 1.00 converges → NO diff cell =====
+    // The Rust pipeline emits NO entry (has_real_change()==false), so the
+    // map is empty: the given grid is the plain Current grid, no toggle.
+    let format_only = reconstruct_fusion_data_diffs("1", "1.00");
+    assert!(
+        format_only.is_empty(),
+        "a format-only reformat (1 vs 1.00) must NOT reconstruct a data_diff \
+         (cute-dbt#127 value-inference convergence); got {format_only:?}",
+    );
+    let url_format_only = render_fusion_report("headless_fusion_format_only.html", format_only);
+
+    // ===== Genuine value change: 9 → 1 → an entry with old → new =====
+    let value_change = reconstruct_fusion_data_diffs("1", "9");
+    assert!(
+        value_change.contains_key(FUSION_TEST_ID),
+        "a genuine value change (9 → 1) MUST reconstruct a data_diff entry; \
+         got {value_change:?}",
+    );
+    let url_value_change = render_fusion_report("headless_fusion_value_change.html", value_change);
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+
+    // ===== Format-only report: plain Current grid, NO cell-diff =====
+    tab.navigate_to(&url_format_only)
+        .expect("navigate format-only");
+    tab.wait_until_navigated()
+        .expect("await format-only navigation");
+    show_all_inputs(&tab);
+    // The given grid renders (the fusion csv parses to a real table)…
+    assert!(
+        visible(&tab, ".given-section table.given-table"),
+        "the fusion given csv grid renders",
+    );
+    // …but a format-only reformat shows NO cell-diff toggle and NO old→new.
+    assert!(
+        eval_bool(&tab, "document.querySelector('.cell-diff-toggle') === null"),
+        "format-only reformat (1 vs 1.00) shows NO Current↔Diff cell-diff toggle",
+    );
+    assert!(
+        eval_bool(&tab, "document.querySelector('.cell-old') === null"),
+        "format-only reformat shows NO inline old → new diff cell",
+    );
+
+    // ===== Value-change report: Diff view tints the changed cell 9 → 1 =====
+    tab.navigate_to(&url_value_change)
+        .expect("navigate value-change");
+    tab.wait_until_navigated()
+        .expect("await value-change navigation");
+    show_all_inputs(&tab);
+    assert!(
+        eval_bool(&tab, "document.querySelector('.cell-diff-toggle') !== null"),
+        "a genuine value change renders the Current↔Diff cell-diff toggle",
+    );
+    assert!(
+        visible(&tab, ".cell-diff-table .cell-changed .cell-old"),
+        "the value-change Diff view renders the inline old value",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.cell-diff-table .cell-changed .cell-old').textContent.trim()"
+        ),
+        "9",
+        "the old quarantined_count was 9 (from the Removed csv line)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.cell-diff-table .cell-changed .cell-new').textContent.trim()"
+        ),
+        "1",
+        "the new quarantined_count is 1 (the working-tree value), old → new",
     );
 
     let _ = tab.close(true);

@@ -104,6 +104,32 @@ pub struct World {
     /// `original_file_path`; `kind` says whether the hunk is a real edit,
     /// a stale (drifted) edit, or a whitespace-only re-indent.
     pub model_sql_targets: Vec<ModelSqlTarget>,
+
+    // --- Cell-level data-table diff (cell_table_diff) -------------------
+    /// cute-dbt#98: the scenario's fixture-cell-diff plan, set by a
+    /// `Given a unit test … with a … given row …` step and consumed by the
+    /// `When the PR …` step. Carries everything the self-contained
+    /// `cell_table_diff.rs` harness needs to build a model + a unit test
+    /// with inline fixture rows AND to synthesize a `--unified=0` patch that
+    /// edits ONE fixture row in a chosen way. `None` outside the cell-diff
+    /// feature.
+    pub cell_diff_plan: Option<CellDiffPlan>,
+}
+
+/// A cute-dbt#98 cell-diff scenario plan — the test name, fixture format,
+/// the NEW (working-tree) fixture rows, and (after the `When`) how a hunk
+/// edits one of them.
+#[derive(Debug, Clone)]
+pub struct CellDiffPlan {
+    /// The unit test's bare name (`test_dim_users`).
+    pub test: String,
+    /// The fixture format (`dict` or `csv`).
+    pub format: String,
+    /// The NEW (working-tree) given rows, as `(column, value)` pairs per
+    /// row in column order. The manifest carries these verbatim; the
+    /// synthesized working-tree YAML renders them; the chosen edit rewrites
+    /// the OLD side of one cell/row.
+    pub new_rows: Vec<Vec<(String, String)>>,
 }
 
 /// A model-SQL-diff hunk directive for the synthesized diff (cute-dbt#111).
