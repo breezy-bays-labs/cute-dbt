@@ -1125,12 +1125,85 @@ mod tests {
         assert_eq!(tbl.rows.len(), 1);
     }
 
+    // ----- unquote: the input-value quote stripper -----
+
+    #[test]
+    fn unquote_strips_only_a_matching_surrounding_pair() {
+        // A matched double- OR single-quote pair is stripped to the inner
+        // text; everything else is returned verbatim. Pins every branch of
+        // `unquote`: the two `&&` clauses (a one-sided quote must NOT strip),
+        // the `||` between them, both `==` quote-char checks, the
+        // `bytes.len() - 1` last-byte index, and the `s[1..s.len() - 1]`
+        // slice bounds — a wrong stripper silently mis-matches a quoted
+        // `input:` reference and attributes OLD rows to the wrong given.
+        assert_eq!(unquote("\"x\""), "x", "double-quote pair strips");
+        assert_eq!(unquote("'x'"), "x", "single-quote pair strips");
+        // One-sided quotes are NOT a pair → verbatim (kills the `&&`→`||`
+        // and the `==`→`!=` flips, which would strip a half-quoted token).
+        assert_eq!(unquote("\"x"), "\"x", "leading-only quote is not a pair");
+        assert_eq!(unquote("x\""), "x\"", "trailing-only quote is not a pair");
+        assert_eq!(unquote("'x"), "'x", "leading-only apostrophe is not a pair");
+        assert_eq!(
+            unquote("x'"),
+            "x'",
+            "trailing-only apostrophe is not a pair"
+        );
+        // A mixed pair (`"x'`) is not a matching pair → verbatim.
+        assert_eq!(unquote("\"x'"), "\"x'", "mixed quotes are not a pair");
+        // Unquoted / too-short stay verbatim.
+        assert_eq!(unquote("plain"), "plain");
+        assert_eq!(
+            unquote("\""),
+            "\"",
+            "a lone quote is too short to be a pair"
+        );
+        // The exact two-char pair strips to empty (pins the slice bounds).
+        assert_eq!(unquote("\"\""), "", "an empty quoted pair strips to empty");
+    }
+
+    #[test]
+    fn slice_given_region_matches_a_quoted_input_value() {
+        // The end-to-end path: a `given` whose `input:` value is wrapped in
+        // double quotes must still be matched by its unquoted reference,
+        // exercising `unquote` inside `is_subblock_opener`. Were `unquote`
+        // broken, the quoted opener would not match and the region would be
+        // dropped (a silent miss of the whole given's data diff).
+        let old_text =
+            "      - input: \"ref('q')\"\n        format: dict\n        rows:\n          - id: 7";
+        let (region, _) = slice_named_region(old_text, "input", Some("ref('q')")).unwrap();
+        let tbl = table_from_yaml_fragment(&region, Some("dict")).unwrap();
+        assert_eq!(tbl.rows.len(), 1);
+        assert_eq!(tbl.rows[0].cells[0].value, n("7"));
+    }
+
     // ----- table_diff_if_changed gating -----
 
     #[test]
     fn table_diff_if_changed_both_none_is_none() {
         // sql/opaque on both sides → no cell diff.
         assert!(table_diff_if_changed(None, None).is_none());
+    }
+
+    #[test]
+    fn table_diff_if_changed_one_sided_none_still_diffs() {
+        // Only when BOTH sides are opaque (None) is the diff skipped. A
+        // None on ONE side (the OLD fixture was sql/absent, the NEW one has
+        // real rows — or vice versa) must still diff against the empty
+        // default, surfacing the rows as Added/Removed. Pins the
+        // `old.is_none() && new.is_none()` guard: were the `&&` flipped to
+        // `||`, a one-sided-None pair would short-circuit to None and the
+        // whole table change would silently vanish (→ no cell diff emitted).
+        let real = table(&["id"], vec![vec![n("1")]]);
+        // NEW present, OLD opaque → the row is Added; a real change.
+        assert!(
+            table_diff_if_changed(None, Some(real.clone())).is_some(),
+            "OLD-opaque + NEW-present must still emit a diff"
+        );
+        // OLD present, NEW opaque → the row is Removed; a real change.
+        assert!(
+            table_diff_if_changed(Some(real), None).is_some(),
+            "OLD-present + NEW-opaque must still emit a diff"
+        );
     }
 
     #[test]

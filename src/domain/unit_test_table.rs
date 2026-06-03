@@ -933,6 +933,20 @@ mod tests {
     }
 
     #[test]
+    fn a7b_one_sided_leading_quote_is_not_a_quoted_scalar() {
+        // A token with a quote on ONLY the leading end is NOT a matching
+        // quote pair, so `is_quoted` is false and the token is NOT
+        // quote-stripped — it stays the verbatim token (a non-numeric string
+        // because the stray quote defeats the i128 parse). Pins BOTH `&&`
+        // operators in `is_quoted`: were either flipped to `||`, a single
+        // leading quote would falsely classify the token as quoted and
+        // `parse_yaml_scalar` would strip it (`"5` → `5`, `'5` → `5`),
+        // collapsing two distinct cell values to one (a silent miss).
+        assert_eq!(type_cell_scalar("\"5"), CellValue::Str("\"5".into()));
+        assert_eq!(type_cell_scalar("'5"), CellValue::Str("'5".into()));
+    }
+
+    #[test]
     fn a8_absent_is_distinct_from_null() {
         // A sparse dict: row 1 has {a,b}, row 2 has only {a} → row 2's b is
         // Absent, NOT Null. And Absent != Null as CellValues.
@@ -1083,6 +1097,77 @@ mod tests {
                 ("b".into(), "2".into()),
                 ("c".into(), "".into())
             ]]
+        );
+    }
+
+    #[test]
+    fn g26b_quote_only_opens_at_field_start_not_mid_field() {
+        // A `"` is a quote-open ONLY at the START of a field (per RFC 4180);
+        // a `"` mid-field is a literal character. Pins the
+        // `self.field.is_empty()` match guard in feed_unquoted: were it
+        // replaced with `true`, the mid-field `"` would open a quoted run,
+        // swallow the rest of the field/line, and silently mangle the cell
+        // value (here `a"b` would collapse to `b`).
+        assert_eq!(
+            parse_csv_rows("note\na\"b"),
+            vec![vec![("note".into(), "a\"b".into())]],
+            "a mid-field double-quote is literal, not a quote-open"
+        );
+    }
+
+    #[test]
+    fn g26c_lone_cr_terminates_one_row_each_not_a_crlf_pair() {
+        // A lone CR (old-Mac line ending) NOT followed by LF terminates a
+        // row consuming ONE char; only a true `\r\n` consumes two. Pins the
+        // `c == '\r' && next == Some('\n')` CRLF check: were the `&&`
+        // flipped to `||`, a lone `\r` (c == '\r', `||` short-circuits true)
+        // would consume the FOLLOWING data char as part of the terminator,
+        // dropping a cell — a silent miss.
+        assert_eq!(
+            parse_csv_rows("id\r1\r2"),
+            vec![
+                vec![("id".into(), "1".into())],
+                vec![("id".into(), "2".into())],
+            ],
+            "lone CRs each terminate one row; no data char is eaten"
+        );
+    }
+
+    #[test]
+    fn g28a_comment_line_inside_a_row_is_skipped_not_a_field() {
+        // A `#` comment line within a row region is skipped, NOT parsed as a
+        // field — even when it superficially looks like `key: value`. Pins the
+        // `trimmed.is_empty() || trimmed.starts_with('#')` skip-guard in
+        // feed_line: were the `||` flipped to `&&`, the guard would never fire
+        // (no string is both empty AND `#`-prefixed) and `# note: x` would be
+        // appended as a spurious `# note` column — a phantom cell.
+        let region = "        - id: 1\n          # note: ignore me\n          name: bob";
+        let rows = parse_block_dict_rows(region);
+        assert_eq!(rows.len(), 1, "one row");
+        assert_eq!(
+            rows[0],
+            vec![("id".into(), "1".into()), ("name".into(), "bob".into())],
+            "the comment line must not contribute a `# note` cell"
+        );
+    }
+
+    #[test]
+    fn g28b_field_attribution_uses_leading_indent_not_line_length() {
+        // A field deeper than its row's `- ` line is attributed to that row;
+        // the depth test is on LEADING-WHITESPACE width, not on line length.
+        // Pins `indent = line.len() - trimmed.len()` in feed_line: were the
+        // `-` flipped to `+`, a long row opener would get an inflated pseudo
+        // "indent" exceeding a genuinely-deeper (but shorter) field line, so
+        // `append_field`'s `indent <= ri` would wrongly drop the field — the
+        // cell would silently vanish. The row opener is deliberately long and
+        // the field line short so the length-based mutant inverts the test.
+        let region = "- aaaaaaaaaa: 1\n  b: 2";
+        let rows = parse_block_dict_rows(region);
+        assert_eq!(rows.len(), 1, "one row");
+        assert_eq!(
+            rows[0],
+            vec![("aaaaaaaaaa".into(), "1".into()), ("b".into(), "2".into())],
+            "the deeper `b: 2` field must be attributed to the row"
         );
     }
 
