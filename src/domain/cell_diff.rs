@@ -961,6 +961,38 @@ mod tests {
     }
 
     #[test]
+    fn e_edit_plus_reorder_of_same_rows_stays_localized_documented_boundary() {
+        // The ONE documented v1 boundary (module doc): two rows that are
+        // BOTH edited AND swap relative order land crossed in the positional
+        // residual zip. old=[id1,id2] -> new=[id2',id1'] (both keys changed,
+        // both rows moved). The positional pairing crosses them, so the
+        // per-cell `id` before->after is mis-attributed (the diff pairs the
+        // 1st residual-OLD with the 1st residual-NEW). This pins the
+        // load-bearing invariant that STILL holds at the boundary: the result
+        // is LOCALIZED Modified rows, NEVER a false "all rows changed" blowup
+        // and never a panic. A future move-detection pass (v2) would tighten
+        // attribution; until then this test makes the boundary visible so a
+        // regression that turns it into an all-Added/all-Removed blowup fails.
+        let old = table(
+            &["id", "v"],
+            vec![vec![n("1"), n("10")], vec![n("2"), n("20")]],
+        );
+        // Both rows edited (v changed) AND swapped order.
+        let new = table(
+            &["id", "v"],
+            vec![vec![n("2"), n("21")], vec![n("1"), n("11")]],
+        );
+        let diff = diff_fixture_tables(&old, &new);
+        assert!(diff.has_real_change());
+        // Two rows out, both Modified (localized) — not 2 Removed + 2 Added.
+        assert_eq!(diff.rows.len(), 2, "stays two rows, no blowup");
+        assert!(
+            diff.rows.iter().all(|r| r.kind == RowChangeKind::Modified),
+            "localized to Modified rows, never a false all-changed split"
+        );
+    }
+
+    #[test]
     fn e_duplicate_rows_remove_one_not_both() {
         // [A,A,B] -> [A,B]: exactly one A Removed, not both (LCS-on-repeats).
         let old = table(&["id"], vec![vec![n("1")], vec![n("1")], vec![n("2")]]);
@@ -1079,7 +1111,7 @@ mod tests {
         // Current behavior: the empty cell diverges Str("") vs Null → changed.
         assert!(
             diff.has_real_change(),
-            "documents the empty-csv divergence (tracked: cute-dbt#85)"
+            "documents the empty-csv divergence (tracked: cute-dbt#124)"
         );
     }
 
