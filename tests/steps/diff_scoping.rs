@@ -113,7 +113,7 @@ fn unit_test_modified(world: &mut World, test_name: String) {
         test_name.clone(),
         NodeId::new(&target),
         Vec::<UnitTestGiven>::new(),
-        UnitTestExpect::new(serde_json::Value::Array(Vec::new()), None),
+        UnitTestExpect::new(serde_json::Value::Array(Vec::new()), None, None),
         Some("v2".to_owned()),
         DependsOn::default(),
         None,

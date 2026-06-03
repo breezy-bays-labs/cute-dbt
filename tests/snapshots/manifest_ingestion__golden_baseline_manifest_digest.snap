@@ -306,7 +306,8 @@ expression: rendered
               "last_name": "B."
             }
           ],
-          "format": "dict"
+          "format": "dict",
+          "fixture": null
         }
       ],
       "expect": {
@@ -322,7 +323,8 @@ expression: rendered
             "last_name": "B."
           }
         ],
-        "format": "dict"
+        "format": "dict",
+        "fixture": null
       },
       "description": "stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows — no real customer data.\n",
       "depends_on": {

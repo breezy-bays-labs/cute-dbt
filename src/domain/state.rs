@@ -736,7 +736,7 @@ mod tests {
             "t",
             NodeId::new(model_bare),
             Vec::new(),
-            UnitTestExpect::new(Value::Null, None),
+            UnitTestExpect::new(Value::Null, None, None),
             description.map(str::to_owned),
             DependsOn::default(),
             None,

@@ -1295,7 +1295,7 @@ mod tests {
             name.to_owned(),
             NodeId::new("model.shop.m"),
             Vec::new(),
-            UnitTestExpect::new(serde_json::Value::Null, None),
+            UnitTestExpect::new(serde_json::Value::Null, None, None),
             None,
             DependsOn::default(),
             None,

@@ -67,7 +67,7 @@ use crate::adapters::asset_embed::{
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
     BANNER_EMPTY_SCOPE, BlockDiff, CteGraph, EdgeType, InScopeSet, Manifest, ModelInScopeSet, Node,
-    NodeId, UnitTest, UnitTestGiven, UnitTestYamlBlock, resolve_target_model,
+    NodeId, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestYamlBlock, resolve_target_model,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -276,12 +276,24 @@ pub struct GivenPayload {
     pub bound_to_node: Option<String>,
     /// Tabular fixture rows lifted verbatim from the unit-test
     /// `given[i].rows` field (kept as serde `Value` to accept the
-    /// heterogeneous shapes dbt allows).
+    /// heterogeneous shapes dbt allows). `Value::Null` when this given's
+    /// data lives in an external [`fixture`](Self::fixture) file (the rows
+    /// are not in the manifest) — the render layer then shows the
+    /// external-fixture affordance + YAML fallback rather than an empty
+    /// grid (cute-dbt#98, #126).
     pub rows: Value,
     /// Fixture format hint (`csv`, `yaml`, `dict`, etc.) when the
     /// manifest specified one; absent for inline-rows fixtures.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    /// Name of the external fixture file this given's rows live in (dbt's
+    /// `fixture:` key), when set. `None` (key omitted) for inline-rows
+    /// givens. When present **with `rows == Value::Null`**, the data is not
+    /// in the manifest at all: the JS surfaces a "data in external fixture
+    /// file: `<name>`" affordance and falls back to the cute-dbt#96 YAML
+    /// text view instead of rendering a silently-empty grid (cute-dbt#126).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixture: Option<String>,
 }
 
 /// One unit test in the per-model payload.
@@ -334,6 +346,18 @@ pub struct TestPayload {
     /// authored-YAML view. Mirrors `authoring_yaml`'s threading exactly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub yaml_diff: Option<BlockDiff>,
+    /// Cell-level data-table diff of this test's `given`/`expect` fixture
+    /// rows (cute-dbt#98) — present only when the PR diff edited this
+    /// test's own YAML block AND at least one fixture table carried a real
+    /// cell change (PR-diff mode, block present + aligned + touched,
+    /// non-opaque rows, `has_real_change()`). `None` (key omitted) for
+    /// context tests, baseline mode, sql/opaque fixtures, and
+    /// format-only / pure-reorder edits, so the given/expect grids default
+    /// to the plain "Current" data view. Mirrors `yaml_diff`'s threading
+    /// exactly; the JS defaults the per-table Current↔Diff toggle to Diff
+    /// when this is present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_diff: Option<UnitTestDataDiff>,
     /// Ordered list of fixture inputs for the test (`given[…]`).
     pub given: Vec<GivenPayload>,
     /// Expected result block (`expect`).
@@ -345,12 +369,19 @@ pub struct TestPayload {
 pub struct ExpectedPayload {
     /// Expected tabular rows lifted verbatim from the unit-test
     /// `expect.rows` field (serde `Value` accepts the heterogeneous
-    /// shapes dbt allows).
+    /// shapes dbt allows). `Value::Null` when the data lives in an
+    /// external [`fixture`](Self::fixture) file (cute-dbt#98, #126).
     pub rows: Value,
     /// Expected-block format hint (`csv`, `yaml`, `dict`, etc.) when
     /// the manifest specified one; absent for inline-rows fixtures.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    /// Name of the external fixture file the `expect` rows live in (dbt's
+    /// `fixture:` key), when set. `None` (key omitted) for inline-rows
+    /// expects. Same external-fixture affordance contract as
+    /// [`GivenPayload::fixture`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixture: Option<String>,
 }
 
 /// The full JSON blob the askama template emits into the
@@ -509,6 +540,7 @@ pub fn build_payload(
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     yaml_diffs: &HashMap<String, BlockDiff>,
     sql_diffs: &HashMap<String, BlockDiff>,
+    data_diffs: &HashMap<String, UnitTestDataDiff>,
     baseline_label: &str,
 ) -> ReportPayload {
     let model_tests = index_tests_for_models(current, models_in_scope);
@@ -526,6 +558,7 @@ pub fn build_payload(
             authoring_yaml,
             yaml_diffs,
             sql_diffs,
+            data_diffs,
         ));
     }
     ReportPayload {
@@ -564,6 +597,7 @@ pub fn render_report(
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     yaml_diffs: &HashMap<String, BlockDiff>,
     sql_diffs: &HashMap<String, BlockDiff>,
+    data_diffs: &HashMap<String, UnitTestDataDiff>,
     baseline_label: &str,
     scope_source: ScopeSource,
     report_title: &str,
@@ -576,6 +610,7 @@ pub fn render_report(
         authoring_yaml,
         yaml_diffs,
         sql_diffs,
+        data_diffs,
         baseline_label,
     );
     // The empty-scope banner contract reads the TRUE in-scope set, not the
@@ -611,6 +646,7 @@ fn build_model_payload(
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     yaml_diffs: &HashMap<String, BlockDiff>,
     sql_diffs: &HashMap<String, BlockDiff>,
+    data_diffs: &HashMap<String, UnitTestDataDiff>,
 ) -> ModelPayload {
     let bare_name = leaf_segment(model.id().as_str()).to_owned();
     let compiled_code = model.compiled_code().unwrap_or_default();
@@ -636,6 +672,7 @@ fn build_model_payload(
                 changed,
                 authoring_yaml.get(*id),
                 yaml_diffs.get(*id),
+                data_diffs.get(*id),
             )
         })
         .collect();
@@ -739,6 +776,7 @@ fn build_test_payload(
     changed: &InScopeSet,
     authoring_yaml: Option<&UnitTestYamlBlock>,
     yaml_diff: Option<&BlockDiff>,
+    data_diff: Option<&UnitTestDataDiff>,
 ) -> TestPayload {
     let given = unit_test
         .given()
@@ -751,6 +789,7 @@ fn build_test_payload(
                 bound_to_node,
                 rows: g.rows().clone(),
                 format: g.format().map(str::to_owned),
+                fixture: g.fixture().map(str::to_owned),
             }
         })
         .collect();
@@ -765,10 +804,12 @@ fn build_test_payload(
         defined_in: unit_test.original_file_path().map(str::to_owned),
         authoring_yaml: authoring_yaml.map(|b| b.raw.clone()),
         yaml_diff: yaml_diff.cloned(),
+        data_diff: data_diff.cloned(),
         given,
         expected: ExpectedPayload {
             rows: unit_test.expect().rows().clone(),
             format: unit_test.expect().format().map(str::to_owned),
+            fixture: unit_test.expect().fixture().map(str::to_owned),
         },
     }
 }
@@ -972,7 +1013,7 @@ mod tests {
     // ===== bind_import_to_given =====
 
     fn sample_given(input: &str) -> UnitTestGiven {
-        UnitTestGiven::new(input, json!([]), None)
+        UnitTestGiven::new(input, json!([]), None, None)
     }
 
     fn unit_test_with_givens(givens: Vec<UnitTestGiven>) -> UnitTest {
@@ -980,7 +1021,7 @@ mod tests {
             "t",
             NodeId::new("model.shop.x"),
             givens,
-            UnitTestExpect::new(json!([]), None),
+            UnitTestExpect::new(json!([]), None, None),
             None,
             DependsOn::default(),
             None,
@@ -1202,8 +1243,9 @@ mod tests {
                 format!("ref('{model_bare}_src')"),
                 json!([]),
                 None,
+                None,
             )],
-            UnitTestExpect::new(json!([]), None),
+            UnitTestExpect::new(json!([]), None, None),
             Some("a description".to_owned()),
             DependsOn::default(),
             Some(vec!["finance".to_owned()]),
@@ -1231,6 +1273,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "main@a1f3c7e",
         );
         assert_eq!(payload.baseline, "main@a1f3c7e");
@@ -1250,6 +1293,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1280,6 +1324,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1315,6 +1360,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &sql_diffs,
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(payload.models.len(), 1);
@@ -1338,6 +1384,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1368,6 +1415,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(payload.models.len(), 1);
@@ -1386,6 +1434,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1409,6 +1458,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(payload.models.len(), 1);
@@ -1423,6 +1473,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1461,6 +1512,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         assert_eq!(payload.models.len(), 1);
@@ -1494,7 +1546,7 @@ mod tests {
             "test_ghost",
             NodeId::new("ghost_model"),
             vec![],
-            UnitTestExpect::new(json!([]), None),
+            UnitTestExpect::new(json!([]), None, None),
             None,
             DependsOn::default(),
             None,
@@ -1508,6 +1560,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1528,6 +1581,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1553,6 +1607,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1586,6 +1641,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         assert_eq!(
@@ -1606,6 +1662,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1636,6 +1693,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         let test = &payload.models[0].tests[0];
@@ -1653,8 +1711,13 @@ mod tests {
         let ut = UnitTest::new(
             "test_one",
             NodeId::new("stg_orders"),
-            vec![UnitTestGiven::new("ref('stg_orders_src')", json!([]), None)],
-            UnitTestExpect::new(json!([]), None),
+            vec![UnitTestGiven::new(
+                "ref('stg_orders_src')",
+                json!([]),
+                None,
+                None,
+            )],
+            UnitTestExpect::new(json!([]), None, None),
             None,
             DependsOn::default(),
             None,
@@ -1668,6 +1731,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1694,8 +1758,13 @@ mod tests {
         let ut = UnitTest::new(
             "test_one",
             NodeId::new("stg_customers"),
-            vec![UnitTestGiven::new("ref('raw_customers')", json!([]), None)],
-            UnitTestExpect::new(json!([]), None),
+            vec![UnitTestGiven::new(
+                "ref('raw_customers')",
+                json!([]),
+                None,
+                None,
+            )],
+            UnitTestExpect::new(json!([]), None, None),
             None,
             DependsOn::default(),
             None,
@@ -1709,6 +1778,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1740,10 +1810,10 @@ mod tests {
             "test_one",
             NodeId::new("union_model"),
             vec![
-                UnitTestGiven::new("ref('raw_orders')", json!([{"id": 1}]), None),
-                UnitTestGiven::new("ref('raw_returns')", json!([{"id": 9}]), None),
+                UnitTestGiven::new("ref('raw_orders')", json!([{"id": 1}]), None, None),
+                UnitTestGiven::new("ref('raw_returns')", json!([{"id": 9}]), None, None),
             ],
-            UnitTestExpect::new(json!([]), None),
+            UnitTestExpect::new(json!([]), None, None),
             None,
             DependsOn::default(),
             None,
@@ -1757,6 +1827,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1794,10 +1865,10 @@ mod tests {
             "test_one",
             NodeId::new("join_model"),
             vec![
-                UnitTestGiven::new("ref('raw_orders')", json!([]), None),
-                UnitTestGiven::new("ref('raw_customers')", json!([]), None),
+                UnitTestGiven::new("ref('raw_orders')", json!([]), None, None),
+                UnitTestGiven::new("ref('raw_customers')", json!([]), None, None),
             ],
-            UnitTestExpect::new(json!([]), None),
+            UnitTestExpect::new(json!([]), None, None),
             None,
             DependsOn::default(),
             None,
@@ -1811,6 +1882,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1841,8 +1913,8 @@ mod tests {
         let ut = UnitTest::new(
             "test_one",
             NodeId::new("x"),
-            vec![UnitTestGiven::new("ref('target')", json!([]), None)],
-            UnitTestExpect::new(json!([]), None),
+            vec![UnitTestGiven::new("ref('target')", json!([]), None, None)],
+            UnitTestExpect::new(json!([]), None, None),
             None,
             DependsOn::default(),
             None,
@@ -1856,6 +1928,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1877,8 +1950,13 @@ mod tests {
         let ut = UnitTest::new(
             "test_one",
             NodeId::new("flat"),
-            vec![UnitTestGiven::new("ref('nonexistent')", json!([]), None)],
-            UnitTestExpect::new(json!([]), None),
+            vec![UnitTestGiven::new(
+                "ref('nonexistent')",
+                json!([]),
+                None,
+                None,
+            )],
+            UnitTestExpect::new(json!([]), None, None),
             None,
             DependsOn::default(),
             None,
@@ -1892,6 +1970,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -1915,6 +1994,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2007,6 +2087,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -2044,6 +2125,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2087,6 +2169,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -2114,6 +2197,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2150,6 +2234,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2212,6 +2297,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -2245,6 +2331,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2285,6 +2372,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -2319,6 +2407,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2368,6 +2457,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -2414,7 +2504,7 @@ mod tests {
             "test_one",
             NodeId::new("x"),
             vec![],
-            UnitTestExpect::new(json!([]), None),
+            UnitTestExpect::new(json!([]), None, None),
             None,
             DependsOn::default(),
             Some(vec![hostile.to_owned()]),
@@ -2432,6 +2522,7 @@ mod tests {
             &in_scope,
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2474,5 +2565,193 @@ mod tests {
         assert_eq!(leaf_segment("model.shop.x"), "x");
         assert_eq!(leaf_segment("x"), "x");
         assert_eq!(leaf_segment(""), "");
+    }
+
+    // ===== cute-dbt#98 — data_diff + fixture wire shape =====
+
+    use crate::domain::{
+        CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff,
+        RowChange, RowChangeKind, UnitTestDataDiff,
+    };
+
+    /// A `TestPayload` carrying a `data_diff` serializes the cell-diff with the
+    /// EXACT JS contract the renderer will branch on: each `CellValue` is
+    /// adjacently tagged `{"t": <type>, "v": <value>}`, the `Absent` unit
+    /// variant is `{"t":"absent"}` (no `"v"`), and the row/column enums are
+    /// lowercase tokens. This pins the wire shape independently of the
+    /// domain's own round-trip test (which proves Rust↔Rust; this proves the
+    /// JSON the template consumes).
+    #[test]
+    fn data_diff_payload_wire_shape_has_adjacent_cellvalue_tags() {
+        let data_diff = UnitTestDataDiff {
+            given: vec![NamedTableDiff {
+                input: "ref('a')".into(),
+                diff: FixtureTableDiff {
+                    columns: vec![
+                        DiffColumn {
+                            name: "id".into(),
+                            status: ColumnStatus::Present,
+                        },
+                        DiffColumn {
+                            name: "city".into(),
+                            status: ColumnStatus::Added,
+                        },
+                    ],
+                    rows: vec![RowChange {
+                        kind: RowChangeKind::Modified,
+                        cells: vec![
+                            CellChange {
+                                old: CellValue::Number("1".into()),
+                                new: CellValue::Number("1".into()),
+                                changed: false,
+                            },
+                            CellChange {
+                                old: CellValue::Absent,
+                                new: CellValue::Str("NYC".into()),
+                                changed: true,
+                            },
+                        ],
+                    }],
+                },
+            }],
+            expect: None,
+        };
+        let json = serde_json::to_value(&data_diff).expect("data_diff serializes");
+        let cells = &json["given"][0]["diff"]["rows"][0]["cells"];
+        // Adjacently-tagged number: {"t":"number","v":"1"}.
+        assert_eq!(cells[0]["old"]["t"], "number");
+        assert_eq!(cells[0]["old"]["v"], "1");
+        // Str cell.
+        assert_eq!(cells[1]["new"]["t"], "str");
+        assert_eq!(cells[1]["new"]["v"], "NYC");
+        // Absent is a bare unit variant — tag only, NO "v" key.
+        assert_eq!(cells[1]["old"]["t"], "absent");
+        assert!(
+            cells[1]["old"].get("v").is_none(),
+            "Absent serializes with no \"v\" key; got {}",
+            cells[1]["old"],
+        );
+        // Row-kind + column-status enums are lowercase tokens.
+        assert_eq!(json["given"][0]["diff"]["rows"][0]["kind"], "modified");
+        assert_eq!(json["given"][0]["diff"]["columns"][0]["status"], "present");
+        assert_eq!(json["given"][0]["diff"]["columns"][1]["status"], "added");
+        // The precomputed `changed` verdict rides on each cell.
+        assert_eq!(cells[0]["changed"], false);
+        assert_eq!(cells[1]["changed"], true);
+    }
+
+    /// `build_test_payload` sets `data_diff` from the threaded map; the field
+    /// appears on the wire only when present (`skip_serializing_if` mirror of
+    /// `yaml_diff` / `sql_diff`). Absent → the JSON omits the key entirely,
+    /// keeping baseline-mode reports byte-stable.
+    #[test]
+    fn build_test_payload_omits_data_diff_when_absent() {
+        let ut = simple_unit_test("m", "t");
+        let graph = CteGraph::default();
+        let changed = InScopeSet::new();
+        let payload =
+            build_test_payload("unit_test.shop.t", &ut, &graph, &changed, None, None, None);
+        assert!(payload.data_diff.is_none());
+        let json = serde_json::to_string(&payload).expect("payload serializes");
+        assert!(
+            !json.contains("data_diff"),
+            "absent data_diff must be omitted from the wire; got {json}",
+        );
+    }
+
+    /// When a `data_diff` is threaded, `build_test_payload` carries it and the
+    /// wire key appears.
+    #[test]
+    fn build_test_payload_carries_data_diff_when_present() {
+        let ut = simple_unit_test("m", "t");
+        let graph = CteGraph::default();
+        let changed = InScopeSet::new();
+        let data_diff = UnitTestDataDiff {
+            given: vec![],
+            expect: Some(FixtureTableDiff {
+                columns: vec![DiffColumn {
+                    name: "id".into(),
+                    status: ColumnStatus::Present,
+                }],
+                rows: vec![RowChange {
+                    kind: RowChangeKind::Added,
+                    cells: vec![CellChange {
+                        old: CellValue::Absent,
+                        new: CellValue::Number("9".into()),
+                        changed: true,
+                    }],
+                }],
+            }),
+        };
+        let payload = build_test_payload(
+            "unit_test.shop.t",
+            &ut,
+            &graph,
+            &changed,
+            None,
+            None,
+            Some(&data_diff),
+        );
+        assert_eq!(payload.data_diff.as_ref(), Some(&data_diff));
+        let json = serde_json::to_string(&payload).expect("payload serializes");
+        assert!(
+            json.contains("data_diff"),
+            "present data_diff is on the wire"
+        );
+    }
+
+    /// The external-fixture guard signal (cute-dbt#98, #126): an external
+    /// `given`/`expect` carries `rows: null` + a `fixture` name. The payload
+    /// surfaces `fixture` (so the JS can show the affordance + YAML fallback)
+    /// and `rows` is JSON `null` — the two facts the JS needs to AVOID
+    /// rendering a silently-empty grid. An inline-rows given omits `fixture`.
+    #[test]
+    fn external_fixture_given_carries_fixture_name_and_null_rows() {
+        let ut = UnitTest::new(
+            "t",
+            NodeId::new("model.shop.m"),
+            vec![UnitTestGiven::new(
+                "ref('a')",
+                Value::Null,
+                Some("csv".to_owned()),
+                Some("stg_a_fixture".to_owned()),
+            )],
+            UnitTestExpect::new(json!([{"id": 1}]), Some("dict".to_owned()), None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let graph = CteGraph::default();
+        let payload = build_test_payload(
+            "unit_test.shop.t",
+            &ut,
+            &graph,
+            &InScopeSet::new(),
+            None,
+            None,
+            None,
+        );
+        // The external given: fixture name present, rows null.
+        assert_eq!(payload.given[0].fixture.as_deref(), Some("stg_a_fixture"));
+        assert!(
+            payload.given[0].rows.is_null(),
+            "external-fixture given has null rows (data not in manifest)",
+        );
+        // The inline expect: fixture omitted, rows present.
+        assert!(payload.expected.fixture.is_none());
+        assert!(payload.expected.rows.is_array());
+        // Wire shape: fixture key present on the given, absent on the expect.
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert!(
+            json.contains("stg_a_fixture"),
+            "given fixture is on the wire"
+        );
+        let expect_json = serde_json::to_string(&payload.expected).expect("serialize expect");
+        assert!(
+            !expect_json.contains("fixture"),
+            "inline expect omits the fixture key; got {expect_json}",
+        );
     }
 }

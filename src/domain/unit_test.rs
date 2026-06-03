@@ -16,26 +16,45 @@ use crate::domain::manifest::{DependsOn, NodeId};
 /// A single `given` block on a dbt unit test.
 ///
 /// `input` is the upstream model reference (e.g. `ref('stg_orders')`),
-/// `rows` is the fixture data (typed `Value` per ADR-5 tolerance), and
+/// `rows` is the fixture data (typed `Value` per ADR-5 tolerance),
 /// `format` is the dbt `format` field (e.g. `"dict"`, `"csv"`,
 /// `"sql"`) — `None` when the manifest omits it (dbt defaults to
-/// `dict`).
+/// `dict`) — and `fixture` is the name of an external fixture CSV the
+/// rows live in (`None` for an inline-rows given). When `fixture` is
+/// `Some` and `rows` is `Value::Null`, the fixture data is **not** in the
+/// manifest at all (a reference-only external fixture) — the render layer
+/// surfaces an affordance and falls back to the YAML text view rather
+/// than a silently-empty grid (cute-dbt#98, #126).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitTestGiven {
     input: String,
+    /// `#[serde(default)]` so an external-fixture given (which carries
+    /// `fixture` instead of inline `rows`) still deserializes, defaulting
+    /// to `Value::Null` (ADR-5 tolerance).
+    #[serde(default)]
     rows: Value,
     #[serde(default)]
     format: Option<String>,
+    /// Name of the external fixture file this given's rows live in (dbt's
+    /// `fixture:` key). `None` for inline-rows givens.
+    #[serde(default)]
+    fixture: Option<String>,
 }
 
 impl UnitTestGiven {
     /// Canonical constructor.
     #[must_use]
-    pub fn new(input: impl Into<String>, rows: Value, format: Option<String>) -> Self {
+    pub fn new(
+        input: impl Into<String>,
+        rows: Value,
+        format: Option<String>,
+        fixture: Option<String>,
+    ) -> Self {
         Self {
             input: input.into(),
             rows,
             format,
+            fixture,
         }
     }
 
@@ -56,22 +75,41 @@ impl UnitTestGiven {
     pub fn format(&self) -> Option<&str> {
         self.format.as_deref()
     }
+
+    /// External fixture file name (dbt's `fixture:` key) — `None` for an
+    /// inline-rows given.
+    #[must_use]
+    pub fn fixture(&self) -> Option<&str> {
+        self.fixture.as_deref()
+    }
 }
 
-/// The `expect` block on a dbt unit test — same `rows` / `format` shape
-/// as a `given` minus the `input` reference.
+/// The `expect` block on a dbt unit test — same `rows` / `format` /
+/// `fixture` shape as a `given` minus the `input` reference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitTestExpect {
+    /// `#[serde(default)]` so an external-fixture `expect` (which carries
+    /// `fixture` instead of inline `rows`) still deserializes, defaulting
+    /// to `Value::Null` (ADR-5 tolerance).
+    #[serde(default)]
     rows: Value,
     #[serde(default)]
     format: Option<String>,
+    /// Name of the external fixture file this `expect`'s rows live in
+    /// (dbt's `fixture:` key). `None` for inline-rows expects.
+    #[serde(default)]
+    fixture: Option<String>,
 }
 
 impl UnitTestExpect {
     /// Canonical constructor.
     #[must_use]
-    pub fn new(rows: Value, format: Option<String>) -> Self {
-        Self { rows, format }
+    pub fn new(rows: Value, format: Option<String>, fixture: Option<String>) -> Self {
+        Self {
+            rows,
+            format,
+            fixture,
+        }
     }
 
     /// Expected rows (verbatim JSON per ADR-5 tolerance).
@@ -84,6 +122,13 @@ impl UnitTestExpect {
     #[must_use]
     pub fn format(&self) -> Option<&str> {
         self.format.as_deref()
+    }
+
+    /// External fixture file name (dbt's `fixture:` key) — `None` for an
+    /// inline-rows expect.
+    #[must_use]
+    pub fn fixture(&self) -> Option<&str> {
+        self.fixture.as_deref()
     }
 }
 
@@ -211,11 +256,12 @@ mod tests {
             "ref('stg_orders')",
             json!([{"order_id": 1}, {"order_id": 2}]),
             Some("dict".to_owned()),
+            None,
         )
     }
 
     fn sample_expect() -> UnitTestExpect {
-        UnitTestExpect::new(json!([{"order_id": 1}]), Some("dict".to_owned()))
+        UnitTestExpect::new(json!([{"order_id": 1}]), Some("dict".to_owned()), None)
     }
 
     #[test]
@@ -224,6 +270,7 @@ mod tests {
         assert_eq!(g.input(), "ref('stg_orders')");
         assert!(g.rows().is_array());
         assert_eq!(g.format(), Some("dict"));
+        assert_eq!(g.fixture(), None, "inline-rows given has no fixture");
     }
 
     #[test]
@@ -232,6 +279,36 @@ mod tests {
         let g: UnitTestGiven = serde_json::from_str(json).unwrap();
         assert!(g.format().is_none());
         assert!(g.rows().is_array());
+    }
+
+    #[test]
+    fn given_fixture_field_deserializes_from_wire() {
+        // dbt emits a top-level `fixture: <name>` (sibling of rows/format).
+        let json = r#"{ "input": "ref('a')", "rows": null, "format": "csv", "fixture": "stg_orders_fixture" }"#;
+        let g: UnitTestGiven = serde_json::from_str(json).unwrap();
+        assert_eq!(g.fixture(), Some("stg_orders_fixture"));
+        assert!(
+            g.rows().is_null(),
+            "external-fixture given carries null rows; data is in the file"
+        );
+    }
+
+    #[test]
+    fn given_with_absent_rows_defaults_to_null() {
+        // A reference-only external given may omit `rows` entirely — the
+        // #[serde(default)] keeps deserialization from failing.
+        let json = r#"{ "input": "ref('a')", "fixture": "ext" }"#;
+        let g: UnitTestGiven = serde_json::from_str(json).unwrap();
+        assert!(g.rows().is_null(), "absent rows default to Value::Null");
+        assert_eq!(g.fixture(), Some("ext"));
+    }
+
+    #[test]
+    fn expect_fixture_field_deserializes_from_wire() {
+        let json = r#"{ "rows": null, "format": "csv", "fixture": "expected_fixture" }"#;
+        let e: UnitTestExpect = serde_json::from_str(json).unwrap();
+        assert_eq!(e.fixture(), Some("expected_fixture"));
+        assert!(e.rows().is_null());
     }
 
     #[test]

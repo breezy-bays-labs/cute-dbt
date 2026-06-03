@@ -328,7 +328,7 @@ mod tests {
             name,
             NodeId::new(model_bare),
             Vec::new(),
-            UnitTestExpect::new(serde_json::Value::Null, None),
+            UnitTestExpect::new(serde_json::Value::Null, None, None),
             None,
             DependsOn::default(),
             None,
