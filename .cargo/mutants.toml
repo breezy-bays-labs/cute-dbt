@@ -37,6 +37,7 @@ examine_globs = [
   "src/domain/preflight.rs",
   "src/domain/pr_diff.rs",
   "src/domain/scope.rs",
+  "src/domain/unit_test_table.rs",
   "src/domain/unit_test_yaml.rs",
   "src/adapters/manifest.rs",
   "src/adapters/cte_engine.rs",

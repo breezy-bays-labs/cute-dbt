@@ -289,7 +289,12 @@ fn list_item_name_matches(
 /// the first end-of-scalar boundary (matching closing quote, or
 /// whitespace / `#` for unquoted). Returns the scalar with surrounding
 /// whitespace and quotes removed.
-fn parse_yaml_scalar(raw: &str) -> String {
+///
+/// `pub(crate)` so the cell-table IR's block-dict parser
+/// ([`crate::domain::unit_test_table::parse_block_dict_rows`], cute-dbt#98)
+/// reuses the same quote-stripping semantics on the OLD-side YAML tokens
+/// rather than re-deriving them.
+pub(crate) fn parse_yaml_scalar(raw: &str) -> String {
     let s = raw.trim_start();
     if let Some(rest) = s.strip_prefix('"') {
         if let Some(end) = rest.find('"') {

@@ -62,6 +62,16 @@ threshold = 15
 pattern ="src/domain/pr_diff.rs"
 threshold = 15
 
+[[overrides]]
+# Cell-level unit-test fixture IR — rows × typed cells, format/engine
+# normalized (cute-dbt#98). The cell-typing canonicalizer + the
+# hand-rolled RFC 4180 csv parser + the OLD-side YAML row parsers are
+# correctness-load-bearing: a silent canonicalization or parser bug
+# yields a wrong table (a false "changed"/"unchanged" cell), never a
+# crash. The cell-diff algorithm (cell_diff.rs) lands with its own entry.
+pattern ="src/domain/unit_test_table.rs"
+threshold = 15
+
 # crap4rs v0.4.0's [[overrides]] schema accepts only `pattern` and
 # `threshold`. There is no top-level `exclude` array; to exclude a file
 # from gating, add an [[overrides]] entry with a very high threshold
