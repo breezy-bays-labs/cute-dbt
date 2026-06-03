@@ -181,11 +181,12 @@ th.col-removed .col-status { font-size: 0.7em; font-weight: 700; margin-left: 0.
 th.col-added .col-status   { background: #a6f0b8; color: #04260f; }
 th.col-removed .col-status { background: #ffabd6; color: #26000a; }
 th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190, 18, 60, 0.6); }
-/* A changed cell renders old → new inline. The two values reuse the #96
-   strong-mark palette (solid pastel + forced dark ink so it reads crisply in
-   both Sakura themes); the arrow between them is muted. */
-.cell-old { background: #ffabd6; color: #26000a; border-radius: 2px; padding: 0 1px; }
-.cell-new { background: #a6f0b8; color: #04260f; border-radius: 2px; padding: 0 1px; }
+/* A changed cell renders old → new inline. The changed values read as bold,
+   brilliant red (old/removed) and green (new/added) text — no fill — matching
+   the inline YAML/SQL char-emphasis below so the whole report speaks one diff
+   language (cute-dbt#132). The arrow between them is muted. */
+.cell-old { color: #dc2626; font-weight: 700; }
+.cell-new { color: #16a34a; font-weight: 700; }
 .cell-arrow { color: #6a6a72; margin: 0 0.3ch; }
 .compiled-sql > summary { cursor: pointer; }
 /* padding-top reserves vertical space for the absolute-positioned
@@ -217,10 +218,13 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
 .recursive-banner { background: #fff8e1; border-left: 4px solid #E69F00; padding: 0.5rem 0.75rem; margin: 0.5rem 0; font-size: 0.85em; color: #6a4a00; }
 .no-tests-empty { padding: 1.25rem 1rem; text-align: center; color: #6a6a72; border: 1px dashed #ccc; font-style: italic; }
 
-.sql-keyword { color: #1d7484; font-weight: 700; }
-.sql-string  { color: #006d3a; }
-.sql-comment { color: #6a6a72; font-style: italic; }
-.sql-jinja   { color: #982c61; }
+/* Syntax palette (cute-dbt#132) — cool/neutral hues (indigo keyword, teal
+   string, violet jinja, graphite comment) chosen to AVOID red + green so the
+   syntax colors never clash with the red/green diff highlight. */
+.sql-keyword { color: #4338ca; font-weight: 700; }
+.sql-string  { color: #0e7490; }
+.sql-comment { color: #555a66; font-style: italic; }
+.sql-jinja   { color: #7c3aed; }
 
 /* cute-dbt#69 — Authoring YAML drawer: nested <details> inside the
    "Test details" drawer, surfacing the raw YAML block as authored
@@ -230,9 +234,9 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
    mirrors the sql-* color values so all three highlighter modes
    (compiled SQL, fixture SQL, authoring YAML) sit in the same
    visual language. */
-.yaml-key     { color: #1d7484; font-weight: 700; }
-.yaml-string  { color: #006d3a; }
-.yaml-comment { color: #6a6a72; font-style: italic; }
+.yaml-key     { color: #4338ca; font-weight: 700; }
+.yaml-string  { color: #0e7490; }
+.yaml-comment { color: #555a66; font-style: italic; }
 .authoring-yaml { margin-top: 0.75rem; }
 .authoring-yaml > summary { cursor: pointer; font-weight: 600; }
 
@@ -255,12 +259,14 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
 .diff-removed { background: rgba(244, 63, 94, 0.06); box-shadow: inset 3px 0 0 rgba(244, 63, 94, 0.85); }
 .diff-added .diff-sigil   { color: #1a7f37; }
 .diff-removed .diff-sigil { color: #be123c; }
-/* The emphasis marks the exact changed characters. It is a solid light
-   pastel with a forced dark ink (not a translucent wash) so the text reads
-   crisply over the row tint — dark-on-light-marker works in both light and
-   dark Sakura themes, where the row's own text would otherwise be light. */
-.diff-added strong   { font-weight: 700; background: #a6f0b8; color: #04260f; border-radius: 2px; padding: 0 1px; }
-.diff-removed strong { font-weight: 700; background: #ffabd6; color: #26000a; border-radius: 2px; padding: 0 1px; }
+/* The emphasis marks the exact changed characters. DELIBERATE DIVERGENCE
+   (cute-dbt#132): the cell grid renders changed scalars as bold red/green TEXT
+   (short values, no surrounding syntax to compete with), but the YAML/SQL line
+   diffs use a vivid red/green HIGHLIGHT marker so the changed token stands apart
+   from the line's OWN syntax highlighting. Do not "unify" these back to plain
+   text — colored text on a syntax-highlighted line reads as funky. */
+.diff-added strong   { font-weight: 700; background: #16a34a; color: #fff; border-radius: 2px; padding: 0 1px; }
+.diff-removed strong { font-weight: 700; background: #e5484d; color: #fff; border-radius: 2px; padding: 0 1px; }
 
 /* cute-dbt#47 — Model SQL expandable section (raw Jinja, model-level).
    Sits between test-selection and the CTE DAG. Collapsed by default. */
@@ -1663,12 +1669,31 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     if (rowKind === "added" || rowKind === "unchanged" || !cell.changed) {
       return decorateValueCell($td, cell.new);
     }
-    // Modified + changed → inline old → new.
+    // Modified + changed → inline old → new. Each side is type-aware via
+    // diffToken: a real null/absent keeps its own neutral styling and never
+    // borrows the value-change red/green (cute-dbt#132).
     $td.addClass("cell-changed").attr("data-order", cellValueText(cell.new));
-    $td.append($("<span>").addClass("cell-old").text(cellValueText(cell.old)));
+    $td.append(diffToken(cell.old, "cell-old"));
     $td.append($("<span>").addClass("cell-arrow").html("&rarr;"));
-    $td.append($("<span>").addClass("cell-new").text(cellValueText(cell.new)));
+    $td.append(diffToken(cell.new, "cell-new"));
     return $td;
+  }
+
+  // One side of an inline `old → new` changed cell. Type-aware so a real null
+  // or absent cell reads in its own neutral styling rather than the brilliant
+  // red/green reserved for a real value change: null → italic muted-gray
+  // "NULL"; absent → blank; any concrete value (including the string 'null')
+  // → the side's color via `sideClass` (.cell-old = red, .cell-new = green).
+  // This is what keeps a real NULL visually distinct from a string 'null'
+  // even mid-diff (cute-dbt#132).
+  function diffToken(cv, sideClass) {
+    if (!cv || cv.t === "null") {
+      return $("<span>").addClass("cell-null").text("NULL");
+    }
+    if (cv.t === "absent") {
+      return $("<span>").addClass("cell-absent").text("");
+    }
+    return $("<span>").addClass(sideClass).text(cellValueText(cv));
   }
 
   // Render a single CellValue into a plain value cell, matching `buildTable`'s
