@@ -49,6 +49,22 @@ fn ut_given(name: &str, input: &str, rows: serde_json::Value, format: Option<&st
     )
 }
 
+/// A unit test with NO `given` and an `expect` (rows + format), declared at
+/// [`OFP`] — drives the `expect`-side reconstruction branch.
+fn ut_expect(name: &str, rows: serde_json::Value, format: Option<&str>) -> UnitTest {
+    UnitTest::new(
+        name.to_owned(),
+        NodeId::new("model.shop.m"),
+        vec![],
+        UnitTestExpect::new(rows, format.map(str::to_owned)),
+        None,
+        cute_dbt::domain::manifest::DependsOn::default(),
+        None,
+        None,
+        Some(OFP.to_owned()),
+    )
+}
+
 /// A `Manifest` carrying a single unit test keyed by `id`.
 fn manifest_with(id: &str, ut: UnitTest) -> Manifest {
     let mut tests = HashMap::new();
@@ -196,6 +212,52 @@ fn h33_inline_flow_single_cell_edit_is_one_modified_cell() {
     let idc = td.columns.iter().position(|c| c.name == "id").unwrap();
     assert!(td.rows[0].cells[name].changed, "name alice -> bob");
     assert!(!td.rows[0].cells[idc].changed, "id unchanged");
+}
+
+/// EXPECT-side, block-style dict single-cell edit — drives the
+/// `build_data_diff` expect branch + `data.expect = Some(...)` (the
+/// given-tests all leave expect Null). Proves the expect path reconstructs
+/// the OLD expect table from Context + Removed lines, same as a given.
+#[test]
+fn expect_side_single_cell_edit_populates_data_expect() {
+    let id = "unit_test.shop.m.expect_edit";
+    // Working-tree (NEW) block: an `expect:` sub-block, row count edited.
+    let raw = "  - name: expect_edit\n    expect:\n      format: dict\n      rows:\n        - count: 7\n          label: 'ok'";
+    let block = block_at(raw, 1);
+    // NEW expect rows from the manifest: count edited 5 -> 7.
+    let manifest = manifest_with(
+        id,
+        ut_expect(
+            "expect_edit",
+            serde_json::json!([{"count": 7, "label": "ok"}]),
+            Some("dict"),
+        ),
+    );
+    // The edit is at new-side line 5 (`        - count: 7`).
+    let index = index_for(vec![replace(
+        5,
+        &["        - count: 5"],
+        &["        - count: 7"],
+    )]);
+    let mut blocks = HashMap::new();
+    blocks.insert(id.to_owned(), block);
+
+    let diffs = reconstruct_table_diffs(&manifest, &changed_set(id), &blocks, &index);
+    let data = diffs.get(id).expect("a data diff must be emitted");
+    assert!(data.given.is_empty(), "no given changed");
+    let td = data.expect.as_ref().expect("data.expect must be Some");
+    assert_eq!(td.rows.len(), 1);
+    assert_eq!(td.rows[0].kind, RowChangeKind::Modified);
+    use cute_dbt::domain::unit_test_table::CellValue;
+    let count = td.columns.iter().position(|c| c.name == "count").unwrap();
+    let label = td.columns.iter().position(|c| c.name == "label").unwrap();
+    assert!(td.rows[0].cells[count].changed, "count changed 5 -> 7");
+    assert!(
+        !td.rows[0].cells[label].changed,
+        "label unchanged (Context)"
+    );
+    assert_eq!(td.rows[0].cells[count].old, CellValue::Number("5".into()));
+    assert_eq!(td.rows[0].cells[count].new, CellValue::Number("7".into()));
 }
 
 /// csv block-scalar edit: the header line survives as Context (only the data
