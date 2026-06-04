@@ -821,7 +821,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     $wrap.append($copy);
     if (hasDiff) {
       var $diffPre = $("<pre>").addClass("sql-block model-sql-block sql-diff-view").append(
-        $("<code>").addClass("model-sql-code").html(renderBlockDiff(m.sql_diff, highlightSql))
+        $("<code>").addClass("model-sql-code").html(renderBlockDiff(m.sql_diff, tokenizeSql))
       );
       var $rawPre = $("<pre>").addClass("sql-block model-sql-block sql-raw-view").prop("hidden", true).append(
         $("<code>").addClass("model-sql-code").html(highlightSql(raw))
@@ -1382,109 +1382,424 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
   function escapeHtmlForBody(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
-  // Single-pass tokenizer-style highlighter. Alternation order matters:
-  // block comments, line comments, string literals, and Jinja tags are
-  // matched FIRST as opaque blobs so keyword recognition can't reach
-  // inside them. Without this, a comment like `-- pulled from raw.users`
-  // would render the `from` token as a keyword (cute-dbt#31 + #40 CR-1).
+  // cute-dbt#132 — token-stream syntax highlighters.
   //
-  // Jinja arms (cute-dbt#47):
-  //   - `{# ... #}` styles as a comment (semantically equivalent to `--`).
-  //   - `{{ ... }}` and `{% ... %}` style as jinja (control flow / refs).
-  // Order matters: comment arm precedes the tag arm so `{#...#}` isn't
-  // swallowed by a hypothetical wider tag pattern.
-  var SQL_TOKEN_RE = new RegExp(
-    "(\\/\\*[\\s\\S]*?\\*\\/)" +                              // /* block comment */
-    "|(--[^\\n]*)" +                                          // -- line comment
-    "|('(?:[^'\\\\]|\\\\.|'')*')" +                           // 'string literal' (escapes: \' and '')
-    "|(\\{#[\\s\\S]*?#\\})" +                                 // {# jinja comment #}
-    "|(\\{\\{[\\s\\S]*?\\}\\}|\\{%[\\s\\S]*?%\\})" +          // {{ jinja }} or {% jinja %}
-    "|\\b(" +
-      "select|from|where|left|right|inner|outer|full|cross|join|on|using|" +
-      "group\\s+by|order\\s+by|partition\\s+by|having|as|and|or|not|" +
-      "case|when|then|else|end|null|is|distinct|with|union|all|over|" +
-      "coalesce|sum|count|avg|min|max|row_number|asc|desc|true|false" +
-    ")\\b",
-    "gi"
-  );
-  function highlightSql(sql) {
-    var s = escapeHtmlForBody(sql);
-    return s.replace(SQL_TOKEN_RE, function (_match, block, line, str, jcomment, jinja, kw) {
-      if (block)    return '<span class="sql-comment">' + block + '</span>';
-      if (line)     return '<span class="sql-comment">' + line + '</span>';
-      if (str)      return '<span class="sql-string">'  + str + '</span>';
-      if (jcomment) return '<span class="sql-comment">' + jcomment + '</span>';
-      if (jinja)    return '<span class="sql-jinja">'   + jinja + '</span>';
-      if (kw)       return '<span class="sql-keyword">' + kw + '</span>';
-      return _match;
-    });
+  // Replaces the old single-`String.replace` highlighters (which matched a
+  // whole `{{ ref('stg_orders') }}` as one opaque jinja blob, so the inner
+  // `'stg_orders'` never read as a string). The new approach is a
+  // position-advancing, mode-stack scanner that returns a GAP-FREE token
+  // stream `[{text, cls}, ...]` over the RAW input (cls "" = plaintext). Two
+  // hard invariants hold by construction:
+  //   1. Gap-free: tokenizeSql(s).map(t=>t.text).join("") === s for all s.
+  //   2. Raw-in / escape-at-emit: tokens carry RAW slices; HTML escaping
+  //      happens only at `emitTokens` time, so renderBlockDiff's codepoint
+  //      `emphasis` offsets (Rust `chars()` indices) never drift.
+  // Every branch advances pos by >=1 (single-char fallthrough is the
+  // backstop), so unterminated fragments — renderBlockDiff feeds per-line
+  // pieces of multi-line constructs — flush-to-end instead of hanging.
+
+  // SQL keyword set (lowercase). `from_date` does NOT highlight `from`
+  // because identifiers are scanned WHOLE then looked up (cute-dbt#31/#40).
+  var SQL_KEYWORDS = {};
+  ("select from where with recursive as join inner left right full outer cross " +
+   "lateral natural on using group by order having limit offset fetch union " +
+   "intersect except all distinct case when then else end and or not in is null " +
+   "like ilike between exists any some asc desc nulls first last over partition " +
+   "qualify window cast try_cast coalesce sum count avg min max row_number true " +
+   "false").split(" ").forEach(function (k) { SQL_KEYWORDS[k] = true; });
+  // Jinja control words stay violet inside `{{ }}` / `{% %}`.
+  var JINJA_KEYWORDS = {};
+  ("if elif else endif for in endfor set endset macro endmacro call endcall " +
+   "filter endfilter block endblock do with without as import from include " +
+   "extends is not and or loop recursive raw endraw").split(" ")
+    .forEach(function (k) { JINJA_KEYWORDS[k] = true; });
+  // Known dbt functions: their name reads violet even without a trailing `(`.
+  var JINJA_FUNCS = {};
+  ("ref source config var env_var is_incremental this target model graph " +
+   "builtins flags modules doc run_query statement log print adapter return " +
+   "dispatch").split(" ").forEach(function (k) { JINJA_FUNCS[k] = true; });
+
+  function isWordChar(ch) {
+    return ch !== undefined && /[A-Za-z0-9_]/.test(ch);
   }
 
-  // cute-dbt#69 — YAML highlighter for the Authoring YAML drawer.
-  // Mirrors `highlightSql`: escape-first, then tokenize.
-  // `escapeHtmlForBody` does NOT escape `"` or `'`, so the regex's
-  // `"..."` and `'...'` branches match the original quote chars
-  // verbatim — and any `&`, `<`, `>` inside a quoted YAML scalar is
-  // already escaped to `&amp;` / `&lt;` / `&gt;` before tokenization,
-  // so the rendered HTML stays well-formed.
-  //
-  // Alternation order matters: comments and strings are matched
-  // first as opaque blobs so a `#` inside a quoted string never
-  // trips the comment arm, and a `key:` lookalike inside a string
-  // never trips the key arm. The key arm anchors on `(^|\n)` so it
-  // only fires at the start of a line, matching real YAML mapping
-  // keys (including the `- name:` list-item form).
-  var YAML_TOKEN_RE = new RegExp(
-    "(#[^\\n]*)" +                                                  // 1: # line comment
-    "|('(?:[^'\\\\]|\\\\.|'')*')" +                                  // 2: 'string'
-    "|(\"(?:[^\"\\\\]|\\\\.)*\")" +                                  // 3: "string"
-    "|(^|\\n)(\\s*(?:-\\s+)?)([A-Za-z_][A-Za-z0-9_\\-]*)(?=\\s*:)",  // 4=sep, 5=indent, 6=key
-    "g"
-  );
-  function highlightYaml(yaml) {
-    var s = escapeHtmlForBody(yaml);
-    return s.replace(YAML_TOKEN_RE, function (_match, c, sq, dq, sep, indent, key) {
-      if (c)                 return '<span class="yaml-comment">' + c + '</span>';
-      if (sq)                return '<span class="yaml-string">'  + sq + '</span>';
-      if (dq)                return '<span class="yaml-string">'  + dq + '</span>';
-      if (key !== undefined) return sep + indent + '<span class="yaml-key">' + key + '</span>';
-      return _match;
-    });
+  // Scan the inside of a `{{ }}` (expr) or `{% %}` (stmt) construct, pushing
+  // tokens onto `out`. `src` is the whole string, `i` the index just past the
+  // open delimiter. `expr` selects the close delimiter. Returns the index past
+  // the close (or src.length if the fragment is unterminated). Strings inside
+  // jinja are `sql-string` (the headline fix: `ref('stg_orders')` reads teal).
+  function scanJinjaBody(src, i, out, expr) {
+    var n = src.length;
+    while (i < n) {
+      var ch = src[i];
+      // Close delim: `-}}`/`}}` for expr, `-%}`/`%}` for stmt.
+      if (expr) {
+        if (ch === "-" && src[i + 1] === "}" && src[i + 2] === "}") {
+          out.push({ text: "-}}", cls: "sql-jinja" }); return i + 3;
+        }
+        if (ch === "}" && src[i + 1] === "}") {
+          out.push({ text: "}}", cls: "sql-jinja" }); return i + 2;
+        }
+      } else {
+        if ((ch === "-" || ch === "+") && src[i + 1] === "%" && src[i + 2] === "}") {
+          out.push({ text: ch + "%}", cls: "sql-jinja" }); return i + 3;
+        }
+        if (ch === "%" && src[i + 1] === "}") {
+          out.push({ text: "%}", cls: "sql-jinja" }); return i + 2;
+        }
+      }
+      // String inside jinja -> sql-string.
+      if (ch === "'" || ch === '"') {
+        var q = ch, j = i + 1;
+        while (j < n) {
+          if (src[j] === "\\") { j += 2; continue; }
+          if (src[j] === q) { j += 1; break; }
+          j += 1;
+        }
+        out.push({ text: src.slice(i, Math.min(j, n)), cls: "sql-string" });
+        i = Math.min(j, n);
+        continue;
+      }
+      // Identifier: jinja keyword / dbt function / function-call -> jinja; else plain.
+      if (/[A-Za-z_]/.test(ch)) {
+        var k = i + 1;
+        while (k < n && isWordChar(src[k])) k += 1;
+        var word = src.slice(i, k);
+        var lower = word.toLowerCase();
+        var rest = k;
+        while (rest < n && (src[rest] === " " || src[rest] === "\t")) rest += 1;
+        var isCall = src[rest] === "(";
+        if (JINJA_KEYWORDS[lower] || JINJA_FUNCS[lower] || isCall) {
+          out.push({ text: word, cls: "sql-jinja" });
+        } else {
+          out.push({ text: word, cls: "" });
+        }
+        i = k;
+        continue;
+      }
+      // Number / operator / other -> plaintext (coalesce a run of non-word,
+      // non-quote, non-close-delim chars into one plaintext token).
+      var s = i;
+      i += 1;
+      out.push({ text: src.slice(s, i), cls: "" });
+    }
+    return i; // unterminated fragment: flushed to end, no hang.
   }
-  // Expose for headless JS unit tests (cute-dbt#69 — parallels the
-  // `__cuteParseCsv` seam introduced in cute-dbt#66).
+
+  // Tokenize SQL (with embedded jinja). Gap-free over RAW `src`.
+  function tokenizeSql(src) {
+    src = String(src);
+    var out = [];
+    var n = src.length;
+    var i = 0;
+    var plainStart = -1;
+    function flushPlain(upTo) {
+      if (plainStart !== -1 && upTo > plainStart) {
+        out.push({ text: src.slice(plainStart, upTo), cls: "" });
+      }
+      plainStart = -1;
+    }
+    while (i < n) {
+      var c0 = src[i], c1 = src[i + 1];
+      // 1. jinja comment {# ... #} (opaque; unterminated -> flush rest).
+      if (c0 === "{" && c1 === "#") {
+        flushPlain(i);
+        var end = src.indexOf("#}", i + 2);
+        var stop = end === -1 ? n : end + 2;
+        out.push({ text: src.slice(i, stop), cls: "sql-comment" });
+        i = stop;
+        continue;
+      }
+      // 2/3. jinja expr `{{` or stmt `{%` (optional -/+ handled by scanner).
+      if (c0 === "{" && (c1 === "{" || c1 === "%")) {
+        flushPlain(i);
+        var expr = c1 === "{";
+        // Emit open delim (with optional whitespace-control sign).
+        var sign = (src[i + 2] === "-" || src[i + 2] === "+") ? src[i + 2] : "";
+        var open = src.slice(i, i + 2 + sign.length);
+        out.push({ text: open, cls: "sql-jinja" });
+        i = scanJinjaBody(src, i + 2 + sign.length, out, expr);
+        continue;
+      }
+      // 4. block comment /* ... */ (unterminated -> flush rest).
+      if (c0 === "/" && c1 === "*") {
+        flushPlain(i);
+        var be = src.indexOf("*/", i + 2);
+        var bstop = be === -1 ? n : be + 2;
+        out.push({ text: src.slice(i, bstop), cls: "sql-comment" });
+        i = bstop;
+        continue;
+      }
+      // 5. line comment -- ... to EOL.
+      if (c0 === "-" && c1 === "-") {
+        flushPlain(i);
+        var nl = src.indexOf("\n", i);
+        var lstop = nl === -1 ? n : nl;
+        out.push({ text: src.slice(i, lstop), cls: "sql-comment" });
+        i = lstop;
+        continue;
+      }
+      // 6. single-quoted string '...' with '' doubling and \' tolerance. If a
+      //    jinja open appears inside, jinja wins: emit string-so-far, scan the
+      //    jinja, then resume the string.
+      if (c0 === "'") {
+        flushPlain(i);
+        var sBegin = i;
+        var j = i + 1;
+        while (j < n) {
+          var cj = src[j];
+          if (cj === "\\") { j += 2; continue; }
+          if (cj === "'" && src[j + 1] === "'") { j += 2; continue; } // doubled
+          if (cj === "{" && (src[j + 1] === "{" || src[j + 1] === "%" || src[j + 1] === "#")) {
+            // jinja wins inside the string body.
+            if (j > sBegin) out.push({ text: src.slice(sBegin, j), cls: "sql-string" });
+            // Re-enter the main loop at the jinja by handling it inline.
+            var jc1 = src[j + 1];
+            if (jc1 === "#") {
+              var je = src.indexOf("#}", j + 2);
+              var jstop = je === -1 ? n : je + 2;
+              out.push({ text: src.slice(j, jstop), cls: "sql-comment" });
+              j = jstop;
+            } else {
+              var jexpr = jc1 === "{";
+              var jsign = (src[j + 2] === "-" || src[j + 2] === "+") ? src[j + 2] : "";
+              out.push({ text: src.slice(j, j + 2 + jsign.length), cls: "sql-jinja" });
+              j = scanJinjaBody(src, j + 2 + jsign.length, out, jexpr);
+            }
+            sBegin = j;
+            continue;
+          }
+          if (cj === "'") { j += 1; break; } // closing quote
+          j += 1;
+        }
+        if (j > sBegin) out.push({ text: src.slice(sBegin, Math.min(j, n)), cls: "sql-string" });
+        i = Math.min(j, n);
+        if (i === sBegin) i += 1; // safety: never stall
+        continue;
+      }
+      // 7. double-quoted identifier "..." -> plaintext (NOT a string).
+      if (c0 === '"') {
+        flushPlain(i);
+        var dj = i + 1;
+        while (dj < n) {
+          if (src[dj] === "\\") { dj += 2; continue; }
+          if (src[dj] === '"') { dj += 1; break; }
+          dj += 1;
+        }
+        out.push({ text: src.slice(i, Math.min(dj, n)), cls: "" });
+        i = Math.min(dj, n);
+        continue;
+      }
+      // 10. identifier -> keyword lookup (case-insensitive) or plaintext.
+      if (/[A-Za-z_]/.test(c0)) {
+        flushPlain(i);
+        var k2 = i + 1;
+        while (k2 < n && isWordChar(src[k2])) k2 += 1;
+        var w = src.slice(i, k2);
+        out.push({ text: w, cls: SQL_KEYWORDS[w.toLowerCase()] ? "sql-keyword" : "" });
+        i = k2;
+        continue;
+      }
+      // 8/9/11. number, multi-char op, single char -> plaintext (coalesced).
+      if (plainStart === -1) plainStart = i;
+      i += 1;
+    }
+    flushPlain(n);
+    return out;
+  }
+
+  // Tokenize YAML. Gap-free over RAW `src`. No jinja nesting (not needed
+  // for the authoring-YAML drawer in v0.x). Strings are matched before the
+  // `#` comment arm so a `#` inside a quoted scalar never opens a comment.
+  function tokenizeYaml(src) {
+    src = String(src);
+    var out = [];
+    var n = src.length;
+    var i = 0;
+    var plainStart = -1;
+    function flushPlain(upTo) {
+      if (plainStart !== -1 && upTo > plainStart) {
+        out.push({ text: src.slice(plainStart, upTo), cls: "" });
+      }
+      plainStart = -1;
+    }
+    // Track whether we are at logical start-of-line content (after optional
+    // indent + a single `- ` list sigil) so the key arm only fires there.
+    var atLineStart = true;     // true right after a newline / at index 0
+    var sawListSigil = false;
+    while (i < n) {
+      var c = src[i];
+      if (c === "\n") {
+        flushPlain(i);
+        out.push({ text: "\n", cls: "" });
+        i += 1;
+        atLineStart = true;
+        sawListSigil = false;
+        continue;
+      }
+      // String scalars (single/double) — matched before the comment arm.
+      if (c === "'" || c === '"') {
+        flushPlain(i);
+        var q = c, j = i + 1;
+        while (j < n) {
+          if (src[j] === "\\") { j += 2; continue; }
+          if (q === "'" && src[j] === "'" && src[j + 1] === "'") { j += 2; continue; }
+          if (src[j] === q) { j += 1; break; }
+          if (src[j] === "\n") break; // YAML scalars don't span our per-line fragments
+          j += 1;
+        }
+        out.push({ text: src.slice(i, Math.min(j, n)), cls: "yaml-string" });
+        i = Math.min(j, n);
+        atLineStart = false;
+        continue;
+      }
+      // # line comment (to EOL).
+      if (c === "#") {
+        flushPlain(i);
+        var nl = src.indexOf("\n", i);
+        var stop = nl === -1 ? n : nl;
+        out.push({ text: src.slice(i, stop), cls: "yaml-comment" });
+        i = stop;
+        atLineStart = false;
+        continue;
+      }
+      // At start-of-line: consume indent, then an optional `- ` list sigil
+      // (which keeps us at start-of-line so `- name:` highlights `name`).
+      if (atLineStart) {
+        if (c === " " || c === "\t") {
+          if (plainStart === -1) plainStart = i;
+          i += 1;
+          continue;
+        }
+        if (!sawListSigil && c === "-" && (src[i + 1] === " " || src[i + 1] === "\t")) {
+          // Emit indent-so-far + the `- ` as plaintext.
+          if (plainStart === -1) plainStart = i;
+          i += 2;
+          // consume following spaces of the sigil run
+          while (i < n && (src[i] === " " || src[i] === "\t")) i += 1;
+          flushPlain(i);
+          sawListSigil = true;
+          continue; // still at line start (key may follow the sigil)
+        }
+        // Identifier followed by `:` -> yaml-key.
+        if (/[A-Za-z_]/.test(c)) {
+          var k = i + 1;
+          while (k < n && /[A-Za-z0-9_\-]/.test(src[k])) k += 1;
+          // peek past optional trailing spaces is NOT done: YAML keys abut `:`.
+          if (src[k] === ":") {
+            flushPlain(i);
+            out.push({ text: src.slice(i, k), cls: "yaml-key" });
+            i = k;
+            atLineStart = false;
+            continue;
+          }
+        }
+        atLineStart = false; // first non-indent, non-key char ends the key zone
+      }
+      // Default: coalesce into a plaintext run.
+      if (plainStart === -1) plainStart = i;
+      i += 1;
+    }
+    flushPlain(n);
+    return out;
+  }
+
+  // Emit a token stream as HTML. RAW slices are escaped here (and ONLY here),
+  // wrapped in a class span unless the token is plaintext (cls === "").
+  function emitTokens(tokens) {
+    var html = "";
+    for (var i = 0; i < tokens.length; i++) {
+      var t = tokens[i];
+      if (t.cls) {
+        html += '<span class="' + t.cls + '">' + escapeHtmlForBody(t.text) + "</span>";
+      } else {
+        html += escapeHtmlForBody(t.text);
+      }
+    }
+    return html;
+  }
+
+  // Thin wrappers: tokenize -> emit. Same observable contract as the old
+  // regex highlighters for context lines, PLUS nested-jinja correctness.
+  function highlightSql(sql) { return emitTokens(tokenizeSql(sql)); }
+  function highlightYaml(yaml) { return emitTokens(tokenizeYaml(yaml)); }
+
+  // Expose for headless JS unit tests (cute-dbt#69 / cute-dbt#132 — parallels
+  // the `__cuteParseCsv` seam introduced in cute-dbt#66).
   window.__cuteHighlightYaml = highlightYaml;
+  window.__cuteTokenizeSql = tokenizeSql;
+  window.__cuteTokenizeYaml = tokenizeYaml;
 
-  // cute-dbt#96 concern 2 / cute-dbt#111 — render a reconstructed inline
-  // block diff (domain::pr_diff::BlockDiff) as HTML for a <pre><code>.
-  // Content-agnostic: `highlightFn` highlights CONTEXT lines only (YAML
-  // for the test drawer, SQL for the Model SQL section). Each line is a
+  // Overlay the codepoint `emphasis` range [a,b) onto a token stream. Walks
+  // the tokens tracking a running CODEPOINT offset; each token is intersected
+  // with [a,b) and split at the boundary so the in-range pieces sit inside a
+  // <strong> while every piece keeps its syntax class. The range can straddle
+  // token boundaries (e.g. a changed run crossing a keyword into the next
+  // token), so this is a true split — NOT a single-token lookup. Slicing is by
+  // CODEPOINT (Array.from), matching Rust `chars()` offsets.
+  function emitTokensWithEmphasis(tokens, a, b) {
+    var html = "";
+    var pos = 0; // running codepoint offset across the whole line
+    for (var t = 0; t < tokens.length; t++) {
+      var cps = Array.from(tokens[t].text);
+      var cls = tokens[t].cls;
+      var len = cps.length;
+      var start = pos, endp = pos + len;
+      pos = endp;
+      // Within this token, codepoint indices [0,len) map to line offsets
+      // [start, endp). Emphasis covers token-local [lo, hi).
+      var lo = Math.max(a, start) - start;
+      var hi = Math.min(b, endp) - start;
+      function wrap(text, emph) {
+        if (text === "") return "";
+        var esc = escapeHtmlForBody(text);
+        var inner = emph ? "<strong>" + esc + "</strong>" : esc;
+        return cls ? '<span class="' + cls + '">' + inner + "</span>" : inner;
+      }
+      if (hi <= 0 || lo >= len || hi <= lo) {
+        // No overlap with this token.
+        html += wrap(cps.join(""), false);
+      } else {
+        // Split this token at [lo, hi): pre | emphasized | post. Each piece
+        // keeps the token's class; the middle piece is wrapped in <strong>.
+        // To keep CSS-descendant nesting valid and the class on every piece,
+        // emit one span per non-empty piece.
+        html += wrap(cps.slice(0, lo).join(""), false);
+        html += wrap(cps.slice(lo, hi).join(""), true);
+        html += wrap(cps.slice(hi).join(""), false);
+      }
+    }
+    return html;
+  }
+
+  // cute-dbt#96 concern 2 / cute-dbt#111 / cute-dbt#132 — render a
+  // reconstructed inline block diff (domain::pr_diff::BlockDiff) as HTML for a
+  // <pre><code>. Content-agnostic: `tokenizeFn` is a TOKENIZER (tokenizeYaml
+  // for the test drawer, tokenizeSql for the Model SQL section). Each line is a
   // block-level `.diff-line` span (so a full-width add/remove row tint fills
   // the line) — block layout provides the breaks, so the spans are joined with
   // "" (a literal "\n" would render as a blank row between blocks in a <pre>);
   // each is prefixed by a +/-/space sigil.
-  // Changed lines BYPASS `highlightFn` (the cute-dbt#96 lesson): they render
-  // escaped text with the intra-line `emphasis` range wrapped in <strong>, so
-  // the emphasis offsets land on the RAW text. The offsets are CODEPOINT
-  // indices (Rust `chars()`), so the slice goes through `Array.from` — UTF-16
-  // `.slice` would drift on astral chars.
-  function renderBlockDiff(diff, highlightFn) {
+  //
+  // cute-dbt#132: CHANGED lines are now ALSO syntax-highlighted. We tokenize
+  // every line (context and changed), then overlay the intra-line `emphasis`
+  // range as <strong> by SPLITTING the token stream at the codepoint range —
+  // so a changed line shows syntax colors AND the emphasis marker. (Previously
+  // changed lines bypassed highlighting entirely and rendered plain escaped
+  // text.) The offsets are CODEPOINT indices (Rust `chars()`), sliced via
+  // Array.from — UTF-16 `.slice` would drift on astral chars.
+  function renderBlockDiff(diff, tokenizeFn) {
     return diff.lines.map(function (ln) {
       var cls = ln.kind === "added" ? "diff-added"
               : ln.kind === "removed" ? "diff-removed"
               : "diff-context";
       var sigil = ln.kind === "added" ? "+" : ln.kind === "removed" ? "-" : " ";
+      var tokens = tokenizeFn(ln.text);
       var body;
-      if (ln.kind === "context") {
-        body = highlightFn(ln.text);
-      } else if (ln.emphasis) {
-        var cps = Array.from(ln.text);
-        var a = ln.emphasis[0], b = ln.emphasis[1];
-        body = escapeHtmlForBody(cps.slice(0, a).join(""))
-             + "<strong>" + escapeHtmlForBody(cps.slice(a, b).join("")) + "</strong>"
-             + escapeHtmlForBody(cps.slice(b).join(""));
+      if (ln.kind !== "context" && ln.emphasis) {
+        body = emitTokensWithEmphasis(tokens, ln.emphasis[0], ln.emphasis[1]);
       } else {
-        body = escapeHtmlForBody(ln.text);
+        body = emitTokens(tokens);
       }
       return '<span class="diff-line ' + cls + '">'
            + '<span class="diff-sigil">' + sigil + '</span>' + body
@@ -1493,8 +1808,8 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
   }
   // Expose for headless JS unit tests (parallels __cuteHighlightYaml). The
   // #96 name is kept as a thin alias so existing headless assertions and the
-  // YAML call site stay byte-stable; new SQL callers pass `highlightSql`.
-  function renderYamlDiff(diff) { return renderBlockDiff(diff, highlightYaml); }
+  // YAML call site stay stable; SQL callers pass `tokenizeSql`.
+  function renderYamlDiff(diff) { return renderBlockDiff(diff, tokenizeYaml); }
   window.__cuteRenderBlockDiff = renderBlockDiff;
   window.__cuteRenderYamlDiff = renderYamlDiff;
 
