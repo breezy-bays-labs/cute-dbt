@@ -713,7 +713,13 @@ fn removed_diff_lines(h: &Hunk) -> Vec<DiffLine> {
             // pairs are already filtered out above, so `i` here is a
             // substantive pair and `added_lines[i]` is in bounds (equal counts).
             emphasis: if aligned {
-                intra_line_span(&trim_cr(r), &trim_cr(&h.added_lines[i]))
+                // `intra_line_span` only needs `&str`; trim with
+                // `trim_end_matches` (no allocation) rather than the owned
+                // `trim_cr` (gemini review on cute-dbt#132).
+                intra_line_span(
+                    r.trim_end_matches('\r'),
+                    h.added_lines[i].trim_end_matches('\r'),
+                )
             } else {
                 None
             },
@@ -772,9 +778,12 @@ fn fold_hunk_edits(edits: &mut HunkEdits, h: &Hunk, bs: usize, be: usize) {
         for k in 0..h.added_lines.len() {
             let line_no = h.new_start + k;
             if !pair_is_ws_only(h, k) && (bs..=be).contains(&line_no) {
-                if let Some(e) =
-                    intra_line_span(&trim_cr(&h.added_lines[k]), &trim_cr(&h.removed_lines[k]))
-                {
+                // `&str` trim (no allocation) — see removed_diff_lines
+                // (gemini review on cute-dbt#132).
+                if let Some(e) = intra_line_span(
+                    h.added_lines[k].trim_end_matches('\r'),
+                    h.removed_lines[k].trim_end_matches('\r'),
+                ) {
                     edits.added_emphasis.insert(line_no, e);
                 }
             }
