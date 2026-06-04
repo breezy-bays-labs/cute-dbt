@@ -673,8 +673,8 @@ fn pair_is_ws_only(h: &Hunk, i: usize) -> bool {
 
 /// The new-side edits a set of touching hunks impose on a block: which
 /// removed-line groups to splice before each 1-based new-side line, which
-/// new-side lines are genuine (non-whitespace) additions, and the
-/// intra-line emphasis span for a clean 1:1 replacement's added line.
+/// new-side lines are genuine (non-whitespace) additions, and the per-pair
+/// intra-line emphasis spans for an aligned replacement's added lines.
 #[derive(Default)]
 struct HunkEdits {
     splice_before: HashMap<usize, Vec<DiffLine>>,
@@ -682,21 +682,24 @@ struct HunkEdits {
     added_emphasis: HashMap<usize, (usize, usize)>,
 }
 
-/// Whether a hunk is a clean 1:1 line replacement (exactly one removed AND
-/// one added body). The `added_lines.len() == 1` guard is load-bearing,
-/// not just `new_len == 1`: a malformed diff can declare `new_len: 1` with
-/// an empty `+` body, and the emphasis branch indexes `added_lines[0]` —
-/// without this guard reconstruction would panic on that input
-/// (cute-dbt#110 review). cute-dbt never panics on a bad diff.
-fn is_clean_1to1(h: &Hunk) -> bool {
-    h.new_len == 1 && h.removed_lines.len() == 1 && h.added_lines.len() == 1
+/// Whether a hunk is an ALIGNED replacement: equal, non-empty removed/added
+/// line counts (cute-dbt#132, generalizing the former 1:1-only gate). Only
+/// then is there a sound positional pairing `removed[i] ↔ added[i]` for
+/// per-line intra-line emphasis. The `removed.len() == added.len()` equality
+/// is load-bearing: a malformed diff can declare `new_len: N` with a shorter
+/// `+` body, and the emphasis branch indexes both `removed_lines[i]` AND
+/// `added_lines[i]` — equal, non-empty counts keep every index in bounds
+/// (cute-dbt#110 review: cute-dbt never panics on a bad diff). A pure
+/// insertion/deletion (unequal counts) has no pairing, hence no emphasis.
+fn is_aligned_replacement(h: &Hunk) -> bool {
+    !h.removed_lines.is_empty() && h.removed_lines.len() == h.added_lines.len()
 }
 
 /// The removed [`DiffLine`]s a hunk contributes, with ws-only pairs
-/// dropped (cute-dbt#111) and a clean 1:1 replacement's single removed
-/// line carrying intra-line emphasis.
+/// dropped (cute-dbt#111) and each surviving removed line of an aligned
+/// replacement carrying its per-pair intra-line emphasis (cute-dbt#132).
 fn removed_diff_lines(h: &Hunk) -> Vec<DiffLine> {
-    let clean = is_clean_1to1(h);
+    let aligned = is_aligned_replacement(h);
     h.removed_lines
         .iter()
         .enumerate()
@@ -704,8 +707,13 @@ fn removed_diff_lines(h: &Hunk) -> Vec<DiffLine> {
         .map(|(i, r)| DiffLine {
             kind: DiffLineKind::Removed,
             text: trim_cr(r),
-            emphasis: if clean && i == 0 {
-                intra_line_span(&trim_cr(r), &trim_cr(&h.added_lines[0]))
+            // cute-dbt#132: each surviving removed line of an aligned
+            // replacement carries the intra-line span against its positional
+            // partner `added[i]` (was 1:1-only, indexing `added[0]`). ws-only
+            // pairs are already filtered out above, so `i` here is a
+            // substantive pair and `added_lines[i]` is in bounds (equal counts).
+            emphasis: if aligned {
+                intra_line_span(&trim_cr(r), &trim_cr(&h.added_lines[i]))
             } else {
                 None
             },
@@ -733,8 +741,8 @@ fn hunk_is_unified_zero(h: &Hunk) -> bool {
 /// Fold one hunk's edits into `edits`. The removed bodies splice before the
 /// hunk's anchor (clamped into the block); each covered new-side line is a
 /// real addition unless it is the new side of a ws-only pair (cute-dbt#111,
-/// then it stays Context); a clean 1:1 replacement records the added line's
-/// intra-line emphasis. The caller has already verified every touching hunk
+/// then it stays Context); an aligned replacement records each added line's
+/// per-pair intra-line emphasis (cute-dbt#132). The caller has already verified every touching hunk
 /// is [`hunk_is_unified_zero`], so iterating `0..h.new_len` indexes
 /// `added_lines`/`removed_lines` only within bounds.
 fn fold_hunk_edits(edits: &mut HunkEdits, h: &Hunk, bs: usize, be: usize) {
@@ -757,10 +765,19 @@ fn fold_hunk_edits(edits: &mut HunkEdits, h: &Hunk, bs: usize, be: usize) {
             edits.added_real.insert(h.new_start + k);
         }
     }
-    if is_clean_1to1(h) && !pair_is_ws_only(h, 0) && (bs..=be).contains(&h.new_start) {
-        if let Some(e) = intra_line_span(&trim_cr(&h.added_lines[0]), &trim_cr(&h.removed_lines[0]))
-        {
-            edits.added_emphasis.insert(h.new_start, e);
+    // cute-dbt#132: record per-pair intra-line emphasis for every substantive
+    // (non-ws-only) pair of an aligned replacement that falls within the block
+    // (was 1:1-only, indexing `added_lines[0]` at `new_start`).
+    if is_aligned_replacement(h) {
+        for k in 0..h.added_lines.len() {
+            let line_no = h.new_start + k;
+            if !pair_is_ws_only(h, k) && (bs..=be).contains(&line_no) {
+                if let Some(e) =
+                    intra_line_span(&trim_cr(&h.added_lines[k]), &trim_cr(&h.removed_lines[k]))
+                {
+                    edits.added_emphasis.insert(line_no, e);
+                }
+            }
         }
     }
 }
@@ -1688,9 +1705,13 @@ mod tests {
         assert_eq!(
             got.lines,
             vec![
-                rem("old8"),
-                rem("old9"),
-                add("    model: m2"), // line 10, inside the hunk's added range
+                // cute-dbt#132: aligned 2↔2 → per-pair emphasis even when one
+                // added partner (new9, line 9) is clamped above the block. Each
+                // removed line and the in-block added line fully change vs their
+                // positional partner, so each carries a whole-line span.
+                rem_e("old8", (0, 4)),
+                rem_e("old9", (0, 4)),
+                add_e("    model: m2", (0, 13)), // line 10, inside the hunk's added range
                 ctx("    given: []"),
                 ctx("      rows: []"),
             ],
@@ -1724,8 +1745,12 @@ mod tests {
     }
 
     #[test]
-    fn reconstruct_multi_line_replacement_has_no_intra_line_emphasis() {
-        // new_len = 2 (not a clean 1:1) → line-level +/- only, no <strong>.
+    fn reconstruct_aligned_multi_line_replacement_carries_per_pair_emphasis() {
+        // cute-dbt#132: an ALIGNED equal-count replacement (removed.len() ==
+        // added.len()) now emphasizes each removed[i]↔added[i] pair, not just
+        // the 1↔1 case. `old`→`new` share no characters, only the trailing
+        // `A`/`B`, so each side's changed span is (0, 3). (Previously this
+        // shape rendered line-level +/- with no <strong>.)
         let block = block_at("  - name: t\nnewA\nnewB\n    given: []", 10); // [10,13]
         let hunks = [replace(11, &["oldA", "oldB"], &["newA", "newB"])];
         let got = reconstruct_one(
@@ -1736,25 +1761,58 @@ mod tests {
             got.lines,
             vec![
                 ctx("  - name: t"),
-                rem("oldA"),
-                rem("oldB"),
-                add("newA"),
-                add("newB"),
+                rem_e("oldA", (0, 3)),
+                rem_e("oldB", (0, 3)),
+                add_e("newA", (0, 3)),
+                add_e("newB", (0, 3)),
                 ctx("    given: []"),
             ],
         );
     }
 
     #[test]
-    fn reconstruct_two_removed_one_added_is_not_clean_1to1_no_emphasis() {
-        // `is_clean_1to1` requires ALL THREE of new_len==1, removed.len()==1,
-        // added.len()==1 (it gates intra-line emphasis). A `@@ -N,2 +N,1 @@`
-        // shape — TWO old lines collapse into ONE new line — is a valid
-        // `--unified=0` hunk (new_len(1) == added.len(1)) but NOT a clean 1:1
-        // (removed.len()==2). The removed lines must carry NO emphasis: a
-        // mutant relaxing `is_clean_1to1`'s `&&` to `||` would qualify this as
-        // clean and emit a spurious <strong> on removed[0] — this pins both
-        // `&&`s (cargo mutants 2026-05-31).
+    fn reconstruct_aligned_multi_line_emphasis_skips_a_whitespace_only_pair() {
+        // cute-dbt#132 boundary: in an aligned 2↔2 hunk, a whitespace-only pair
+        // (a pure re-indent) must still render as Context with NO emphasis —
+        // per-pair emphasis fires ONLY on substantive pairs. Pair 0
+        // (`was`→`now`) is real; pair 1 (`rows: []` re-indented 6→4 spaces) is
+        // whitespace-only. This pins that the per-pair loop honors
+        // `pair_is_ws_only`, not just blanket-emphasizes every aligned pair.
+        let block = block_at(
+            "  - name: t\n    model: now\n    rows: []\n    given: x",
+            10,
+        ); // [10,13]
+        let hunks = [replace(
+            11,
+            &["    model: was", "      rows: []"],
+            &["    model: now", "    rows: []"],
+        )];
+        let got = reconstruct_one(
+            &BlockSpan::new(&block.raw, block.block_start, block.block_end),
+            &hunks.iter().collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            got.lines,
+            vec![
+                ctx("  - name: t"),
+                rem_e("    model: was", (11, 14)),
+                add_e("    model: now", (11, 14)),
+                ctx("    rows: []"), // ws-only pair → Context, no removed splice, no emphasis
+                ctx("    given: x"),
+            ],
+        );
+    }
+
+    #[test]
+    fn reconstruct_unequal_count_replacement_has_no_emphasis() {
+        // cute-dbt#132: per-pair emphasis fires only on an ALIGNED replacement
+        // (`is_aligned_replacement`: removed.len() == added.len()). A
+        // `@@ -N,2 +N,1 @@` shape — TWO old lines collapse into ONE new line —
+        // is a valid `--unified=0` hunk (new_len(1) == added.len(1)) but the
+        // counts are UNEQUAL (removed.len()==2 != added.len()==1), so there is
+        // no sound positional pairing and NO emphasis is emitted. A mutant
+        // relaxing the equal-count guard would emit a spurious <strong> on
+        // removed[0]/added[0] — this pins the count check (cargo mutants).
         let block = block_at("  - name: t\n    model: m\n    given: []", 10); // [10,12]
         let hunks = [replace(
             11,
@@ -2021,11 +2079,14 @@ mod tests {
         assert_eq!(
             got.lines,
             vec![
-                rem("from t"),     // removed splices at the hunk anchor (line 1)
-                ctx("  select a"), // re-indented line: Context, NOT a change
-                add("from u"),     // the real new-side change
+                // cute-dbt#132: the substantive pair now carries per-pair
+                // emphasis ("t"→"u" at offset 5); the ws-only pair stays
+                // Context with none.
+                rem_e("from t", (5, 6)), // removed splices at the hunk anchor (line 1)
+                ctx("  select a"),       // re-indented line: Context, NOT a change
+                add_e("from u", (5, 6)), // the real new-side change
             ],
-            "the re-indent stays Context; only the substantive pair diffs",
+            "the re-indent stays Context; only the substantive pair diffs (now emphasised)",
         );
         // Critically: the re-indented line is NOT marked Added/Removed.
         assert!(
