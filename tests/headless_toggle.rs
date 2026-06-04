@@ -1452,6 +1452,126 @@ fn one_cell_modified_data_diff(input: &str) -> UnitTestDataDiff {
     }
 }
 
+/// `data_diff` for one given input with a single Modified row carrying TWO
+/// changed cells: one whose NEW value is a real null, one whose NEW value is
+/// the string literal `"null"` — the cute-dbt#132 null-vs-string distinction.
+fn null_vs_string_null_data_diff(input: &str) -> UnitTestDataDiff {
+    use cute_dbt::domain::{
+        CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff,
+        RowChange, RowChangeKind,
+    };
+    UnitTestDataDiff {
+        given: vec![NamedTableDiff {
+            input: input.to_owned(),
+            diff: FixtureTableDiff {
+                columns: vec![
+                    DiffColumn {
+                        name: "cnt".into(),
+                        status: ColumnStatus::Present,
+                    },
+                    DiffColumn {
+                        name: "status".into(),
+                        status: ColumnStatus::Present,
+                    },
+                ],
+                rows: vec![RowChange {
+                    kind: RowChangeKind::Modified,
+                    cells: vec![
+                        // new side is a REAL null -> italic muted-gray .cell-null.
+                        CellChange {
+                            old: CellValue::Number("1".into()),
+                            new: CellValue::Null,
+                            changed: true,
+                        },
+                        // new side is the STRING "null" -> a normal value
+                        // (.cell-new), NOT .cell-null.
+                        CellChange {
+                            old: CellValue::Str("completed".into()),
+                            new: CellValue::Str("null".into()),
+                            changed: true,
+                        },
+                    ],
+                }],
+            },
+        }],
+        expect: None,
+    }
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn changed_cell_distinguishes_a_real_null_from_a_string_null() {
+    // cute-dbt#132 — inside an inline old -> new changed cell, a REAL null reads
+    // as italic muted-gray `.cell-null` ("NULL") while a string literal 'null'
+    // reads as a normal value (`.cell-new`, "null") — visually distinct even
+    // mid-diff. Also pins the no-fill emphasis: the changed value is bold
+    // colored TEXT with a transparent background, not a github-style fill.
+    let id = "unit_test.shop.dim_a.upd";
+    let url = render_pr_diff_with_data_diffs(
+        "headless_cell_null_distinction.html",
+        vec![model_node_with_src("model.shop.dim_a")],
+        vec![(
+            id,
+            unit_test_with_given(
+                "upd",
+                "dim_a",
+                serde_json::json!([{"cnt": null, "status": "null"}]),
+            ),
+        )],
+        &["model.shop.dim_a"],
+        &[id],
+        vec![(id, null_vs_string_null_data_diff("ref('src')"))],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    show_all_inputs(&tab);
+
+    // A real null on the new side -> `.cell-null` "NULL", italic.
+    assert!(
+        visible(&tab, ".cell-diff-table .cell-changed .cell-null"),
+        "a real null on the changed cell's new side renders as .cell-null",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.cell-diff-table .cell-changed .cell-null').textContent.trim()"
+        ),
+        "NULL",
+        "the real null reads as NULL",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "getComputedStyle(document.querySelector('.cell-diff-table .cell-changed .cell-null')).fontStyle"
+        ),
+        "italic",
+        "a real null is italic (muted-gray), distinct from a normal value",
+    );
+
+    // The string literal 'null' -> a normal `.cell-new` value (NOT .cell-null).
+    assert!(
+        eval_bool(
+            &tab,
+            "Array.from(document.querySelectorAll('.cell-diff-table .cell-changed .cell-new'))\
+             .some(function(e){return e.textContent.trim()==='null';})"
+        ),
+        "a string literal 'null' renders as a normal .cell-new value, not .cell-null",
+    );
+
+    // No-fill emphasis: the changed value is bold colored TEXT, transparent bg.
+    assert_eq!(
+        eval_string(
+            &tab,
+            "getComputedStyle(document.querySelector('.cell-diff-table .cell-changed .cell-new')).backgroundColor"
+        ),
+        "rgba(0, 0, 0, 0)",
+        "the changed value has no background fill (bold colored text, not a github-style highlight)",
+    );
+}
+
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn cell_diff_toggle_defaults_to_diff_and_shows_exactly_one_view() {
