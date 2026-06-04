@@ -259,6 +259,13 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
 .diff-removed { background: rgba(244, 63, 94, 0.06); box-shadow: inset 3px 0 0 rgba(244, 63, 94, 0.85); }
 .diff-added .diff-sigil   { color: #1a7f37; }
 .diff-removed .diff-sigil { color: #be123c; }
+/* cute-dbt#132 — hunk-fold control: a clickable "Show N unchanged line(s)"
+   row collapsing a long unchanged stretch (GitHub-style). Subtle indigo tint
+   (echoes the .sql-keyword/.yaml-key indigo) with a hover lift; the ··· sigil
+   is muted; italic to read as meta, not content. */
+.diff-fold { cursor: pointer; font-style: italic; color: #4338ca; background: rgba(67, 56, 202, 0.06); }
+.diff-fold:hover { background: rgba(67, 56, 202, 0.12); }
+.diff-fold .diff-sigil { color: #9aa0b4; opacity: 0.85; }
 /* The emphasis marks the exact changed characters. DELIBERATE DIVERGENCE
    (cute-dbt#132): the cell grid renders changed scalars as bold red/green TEXT
    (short values, no surrounding syntax to compete with), but the YAML/SQL line
@@ -1051,6 +1058,26 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
       renderTestSelector();
       renderForSelectedModel();
     });
+    // cute-dbt#132 — hunk-fold reveal. ONE delegated listener (diff blocks are
+    // .empty()'d and rebuilt on model/test switch, so delegate on `document`
+    // to survive re-renders). Reveal is PARENT-SCOPED: `$(this).parent()`
+    // isolates `.fold-<id>` to the SAME <code> block, so the call-local fold
+    // ids never collide across the YAML drawer vs the model-SQL block.
+    function revealFold($ctrl) {
+      var id = $ctrl.attr("data-fold");
+      $ctrl.parent().find(".fold-" + id).prop("hidden", false);
+      $ctrl.prop("hidden", true);
+    }
+    $(document).on("click", ".diff-fold", function () {
+      revealFold($(this));
+    });
+    $(document).on("keydown", ".diff-fold", function (e) {
+      // Enter or Space activates; preventDefault on Space stops page scroll.
+      if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();
+        revealFold($(this));
+      }
+    });
   }
 
   function renderLeftPanel() {
@@ -1788,23 +1815,88 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
   // changed lines bypassed highlighting entirely and rendered plain escaped
   // text.) The offsets are CODEPOINT indices (Rust `chars()`), sliced via
   // Array.from — UTF-16 `.slice` would drift on astral chars.
+  // cute-dbt#132 — hunk contraction (GitHub-style fold). Long unchanged
+  // stretches collapse behind a click/keyboard "Show N unchanged line(s)"
+  // control. Frontend-only over the existing DiffLine[] payload.
+  //   FOLD_PAD       — context lines kept adjacent to a change (head/tail).
+  //   FOLD_MIN_HIDDEN — only fold when >=2 lines would actually hide, so a
+  //                     short YAML test block (a change + a couple context
+  //                     lines) NEVER folds.
+  var FOLD_PAD = 3;
+  var FOLD_MIN_HIDDEN = 2;
+
+  // Render a single DiffLine to its `.diff-line` span via the shared
+  // tokenize + emphasis-overlay path. `extraClass` appends to the kind class
+  // (the folded middle passes `diff-folded fold-<id>`); `hidden` toggles the
+  // `hidden` attribute (relies on the #122 `[hidden]{display:none!important}`
+  // rule, since Sakura's `.diff-line{display:block}` defeats a bare [hidden]).
+  function renderOneDiffLine(ln, tokenizeFn, extraClass, hidden) {
+    var cls = ln.kind === "added" ? "diff-added"
+            : ln.kind === "removed" ? "diff-removed"
+            : "diff-context";
+    var sigil = ln.kind === "added" ? "+" : ln.kind === "removed" ? "-" : " ";
+    var tokens = tokenizeFn(ln.text);
+    var body;
+    if (ln.kind !== "context" && ln.emphasis) {
+      body = emitTokensWithEmphasis(tokens, ln.emphasis[0], ln.emphasis[1]);
+    } else {
+      body = emitTokens(tokens);
+    }
+    return '<span class="diff-line ' + cls + (extraClass ? " " + extraClass : "") + '"'
+         + (hidden ? " hidden" : "") + '>'
+         + '<span class="diff-sigil">' + sigil + '</span>' + body
+         + '</span>';
+  }
+
   function renderBlockDiff(diff, tokenizeFn) {
-    return diff.lines.map(function (ln) {
-      var cls = ln.kind === "added" ? "diff-added"
-              : ln.kind === "removed" ? "diff-removed"
-              : "diff-context";
-      var sigil = ln.kind === "added" ? "+" : ln.kind === "removed" ? "-" : " ";
-      var tokens = tokenizeFn(ln.text);
-      var body;
-      if (ln.kind !== "context" && ln.emphasis) {
-        body = emitTokensWithEmphasis(tokens, ln.emphasis[0], ln.emphasis[1]);
-      } else {
-        body = emitTokens(tokens);
+    var lines = diff.lines;
+    var n = lines.length;
+    var html = "";
+    var foldId = 0; // counter LOCAL to this call — parent-scoping makes it safe.
+    var i = 0;
+    while (i < n) {
+      if (lines[i].kind !== "context") {
+        html += renderOneDiffLine(lines[i], tokenizeFn, "", false);
+        i += 1;
+        continue;
       }
-      return '<span class="diff-line ' + cls + '">'
-           + '<span class="diff-sigil">' + sigil + '</span>' + body
-           + '</span>';
-    }).join("");
+      // Maximal run of consecutive context lines: [runStart, j).
+      var runStart = i;
+      var j = i;
+      while (j < n && lines[j].kind === "context") j += 1;
+      var runLen = j - runStart;
+      var head = runStart > 0 ? FOLD_PAD : 0;     // change before -> keep PAD on top
+      var tail = j < n ? FOLD_PAD : 0;            // change after  -> keep PAD on bottom
+      var hidden = runLen - head - tail;
+      if (hidden < FOLD_MIN_HIDDEN) {
+        // Short run (or short hidden middle): render the whole run normally.
+        for (var k = runStart; k < j; k++) {
+          html += renderOneDiffLine(lines[k], tokenizeFn, "", false);
+        }
+      } else {
+        var id = foldId++;
+        // head context lines (adjacent to the preceding change).
+        for (var h = runStart; h < runStart + head; h++) {
+          html += renderOneDiffLine(lines[h], tokenizeFn, "", false);
+        }
+        // The fold control.
+        html += '<span class="diff-line diff-fold" data-fold="' + id + '"'
+              + ' role="button" tabindex="0">'
+              + '<span class="diff-sigil">···</span>'
+              + 'Show ' + hidden + ' unchanged line' + (hidden === 1 ? "" : "s")
+              + '</span>';
+        // The folded (hidden) middle lines.
+        for (var m2 = runStart + head; m2 < j - tail; m2++) {
+          html += renderOneDiffLine(lines[m2], tokenizeFn, "diff-folded fold-" + id, true);
+        }
+        // tail context lines (adjacent to the following change).
+        for (var tIdx = j - tail; tIdx < j; tIdx++) {
+          html += renderOneDiffLine(lines[tIdx], tokenizeFn, "", false);
+        }
+      }
+      i = j;
+    }
+    return html;
   }
   // Expose for headless JS unit tests (parallels __cuteHighlightYaml). The
   // #96 name is kept as a thin alias so existing headless assertions and the

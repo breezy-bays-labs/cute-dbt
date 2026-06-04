@@ -735,6 +735,187 @@ fn render_yaml_diff_js_emits_classes_sigils_and_codepoint_emphasis() {
     let _ = tab.close(true);
 }
 
+/// Read a numeric expression from the page as i64 (DOM element counts).
+fn eval_i64(tab: &Tab, expr: &str) -> i64 {
+    eval(tab, expr).as_i64().unwrap_or(-1)
+}
+
+/// A JS array-literal of `n` context DiffLine objects (text `c0..c{n-1}`).
+fn ctx_lines_js(n: usize) -> String {
+    (0..n)
+        .map(|i| format!("{{kind:'context',text:'c{i}',emphasis:null}}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
+    // cute-dbt#132 — hunk contraction. Drives the `__cuteRenderBlockDiff` JS
+    // seam with synthetic diffs (no manifest content needed) to verify:
+    //  (1) a long middle context run folds: a `.diff-fold` control with the
+    //      correct hidden count + `.diff-folded[hidden]` lines;
+    //  (2) a SHORT block (change + 2 context) renders NO fold (small YAML
+    //      test blocks must never fold);
+    //  (3) activating the control (click AND keyboard) reveals the folded
+    //      lines (they lose `hidden`), and reveal is PARENT-SCOPED: a second
+    //      block with the same local `fold-0` id stays hidden.
+    let url = render_pr_diff_to_file(
+        "headless_fold_js.html",
+        vec![model_node("model.shop.dim_a")],
+        vec![("unit_test.shop.dim_a.t", unit_test("t", "dim_a"))],
+        &["model.shop.dim_a"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // (1) LONG middle run: 1 removed + 1 added, then 10 context, then a change.
+    // head=3, tail=3, hidden=4.
+    let long_diff = format!(
+        "{{lines:[{{kind:'removed',text:'a',emphasis:null}},\
+         {{kind:'added',text:'b',emphasis:null}},{ctx},\
+         {{kind:'removed',text:'c',emphasis:null}},\
+         {{kind:'added',text:'d',emphasis:null}}]}}",
+        ctx = ctx_lines_js(10),
+    );
+    let folded_html = eval_string(
+        &tab,
+        &format!("window.__cuteRenderBlockDiff({long_diff}, window.__cuteTokenizeSql)"),
+    );
+    assert!(
+        folded_html.contains("Show 4 unchanged lines"),
+        "the long run folds with the correct hidden count: {folded_html}",
+    );
+    assert!(
+        folded_html.contains("diff-fold") && folded_html.contains("data-fold=\"0\""),
+        "a fold control with a local id is emitted: {folded_html}",
+    );
+    assert!(
+        folded_html.contains("diff-folded fold-0")
+            && folded_html.contains("diff-folded fold-0\" hidden>"),
+        "the folded middle lines carry `diff-folded fold-0` and the hidden attribute: {folded_html}",
+    );
+
+    // (2) SHORT block: a change + 2 context → NO fold.
+    let short_html = eval_string(
+        &tab,
+        "window.__cuteRenderBlockDiff({lines:[\
+         {kind:'removed',text:'x',emphasis:null},\
+         {kind:'added',text:'y',emphasis:null},\
+         {kind:'context',text:'c1',emphasis:null},\
+         {kind:'context',text:'c2',emphasis:null}\
+         ]}, window.__cuteTokenizeSql)",
+    );
+    assert!(
+        !short_html.contains("diff-fold"),
+        "a short block (change + 2 context) does NOT fold: {short_html}",
+    );
+
+    // (3) Reveal on activate, parent-scoped. Inject the SAME folded HTML into
+    // TWO separate <code> blocks (each carries its own local fold-0) so the
+    // parent-scoping invariant is exercised. The delegated document handler
+    // (bound once by bindGlobalHandlers) must fire on the injected nodes.
+    let _ = eval(
+        &tab,
+        &format!(
+            "(function(){{\
+               var h = window.__cuteRenderBlockDiff({long_diff}, window.__cuteTokenizeSql);\
+               var a = document.createElement('code'); a.id='fold-block-a'; a.innerHTML = h;\
+               var b = document.createElement('code'); b.id='fold-block-b'; b.innerHTML = h;\
+               var s = document.createElement('code'); s.id='fold-block-s'; s.innerHTML = h;\
+               document.body.appendChild(a); document.body.appendChild(b); document.body.appendChild(s);\
+             }})()"
+        ),
+    );
+    // Both blocks start with 4 hidden folded lines each.
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#fold-block-a .diff-folded[hidden]').length"
+        ),
+        4,
+        "block A starts with 4 hidden folded lines",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#fold-block-b .diff-folded[hidden]').length"
+        ),
+        4,
+        "block B starts with 4 hidden folded lines",
+    );
+
+    // CLICK the control in block A: A reveals (0 hidden), control hides; B is
+    // untouched (still 4 hidden) — proving the reveal is parent-scoped.
+    let _ = eval(
+        &tab,
+        "document.querySelector('#fold-block-a .diff-fold').click()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#fold-block-a .diff-folded[hidden]').length"
+        ),
+        0,
+        "clicking block A's control reveals its folded lines",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('#fold-block-a .diff-fold').hidden"
+        ),
+        "the activated control hides itself",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#fold-block-b .diff-folded[hidden]').length"
+        ),
+        4,
+        "block B stays folded — reveal is PARENT-SCOPED despite the shared fold-0 id",
+    );
+
+    // KEYBOARD activate block B's control (Enter): B reveals too.
+    let _ = eval(
+        &tab,
+        "(function(){\
+           var c = document.querySelector('#fold-block-b .diff-fold');\
+           c.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));\
+         })()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#fold-block-b .diff-folded[hidden]').length"
+        ),
+        0,
+        "pressing Enter on block B's control reveals its folded lines (keyboard activation)",
+    );
+
+    // KEYBOARD activate block S's control with SPACE: S reveals too (pins the
+    // spec's literal Enter/Space activation, distinct from the Enter path).
+    let _ = eval(
+        &tab,
+        "(function(){\
+           var c = document.querySelector('#fold-block-s .diff-fold');\
+           c.dispatchEvent(new KeyboardEvent('keydown',{key:' ',bubbles:true}));\
+         })()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#fold-block-s .diff-folded[hidden]').length"
+        ),
+        0,
+        "pressing Space on block S's control reveals its folded lines (Space activation)",
+    );
+
+    let _ = tab.close(true);
+}
+
 // --- cute-dbt#111: inline model SQL diff (Raw↔Diff toggle) ----------
 
 /// PR-diff render that injects a model-SQL-diff map so the Model SQL
