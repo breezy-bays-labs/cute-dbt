@@ -262,7 +262,7 @@ bracket-demo YAML comments).\
 path = "playground-pr-diff.patch"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/134"
-sha256 = "2ced6bad1f22ad79e44bbe2dafc737c4342f1c2c0a880fcfd3174830f99f835a"
+sha256 = "3fc8ddca9238be48067bec85c5eacddd231105e7c0981b9e63ae1f2ef91bc4f9"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"
@@ -270,10 +270,12 @@ description = """
 Synthetic hand-crafted `git diff --unified=0` (cute-dbt#134) — the durable \
 diff-view showcase. Paired with playground-current.json + playground-source \
 under `--pr-diff`, it renders one report exercising the full #132/#133 \
-overhaul: a foldable inline SQL diff (one mid-file change in the 158-line \
-fct_provider_metrics, so the long unchanged runs collapse), a YAML block \
-diff, and a cell-level data diff with a real NULL (test 2's quarantined_count \
-null->0 plus total_count 2->1). The `+` sides are aligned byte-for-byte to \
+overhaul: a foldable inline SQL diff with THREE separated mid-file changes in \
+the 158-line fct_provider_metrics (so the long unchanged runs collapse — with \
+a contracted section BETWEEN each change, exercising the bidirectional #136 \
+fold), a YAML block diff, and a cell-level data diff across BOTH expect rows \
+with a real NULL (test 2's encounters quarantined_count null->0 + total_count \
+2->1, medications 1->0 + 2->1). The `+` sides are aligned byte-for-byte to \
 the manifest raw_code (model) and the committed source YAML (unit test) so \
 the inline diffs reconstruct cleanly under the same-revision contract. No \
 real data — a hypothetical PR against the synthetic Synthea playground.\

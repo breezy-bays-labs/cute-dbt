@@ -52,13 +52,14 @@ The two reports above run in **baseline** mode. This one runs in **`--pr-diff`
 mode** — the way cute-dbt runs inside a CI PR review — so it shows the diff-view
 feature set in action:
 
-- an **inline SQL diff** with **hunk contraction** (a single mid-file change in
-  a 158-line model collapses the long unchanged runs behind a "Show N unchanged
-  lines" control — expand per-hunk or all at once),
+- an **inline SQL diff** with **hunk contraction** (three separated mid-file
+  changes in a 158-line model collapse the long unchanged runs — including a
+  folded section *between* each change — behind "Show N unchanged lines"
+  controls you can expand **and re-collapse**, per-hunk or all at once),
 - the **SQL/Jinja syntax palette** overlaid on the diff lines,
 - a **YAML block diff** of the changed unit test, and
-- a **cell-level data diff** with a real **NULL** (rendered as muted italic,
-  distinct from a string `"null"`).
+- a **cell-level data diff** across both expect rows, including a real **NULL**
+  (rendered as muted italic, distinct from a string `"null"`).
 
 It's rendered from a synthetic hand-crafted patch against the playground
 fixtures (so it stays committable + zero-egress), and it's byte-identity-gated
