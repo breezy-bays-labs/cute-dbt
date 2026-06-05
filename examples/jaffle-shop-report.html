@@ -493,6 +493,15 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
 .diff-fold { cursor: pointer; font-style: italic; color: #4338ca; background: rgba(67, 56, 202, 0.06); }
 .diff-fold:hover { background: rgba(67, 56, 202, 0.12); }
 .diff-fold .diff-sigil { color: #9aa0b4; opacity: 0.85; }
+/* cute-dbt#132 — diff-view controls (PR-diff mode only): set how many
+   unchanged context lines stay around each change, and expand/collapse every
+   fold at once. A global toolbar since the setting applies to all diffs. */
+.diff-view-controls { display: flex; align-items: center; gap: 1rem; margin: 0.5rem 0 0; font-size: 0.85em; flex-wrap: wrap; }
+.diff-ctl-label { display: inline-flex; align-items: center; gap: 0.45ch; color: #4a4a52; }
+.diff-context-input { width: 3.5em; font: inherit; padding: 0.1rem 0.3rem; border: 1px solid #d0d0d8; border-radius: 4px; }
+.diff-expand-all { font: inherit; font-size: 1em; padding: 0.15rem 0.65rem; border: 1px solid #d0d0d8; background: #f4f4f6; color: #4a4a52; cursor: pointer; border-radius: 4px; }
+.diff-expand-all:hover { background: #e9e9ee; }
+.diff-expand-all[aria-pressed="true"] { background: #2a2a32; color: #fff; border-color: #2a2a32; }
 /* The emphasis marks the exact changed characters. DELIBERATE DIVERGENCE
    (cute-dbt#132): the cell grid renders changed scalars as bold red/green TEXT
    (short values, no surrounding syntax to compete with), but the YAML/SQL line
@@ -4338,6 +4347,9 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
           .text("No unit test selected.")
       );
     }
+    // Fresh diffs render default-folded, so the global toggle resets to
+    // "Expand all" (cute-dbt#132). Null-safe in baseline mode.
+    resetExpandAllToggle();
   }
 
   function renderTestDetails(t) {
@@ -4709,6 +4721,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
         revealFold($(this));
       }
     });
+    bindDiffViewControls();
   }
 
   function renderLeftPanel() {
@@ -5449,12 +5462,20 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   // cute-dbt#132 — hunk contraction (GitHub-style fold). Long unchanged
   // stretches collapse behind a click/keyboard "Show N unchanged line(s)"
   // control. Frontend-only over the existing DiffLine[] payload.
-  //   FOLD_PAD       — context lines kept adjacent to a change (head/tail).
+  //   diffFoldPad     — context lines kept adjacent to a change (head/tail).
+  //                     User-configurable live via the .diff-context-input
+  //                     control (PR-diff mode only); defaults to 3.
+  //                     renderBlockDiff reads it, or an explicit per-call
+  //                     override (the headless tests pass one directly).
   //   FOLD_MIN_HIDDEN — only fold when >=2 lines would actually hide, so a
   //                     short YAML test block (a change + a couple context
   //                     lines) NEVER folds.
-  var FOLD_PAD = 3;
+  //   diffAllExpanded — global expand-all/collapse-all state. The toggle is a
+  //                     symmetric DOM mirror (setAllFolds), NOT a re-render, so
+  //                     it never disturbs the SQL File<->Diff view or mermaid.
+  var diffFoldPad = 3;
   var FOLD_MIN_HIDDEN = 2;
+  var diffAllExpanded = false;
 
   // Render a single DiffLine to its `.diff-line` span via the shared
   // tokenize + emphasis-overlay path. `extraClass` appends to the kind class
@@ -5479,7 +5500,12 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
          + '</span>';
   }
 
-  function renderBlockDiff(diff, tokenizeFn) {
+  function renderBlockDiff(diff, tokenizeFn, padOverride) {
+    // `padOverride` (>= 0) wins over the module-level diffFoldPad — the
+    // headless tests pin specific pads without touching shared state; the
+    // production callers omit it and ride the user-configurable value.
+    var foldPad = (typeof padOverride === "number" && padOverride >= 0)
+      ? padOverride : diffFoldPad;
     var lines = diff.lines;
     var n = lines.length;
     var html = "";
@@ -5496,8 +5522,8 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       var j = i;
       while (j < n && lines[j].kind === "context") j += 1;
       var runLen = j - runStart;
-      var head = runStart > 0 ? FOLD_PAD : 0;     // change before -> keep PAD on top
-      var tail = j < n ? FOLD_PAD : 0;            // change after  -> keep PAD on bottom
+      var head = runStart > 0 ? foldPad : 0;      // change before -> keep PAD on top
+      var tail = j < n ? foldPad : 0;             // change after  -> keep PAD on bottom
       var hidden = runLen - head - tail;
       if (hidden < FOLD_MIN_HIDDEN) {
         // Short run (or short hidden middle): render the whole run normally.
@@ -5535,6 +5561,63 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   function renderYamlDiff(diff) { return renderBlockDiff(diff, tokenizeYaml); }
   window.__cuteRenderBlockDiff = renderBlockDiff;
   window.__cuteRenderYamlDiff = renderYamlDiff;
+
+  // cute-dbt#132 — global fold controls (configurable context lines +
+  // expand-all/collapse-all). setAllFolds is a SYMMETRIC DOM MIRROR over the
+  // already-rendered diff: expand reveals every folded middle line and hides
+  // the now-redundant per-hunk "Show N" controls; collapse re-hides the middles
+  // and restores the controls — exactly reproducing renderBlockDiff's
+  // default-folded output WITHOUT a re-render, so the SQL File<->Diff toggle,
+  // mermaid, and scroll position are never disturbed. `root` scopes the op (the
+  // report passes `document`; the headless tests pass a mounted node).
+  function setAllFolds(expanded, root) {
+    var scope = root || document;
+    var folded = scope.querySelectorAll(".diff-folded");
+    for (var i = 0; i < folded.length; i++) folded[i].hidden = !expanded;
+    var controls = scope.querySelectorAll(".diff-fold");
+    for (var k = 0; k < controls.length; k++) controls[k].hidden = expanded;
+  }
+  window.__cuteExpandAllFolds = function (root) { setAllFolds(true, root); };
+  window.__cuteCollapseAllFolds = function (root) { setAllFolds(false, root); };
+
+  // Sync the global Expand/Collapse-all button label + aria-pressed to
+  // diffAllExpanded. Null-safe: the .diff-view-controls strip is is_pr_diff-
+  // gated and absent in baseline mode.
+  function renderExpandAllToggle() {
+    var $btn = $(".diff-expand-all");
+    if (!$btn.length) return;
+    $btn.text(diffAllExpanded ? "Collapse all" : "Expand all")
+        .attr("aria-pressed", diffAllExpanded ? "true" : "false");
+  }
+  // Any re-render emits freshly default-folded diffs, so the global toggle
+  // returns to "Expand all" (called at the tail of renderForSelectedModel).
+  function resetExpandAllToggle() {
+    diffAllExpanded = false;
+    renderExpandAllToggle();
+  }
+
+  // Wire the PR-diff-only diff-view controls strip. Idempotent-safe binding;
+  // returns early in baseline mode where the strip is not emitted.
+  function bindDiffViewControls() {
+    var $strip = $(".diff-view-controls");
+    if (!$strip.length) return;
+    // Context-lines stepper: clamp to [0,20] and re-render the active diffs
+    // with the new pad. A re-render naturally resets the expand-all toggle.
+    $strip.find(".diff-context-input").on("change", function () {
+      var v = parseInt($(this).val(), 10);
+      if (isNaN(v)) { $(this).val(diffFoldPad); return; }
+      diffFoldPad = Math.max(0, Math.min(20, v));
+      $(this).val(diffFoldPad);
+      renderForSelectedModel();
+    });
+    // Global expand-all/collapse-all over every currently-mounted fold (the
+    // model SQL diff + the test YAML diff), per-hunk controls still work too.
+    $strip.find(".diff-expand-all").on("click", function () {
+      diffAllExpanded = !diffAllExpanded;
+      setAllFolds(diffAllExpanded, document);
+      renderExpandAllToggle();
+    });
+  }
 
   function copySql(text, $btn) {
     function done(ok) {
