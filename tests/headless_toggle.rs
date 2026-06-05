@@ -735,6 +735,187 @@ fn render_yaml_diff_js_emits_classes_sigils_and_codepoint_emphasis() {
     let _ = tab.close(true);
 }
 
+/// Read a numeric expression from the page as i64 (DOM element counts).
+fn eval_i64(tab: &Tab, expr: &str) -> i64 {
+    eval(tab, expr).as_i64().unwrap_or(-1)
+}
+
+/// A JS array-literal of `n` context DiffLine objects (text `c0..c{n-1}`).
+fn ctx_lines_js(n: usize) -> String {
+    (0..n)
+        .map(|i| format!("{{kind:'context',text:'c{i}',emphasis:null}}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
+    // cute-dbt#132 — hunk contraction. Drives the `__cuteRenderBlockDiff` JS
+    // seam with synthetic diffs (no manifest content needed) to verify:
+    //  (1) a long middle context run folds: a `.diff-fold` control with the
+    //      correct hidden count + `.diff-folded[hidden]` lines;
+    //  (2) a SHORT block (change + 2 context) renders NO fold (small YAML
+    //      test blocks must never fold);
+    //  (3) activating the control (click AND keyboard) reveals the folded
+    //      lines (they lose `hidden`), and reveal is PARENT-SCOPED: a second
+    //      block with the same local `fold-0` id stays hidden.
+    let url = render_pr_diff_to_file(
+        "headless_fold_js.html",
+        vec![model_node("model.shop.dim_a")],
+        vec![("unit_test.shop.dim_a.t", unit_test("t", "dim_a"))],
+        &["model.shop.dim_a"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // (1) LONG middle run: 1 removed + 1 added, then 10 context, then a change.
+    // head=3, tail=3, hidden=4.
+    let long_diff = format!(
+        "{{lines:[{{kind:'removed',text:'a',emphasis:null}},\
+         {{kind:'added',text:'b',emphasis:null}},{ctx},\
+         {{kind:'removed',text:'c',emphasis:null}},\
+         {{kind:'added',text:'d',emphasis:null}}]}}",
+        ctx = ctx_lines_js(10),
+    );
+    let folded_html = eval_string(
+        &tab,
+        &format!("window.__cuteRenderBlockDiff({long_diff}, window.__cuteTokenizeSql)"),
+    );
+    assert!(
+        folded_html.contains("Show 4 unchanged lines"),
+        "the long run folds with the correct hidden count: {folded_html}",
+    );
+    assert!(
+        folded_html.contains("diff-fold") && folded_html.contains("data-fold=\"0\""),
+        "a fold control with a local id is emitted: {folded_html}",
+    );
+    assert!(
+        folded_html.contains("diff-folded fold-0")
+            && folded_html.contains("diff-folded fold-0\" hidden>"),
+        "the folded middle lines carry `diff-folded fold-0` and the hidden attribute: {folded_html}",
+    );
+
+    // (2) SHORT block: a change + 2 context → NO fold.
+    let short_html = eval_string(
+        &tab,
+        "window.__cuteRenderBlockDiff({lines:[\
+         {kind:'removed',text:'x',emphasis:null},\
+         {kind:'added',text:'y',emphasis:null},\
+         {kind:'context',text:'c1',emphasis:null},\
+         {kind:'context',text:'c2',emphasis:null}\
+         ]}, window.__cuteTokenizeSql)",
+    );
+    assert!(
+        !short_html.contains("diff-fold"),
+        "a short block (change + 2 context) does NOT fold: {short_html}",
+    );
+
+    // (3) Reveal on activate, parent-scoped. Inject the SAME folded HTML into
+    // TWO separate <code> blocks (each carries its own local fold-0) so the
+    // parent-scoping invariant is exercised. The delegated document handler
+    // (bound once by bindGlobalHandlers) must fire on the injected nodes.
+    let _ = eval(
+        &tab,
+        &format!(
+            "(function(){{\
+               var h = window.__cuteRenderBlockDiff({long_diff}, window.__cuteTokenizeSql);\
+               var a = document.createElement('code'); a.id='fold-block-a'; a.innerHTML = h;\
+               var b = document.createElement('code'); b.id='fold-block-b'; b.innerHTML = h;\
+               var s = document.createElement('code'); s.id='fold-block-s'; s.innerHTML = h;\
+               document.body.appendChild(a); document.body.appendChild(b); document.body.appendChild(s);\
+             }})()"
+        ),
+    );
+    // Both blocks start with 4 hidden folded lines each.
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#fold-block-a .diff-folded[hidden]').length"
+        ),
+        4,
+        "block A starts with 4 hidden folded lines",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#fold-block-b .diff-folded[hidden]').length"
+        ),
+        4,
+        "block B starts with 4 hidden folded lines",
+    );
+
+    // CLICK the control in block A: A reveals (0 hidden), control hides; B is
+    // untouched (still 4 hidden) — proving the reveal is parent-scoped.
+    let _ = eval(
+        &tab,
+        "document.querySelector('#fold-block-a .diff-fold').click()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#fold-block-a .diff-folded[hidden]').length"
+        ),
+        0,
+        "clicking block A's control reveals its folded lines",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('#fold-block-a .diff-fold').hidden"
+        ),
+        "the activated control hides itself",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#fold-block-b .diff-folded[hidden]').length"
+        ),
+        4,
+        "block B stays folded — reveal is PARENT-SCOPED despite the shared fold-0 id",
+    );
+
+    // KEYBOARD activate block B's control (Enter): B reveals too.
+    let _ = eval(
+        &tab,
+        "(function(){\
+           var c = document.querySelector('#fold-block-b .diff-fold');\
+           c.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true}));\
+         })()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#fold-block-b .diff-folded[hidden]').length"
+        ),
+        0,
+        "pressing Enter on block B's control reveals its folded lines (keyboard activation)",
+    );
+
+    // KEYBOARD activate block S's control with SPACE: S reveals too (pins the
+    // spec's literal Enter/Space activation, distinct from the Enter path).
+    let _ = eval(
+        &tab,
+        "(function(){\
+           var c = document.querySelector('#fold-block-s .diff-fold');\
+           c.dispatchEvent(new KeyboardEvent('keydown',{key:' ',bubbles:true}));\
+         })()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#fold-block-s .diff-folded[hidden]').length"
+        ),
+        0,
+        "pressing Space on block S's control reveals its folded lines (Space activation)",
+    );
+
+    let _ = tab.close(true);
+}
+
 // --- cute-dbt#111: inline model SQL diff (Raw↔Diff toggle) ----------
 
 /// PR-diff render that injects a model-SQL-diff map so the Model SQL
@@ -1271,6 +1452,126 @@ fn one_cell_modified_data_diff(input: &str) -> UnitTestDataDiff {
     }
 }
 
+/// `data_diff` for one given input with a single Modified row carrying TWO
+/// changed cells: one whose NEW value is a real null, one whose NEW value is
+/// the string literal `"null"` — the cute-dbt#132 null-vs-string distinction.
+fn null_vs_string_null_data_diff(input: &str) -> UnitTestDataDiff {
+    use cute_dbt::domain::{
+        CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff,
+        RowChange, RowChangeKind,
+    };
+    UnitTestDataDiff {
+        given: vec![NamedTableDiff {
+            input: input.to_owned(),
+            diff: FixtureTableDiff {
+                columns: vec![
+                    DiffColumn {
+                        name: "cnt".into(),
+                        status: ColumnStatus::Present,
+                    },
+                    DiffColumn {
+                        name: "status".into(),
+                        status: ColumnStatus::Present,
+                    },
+                ],
+                rows: vec![RowChange {
+                    kind: RowChangeKind::Modified,
+                    cells: vec![
+                        // new side is a REAL null -> italic muted-gray .cell-null.
+                        CellChange {
+                            old: CellValue::Number("1".into()),
+                            new: CellValue::Null,
+                            changed: true,
+                        },
+                        // new side is the STRING "null" -> a normal value
+                        // (.cell-new), NOT .cell-null.
+                        CellChange {
+                            old: CellValue::Str("completed".into()),
+                            new: CellValue::Str("null".into()),
+                            changed: true,
+                        },
+                    ],
+                }],
+            },
+        }],
+        expect: None,
+    }
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn changed_cell_distinguishes_a_real_null_from_a_string_null() {
+    // cute-dbt#132 — inside an inline old -> new changed cell, a REAL null reads
+    // as italic muted-gray `.cell-null` ("NULL") while a string literal 'null'
+    // reads as a normal value (`.cell-new`, "null") — visually distinct even
+    // mid-diff. Also pins the no-fill emphasis: the changed value is bold
+    // colored TEXT with a transparent background, not a github-style fill.
+    let id = "unit_test.shop.dim_a.upd";
+    let url = render_pr_diff_with_data_diffs(
+        "headless_cell_null_distinction.html",
+        vec![model_node_with_src("model.shop.dim_a")],
+        vec![(
+            id,
+            unit_test_with_given(
+                "upd",
+                "dim_a",
+                serde_json::json!([{"cnt": null, "status": "null"}]),
+            ),
+        )],
+        &["model.shop.dim_a"],
+        &[id],
+        vec![(id, null_vs_string_null_data_diff("ref('src')"))],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    show_all_inputs(&tab);
+
+    // A real null on the new side -> `.cell-null` "NULL", italic.
+    assert!(
+        visible(&tab, ".cell-diff-table .cell-changed .cell-null"),
+        "a real null on the changed cell's new side renders as .cell-null",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.cell-diff-table .cell-changed .cell-null').textContent.trim()"
+        ),
+        "NULL",
+        "the real null reads as NULL",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "getComputedStyle(document.querySelector('.cell-diff-table .cell-changed .cell-null')).fontStyle"
+        ),
+        "italic",
+        "a real null is italic (muted-gray), distinct from a normal value",
+    );
+
+    // The string literal 'null' -> a normal `.cell-new` value (NOT .cell-null).
+    assert!(
+        eval_bool(
+            &tab,
+            "Array.from(document.querySelectorAll('.cell-diff-table .cell-changed .cell-new'))\
+             .some(function(e){return e.textContent.trim()==='null';})"
+        ),
+        "a string literal 'null' renders as a normal .cell-new value, not .cell-null",
+    );
+
+    // No-fill emphasis: the changed value is bold colored TEXT, transparent bg.
+    assert_eq!(
+        eval_string(
+            &tab,
+            "getComputedStyle(document.querySelector('.cell-diff-table .cell-changed .cell-new')).backgroundColor"
+        ),
+        "rgba(0, 0, 0, 0)",
+        "the changed value has no background fill (bold colored text, not a github-style highlight)",
+    );
+}
+
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn cell_diff_toggle_defaults_to_diff_and_shows_exactly_one_view() {
@@ -1566,6 +1867,272 @@ fn fusion_csv_format_only_shows_no_diff_cell_but_value_change_shows_old_to_new()
         ),
         "1",
         "the new quarantined_count is 1 (the working-tree value), old → new",
+    );
+
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#132: SQL token-stream highlighter contract -------------
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn sql_tokenizer_pins_keyword_jinja_and_string_classification() {
+    // CHARACTERIZATION test for the token-stream highlighter that shipped in
+    // THIS PR (commit 6f4a756). The JS highlighter sits OUTSIDE every Rust gate
+    // (mutation/CRAP only see domain Rust), and had zero committed assertions on
+    // its documented invariants — this pins the classification contract,
+    // INCLUDING the deliberate keyword-as-column limitation (see assertion 4).
+    let url = render_pr_diff_to_file(
+        "headless_sql_tokenizer.html",
+        vec![model_node("model.shop.dim_a")],
+        vec![("unit_test.shop.dim_a.t", unit_test("t", "dim_a"))],
+        &["model.shop.dim_a"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // (1) GAP-FREE invariant: tokenizeSql(s).join("") === s over a mixed string
+    //     (keywords, a keyword-substring identifier, jinja, a jinja string).
+    let gapfree = eval_string(
+        &tab,
+        "(function(){var s=\"select a.from_date, count(*) from t where x = {{ ref('y') }}\";\
+          return window.__cuteTokenizeSql(s).map(function(t){return t.text;}).join('')===s ? 'OK':'BAD';})()",
+    );
+    assert_eq!(gapfree, "OK", "tokenizeSql is gap-free over its raw input");
+
+    // (2) Keyword-as-SUBSTRING is SAFE: `from_date` scans as ONE identifier and
+    //     is looked up WHOLE, so it does NOT highlight the `from` keyword.
+    let from_date = eval_string(
+        &tab,
+        "(function(){var ts=window.__cuteTokenizeSql('from_date');\
+          return ts.length===1 ? ('['+ts[0].cls+']') : 'MULTI';})()",
+    );
+    assert_eq!(
+        from_date, "[]",
+        "from_date is a single PLAIN identifier token, not a keyword"
+    );
+
+    // (3) A standalone `from` DOES classify as a keyword.
+    let from_kw = eval_string(
+        &tab,
+        "(function(){return window.__cuteTokenizeSql('from')[0].cls;})()",
+    );
+    assert_eq!(from_kw, "sql-keyword", "a bare `from` is a keyword");
+
+    // (4) KNOWN LIMITATION, pinned as a DELIBERATE decision (not a bug): a
+    //     column/alias/CTE whose ENTIRE name is a keyword false-highlights,
+    //     because this is lexer-only highlighting with NO render-time SQL parse
+    //     (a parse would fight cute-dbt's zero-egress / zero-compute property).
+    //     GitHub, Prism, and highlight.js all behave the same way. The keyword
+    //     set is deliberately CONSERVATIVE — `name`, `date`, `value`, `status`,
+    //     `id`, `amount` are intentionally excluded — so the practical surface
+    //     is narrow. Changing this assertion is a conscious scope decision.
+    let count_as_col = eval_string(
+        &tab,
+        "(function(){var ts=window.__cuteTokenizeSql('select count from t');\
+          for(var i=0;i<ts.length;i++){if(ts[i].text==='count')return ts[i].cls;}return 'NONE';})()",
+    );
+    assert_eq!(
+        count_as_col, "sql-keyword",
+        "PINNED limitation: `count` used as a column still reads as a keyword (lexer-only)",
+    );
+
+    // (5) NESTED jinja (the headline #132 fix): a string INSIDE `{{ }}` reads as
+    //     sql-string (`'stg_orders'`), and the dbt function name reads sql-jinja.
+    let nested = eval_string(
+        &tab,
+        "(function(){var ts=window.__cuteTokenizeSql(\"{{ ref('stg_orders') }}\");\
+          var s='',j='';for(var i=0;i<ts.length;i++){\
+            if(ts[i].cls==='sql-string')s=ts[i].text;\
+            if(ts[i].text==='ref')j=ts[i].cls;}\
+          return s+'|'+j;})()",
+    );
+    assert_eq!(
+        nested, "'stg_orders'|sql-jinja",
+        "a string inside jinja is sql-string; the dbt function name is sql-jinja",
+    );
+
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#132: configurable fold context + global expand/collapse ---
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn render_block_diff_honors_a_configurable_fold_pad() {
+    // The "Context lines" control flows into renderBlockDiff as an optional 3rd
+    // arg (the .diff-context-input handler sets the module default; the tests
+    // pin specific pads directly without touching shared state). 10 context
+    // lines between two changes:
+    //   pad 3 (default) -> head 3 + tail 3, hidden 4
+    //   pad 1           -> head 1 + tail 1, hidden 8
+    //   pad 5           -> head 5 + tail 5, hidden 0 (< FOLD_MIN_HIDDEN) -> NO fold
+    let url = render_pr_diff_to_file(
+        "headless_fold_pad.html",
+        vec![model_node("model.shop.dim_a")],
+        vec![("unit_test.shop.dim_a.t", unit_test("t", "dim_a"))],
+        &["model.shop.dim_a"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    let long_diff = format!(
+        "{{lines:[{{kind:'removed',text:'a',emphasis:null}},\
+         {{kind:'added',text:'b',emphasis:null}},{ctx},\
+         {{kind:'removed',text:'c',emphasis:null}},\
+         {{kind:'added',text:'d',emphasis:null}}]}}",
+        ctx = ctx_lines_js(10),
+    );
+
+    let default_html = eval_string(
+        &tab,
+        &format!("window.__cuteRenderBlockDiff({long_diff}, window.__cuteTokenizeSql)"),
+    );
+    assert!(
+        default_html.contains("Show 4 unchanged lines"),
+        "default pad 3 hides 4 of the 10 context lines: {default_html}",
+    );
+
+    let pad1_html = eval_string(
+        &tab,
+        &format!("window.__cuteRenderBlockDiff({long_diff}, window.__cuteTokenizeSql, 1)"),
+    );
+    assert!(
+        pad1_html.contains("Show 8 unchanged lines"),
+        "pad 1 keeps 1 context line each side, hiding 8: {pad1_html}",
+    );
+
+    let pad5_html = eval_string(
+        &tab,
+        &format!("window.__cuteRenderBlockDiff({long_diff}, window.__cuteTokenizeSql, 5)"),
+    );
+    assert!(
+        !pad5_html.contains("diff-fold"),
+        "pad 5 keeps 5 context each side (hidden 0 < FOLD_MIN_HIDDEN), so NO fold: {pad5_html}",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn global_expand_collapse_mirrors_every_fold() {
+    // The global expand-all/collapse-all is a SYMMETRIC DOM MIRROR (setAllFolds),
+    // NOT a re-render: expand reveals every folded middle line + hides the
+    // now-redundant per-hunk controls; collapse restores both EXACTLY. A
+    // re-render would have reset the SQL File<->Diff view and re-flashed mermaid.
+    // Verified through the __cute* seams on a mounted folded block (the report's
+    // own diff is not guaranteed long enough to fold) plus the controls strip.
+    let url = render_pr_diff_to_file(
+        "headless_global_fold.html",
+        vec![model_node("model.shop.dim_a")],
+        vec![("unit_test.shop.dim_a.t", unit_test("t", "dim_a"))],
+        &["model.shop.dim_a"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // The controls strip renders in PR-diff mode, context input defaults to 3.
+    assert_eq!(
+        eval_string(
+            &tab,
+            "String(document.querySelectorAll('.diff-view-controls').length)"
+        ),
+        "1",
+        "the diff-view controls strip renders in PR-diff mode",
+    );
+    assert_eq!(
+        eval_string(&tab, "document.querySelector('.diff-context-input').value"),
+        "3",
+        "the context-lines input defaults to 3",
+    );
+
+    // Mount a folded block: 1+1 change, 10 context, 1+1 change -> 4 folded.
+    let long_diff = format!(
+        "{{lines:[{{kind:'removed',text:'a',emphasis:null}},\
+         {{kind:'added',text:'b',emphasis:null}},{ctx},\
+         {{kind:'removed',text:'c',emphasis:null}},\
+         {{kind:'added',text:'d',emphasis:null}}]}}",
+        ctx = ctx_lines_js(10),
+    );
+    let _ = eval(
+        &tab,
+        &format!(
+            "(function(){{var g=document.createElement('code');g.id='gf';\
+               g.innerHTML=window.__cuteRenderBlockDiff({long_diff}, window.__cuteTokenizeSql);\
+               document.body.appendChild(g);}})()"
+        ),
+    );
+
+    // Default state: 4 folded+hidden, 1 visible per-hunk control.
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#gf .diff-folded[hidden]').length"
+        ),
+        4,
+        "starts with 4 hidden folded lines",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#gf .diff-fold:not([hidden])').length"
+        ),
+        1,
+        "the per-hunk control is visible by default",
+    );
+
+    // Expand all -> 0 folded hidden, control hidden.
+    let _ = eval(
+        &tab,
+        "window.__cuteExpandAllFolds(document.getElementById('gf'))",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#gf .diff-folded[hidden]').length"
+        ),
+        0,
+        "expand-all reveals every folded line",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#gf .diff-fold[hidden]').length"
+        ),
+        1,
+        "expand-all hides the now-redundant per-hunk control",
+    );
+
+    // Collapse all -> back to 4 folded hidden + visible control (exact restore).
+    let _ = eval(
+        &tab,
+        "window.__cuteCollapseAllFolds(document.getElementById('gf'))",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#gf .diff-folded[hidden]').length"
+        ),
+        4,
+        "collapse-all re-hides every folded line",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#gf .diff-fold:not([hidden])').length"
+        ),
+        1,
+        "collapse-all restores the per-hunk control",
     );
 
     let _ = tab.close(true);
