@@ -190,7 +190,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
    the inline YAML/SQL char-emphasis below so the whole report speaks one diff
    language (cute-dbt#132). The arrow between them is muted. */
 .cell-old { color: #dc2626; font-weight: 700; }
-.cell-new { color: #16a34a; font-weight: 700; }
+.cell-new { color: #15803d; font-weight: 700; }
 .cell-arrow { color: #6a6a72; margin: 0 0.3ch; }
 .compiled-sql > summary { cursor: pointer; }
 /* padding-top reserves vertical space for the absolute-positioned
@@ -273,11 +273,15 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
 /* The emphasis marks the exact changed characters. DELIBERATE DIVERGENCE
    (cute-dbt#132): the cell grid renders changed scalars as bold red/green TEXT
    (short values, no surrounding syntax to compete with), but the YAML/SQL line
-   diffs use a vivid red/green HIGHLIGHT marker so the changed token stands apart
-   from the line's OWN syntax highlighting. Do not "unify" these back to plain
-   text — colored text on a syntax-highlighted line reads as funky. */
-.diff-added strong   { font-weight: 700; background: #16a34a; color: #fff; border-radius: 2px; padding: 0 1px; }
-.diff-removed strong { font-weight: 700; background: #e5484d; color: #fff; border-radius: 2px; padding: 0 1px; }
+   diffs use a saturated red/green HIGHLIGHT marker so the changed token stands
+   apart from the line's OWN syntax highlighting. Do not "unify" these back to
+   plain text — colored text on a syntax-highlighted line reads as funky.
+   Colors are pinned to WCAG-AA white-on-fill (green #15803d ≈ 5.0:1, red
+   #dc2626 ≈ 4.8:1, both ≥4.5:1 at the 13px marker size); the cell green text
+   shares #15803d and the cell red shares #dc2626. Do not re-brighten to
+   #16a34a / #e5484d — those drop below AA (3.3:1 / 3.9:1). cute-dbt#132. */
+.diff-added strong   { font-weight: 700; background: #15803d; color: #fff; border-radius: 2px; padding: 0 1px; }
+.diff-removed strong { font-weight: 700; background: #dc2626; color: #fff; border-radius: 2px; padding: 0 1px; }
 
 /* cute-dbt#47 — Model SQL expandable section (raw Jinja, model-level).
    Sits between test-selection and the CTE DAG. Collapsed by default. */
