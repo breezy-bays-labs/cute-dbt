@@ -200,7 +200,7 @@ diffs, NULL-aware cells, the SQL/Jinja syntax palette) only manifests in
   it is byte-identity-gated and regenerated exactly like the baseline examples.
   It **must be synthetic**: a report rendered from the real `dbt-project/` would
   bake `metadata.root_path` (a home/runner absolute path) into the inlined HTML
-  — never commit such an artifact (the same invariant that gitignores the
+  — never commit such an artifact (the same invariant that git-ignores the
   `dbt-project/target/` manifest).
 - **Live, transient**: every PR that touches `dbt-project/` self-renders its own
   `--pr-diff` report on the sticky preview (`report-preview.yml` →
