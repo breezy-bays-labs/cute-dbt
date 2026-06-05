@@ -108,6 +108,14 @@ jobs:
           # Scope source: --pr-diff arm (cute-dbt#134 showcase row sets
           # `pr_diff`, no baseline) vs the default baseline arm. Mirrors
           # ci.yml's example-report-check.
+          # Fail-closed: exactly one scope source must be set, mirroring the
+          # clap `scope_source` ArgGroup the binary enforces. Guards against
+          # future matrix drift silently mis-selecting a mode.
+          if { [ -n "$PR_DIFF" ] && [ -n "$BASELINE" ]; } || \
+             { [ -z "$PR_DIFF" ] && [ -z "$BASELINE" ]; }; then
+            echo "::error::report-preview ($NAME): exactly one scope source is required (set either PR_DIFF or BASELINE, not both)"
+            exit 1
+          fi
           if [ -n "$PR_DIFF" ]; then
             scope_args=(--pr-diff "@$PR_DIFF")
           else

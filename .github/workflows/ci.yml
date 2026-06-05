@@ -607,6 +607,14 @@ jobs:
           # Scope source: --pr-diff arm (cute-dbt#134 showcase row sets
           # `pr_diff`, leaves `baseline` empty) vs the default baseline
           # arm. The `@`-prefix tells cute-dbt to read the diff from file.
+          # Fail-closed: exactly one scope source must be set, mirroring the
+          # clap `scope_source` ArgGroup the binary enforces. Guards against
+          # future matrix drift silently mis-selecting a mode.
+          if { [ -n "$PR_DIFF" ] && [ -n "$BASELINE_MANIFEST" ]; } || \
+             { [ -z "$PR_DIFF" ] && [ -z "$BASELINE_MANIFEST" ]; }; then
+            echo "::error::example-report-check ($EXAMPLE_NAME): exactly one scope source is required (set either PR_DIFF or BASELINE_MANIFEST, not both)"
+            exit 1
+          fi
           if [ -n "$PR_DIFF" ]; then
             scope_args=(--pr-diff "@$PR_DIFF")
             scope_hint=" --pr-diff @$PR_DIFF"
