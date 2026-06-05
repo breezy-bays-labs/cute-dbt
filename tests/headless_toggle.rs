@@ -848,8 +848,9 @@ fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
         "block B starts with 4 hidden folded lines",
     );
 
-    // CLICK the control in block A: A reveals (0 hidden), control hides; B is
-    // untouched (still 4 hidden) — proving the reveal is parent-scoped.
+    // CLICK the control in block A: A reveals (0 hidden); the control STAYS
+    // visible and relabels to a "Hide N" collapse affordance (#136
+    // bidirectional). B is untouched (still 4 hidden) — toggle is parent-scoped.
     let _ = eval(
         &tab,
         "document.querySelector('#fold-block-a .diff-fold').click()",
@@ -863,11 +864,27 @@ fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
         "clicking block A's control reveals its folded lines",
     );
     assert!(
-        eval_bool(
+        !eval_bool(
             &tab,
             "document.querySelector('#fold-block-a .diff-fold').hidden"
         ),
-        "the activated control hides itself",
+        "the activated control STAYS visible (bidirectional toggle, #136)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('#fold-block-a .diff-fold').getAttribute('aria-expanded')"
+        ),
+        "true",
+        "the expanded control reports aria-expanded=true",
+    );
+    assert!(
+        eval_string(
+            &tab,
+            "document.querySelector('#fold-block-a .diff-fold-label').textContent"
+        )
+        .contains("Hide 4 unchanged lines"),
+        "the expanded control relabels to 'Hide N unchanged lines'",
     );
     assert_eq!(
         eval_i64(
@@ -875,7 +892,38 @@ fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
             "document.querySelectorAll('#fold-block-b .diff-folded[hidden]').length"
         ),
         4,
-        "block B stays folded — reveal is PARENT-SCOPED despite the shared fold-0 id",
+        "block B stays folded — toggle is PARENT-SCOPED despite the shared fold-0 id",
+    );
+
+    // CLICK A's control AGAIN: it re-collapses (4 hidden) and relabels to Show —
+    // the round-trip the old one-way reveal could not do (#136).
+    let _ = eval(
+        &tab,
+        "document.querySelector('#fold-block-a .diff-fold').click()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#fold-block-a .diff-folded[hidden]').length"
+        ),
+        4,
+        "clicking A's control again re-collapses its folded lines",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('#fold-block-a .diff-fold').getAttribute('aria-expanded')"
+        ),
+        "false",
+        "the re-collapsed control reports aria-expanded=false",
+    );
+    assert!(
+        eval_string(
+            &tab,
+            "document.querySelector('#fold-block-a .diff-fold-label').textContent"
+        )
+        .contains("Show 4 unchanged lines"),
+        "the re-collapsed control relabels back to 'Show N unchanged lines'",
     );
 
     // KEYBOARD activate block B's control (Enter): B reveals too.
@@ -2024,11 +2072,12 @@ fn render_block_diff_honors_a_configurable_fold_pad() {
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn global_expand_collapse_mirrors_every_fold() {
     // The global expand-all/collapse-all is a SYMMETRIC DOM MIRROR (setAllFolds),
-    // NOT a re-render: expand reveals every folded middle line + hides the
-    // now-redundant per-hunk controls; collapse restores both EXACTLY. A
-    // re-render would have reset the SQL File<->Diff view and re-flashed mermaid.
-    // Verified through the __cute* seams on a mounted folded block (the report's
-    // own diff is not guaranteed long enough to fold) plus the controls strip.
+    // NOT a re-render: expand reveals every folded middle line and relabels the
+    // (still-visible) per-hunk controls Show->Hide; collapse restores both
+    // EXACTLY (#136 bidirectional). A re-render would have reset the SQL
+    // File<->Diff view and re-flashed mermaid. Verified through the __cute* seams
+    // on a mounted folded block (the report's own diff is not guaranteed long
+    // enough to fold) plus the controls strip.
     let url = render_pr_diff_to_file(
         "headless_global_fold.html",
         vec![model_node("model.shop.dim_a")],
@@ -2107,10 +2156,18 @@ fn global_expand_collapse_mirrors_every_fold() {
     assert_eq!(
         eval_i64(
             &tab,
-            "document.querySelectorAll('#gf .diff-fold[hidden]').length"
+            "document.querySelectorAll('#gf .diff-fold:not([hidden])').length"
         ),
         1,
-        "expand-all hides the now-redundant per-hunk control",
+        "expand-all keeps the per-hunk control visible (#136 bidirectional)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('#gf .diff-fold').getAttribute('aria-expanded')"
+        ),
+        "true",
+        "expand-all sets the per-hunk control to aria-expanded=true",
     );
 
     // Collapse all -> back to 4 folded hidden + visible control (exact restore).
@@ -2132,7 +2189,15 @@ fn global_expand_collapse_mirrors_every_fold() {
             "document.querySelectorAll('#gf .diff-fold:not([hidden])').length"
         ),
         1,
-        "collapse-all restores the per-hunk control",
+        "collapse-all keeps the per-hunk control visible",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('#gf .diff-fold').getAttribute('aria-expanded')"
+        ),
+        "false",
+        "collapse-all sets the per-hunk control back to aria-expanded=false",
     );
 
     let _ = tab.close(true);
