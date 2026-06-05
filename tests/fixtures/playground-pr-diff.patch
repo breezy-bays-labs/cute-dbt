@@ -1,0 +1,14 @@
+diff --git a/models/marts/analytics/fct_provider_metrics.sql b/models/marts/analytics/fct_provider_metrics.sql
+--- a/models/marts/analytics/fct_provider_metrics.sql
++++ b/models/marts/analytics/fct_provider_metrics.sql
+@@ -50 +50 @@
+-        , count(distinct procedure_code) as procedure_count
++        , count(*) as procedure_count
+diff --git a/models/marts/analytics/_analytics__models.yml b/models/marts/analytics/_analytics__models.yml
+--- a/models/marts/analytics/_analytics__models.yml
++++ b/models/marts/analytics/_analytics__models.yml
+@@ -1388,2 +1388,2 @@
+-          quarantined_count: null
+-          total_count: 2
++          quarantined_count: 0
++          total_count: 1

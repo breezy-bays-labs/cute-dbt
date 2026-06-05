@@ -42,3 +42,24 @@ data). One diff touches three models, so the report shows off:
 
 Open it and click around — the fastest way to get a feel for a real-world
 report.
+
+## diff-view showcase (PR-diff mode)
+
+👉 **[Open the rendered diff-view showcase](./examples/playground-pr-diff-report.html)**
+([source](https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/playground-pr-diff-report.html))
+
+The two reports above run in **baseline** mode. This one runs in **`--pr-diff`
+mode** — the way cute-dbt runs inside a CI PR review — so it shows the diff-view
+feature set in action:
+
+- an **inline SQL diff** with **hunk contraction** (a single mid-file change in
+  a 158-line model collapses the long unchanged runs behind a "Show N unchanged
+  lines" control — expand per-hunk or all at once),
+- the **SQL/Jinja syntax palette** overlaid on the diff lines,
+- a **YAML block diff** of the changed unit test, and
+- a **cell-level data diff** with a real **NULL** (rendered as muted italic,
+  distinct from a string `"null"`).
+
+It's rendered from a synthetic hand-crafted patch against the playground
+fixtures (so it stays committable + zero-egress), and it's byte-identity-gated
+in CI like the others.
