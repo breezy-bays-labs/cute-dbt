@@ -1409,11 +1409,13 @@ mod tests {
             added.iter().any(|t| t.contains("cutoff_days: 30")),
             "the added line is the working-tree override value; got added {added:?}",
         );
-        // The slice spans the WHOLE entry: sibling override keys AND the
-        // given/expect data ride along as context (proves the slicer did NOT
-        // stop at given/expect — the #125 hypothesis). Not a tautology: were
-        // the block to end before `overrides:`, no env_vars context line and
-        // no override change pair would exist.
+        // Reconstruction preserves the WHOLE block: sibling override keys AND
+        // the given/expect data ride along as context around the change pair.
+        // (That the SLICER includes `overrides:` in the block — the
+        // foundational #125 link — is pinned separately by
+        // `unit_test_yaml::tests::overrides_block_and_all_three_kinds_are_included_in_the_slice`;
+        // the block here is hand-built, so this asserts only that untouched
+        // sibling lines survive reconstruction.)
         let context: Vec<&str> = bd
             .lines
             .iter()
