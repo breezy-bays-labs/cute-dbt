@@ -467,7 +467,9 @@ fn unchanged_row(cells: &[Cell]) -> RowChange {
     }
 }
 
-/// An `Added` row: `old` is absent, `new` is the projected cell.
+/// An `Added` row: `old` is absent, `new` is the projected cell. Honors the
+/// `changed == old.key != new.key` contract — an `Absent` projected cell (a
+/// column this row lacks) stays NOT changed (cute-dbt#138).
 fn added_row(cells: &[Cell]) -> RowChange {
     RowChange {
         kind: RowChangeKind::Added,
@@ -476,13 +478,15 @@ fn added_row(cells: &[Cell]) -> RowChange {
             .map(|c| CellChange {
                 old: absent_cell(),
                 new: c.clone(),
-                changed: true,
+                changed: c.key != CellValue::Absent,
             })
             .collect(),
     }
 }
 
-/// A `Removed` row: `new` is absent, `old` is the projected cell.
+/// A `Removed` row: `new` is absent, `old` is the projected cell. Honors the
+/// `changed == old.key != new.key` contract — an `Absent` projected cell (a
+/// column this row lacks) stays NOT changed (cute-dbt#138).
 fn removed_row(cells: &[Cell]) -> RowChange {
     RowChange {
         kind: RowChangeKind::Removed,
@@ -491,7 +495,7 @@ fn removed_row(cells: &[Cell]) -> RowChange {
             .map(|c| CellChange {
                 old: c.clone(),
                 new: absent_cell(),
-                changed: true,
+                changed: c.key != CellValue::Absent,
             })
             .collect(),
     }
@@ -1145,6 +1149,35 @@ mod tests {
             .position(|c| c.name == "legacy")
             .unwrap();
         assert_eq!(diff.rows[0].cells[legacy_idx].new.key, CellValue::Absent);
+    }
+
+    #[test]
+    fn f_added_removed_rows_keep_absent_cells_unchanged() {
+        // cute-dbt#138 (CodeRabbit #140): when a row add/remove coincides with
+        // an unrelated column add/remove, the unified axis projects an
+        // `Absent` cell into the added/removed row. Per the
+        // `changed == old.key != new.key` contract that `modified_row` honors,
+        // an `Absent -> Absent` cell is NOT a change — the builders must not
+        // hardcode `changed: true`. Pins both `&&`/comparison mutants.
+        let absent = Cell::new(CellValue::Absent);
+        let added = added_row(&[absent.clone(), Cell::new(n("2"))]);
+        assert!(
+            !added.cells[0].changed,
+            "Absent projected cell in an Added row is not a change",
+        );
+        assert!(
+            added.cells[1].changed,
+            "a present projected cell in an Added row is a change",
+        );
+        let removed = removed_row(&[Cell::new(n("2")), absent.clone()]);
+        assert!(
+            removed.cells[0].changed,
+            "a present projected cell in a Removed row is a change",
+        );
+        assert!(
+            !removed.cells[1].changed,
+            "Absent projected cell in a Removed row is not a change",
+        );
     }
 
     // ----- Cross-source equivalence (the headline kill) -----
