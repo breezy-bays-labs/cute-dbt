@@ -311,27 +311,29 @@ fn h32_csv_block_scalar_edit_header_survives_one_row_modified() {
 // I. fallback / gating
 // ---------------------------------------------------------------------
 
-/// A sql-format given is opaque → no cell table → no entry (→ the #96
-/// yaml_diff fallback renders). The diff still touches the block, so the
+/// A NON-literal sql-format given is opaque → no cell table → no entry (→ the
+/// #96 yaml_diff fallback renders). The diff still touches the block, so the
 /// gating passes; it is the per-fixture opacity that suppresses the entry.
+/// cute-dbt#137 narrowed sql-opacity to the non-literal subset (a real FROM
+/// clause here); a literal-row SELECT now tabulates (see `i37_*`).
 #[test]
-fn i34_sql_format_given_emits_no_data_diff() {
+fn i34_non_literal_sql_format_given_emits_no_data_diff() {
     let id = "unit_test.shop.m.sql_given";
-    let raw = "  - name: sql_given\n    given:\n      - input: ref('src')\n        format: sql\n        rows: SELECT 2 AS id";
+    let raw = "  - name: sql_given\n    given:\n      - input: ref('src')\n        format: sql\n        rows: SELECT id FROM src WHERE id = 2";
     let block = block_at(raw, 1);
     let manifest = manifest_with(
         id,
         ut_given(
             "sql_given",
             "ref('src')",
-            serde_json::json!("SELECT 2 AS id"),
+            serde_json::json!("SELECT id FROM src WHERE id = 2"),
             Some("sql"),
         ),
     );
     let index = index_for(vec![replace(
         5,
-        &["        rows: SELECT 1 AS id"],
-        &["        rows: SELECT 2 AS id"],
+        &["        rows: SELECT id FROM src WHERE id = 1"],
+        &["        rows: SELECT id FROM src WHERE id = 2"],
     )]);
     let mut blocks = HashMap::new();
     blocks.insert(id.to_owned(), block);
@@ -339,7 +341,88 @@ fn i34_sql_format_given_emits_no_data_diff() {
     let diffs = reconstruct_table_diffs(&manifest, &changed_set(id), &blocks, &index);
     assert!(
         !diffs.contains_key(id),
-        "sql given is opaque → no data_diff entry (yaml_diff fallback)"
+        "non-literal sql given is opaque → no data_diff entry (yaml_diff fallback)"
+    );
+}
+
+/// A LITERAL-ROW sql-format given (cute-dbt#137) tabulates: a single edited
+/// literal value in a `rows: |` block scalar surfaces as a cell-level data
+/// diff entry, same as dict/csv. The `select` + first projection survive as
+/// Context (only the edited value line is in the hunk), so the reconstructed
+/// OLD sql is a complete literal-row SELECT.
+#[test]
+fn i37_literal_sql_format_given_emits_data_diff() {
+    let id = "unit_test.shop.m.lit_sql_given";
+    // Block scalar (`rows: |`) on line 5; child SELECT lines 6-7. NEW id = 2.
+    let raw = "  - name: lit_sql_given\n    given:\n      - input: ref('src')\n        format: sql\n        rows: |\n          select\n            2 as id";
+    let block = block_at(raw, 1);
+    let manifest = manifest_with(
+        id,
+        ut_given(
+            "lit_sql_given",
+            "ref('src')",
+            serde_json::json!("select\n  2 as id"),
+            Some("sql"),
+        ),
+    );
+    // Edit only the value line (line 7); the `select` keyword (line 6) is
+    // Context, so the OLD reconstructs as a complete literal-row SELECT.
+    let index = index_for(vec![replace(
+        7,
+        &["            1 as id"],
+        &["            2 as id"],
+    )]);
+    let mut blocks = HashMap::new();
+    blocks.insert(id.to_owned(), block);
+
+    let diffs = reconstruct_table_diffs(&manifest, &changed_set(id), &blocks, &index);
+    let td = &diffs
+        .get(id)
+        .expect("literal sql given tabulates → a data_diff entry")
+        .given[0]
+        .diff;
+    assert_eq!(td.columns.len(), 1, "id column");
+    assert_eq!(td.rows.len(), 1);
+    assert_eq!(td.rows[0].kind, RowChangeKind::Modified);
+    assert!(td.rows[0].cells[0].changed, "id 1 -> 2 is a changed cell");
+}
+
+/// The mixed-tabulability degrade (cute-dbt#137): a given whose OLD side was a
+/// non-literal sql (a real FROM clause, rejected) and whose NEW side is a
+/// literal-sql table must NOT emit a phantom all-added cell diff — it degrades
+/// to the #96 text fallback (no entry). Uses a `rows: |` block scalar so the
+/// OLD reconstruction yields a sliceable (but rejected) sql region.
+#[test]
+fn i38_mixed_rejected_old_literal_new_degrades_to_yaml_fallback() {
+    let id = "unit_test.shop.m.mixed_sql";
+    // NEW (manifest) is a literal-row SELECT; OLD (reconstructed) is a
+    // non-literal sql with a real FROM clause. The hunk replaces the whole
+    // block-scalar body.
+    let raw = "  - name: mixed_sql\n    given:\n      - input: ref('src')\n        format: sql\n        rows: |\n          select\n            1 as id";
+    let block = block_at(raw, 1);
+    let manifest = manifest_with(
+        id,
+        ut_given(
+            "mixed_sql",
+            "ref('src')",
+            serde_json::json!("select\n  1 as id"),
+            Some("sql"),
+        ),
+    );
+    // The OLD body (Removed) is `select id from src` (non-literal → rejected);
+    // the NEW body (Added) is the literal `select` + `1 as id`.
+    let index = index_for(vec![replace(
+        6,
+        &["          select id from src"],
+        &["          select", "            1 as id"],
+    )]);
+    let mut blocks = HashMap::new();
+    blocks.insert(id.to_owned(), block);
+
+    let diffs = reconstruct_table_diffs(&manifest, &changed_set(id), &blocks, &index);
+    assert!(
+        !diffs.contains_key(id),
+        "rejected-OLD + literal-NEW degrades to the #96 text fallback, not a phantom all-added table"
     );
 }
 

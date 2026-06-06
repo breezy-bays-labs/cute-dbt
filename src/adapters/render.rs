@@ -853,8 +853,10 @@ fn build_test_payload(
 ///    affordance behind a silently-empty grid (cute-dbt#126). We gate on the
 ///    `fixture:`+`Null` pair (NOT on `rows == Null` alone — a genuinely empty
 ///    inline fixture still tabulates to the empty grid).
-/// 2. **sql / opaque** — [`table_from_manifest_rows`] returns `None` (a raw
-///    `SELECT` string has no cells); the JS renders the sql code block.
+/// 2. **non-literal sql / opaque** — [`table_from_manifest_rows`] returns
+///    `None` for a sql `rows` that is NOT a literal-row `SELECT … UNION ALL`
+///    (cute-dbt#137); the JS renders the sql code block. A literal-row sql
+///    tabulates here just like dict/csv.
 fn current_view_table(
     rows: &Value,
     format: Option<&str>,

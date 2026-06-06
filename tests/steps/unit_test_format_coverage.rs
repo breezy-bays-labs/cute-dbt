@@ -310,3 +310,36 @@ fn expected_fixture_shape(world: &mut World, format: String, kind: String) {
         panic!("expected fixture: {msg}");
     });
 }
+
+/// cute-dbt#137 — a given fixture either tabulates (the renderer computed a
+/// `table` POD: a data grid in the Current view) or falls back (no `table`
+/// POD: the sql code block / external-fixture affordance).
+#[then(
+    regex = r#"^the unit test's given fixture for input "([^"]+)" (tabulates as a data table|falls back to a sql code block)$"#
+)]
+fn given_fixture_tabulation(world: &mut World, input: String, verdict: String) {
+    let html = world
+        .report_html
+        .as_ref()
+        .expect("report.html was written by the subprocess")
+        .clone();
+    let payload = extract_payload(&html);
+    let test = find_named_unit_test(world, &payload);
+    let given_arr = test
+        .get("given")
+        .and_then(Value::as_array)
+        .expect("unit test has a `given` array");
+    let given = given_arr
+        .iter()
+        .find(|g| g.get("input").and_then(Value::as_str) == Some(&input))
+        .unwrap_or_else(|| panic!("given fixture for input {input} not found"));
+    // The renderer omits the `table` key entirely when the fixture is not
+    // tabulatable (serde `skip_serializing_if = "Option::is_none"`).
+    let has_table = given.get("table").is_some_and(|t| !t.is_null());
+    let should_tabulate = verdict == "tabulates as a data table";
+    assert_eq!(
+        has_table, should_tabulate,
+        "given fixture for input {input}: expected tabulates={should_tabulate}, \
+         but `table` POD present={has_table}"
+    );
+}
