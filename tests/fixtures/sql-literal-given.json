@@ -1,0 +1,66 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "2.0.0-preview",
+    "generated_at": "1970-01-01T00:00:00Z",
+    "invocation_id": "00000000-0000-0000-0000-000000000000",
+    "project_name": "sql_literal_demo",
+    "project_id": "0000000000000000000000000000000000000000",
+    "user_id": "00000000-0000-0000-0000-000000000000",
+    "send_anonymous_usage_stats": false,
+    "adapter_type": "duckdb"
+  },
+  "nodes": {
+    "model.sql_literal_demo.dq_flags": {
+      "database": "sql_literal_demo",
+      "schema": "main",
+      "name": "dq_flags",
+      "resource_type": "model",
+      "package_name": "sql_literal_demo",
+      "path": "marts/dq_flags.sql",
+      "original_file_path": "models/marts/dq_flags.sql",
+      "unique_id": "model.sql_literal_demo.dq_flags",
+      "fqn": ["sql_literal_demo", "marts", "dq_flags"],
+      "alias": "dq_flags",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "SQL_LITERAL_GIVEN_SYNTHETIC_SENTINEL_0001"
+      },
+      "raw_code": "{# Synthetic cute-dbt#137 fixture: sql-format givens, one literal-row (tabulates) + one non-literal (falls back). #}\nselect entity_type, is_valid from {{ ref('src_checks') }}",
+      "compiled_code": "select entity_type, is_valid from \"sql_literal_demo\".\"main\".\"src_checks\"",
+      "depends_on": {
+        "nodes": ["model.sql_literal_demo.src_checks"]
+      }
+    }
+  },
+  "unit_tests": {
+    "unit_test.sql_literal_demo.test_dq_flags_sql_literal_givens": {
+      "name": "test_dq_flags_sql_literal_givens",
+      "model": "dq_flags",
+      "package_name": "sql_literal_demo",
+      "resource_type": "unit_test",
+      "unique_id": "unit_test.sql_literal_demo.test_dq_flags_sql_literal_givens",
+      "original_file_path": "models/marts/_unit_tests.yml",
+      "given": [
+        {
+          "input": "ref('literal_checks')",
+          "format": "sql",
+          "rows": "select 'encounters' as entity_type, true as is_valid\nunion all\nselect 'medications' as entity_type, false as is_valid"
+        },
+        {
+          "input": "ref('opaque_checks')",
+          "format": "sql",
+          "rows": "select entity_type, is_valid from src_checks where is_valid"
+        }
+      ],
+      "expect": {
+        "format": "dict",
+        "rows": [
+          { "entity_type": "encounters", "is_valid": true },
+          { "entity_type": "medications", "is_valid": false }
+        ]
+      },
+      "description": "Synthetic cute-dbt#137 unit test. The first given is a LITERAL-ROW sql fixture (`select <literal> as <col> union all ...`) that cute-dbt tabulates as a data table in the Current view, identical to a dict/csv given. The second given is a NON-literal sql fixture (a real FROM/WHERE clause) that cute-dbt conservatively rejects, so it falls back to the syntax-highlighted sql code block. Pure synthetic data only; sql_literal_demo, src_checks, and the rows are fictitious data-quality flags, not real records."
+    }
+  }
+}

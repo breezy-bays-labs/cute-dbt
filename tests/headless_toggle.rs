@@ -1955,6 +1955,115 @@ fn fusion_csv_format_only_shows_no_diff_cell_but_value_change_shows_old_to_new()
     let _ = tab.close(true);
 }
 
+// --- cute-dbt#137: literal-row sql given renders as a TABLE -----------
+//
+// End-to-end over the COMMITTED `tests/fixtures/sql-literal-given.json`,
+// loaded through the REAL manifest adapter. The unit test carries TWO
+// `format: sql` givens:
+//
+//   * `ref('literal_checks')` — a literal-row `SELECT … UNION ALL …` that
+//     cute-dbt#137 tabulates: the Current view must render a `given-table`
+//     data grid (identical affordance to dict/csv), NOT the sql code block.
+//   * `ref('opaque_checks')` — a non-literal sql (a real `FROM … WHERE`)
+//     that is conservatively rejected: the Current view must fall back to
+//     the `.fixture-sql-block-wrap` syntax-highlighted code block.
+//
+// Driving through the real adapter + renderer ties the DOM assertion to the
+// actual `table_from_manifest_rows` literal-sql producer.
+
+/// The committed sql-literal fixture's unit test id.
+const SQL_LITERAL_TEST_ID: &str = "unit_test.sql_literal_demo.test_dq_flags_sql_literal_givens";
+
+/// Load the committed sql-literal-given manifest through the REAL adapter.
+fn load_sql_literal_manifest() -> Manifest {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sql-literal-given.json");
+    FileManifestSource
+        .load(&path)
+        .expect("sql-literal-given fixture loads as a v12 manifest")
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn literal_sql_given_renders_as_table_non_literal_falls_back_to_code_block() {
+    let manifest = load_sql_literal_manifest();
+    let in_scope: InScopeSet = [SQL_LITERAL_TEST_ID.to_owned()].into_iter().collect();
+    let models: ModelInScopeSet = [NodeId::new("model.sql_literal_demo.dq_flags")]
+        .into_iter()
+        .collect();
+    let out = tmp("headless_sql_literal_given.html");
+    let _ = std::fs::remove_file(&out);
+    render_report(
+        &out,
+        &manifest,
+        &in_scope,
+        &models,
+        &in_scope,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    let url = format!("file://{p}");
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    show_all_inputs(&tab);
+
+    // Exactly two given sections render (the two sql givens). The `'` in the
+    // `ref('…')` input names can't go through `querySelector('…')`'s
+    // single-quoted JS string, so these assertions select by class +
+    // attribute-substring (no literal `'` in the selector) instead of the
+    // full `data-input-name` value.
+
+    // The LITERAL-row sql given tabulates → a Current data grid renders. Its
+    // section is identifiable by the `literal_checks` substring of its
+    // `data-input-name`.
+    assert!(
+        eval_bool(
+            &tab,
+            "(document.querySelector('.given-section[data-input-name*=literal_checks] table.given-table') || {}).offsetHeight > 0"
+        ),
+        "the literal-row sql given (cute-dbt#137) renders as a data table in the Current view",
+    );
+    // Its tabulated cells carry the literal values: the string `encounters`.
+    assert!(
+        eval_bool(
+            &tab,
+            "Array.prototype.some.call(\
+               document.querySelectorAll('.given-section[data-input-name*=literal_checks] table.given-table td'),\
+               function (td) { return td.textContent.trim() === 'encounters'; })"
+        ),
+        "the literal-sql table shows the authored string literal encounters",
+    );
+
+    // The NON-literal sql given is rejected → the sql code-block fallback
+    // renders, and NO data table is present in that section.
+    assert!(
+        eval_bool(
+            &tab,
+            "(document.querySelector('.given-section[data-input-name*=opaque_checks] .fixture-sql-block-wrap') || {}).offsetHeight > 0"
+        ),
+        "the non-literal sql given falls back to the syntax-highlighted code block",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.given-section[data-input-name*=opaque_checks] table.given-table') === null"
+        ),
+        "the non-literal sql given renders NO data table (conservative reject)",
+    );
+
+    let _ = tab.close(true);
+}
+
 // --- cute-dbt#132: SQL token-stream highlighter contract -------------
 
 #[test]

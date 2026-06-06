@@ -1275,7 +1275,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     var $sec = $("<section>").addClass("given-section").attr("data-input-name", given.input);
     var $hdr = $("<div>").addClass("table-header");
     $hdr.append($("<h4>").addClass("table-title").text("given · " + given.input));
-    if (isSqlStringFixture(given)) {
+    if (isSqlCodeBlockFixture(given)) {
       $hdr.append($("<span>").addClass("format-badge").text("format: sql"));
       $sec.append($hdr);
       $sec.append(buildSqlCodeBlock(given.rows));
@@ -1320,7 +1320,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
   function renderExpectedPanel(t) {
     var $panel = $(".expected-panel");
     var $body = $panel.find(".expected-body").empty();
-    if (isSqlStringFixture(t.expected)) {
+    if (isSqlCodeBlockFixture(t.expected)) {
       $panel.find(".expected-rowcount").text("format: sql");
       $body.append(buildSqlCodeBlock(t.expected.rows));
       return;
@@ -1355,12 +1355,24 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
   // The two engines diverge on csv normalization — core pre-parses the
   // CSV body at compile time, fusion passes it through. cute-dbt must
   // tabulate both csv paths so reports look identical regardless of
-  // which engine compiled the manifest. `format: sql` always arrives
-  // as a string and cannot be tabulated without execution; we render
-  // it as a syntax-highlighted code block.
+  // which engine compiled the manifest. `format: sql` arrives as a raw
+  // SELECT string; cute-dbt#137 tabulates the LITERAL-ROW subset in Rust
+  // (so `obj.table` is populated), and only a NON-literal sql (a real
+  // FROM/operator/cast/function) falls back to the syntax-highlighted
+  // code block here.
 
+  // Whether `obj` is a raw `format: sql` fixture string.
   function isSqlStringFixture(obj) {
     return Boolean(obj && obj.format === "sql" && typeof obj.rows === "string");
+  }
+
+  // Whether to render `obj` as the sql CODE BLOCK fallback: a raw sql
+  // string AND the domain produced no tabulated `table` POD (cute-dbt#137 —
+  // a literal-row SELECT tabulates, so `obj.table` is present and we render
+  // the data grid instead). An accepted literal-sql always yields ≥1 row, so
+  // a truthy `obj.table` reliably distinguishes "tabulated" from "fell back".
+  function isSqlCodeBlockFixture(obj) {
+    return isSqlStringFixture(obj) && !obj.table;
   }
 
   // Render a sql-format fixture as a syntax-highlighted code block.

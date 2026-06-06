@@ -210,6 +210,27 @@ no-op. Pure synthetic data only — the `fusion_demo` package, `dq_rollup` / \
 """
 
 [[fixture]]
+path = "sql-literal-given.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/137"
+sha256 = "cc47529b7eaf992b52be76bcd4b9af49b4341e1901415de96baec172943c6c05"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Synthetic single-model manifest exercising cute-dbt#137's literal-row sql \
+producer. The `test_dq_flags_sql_literal_givens` unit test carries two \
+`format: sql` givens: `ref('literal_checks')` is a literal-row \
+`select <literal> as <col> union all ...` that cute-dbt tabulates as a data \
+table (same affordance as dict/csv), and `ref('opaque_checks')` is a \
+non-literal sql (a real FROM/WHERE clause) that is conservatively rejected \
+and falls back to the syntax-highlighted sql code block. The end-to-end gate \
+for the headless `literal_sql_given_renders_as_table_non_literal_falls_back_to_code_block` \
+test. Pure synthetic data only — the `sql_literal_demo` package, `dq_flags` / \
+`src_checks` node names, and all row values are fictitious data-quality flags.\
+"""
+
+[[fixture]]
 path = "playground-baseline.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"

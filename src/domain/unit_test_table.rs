@@ -221,9 +221,11 @@ pub enum CellValue {
 
 /// A fixture's dbt `format`: `dict`, `csv`, or `sql`.
 ///
-/// `sql` is opaque — a raw `SELECT` string has no cells, so the
-/// [normalizers](table_from_manifest_rows) return `None` for it and the
-/// view falls back to the cute-dbt#96 YAML text diff.
+/// `sql` is a raw `SELECT` string. cute-dbt#137 tabulates the **literal-row**
+/// subset (`SELECT lit AS col … UNION ALL …`) via [`parse_sql_literal_rows`];
+/// a non-literal sql (any clause/operator/cast/function/bare-word ref) is
+/// opaque, so the [normalizers](table_from_manifest_rows) return `None` and
+/// the view falls back to the cute-dbt#96 YAML/sql text diff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FixtureFormat {
@@ -870,15 +872,484 @@ fn split_quote_aware(s: &str, sep: char) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------
+// SQL literal-row parser (cute-dbt#137) — conservative-reject
+// ---------------------------------------------------------------------
+
+/// Parse a `format: sql` fixture body into header-keyed string rows, but
+/// ONLY when it is a literal-row `SELECT ... UNION ALL SELECT ...` shape —
+/// the static subset a render-not-execute diff tool can tabulate without a
+/// warehouse. Returns `None` ("conservative reject") for anything that needs
+/// a query engine to evaluate, so the caller falls back to the cute-dbt#96
+/// SQL/text view rather than ever showing a partial or wrong table.
+///
+/// ## Accept grammar
+///
+/// ```text
+/// query := arm ( "UNION ALL" arm )*
+/// arm   := SELECT proj ( "," proj )*
+/// proj  := literal [ "AS" ] alias
+/// literal := number | 'single-quoted string' | TRUE | FALSE | NULL
+/// alias   := bare-word identifier
+/// ```
+///
+/// Columns are the FIRST arm's aliases (UNION ALL is positional in SQL);
+/// every later arm must have the same projection count (its own aliases are
+/// ignored — positional). `AS` is optional (dbt's canonical fixture writes
+/// `select 1 as id`, but `select 1 id` is also valid SQL); the keywords
+/// `SELECT`/`AS`/`UNION ALL`/`TRUE`/`FALSE`/`NULL` are case-insensitive.
+///
+/// ## Reject (→ `None` → cute-dbt#96 fallback)
+///
+/// Any top-level clause (`FROM`/`WHERE`/`JOIN`/`GROUP`/`ORDER`/`LIMIT`/…);
+/// any set-op except `UNION ALL` (`UNION`, `INTERSECT`, `EXCEPT`); any
+/// non-literal projection (operators `1+1`, casts `1::int`/`CAST(...)`,
+/// function calls `now()`, bare-word column refs, **double-quoted**
+/// identifiers, `*`, subqueries, `CASE`); a missing alias; a projection-count
+/// mismatch across arms.
+///
+/// ## Comments
+///
+/// `--`-to-EOL and `/* … */` comments are **stripped quote-awarely** (a `--`
+/// or `/*` inside a single-quoted string literal — and a `''` escape within
+/// it — is preserved) and then ignored — a comment never causes a reject
+/// (cute-dbt#137, Christopher's call).
+///
+/// Each cell carries its own authored [`Cell`] (`display` = the literal's
+/// faithful token — a string's unescaped inner text, a number/bool/null's
+/// verbatim token-case; `key` = the canonical [`CellValue`]). The literal
+/// *kind* is preserved per cell (a `'1'` string literal stays
+/// [`CellValue::Str`]; a bare `1` is [`CellValue::Number`]), which is why the
+/// parser builds [`Cell`]s directly instead of routing display strings back
+/// through a type-erasing string cell-fn.
+#[must_use]
+pub fn parse_sql_literal_rows(sql: &str) -> Option<FixtureTable> {
+    let stripped = strip_sql_comments(sql);
+    let arms = split_union_all_arms(&stripped)?;
+    let mut columns: Vec<String> = Vec::new();
+    let mut rows: Vec<TableRow> = Vec::new();
+    for (ai, arm) in arms.iter().enumerate() {
+        let cells = parse_select_arm(arm)?;
+        if ai == 0 {
+            columns = cells.iter().map(|(alias, _)| alias.clone()).collect();
+        } else if cells.len() != columns.len() {
+            return None; // mismatched arm width — positional union impossible
+        }
+        // UNION ALL is positional: every arm's values align to the FIRST
+        // arm's aliases (a later arm's own alias text is ignored).
+        let row_cells = cells.into_iter().map(|(_, cell)| cell).collect();
+        rows.push(TableRow::new(row_cells));
+    }
+    Some(FixtureTable::new(columns, rows))
+}
+
+/// Strip `--`-to-EOL and `/* … */` SQL comments, quote-awarely: a `--` or
+/// `/*` appearing inside a single-quoted string literal (honoring the `''`
+/// escape) is NOT a comment and is preserved verbatim. Returns the
+/// comment-free SQL (comment runs replaced by a single space so two tokens a
+/// comment separated do not fuse).
+///
+/// The char-loop body distributes onto [`SqlCommentStripper`]'s four
+/// single-responsibility handlers (in-string, line comment, block comment,
+/// ordinary char) so each function's cyclomatic complexity stays in the
+/// strict-gate band.
+fn strip_sql_comments(sql: &str) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut s = SqlCommentStripper {
+        out: String::with_capacity(sql.len()),
+        i: 0,
+        in_string: false,
+    };
+    while s.i < chars.len() {
+        s.step(&chars);
+    }
+    s.out
+}
+
+/// The quote-aware SQL comment-stripping scan state. Each branch of the char
+/// loop is one method so [`strip_sql_comments`]'s body stays a thin dispatch.
+struct SqlCommentStripper {
+    out: String,
+    i: usize,
+    in_string: bool,
+}
+
+impl SqlCommentStripper {
+    /// Advance one step over `chars`, emitting kept characters and skipping
+    /// comment runs (replaced by a single space).
+    fn step(&mut self, chars: &[char]) {
+        if self.in_string {
+            self.in_string(chars);
+            return;
+        }
+        let c = chars[self.i];
+        if c == '\'' {
+            self.in_string = true;
+            self.out.push(c);
+            self.i += 1;
+        } else if c == '-' && chars.get(self.i + 1) == Some(&'-') {
+            self.skip_line_comment(chars);
+        } else if c == '/' && chars.get(self.i + 1) == Some(&'*') {
+            self.skip_block_comment(chars);
+        } else {
+            self.out.push(c);
+            self.i += 1;
+        }
+    }
+
+    /// Inside a single-quoted string: copy verbatim, honoring the `''` escape
+    /// (which stays in-string), and close on a lone `'`.
+    fn in_string(&mut self, chars: &[char]) {
+        let c = chars[self.i];
+        self.out.push(c);
+        if c == '\'' {
+            if chars.get(self.i + 1) == Some(&'\'') {
+                self.out.push('\''); // `''` escape — stay in the string
+                self.i += 2;
+                return;
+            }
+            self.in_string = false;
+        }
+        self.i += 1;
+    }
+
+    /// Skip a `--`-to-EOL line comment, leaving a single separating space.
+    fn skip_line_comment(&mut self, chars: &[char]) {
+        while self.i < chars.len() && chars[self.i] != '\n' {
+            self.i += 1;
+        }
+        self.out.push(' ');
+    }
+
+    /// Skip a `/* … */` block comment (or to EOF), leaving a single space.
+    fn skip_block_comment(&mut self, chars: &[char]) {
+        self.i += 2;
+        while self.i < chars.len() && !(chars[self.i] == '*' && chars.get(self.i + 1) == Some(&'/'))
+        {
+            self.i += 1;
+        }
+        self.i += 2; // consume the `*/` (saturates past EOF harmlessly)
+        self.out.push(' ');
+    }
+}
+
+/// Split a comment-free query into its `UNION ALL` arms, quote-awarely and
+/// case-insensitively. Returns `None` if any OTHER top-level set operator
+/// (`UNION` without `ALL`, `INTERSECT`, `EXCEPT`, `MINUS`) appears, or there
+/// is no arm at all.
+fn split_union_all_arms(sql: &str) -> Option<Vec<String>> {
+    let words = tokenize_sql_words(sql);
+    // Reject any disallowed top-level set op before splitting.
+    if has_disallowed_set_op(&words) {
+        return None;
+    }
+    let mut arms: Vec<String> = Vec::new();
+    let mut cur: Vec<SqlWord> = Vec::new();
+    let mut idx = 0;
+    while idx < words.len() {
+        if is_union_all_at(&words, idx) {
+            arms.push(render_words(&cur));
+            cur.clear();
+            idx += 2; // consume UNION ALL
+            continue;
+        }
+        cur.push(words[idx].clone());
+        idx += 1;
+    }
+    arms.push(render_words(&cur));
+    if arms.iter().any(|a| a.trim().is_empty()) {
+        return None; // a dangling `UNION ALL` with an empty arm
+    }
+    Some(arms)
+}
+
+/// Whether the word at `idx` begins a `UNION ALL` (case-insensitive).
+fn is_union_all_at(words: &[SqlWord], idx: usize) -> bool {
+    words.get(idx).is_some_and(|w| w.eq_kw("union"))
+        && words.get(idx + 1).is_some_and(|w| w.eq_kw("all"))
+}
+
+/// Whether the token stream carries a top-level set operator cute-dbt cannot
+/// tabulate: a bare `UNION` not followed by `ALL`, or `INTERSECT` / `EXCEPT`
+/// / `MINUS`. (`UNION ALL` is the only accepted set op.)
+fn has_disallowed_set_op(words: &[SqlWord]) -> bool {
+    words.iter().enumerate().any(|(i, w)| {
+        if w.eq_kw("intersect") || w.eq_kw("except") || w.eq_kw("minus") {
+            return true;
+        }
+        w.eq_kw("union") && !words.get(i + 1).is_some_and(|n| n.eq_kw("all"))
+    })
+}
+
+/// Parse one `SELECT proj (, proj)*` arm into `(alias, cell)` pairs, or
+/// `None` if it is not a literal-only projection list. Rejects an arm that
+/// does not start with `SELECT`, or carries any top-level clause keyword
+/// after the projection list (`FROM`/`WHERE`/`JOIN`/…) — such a clause makes
+/// some projection fail [`parse_projection`].
+fn parse_select_arm(arm: &str) -> Option<Vec<(String, Cell)>> {
+    let arm = arm.trim();
+    // Must begin with the SELECT keyword (case-insensitive), followed by a
+    // word boundary.
+    let rest = strip_leading_keyword(arm, "select")?;
+    if rest.trim().is_empty() {
+        return None; // SELECT with no projections
+    }
+    let mut out: Vec<(String, Cell)> = Vec::new();
+    for proj in split_quote_aware(rest, ',') {
+        out.push(parse_projection(proj.trim())?);
+    }
+    Some(out)
+}
+
+/// Strip a leading SQL keyword (case-insensitive) from `s`, requiring a word
+/// boundary after it (whitespace or EOF). `None` if `s` does not begin with
+/// the keyword as a whole word.
+fn strip_leading_keyword<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
+    let s = s.trim_start();
+    // `s.get(..kw.len())` is byte-safe: it returns `None` when `kw.len()`
+    // exceeds `s` OR lands inside a multi-byte char, so a unicode-leading SQL
+    // string can never panic the keyword check (`s[..kw.len()]` would).
+    let head = s.get(..kw.len())?;
+    if !head.eq_ignore_ascii_case(kw) {
+        return None;
+    }
+    let after = &s[kw.len()..];
+    // Word boundary: the keyword must be followed by whitespace (or be the
+    // whole token, handled by callers that allow an empty rest).
+    if after.is_empty() || after.starts_with(char::is_whitespace) {
+        Some(after)
+    } else {
+        None
+    }
+}
+
+/// Parse one projection `literal [AS] alias` into `(alias, cell)`. The cell
+/// carries the literal's faithful display plus its canonical typed key.
+/// `None` for any non-literal projection, a missing alias, a double-quoted
+/// alias, or extra trailing tokens.
+fn parse_projection(proj: &str) -> Option<(String, Cell)> {
+    let (literal_tok, alias_region) = split_literal_token(proj)?;
+    let cell = literal_cell(&literal_tok)?;
+    // The alias region may be `AS alias` or just `alias`.
+    let alias_region = alias_region.trim();
+    let alias_str = strip_leading_keyword(alias_region, "as")
+        .map_or(alias_region, str::trim_start)
+        .trim();
+    let alias = parse_bare_alias(alias_str)?;
+    Some((alias, cell))
+}
+
+/// Split a projection into its leading literal token and the trailing alias
+/// region. The literal is one of: a single-quoted string (consuming `''`
+/// escapes), or a contiguous non-whitespace run (number / keyword literal).
+/// `None` if the projection is empty. A double-quoted leading token is
+/// returned as a token that [`literal_cell`] then rejects.
+fn split_literal_token(proj: &str) -> Option<(String, &str)> {
+    let proj = proj.trim_start();
+    if proj.is_empty() {
+        return None;
+    }
+    let bytes = proj.as_bytes();
+    if bytes[0] == b'\'' {
+        // Single-quoted string literal: read to the matching unescaped `'`.
+        let end = single_quote_end(proj)?;
+        return Some((proj[..end].to_owned(), &proj[end..]));
+    }
+    // Otherwise the literal is a whitespace-delimited token.
+    let end = proj.find(char::is_whitespace).unwrap_or(proj.len());
+    Some((proj[..end].to_owned(), &proj[end..]))
+}
+
+/// The byte index just past the closing quote of a single-quoted string
+/// starting at byte 0 of `s` (which begins with `'`), honoring the `''`
+/// escape. `None` if the string is never closed.
+fn single_quote_end(s: &str) -> Option<usize> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 1; // past the opening quote
+    let mut byte = '\''.len_utf8();
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' {
+            if chars.get(i + 1) == Some(&'\'') {
+                byte += 2 * '\''.len_utf8();
+                i += 2;
+                continue;
+            }
+            return Some(byte + c.len_utf8());
+        }
+        byte += c.len_utf8();
+        i += 1;
+    }
+    None
+}
+
+/// Convert a SQL literal token to a typed [`Cell`] (`display` = the literal's
+/// faithful authored token; `key` = the canonical [`CellValue`]), or `None`
+/// if it is not one of the accepted literal kinds. SQL-literal typing is its
+/// own ladder — deliberately NOT the dict/csv typers, which only honor
+/// *lowercase* `true`/`false`/`null` and apply YAML quoting semantics:
+///
+/// - `'…'` single-quoted string → [`CellValue::Str`] of its unescaped inner
+///   text (`''` → `'`); display = that inner text. A `'1'` literal stays a
+///   string (never re-coerced to a number).
+/// - `"…"` double-quoted → an identifier → **reject**.
+/// - case-insensitive `TRUE` / `FALSE` → [`CellValue::Bool`]; `NULL` →
+///   [`CellValue::Null`]. Display keeps the authored case (`TRUE`/`true`).
+/// - a numeric token (`-1`, `1.5`, `1e3`) → [`CellValue::Number`]
+///   (canonicalized key); display = the authored digits.
+/// - anything else (operators, casts, function calls, bare words, `*`,
+///   `CAST`, `CASE`, a subquery `(`) → reject.
+fn literal_cell(token: &str) -> Option<Cell> {
+    let t = token.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Some(rest) = t.strip_prefix('\'') {
+        // A well-formed single-quoted string (its end was found by
+        // split_literal_token, so the trailing `'` is present here).
+        let inner = rest.strip_suffix('\'')?.replace("''", "'");
+        return Some(Cell::with_display(inner.clone(), CellValue::Str(inner)));
+    }
+    if t.starts_with('"') {
+        return None; // double-quoted = identifier
+    }
+    if t.eq_ignore_ascii_case("true") {
+        return Some(Cell::with_display(t.to_owned(), CellValue::Bool(true)));
+    }
+    if t.eq_ignore_ascii_case("false") {
+        return Some(Cell::with_display(t.to_owned(), CellValue::Bool(false)));
+    }
+    if t.eq_ignore_ascii_case("null") {
+        // A NULL literal keys to Null; per the Cell contract a Null cell
+        // displays empty (the renderer styles it from `key.t`).
+        return Some(Cell::with_display(String::new(), CellValue::Null));
+    }
+    // A numeric literal — the only remaining accepted kind. The canonical key
+    // strips format (`1.00` → `1`); the display keeps the authored digits.
+    canonicalize_str_number(t)
+        .map(|canon| Cell::with_display(t.to_owned(), CellValue::Number(canon)))
+}
+
+/// Validate `s` as a bare-word SQL alias (an unquoted identifier: ASCII
+/// letter/underscore start, then letters/digits/underscores; no trailing
+/// tokens). `None` for an empty, quoted, dotted, or multi-token alias.
+fn parse_bare_alias(s: &str) -> Option<String> {
+    if s.is_empty() {
+        return None;
+    }
+    let mut chars = s.chars();
+    let first = chars.next()?;
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return None;
+    }
+    if !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None; // a space, dot, quote, or operator → not a bare alias
+    }
+    Some(s.to_owned())
+}
+
+/// A single SQL "word" produced by [`tokenize_sql_words`]: the raw slice plus
+/// a flag marking a single-quoted string literal (so a keyword-looking word
+/// inside a string never matches a set-op check).
+#[derive(Debug, Clone)]
+struct SqlWord {
+    text: String,
+    is_string: bool,
+}
+
+impl SqlWord {
+    /// Whether this word equals `kw` case-insensitively AND is not a quoted
+    /// string literal (so `'union'` the string never reads as the set op).
+    fn eq_kw(&self, kw: &str) -> bool {
+        !self.is_string && self.text.eq_ignore_ascii_case(kw)
+    }
+}
+
+/// Tokenize comment-free SQL into whitespace-delimited words, keeping a
+/// single-quoted string (with its `''` escapes) as ONE word. Punctuation
+/// stays attached to its word — this tokenizer's only job is the set-op /
+/// UNION-ALL boundary scan, not full lexing.
+fn tokenize_sql_words(sql: &str) -> Vec<SqlWord> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut words: Vec<SqlWord> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_has_string = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' {
+            cur_has_string = true;
+            i = consume_quoted_run(&chars, i, &mut cur);
+        } else if c.is_whitespace() {
+            flush_word(&mut words, &mut cur, &mut cur_has_string);
+            i += 1;
+        } else {
+            cur.push(c);
+            i += 1;
+        }
+    }
+    flush_word(&mut words, &mut cur, &mut cur_has_string);
+    words
+}
+
+/// Append a single-quoted run (starting at the opening `'` at `start`) to
+/// `cur`, honoring the `''` escape, and return the index just past the
+/// closing quote (or EOF for an unterminated run). The opening and closing
+/// quotes are kept verbatim in `cur` — this is a boundary tokenizer, not a
+/// quote stripper.
+fn consume_quoted_run(chars: &[char], start: usize, cur: &mut String) -> usize {
+    cur.push(chars[start]); // opening quote
+    let mut i = start + 1;
+    while i < chars.len() {
+        let d = chars[i];
+        cur.push(d);
+        if d == '\'' {
+            if chars.get(i + 1) == Some(&'\'') {
+                cur.push('\''); // `''` escape — stays in the run
+                i += 2;
+                continue;
+            }
+            return i + 1; // past the closing quote
+        }
+        i += 1;
+    }
+    i // unterminated run → EOF
+}
+
+/// Push the in-progress word (if non-empty) into `words`, resetting the
+/// accumulator. A word is a string literal iff it contained a quoted run.
+fn flush_word(words: &mut Vec<SqlWord>, cur: &mut String, has_string: &mut bool) {
+    if !cur.is_empty() {
+        words.push(SqlWord {
+            text: std::mem::take(cur),
+            is_string: *has_string,
+        });
+    }
+    *has_string = false;
+}
+
+/// Re-render a word slice into a space-joined arm string for the per-arm
+/// `SELECT` parse. (The arm parser re-splits on commas quote-awarely, so the
+/// single-space join is lossless for the literal-only grammar.)
+fn render_words(words: &[SqlWord]) -> String {
+    words
+        .iter()
+        .map(|w| w.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+// ---------------------------------------------------------------------
 // Normalizers — the two terminus functions producing a FixtureTable
 // ---------------------------------------------------------------------
 
 /// Build the NEW-side [`FixtureTable`] from a manifest fixture's `rows`
-/// `Value` + `format`. Returns `None` for an opaque/sql fixture (no cells).
+/// `Value` + `format`. Returns `None` for an opaque fixture (no cells).
 ///
 /// Absorbs the dbt-core-vs-fusion csv divergence in ONE place:
-/// - `format: sql` with a string `rows` → `None` (opaque → cute-dbt#96
-///   fallback).
+/// - `format: sql` with a string `rows` → the literal-row table when it parses
+///   as `SELECT lit AS col … UNION ALL …` (cute-dbt#137,
+///   [`parse_sql_literal_rows`]); `None` otherwise (non-literal sql → opaque →
+///   cute-dbt#96 fallback).
 /// - `rows` is an `Array` (dict on both engines, csv-from-core, inline-flow
 ///   after serde): each element is an object; columns are the first-seen
 ///   union of keys; a key a row lacks → [`CellValue::Absent`]. The per-field
@@ -911,9 +1382,13 @@ pub fn table_from_manifest_rows(rows: &Value, format: Option<&str>) -> Option<Fi
         }
         Value::String(s) => match fmt {
             FixtureFormat::Csv => Some(table_from_csv_text(s)),
-            // A non-csv string `rows` (a raw sql SELECT, or a malformed
-            // dict) is opaque — no cells.
-            FixtureFormat::Sql | FixtureFormat::Dict => None,
+            // A `format: sql` string `rows` tabulates IFF it is a literal-row
+            // `SELECT … UNION ALL …` shape (cute-dbt#137); a non-literal sql
+            // (any clause, operator, cast, function, bare-word ref) returns
+            // `None` → the cute-dbt#96 sql/text fallback.
+            FixtureFormat::Sql => parse_sql_literal_rows(s),
+            // A non-csv/non-sql string `rows` (a malformed dict) is opaque.
+            FixtureFormat::Dict => None,
         },
         // Object / Bool / Number `rows` — not a table.
         _ => None,
@@ -925,7 +1400,8 @@ pub fn table_from_manifest_rows(rows: &Value, format: Option<&str>) -> Option<Fi
 /// terminating in the same canonicalization so the two sides are
 /// comparable.
 ///
-/// - `format: sql` → `None` (opaque).
+/// - `format: sql` → dedent then [`parse_sql_literal_rows`] (the literal-row
+///   table, or `None` for non-literal sql → cute-dbt#96 fallback).
 /// - `format: csv` → dedent then [`parse_csv_rows`] → [`type_csv_token`].
 /// - `format: dict` (the default) → [`parse_block_dict_rows`] (which routes
 ///   inline-flow rows to [`parse_inline_flow_row`]) → [`type_cell_scalar`].
@@ -934,7 +1410,13 @@ pub fn table_from_manifest_rows(rows: &Value, format: Option<&str>) -> Option<Fi
 #[must_use]
 pub fn table_from_yaml_fragment(rows_region: &str, format: Option<&str>) -> Option<FixtureTable> {
     match FixtureFormat::from_opt(format) {
-        FixtureFormat::Sql => None,
+        // The OLD-side sql path mirrors the NEW side (cute-dbt#137): dedent
+        // the reconstructed `rows:` region, then tabulate IFF it is a
+        // literal-row SELECT; a non-literal sql → `None` → #96 fallback.
+        FixtureFormat::Sql => {
+            let dedented = dedent(rows_region);
+            parse_sql_literal_rows(&dedented)
+        }
         FixtureFormat::Csv => {
             let dedented = dedent(rows_region);
             Some(table_from_csv_text(&dedented))
@@ -1694,8 +2176,11 @@ mod tests {
     // ----- I. (IR half) sql-opaque yields no cells -----
 
     #[test]
-    fn i34_sql_format_manifest_rows_returns_none() {
-        let sql = json!("SELECT 1 AS id, 'alice' AS name");
+    fn i34_non_literal_sql_format_manifest_rows_returns_none() {
+        // A NON-literal sql (a real FROM clause) is opaque → None → the
+        // cute-dbt#96 sql/text fallback. (A literal-row SELECT now tabulates;
+        // see the K-series.) cute-dbt#137 narrowed this from "all sql → None".
+        let sql = json!("SELECT id, name FROM src");
         assert_eq!(table_from_manifest_rows(&sql, Some("sql")), None);
         // And the OLD-side sql path too.
         assert_eq!(table_from_yaml_fragment("anything", Some("sql")), None);
@@ -1866,5 +2351,317 @@ mod tests {
         assert_eq!(FixtureFormat::from_opt(Some("sql")), FixtureFormat::Sql);
         // Unrecognized → Dict (tolerant).
         assert_eq!(FixtureFormat::from_opt(Some("yaml")), FixtureFormat::Dict);
+    }
+
+    // -----------------------------------------------------------------
+    // K. SQL literal-row parser (cute-dbt#137) — the conservative-reject
+    //    boundary table.
+    // -----------------------------------------------------------------
+
+    /// Read parsed cells as `(column, display, key)` triples for assertions.
+    fn sql_cells(sql: &str) -> Vec<Vec<(String, String, CellValue)>> {
+        let t = parse_sql_literal_rows(sql).expect("expected an accepted literal-row table");
+        t.rows
+            .iter()
+            .map(|r| {
+                t.columns
+                    .iter()
+                    .zip(r.cells.iter())
+                    .map(|(c, cell)| (c.clone(), cell.display.clone(), cell.key.clone()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    // ----- K1. accept: single-arm, all literal kinds -----
+
+    #[test]
+    fn k1_single_arm_canonical_dbt_shape_accepts() {
+        let cells = sql_cells("select 1 as id, 'alice' as name");
+        assert_eq!(cells.len(), 1);
+        assert_eq!(
+            cells[0],
+            vec![
+                ("id".into(), "1".into(), CellValue::Number("1".into())),
+                (
+                    "name".into(),
+                    "alice".into(),
+                    CellValue::Str("alice".into())
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn k1b_all_literal_kinds_type_correctly() {
+        // number, single-quoted string, TRUE/FALSE (case-insensitive),
+        // NULL, negative + decimal + scientific numbers.
+        let cells = sql_cells(
+            "SELECT 42 AS n, 'hi' AS s, TRUE AS t, false AS f, NULL AS z, -1 AS neg, 1.5 AS dec, 1e3 AS sci",
+        );
+        let row = &cells[0];
+        assert_eq!(row[0].2, CellValue::Number("42".into()));
+        assert_eq!(row[1].2, CellValue::Str("hi".into()));
+        assert_eq!(row[2].2, CellValue::Bool(true));
+        assert_eq!(row[3].2, CellValue::Bool(false));
+        assert_eq!(row[4].2, CellValue::Null);
+        assert_eq!(row[5].2, CellValue::Number("-1".into()));
+        assert_eq!(row[6].2, CellValue::Number("1.5".into()));
+        assert_eq!(row[7].2, CellValue::Number("1000".into()));
+        // TRUE/false keep their authored display case.
+        assert_eq!(row[2].1, "TRUE");
+        assert_eq!(row[3].1, "false");
+        // A NULL literal displays empty (renderer styles from key.t).
+        assert_eq!(row[4].1, "");
+    }
+
+    #[test]
+    fn k1c_alias_without_as_keyword_accepts() {
+        // `AS` is optional: `select 1 id` is valid SQL.
+        let cells = sql_cells("select 1 id, 2 qty");
+        assert_eq!(
+            cells[0],
+            vec![
+                ("id".into(), "1".into(), CellValue::Number("1".into())),
+                ("qty".into(), "2".into(), CellValue::Number("2".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn k1d_string_literal_1_stays_str_not_number() {
+        // A SQL `'1'` is a deliberate string literal — never re-coerced.
+        let cells = sql_cells("select '1' as code");
+        assert_eq!(cells[0][0].2, CellValue::Str("1".into()));
+        assert_eq!(cells[0][0].1, "1");
+    }
+
+    #[test]
+    fn k1e_single_quote_escape_doubled_quote() {
+        // `''` inside a single-quoted string is a literal `'`.
+        let cells = sql_cells("select 'it''s' as note");
+        assert_eq!(cells[0][0].2, CellValue::Str("it's".into()));
+        assert_eq!(cells[0][0].1, "it's");
+    }
+
+    // ----- K2. accept: UNION ALL (positional) -----
+
+    #[test]
+    fn k2_union_all_multi_arm_accepts_positionally() {
+        let cells = sql_cells("select 1 as id union all select 2 as id union all select 3 as id");
+        assert_eq!(cells.len(), 3);
+        assert_eq!(cells[0][0].2, CellValue::Number("1".into()));
+        assert_eq!(cells[1][0].2, CellValue::Number("2".into()));
+        assert_eq!(cells[2][0].2, CellValue::Number("3".into()));
+    }
+
+    #[test]
+    fn k2b_union_all_is_case_insensitive() {
+        let cells = sql_cells("select 1 as id UNION ALL select 2 as id");
+        assert_eq!(cells.len(), 2);
+    }
+
+    #[test]
+    fn k2c_union_all_uses_first_arm_aliases_positionally() {
+        // A later arm's own alias text is ignored — columns come from arm 0.
+        let t = parse_sql_literal_rows("select 1 as id union all select 2 as other").unwrap();
+        assert_eq!(t.columns, vec!["id".to_string()]);
+        assert_eq!(t.rows.len(), 2);
+        assert_eq!(t.rows[1].cells[0].key, CellValue::Number("2".into()));
+    }
+
+    #[test]
+    fn k2d_union_all_mismatched_arm_width_rejects() {
+        assert_eq!(
+            parse_sql_literal_rows("select 1 as id union all select 2 as id, 3 as x"),
+            None,
+            "mismatched projection count across UNION ALL arms rejects"
+        );
+    }
+
+    // ----- K3. comments (ignored, never reject) -----
+
+    #[test]
+    fn k3_line_comment_is_stripped_not_rejected() {
+        let cells = sql_cells("select 1 as id -- trailing comment\nunion all select 2 as id");
+        assert_eq!(cells.len(), 2);
+    }
+
+    #[test]
+    fn k3b_block_comment_is_stripped_not_rejected() {
+        let cells = sql_cells("select /* inline */ 1 as id, 2 as qty");
+        assert_eq!(cells[0].len(), 2);
+    }
+
+    #[test]
+    fn k3c_comment_marker_inside_string_literal_is_preserved() {
+        // A `--` inside a single-quoted string is NOT a comment.
+        let cells = sql_cells("select '-- not a comment' as note");
+        assert_eq!(cells[0][0].2, CellValue::Str("-- not a comment".into()));
+        // A `/*` inside a string is preserved too.
+        let cells = sql_cells("select '/* literal */' as note");
+        assert_eq!(cells[0][0].2, CellValue::Str("/* literal */".into()));
+    }
+
+    // ----- K4. reject: clauses -----
+
+    #[test]
+    fn k4_top_level_clauses_reject() {
+        for sql in [
+            "select id from src",
+            "select 1 as id where id > 0",
+            "select 1 as id group by id",
+            "select 1 as id order by id",
+            "select 1 as id limit 10",
+            "select a.id from a join b on a.id = b.id",
+            "select 1 as id having count(*) > 0",
+        ] {
+            assert_eq!(parse_sql_literal_rows(sql), None, "must reject: {sql}");
+        }
+    }
+
+    // ----- K5. reject: non-UNION-ALL set ops -----
+
+    #[test]
+    fn k5_other_set_ops_reject() {
+        for sql in [
+            "select 1 as id union select 2 as id",
+            "select 1 as id intersect select 2 as id",
+            "select 1 as id except select 2 as id",
+        ] {
+            assert_eq!(
+                parse_sql_literal_rows(sql),
+                None,
+                "must reject set op: {sql}"
+            );
+        }
+    }
+
+    // ----- K6. reject: non-literal projections -----
+
+    #[test]
+    fn k6_non_literal_projections_reject() {
+        for sql in [
+            "select 1 + 1 as x",                  // operator
+            "select 1::int as x",                 // postgres cast
+            "select cast(1 as int) as x",         // CAST(...)
+            "select now() as x",                  // function call
+            "select id as x",                     // bare-word column ref
+            "select * ",                          // star
+            "select \"quoted\" as x",             // double-quoted identifier
+            "select (select 1) as x",             // subquery
+            "select case when 1 then 2 end as x", // CASE
+        ] {
+            assert_eq!(
+                parse_sql_literal_rows(sql),
+                None,
+                "must reject projection: {sql}"
+            );
+        }
+    }
+
+    // ----- K7. reject: missing alias / structural -----
+
+    #[test]
+    fn k7_missing_alias_rejects() {
+        assert_eq!(parse_sql_literal_rows("select 1"), None, "no alias rejects");
+        assert_eq!(
+            parse_sql_literal_rows("select 1 as id, 2"),
+            None,
+            "one missing alias rejects the whole arm"
+        );
+    }
+
+    #[test]
+    fn k7b_empty_and_non_select_reject() {
+        assert_eq!(parse_sql_literal_rows(""), None);
+        assert_eq!(parse_sql_literal_rows("   "), None);
+        assert_eq!(parse_sql_literal_rows("insert into t values (1)"), None);
+        assert_eq!(
+            parse_sql_literal_rows("select"),
+            None,
+            "SELECT with no proj"
+        );
+    }
+
+    #[test]
+    fn k7c_dotted_or_quoted_alias_rejects() {
+        assert_eq!(parse_sql_literal_rows("select 1 as a.b"), None);
+        assert_eq!(parse_sql_literal_rows("select 1 as \"id\""), None);
+        assert_eq!(parse_sql_literal_rows("select 1 as 'id'"), None);
+    }
+
+    // ----- K8. the #40 scar re-check (must hold) -----
+
+    #[test]
+    fn k8_scar_select_quoted_from_tabulates() {
+        // `select 'from' as col` — `'from'` is a quoted STRING literal, not
+        // the FROM clause. Must tabulate.
+        let cells = sql_cells("select 'from' as col");
+        assert_eq!(cells[0][0].2, CellValue::Str("from".into()));
+    }
+
+    #[test]
+    fn k8b_scar_from_clause_rejects() {
+        // `from x, y` as a top-level clause → reject.
+        assert_eq!(
+            parse_sql_literal_rows("select c from x, y"),
+            None,
+            "a real FROM clause must reject"
+        );
+    }
+
+    // ----- K9. normalizer wiring (both sides) -----
+
+    #[test]
+    fn k9_manifest_rows_sql_literal_tabulates() {
+        let sql = json!("select 1 as id, 'alice' as name union all select 2 as id, 'bob' as name");
+        let t = table_from_manifest_rows(&sql, Some("sql")).expect("literal sql tabulates");
+        assert_eq!(t.columns, vec!["id".to_string(), "name".to_string()]);
+        assert_eq!(t.rows.len(), 2);
+        assert_eq!(t.rows[1].cells[1].key, CellValue::Str("bob".into()));
+    }
+
+    #[test]
+    fn k9b_manifest_rows_non_literal_sql_returns_none() {
+        // A non-literal sql falls back (None) — the renderer shows the sql
+        // code block.
+        let sql = json!("select id, name from src");
+        assert_eq!(table_from_manifest_rows(&sql, Some("sql")), None);
+    }
+
+    #[test]
+    fn k9c_yaml_fragment_sql_literal_tabulates_dedented() {
+        // The OLD-side path: an indented multi-line literal-row block scalar.
+        let region = "          select\n            true as is_valid\n            , 1 as n";
+        let t = table_from_yaml_fragment(region, Some("sql")).expect("literal sql tabulates");
+        assert_eq!(t.columns, vec!["is_valid".to_string(), "n".to_string()]);
+        assert_eq!(t.rows[0].cells[0].key, CellValue::Bool(true));
+        assert_eq!(t.rows[0].cells[1].key, CellValue::Number("1".into()));
+    }
+
+    #[test]
+    fn k9d_yaml_fragment_non_literal_sql_returns_none() {
+        assert_eq!(
+            table_from_yaml_fragment("select id from src", Some("sql")),
+            None
+        );
+    }
+
+    #[test]
+    fn k9e_cross_source_sql_literal_equals_manifest_string() {
+        // The OLD reconstructed region and the NEW manifest string of the
+        // same literal-row SQL → EQUAL FixtureTable (cross-source symmetry).
+        let new_tbl = table_from_manifest_rows(
+            &json!("select 1 as id\nunion all select 2 as id"),
+            Some("sql"),
+        )
+        .unwrap();
+        let old_tbl = table_from_yaml_fragment(
+            "          select 1 as id\n          union all select 2 as id",
+            Some("sql"),
+        )
+        .unwrap();
+        assert_eq!(new_tbl, old_tbl);
     }
 }

@@ -63,6 +63,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::domain::manifest::Manifest;
 use crate::domain::pr_diff::{
@@ -619,9 +620,14 @@ fn build_data_diff(ut: &UnitTest, old_text: &str) -> UnitTestDataDiff {
     for g in ut.given() {
         let new_tbl = table_from_manifest_rows(g.rows(), g.format());
         let old = slice_named_region(old_text, "input", Some(g.input()));
-        let old_tbl =
-            old.and_then(|(region, fmt)| table_from_yaml_fragment(&region, fmt.as_deref()));
-        if let Some(diff) = table_diff_if_changed(old_tbl, new_tbl) {
+        // Build the OLD table ONCE (borrowing `old`); both the rejection check
+        // and the diff consume it — no second `table_from_yaml_fragment` parse.
+        let old_tbl = old
+            .as_ref()
+            .and_then(|(region, fmt)| table_from_yaml_fragment(region, fmt.as_deref()));
+        let new_rejected = is_rejected_sql_new(g.rows(), g.format(), new_tbl.as_ref());
+        let old_rejected = is_rejected_sql_old(old.as_ref(), old_tbl.as_ref());
+        if let Some(diff) = table_diff_if_changed(old_tbl, new_tbl, old_rejected, new_rejected) {
             data.given.push(NamedTableDiff {
                 input: g.input().to_owned(),
                 diff,
@@ -630,20 +636,72 @@ fn build_data_diff(ut: &UnitTest, old_text: &str) -> UnitTestDataDiff {
     }
     let new_e = table_from_manifest_rows(ut.expect().rows(), ut.expect().format());
     let old_e = slice_named_region(old_text, "expect", None);
-    let old_e_tbl =
-        old_e.and_then(|(region, fmt)| table_from_yaml_fragment(&region, fmt.as_deref()));
-    if let Some(diff) = table_diff_if_changed(old_e_tbl, new_e) {
+    let old_e_tbl = old_e
+        .as_ref()
+        .and_then(|(region, fmt)| table_from_yaml_fragment(region, fmt.as_deref()));
+    let new_e_rejected =
+        is_rejected_sql_new(ut.expect().rows(), ut.expect().format(), new_e.as_ref());
+    let old_e_rejected = is_rejected_sql_old(old_e.as_ref(), old_e_tbl.as_ref());
+    if let Some(diff) = table_diff_if_changed(old_e_tbl, new_e, old_e_rejected, new_e_rejected) {
         data.expect = Some(diff);
     }
     data
 }
 
-/// Diff an OLD/NEW table pair, returning the diff only when both sides are
-/// non-opaque (`None` from sql) and the diff carries a real change.
+/// Whether the NEW (manifest) side is a **present-but-rejected** sql fixture:
+/// `format: sql` with a non-empty raw `SELECT` string that
+/// [`table_from_manifest_rows`] could NOT tabulate as literal rows
+/// (cute-dbt#137). Distinct from a genuinely absent NEW side (an empty/`Null`
+/// `rows`) — only a rejected sql degrades the diff to the #96 text fallback.
+fn is_rejected_sql_new(rows: &Value, format: Option<&str>, new_tbl: Option<&FixtureTable>) -> bool {
+    format == Some("sql")
+        && new_tbl.is_none()
+        && matches!(rows, Value::String(s) if !s.trim().is_empty())
+}
+
+/// Whether the OLD (reconstructed-YAML) side is a **present-but-rejected** sql
+/// fixture: the slice found a `format: sql` sub-block whose `rows:` region
+/// could NOT tabulate as literal rows (cute-dbt#137). A `None` slice means the
+/// OLD fixture was genuinely ABSENT (a newly-added given), which is NOT
+/// "rejected" and still flows to an all-added diff.
+///
+/// Bounded boundary (cute-dbt#137, not fixed by design): an OLD sql written
+/// **inline** (`rows: <SELECT…>` on one line) slices to `None` — the
+/// pre-existing inline-`rows:` limitation shared by every format — so an
+/// inline non-literal OLD + literal NEW reads as "absent", not "rejected", and
+/// still produces an all-added table. Real multi-line sql fixtures are block
+/// scalars (`rows: |`), which slice correctly and degrade as intended.
+///
+/// Takes the already-built `old_tbl` (the caller parses the OLD region once)
+/// rather than re-parsing — symmetric with [`is_rejected_sql_new`].
+fn is_rejected_sql_old(
+    old: Option<&(String, Option<String>)>,
+    old_tbl: Option<&FixtureTable>,
+) -> bool {
+    matches!(old, Some((_, fmt)) if fmt.as_deref() == Some("sql")) && old_tbl.is_none()
+}
+
+/// Diff an OLD/NEW table pair, returning the diff only when the diff carries
+/// a real change AND neither side is a present-but-rejected non-literal sql
+/// fixture (cute-dbt#137).
+///
+/// `*_rejected` flags carry the **mixed-tabulability** signal: if EITHER side
+/// is present-but-rejected sql (a non-literal `SELECT` that cannot tabulate),
+/// the whole given's diff degrades to the #96 text fallback (`None`) — a
+/// cell-level table diff against an empty stand-in would paint phantom
+/// all-added / all-removed rows. A genuinely-absent OLD side
+/// (`old_rejected == false`, `old == None`) still flows to an all-added diff.
 fn table_diff_if_changed(
     old: Option<FixtureTable>,
     new: Option<FixtureTable>,
+    old_rejected: bool,
+    new_rejected: bool,
 ) -> Option<FixtureTableDiff> {
+    // Mixed tabulability: a present-but-rejected sql on either side → degrade
+    // the whole given to the #96 text fallback (cute-dbt#137).
+    if old_rejected || new_rejected {
+        return None;
+    }
     // Both sides opaque (sql/None) → no cell diff (→ #96 fallback).
     if old.is_none() && new.is_none() {
         return None;
@@ -1387,7 +1445,7 @@ mod tests {
     #[test]
     fn table_diff_if_changed_both_none_is_none() {
         // sql/opaque on both sides → no cell diff.
-        assert!(table_diff_if_changed(None, None).is_none());
+        assert!(table_diff_if_changed(None, None, false, false).is_none());
     }
 
     #[test]
@@ -1402,12 +1460,12 @@ mod tests {
         let real = table(&["id"], vec![vec![n("1")]]);
         // NEW present, OLD opaque → the row is Added; a real change.
         assert!(
-            table_diff_if_changed(None, Some(real.clone())).is_some(),
+            table_diff_if_changed(None, Some(real.clone()), false, false).is_some(),
             "OLD-opaque + NEW-present must still emit a diff"
         );
         // OLD present, NEW opaque → the row is Removed; a real change.
         assert!(
-            table_diff_if_changed(Some(real), None).is_some(),
+            table_diff_if_changed(Some(real), None, false, false).is_some(),
             "OLD-present + NEW-opaque must still emit a diff"
         );
     }
@@ -1415,14 +1473,94 @@ mod tests {
     #[test]
     fn table_diff_if_changed_identical_is_none() {
         let t = table(&["id"], vec![vec![n("1")]]);
-        assert!(table_diff_if_changed(Some(t.clone()), Some(t)).is_none());
+        assert!(table_diff_if_changed(Some(t.clone()), Some(t), false, false).is_none());
     }
 
     #[test]
     fn table_diff_if_changed_emits_on_real_change() {
         let old = table(&["id"], vec![vec![n("1")]]);
         let new = table(&["id"], vec![vec![n("2")]]);
-        assert!(table_diff_if_changed(Some(old), Some(new)).is_some());
+        assert!(table_diff_if_changed(Some(old), Some(new), false, false).is_some());
+    }
+
+    // ----- cute-dbt#137 mixed-tabulability guard (the trap-2 trio) -----
+
+    #[test]
+    fn k_mixed_rejected_old_literal_new_degrades_to_text_fallback() {
+        // OLD side is a present-but-rejected non-literal sql (e.g. a real
+        // FROM clause); NEW side is a literal-sql table. A cell diff would
+        // paint the NEW rows as phantom all-added against an empty OLD
+        // stand-in — so degrade the whole given to the #96 text fallback.
+        let literal_new = table(&["id"], vec![vec![n("1")]]);
+        assert!(
+            table_diff_if_changed(None, Some(literal_new), true, false).is_none(),
+            "rejected-OLD + literal-NEW → None (text fallback), not phantom all-added"
+        );
+    }
+
+    #[test]
+    fn k_mixed_literal_old_rejected_new_degrades_to_text_fallback() {
+        // The reverse: OLD literal, NEW present-but-rejected sql. A cell diff
+        // would paint phantom all-removed rows.
+        let literal_old = table(&["id"], vec![vec![n("1")]]);
+        assert!(
+            table_diff_if_changed(Some(literal_old), None, false, true).is_none(),
+            "literal-OLD + rejected-NEW → None (text fallback), not phantom all-removed"
+        );
+    }
+
+    #[test]
+    fn k_genuinely_absent_old_literal_new_stays_all_added() {
+        // A genuinely NEW given (OLD absent, `old_rejected == false`) still
+        // flows to an all-added cell diff — the absent case is NOT a reject.
+        let literal_new = table(&["id"], vec![vec![n("1")], vec![n("2")]]);
+        let diff = table_diff_if_changed(None, Some(literal_new), false, false)
+            .expect("absent-OLD + literal-NEW must still emit an all-added diff");
+        assert!(diff.rows.iter().all(|r| r.kind == RowChangeKind::Added));
+    }
+
+    // ----- cute-dbt#137 rejected-sql discriminators -----
+
+    #[test]
+    fn k_is_rejected_sql_new_only_for_present_non_literal_sql() {
+        // A non-literal sql (real FROM) with a None table → rejected.
+        let rows = serde_json::json!("select id from src");
+        assert!(is_rejected_sql_new(&rows, Some("sql"), None));
+        // A literal sql that DID tabulate (table Some) → NOT rejected.
+        let literal = table(&["id"], vec![vec![n("1")]]);
+        let lit_rows = serde_json::json!("select 1 as id");
+        assert!(!is_rejected_sql_new(&lit_rows, Some("sql"), Some(&literal)));
+        // A non-sql format → never "rejected sql".
+        assert!(!is_rejected_sql_new(
+            &serde_json::json!(null),
+            Some("dict"),
+            None
+        ));
+        // An empty/whitespace sql string → genuinely absent, not rejected.
+        assert!(!is_rejected_sql_new(
+            &serde_json::json!("   "),
+            Some("sql"),
+            None
+        ));
+    }
+
+    #[test]
+    fn k_is_rejected_sql_old_only_for_present_non_literal_sql_slice() {
+        // A sliced sql region that cannot tabulate → rejected. The caller
+        // builds the table once and passes it in (None ⇒ rejected).
+        let rejected = ("select id from src".to_owned(), Some("sql".to_owned()));
+        let rejected_tbl = table_from_yaml_fragment(&rejected.0, rejected.1.as_deref());
+        assert!(is_rejected_sql_old(Some(&rejected), rejected_tbl.as_ref()));
+        // A sliced sql region that DOES tabulate (literal) → NOT rejected.
+        let literal = ("select 1 as id".to_owned(), Some("sql".to_owned()));
+        let literal_tbl = table_from_yaml_fragment(&literal.0, literal.1.as_deref());
+        assert!(!is_rejected_sql_old(Some(&literal), literal_tbl.as_ref()));
+        // A non-sql slice → not "rejected sql".
+        let dict = ("- id: 1".to_owned(), Some("dict".to_owned()));
+        let dict_tbl = table_from_yaml_fragment(&dict.0, dict.1.as_deref());
+        assert!(!is_rejected_sql_old(Some(&dict), dict_tbl.as_ref()));
+        // No slice (genuinely absent OLD) → NOT rejected.
+        assert!(!is_rejected_sql_old(None, None));
     }
 
     // ----- J. wire-shape / serde round-trip -----
