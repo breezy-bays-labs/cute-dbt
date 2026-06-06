@@ -72,7 +72,7 @@ use crate::domain::pr_diff::{
 use crate::domain::state::InScopeSet;
 use crate::domain::unit_test::UnitTest;
 use crate::domain::unit_test_table::{
-    CellValue, FixtureTable, TableRow, table_from_manifest_rows, table_from_yaml_fragment,
+    Cell, CellValue, FixtureTable, TableRow, table_from_manifest_rows, table_from_yaml_fragment,
 };
 use crate::domain::unit_test_yaml::UnitTestYamlBlock;
 
@@ -194,19 +194,24 @@ pub enum RowChangeKind {
     Removed,
 }
 
-/// One cell's before/after value plus the precomputed semantic verdict.
+/// One cell's before/after [`Cell`]s (each carrying its authored `display` +
+/// canonical `key`) plus the precomputed semantic verdict (cute-dbt#138).
 ///
-/// `changed` is `old != new` — the ONE equality oracle, computed once here
-/// over the canonical [`CellValue`]s so the render layer never re-derives
-/// it (a `Str "1"` vs `Number "1"` never collide; a format-only difference
-/// is `changed: false`).
+/// `changed` is `old.key != new.key` — the ONE equality oracle, computed once
+/// here over the canonical [`CellValue`] **keys** (NEVER the display token) so
+/// a format-only reformat (`1` → `1.00`, both keying to `Number("1")`) is
+/// `changed: false` while a real value change is `changed: true`. The render
+/// layer renders each side's `display` (authored truth) but takes the flag
+/// verdict from here; shipping both axes lets cute-dbt#139 re-flag client-side
+/// without a Rust round-trip.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellChange {
-    /// The OLD cell value ([`CellValue::Absent`] for an added row/column).
-    pub old: CellValue,
-    /// The NEW cell value ([`CellValue::Absent`] for a removed row/column).
-    pub new: CellValue,
-    /// `old != new` — precomputed semantic verdict.
+    /// The OLD cell (key [`CellValue::Absent`] for an added row/column).
+    pub old: Cell,
+    /// The NEW cell (key [`CellValue::Absent`] for a removed row/column).
+    pub new: Cell,
+    /// `old.key != new.key` — precomputed semantic verdict on the equality
+    /// axis only (the display token never participates).
     pub changed: bool,
 }
 
@@ -240,8 +245,8 @@ pub fn diff_fixture_tables(old: &FixtureTable, new: &FixtureTable) -> FixtureTab
     let columns = unify_columns(old, new);
     let col_names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
 
-    let old_rows: Vec<Vec<CellValue>> = project_rows(old, &col_names);
-    let new_rows: Vec<Vec<CellValue>> = project_rows(new, &col_names);
+    let old_rows: Vec<Vec<Cell>> = project_rows(old, &col_names);
+    let new_rows: Vec<Vec<Cell>> = project_rows(new, &col_names);
 
     let rows = align_rows(&old_rows, &new_rows);
 
@@ -251,7 +256,7 @@ pub fn diff_fixture_tables(old: &FixtureTable, new: &FixtureTable) -> FixtureTab
 /// Align the projected OLD/NEW rows: multiset-match equal keys as
 /// `Unchanged`, then pair the residual positionally, emitting in NEW order
 /// with trailing `Removed` appended.
-fn align_rows(old_rows: &[Vec<CellValue>], new_rows: &[Vec<CellValue>]) -> Vec<RowChange> {
+fn align_rows(old_rows: &[Vec<Cell>], new_rows: &[Vec<Cell>]) -> Vec<RowChange> {
     let (new_matched, old_consumed) = match_multiset(old_rows, new_rows);
 
     // Residual rows, still in source order.
@@ -291,10 +296,7 @@ fn align_rows(old_rows: &[Vec<CellValue>], new_rows: &[Vec<CellValue>]) -> Vec<R
 /// the same key, which consumes that OLD row. Returns `(new_matched,
 /// old_consumed)`. Duplicate keys match duplicate-for-duplicate (the
 /// LCS-on-repeats property without LCS).
-fn match_multiset(
-    old_rows: &[Vec<CellValue>],
-    new_rows: &[Vec<CellValue>],
-) -> (Vec<bool>, Vec<bool>) {
+fn match_multiset(old_rows: &[Vec<Cell>], new_rows: &[Vec<Cell>]) -> (Vec<bool>, Vec<bool>) {
     let old_keys: Vec<String> = old_rows.iter().map(|r| row_key(r)).collect();
     let mut consumed = vec![false; old_rows.len()];
     let mut matched = vec![false; new_rows.len()];
@@ -325,8 +327,8 @@ fn first_unconsumed(old_keys: &[String], consumed: &[bool], nkey: &str) -> Optio
 fn pair_residual(
     residual_old: &[usize],
     residual_new: &[usize],
-    old_rows: &[Vec<CellValue>],
-    new_rows: &[Vec<CellValue>],
+    old_rows: &[Vec<Cell>],
+    new_rows: &[Vec<Cell>],
     by_new: &mut HashMap<usize, RowChange>,
     trailing_removed: &mut Vec<RowChange>,
 ) {
@@ -376,8 +378,9 @@ fn unify_columns(old: &FixtureTable, new: &FixtureTable) -> Vec<DiffColumn> {
 }
 
 /// Project each of `table`'s rows over the unified `col_names`, filling a
-/// column the row lacks with [`CellValue::Absent`].
-fn project_rows(table: &FixtureTable, col_names: &[&str]) -> Vec<Vec<CellValue>> {
+/// column the row lacks with an absent [`Cell`]. Each projected cell keeps its
+/// authored display alongside the canonical key (cute-dbt#138).
+fn project_rows(table: &FixtureTable, col_names: &[&str]) -> Vec<Vec<Cell>> {
     table
         .rows
         .iter()
@@ -390,15 +393,16 @@ fn project_rows(table: &FixtureTable, col_names: &[&str]) -> Vec<Vec<CellValue>>
         .collect()
 }
 
-/// The [`CellValue`] of `row` for unified column `col`, or
-/// [`CellValue::Absent`] when this table has no such column.
-fn cell_for_column(table: &FixtureTable, row: &TableRow, col: &str) -> CellValue {
+/// The [`Cell`] of `row` for unified column `col`, or an absent cell (key
+/// [`CellValue::Absent`], empty display) when this table has no such column.
+fn cell_for_column(table: &FixtureTable, row: &TableRow, col: &str) -> Cell {
     table
         .columns
         .iter()
         .position(|c| c == col)
         .and_then(|idx| row.cells.get(idx))
-        .map_or(CellValue::Absent, |cell| cell.value.clone())
+        .cloned()
+        .unwrap_or_else(|| Cell::new(CellValue::Absent))
 }
 
 /// The canonical row key — each cell's tag+value, length-prefixed and
@@ -414,10 +418,13 @@ fn cell_for_column(table: &FixtureTable, row: &TableRow, col: &str) -> CellValue
 /// `["a|str:x", "b"]` both flatten to `str:a|str:x|str:b` — which would let
 /// [`match_multiset`] mark unrelated rows `Unchanged` and silently drop a
 /// real cell diff.
-fn row_key(cells: &[CellValue]) -> String {
+fn row_key(cells: &[Cell]) -> String {
     let mut key = String::new();
     for cell in cells {
-        let token = cell_key_token(cell);
+        // Keyed on the canonical equality axis ONLY — the authored `display`
+        // never participates, so the display lens (cute-dbt#139) cannot
+        // re-pair rows (cute-dbt#138).
+        let token = cell_key_token(&cell.key);
         // `<byte-len>:<token>` — the length prefix makes concatenation
         // unambiguous regardless of what bytes the token carries.
         key.push_str(&token.len().to_string());
@@ -438,73 +445,85 @@ fn cell_key_token(v: &CellValue) -> String {
     }
 }
 
-/// An `Unchanged` row: `old`/`new` echo the projected cells, every
-/// `changed` is `false`.
-fn unchanged_row(cells: &[CellValue]) -> RowChange {
+/// An absent [`Cell`] (key [`CellValue::Absent`], empty display) — the
+/// add/remove placeholder for the side a row/column is missing from.
+fn absent_cell() -> Cell {
+    Cell::new(CellValue::Absent)
+}
+
+/// An `Unchanged` row: `old`/`new` echo the projected cells (display + key),
+/// every `changed` is `false`.
+fn unchanged_row(cells: &[Cell]) -> RowChange {
     RowChange {
         kind: RowChangeKind::Unchanged,
         cells: cells
             .iter()
-            .map(|v| CellChange {
-                old: v.clone(),
-                new: v.clone(),
+            .map(|c| CellChange {
+                old: c.clone(),
+                new: c.clone(),
                 changed: false,
             })
             .collect(),
     }
 }
 
-/// An `Added` row: `old` is `Absent`, `new` is the projected cell.
-fn added_row(cells: &[CellValue]) -> RowChange {
+/// An `Added` row: `old` is absent, `new` is the projected cell. Honors the
+/// `changed == old.key != new.key` contract — an `Absent` projected cell (a
+/// column this row lacks) stays NOT changed (cute-dbt#138).
+fn added_row(cells: &[Cell]) -> RowChange {
     RowChange {
         kind: RowChangeKind::Added,
         cells: cells
             .iter()
-            .map(|v| CellChange {
-                old: CellValue::Absent,
-                new: v.clone(),
-                changed: true,
+            .map(|c| CellChange {
+                old: absent_cell(),
+                new: c.clone(),
+                changed: c.key != CellValue::Absent,
             })
             .collect(),
     }
 }
 
-/// A `Removed` row: `new` is `Absent`, `old` is the projected cell.
-fn removed_row(cells: &[CellValue]) -> RowChange {
+/// A `Removed` row: `new` is absent, `old` is the projected cell. Honors the
+/// `changed == old.key != new.key` contract — an `Absent` projected cell (a
+/// column this row lacks) stays NOT changed (cute-dbt#138).
+fn removed_row(cells: &[Cell]) -> RowChange {
     RowChange {
         kind: RowChangeKind::Removed,
         cells: cells
             .iter()
-            .map(|v| CellChange {
-                old: v.clone(),
-                new: CellValue::Absent,
-                changed: true,
+            .map(|c| CellChange {
+                old: c.clone(),
+                new: absent_cell(),
+                changed: c.key != CellValue::Absent,
             })
             .collect(),
     }
 }
 
 /// Whether two projected rows share at least one column position where
-/// BOTH cells are present (non-`Absent`) — the heuristic that distinguishes
-/// an in-place edit (`Modified`) from a wholesale replacement (a separate
-/// `Removed` + `Added`).
-fn rows_share_present_cell(old_cells: &[CellValue], new_cells: &[CellValue]) -> bool {
+/// BOTH cells are present (non-`Absent` key) — the heuristic that
+/// distinguishes an in-place edit (`Modified`) from a wholesale replacement
+/// (a separate `Removed` + `Added`).
+fn rows_share_present_cell(old_cells: &[Cell], new_cells: &[Cell]) -> bool {
     old_cells
         .iter()
         .zip(new_cells.iter())
-        .any(|(o, n)| *o != CellValue::Absent && *n != CellValue::Absent)
+        .any(|(o, n)| o.key != CellValue::Absent && n.key != CellValue::Absent)
 }
 
 /// Fuse a residual OLD row's cells with a residual NEW row's cells into one
-/// `Modified` row, computing each cell's `changed` verdict (`old != new`).
-fn modified_row(old_cells: &[CellValue], new_cells: &[CellValue]) -> RowChange {
+/// `Modified` row, computing each cell's `changed` verdict on the **key**
+/// axis only (`old.key != new.key`) — a format-only display change is not a
+/// change (cute-dbt#138).
+fn modified_row(old_cells: &[Cell], new_cells: &[Cell]) -> RowChange {
     let cells = old_cells
         .iter()
         .zip(new_cells.iter())
         .map(|(o, n)| CellChange {
             old: o.clone(),
             new: n.clone(),
-            changed: o != n,
+            changed: o.key != n.key,
         })
         .collect();
     RowChange {
@@ -828,8 +847,8 @@ mod tests {
         // id unchanged, qty changed.
         assert!(!diff.rows[0].cells[0].changed, "id cell unchanged");
         assert!(diff.rows[0].cells[1].changed, "qty cell changed");
-        assert_eq!(diff.rows[0].cells[1].old, n("100"));
-        assert_eq!(diff.rows[0].cells[1].new, n("200"));
+        assert_eq!(diff.rows[0].cells[1].old.key, n("100"));
+        assert_eq!(diff.rows[0].cells[1].new.key, n("200"));
     }
 
     #[test]
@@ -838,8 +857,16 @@ mod tests {
         let old = table(&["v"], vec![vec![n("10")]]);
         let new = table(&["v"], vec![vec![n("20")]]);
         let diff = diff_fixture_tables(&old, &new);
-        assert_eq!(diff.rows[0].cells[0].old, n("10"), "old side must be 10");
-        assert_eq!(diff.rows[0].cells[0].new, n("20"), "new side must be 20");
+        assert_eq!(
+            diff.rows[0].cells[0].old.key,
+            n("10"),
+            "old side must be 10"
+        );
+        assert_eq!(
+            diff.rows[0].cells[0].new.key,
+            n("20"),
+            "new side must be 20"
+        );
     }
 
     // ----- D. row add / remove / pairing boundary -----
@@ -852,8 +879,8 @@ mod tests {
         assert_eq!(diff.rows.len(), 2);
         assert_eq!(diff.rows[0].kind, RowChangeKind::Unchanged);
         assert_eq!(diff.rows[1].kind, RowChangeKind::Added);
-        assert_eq!(diff.rows[1].cells[0].old, CellValue::Absent);
-        assert_eq!(diff.rows[1].cells[0].new, n("2"));
+        assert_eq!(diff.rows[1].cells[0].old.key, CellValue::Absent);
+        assert_eq!(diff.rows[1].cells[0].new.key, n("2"));
     }
 
     #[test]
@@ -864,8 +891,8 @@ mod tests {
         assert_eq!(diff.rows.len(), 2);
         assert_eq!(diff.rows[0].kind, RowChangeKind::Unchanged);
         assert_eq!(diff.rows[1].kind, RowChangeKind::Removed);
-        assert_eq!(diff.rows[1].cells[0].old, n("2"));
-        assert_eq!(diff.rows[1].cells[0].new, CellValue::Absent);
+        assert_eq!(diff.rows[1].cells[0].old.key, n("2"));
+        assert_eq!(diff.rows[1].cells[0].new.key, CellValue::Absent);
     }
 
     #[test]
@@ -887,10 +914,10 @@ mod tests {
         // The one row is Modified: c1 a -> a|str:x, c2 x|str:b -> b.
         assert_eq!(diff.rows.len(), 1);
         assert_eq!(diff.rows[0].kind, RowChangeKind::Modified);
-        assert_eq!(diff.rows[0].cells[0].old, s("a"));
-        assert_eq!(diff.rows[0].cells[0].new, s("a|str:x"));
-        assert_eq!(diff.rows[0].cells[1].old, s("x|str:b"));
-        assert_eq!(diff.rows[0].cells[1].new, s("b"));
+        assert_eq!(diff.rows[0].cells[0].old.key, s("a"));
+        assert_eq!(diff.rows[0].cells[0].new.key, s("a|str:x"));
+        assert_eq!(diff.rows[0].cells[1].old.key, s("x|str:b"));
+        assert_eq!(diff.rows[0].cells[1].new.key, s("b"));
     }
 
     #[test]
@@ -953,12 +980,12 @@ mod tests {
         );
         assert!(diff.rows.iter().all(|r| r.kind == RowChangeKind::Modified));
         // Row 0 pairs id=1: old v=10, new v=11. Row 1 pairs id=2: old 20, new 21.
-        assert_eq!(diff.rows[0].cells[0].new, n("1"));
-        assert_eq!(diff.rows[0].cells[1].old, n("10"));
-        assert_eq!(diff.rows[0].cells[1].new, n("11"));
-        assert_eq!(diff.rows[1].cells[0].new, n("2"));
-        assert_eq!(diff.rows[1].cells[1].old, n("20"));
-        assert_eq!(diff.rows[1].cells[1].new, n("21"));
+        assert_eq!(diff.rows[0].cells[0].new.key, n("1"));
+        assert_eq!(diff.rows[0].cells[1].old.key, n("10"));
+        assert_eq!(diff.rows[0].cells[1].new.key, n("11"));
+        assert_eq!(diff.rows[1].cells[0].new.key, n("2"));
+        assert_eq!(diff.rows[1].cells[1].old.key, n("20"));
+        assert_eq!(diff.rows[1].cells[1].new.key, n("21"));
     }
 
     // ----- E. row reorder (the riskiest seam) -----
@@ -1006,8 +1033,8 @@ mod tests {
             .collect();
         // Only the id=1 row is a genuine edit; the moved rows are Unchanged.
         assert_eq!(modified.len(), 1, "exactly one row genuinely edited");
-        assert_eq!(modified[0].cells[1].old, n("10"));
-        assert_eq!(modified[0].cells[1].new, n("99"));
+        assert_eq!(modified[0].cells[1].old.key, n("10"));
+        assert_eq!(modified[0].cells[1].new.key, n("99"));
     }
 
     #[test]
@@ -1098,7 +1125,7 @@ mod tests {
         assert!(diff.has_real_change(), "a column add is a real change");
         // Each row's new city cell is present, old is Absent, changed.
         for r in &diff.rows {
-            assert_eq!(r.cells[1].old, CellValue::Absent);
+            assert_eq!(r.cells[1].old.key, CellValue::Absent);
             assert!(r.cells[1].changed);
         }
     }
@@ -1121,7 +1148,79 @@ mod tests {
             .iter()
             .position(|c| c.name == "legacy")
             .unwrap();
-        assert_eq!(diff.rows[0].cells[legacy_idx].new, CellValue::Absent);
+        assert_eq!(diff.rows[0].cells[legacy_idx].new.key, CellValue::Absent);
+    }
+
+    #[test]
+    fn f_added_removed_rows_keep_absent_cells_unchanged() {
+        // cute-dbt#138 (CodeRabbit #140): when a row add/remove coincides with
+        // an unrelated column add/remove, the unified axis projects an
+        // `Absent` cell into the added/removed row. Per the
+        // `changed == old.key != new.key` contract that `modified_row` honors,
+        // an `Absent -> Absent` cell is NOT a change — the builders must not
+        // hardcode `changed: true`. Pins both `&&`/comparison mutants.
+        let absent = Cell::new(CellValue::Absent);
+        let added = added_row(&[absent.clone(), Cell::new(n("2"))]);
+        assert!(
+            !added.cells[0].changed,
+            "Absent projected cell in an Added row is not a change",
+        );
+        assert!(
+            added.cells[1].changed,
+            "a present projected cell in an Added row is a change",
+        );
+        let removed = removed_row(&[Cell::new(n("2")), absent.clone()]);
+        assert!(
+            removed.cells[0].changed,
+            "a present projected cell in a Removed row is a change",
+        );
+        assert!(
+            !removed.cells[1].changed,
+            "Absent projected cell in a Removed row is not a change",
+        );
+    }
+
+    #[test]
+    fn g_added_row_absent_overlap_cell_is_unchanged_end_to_end() {
+        // cute-dbt#138 (CI stage review): the integration counterpart of
+        // `f_added_removed_rows_keep_absent_cells_unchanged`. A row add that
+        // COINCIDES with a column add makes the unified column axis project an
+        // `Absent` cell into the Added row. Building the tables through the
+        // production normalizer (not the builders directly) proves the
+        // end-to-end path leaves that `Absent -> Absent` cell unflagged.
+        use crate::domain::unit_test_table::table_from_manifest_rows;
+        let old = table_from_manifest_rows(&serde_json::json!([{"a": 1}]), Some("dict")).unwrap();
+        let new = table_from_manifest_rows(&serde_json::json!([{"a": 1}, {"b": 2}]), Some("dict"))
+            .unwrap();
+        let diff = diff_fixture_tables(&old, &new);
+        let a = diff
+            .columns
+            .iter()
+            .position(|c| c.name == "a")
+            .expect("col a");
+        let b = diff
+            .columns
+            .iter()
+            .position(|c| c.name == "b")
+            .expect("col b");
+        let added = diff
+            .rows
+            .iter()
+            .find(|r| r.kind == RowChangeKind::Added)
+            .expect("{b:2} is wholly added — shares no present cell with {a:1}");
+        assert_eq!(
+            added.cells[a].new.key,
+            CellValue::Absent,
+            "the added row lacks column a, so its a-cell is Absent",
+        );
+        assert!(
+            !added.cells[a].changed,
+            "Absent->Absent in the Added row stays unchanged (row-add overlaps column-add)",
+        );
+        assert!(
+            added.cells[b].changed,
+            "the present b-cell in the Added row is a change",
+        );
     }
 
     // ----- Cross-source equivalence (the headline kill) -----
@@ -1146,8 +1245,8 @@ mod tests {
     #[test]
     fn cross_source_empty_csv_cell_converges_no_change() {
         // cute-dbt#127 (closes #124): the core csv-as-array-of-string-dicts
-        // NEW path now routes string cells through `type_csv_value` →
-        // `type_csv_token`, so an empty core cell maps to `Null` — the SAME as
+        // NEW path now routes string cells through `cell_from_csv_value` →
+        // `cell_from_csv_token`, so an empty core cell keys to `Null` — the SAME as
         // the OLD-YAML csv path's empty → `Null`. Both sides converge: `id`
         // "1" → Number on both, `note` "" → Null on both. The previously-
         // documented Str("") vs Null divergence is GONE; this now asserts a
@@ -1180,8 +1279,8 @@ mod tests {
         let new =
             table_from_manifest_rows(&serde_json::json!([{"id": "1.5"}]), Some("csv")).unwrap();
         // Both inferred to Number (the inference fired on each side)…
-        assert_eq!(old.rows[0].cells[0].value, CellValue::Number("1".into()));
-        assert_eq!(new.rows[0].cells[0].value, CellValue::Number("1.5".into()));
+        assert_eq!(old.rows[0].cells[0].key, CellValue::Number("1".into()));
+        assert_eq!(new.rows[0].cells[0].key, CellValue::Number("1.5".into()));
         // …and the genuine value change survives to the diff verdict.
         let diff = diff_fixture_tables(&old, &new);
         assert!(
@@ -1200,11 +1299,11 @@ mod tests {
         assert_eq!(fmt_a.as_deref(), Some("dict"));
         let tbl_a = table_from_yaml_fragment(&region_a, fmt_a.as_deref()).unwrap();
         assert_eq!(tbl_a.rows.len(), 1);
-        assert_eq!(tbl_a.rows[0].cells[0].value, n("1"));
+        assert_eq!(tbl_a.rows[0].cells[0].key, n("1"));
 
         let (region_b, _) = slice_named_region(old_text, "input", Some("ref('b')")).unwrap();
         let tbl_b = table_from_yaml_fragment(&region_b, Some("dict")).unwrap();
-        assert_eq!(tbl_b.rows[0].cells[0].value, n("2"));
+        assert_eq!(tbl_b.rows[0].cells[0].key, n("2"));
     }
 
     #[test]
@@ -1213,7 +1312,7 @@ mod tests {
         let (region, _) = slice_named_region(old_text, "expect", None).unwrap();
         let tbl = table_from_yaml_fragment(&region, Some("dict")).unwrap();
         assert_eq!(tbl.rows.len(), 1);
-        assert_eq!(tbl.rows[0].cells[0].value, n("99"));
+        assert_eq!(tbl.rows[0].cells[0].key, n("99"));
     }
 
     #[test]
@@ -1280,7 +1379,7 @@ mod tests {
         let (region, _) = slice_named_region(old_text, "input", Some("ref('q')")).unwrap();
         let tbl = table_from_yaml_fragment(&region, Some("dict")).unwrap();
         assert_eq!(tbl.rows.len(), 1);
-        assert_eq!(tbl.rows[0].cells[0].value, n("7"));
+        assert_eq!(tbl.rows[0].cells[0].key, n("7"));
     }
 
     // ----- table_diff_if_changed gating -----
@@ -1373,8 +1472,8 @@ mod tests {
                     rows: vec![RowChange {
                         kind: RowChangeKind::Modified,
                         cells: vec![CellChange {
-                            old: n("1"),
-                            new: n("2"),
+                            old: Cell::new(n("1")),
+                            new: Cell::new(n("2")),
                             changed: true,
                         }],
                     }],
@@ -1388,8 +1487,8 @@ mod tests {
                 rows: vec![RowChange {
                     kind: RowChangeKind::Added,
                     cells: vec![CellChange {
-                        old: CellValue::Absent,
-                        new: n("9"),
+                        old: Cell::new(CellValue::Absent),
+                        new: Cell::new(n("9")),
                         changed: true,
                     }],
                 }],
@@ -1449,8 +1548,8 @@ mod tests {
                                 rows: vec![RowChange {
                                     kind,
                                     cells: vec![CellChange {
-                                        old: old.clone(),
-                                        new: new.clone(),
+                                        old: Cell::new(old.clone()),
+                                        new: Cell::new(new.clone()),
                                         changed: old != new,
                                     }],
                                 }],

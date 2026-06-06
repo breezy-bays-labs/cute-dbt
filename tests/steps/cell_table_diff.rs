@@ -471,8 +471,25 @@ fn data_diff_one_changed_cell(world: &mut World, name: String, old: String, new:
         .filter(|c| c["changed"] == Value::Bool(true))
         .collect();
     assert_eq!(changed.len(), 1, "exactly one changed cell; got {cells:?}");
-    assert_eq!(changed[0]["old"]["v"], old, "old value is {old:?}");
-    assert_eq!(changed[0]["new"]["v"], new, "new value is {new:?}");
+    // cute-dbt#138 — each cell side is a `{display, key}` Cell; the value
+    // (equality) axis lives under `key`. The authored `display` echoes it for
+    // these string values, so assert both for completeness.
+    assert_eq!(
+        changed[0]["old"]["key"]["v"], old,
+        "old key value is {old:?}"
+    );
+    assert_eq!(
+        changed[0]["new"]["key"]["v"], new,
+        "new key value is {new:?}"
+    );
+    assert_eq!(
+        changed[0]["old"]["display"], old,
+        "old authored display is {old:?}"
+    );
+    assert_eq!(
+        changed[0]["new"]["display"], new,
+        "new authored display is {new:?}"
+    );
 }
 
 #[then(regex = r#"^the test "([^"]+)" carries no data diff$"#)]

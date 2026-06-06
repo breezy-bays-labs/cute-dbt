@@ -121,21 +121,66 @@ impl TableRow {
     }
 }
 
-/// One cell — a thin newtype over its [typed value](CellValue).
+/// One cell — split into its two axes (cute-dbt#138):
 ///
-/// Kept a struct (not a bare `CellValue`) so the File-2 diff can later hang
-/// per-cell render hints off it without a wire-shape break.
+/// - [`display`](Self::display) — the **authored token** (truth), rendered in
+///   BOTH the Current and Diff views. A csv `1.00` shows `1.00`, not the
+///   normalized `1`.
+/// - [`key`](Self::key) — the canonical [`CellValue`], the **equality** axis,
+///   used ONLY for the diff's change decision and row alignment. `1`, `1.0`,
+///   `1.00` all key to `Number("1")`, so a format-only reformat is not a diff.
+///
+/// Shipping both axes to JS is the foundation the settings normalize-toggle
+/// (cute-dbt#139) builds on — it re-flags client-side between `key` (normalized)
+/// and `display` (strict) without a Rust round-trip.
+///
+/// Kept a struct (not a bare `CellValue`) so the diff can hang per-cell render
+/// hints off it without a wire-shape break.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
-    /// The cell's semantically-typed value.
-    pub value: CellValue,
+    /// The authored token, rendered verbatim in both views. For an
+    /// [`Absent`](CellValue::Absent) or [`Null`](CellValue::Null) key the
+    /// display is the empty string (the renderer derives the NULL/absent
+    /// affordance from `key.t`, never from `display`).
+    pub display: String,
+    /// The cell's semantically-typed equality key.
+    pub key: CellValue,
 }
 
 impl Cell {
-    /// Construct from a typed value.
+    /// Construct from a typed value, deriving the display from the key (the
+    /// canonical form). Use this when there is no distinct authored token —
+    /// e.g. test literals, projected diff cells, and `Absent` placeholders.
     #[must_use]
-    pub fn new(value: CellValue) -> Self {
-        Self { value }
+    pub fn new(key: CellValue) -> Self {
+        Self {
+            display: display_from_key(&key),
+            key,
+        }
+    }
+
+    /// Construct from a distinct authored `display` token plus its canonical
+    /// `key`. This is the **fidelity** path: the normalizers capture the raw
+    /// token here so the Current/Diff views render what the author wrote, not
+    /// the canonicalized form.
+    #[must_use]
+    pub fn with_display(display: String, key: CellValue) -> Self {
+        Self { display, key }
+    }
+}
+
+/// The display string derived from a canonical [`CellValue`] when there is no
+/// distinct authored token: the value rendered as the author would have seen
+/// it. [`Null`](CellValue::Null) and [`Absent`](CellValue::Absent) yield the
+/// empty string — the renderer supplies their NULL/blank affordance from
+/// `key.t`, never from the display text.
+#[must_use]
+pub fn display_from_key(key: &CellValue) -> String {
+    match key {
+        CellValue::Null | CellValue::Absent => String::new(),
+        CellValue::Bool(b) => b.to_string(),
+        CellValue::Number(n) => n.clone(),
+        CellValue::Str(s) => s.clone(),
     }
 }
 
@@ -322,19 +367,81 @@ pub fn type_csv_token(token: &str) -> CellValue {
     CellValue::Str(token.to_owned())
 }
 
-/// Type a NEW-side cell from a csv-format manifest `Value` (dbt-core's
-/// csv-as-array-of-string-dicts encoding). A [`Value::String`] cell — what
-/// core ships for every csv field — routes through [`type_csv_token`] so its
-/// value is inferred (the csv-Array format discriminator, cute-dbt#127 DELTA
-/// 2); any other `Value` shape (a defensive non-string cell) falls back to
-/// [`type_cell_value`]. This is the `type_fn` [`table_from_value_objects`]
-/// threads when `format: csv`, mirroring how `format: dict` threads
-/// [`type_cell_value`] verbatim — `format` is the only discriminator, so a
-/// deliberately-quoted dict `'1'` stays `Str` while a csv `1` infers `Number`.
-fn type_csv_value(v: &Value) -> CellValue {
+// ---------------------------------------------------------------------
+// Authored-token cell builders — display (truth) + key (equality)
+// ---------------------------------------------------------------------
+
+/// Build a NEW-side **dict** [`Cell`] from an already-typed JSON `Value`,
+/// capturing the authored token as the display (cute-dbt#138).
+///
+/// `key` is [`type_cell_value`]'s canonical value; `display` is the value as
+/// authored: a string verbatim, a bool's `true`/`false`, a number's authored
+/// digits (`Value::Number`'s own `to_string`, which — absent `serde_json`'s
+/// `arbitrary_precision` — is the f64 round-trip, so a dict-numeric `1.00`
+/// already arrived as `1.0` upstream of this layer), or compact JSON for a
+/// nested value. A `Null` displays empty (the renderer styles it from `key.t`).
+#[must_use]
+pub fn cell_from_value(v: &Value) -> Cell {
+    let key = type_cell_value(v);
+    let display = match v {
+        Value::Null => String::new(),
+        Value::String(s) => s.clone(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(v).unwrap_or_default(),
+    };
+    Cell::with_display(display, key)
+}
+
+/// Build an OLD-side **dict** [`Cell`] from a YAML scalar token, capturing the
+/// authored token as the display (cute-dbt#138).
+///
+/// `key` is [`type_cell_scalar`]'s canonical value. `display` is the authored
+/// token as a reader sees it: a quoted scalar's inner text (quote-stripped via
+/// the same `parse_yaml_scalar` path that `type_cell_scalar` uses), else the
+/// trimmed token. A token whose key is [`Null`](CellValue::Null) (`""`,
+/// `null`, `~`) displays empty so the renderer styles it as NULL from `key.t`.
+#[must_use]
+pub fn cell_from_scalar(token: &str) -> Cell {
+    let key = type_cell_scalar(token);
+    let trimmed = token.trim();
+    let display = if is_quoted(trimmed) {
+        parse_yaml_scalar(trimmed)
+    } else if matches!(key, CellValue::Null) {
+        String::new()
+    } else {
+        trimmed.to_owned()
+    };
+    Cell::with_display(display, key)
+}
+
+/// Build a csv [`Cell`] from a field token, capturing the raw token as the
+/// display (cute-dbt#138).
+///
+/// `key` is [`type_csv_token`]'s value-inferred canonical value; `display` is
+/// the raw csv token **verbatim** (so a csv `1.00` renders as `1.00` even
+/// though its key is `Number("1")` — the headline fidelity fix). An empty
+/// field (`key == Null`) displays empty.
+#[must_use]
+pub fn cell_from_csv_token(token: &str) -> Cell {
+    let key = type_csv_token(token);
+    let display = if token.is_empty() {
+        String::new()
+    } else {
+        token.to_owned()
+    };
+    Cell::with_display(display, key)
+}
+
+/// The csv-format NEW-side `Value` cell builder (cute-dbt#138): a
+/// [`Value::String`] routes through [`cell_from_csv_token`] (raw token kept as
+/// display, value-inferred key); any other shape falls back to
+/// [`cell_from_value`]. The `cell_fn` analogue of the dict-path
+/// [`cell_from_value`] — `format` is the only discriminator.
+fn cell_from_csv_value(v: &Value) -> Cell {
     match v {
-        Value::String(s) => type_csv_token(s),
-        other => type_cell_value(other),
+        Value::String(s) => cell_from_csv_token(s),
+        other => cell_from_value(other),
     }
 }
 
@@ -424,13 +531,15 @@ fn canonicalize_float(f: f64) -> String {
 /// ([`table_from_manifest_rows`] on a `Value::String`) and the csv OLD side
 /// ([`table_from_yaml_fragment`] on a dedented `rows: |` body).
 ///
-/// Behavior, mirroring the JS twin's `tests/headless_csv_parser.rs` cases:
-/// strip exactly one trailing `\n` (and a preceding `\r`); quoted fields;
-/// `""` → a literal `"`; CRLF as one terminator; commas/newlines inside
-/// quotes verbatim; the first row is the header; fewer than two rows
-/// (empty or header-only) → `[]`; an unterminated final row is accepted;
-/// a row shorter than the header fills the missing trailing columns with
-/// `""` (which [`type_csv_token`] then maps to `Null`).
+/// Behavior (since cute-dbt#138 this is the SOLE RFC 4180 implementation — the
+/// JS `parseCsvRows` twin was retired when the Current view started rendering
+/// the Rust-computed [`FixtureTable`] POD; the `g22`–`g26` unit tests own its
+/// correctness): strip exactly one trailing `\n` (and a preceding `\r`);
+/// quoted fields; `""` → a literal `"`; CRLF as one terminator;
+/// commas/newlines inside quotes verbatim; the first row is the header; fewer
+/// than two rows (empty or header-only) → `[]`; an unterminated final row is
+/// accepted; a row shorter than the header fills the missing trailing columns
+/// with `""` (which [`type_csv_token`] then maps to `Null`).
 #[must_use]
 pub fn parse_csv_rows(text: &str) -> Vec<Vec<(String, String)>> {
     if text.is_empty() {
@@ -787,17 +896,18 @@ pub fn table_from_manifest_rows(rows: &Value, format: Option<&str>) -> Option<Fi
     let fmt = FixtureFormat::from_opt(format);
     match rows {
         Value::Null => Some(FixtureTable::default()),
-        // The Array arm is FORMAT-AWARE (cute-dbt#127 DELTA 2): dbt-core
-        // encodes csv as a `Value::Array` of all-string dicts, so a csv-format
-        // array threads the value-inferring `type_csv_value`; a dict-format
-        // array keeps `type_cell_value` verbatim (a deliberately-quoted dict
-        // `'1'` stays `Str`). `format` is the only discriminator.
+        // The Array arm is FORMAT-AWARE (cute-dbt#127 DELTA 2, cute-dbt#138):
+        // dbt-core encodes csv as a `Value::Array` of all-string dicts, so a
+        // csv-format array threads the value-inferring `cell_from_csv_value`;
+        // a dict-format array keeps `cell_from_value` verbatim (a
+        // deliberately-quoted dict `'1'` stays `Str`). Each cell carries its
+        // authored display + canonical key. `format` is the only discriminator.
         Value::Array(elems) => {
-            let type_fn: fn(&Value) -> CellValue = match fmt {
-                FixtureFormat::Csv => type_csv_value,
-                FixtureFormat::Dict | FixtureFormat::Sql => type_cell_value,
+            let cell_fn: fn(&Value) -> Cell = match fmt {
+                FixtureFormat::Csv => cell_from_csv_value,
+                FixtureFormat::Dict | FixtureFormat::Sql => cell_from_value,
             };
-            Some(table_from_value_objects(elems, type_fn))
+            Some(table_from_value_objects(elems, cell_fn))
         }
         Value::String(s) => match fmt {
             FixtureFormat::Csv => Some(table_from_csv_text(s)),
@@ -831,7 +941,7 @@ pub fn table_from_yaml_fragment(rows_region: &str, format: Option<&str>) -> Opti
         }
         FixtureFormat::Dict => {
             let keyed = parse_block_dict_rows(rows_region);
-            Some(table_from_keyed_rows(&keyed, type_cell_scalar))
+            Some(table_from_keyed_rows(&keyed, cell_from_scalar))
         }
     }
 }
@@ -841,11 +951,13 @@ pub fn table_from_yaml_fragment(rows_region: &str, format: Option<&str>) -> Opti
 /// through `type_fn`. Columns are the first-seen union of object keys; absent
 /// keys → [`CellValue::Absent`].
 ///
-/// `type_fn` is the **format discriminator** (cute-dbt#127 DELTA 2): the
-/// caller passes [`type_cell_value`] for `format: dict` (a quoted `'1'` stays
-/// `Str`) and [`type_csv_value`] for `format: csv` (a `"1"` string cell
-/// infers `Number`). Mirrors the `type_fn` thread in [`table_from_keyed_rows`].
-fn table_from_value_objects(elems: &[Value], type_fn: fn(&Value) -> CellValue) -> FixtureTable {
+/// `cell_fn` is the **format discriminator** (cute-dbt#127 DELTA 2,
+/// cute-dbt#138): the caller passes [`cell_from_value`] for `format: dict`
+/// (a quoted `'1'` stays `Str`) and [`cell_from_csv_value`] for `format: csv`
+/// (a `"1"` string cell infers `Number`). Each cell carries its authored
+/// display plus the canonical key. Mirrors the `cell_fn` thread in
+/// [`table_from_keyed_rows`].
+fn table_from_value_objects(elems: &[Value], cell_fn: fn(&Value) -> Cell) -> FixtureTable {
     // First-seen union of keys across all object rows.
     let mut columns: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -863,12 +975,11 @@ fn table_from_value_objects(elems: &[Value], type_fn: fn(&Value) -> CellValue) -
         .map(|elem| {
             let cells = columns
                 .iter()
-                .map(|col| {
-                    let value = match elem {
-                        Value::Object(map) => map.get(col).map_or(CellValue::Absent, type_fn),
-                        _ => CellValue::Absent,
-                    };
-                    Cell::new(value)
+                .map(|col| match elem {
+                    Value::Object(map) => map
+                        .get(col)
+                        .map_or_else(|| Cell::new(CellValue::Absent), cell_fn),
+                    _ => Cell::new(CellValue::Absent),
                 })
                 .collect();
             TableRow::new(cells)
@@ -878,18 +989,20 @@ fn table_from_value_objects(elems: &[Value], type_fn: fn(&Value) -> CellValue) -
 }
 
 /// Normalize a raw csv body into a [`FixtureTable`] (cells value-inferred via
-/// [`type_csv_token`]). Shared by the fusion NEW side and the csv OLD side.
+/// [`cell_from_csv_token`], raw token kept as display). Shared by the fusion
+/// NEW side and the csv OLD side.
 fn table_from_csv_text(text: &str) -> FixtureTable {
     let keyed = parse_csv_rows(text);
-    table_from_keyed_rows(&keyed, type_csv_token)
+    table_from_keyed_rows(&keyed, cell_from_csv_token)
 }
 
-/// Turn header-keyed string rows into a [`FixtureTable`], typing each token
-/// through `type_fn`. Columns are the first-seen union of keys; a row that
-/// lacks a column → [`CellValue::Absent`].
+/// Turn header-keyed string rows into a [`FixtureTable`], building each cell
+/// through `cell_fn` (authored display + canonical key). Columns are the
+/// first-seen union of keys; a row that lacks a column → a `Cell` with an
+/// [`Absent`](CellValue::Absent) key.
 fn table_from_keyed_rows(
     keyed: &[Vec<(String, String)>],
-    type_fn: fn(&str) -> CellValue,
+    cell_fn: fn(&str) -> Cell,
 ) -> FixtureTable {
     let mut columns: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -906,11 +1019,9 @@ fn table_from_keyed_rows(
             let cells = columns
                 .iter()
                 .map(|col| {
-                    let value = row
-                        .iter()
+                    row.iter()
                         .find(|(k, _)| k == col)
-                        .map_or(CellValue::Absent, |(_, v)| type_fn(v));
-                    Cell::new(value)
+                        .map_or_else(|| Cell::new(CellValue::Absent), |(_, v)| cell_fn(v))
                 })
                 .collect();
             TableRow::new(cells)
@@ -1105,9 +1216,9 @@ mod tests {
         // A sparse dict: row 1 has {a,b}, row 2 has only {a} → row 2's b is
         // Absent, NOT Null. And Absent != Null as CellValues.
         let elems = vec![json!({"a": 1, "b": 2}), json!({"a": 3})];
-        let table = table_from_value_objects(&elems, type_cell_value);
+        let table = table_from_value_objects(&elems, cell_from_value);
         assert_eq!(table.columns, vec!["a".to_string(), "b".to_string()]);
-        assert_eq!(table.rows[1].cells[1].value, CellValue::Absent);
+        assert_eq!(table.rows[1].cells[1].key, CellValue::Absent);
         assert_ne!(CellValue::Absent, CellValue::Null);
     }
 
@@ -1168,7 +1279,7 @@ mod tests {
         // through type_csv_token). The convergence is stronger than the old
         // both-Str: a format-only reformat is a true no-op.
         assert_eq!(
-            fusion_tbl.rows[0].cells[0].value,
+            fusion_tbl.rows[0].cells[0].key,
             CellValue::Number("1".into())
         );
     }
@@ -1188,7 +1299,7 @@ mod tests {
         // Build a one-row, one-column table for `id` and pull out cell[0][0].
         fn cell(rows: &Value, fmt: &str) -> CellValue {
             let t = table_from_manifest_rows(rows, Some(fmt)).unwrap();
-            t.rows[0].cells[0].value.clone()
+            t.rows[0].cells[0].key.clone()
         }
         // dict side: a typed JSON scalar value for `id`.
         fn dict(v: Value) -> CellValue {
@@ -1265,12 +1376,12 @@ mod tests {
         let dict_tbl = table_from_manifest_rows(&rows, Some("dict")).unwrap();
         let csv_tbl = table_from_manifest_rows(&rows, Some("csv")).unwrap();
         assert_eq!(
-            dict_tbl.rows[0].cells[0].value,
+            dict_tbl.rows[0].cells[0].key,
             CellValue::Str("1".into()),
             "a deliberately-quoted dict '1' stays Str"
         );
         assert_eq!(
-            csv_tbl.rows[0].cells[0].value,
+            csv_tbl.rows[0].cells[0].key,
             CellValue::Number("1".into()),
             "the same array under csv format infers Number"
         );
@@ -1324,7 +1435,7 @@ mod tests {
     /// `BTreeMap`, so the column order is alphabetical, not insertion order).
     fn cell_by_col(t: &FixtureTable, row: usize, col: &str) -> CellValue {
         let idx = t.columns.iter().position(|c| c == col).expect("column");
-        t.rows[row].cells[idx].value.clone()
+        t.rows[row].cells[idx].key.clone()
     }
 
     /// Kill the csv-Array routing in `table_from_value_objects`: the threaded
@@ -1356,7 +1467,8 @@ mod tests {
 
     // ----- G. Parsers -----
 
-    /// Mirror tests/headless_csv_parser.rs's exact RFC 4180 cases.
+    /// The canonical RFC 4180 cases (since cute-dbt#138 the Rust parser is the
+    /// sole implementation — the retired JS twin's cases live here now).
     #[test]
     fn g22_parse_csv_mirrors_headless_edge_cases() {
         // Helper: parse and project to a simple Vec<Vec<(k,v)>> string form.
@@ -1524,11 +1636,8 @@ mod tests {
             table.columns,
             vec!["payer_key".to_string(), "payer_id".to_string()]
         );
-        assert_eq!(table.rows[0].cells[0].value, CellValue::Number("-1".into()));
-        assert_eq!(
-            table.rows[0].cells[1].value,
-            CellValue::Str("UNKNOWN".into())
-        );
+        assert_eq!(table.rows[0].cells[0].key, CellValue::Number("-1".into()));
+        assert_eq!(table.rows[0].cells[1].key, CellValue::Str("UNKNOWN".into()));
     }
 
     #[test]
@@ -1544,7 +1653,7 @@ mod tests {
         assert_eq!(row, vec![("note".into(), "'a, b'".into())]);
         // Through the normalizer the quoted value strips to Str("a, b").
         let table = table_from_yaml_fragment("      - {note: 'a, b'}", Some("dict")).unwrap();
-        assert_eq!(table.rows[0].cells[0].value, CellValue::Str("a, b".into()));
+        assert_eq!(table.rows[0].cells[0].key, CellValue::Str("a, b".into()));
     }
 
     #[test]
@@ -1630,7 +1739,7 @@ mod tests {
         let table = table_from_yaml_fragment(region, Some("csv")).unwrap();
         assert_eq!(table.columns, vec!["id".to_string(), "name".to_string()]);
         assert_eq!(table.rows.len(), 2);
-        assert_eq!(table.rows[0].cells[1].value, CellValue::Str("alice".into()));
+        assert_eq!(table.rows[0].cells[1].key, CellValue::Str("alice".into()));
     }
 
     #[test]

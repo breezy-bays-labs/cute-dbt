@@ -178,11 +178,11 @@ fn h31_block_style_dict_single_cell_edit_is_one_modified_cell() {
     // Old payer_key was 1 (from the Removed line), new is 2 (manifest).
     use cute_dbt::domain::unit_test_table::CellValue;
     assert_eq!(
-        td.rows[0].cells[pk].old,
+        td.rows[0].cells[pk].old.key,
         CellValue::Number("1".into()),
         "old payer_key reconstructed from the Removed line"
     );
-    assert_eq!(td.rows[0].cells[pk].new, CellValue::Number("2".into()));
+    assert_eq!(td.rows[0].cells[pk].new.key, CellValue::Number("2".into()));
 }
 
 /// Inline-flow dict, single-cell edit. Each list item is a whole row, so
@@ -261,8 +261,14 @@ fn expect_side_single_cell_edit_populates_data_expect() {
         !td.rows[0].cells[label].changed,
         "label unchanged (Context)"
     );
-    assert_eq!(td.rows[0].cells[count].old, CellValue::Number("5".into()));
-    assert_eq!(td.rows[0].cells[count].new, CellValue::Number("7".into()));
+    assert_eq!(
+        td.rows[0].cells[count].old.key,
+        CellValue::Number("5".into())
+    );
+    assert_eq!(
+        td.rows[0].cells[count].new.key,
+        CellValue::Number("7".into())
+    );
 }
 
 /// csv block-scalar edit: the header line survives as Context (only the data
@@ -545,25 +551,33 @@ fn fusion_csv_raw_string_new_path_value_infers_through_the_adapter() {
     // Value inference (cute-dbt#127) fired on the raw-string fields:
     // `encounters` → Str, `1` → Number, `false` → Bool.
     assert_eq!(
-        given_tbl.rows[0].cells[0].value,
+        given_tbl.rows[0].cells[0].key,
         CellValue::Str("encounters".into())
     );
     assert_eq!(
-        given_tbl.rows[0].cells[1].value,
+        given_tbl.rows[0].cells[1].key,
         CellValue::Number("1".into()),
         "a fusion csv numeric field infers Number, not Str"
     );
     assert_eq!(
-        given_tbl.rows[0].cells[2].value,
+        given_tbl.rows[0].cells[2].key,
         CellValue::Bool(false),
         "a fusion csv `false` field infers Bool"
     );
-    assert_eq!(given_tbl.rows[1].cells[2].value, CellValue::Bool(true));
+    assert_eq!(given_tbl.rows[1].cells[2].key, CellValue::Bool(true));
+
+    // The given side authored `1` (row 0) / `true` (row 1) — and the authored
+    // DISPLAY token survives the IR (cute-dbt#138). `1` displays `1`, lowercase
+    // `true` displays `true`.
+    assert_eq!(given_tbl.rows[0].cells[1].display, "1");
+    assert_eq!(given_tbl.rows[1].cells[2].display, "true");
 
     // --- EXPECT side: the SAME logical data, reformatted (1 → 1.00, true →
-    // TRUE). Because csv is value-inferred, the expect table is EQUAL to the
-    // given table — a reformat-only change is a zero data diff (the #127
-    // headline guarantee), proven end-to-end on a committed fixture.
+    // TRUE). Because csv is value-inferred, the expect table's KEYS are EQUAL
+    // to the given table's keys — a reformat-only change is a zero data diff
+    // (the #127 equality guarantee). But the authored DISPLAY tokens DIFFER
+    // (`1` vs `1.00`), and cute-dbt#138 preserves them: the diff shows the
+    // authored value yet is NOT flagged.
     let expect = ut.expect();
     assert_eq!(expect.format(), Some("csv"));
     assert!(
@@ -572,9 +586,38 @@ fn fusion_csv_raw_string_new_path_value_infers_through_the_adapter() {
     );
     let expect_tbl = table_from_manifest_rows(expect.rows(), expect.format())
         .expect("the raw-string csv expect body parses");
+
+    // cute-dbt#138: the two tables are NO LONGER byte-equal — the `display`
+    // axis preserves the authored reformat (`1` vs `1.00`). The expect side
+    // authored `1.00`; that token survives.
     assert_eq!(
+        expect_tbl.rows[0].cells[1].display, "1.00",
+        "the authored `1.00` token is preserved (the #138 fidelity fix)"
+    );
+    assert_eq!(
+        expect_tbl.rows[1].cells[2].display, "TRUE",
+        "the authored uppercase `TRUE` token is preserved too (#138)"
+    );
+    assert_ne!(
         given_tbl, expect_tbl,
-        "1 vs 1.00 and false vs TRUE are value-equal: the reformatted expect \
-         table converges with the given table (cute-dbt#127)"
+        "the tables now differ on the authored DISPLAY axis (1 vs 1.00) — #138"
+    );
+
+    // But on the canonical KEY (equality) axis they converge cell-for-cell:
+    // a reformat-only change is still a zero data diff.
+    for (g_row, e_row) in given_tbl.rows.iter().zip(expect_tbl.rows.iter()) {
+        for (g_cell, e_cell) in g_row.cells.iter().zip(e_row.cells.iter()) {
+            assert_eq!(
+                g_cell.key, e_cell.key,
+                "keys converge: 1≡1.00, TRUE≡true (the #127 equality guarantee)"
+            );
+        }
+    }
+    // End-to-end: the diff verdict is zero change (keys equal) even though the
+    // displays differ — the headline #138 behavior on a committed fixture.
+    let diff = cute_dbt::domain::cell_diff::diff_fixture_tables(&given_tbl, &expect_tbl);
+    assert!(
+        !diff.has_real_change(),
+        "format-only reformat (1 → 1.00) is NOT flagged: keys equal despite display change"
     );
 }

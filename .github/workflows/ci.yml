@@ -711,12 +711,11 @@ jobs:
       # invocation in the cross-platform `test` matrix does not carry a
       # Chrome dependency. This dedicated job opts in explicitly.
       - run: cargo test --test headless_zero_egress --locked -- --ignored
-      # RFC 4180 CSV parser correctness (cute-dbt#66) — also requires
-      # headless Chrome and reuses the Chrome install above. Splitting
-      # into a separate `cargo test` invocation keeps test names clean
-      # and isolates failure modes (a parser regression is unrelated
-      # to a network regression).
-      - run: cargo test --test headless_csv_parser --locked -- --ignored
+      # RFC 4180 CSV parser correctness (cute-dbt#66) moved to the Rust
+      # `parse_csv_rows` unit tests (`src/domain/unit_test_table.rs`,
+      # `g22`–`g26`) in cute-dbt#138: the JS `parseCsvRows` twin was retired
+      # when the Current view started rendering the Rust-computed FixtureTable
+      # POD, so there is no longer a headless CSV parser to exercise.
       # Updated-only ↔ All-tests toggle interaction (cute-dbt#91) — drives
       # the inlined report JS in a real browser (selector visibility,
       # toggle-dependent counts, 0-updated hint, auto-All landing). Reuses

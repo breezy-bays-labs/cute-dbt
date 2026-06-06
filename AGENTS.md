@@ -98,12 +98,14 @@ verified 2026-05-26:
 | csv    | array of dicts    | raw CSV string         |
 | sql    | raw SELECT string | raw SELECT string      |
 
-cute-dbt's JS renderer parses csv at render time so reports look
-identical regardless of which engine compiled the manifest
-(cute-dbt#66 — hand-rolled RFC 4180 parser, unit-tested via
-`tests/headless_csv_parser.rs`). The real engine-divergent surface
-elsewhere is YAML strictness: fusion rejects deprecated test-args
-that core only warns about.
+cute-dbt parses csv in the domain (`table_from_manifest_rows` →
+`parse_csv_rows`) so reports look identical regardless of which engine
+compiled the manifest (cute-dbt#66 — hand-rolled RFC 4180 parser, unit-tested
+via `src/domain/unit_test_table.rs` `g22`–`g26`). Since cute-dbt#138 the
+Current-view table renders the Rust-computed `FixtureTable` POD directly and
+the JS `parseCsvRows` twin is retired — the template is a pure renderer. The
+real engine-divergent surface elsewhere is YAML strictness: fusion rejects
+deprecated test-args that core only warns about.
 
 ## Working rules
 
