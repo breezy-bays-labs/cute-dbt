@@ -729,15 +729,20 @@ fn override_only_edit_shows_text_diff_and_no_spurious_cell_diff() {
             dl(DiffLineKind::Context, "      macros:", None),
             dl(DiffLineKind::Context, "        is_incremental: false", None),
             dl(DiffLineKind::Context, "      vars:", None),
+            // emphasis = the changed VALUE codepoints. `cutoff_days: ` is 13
+            // chars after the 8-space indent (indices 8..=20), so the value
+            // starts at codepoint 21 (Gemini PR#144): `7` → [21,22), `30` →
+            // [21,23). The assertions below key on the change LINES, not the
+            // emphasis, but the mock should still describe a faithful diff.
             dl(
                 DiffLineKind::Removed,
                 "        cutoff_days: 7",
-                Some((19, 20)),
+                Some((21, 22)),
             ),
             dl(
                 DiffLineKind::Added,
                 "        cutoff_days: 30",
-                Some((19, 21)),
+                Some((21, 23)),
             ),
             dl(DiffLineKind::Context, "      env_vars:", None),
             dl(DiffLineKind::Context, "        DBT_REGION: us-east-1", None),
