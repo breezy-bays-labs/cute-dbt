@@ -2125,7 +2125,9 @@ fn global_expand_collapse_mirrors_every_fold() {
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
 
-    // The controls strip renders in PR-diff mode, context input defaults to 3.
+    // The controls strip renders in PR-diff mode (now Expand-all only; the
+    // configurable context-lines input moved into the #139 settings cog panel,
+    // where it still defaults to 3).
     assert_eq!(
         eval_string(
             &tab,
@@ -2135,9 +2137,12 @@ fn global_expand_collapse_mirrors_every_fold() {
         "the diff-view controls strip renders in PR-diff mode",
     );
     assert_eq!(
-        eval_string(&tab, "document.querySelector('.diff-context-input').value"),
+        eval_string(
+            &tab,
+            "document.querySelector('#settings-context-input').value"
+        ),
         "3",
-        "the context-lines input defaults to 3",
+        "the settings-panel context-lines input defaults to 3",
     );
 
     // Mount a folded block: 1+1 change, 10 context, 1+1 change -> 4 folded.
@@ -2234,6 +2239,354 @@ fn global_expand_collapse_mirrors_every_fold() {
         "false",
         "collapse-all sets the per-hunk control back to aria-expanded=false",
     );
+
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#139: report settings menu (cog) -----------------------------
+
+/// `data_diff` for one given input with a single Modified row carrying TWO
+/// cells: a REAL value change (`qty` 100 -> 200, keys differ) AND a FORMAT-ONLY
+/// change (`amt` displays `1.00` -> `1`, both keying to Number("1")). The
+/// format-only cell is `changed: false` (the Rust normalized verdict), the real
+/// cell `changed: true`. This is the cute-dbt#139 toggle anchor: the strict lens
+/// must flip the format-only cell to changed; the normalized lens must keep it
+/// unchanged. The format-only cell lives in a Modified row (the only place both
+/// authored displays survive on the wire — an Unchanged row discards the OLD
+/// display).
+fn format_only_plus_real_data_diff(input: &str) -> UnitTestDataDiff {
+    use cute_dbt::domain::{
+        Cell, CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff,
+        RowChange, RowChangeKind,
+    };
+    UnitTestDataDiff {
+        given: vec![NamedTableDiff {
+            input: input.to_owned(),
+            diff: FixtureTableDiff {
+                columns: vec![
+                    DiffColumn {
+                        name: "qty".into(),
+                        status: ColumnStatus::Present,
+                    },
+                    DiffColumn {
+                        name: "amt".into(),
+                        status: ColumnStatus::Present,
+                    },
+                ],
+                rows: vec![RowChange {
+                    kind: RowChangeKind::Modified,
+                    cells: vec![
+                        // Real value change: 100 -> 200 (keys differ).
+                        CellChange {
+                            old: Cell::new(CellValue::Number("100".into())),
+                            new: Cell::new(CellValue::Number("200".into())),
+                            changed: true,
+                        },
+                        // Format-only change: display 1.00 -> 1, BOTH key
+                        // Number("1") so the Rust verdict is `changed: false`.
+                        // The strict lens (compare display) flips this to true.
+                        CellChange {
+                            old: Cell::with_display("1.00".into(), CellValue::Number("1".into())),
+                            new: Cell::with_display("1".into(), CellValue::Number("1".into())),
+                            changed: false,
+                        },
+                    ],
+                }],
+            },
+        }],
+        expect: None,
+    }
+}
+
+/// Render the standard single-test PR-diff report whose sole given carries the
+/// format-only-plus-real cell diff, then switch to All-inputs so the grid (and
+/// its cell-diff Diff view) is on screen. Returns the open `Tab`.
+fn settings_fixture_tab(browser: &Browser, filename: &str) -> std::sync::Arc<Tab> {
+    let id = "unit_test.shop.dim_a.upd";
+    let url = render_pr_diff_with_data_diffs(
+        filename,
+        vec![model_node_with_src("model.shop.dim_a")],
+        vec![(
+            id,
+            unit_test_with_given("upd", "dim_a", serde_json::json!([{"qty": 200, "amt": 1}])),
+        )],
+        &["model.shop.dim_a"],
+        &[id],
+        vec![(id, format_only_plus_real_data_diff("ref('src')"))],
+    );
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    show_all_inputs(&tab);
+    tab
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn settings_cog_opens_and_closes_by_click_keyboard_and_outside() {
+    // The cog (top-right, aria-labelled, aria-haspopup) toggles a non-blocking
+    // panel: click opens (aria-expanded=true, panel visible), click closes,
+    // Escape closes + returns focus to the cog, an outside click closes.
+    let browser = launch_browser();
+    let tab = settings_fixture_tab(&browser, "headless_settings_cog.html");
+
+    // The cog is present, aria-labelled, collapsed at boot; panel hidden.
+    assert!(
+        eval_bool(&tab, "document.querySelector('.settings-cog') !== null"),
+        "the settings cog renders in PR-diff mode",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.settings-cog').getAttribute('aria-label')"
+        ),
+        "Report settings",
+        "the cog is aria-labelled",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.settings-cog').getAttribute('aria-expanded')"
+        ),
+        "false",
+        "the cog starts collapsed",
+    );
+    assert!(
+        !visible(&tab, "#settings-panel"),
+        "the panel is hidden at boot",
+    );
+
+    // Click opens.
+    let _ = eval(&tab, "document.querySelector('.settings-cog').click()");
+    assert!(
+        visible(&tab, "#settings-panel"),
+        "clicking the cog opens the panel",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.settings-cog').getAttribute('aria-expanded')"
+        ),
+        "true",
+        "the open cog reports aria-expanded=true",
+    );
+
+    // Escape closes and returns focus to the cog.
+    let _ = eval(
+        &tab,
+        "document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))",
+    );
+    assert!(!visible(&tab, "#settings-panel"), "Escape closes the panel",);
+    assert!(
+        eval_bool(
+            &tab,
+            "document.activeElement === document.querySelector('.settings-cog')"
+        ),
+        "Escape returns focus to the cog",
+    );
+
+    // Re-open, then an outside click (on the body) closes it.
+    let _ = eval(&tab, "document.querySelector('.settings-cog').click()");
+    assert!(visible(&tab, "#settings-panel"), "re-opened");
+    let _ = eval(&tab, "document.body.click()");
+    assert!(
+        !visible(&tab, "#settings-panel"),
+        "an outside click closes the panel",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn settings_context_lines_refolds_block_diffs_live() {
+    // Changing the panel's context-lines input re-folds the live block diffs
+    // (the same renderForSelectedModel re-render path) and updates diffFoldPad.
+    // Verified through the __cuteRenderBlockDiff seam (the report's own diff is
+    // not guaranteed long enough to fold): set the input to 1 and assert a
+    // freshly-rendered 10-context block now hides 8 (head 1 + tail 1) lines.
+    let browser = launch_browser();
+    let tab = settings_fixture_tab(&browser, "headless_settings_context.html");
+
+    let long_diff = format!(
+        "{{lines:[{{kind:'removed',text:'a',emphasis:null}},\
+         {{kind:'added',text:'b',emphasis:null}},{ctx},\
+         {{kind:'removed',text:'c',emphasis:null}},\
+         {{kind:'added',text:'d',emphasis:null}}]}}",
+        ctx = ctx_lines_js(10),
+    );
+
+    // Default pad 3: a fresh block hides 4.
+    let default_html = eval_string(
+        &tab,
+        &format!("window.__cuteRenderBlockDiff({long_diff}, window.__cuteTokenizeSql)"),
+    );
+    assert!(
+        default_html.contains("Show 4 unchanged lines"),
+        "default pad 3 hides 4: {default_html}",
+    );
+
+    // Set the panel input to 1 and fire change -> diffFoldPad becomes 1.
+    let _ = eval(
+        &tab,
+        "(function(){var i=document.querySelector('#settings-context-input');\
+           i.value='1';i.dispatchEvent(new Event('change'));})()",
+    );
+    let pad1_html = eval_string(
+        &tab,
+        &format!("window.__cuteRenderBlockDiff({long_diff}, window.__cuteTokenizeSql)"),
+    );
+    assert!(
+        pad1_html.contains("Show 8 unchanged lines"),
+        "after setting context lines to 1, a fresh block hides 8: {pad1_html}",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn settings_normalize_toggle_flips_the_format_only_cell_lens() {
+    // The normalize-equality lens, driven from BOTH the settings switch AND the
+    // __cuteCellChanged seam: ON (default) hides a format-only cell change
+    // (key-equal); OFF flags it (display differs). The real value change stays
+    // flagged either way. Row alignment is never re-paired — only the per-cell
+    // flag + the row-modified rollup move.
+    let browser = launch_browser();
+    let tab = settings_fixture_tab(&browser, "headless_settings_normalize.html");
+
+    // Pin the lens directly on the two cells via the seam (no DOM dependency).
+    let real = "{old:{display:'100',key:{t:'number',v:'100'}},\
+                 new:{display:'200',key:{t:'number',v:'200'}},changed:true}";
+    let fmt = "{old:{display:'1.00',key:{t:'number',v:'1'}},\
+               new:{display:'1',key:{t:'number',v:'1'}},changed:false}";
+
+    // Normalized (default ON): the real cell flags, the format-only does not.
+    assert!(
+        eval_bool(&tab, &format!("window.__cuteCellChanged({real})")),
+        "normalized lens flags a real value change",
+    );
+    assert!(
+        !eval_bool(&tab, &format!("window.__cuteCellChanged({fmt})")),
+        "normalized lens HIDES a format-only change",
+    );
+
+    // The Diff grid: exactly one changed cell (the real one), so ONE
+    // .cell-changed and the row keeps its row-modified tint.
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.cell-diff-table tr.row-modified .cell-changed').length"
+        ),
+        1,
+        "normalized: only the real value change renders as a changed cell",
+    );
+
+    // Flip the switch OFF (strict) via the panel checkbox.
+    let _ = eval(&tab, "document.querySelector('.settings-cog').click()");
+    let _ = eval(
+        &tab,
+        "(function(){var c=document.querySelector('#settings-normalize-input');\
+           c.checked=false;c.dispatchEvent(new Event('change'));})()",
+    );
+
+    // Strict lens: the format-only cell now flags (displays differ).
+    assert!(
+        eval_bool(&tab, &format!("window.__cuteCellChanged({fmt})")),
+        "strict lens FLAGS a format-only change (displays differ)",
+    );
+    // And the re-render now shows BOTH cells changed in the Diff grid.
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.cell-diff-table tr.row-modified .cell-changed').length"
+        ),
+        2,
+        "strict: both the real and the format-only change render as changed cells",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn settings_persist_across_reload_where_supported() {
+    // Settings persist across a reload via localStorage where available; under
+    // a file:// origin where localStorage throws, the load is a no-op (defaults
+    // hold) and nothing crashes. Either way the page renders. We assert the
+    // happy path when storage is available, else the graceful-default path.
+    let browser = launch_browser();
+    let tab = settings_fixture_tab(&browser, "headless_settings_persist.html");
+
+    // Is localStorage usable at this origin? (file:// may throw or be null.)
+    let storage_ok = eval_bool(
+        &tab,
+        "(function(){try{if(!window.localStorage)return false;\
+           window.localStorage.setItem('__probe','1');\
+           window.localStorage.removeItem('__probe');return true;}\
+           catch(e){return false;}})()",
+    );
+
+    // Change both settings through the panel.
+    let _ = eval(&tab, "document.querySelector('.settings-cog').click()");
+    let _ = eval(
+        &tab,
+        "(function(){var i=document.querySelector('#settings-context-input');\
+           i.value='7';i.dispatchEvent(new Event('change'));\
+           var c=document.querySelector('#settings-normalize-input');\
+           c.checked=false;c.dispatchEvent(new Event('change'));})()",
+    );
+
+    if storage_ok {
+        // Persisted blob carries the new values.
+        let raw = eval_string(
+            &tab,
+            "window.localStorage.getItem('cute-dbt.settings.v1') || ''",
+        );
+        assert!(
+            raw.contains("\"contextLines\":7") && raw.contains("\"normalizeEquality\":false"),
+            "settings persisted to localStorage: {raw}",
+        );
+
+        // Reload and assert the controls hydrate to the persisted values. The
+        // boot `$(function(){...})` (bindSettingsMenu hydrates the controls)
+        // runs after jQuery-ready, which `wait_until_navigated` alone races —
+        // poll the hydrated input value with a bounded retry.
+        tab.reload(false, None).expect("reload");
+        tab.wait_until_navigated().expect("await reload");
+        let mut ctx_val = String::new();
+        for _ in 0..50 {
+            ctx_val = eval_string(
+                &tab,
+                "(document.querySelector('#settings-context-input')||{}).value||''",
+            );
+            if ctx_val == "7" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(
+            ctx_val, "7",
+            "context-lines hydrates from localStorage after reload",
+        );
+        assert!(
+            !eval_bool(
+                &tab,
+                "document.querySelector('#settings-normalize-input').checked"
+            ),
+            "normalize switch hydrates to OFF from localStorage after reload",
+        );
+    } else {
+        // file:// no-storage path: the in-memory settings still drive the live
+        // UI (the switch we just flipped is OFF) and the page did not crash.
+        assert!(
+            !eval_bool(
+                &tab,
+                "document.querySelector('#settings-normalize-input').checked"
+            ),
+            "without storage, the in-memory toggle still reflects the live OFF state",
+        );
+    }
 
     let _ = tab.close(true);
 }

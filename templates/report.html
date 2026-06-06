@@ -278,6 +278,48 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
 .diff-expand-all { font: inherit; font-size: 1em; padding: 0.15rem 0.65rem; border: 1px solid #d0d0d8; background: #f4f4f6; color: #4a4a52; cursor: pointer; border-radius: 4px; }
 .diff-expand-all:hover { background: #e9e9ee; }
 .diff-expand-all[aria-pressed="true"] { background: #2a2a32; color: #fff; border-color: #2a2a32; }
+/* cute-dbt#139 — report settings menu (cog, top-right). A fixed-position cog
+   button toggles a non-blocking dropdown panel of display preferences
+   (diff context lines + the normalize-equality lens). PR-diff-mode only (its
+   settings act on the inline diffs that exist only there), so baseline output
+   stays byte-identical (#85). Zero-egress: client-side state only, optional
+   localStorage with a graceful in-memory fallback under file://. */
+.settings-cog-wrap { position: fixed; top: 0.75rem; right: 0.75rem; z-index: 50; }
+.settings-cog {
+  font: inherit; font-size: 1.2em; line-height: 1; width: 2.2rem; height: 2.2rem;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid #d0d0d8; border-radius: 50%; background: #fff; color: #4a4a52;
+  cursor: pointer; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+}
+.settings-cog:hover { background: #f4f4f6; }
+.settings-cog:focus-visible { outline: 2px solid #4338ca; outline-offset: 2px; }
+.settings-cog[aria-expanded="true"] { background: #2a2a32; color: #fff; border-color: #2a2a32; }
+.settings-panel {
+  position: absolute; top: 2.6rem; right: 0; width: 19rem;
+  background: #fff; border: 1px solid #d0d0d8; border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.16); padding: 0.85rem 1rem;
+  font-size: 0.85em; color: #3a3a42;
+}
+.settings-panel h2 { font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.06em; color: #6a6a72; margin: 0 0 0.6rem; }
+.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; margin: 0.55rem 0; }
+.settings-row label { flex: 1 1 auto; }
+.settings-row .settings-hint { display: block; color: #6a6a72; font-size: 0.85em; margin-top: 0.1rem; }
+.settings-context-input { width: 3.5em; font: inherit; padding: 0.1rem 0.3rem; border: 1px solid #d0d0d8; border-radius: 4px; }
+/* Pure-CSS switch built on a checkbox; keyboard-operable (Space toggles the
+   native checkbox), aria comes from the checkbox itself. */
+.settings-switch { position: relative; display: inline-block; width: 2.4rem; height: 1.3rem; flex: 0 0 auto; }
+.settings-switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.settings-switch .switch-track {
+  position: absolute; inset: 0; background: #c8c8d0; border-radius: 999px; transition: background 0.12s;
+  pointer-events: none;
+}
+.settings-switch .switch-track::before {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 1.1rem; height: 1.1rem;
+  background: #fff; border-radius: 50%; transition: transform 0.12s; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+.settings-switch input:checked + .switch-track { background: #4338ca; }
+.settings-switch input:checked + .switch-track::before { transform: translateX(1.1rem); }
+.settings-switch input:focus-visible + .switch-track { outline: 2px solid #4338ca; outline-offset: 2px; }
 /* The emphasis marks the exact changed characters. DELIBERATE DIVERGENCE
    (cute-dbt#132): the cell grid renders changed scalars as bold red/green TEXT
    (short values, no surrounding syntax to compete with), but the YAML/SQL line
@@ -329,18 +371,53 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
      (never a scoping failure). The leading `{%-` trims the inter-tag
      whitespace so baseline-mode output stays byte-identical (#85 contract). #}
   <p class="zero-updated-affirm" data-testid="zero-updated-affirm" hidden>no unit-test definitions changed in this diff</p>
-  {# cute-dbt#132 — diff-view controls: configurable fold context + global
-     expand/collapse. PR-diff mode only (inline diffs exist only here), so
-     baseline output stays byte-identical (#85). Wired in bindDiffViewControls. #}
+  {# cute-dbt#132 — diff-view controls: the global expand/collapse action.
+     PR-diff mode only (inline diffs exist only here), so baseline output stays
+     byte-identical (#85). The configurable fold-context input moved into the
+     #139 settings panel (the cog, top-right); the Expand-all action stays here
+     as a per-view affordance. Wired in bindDiffViewControls. #}
   <div class="diff-view-controls" aria-label="Diff view controls">
-    <label class="diff-ctl-label">Context lines
-      <input type="number" class="diff-context-input" min="0" max="20" step="1" value="3"
-             aria-label="Unchanged context lines shown around each change">
-    </label>
     <button type="button" class="diff-expand-all" aria-pressed="false">Expand all</button>
   </div>
   {%- endif %}
 </section>
+
+{%- if is_pr_diff %}
+{# cute-dbt#139 — report settings menu. A cog button (top-right, keyboard-
+   accessible, aria-labelled) toggles a non-blocking panel of display
+   preferences that act on the inline diffs (PR-diff mode only, so baseline
+   output stays byte-identical, #85). Both settings are zero-egress: in-memory
+   client state with optional localStorage persistence + a file:// fallback.
+   Wired in bindSettingsMenu. #}
+<div class="settings-cog-wrap">
+  <button type="button" class="settings-cog" aria-label="Report settings"
+          aria-haspopup="true" aria-expanded="false" aria-controls="settings-panel">
+    <span aria-hidden="true">&#9881;</span>
+  </button>
+  <div class="settings-panel" id="settings-panel" role="dialog"
+       aria-label="Report settings" hidden>
+    <h2>Settings</h2>
+    <div class="settings-row">
+      <label for="settings-context-input">Diff context lines
+        <span class="settings-hint">unchanged lines kept around each change</span>
+      </label>
+      <input type="number" class="settings-context-input" id="settings-context-input"
+             min="0" max="20" step="1" value="3"
+             aria-label="Unchanged context lines shown around each change">
+    </div>
+    <div class="settings-row">
+      <label for="settings-normalize-input">Hide format-only changes
+        <span class="settings-hint">treat reformatted-but-equal cells as unchanged</span>
+      </label>
+      <span class="settings-switch">
+        <input type="checkbox" id="settings-normalize-input"
+               aria-label="Hide format-only (normalized-equal) cell changes" checked>
+        <span class="switch-track" aria-hidden="true"></span>
+      </span>
+    </div>
+  </div>
+</div>
+{%- endif %}
 
 <section class="error-card" role="alert" aria-label="Manifest error">
   <h2>This manifest can't be visualized</h2>
@@ -521,8 +598,61 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     showAll:        false
   };
 
+  // cute-dbt#139 — report-settings menu state. Both settings are PURE
+  // presentation over the existing payload: `contextLines` re-folds the block
+  // diffs (no recompute), `normalizeEquality` flips the per-cell change lens
+  // (normalized: compare the canonical `key`; strict: compare the authored
+  // `display` — both axes ship on the #138 wire, so neither needs a Rust
+  // round-trip). State is in-memory; loadSettings/saveSettings persist it to
+  // localStorage where available (a graceful in-memory fallback under file://,
+  // where some browsers throw on localStorage access).
+  var SETTINGS_KEY = "cute-dbt.settings.v1";
+  var settings = {
+    contextLines:      3,    // mirrors diffFoldPad's historical default (#132).
+    normalizeEquality: true  // ON: hide format-only cell changes (default).
+  };
+
+  // Read persisted settings, clamping/coercing into the valid ranges. Any
+  // storage error (file:// SecurityError, disabled storage) leaves the
+  // in-memory defaults intact — never throws to the caller.
+  function loadSettings() {
+    var raw;
+    try {
+      raw = window.localStorage && window.localStorage.getItem(SETTINGS_KEY);
+    } catch (e) {
+      raw = null;
+    }
+    if (!raw) return;
+    var parsed;
+    try { parsed = JSON.parse(raw); } catch (e) { return; }
+    if (!parsed || typeof parsed !== "object") return;
+    if (typeof parsed.contextLines === "number" && isFinite(parsed.contextLines)) {
+      settings.contextLines = Math.max(0, Math.min(20, Math.round(parsed.contextLines)));
+    }
+    if (typeof parsed.normalizeEquality === "boolean") {
+      settings.normalizeEquality = parsed.normalizeEquality;
+    }
+  }
+
+  // Persist the current settings. Swallows any storage error (file:// or
+  // disabled storage) so the in-memory state still drives the live UI.
+  function saveSettings() {
+    try {
+      if (window.localStorage) {
+        window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+      }
+    } catch (e) {
+      // In-memory only — zero-egress fallback, no rethrow.
+    }
+  }
+
   $(function () {
     initExplainHash();
+    // cute-dbt#139 — hydrate persisted settings BEFORE the first render so the
+    // initial diffs fold at the saved context-lines and the cell lens reflects
+    // the saved normalize-equality choice. diffFoldPad mirrors settings.
+    loadSettings();
+    diffFoldPad = settings.contextLines;
     renderBanner();
     if (!DATA.models.length) {
       $(".test-selection").hide();
@@ -554,6 +684,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     renderTestSelector();
     renderForSelectedModel();
     bindGlobalHandlers();
+    bindSettingsMenu();
   });
 
   // cute-dbt#91 — scope-toggle helpers --------------------------------
@@ -1883,25 +2014,78 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
   }
 
   // Wire the PR-diff-only diff-view controls strip. Idempotent-safe binding;
-  // returns early in baseline mode where the strip is not emitted.
+  // returns early in baseline mode where the strip is not emitted. The
+  // configurable fold-context input now lives in the #139 settings panel; this
+  // strip retains only the global expand-all/collapse-all action.
   function bindDiffViewControls() {
     var $strip = $(".diff-view-controls");
     if (!$strip.length) return;
-    // Context-lines stepper: clamp to [0,20] and re-render the active diffs
-    // with the new pad. A re-render naturally resets the expand-all toggle.
-    $strip.find(".diff-context-input").on("change", function () {
-      var v = parseInt($(this).val(), 10);
-      if (isNaN(v)) { $(this).val(diffFoldPad); return; }
-      diffFoldPad = Math.max(0, Math.min(20, v));
-      $(this).val(diffFoldPad);
-      renderForSelectedModel();
-    });
     // Global expand-all/collapse-all over every currently-mounted fold (the
     // model SQL diff + the test YAML diff), per-hunk controls still work too.
     $strip.find(".diff-expand-all").on("click", function () {
       diffAllExpanded = !diffAllExpanded;
       setAllFolds(diffAllExpanded, document);
       renderExpandAllToggle();
+    });
+  }
+
+  // cute-dbt#139 — wire the settings cog + panel. PR-diff mode only; returns
+  // early in baseline mode where the cog is not emitted. The cog toggles a
+  // non-blocking panel (Escape + outside-click close, focus returns to the
+  // cog). The two settings drive PURE presentation:
+  //   contextLines  -> diffFoldPad, then renderForSelectedModel() re-folds the
+  //                    live diffs (the same re-render path #132's input used).
+  //   normalize     -> flips the cell lens (cellChanged); a re-render re-tints
+  //                    the cell-diff grids under the new lens.
+  // Both persist via saveSettings (localStorage where available; in-memory
+  // under file://). The controls hydrate to the loaded settings at bind time.
+  function bindSettingsMenu() {
+    var $cog = $(".settings-cog");
+    if (!$cog.length) return;
+    var $panel = $("#settings-panel");
+    var $ctx = $("#settings-context-input");
+    var $norm = $("#settings-normalize-input");
+
+    // Hydrate the controls from the (possibly persisted) settings.
+    $ctx.val(settings.contextLines);
+    $norm.prop("checked", settings.normalizeEquality);
+
+    function setOpen(open) {
+      $panel.prop("hidden", !open);
+      $cog.attr("aria-expanded", open ? "true" : "false");
+    }
+    $cog.on("click", function () {
+      setOpen($cog.attr("aria-expanded") !== "true");
+    });
+    // Escape closes (from anywhere) and returns focus to the cog. Outside-click
+    // closes too; clicks inside the panel/cog are ignored.
+    $(document).on("keydown", function (e) {
+      if ((e.key === "Escape" || e.key === "Esc") && $cog.attr("aria-expanded") === "true") {
+        setOpen(false);
+        $cog.trigger("focus");
+      }
+    });
+    $(document).on("click", function (e) {
+      if ($cog.attr("aria-expanded") !== "true") return;
+      if ($(e.target).closest(".settings-cog-wrap").length) return;
+      setOpen(false);
+    });
+
+    // Context-lines: clamp to [0,20], re-fold the live diffs, persist.
+    $ctx.on("change", function () {
+      var v = parseInt($(this).val(), 10);
+      if (isNaN(v)) { $(this).val(settings.contextLines); return; }
+      settings.contextLines = Math.max(0, Math.min(20, v));
+      diffFoldPad = settings.contextLines;
+      $(this).val(settings.contextLines);
+      saveSettings();
+      renderForSelectedModel();
+    });
+    // Normalize-equality: flip the cell lens, re-render to re-tint, persist.
+    $norm.on("change", function () {
+      settings.normalizeEquality = $(this).prop("checked");
+      saveSettings();
+      renderForSelectedModel();
     });
   }
 
@@ -2050,10 +2234,44 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     return $wrap;
   }
 
+  // cute-dbt#139 — the per-cell change lens. The #138 wire ships BOTH axes per
+  // cell (`old`/`new` each a `{display, key}` Cell) plus the Rust-precomputed
+  // `changed = old.key != new.key` (the NORMALIZED verdict). This re-derives
+  // the verdict client-side from the active lens WITHOUT a Rust round-trip:
+  //   normalized (default): the canonical `key` axis — Rust's `cell.changed`.
+  //   strict:               the authored `display` axis — a reformat-but-equal
+  //                         cell (`1.00` -> `1`, both keying Number("1")) flags.
+  // Row alignment is NEVER re-paired here (it stays Rust-canonical, #138): only
+  // a Modified row's cells carry both displays, so the strict lens reveals
+  // format-only changes exclusively WITHIN already-Modified rows. Added/Removed
+  // cells never participate — their `changed` is intrinsic to the row kind.
+  // DOCUMENTED ASYMMETRY (the literal #139 spec, not a bug): the strict lens
+  // HIDES a same-display/different-key real change (e.g. Number `1` vs Str
+  // `1`), since the displays match. A pure-reformat row stays canonically
+  // Unchanged (its OLD display is discarded by the Rust `unchanged_row`), so
+  // strict cannot reveal it — closing that gap needs a Rust change and is out
+  // of #139's scope.
+  function cellChanged(cell) {
+    if (!cell) return false;
+    if (settings.normalizeEquality) {
+      return !!cell.changed;
+    }
+    return cellText(cell.old) !== cellText(cell.new);
+  }
+
+  // The row-modified rollup under the active lens: a Modified row counts as
+  // modified iff >=1 of its cells flags under cellChanged. The normalize toggle
+  // never re-pairs rows; it only re-rolls this presentation flag (the row stays
+  // a Rust-`Modified` row even when the lens flags no cell, e.g. a row whose
+  // only delta is format-only and the lens is normalized).
+  function rowFlagged(rc) {
+    return rc.kind === "modified" && rc.cells.some(cellChanged);
+  }
+
   // Build the Diff grid from a FixtureTableDiff: a unified column axis (with
   // added/removed column badges from DiffColumn.status) and rows tinted by
-  // RowChangeKind. A `Modified` cell whose `changed` is true renders inline
-  // `old → new`; otherwise the cell shows its current value.
+  // RowChangeKind. A `Modified` cell flagged by the active lens (cellChanged)
+  // renders inline `old → new`; otherwise the cell shows its current value.
   function buildDiffTable(diff, cls) {
     var $wrap = $("<div>").addClass("table-fit");
     var $tbl = $("<table>").addClass(cls).addClass("cell-diff-table");
@@ -2074,7 +2292,11 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
       var $tr = $("<tr>").appendTo($tbody);
       if (rc.kind === "added")   $tr.addClass("row-added");
       if (rc.kind === "removed") $tr.addClass("row-removed");
-      if (rc.kind === "modified") $tr.addClass("row-modified");
+      // cute-dbt#139 — the row-modified tint is the lens rollup, not the raw
+      // Rust kind: a Modified row whose only delta is format-only sheds its
+      // tint under the normalized lens (no cell flags), and regains it under
+      // strict. Added/Removed tints are intrinsic and never lens-driven.
+      if (rowFlagged(rc)) $tr.addClass("row-modified");
       rc.cells.forEach(function (cell) {
         $tr.append(buildDiffCell(cell, rc.kind));
       });
@@ -2093,9 +2315,10 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     if (rowKind === "removed") {
       return decorateValueCell($td, cell.old);
     }
-    if (rowKind === "added" || rowKind === "unchanged" || !cell.changed) {
-      // Not flagged (added/unchanged, or a format-only change where the keys
-      // are equal): show the NEW authored value, no red/green (cute-dbt#138).
+    if (rowKind === "added" || rowKind === "unchanged" || !cellChanged(cell)) {
+      // Not flagged (added/unchanged, or — under the active lens — a cell the
+      // normalize toggle treats as unchanged): show the NEW authored value, no
+      // red/green (cute-dbt#138/#139).
       return decorateValueCell($td, cell.new);
     }
     // Modified + changed → inline old → new, each side showing its authored
@@ -2167,6 +2390,11 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
       return buildFixtureView(table, cls, diff)[0];
     };
     window.__cuteCellText = cellText;
+    // cute-dbt#139 — the cell-change lens + the settings object, exposed so the
+    // headless tests can pin the normalized/strict verdict on a `{old,new,
+    // changed}` cell without driving the full panel, and flip the lens directly.
+    window.__cuteCellChanged = cellChanged;
+    window.__cuteSettings = settings;
   }
 
   function initDataTablesIn($scope) {
