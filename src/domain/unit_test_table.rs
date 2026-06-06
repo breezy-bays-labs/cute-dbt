@@ -1105,7 +1105,11 @@ fn parse_select_arm(arm: &str) -> Option<Vec<(String, Cell)>> {
 /// the keyword as a whole word.
 fn strip_leading_keyword<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
     let s = s.trim_start();
-    if s.len() < kw.len() || !s[..kw.len()].eq_ignore_ascii_case(kw) {
+    // `s.get(..kw.len())` is byte-safe: it returns `None` when `kw.len()`
+    // exceeds `s` OR lands inside a multi-byte char, so a unicode-leading SQL
+    // string can never panic the keyword check (`s[..kw.len()]` would).
+    let head = s.get(..kw.len())?;
+    if !head.eq_ignore_ascii_case(kw) {
         return None;
     }
     let after = &s[kw.len()..];

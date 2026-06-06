@@ -620,10 +620,13 @@ fn build_data_diff(ut: &UnitTest, old_text: &str) -> UnitTestDataDiff {
     for g in ut.given() {
         let new_tbl = table_from_manifest_rows(g.rows(), g.format());
         let old = slice_named_region(old_text, "input", Some(g.input()));
+        // Build the OLD table ONCE (borrowing `old`); both the rejection check
+        // and the diff consume it — no second `table_from_yaml_fragment` parse.
+        let old_tbl = old
+            .as_ref()
+            .and_then(|(region, fmt)| table_from_yaml_fragment(region, fmt.as_deref()));
         let new_rejected = is_rejected_sql_new(g.rows(), g.format(), new_tbl.as_ref());
-        let old_rejected = is_rejected_sql_old(old.as_ref());
-        let old_tbl =
-            old.and_then(|(region, fmt)| table_from_yaml_fragment(&region, fmt.as_deref()));
+        let old_rejected = is_rejected_sql_old(old.as_ref(), old_tbl.as_ref());
         if let Some(diff) = table_diff_if_changed(old_tbl, new_tbl, old_rejected, new_rejected) {
             data.given.push(NamedTableDiff {
                 input: g.input().to_owned(),
@@ -633,11 +636,12 @@ fn build_data_diff(ut: &UnitTest, old_text: &str) -> UnitTestDataDiff {
     }
     let new_e = table_from_manifest_rows(ut.expect().rows(), ut.expect().format());
     let old_e = slice_named_region(old_text, "expect", None);
+    let old_e_tbl = old_e
+        .as_ref()
+        .and_then(|(region, fmt)| table_from_yaml_fragment(region, fmt.as_deref()));
     let new_e_rejected =
         is_rejected_sql_new(ut.expect().rows(), ut.expect().format(), new_e.as_ref());
-    let old_e_rejected = is_rejected_sql_old(old_e.as_ref());
-    let old_e_tbl =
-        old_e.and_then(|(region, fmt)| table_from_yaml_fragment(&region, fmt.as_deref()));
+    let old_e_rejected = is_rejected_sql_old(old_e.as_ref(), old_e_tbl.as_ref());
     if let Some(diff) = table_diff_if_changed(old_e_tbl, new_e, old_e_rejected, new_e_rejected) {
         data.expect = Some(diff);
     }
@@ -667,14 +671,14 @@ fn is_rejected_sql_new(rows: &Value, format: Option<&str>, new_tbl: Option<&Fixt
 /// inline non-literal OLD + literal NEW reads as "absent", not "rejected", and
 /// still produces an all-added table. Real multi-line sql fixtures are block
 /// scalars (`rows: |`), which slice correctly and degrade as intended.
-fn is_rejected_sql_old(old: Option<&(String, Option<String>)>) -> bool {
-    match old {
-        Some((region, fmt)) => {
-            fmt.as_deref() == Some("sql")
-                && table_from_yaml_fragment(region, fmt.as_deref()).is_none()
-        }
-        None => false,
-    }
+///
+/// Takes the already-built `old_tbl` (the caller parses the OLD region once)
+/// rather than re-parsing — symmetric with [`is_rejected_sql_new`].
+fn is_rejected_sql_old(
+    old: Option<&(String, Option<String>)>,
+    old_tbl: Option<&FixtureTable>,
+) -> bool {
+    matches!(old, Some((_, fmt)) if fmt.as_deref() == Some("sql")) && old_tbl.is_none()
 }
 
 /// Diff an OLD/NEW table pair, returning the diff only when the diff carries
@@ -1542,17 +1546,21 @@ mod tests {
 
     #[test]
     fn k_is_rejected_sql_old_only_for_present_non_literal_sql_slice() {
-        // A sliced sql region that cannot tabulate → rejected.
+        // A sliced sql region that cannot tabulate → rejected. The caller
+        // builds the table once and passes it in (None ⇒ rejected).
         let rejected = ("select id from src".to_owned(), Some("sql".to_owned()));
-        assert!(is_rejected_sql_old(Some(&rejected)));
+        let rejected_tbl = table_from_yaml_fragment(&rejected.0, rejected.1.as_deref());
+        assert!(is_rejected_sql_old(Some(&rejected), rejected_tbl.as_ref()));
         // A sliced sql region that DOES tabulate (literal) → NOT rejected.
         let literal = ("select 1 as id".to_owned(), Some("sql".to_owned()));
-        assert!(!is_rejected_sql_old(Some(&literal)));
+        let literal_tbl = table_from_yaml_fragment(&literal.0, literal.1.as_deref());
+        assert!(!is_rejected_sql_old(Some(&literal), literal_tbl.as_ref()));
         // A non-sql slice → not "rejected sql".
         let dict = ("- id: 1".to_owned(), Some("dict".to_owned()));
-        assert!(!is_rejected_sql_old(Some(&dict)));
+        let dict_tbl = table_from_yaml_fragment(&dict.0, dict.1.as_deref());
+        assert!(!is_rejected_sql_old(Some(&dict), dict_tbl.as_ref()));
         // No slice (genuinely absent OLD) → NOT rejected.
-        assert!(!is_rejected_sql_old(None));
+        assert!(!is_rejected_sql_old(None, None));
     }
 
     // ----- J. wire-shape / serde round-trip -----
