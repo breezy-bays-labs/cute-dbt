@@ -283,7 +283,7 @@ bracket-demo YAML comments).\
 path = "playground-pr-diff.patch"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/134"
-sha256 = "3fc8ddca9238be48067bec85c5eacddd231105e7c0981b9e63ae1f2ef91bc4f9"
+sha256 = "2b25da4e8d2108f2e253f54379ebc02041ddb6f65f70da4eddba071eab04761e"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"
@@ -345,7 +345,7 @@ slicer's contiguous-comment-bracketing rule end-to-end \
 path = "playground-source/models/marts/analytics/_analytics__models.yml"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"
-sha256 = "a4549ad6fe54c4c68f0822d9913f2f1372b35bae81e6b121c6e79ad896f45236"
+sha256 = "63a82ecad11fc1b4aafc3ed0d1d25d2ee94a598b53fdd176ca03a93bef0280de"
 synthetic_only = true
 license = "MIT"
 description = """
