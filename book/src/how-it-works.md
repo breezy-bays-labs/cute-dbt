@@ -213,6 +213,20 @@ page lays out as:
    The inline diff is **`--pr-diff`-only**: baseline mode computes
    `changed` from a structural manifest diff with no hunks, so it has no
    inline YAML diff and the drawer always shows the authored YAML.
+
+   Because this drawer's inline diff is a **text** diff over the *whole*
+   `- name:` block slice, changes to a test's **`overrides`** block
+   (`macros` / `vars` / `env_vars` — where dbt pins `is_incremental`,
+   `current_timestamp`, project vars, … to deterministic values) surface
+   here like any other line change. An **override-only edit** is the one
+   case that *needs* this fallback: it leaves the `given`/`expect` cells
+   byte-identical, so the cell-level data-table diff (the Inspect /
+   Expected panels, cute-dbt#98) correctly shows **no** change — the YAML
+   drawer is the only place the edit is visible. cute-dbt does not parse
+   the structured `overrides` payload at all (it is dropped on
+   deserialize), and it does not need to: the text-diff fallback reads
+   only the working-tree YAML the `--project-root` slice already provides
+   (cute-dbt#125).
 6. **Model SQL section** — the model's **raw Jinja source** (`raw_code`
    from the manifest — the diffable layer; compiled SQL is generated and
    un-diffable). When the PR diff changed the model's `.sql`, this section

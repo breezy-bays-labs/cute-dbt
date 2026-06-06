@@ -1281,6 +1281,166 @@ mod tests {
         );
     }
 
+    // ----- cute-dbt#125: override-only edit (verify-and-pin) -----
+    //
+    // An override-only edit (a change confined to the `overrides:` block —
+    // `macros` / `vars` / `env_vars`, all 3 dbt override kinds present here)
+    // leaves `given` / `expect` byte-identical. The two diff surfaces must
+    // split cleanly:
+    //   - the #96 YAML *text* diff (`reconstruct_block_diffs`) carries the
+    //     override change pair — because the #69 slicer spans the WHOLE
+    //     `- name:` entry, so `overrides:` (a sibling of given/expect) rides
+    //     along by construction;
+    //   - the #98 cell diff (`reconstruct_table_diffs`) returns NOTHING —
+    //     given/expect cells are unchanged, so the drawer surfaces the text
+    //     diff, not a misleading empty cell view.
+    // This is the load-bearing #125 interaction (a payload-presence headless
+    // test pins the *rendered* visibility separately). It must FAIL if the
+    // slicer ever stops at given/expect (no override pair) or if the cell
+    // diff ever fires on an override-only edit.
+    #[test]
+    fn override_only_edit_surfaces_in_text_diff_but_not_cell_diff_end_to_end() {
+        use crate::domain::manifest::{DependsOn, Manifest, ManifestMetadata, NodeId};
+        use crate::domain::pr_diff::{FileHunks, PrDiff, reconstruct_block_diffs};
+        use crate::domain::unit_test::{UnitTestExpect, UnitTestGiven};
+
+        let id = "unit_test.shop.orders.test_overrides_only";
+        let ofp = "models/_ut.yml";
+
+        // The working-tree (NEW) block, byte-aligned to the manifest rows
+        // below. Lines are 1-based; `cutoff_days: 30` is line 7 (the hunk's
+        // new-side anchor). All 3 override kinds are present so the slice is
+        // proven to carry each.
+        let raw = [
+            "  - name: test_overrides_only", // 1
+            "    model: orders",             // 2
+            "    overrides:",                // 3
+            "      macros:",                 // 4
+            "        is_incremental: false", // 5
+            "      vars:",                   // 6
+            "        cutoff_days: 30",       // 7  <- edited line
+            "      env_vars:",               // 8
+            "        DBT_REGION: us-east-1", // 9
+            "    given:",                    // 10
+            "      - input: ref('orders')",  // 11
+            "        format: dict",          // 12
+            "        rows:",                 // 13
+            "          - id: 1",             // 14
+            "            amount: 100",       // 15
+            "    expect:",                   // 16
+            "      format: dict",            // 17
+            "      rows:",                   // 18
+            "        - id: 1",               // 19
+            "          total: 100",          // 20
+        ]
+        .join("\n");
+
+        let ut = UnitTest::new(
+            "test_overrides_only",
+            NodeId::new("model.shop.orders"),
+            vec![UnitTestGiven::new(
+                "ref('orders')",
+                serde_json::json!([{"id": 1, "amount": 100}]),
+                Some("dict".to_owned()),
+                None,
+            )],
+            UnitTestExpect::new(
+                serde_json::json!([{"id": 1, "total": 100}]),
+                Some("dict".to_owned()),
+                None,
+            ),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            Some(ofp.to_owned()),
+        );
+        let mut tests = HashMap::new();
+        tests.insert(id.to_owned(), ut);
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            tests,
+            HashMap::new(),
+        );
+
+        let mut blocks = HashMap::new();
+        blocks.insert(id.to_owned(), UnitTestYamlBlock::new(raw.clone(), 1, 1, 20));
+
+        // A `--unified=0` replacement of ONLY the overrides line (`vars`):
+        // `cutoff_days: 7` → `cutoff_days: 30`. The `+` body equals the
+        // working-tree line 7, so N7b aligns; the hunk sits inside the block.
+        let diff = PrDiff {
+            files: vec![FileHunks {
+                path: ofp.to_owned(),
+                hunks: vec![Hunk {
+                    new_start: 7,
+                    new_len: 1,
+                    removed_lines: vec!["        cutoff_days: 7".to_owned()],
+                    added_lines: vec!["        cutoff_days: 30".to_owned()],
+                }],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        let changed: InScopeSet = [id.to_owned()].into_iter().collect();
+
+        // (1) The #96 YAML text diff carries the override change pair.
+        let yaml_diffs = reconstruct_block_diffs(&current, &changed, &blocks, &index);
+        let bd = yaml_diffs
+            .get(id)
+            .expect("an override-only edit produces a reconstructed YAML block diff");
+        let removed: Vec<&str> = bd
+            .lines
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Removed)
+            .map(|l| l.text.as_str())
+            .collect();
+        let added: Vec<&str> = bd
+            .lines
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Added)
+            .map(|l| l.text.as_str())
+            .collect();
+        assert!(
+            removed.iter().any(|t| t.contains("cutoff_days: 7")),
+            "the removed line is the pre-edit override value; got removed {removed:?}",
+        );
+        assert!(
+            added.iter().any(|t| t.contains("cutoff_days: 30")),
+            "the added line is the working-tree override value; got added {added:?}",
+        );
+        // The slice spans the WHOLE entry: sibling override keys AND the
+        // given/expect data ride along as context (proves the slicer did NOT
+        // stop at given/expect — the #125 hypothesis). Not a tautology: were
+        // the block to end before `overrides:`, no env_vars context line and
+        // no override change pair would exist.
+        let context: Vec<&str> = bd
+            .lines
+            .iter()
+            .filter(|l| l.kind == DiffLineKind::Context)
+            .map(|l| l.text.as_str())
+            .collect();
+        assert!(
+            context.iter().any(|t| t.contains("env_vars")),
+            "a sibling override key must ride along as context; got context {context:?}",
+        );
+        assert!(
+            context.iter().any(|t| t.contains("amount: 100")),
+            "the unchanged given rows ride along as context; got context {context:?}",
+        );
+
+        // (2) The #98 cell diff returns NOTHING — given/expect are unchanged,
+        // so the cell-level grid carries no spurious diff and the drawer falls
+        // back to the YAML text diff (verified above).
+        let data_diffs = reconstruct_table_diffs(&current, &changed, &blocks, &index);
+        let data_diff = data_diffs.get(id);
+        assert!(
+            data_diff.is_none(),
+            "an override-only edit leaves given/expect cells identical → no cell diff; \
+             got {data_diff:?}",
+        );
+    }
+
     // ----- Cross-source equivalence (the headline kill) -----
 
     #[test]
