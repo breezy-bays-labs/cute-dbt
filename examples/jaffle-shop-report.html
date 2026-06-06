@@ -658,7 +658,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
 
 </div>
 
-<script type="application/json" id="cute-dbt-data">{"baseline":"tests/fixtures/jaffle-shop-baseline.json","models":[{"name":"stg_customers","dag":{"nodes":[{"id":"source","role":"import"},{"id":"renamed","role":"transform"},{"id":"stg_customers","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"stg_customers","edge_type":"from"}]},"compiled_sql":{"renamed":"renamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)","source":"source as (\n    select * from \"jaffle_shop\".\"main\".\"raw_customers\"\n\n)","stg_customers":"select * from renamed"},"raw_sql":"with source as (\n\n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project. Modified body — adds a trim() pass on names so\n    PR 5's StateComparator sees the body checksum change.\n    #}\n    select * from {{ ref('raw_customers') }}\n\n),\n\nrenamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)\n\nselect * from renamed","tests":[{"id":"unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns","name":"test_stg_customers_renames_columns","target_model":"stg_customers","changed":true,"description":"stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows — no real customer data.\n","tags":["quality","smoke"],"meta":{"owner":"data-eng","priority":"high"},"defined_in":"models/staging/unit_tests.yml","given":[{"input":"ref('raw_customers')","bound_to_node":"source","rows":[{"first_name":"Alice","id":1,"last_name":"A."},{"first_name":"Bob","id":2,"last_name":"B."}],"format":"dict"}],"expected":{"rows":[{"customer_id":1,"first_name":"Alice","last_name":"A."},{"customer_id":2,"first_name":"Bob","last_name":"B."}],"format":"dict"}}],"is_recursive":false}]}</script>
+<script type="application/json" id="cute-dbt-data">{"baseline":"tests/fixtures/jaffle-shop-baseline.json","models":[{"name":"stg_customers","dag":{"nodes":[{"id":"source","role":"import"},{"id":"renamed","role":"transform"},{"id":"stg_customers","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"stg_customers","edge_type":"from"}]},"compiled_sql":{"renamed":"renamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)","source":"source as (\n    select * from \"jaffle_shop\".\"main\".\"raw_customers\"\n\n)","stg_customers":"select * from renamed"},"raw_sql":"with source as (\n\n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project. Modified body — adds a trim() pass on names so\n    PR 5's StateComparator sees the body checksum change.\n    #}\n    select * from {{ ref('raw_customers') }}\n\n),\n\nrenamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)\n\nselect * from renamed","tests":[{"id":"unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns","name":"test_stg_customers_renames_columns","target_model":"stg_customers","changed":true,"description":"stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows — no real customer data.\n","tags":["quality","smoke"],"meta":{"owner":"data-eng","priority":"high"},"defined_in":"models/staging/unit_tests.yml","given":[{"input":"ref('raw_customers')","bound_to_node":"source","table":{"columns":["first_name","id","last_name"],"rows":[{"cells":[{"display":"Alice","key":{"t":"str","v":"Alice"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"A.","key":{"t":"str","v":"A."}}]},{"cells":[{"display":"Bob","key":{"t":"str","v":"Bob"}},{"display":"2","key":{"t":"number","v":"2"}},{"display":"B.","key":{"t":"str","v":"B."}}]}]},"rows":[{"first_name":"Alice","id":1,"last_name":"A."},{"first_name":"Bob","id":2,"last_name":"B."}],"format":"dict"}],"expected":{"table":{"columns":["customer_id","first_name","last_name"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"Alice","key":{"t":"str","v":"Alice"}},{"display":"A.","key":{"t":"str","v":"A."}}]},{"cells":[{"display":"2","key":{"t":"number","v":"2"}},{"display":"Bob","key":{"t":"str","v":"Bob"}},{"display":"B.","key":{"t":"str","v":"B."}}]}]},"rows":[{"customer_id":1,"first_name":"Alice","last_name":"A."},{"customer_id":2,"first_name":"Bob","last_name":"B."}],"format":"dict"}}],"is_recursive":false}]}</script>
 
 <script>
 /*! jQuery v3.7.1 | (c) OpenJS Foundation and other contributors | jquery.org/license */
@@ -4830,16 +4830,17 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       $sec.append(buildExternalFixtureAffordance(given.fixture));
       return $sec;
     }
-    var rows = extractRowsFromFixture(given);
+    // cute-dbt#138 — the Current view renders the Rust-computed POD directly.
+    var table = given.table || { columns: [], rows: [] };
+    var rowCount = table.rows.length;
     if (given.format && given.format !== "dict") {
       $hdr.append($("<span>").addClass("format-badge").text("format: " + given.format));
     }
     $hdr.append($("<span>").addClass("row-count-badge")
-      .text(rows.length + " row" + (rows.length === 1 ? "" : "s")));
+      .text(rowCount + " row" + (rowCount === 1 ? "" : "s")));
     $sec.append($hdr);
-    var cols = collectColumns(rows);
     var diff = givenDataDiff(dataDiff, given.input);
-    $sec.append(buildFixtureView(cols, rows, "given-table", diff));
+    $sec.append(buildFixtureView(table, "given-table", diff));
     return $sec;
   }
 
@@ -4867,14 +4868,15 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       $body.append(buildExternalFixtureAffordance(t.expected.fixture));
       return;
     }
-    var rows = extractRowsFromFixture(t.expected);
-    $panel.find(".expected-rowcount").text(rows.length + " row" + (rows.length === 1 ? "" : "s"));
-    var cols = collectColumns(rows);
+    // cute-dbt#138 — the Current view renders the Rust-computed POD directly.
+    var table = t.expected.table || { columns: [], rows: [] };
+    var rowCount = table.rows.length;
+    $panel.find(".expected-rowcount").text(rowCount + " row" + (rowCount === 1 ? "" : "s"));
     // The expect side's cell diff, when the test's expect fixture carried a
     // real change (cute-dbt#98). `data_diff.expect` already passed
     // `has_real_change()`, so its presence === "default this table to Diff".
     var diff = (t.data_diff && t.data_diff.expect) || undefined;
-    $body.append(buildFixtureView(cols, rows, "expected-table", diff));
+    $body.append(buildFixtureView(table, "expected-table", diff));
     initDataTablesIn($body);
   }
 
@@ -4898,26 +4900,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     return Boolean(obj && obj.format === "sql" && typeof obj.rows === "string");
   }
 
-  // Return a tabulable row array from a fixture, handling both
-  // array shapes (dict/csv-from-core) and raw-CSV-string shapes
-  // (csv-from-fusion). Returns `[]` for sql fixtures and other
-  // unexpected shapes — the sql path is dispatched separately by the
-  // caller via `isSqlStringFixture`.
-  function extractRowsFromFixture(fixture) {
-    if (!fixture) return [];
-    var rows = fixture.rows;
-    if (rows == null) return [];
-    if (Array.isArray(rows)) return rows;
-    if (typeof rows === "string" && fixture.format === "csv") {
-      return parseCsvRows(rows);
-    }
-    return [];
-  }
-
   // Render a sql-format fixture as a syntax-highlighted code block.
   // Reuses the compiled-SQL drawer's `.sql-block-wrap` shell so visual
   // style stays consistent. No copy button: the source of truth is the
-  // fixture in the manifest, not the rendered DOM.
+  // fixture in the manifest, not the rendered DOM. This is the ONE
+  // remaining non-tabulatable fallback path: a `format: sql` fixture has no
+  // cells, so the domain returns no `table` POD (cute-dbt#138) and the JS
+  // renders the raw SELECT here.
   function buildSqlCodeBlock(sql) {
     var $wrap = $("<div>").addClass("sql-block-wrap fixture-sql-block-wrap");
     var $pre = $("<pre>").addClass("sql-block").append(
@@ -4927,129 +4916,14 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     return $wrap;
   }
 
-  // RFC 4180 CSV parser — state machine over the input string.
-  //
-  // dbt-fusion 2.0-preview emits `format: csv` unit-test fixtures as
-  // a raw CSV body in the manifest. dbt-core 1.11+ pre-parses csv to
-  // an array of dicts. cute-dbt does the parse at render time so both
-  // engines render identically (cute-dbt#66).
-  //
-  // Behavior summary:
-  //   * First row is headers; subsequent rows are body values.
-  //   * Quoted fields strip the surrounding double-quotes.
-  //   * Double-quote inside a quoted field is the RFC 4180 escape:
-  //     `""` decodes to a literal `"`.
-  //   * Quoted fields may contain commas and newlines verbatim.
-  //   * A single trailing newline (LF or CRLF) is consumed — dbt YAML
-  //     `rows: |` block scalars always end in `\n`; preserving it
-  //     would create a spurious final empty row.
-  //   * An unterminated final row is accepted (graceful — the
-  //     renderer is not a validator).
-  //   * CRLF (`\r\n`) terminates a row as a single unit.
-  //   * Empty input or header-only input returns `[]`.
-  //
-  // Correctness is unit-tested via `tests/headless_csv_parser.rs` —
-  // the parser is exposed on `window.__cuteParseCsv` so that test can
-  // invoke it through the headless Chrome runtime.
-  function parseCsvRows(text) {
-    if (text == null) return [];
-    var t = String(text);
-    if (t.length === 0) return [];
-    // Strip exactly one trailing newline (LF or CRLF).
-    if (t.charAt(t.length - 1) === "\n") {
-      t = t.slice(0, -1);
-      if (t.length > 0 && t.charAt(t.length - 1) === "\r") {
-        t = t.slice(0, -1);
-      }
-    }
-    if (t.length === 0) return [];
-
-    var matrix = [];
-    var fields = [];
-    var field = "";
-    var inQuotes = false;
-    for (var i = 0; i < t.length; i++) {
-      var c = t.charAt(i);
-      if (inQuotes) {
-        if (c === '"') {
-          // RFC 4180 escape: doubled quote inside a quoted field
-          // collapses to a single literal quote.
-          if (i + 1 < t.length && t.charAt(i + 1) === '"') {
-            field += '"';
-            i++;
-            continue;
-          }
-          inQuotes = false;
-          continue;
-        }
-        field += c;
-        continue;
-      }
-      // Outside quotes.
-      if (c === '"' && field === "") {
-        inQuotes = true;
-        continue;
-      }
-      if (c === ',') {
-        fields.push(field);
-        field = "";
-        continue;
-      }
-      if (c === '\n' || c === '\r') {
-        fields.push(field);
-        matrix.push(fields);
-        fields = [];
-        field = "";
-        if (c === '\r' && i + 1 < t.length && t.charAt(i + 1) === '\n') {
-          i++;
-        }
-        continue;
-      }
-      field += c;
-    }
-    // Flush the final field/row. We always run this — the trailing-
-    // newline strip above guarantees at least one character of
-    // content survives to reach this branch in non-empty input.
-    fields.push(field);
-    matrix.push(fields);
-
-    if (matrix.length < 2) return [];
-    var headers = matrix[0];
-    var out = [];
-    for (var ri = 1; ri < matrix.length; ri++) {
-      var row = matrix[ri];
-      var obj = {};
-      for (var hi = 0; hi < headers.length; hi++) {
-        obj[headers[hi]] = hi < row.length ? row[hi] : "";
-      }
-      out.push(obj);
-    }
-    return out;
-  }
-
-  // Expose the parser on `window.__cuteParseCsv` so the headless
-  // integration test at `tests/headless_csv_parser.rs` can invoke it
-  // via `Runtime.Evaluate` and assert RFC 4180 edge cases (quoted
-  // fields, embedded commas, embedded newlines, escaped quotes,
-  // CRLF, empty input, header-only input). The `__` prefix marks it
-  // as a test-only seam; production code reaches it via the closure
-  // binding above.
-  if (typeof window !== "undefined") {
-    window.__cuteParseCsv = parseCsvRows;
-  }
-
-  function collectColumns(rows) {
-    var seen = {};
-    var order = [];
-    rows.forEach(function (row) {
-      if (row && typeof row === "object" && !Array.isArray(row)) {
-        Object.keys(row).forEach(function (k) {
-          if (!seen[k]) { seen[k] = true; order.push(k); }
-        });
-      }
-    });
-    return order;
-  }
+  // cute-dbt#138 — the JS csv/dict table parsers (`parseCsvRows`,
+  // `extractRowsFromFixture`, `collectColumns`) are RETIRED. The Current view
+  // now renders the Rust-computed `FixtureTable` POD that the domain ships on
+  // each given/expect payload (`table`), so csv/dict tabulation — and the
+  // engine-divergence handling above — happens once, in Rust
+  // (`table_from_manifest_rows`), and the template is a pure renderer. CSV
+  // RFC 4180 correctness is now owned by the Rust `parse_csv_rows` unit tests
+  // (the JS `__cuteParseCsv` headless seam retired with the function).
 
   function escapeHtml(s) {
     return String(s)
@@ -5406,7 +5280,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   function highlightYaml(yaml) { return emitTokens(tokenizeYaml(yaml)); }
 
   // Expose for headless JS unit tests (cute-dbt#69 / cute-dbt#132 — parallels
-  // the `__cuteParseCsv` seam introduced in cute-dbt#66).
+  // the `__cuteRenderYamlDiff` headless seam).
   window.__cuteHighlightYaml = highlightYaml;
   window.__cuteTokenizeSql = tokenizeSql;
   window.__cuteTokenizeYaml = tokenizeYaml;
@@ -5677,7 +5551,16 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     done(ok);
   }
 
-  function buildTable(columns, rows, cls) {
+  // The Current-view grid, rendered PURELY from the Rust-computed
+  // `FixtureTable` POD (cute-dbt#138). Each cell is a `{display, key}` Cell:
+  // the text is the authored `display` (so a csv `1.00` shows `1.00`, not the
+  // canonicalized `1`), while the numeric / NULL styling + sort order come
+  // from the canonical `key` (a `Number` key sorts numerically even when its
+  // display is `1.00`). The JS no longer parses csv/dict — the domain's
+  // `table_from_manifest_rows` owns that, and ships this POD on the wire.
+  function buildTable(table, cls) {
+    var columns = (table && table.columns) || [];
+    var rows = (table && table.rows) || [];
     var $wrap = $("<div>").addClass("table-fit");
     var $tbl = $("<table>").addClass(cls);
     var $thead = $("<thead>").appendTo($tbl);
@@ -5689,21 +5572,32 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     var $tbody = $("<tbody>").appendTo($tbl);
     rows.forEach(function (r) {
       var $tr = $("<tr>").appendTo($tbody);
-      columns.forEach(function (col) {
-        var cell = (r && typeof r === "object" && !Array.isArray(r)) ? r[col] : undefined;
-        var $td = $("<td>");
-        if (cell === null || cell === undefined) {
-          $td.addClass("cell-null").text("NULL");
-        } else if (typeof cell === "number") {
-          $td.addClass("cell-num").text(cell);
-        } else {
-          $td.text(String(cell));
-        }
-        $tr.append($td);
+      (r.cells || []).forEach(function (cell) {
+        $tr.append(decorateCurrentCell($("<td>"), cell));
       });
     });
     $wrap.append($tbl);
     return $wrap;
+  }
+
+  // Render one Current-view Cell (`{display, key}`) into a <td>: the text is
+  // the authored `display`; the styling/sort affordance is read from `key.t`
+  // (the canonical type), never from the display token (cute-dbt#138). Shares
+  // the null/number styling with `decorateValueCell` so Current and Diff read
+  // identically.
+  function decorateCurrentCell($td, cell) {
+    var key = cell && cell.key;
+    if (!key || key.t === "null") {
+      return $td.addClass("cell-null").text("NULL");
+    }
+    if (key.t === "absent") {
+      return $td.addClass("cell-absent").text("");
+    }
+    if (key.t === "number") {
+      // Sort numerically on the canonical value; show the authored display.
+      return $td.addClass("cell-num").attr("data-order", key.v).text(cell.display);
+    }
+    return $td.text(cell.display);
   }
 
   // cute-dbt#98 ----------------------------------------------------------
@@ -5737,14 +5631,14 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   // is present — also build the Diff grid and a Current↔Diff toggle that flips
   // exactly one view visible at a time (the inactive view carries `hidden`).
   // Default-Diff when a diff exists, else Current with no toggle.
-  function buildFixtureView(columns, rows, cls, diff) {
+  function buildFixtureView(table, cls, diff) {
     if (!diff) {
-      // No cell diff for this table → today's behavior, byte-for-byte.
-      return buildTable(columns, rows, cls);
+      // No cell diff for this table → the plain Current grid from the POD.
+      return buildTable(table, cls);
     }
     var $wrap = $("<div>").addClass("fixture-view");
     var $diffView = buildDiffTable(diff, cls);
-    var $currentView = buildTable(columns, rows, cls).prop("hidden", true);
+    var $currentView = buildTable(table, cls).prop("hidden", true);
 
     var $toggle = $("<div>").addClass("cell-diff-toggle");
     var $diffBtn = $("<button>").attr("type", "button")
@@ -5817,67 +5711,56 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       return decorateValueCell($td, cell.old);
     }
     if (rowKind === "added" || rowKind === "unchanged" || !cell.changed) {
+      // Not flagged (added/unchanged, or a format-only change where the keys
+      // are equal): show the NEW authored value, no red/green (cute-dbt#138).
       return decorateValueCell($td, cell.new);
     }
-    // Modified + changed → inline old → new. Each side is type-aware via
-    // diffToken: a real null/absent keeps its own neutral styling and never
-    // borrows the value-change red/green (cute-dbt#132).
-    $td.addClass("cell-changed").attr("data-order", cellValueText(cell.new));
+    // Modified + changed → inline old → new, each side showing its authored
+    // display. Each side is type-aware via diffToken: a real null/absent keeps
+    // its own neutral styling and never borrows the value-change red/green
+    // (cute-dbt#132). The sort key is the NEW cell's authored display.
+    $td.addClass("cell-changed").attr("data-order", cellText(cell.new));
     $td.append(diffToken(cell.old, "cell-old"));
     $td.append($("<span>").addClass("cell-arrow").html("&rarr;"));
     $td.append(diffToken(cell.new, "cell-new"));
     return $td;
   }
 
-  // One side of an inline `old → new` changed cell. Type-aware so a real null
-  // or absent cell reads in its own neutral styling rather than the brilliant
-  // red/green reserved for a real value change: null → italic muted-gray
-  // "NULL"; absent → blank; any concrete value (including the string 'null')
-  // → the side's color via `sideClass` (.cell-old = red, .cell-new = green).
-  // This is what keeps a real NULL visually distinct from a string 'null'
-  // even mid-diff (cute-dbt#132).
-  function diffToken(cv, sideClass) {
-    if (!cv || cv.t === "null") {
+  // One side of an inline `old → new` changed cell. `cell` is a `{display,
+  // key}` Cell (cute-dbt#138): the text is the authored `display`; the
+  // neutral-vs-value styling is read from `key.t` so a real null or absent
+  // cell reads in its own neutral styling rather than the brilliant red/green
+  // reserved for a real value change: null → italic muted-gray "NULL"; absent
+  // → blank; any concrete value (including the string 'null') → the side's
+  // color via `sideClass` (.cell-old = red, .cell-new = green). This keeps a
+  // real NULL visually distinct from a string 'null' even mid-diff (#132).
+  function diffToken(cell, sideClass) {
+    var key = cell && cell.key;
+    if (!key || key.t === "null") {
       return $("<span>").addClass("cell-null").text("NULL");
     }
-    if (cv.t === "absent") {
+    if (key.t === "absent") {
       return $("<span>").addClass("cell-absent").text("");
     }
-    return $("<span>").addClass(sideClass).text(cellValueText(cv));
+    return $("<span>").addClass(sideClass).text(cell.display);
   }
 
-  // Render a single CellValue into a plain value cell, matching `buildTable`'s
-  // null/number styling so the Current and Diff views read identically.
-  function decorateValueCell($td, cv) {
-    if (!cv || cv.t === "null") {
-      // A literal null reads as NULL, matching the Current grid's
-      // `cell === null` styling.
-      return $td.addClass("cell-null").text("NULL");
-    }
-    if (cv.t === "absent") {
-      // An absent cell (a unified-diff column the row's source table lacks)
-      // is NOT a null — render it blank so an Absent->Null change stays
-      // visible and added/removed-column cells don't read as literal nulls.
-      return $td.addClass("cell-absent").text("");
-    }
-    if (cv.t === "number") {
-      return $td.addClass("cell-num").attr("data-order", cv.v).text(cv.v);
-    }
-    return $td.text(cellValueText(cv));
+  // Render a single `{display, key}` Cell into a plain value cell, matching
+  // `buildTable`'s null/number styling so the Current and Diff views read
+  // identically. Text is the authored `display`; styling/sort from `key`.
+  function decorateValueCell($td, cell) {
+    return decorateCurrentCell($td, cell);
   }
 
-  // The display text of an adjacently-tagged CellValue ({t, v}). `absent`
-  // renders empty; `null` renders the word NULL; bool/number/str verbatim.
-  function cellValueText(cv) {
-    if (!cv) return "";
-    switch (cv.t) {
-      case "null":   return "NULL";
-      case "absent": return "";
-      case "bool":   return cv.v ? "true" : "false";
-      case "number": return String(cv.v);
-      case "str":    return String(cv.v);
-      default:       return cv.v == null ? "" : String(cv.v);
-    }
+  // The display text of a `{display, key}` Cell (cute-dbt#138): a `null` key
+  // renders the word NULL, an `absent` key renders empty, otherwise the
+  // authored `display` token verbatim. Used for the changed-cell sort key.
+  function cellText(cell) {
+    var key = cell && cell.key;
+    if (!key) return "";
+    if (key.t === "null") return "NULL";
+    if (key.t === "absent") return "";
+    return cell.display == null ? "" : String(cell.display);
   }
 
   // Re-measure DataTables column widths for any (now-visible) table under
@@ -5892,13 +5775,15 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     });
   }
   // Exposed for headless JS unit tests (cute-dbt#98 — parallels the
-  // `__cuteRenderYamlDiff` / `__cuteParseCsv` seams). Returns the outer
-  // wrapper element so a test can assert the toggle + tinted markup.
+  // `__cuteRenderYamlDiff` seam). Takes the Rust-computed `FixtureTable` POD
+  // (cute-dbt#138) + an optional cell diff and returns the outer wrapper
+  // element so a test can assert the authored-display rendering, the toggle,
+  // and the tinted markup.
   if (typeof window !== "undefined") {
-    window.__cuteBuildFixtureView = function (columns, rows, cls, diff) {
-      return buildFixtureView(columns, rows, cls, diff)[0];
+    window.__cuteBuildFixtureView = function (table, cls, diff) {
+      return buildFixtureView(table, cls, diff)[0];
     };
-    window.__cuteCellValueText = cellValueText;
+    window.__cuteCellText = cellText;
   }
 
   function initDataTablesIn($scope) {

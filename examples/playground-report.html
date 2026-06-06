@@ -658,7 +658,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
 
 </div>
 
-<script type="application/json" id="cute-dbt-data">{"baseline":"tests/fixtures/playground-baseline.json","models":[{"name":"dim_payers","dag":{"nodes":[{"id":"source","role":"import"},{"id":"sequenced","role":"transform"},{"id":"unknown_member","role":"transform"},{"id":"final","role":"transform"},{"id":"dim_payers","role":"final"}],"edges":[{"from":"source","to":"sequenced","edge_type":"from"},{"from":"unknown_member","to":"final","edge_type":"union_all"},{"from":"sequenced","to":"final","edge_type":"union_all"},{"from":"final","to":"dim_payers","edge_type":"from"}]},"compiled_sql":{"dim_payers":"select * from final\n\n-- cute-dbt fixture: synthetic body mod","final":"final as (\n    select * from unknown_member\n    union all\n    select * from sequenced\n)","sequenced":"sequenced as (\n    select\n        -- surrogate key (starting from 1, reserving -1 for unknown)\n        row_number() over (order by payer_id) as payer_key\n\n        -- natural key\n        , payer_id\n\n        -- attributes\n        , payer_name\n        , address\n        , city\n        , state\n        , zip_code\n        , phone\n\n        -- financial metrics\n        , amount_covered\n        , amount_uncovered\n        , revenue\n\n        -- utilization metrics\n        , covered_encounters\n        , uncovered_encounters\n        , covered_medications\n        , uncovered_medications\n        , covered_procedures\n        , uncovered_procedures\n        , covered_immunizations\n        , uncovered_immunizations\n\n        -- member metrics\n        , unique_customers\n        , average_quality_of_life_score\n        , member_months\n\n        -- derived metrics\n        , case\n            when (amount_covered + amount_uncovered) > 0\n            then amount_covered / (amount_covered + amount_uncovered)\n            else 0\n        end as coverage_rate\n\n        -- metadata\n        , current_timestamp as _loaded_at\n\n    from source\n)","source":"source as (\n    select * from \"memory\".\"main_staging\".\"stg_synthea__payers\"\n)","unknown_member":"unknown_member as (\n    select\n        -1 as payer_key\n        , 'UNKNOWN' as payer_id\n        , 'Unknown Payer' as payer_name\n        , cast(null as varchar) as address\n        , cast(null as varchar) as city\n        , cast(null as varchar) as state\n        , cast(null as varchar) as zip_code\n        , cast(null as varchar) as phone\n        , cast(null as double) as amount_covered\n        , cast(null as double) as amount_uncovered\n        , cast(null as double) as revenue\n        , cast(null as bigint) as covered_encounters\n        , cast(null as bigint) as uncovered_encounters\n        , cast(null as bigint) as covered_medications\n        , cast(null as bigint) as uncovered_medications\n        , cast(null as bigint) as covered_procedures\n        , cast(null as bigint) as uncovered_procedures\n        , cast(null as bigint) as covered_immunizations\n        , cast(null as bigint) as uncovered_immunizations\n        , cast(null as bigint) as unique_customers\n        , cast(null as double) as average_quality_of_life_score\n        , cast(null as bigint) as member_months\n        , cast(null as double) as coverage_rate\n        , current_timestamp as _loaded_at\n)"},"raw_sql":"{{\n    config(\n        materialized='table',\n        unique_key='payer_key'\n    )\n}}\n\nwith source as (\n    select * from {{ ref('stg_synthea__payers') }}\n),\n\nsequenced as (\n    select\n        -- surrogate key (starting from 1, reserving -1 for unknown)\n        row_number() over (order by payer_id) as payer_key\n\n        -- natural key\n        , payer_id\n\n        -- attributes\n        , payer_name\n        , address\n        , city\n        , state\n        , zip_code\n        , phone\n\n        -- financial metrics\n        , amount_covered\n        , amount_uncovered\n        , revenue\n\n        -- utilization metrics\n        , covered_encounters\n        , uncovered_encounters\n        , covered_medications\n        , uncovered_medications\n        , covered_procedures\n        , uncovered_procedures\n        , covered_immunizations\n        , uncovered_immunizations\n\n        -- member metrics\n        , unique_customers\n        , average_quality_of_life_score\n        , member_months\n\n        -- derived metrics\n        , case\n            when (amount_covered + amount_uncovered) > 0\n            then amount_covered / (amount_covered + amount_uncovered)\n            else 0\n        end as coverage_rate\n\n        -- metadata\n        , current_timestamp as _loaded_at\n\n    from source\n),\n\n-- unknown member for handling missing dimension lookups\nunknown_member as (\n    select\n        -1 as payer_key\n        , 'UNKNOWN' as payer_id\n        , 'Unknown Payer' as payer_name\n        , cast(null as varchar) as address\n        , cast(null as varchar) as city\n        , cast(null as varchar) as state\n        , cast(null as varchar) as zip_code\n        , cast(null as varchar) as phone\n        , cast(null as double) as amount_covered\n        , cast(null as double) as amount_uncovered\n        , cast(null as double) as revenue\n        , cast(null as bigint) as covered_encounters\n        , cast(null as bigint) as uncovered_encounters\n        , cast(null as bigint) as covered_medications\n        , cast(null as bigint) as uncovered_medications\n        , cast(null as bigint) as covered_procedures\n        , cast(null as bigint) as uncovered_procedures\n        , cast(null as bigint) as covered_immunizations\n        , cast(null as bigint) as uncovered_immunizations\n        , cast(null as bigint) as unique_customers\n        , cast(null as double) as average_quality_of_life_score\n        , cast(null as bigint) as member_months\n        , cast(null as double) as coverage_rate\n        , current_timestamp as _loaded_at\n),\n\nfinal as (\n    select * from unknown_member\n    union all\n    select * from sequenced\n)\n\nselect * from final\n\n-- cute-dbt fixture: synthetic body mod","tests":[{"id":"unit_test.healthcare_analytics.dim_payers.test_dim_payers_injects_unknown_sentinel","name":"test_dim_payers_injects_unknown_sentinel","target_model":"dim_payers","changed":false,"description":"dim_payers UNION-ALLs an unknown-member sentinel row (payer_key = -1)\nwith the sequenced source rows. This test verifies the sentinel\nsurvives the union and the sequenced rows are surrogate-keyed\nstarting at 1. Uses dbt's dict format for both GIVEN and EXPECT —\ndict format only compares listed columns, so non-deterministic\noutputs (`_loaded_at` via `current_timestamp`) are excluded from\nassertion automatically.\n","tags":[],"meta":{},"defined_in":"models/marts/core/_core__models.yml","authoring_yaml":"  # cute-dbt's authoring-YAML drawer (since #69) attaches contiguous\n  # `#`-comment lines at the SAME indent as `- name:` immediately above\n  # the test to the test's authored slice. This block demonstrates the\n  # LEADING bracket — useful for stating the test's intent before the\n  # reader sees the assertion (cute-dbt#73).\n  - name: test_dim_payers_injects_unknown_sentinel\n    description: |\n      dim_payers UNION-ALLs an unknown-member sentinel row (payer_key = -1)\n      with the sequenced source rows. This test verifies the sentinel\n      survives the union and the sequenced rows are surrogate-keyed\n      starting at 1. Uses dbt's dict format for both GIVEN and EXPECT —\n      dict format only compares listed columns, so non-deterministic\n      outputs (`_loaded_at` via `current_timestamp`) are excluded from\n      assertion automatically.\n    model: dim_payers\n    # The INSIDE bracket — comments at deeper indent than `- name:` ride\n    # along with the body slice as raw text. Cute-dbt preserves them\n    # verbatim in the Authoring YAML drawer (cute-dbt#73).\n    given:\n      - input: ref('stg_synthea__payers')\n        format: dict\n        rows:\n          - payer_id: 'a00000aa-0000-0000-0000-000000000001'\n            payer_name: 'Acme Health'\n            address: '1 Acme Way'\n            city: 'Boston'\n            state: 'MA'\n            zip_code: '02101'\n            phone: '555-0100'\n            amount_covered: 1000.0\n            amount_uncovered: 250.0\n            revenue: 1250.0\n            covered_encounters: 10\n            uncovered_encounters: 2\n            covered_medications: 5\n            uncovered_medications: 1\n            covered_procedures: 3\n            uncovered_procedures: 0\n            covered_immunizations: 4\n            uncovered_immunizations: 0\n            unique_customers: 8\n            average_quality_of_life_score: 0.85\n            member_months: 96\n    expect:\n      format: dict\n      rows:\n        - payer_key: -1\n          payer_id: 'UNKNOWN'\n          payer_name: 'Unknown Payer'\n        - payer_key: 1\n          payer_id: 'a00000aa-0000-0000-0000-000000000001'\n          payer_name: 'Acme Health'\n  # The TRAILING bracket — contiguous `#`-comment lines at the SAME\n  # indent as `- name:`, immediately following the test body and\n  # terminated by EOF or a blank line, are attached to this test's\n  # slice. Useful for cross-references and follow-up notes (cute-dbt#73).","given":[{"input":"ref('stg_synthea__payers')","bound_to_node":"source","rows":[{"address":"1 Acme Way","amount_covered":1000.0,"amount_uncovered":250.0,"average_quality_of_life_score":0.85,"city":"Boston","covered_encounters":10,"covered_immunizations":4,"covered_medications":5,"covered_procedures":3,"member_months":96,"payer_id":"a00000aa-0000-0000-0000-000000000001","payer_name":"Acme Health","phone":"555-0100","revenue":1250.0,"state":"MA","uncovered_encounters":2,"uncovered_immunizations":0,"uncovered_medications":1,"uncovered_procedures":0,"unique_customers":8,"zip_code":"02101"}],"format":"dict"}],"expected":{"rows":[{"payer_id":"UNKNOWN","payer_key":-1,"payer_name":"Unknown Payer"},{"payer_id":"a00000aa-0000-0000-0000-000000000001","payer_key":1,"payer_name":"Acme Health"}],"format":"dict"}}],"is_recursive":false},{"name":"int_dq_quarantine__encounters","dag":{"nodes":[],"edges":[]},"compiled_sql":{"int_dq_quarantine__encounters":"\n\n\n\n-- Encounters quarantined due to data quality violations\n\nselect * from \"memory\".\"main_staging\".\"stg_synthea__encounters\"\nwhere is_dq_valid = false\n\n\n-- cute-dbt fixture: synthetic body mod"},"raw_sql":"{{\n    config(\n        materialized='table',\n        tags=['intermediate', 'quarantine', 'data_quality']\n    )\n}}\n\n{{ generate_quarantine_model(\n    source_model='stg_synthea__encounters',\n    description='Encounters quarantined due to data quality violations'\n) }}\n\n-- cute-dbt fixture: synthetic body mod","tests":[],"is_recursive":false},{"name":"mart_dq_summary","dag":{"nodes":[{"id":"encounter_metrics","role":"import"},{"id":"medication_metrics","role":"import"},{"id":"combined_metrics","role":"transform"},{"id":"mart_dq_summary","role":"final"}],"edges":[{"from":"encounter_metrics","to":"combined_metrics","edge_type":"union_all"},{"from":"medication_metrics","to":"combined_metrics","edge_type":"union_all"},{"from":"combined_metrics","to":"mart_dq_summary","edge_type":"from"}]},"compiled_sql":{"combined_metrics":"combined_metrics as (\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_encounter_timestamps as failed_timestamp_validations\n        , failed_no_future_encounter_dates as failed_future_date_validations\n        , failed_end_after_1900 as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from encounter_metrics\n\n    union all\n\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_medication_dates as failed_timestamp_validations\n        , failed_no_future_medication_dates as failed_future_date_validations\n        , failed_end_after_1900_if_present as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from medication_metrics\n)","encounter_metrics":"encounter_metrics as (\n    select\n        'encounters' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_encounter_timestamps) as failed_valid_encounter_timestamps\n        , count(*) filter (where not no_future_encounter_dates) as failed_no_future_encounter_dates\n        , count(*) filter (where not end_after_1900) as failed_end_after_1900\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n    from \"memory\".\"main_staging\".\"stg_synthea__encounters\"\n)","mart_dq_summary":"select\n    entity_type\n    , quarantined_count\n    , total_count\n    , quarantine_rate_pct\n    , failed_timestamp_validations\n    , failed_future_date_validations\n    , failed_historical_end_validations\n    , failed_historical_start_validations\n    , current_timestamp as _generated_at\nfrom combined_metrics\norder by entity_type\n\n-- cute-dbt fixture: synthetic body mod","medication_metrics":"medication_metrics as (\n    select\n        'medications' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_medication_dates) as failed_valid_medication_dates\n        , count(*) filter (where not no_future_medication_dates) as failed_no_future_medication_dates\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n        , count(*) filter (where not end_after_1900_if_present) as failed_end_after_1900_if_present\n    from \"memory\".\"main_staging\".\"stg_synthea__medications\"\n)"},"raw_sql":"{{\n    config(\n        materialized='table',\n        tags=['analytics', 'data_quality']\n    )\n}}\n\nwith encounter_metrics as (\n    select\n        'encounters' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_encounter_timestamps) as failed_valid_encounter_timestamps\n        , count(*) filter (where not no_future_encounter_dates) as failed_no_future_encounter_dates\n        , count(*) filter (where not end_after_1900) as failed_end_after_1900\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n    from {{ ref('stg_synthea__encounters') }}\n),\n\nmedication_metrics as (\n    select\n        'medications' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_medication_dates) as failed_valid_medication_dates\n        , count(*) filter (where not no_future_medication_dates) as failed_no_future_medication_dates\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n        , count(*) filter (where not end_after_1900_if_present) as failed_end_after_1900_if_present\n    from {{ ref('stg_synthea__medications') }}\n),\n\ncombined_metrics as (\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_encounter_timestamps as failed_timestamp_validations\n        , failed_no_future_encounter_dates as failed_future_date_validations\n        , failed_end_after_1900 as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from encounter_metrics\n\n    union all\n\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_medication_dates as failed_timestamp_validations\n        , failed_no_future_medication_dates as failed_future_date_validations\n        , failed_end_after_1900_if_present as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from medication_metrics\n)\n\nselect\n    entity_type\n    , quarantined_count\n    , total_count\n    , quarantine_rate_pct\n    , failed_timestamp_validations\n    , failed_future_date_validations\n    , failed_historical_end_validations\n    , failed_historical_start_validations\n    , current_timestamp as _generated_at\nfrom combined_metrics\norder by entity_type\n\n-- cute-dbt fixture: synthetic body mod","tests":[{"id":"unit_test.healthcare_analytics.mart_dq_summary.test_mart_dq_summary_combines_encounter_and_medication_metrics","name":"test_mart_dq_summary_combines_encounter_and_medication_metrics","target_model":"mart_dq_summary","changed":false,"description":"mart_dq_summary UNION-ALLs metrics from stg_synthea__encounters\nand stg_synthea__medications. This test mocks two encounter rows\n(one invalid) and two medication rows (both invalid), then asserts\nthe per-entity counts + quarantine rate. Uses csv format for both\nGIVEN and EXPECT — compact tabular form across many boolean\ndq-flag columns.\n","tags":[],"meta":{},"defined_in":"models/marts/analytics/_analytics__models.yml","authoring_yaml":"  # LEADING bracket for test 1 — the slicer attaches contiguous\n  # `#`-comment lines at the SAME indent as `- name:` immediately above\n  # the test (no blank-line gap below) to this test's authored slice\n  # (cute-dbt#69 / #73).\n  - name: test_mart_dq_summary_combines_encounter_and_medication_metrics\n    description: |\n      mart_dq_summary UNION-ALLs metrics from stg_synthea__encounters\n      and stg_synthea__medications. This test mocks two encounter rows\n      (one invalid) and two medication rows (both invalid), then asserts\n      the per-entity counts + quarantine rate. Uses csv format for both\n      GIVEN and EXPECT — compact tabular form across many boolean\n      dq-flag columns.\n    model: mart_dq_summary\n    # INSIDE bracket for test 1 — comments at deeper indent than\n    # `- name:` ride along with the body slice as raw text (cute-dbt#69\n    # / #73).\n    given:\n      - input: ref('stg_synthea__encounters')\n        format: csv\n        rows: |\n          is_dq_valid,valid_encounter_timestamps,no_future_encounter_dates,end_after_1900,start_after_1900\n          false,false,true,true,true\n          true,true,true,true,true\n      - input: ref('stg_synthea__medications')\n        format: csv\n        rows: |\n          is_dq_valid,valid_medication_dates,no_future_medication_dates,start_after_1900,end_after_1900_if_present\n          false,false,true,true,true\n          false,true,false,true,true\n    expect:\n      format: csv\n      rows: |\n        entity_type,quarantined_count,total_count,quarantine_rate_pct,failed_timestamp_validations\n        encounters,1,2,50.00,1\n        medications,2,2,100.00,1\n  # TRAILING bracket for test 1 — the comment block butts against the\n  # body above (no blank-line gap) and is terminated below by the blank\n  # line separating the two tests (cute-dbt#69 / #73).","given":[{"input":"ref('stg_synthea__encounters')","bound_to_node":"encounter_metrics","rows":[{"end_after_1900":"true","is_dq_valid":"false","no_future_encounter_dates":"true","start_after_1900":"true","valid_encounter_timestamps":"false"},{"end_after_1900":"true","is_dq_valid":"true","no_future_encounter_dates":"true","start_after_1900":"true","valid_encounter_timestamps":"true"}],"format":"csv"},{"input":"ref('stg_synthea__medications')","bound_to_node":"medication_metrics","rows":[{"end_after_1900_if_present":"true","is_dq_valid":"false","no_future_medication_dates":"true","start_after_1900":"true","valid_medication_dates":"false"},{"end_after_1900_if_present":"true","is_dq_valid":"false","no_future_medication_dates":"false","start_after_1900":"true","valid_medication_dates":"true"}],"format":"csv"}],"expected":{"rows":[{"entity_type":"encounters","failed_timestamp_validations":"1","quarantine_rate_pct":"50.00","quarantined_count":"1","total_count":"2"},{"entity_type":"medications","failed_timestamp_validations":"1","quarantine_rate_pct":"100.00","quarantined_count":"2","total_count":"2"}],"format":"csv"}},{"id":"unit_test.healthcare_analytics.mart_dq_summary.test_mart_dq_summary_zero_quarantined_when_all_valid","name":"test_mart_dq_summary_zero_quarantined_when_all_valid","target_model":"mart_dq_summary","changed":false,"description":"mart_dq_summary should report zero quarantined_count and 0.00\nquarantine_rate_pct when every upstream row passes data-quality\nvalidations. Uses sql format for the GIVEN mocks and dict format\nfor the EXPECT — dict expects only compare listed columns, so\nnon-deterministic outputs (`_generated_at` from\n`current_timestamp`) are excluded from comparison.\n","tags":[],"meta":{},"defined_in":"models/marts/analytics/_analytics__models.yml","authoring_yaml":"  # LEADING bracket for test 2 — sits between the blank-line\n  # terminator above and `- name:` below with no further gap, so the\n  # leading-wins tiebreaker is moot here (cute-dbt#69 / #73).\n  - name: test_mart_dq_summary_zero_quarantined_when_all_valid\n    description: |\n      mart_dq_summary should report zero quarantined_count and 0.00\n      quarantine_rate_pct when every upstream row passes data-quality\n      validations. Uses sql format for the GIVEN mocks and dict format\n      for the EXPECT — dict expects only compare listed columns, so\n      non-deterministic outputs (`_generated_at` from\n      `current_timestamp`) are excluded from comparison.\n    model: mart_dq_summary\n    # INSIDE bracket for test 2 — same rule as test 1 (cute-dbt#69 /\n    # #73). Demonstrates that the slicer ride-along applies to every\n    # unit_test, not just the first in the file.\n    given:\n      - input: ref('stg_synthea__encounters')\n        format: sql\n        rows: |\n          select\n            true as is_dq_valid\n            , true as valid_encounter_timestamps\n            , true as no_future_encounter_dates\n            , true as end_after_1900\n            , true as start_after_1900\n      - input: ref('stg_synthea__medications')\n        format: sql\n        rows: |\n          select\n            true as is_dq_valid\n            , true as valid_medication_dates\n            , true as no_future_medication_dates\n            , true as start_after_1900\n            , true as end_after_1900_if_present\n    expect:\n      format: dict\n      rows:\n        - entity_type: 'encounters'\n          quarantined_count: 0\n          total_count: 1\n          quarantine_rate_pct: 0.00\n        - entity_type: 'medications'\n          quarantined_count: 0\n          total_count: 1\n          quarantine_rate_pct: 0.00\n  # TRAILING bracket for test 2 — terminated by EOF (cute-dbt#69 /\n  # #73).","given":[{"input":"ref('stg_synthea__encounters')","bound_to_node":"encounter_metrics","rows":"select\n  true as is_dq_valid\n  , true as valid_encounter_timestamps\n  , true as no_future_encounter_dates\n  , true as end_after_1900\n  , true as start_after_1900","format":"sql"},{"input":"ref('stg_synthea__medications')","bound_to_node":"medication_metrics","rows":"select\n  true as is_dq_valid\n  , true as valid_medication_dates\n  , true as no_future_medication_dates\n  , true as start_after_1900\n  , true as end_after_1900_if_present","format":"sql"}],"expected":{"rows":[{"entity_type":"encounters","quarantine_rate_pct":0.0,"quarantined_count":0,"total_count":1},{"entity_type":"medications","quarantine_rate_pct":0.0,"quarantined_count":0,"total_count":1}],"format":"dict"}}],"is_recursive":false}]}</script>
+<script type="application/json" id="cute-dbt-data">{"baseline":"tests/fixtures/playground-baseline.json","models":[{"name":"dim_payers","dag":{"nodes":[{"id":"source","role":"import"},{"id":"sequenced","role":"transform"},{"id":"unknown_member","role":"transform"},{"id":"final","role":"transform"},{"id":"dim_payers","role":"final"}],"edges":[{"from":"source","to":"sequenced","edge_type":"from"},{"from":"unknown_member","to":"final","edge_type":"union_all"},{"from":"sequenced","to":"final","edge_type":"union_all"},{"from":"final","to":"dim_payers","edge_type":"from"}]},"compiled_sql":{"dim_payers":"select * from final\n\n-- cute-dbt fixture: synthetic body mod","final":"final as (\n    select * from unknown_member\n    union all\n    select * from sequenced\n)","sequenced":"sequenced as (\n    select\n        -- surrogate key (starting from 1, reserving -1 for unknown)\n        row_number() over (order by payer_id) as payer_key\n\n        -- natural key\n        , payer_id\n\n        -- attributes\n        , payer_name\n        , address\n        , city\n        , state\n        , zip_code\n        , phone\n\n        -- financial metrics\n        , amount_covered\n        , amount_uncovered\n        , revenue\n\n        -- utilization metrics\n        , covered_encounters\n        , uncovered_encounters\n        , covered_medications\n        , uncovered_medications\n        , covered_procedures\n        , uncovered_procedures\n        , covered_immunizations\n        , uncovered_immunizations\n\n        -- member metrics\n        , unique_customers\n        , average_quality_of_life_score\n        , member_months\n\n        -- derived metrics\n        , case\n            when (amount_covered + amount_uncovered) > 0\n            then amount_covered / (amount_covered + amount_uncovered)\n            else 0\n        end as coverage_rate\n\n        -- metadata\n        , current_timestamp as _loaded_at\n\n    from source\n)","source":"source as (\n    select * from \"memory\".\"main_staging\".\"stg_synthea__payers\"\n)","unknown_member":"unknown_member as (\n    select\n        -1 as payer_key\n        , 'UNKNOWN' as payer_id\n        , 'Unknown Payer' as payer_name\n        , cast(null as varchar) as address\n        , cast(null as varchar) as city\n        , cast(null as varchar) as state\n        , cast(null as varchar) as zip_code\n        , cast(null as varchar) as phone\n        , cast(null as double) as amount_covered\n        , cast(null as double) as amount_uncovered\n        , cast(null as double) as revenue\n        , cast(null as bigint) as covered_encounters\n        , cast(null as bigint) as uncovered_encounters\n        , cast(null as bigint) as covered_medications\n        , cast(null as bigint) as uncovered_medications\n        , cast(null as bigint) as covered_procedures\n        , cast(null as bigint) as uncovered_procedures\n        , cast(null as bigint) as covered_immunizations\n        , cast(null as bigint) as uncovered_immunizations\n        , cast(null as bigint) as unique_customers\n        , cast(null as double) as average_quality_of_life_score\n        , cast(null as bigint) as member_months\n        , cast(null as double) as coverage_rate\n        , current_timestamp as _loaded_at\n)"},"raw_sql":"{{\n    config(\n        materialized='table',\n        unique_key='payer_key'\n    )\n}}\n\nwith source as (\n    select * from {{ ref('stg_synthea__payers') }}\n),\n\nsequenced as (\n    select\n        -- surrogate key (starting from 1, reserving -1 for unknown)\n        row_number() over (order by payer_id) as payer_key\n\n        -- natural key\n        , payer_id\n\n        -- attributes\n        , payer_name\n        , address\n        , city\n        , state\n        , zip_code\n        , phone\n\n        -- financial metrics\n        , amount_covered\n        , amount_uncovered\n        , revenue\n\n        -- utilization metrics\n        , covered_encounters\n        , uncovered_encounters\n        , covered_medications\n        , uncovered_medications\n        , covered_procedures\n        , uncovered_procedures\n        , covered_immunizations\n        , uncovered_immunizations\n\n        -- member metrics\n        , unique_customers\n        , average_quality_of_life_score\n        , member_months\n\n        -- derived metrics\n        , case\n            when (amount_covered + amount_uncovered) > 0\n            then amount_covered / (amount_covered + amount_uncovered)\n            else 0\n        end as coverage_rate\n\n        -- metadata\n        , current_timestamp as _loaded_at\n\n    from source\n),\n\n-- unknown member for handling missing dimension lookups\nunknown_member as (\n    select\n        -1 as payer_key\n        , 'UNKNOWN' as payer_id\n        , 'Unknown Payer' as payer_name\n        , cast(null as varchar) as address\n        , cast(null as varchar) as city\n        , cast(null as varchar) as state\n        , cast(null as varchar) as zip_code\n        , cast(null as varchar) as phone\n        , cast(null as double) as amount_covered\n        , cast(null as double) as amount_uncovered\n        , cast(null as double) as revenue\n        , cast(null as bigint) as covered_encounters\n        , cast(null as bigint) as uncovered_encounters\n        , cast(null as bigint) as covered_medications\n        , cast(null as bigint) as uncovered_medications\n        , cast(null as bigint) as covered_procedures\n        , cast(null as bigint) as uncovered_procedures\n        , cast(null as bigint) as covered_immunizations\n        , cast(null as bigint) as uncovered_immunizations\n        , cast(null as bigint) as unique_customers\n        , cast(null as double) as average_quality_of_life_score\n        , cast(null as bigint) as member_months\n        , cast(null as double) as coverage_rate\n        , current_timestamp as _loaded_at\n),\n\nfinal as (\n    select * from unknown_member\n    union all\n    select * from sequenced\n)\n\nselect * from final\n\n-- cute-dbt fixture: synthetic body mod","tests":[{"id":"unit_test.healthcare_analytics.dim_payers.test_dim_payers_injects_unknown_sentinel","name":"test_dim_payers_injects_unknown_sentinel","target_model":"dim_payers","changed":false,"description":"dim_payers UNION-ALLs an unknown-member sentinel row (payer_key = -1)\nwith the sequenced source rows. This test verifies the sentinel\nsurvives the union and the sequenced rows are surrogate-keyed\nstarting at 1. Uses dbt's dict format for both GIVEN and EXPECT —\ndict format only compares listed columns, so non-deterministic\noutputs (`_loaded_at` via `current_timestamp`) are excluded from\nassertion automatically.\n","tags":[],"meta":{},"defined_in":"models/marts/core/_core__models.yml","authoring_yaml":"  # cute-dbt's authoring-YAML drawer (since #69) attaches contiguous\n  # `#`-comment lines at the SAME indent as `- name:` immediately above\n  # the test to the test's authored slice. This block demonstrates the\n  # LEADING bracket — useful for stating the test's intent before the\n  # reader sees the assertion (cute-dbt#73).\n  - name: test_dim_payers_injects_unknown_sentinel\n    description: |\n      dim_payers UNION-ALLs an unknown-member sentinel row (payer_key = -1)\n      with the sequenced source rows. This test verifies the sentinel\n      survives the union and the sequenced rows are surrogate-keyed\n      starting at 1. Uses dbt's dict format for both GIVEN and EXPECT —\n      dict format only compares listed columns, so non-deterministic\n      outputs (`_loaded_at` via `current_timestamp`) are excluded from\n      assertion automatically.\n    model: dim_payers\n    # The INSIDE bracket — comments at deeper indent than `- name:` ride\n    # along with the body slice as raw text. Cute-dbt preserves them\n    # verbatim in the Authoring YAML drawer (cute-dbt#73).\n    given:\n      - input: ref('stg_synthea__payers')\n        format: dict\n        rows:\n          - payer_id: 'a00000aa-0000-0000-0000-000000000001'\n            payer_name: 'Acme Health'\n            address: '1 Acme Way'\n            city: 'Boston'\n            state: 'MA'\n            zip_code: '02101'\n            phone: '555-0100'\n            amount_covered: 1000.0\n            amount_uncovered: 250.0\n            revenue: 1250.0\n            covered_encounters: 10\n            uncovered_encounters: 2\n            covered_medications: 5\n            uncovered_medications: 1\n            covered_procedures: 3\n            uncovered_procedures: 0\n            covered_immunizations: 4\n            uncovered_immunizations: 0\n            unique_customers: 8\n            average_quality_of_life_score: 0.85\n            member_months: 96\n    expect:\n      format: dict\n      rows:\n        - payer_key: -1\n          payer_id: 'UNKNOWN'\n          payer_name: 'Unknown Payer'\n        - payer_key: 1\n          payer_id: 'a00000aa-0000-0000-0000-000000000001'\n          payer_name: 'Acme Health'\n  # The TRAILING bracket — contiguous `#`-comment lines at the SAME\n  # indent as `- name:`, immediately following the test body and\n  # terminated by EOF or a blank line, are attached to this test's\n  # slice. Useful for cross-references and follow-up notes (cute-dbt#73).","given":[{"input":"ref('stg_synthea__payers')","bound_to_node":"source","table":{"columns":["address","amount_covered","amount_uncovered","average_quality_of_life_score","city","covered_encounters","covered_immunizations","covered_medications","covered_procedures","member_months","payer_id","payer_name","phone","revenue","state","uncovered_encounters","uncovered_immunizations","uncovered_medications","uncovered_procedures","unique_customers","zip_code"],"rows":[{"cells":[{"display":"1 Acme Way","key":{"t":"str","v":"1 Acme Way"}},{"display":"1000.0","key":{"t":"number","v":"1000"}},{"display":"250.0","key":{"t":"number","v":"250"}},{"display":"0.85","key":{"t":"number","v":"0.85"}},{"display":"Boston","key":{"t":"str","v":"Boston"}},{"display":"10","key":{"t":"number","v":"10"}},{"display":"4","key":{"t":"number","v":"4"}},{"display":"5","key":{"t":"number","v":"5"}},{"display":"3","key":{"t":"number","v":"3"}},{"display":"96","key":{"t":"number","v":"96"}},{"display":"a00000aa-0000-0000-0000-000000000001","key":{"t":"str","v":"a00000aa-0000-0000-0000-000000000001"}},{"display":"Acme Health","key":{"t":"str","v":"Acme Health"}},{"display":"555-0100","key":{"t":"str","v":"555-0100"}},{"display":"1250.0","key":{"t":"number","v":"1250"}},{"display":"MA","key":{"t":"str","v":"MA"}},{"display":"2","key":{"t":"number","v":"2"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"8","key":{"t":"number","v":"8"}},{"display":"02101","key":{"t":"str","v":"02101"}}]}]},"rows":[{"address":"1 Acme Way","amount_covered":1000.0,"amount_uncovered":250.0,"average_quality_of_life_score":0.85,"city":"Boston","covered_encounters":10,"covered_immunizations":4,"covered_medications":5,"covered_procedures":3,"member_months":96,"payer_id":"a00000aa-0000-0000-0000-000000000001","payer_name":"Acme Health","phone":"555-0100","revenue":1250.0,"state":"MA","uncovered_encounters":2,"uncovered_immunizations":0,"uncovered_medications":1,"uncovered_procedures":0,"unique_customers":8,"zip_code":"02101"}],"format":"dict"}],"expected":{"table":{"columns":["payer_id","payer_key","payer_name"],"rows":[{"cells":[{"display":"UNKNOWN","key":{"t":"str","v":"UNKNOWN"}},{"display":"-1","key":{"t":"number","v":"-1"}},{"display":"Unknown Payer","key":{"t":"str","v":"Unknown Payer"}}]},{"cells":[{"display":"a00000aa-0000-0000-0000-000000000001","key":{"t":"str","v":"a00000aa-0000-0000-0000-000000000001"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"Acme Health","key":{"t":"str","v":"Acme Health"}}]}]},"rows":[{"payer_id":"UNKNOWN","payer_key":-1,"payer_name":"Unknown Payer"},{"payer_id":"a00000aa-0000-0000-0000-000000000001","payer_key":1,"payer_name":"Acme Health"}],"format":"dict"}}],"is_recursive":false},{"name":"int_dq_quarantine__encounters","dag":{"nodes":[],"edges":[]},"compiled_sql":{"int_dq_quarantine__encounters":"\n\n\n\n-- Encounters quarantined due to data quality violations\n\nselect * from \"memory\".\"main_staging\".\"stg_synthea__encounters\"\nwhere is_dq_valid = false\n\n\n-- cute-dbt fixture: synthetic body mod"},"raw_sql":"{{\n    config(\n        materialized='table',\n        tags=['intermediate', 'quarantine', 'data_quality']\n    )\n}}\n\n{{ generate_quarantine_model(\n    source_model='stg_synthea__encounters',\n    description='Encounters quarantined due to data quality violations'\n) }}\n\n-- cute-dbt fixture: synthetic body mod","tests":[],"is_recursive":false},{"name":"mart_dq_summary","dag":{"nodes":[{"id":"encounter_metrics","role":"import"},{"id":"medication_metrics","role":"import"},{"id":"combined_metrics","role":"transform"},{"id":"mart_dq_summary","role":"final"}],"edges":[{"from":"encounter_metrics","to":"combined_metrics","edge_type":"union_all"},{"from":"medication_metrics","to":"combined_metrics","edge_type":"union_all"},{"from":"combined_metrics","to":"mart_dq_summary","edge_type":"from"}]},"compiled_sql":{"combined_metrics":"combined_metrics as (\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_encounter_timestamps as failed_timestamp_validations\n        , failed_no_future_encounter_dates as failed_future_date_validations\n        , failed_end_after_1900 as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from encounter_metrics\n\n    union all\n\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_medication_dates as failed_timestamp_validations\n        , failed_no_future_medication_dates as failed_future_date_validations\n        , failed_end_after_1900_if_present as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from medication_metrics\n)","encounter_metrics":"encounter_metrics as (\n    select\n        'encounters' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_encounter_timestamps) as failed_valid_encounter_timestamps\n        , count(*) filter (where not no_future_encounter_dates) as failed_no_future_encounter_dates\n        , count(*) filter (where not end_after_1900) as failed_end_after_1900\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n    from \"memory\".\"main_staging\".\"stg_synthea__encounters\"\n)","mart_dq_summary":"select\n    entity_type\n    , quarantined_count\n    , total_count\n    , quarantine_rate_pct\n    , failed_timestamp_validations\n    , failed_future_date_validations\n    , failed_historical_end_validations\n    , failed_historical_start_validations\n    , current_timestamp as _generated_at\nfrom combined_metrics\norder by entity_type\n\n-- cute-dbt fixture: synthetic body mod","medication_metrics":"medication_metrics as (\n    select\n        'medications' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_medication_dates) as failed_valid_medication_dates\n        , count(*) filter (where not no_future_medication_dates) as failed_no_future_medication_dates\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n        , count(*) filter (where not end_after_1900_if_present) as failed_end_after_1900_if_present\n    from \"memory\".\"main_staging\".\"stg_synthea__medications\"\n)"},"raw_sql":"{{\n    config(\n        materialized='table',\n        tags=['analytics', 'data_quality']\n    )\n}}\n\nwith encounter_metrics as (\n    select\n        'encounters' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_encounter_timestamps) as failed_valid_encounter_timestamps\n        , count(*) filter (where not no_future_encounter_dates) as failed_no_future_encounter_dates\n        , count(*) filter (where not end_after_1900) as failed_end_after_1900\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n    from {{ ref('stg_synthea__encounters') }}\n),\n\nmedication_metrics as (\n    select\n        'medications' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_medication_dates) as failed_valid_medication_dates\n        , count(*) filter (where not no_future_medication_dates) as failed_no_future_medication_dates\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n        , count(*) filter (where not end_after_1900_if_present) as failed_end_after_1900_if_present\n    from {{ ref('stg_synthea__medications') }}\n),\n\ncombined_metrics as (\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_encounter_timestamps as failed_timestamp_validations\n        , failed_no_future_encounter_dates as failed_future_date_validations\n        , failed_end_after_1900 as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from encounter_metrics\n\n    union all\n\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_medication_dates as failed_timestamp_validations\n        , failed_no_future_medication_dates as failed_future_date_validations\n        , failed_end_after_1900_if_present as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from medication_metrics\n)\n\nselect\n    entity_type\n    , quarantined_count\n    , total_count\n    , quarantine_rate_pct\n    , failed_timestamp_validations\n    , failed_future_date_validations\n    , failed_historical_end_validations\n    , failed_historical_start_validations\n    , current_timestamp as _generated_at\nfrom combined_metrics\norder by entity_type\n\n-- cute-dbt fixture: synthetic body mod","tests":[{"id":"unit_test.healthcare_analytics.mart_dq_summary.test_mart_dq_summary_combines_encounter_and_medication_metrics","name":"test_mart_dq_summary_combines_encounter_and_medication_metrics","target_model":"mart_dq_summary","changed":false,"description":"mart_dq_summary UNION-ALLs metrics from stg_synthea__encounters\nand stg_synthea__medications. This test mocks two encounter rows\n(one invalid) and two medication rows (both invalid), then asserts\nthe per-entity counts + quarantine rate. Uses csv format for both\nGIVEN and EXPECT — compact tabular form across many boolean\ndq-flag columns.\n","tags":[],"meta":{},"defined_in":"models/marts/analytics/_analytics__models.yml","authoring_yaml":"  # LEADING bracket for test 1 — the slicer attaches contiguous\n  # `#`-comment lines at the SAME indent as `- name:` immediately above\n  # the test (no blank-line gap below) to this test's authored slice\n  # (cute-dbt#69 / #73).\n  - name: test_mart_dq_summary_combines_encounter_and_medication_metrics\n    description: |\n      mart_dq_summary UNION-ALLs metrics from stg_synthea__encounters\n      and stg_synthea__medications. This test mocks two encounter rows\n      (one invalid) and two medication rows (both invalid), then asserts\n      the per-entity counts + quarantine rate. Uses csv format for both\n      GIVEN and EXPECT — compact tabular form across many boolean\n      dq-flag columns.\n    model: mart_dq_summary\n    # INSIDE bracket for test 1 — comments at deeper indent than\n    # `- name:` ride along with the body slice as raw text (cute-dbt#69\n    # / #73).\n    given:\n      - input: ref('stg_synthea__encounters')\n        format: csv\n        rows: |\n          is_dq_valid,valid_encounter_timestamps,no_future_encounter_dates,end_after_1900,start_after_1900\n          false,false,true,true,true\n          true,true,true,true,true\n      - input: ref('stg_synthea__medications')\n        format: csv\n        rows: |\n          is_dq_valid,valid_medication_dates,no_future_medication_dates,start_after_1900,end_after_1900_if_present\n          false,false,true,true,true\n          false,true,false,true,true\n    expect:\n      format: csv\n      rows: |\n        entity_type,quarantined_count,total_count,quarantine_rate_pct,failed_timestamp_validations\n        encounters,1,2,50.00,1\n        medications,2,2,100.00,1\n  # TRAILING bracket for test 1 — the comment block butts against the\n  # body above (no blank-line gap) and is terminated below by the blank\n  # line separating the two tests (cute-dbt#69 / #73).","given":[{"input":"ref('stg_synthea__encounters')","bound_to_node":"encounter_metrics","table":{"columns":["end_after_1900","is_dq_valid","no_future_encounter_dates","start_after_1900","valid_encounter_timestamps"],"rows":[{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}}]},{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}}]}]},"rows":[{"end_after_1900":"true","is_dq_valid":"false","no_future_encounter_dates":"true","start_after_1900":"true","valid_encounter_timestamps":"false"},{"end_after_1900":"true","is_dq_valid":"true","no_future_encounter_dates":"true","start_after_1900":"true","valid_encounter_timestamps":"true"}],"format":"csv"},{"input":"ref('stg_synthea__medications')","bound_to_node":"medication_metrics","table":{"columns":["end_after_1900_if_present","is_dq_valid","no_future_medication_dates","start_after_1900","valid_medication_dates"],"rows":[{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}}]},{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}},{"display":"false","key":{"t":"bool","v":false}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}}]}]},"rows":[{"end_after_1900_if_present":"true","is_dq_valid":"false","no_future_medication_dates":"true","start_after_1900":"true","valid_medication_dates":"false"},{"end_after_1900_if_present":"true","is_dq_valid":"false","no_future_medication_dates":"false","start_after_1900":"true","valid_medication_dates":"true"}],"format":"csv"}],"expected":{"table":{"columns":["entity_type","failed_timestamp_validations","quarantine_rate_pct","quarantined_count","total_count"],"rows":[{"cells":[{"display":"encounters","key":{"t":"str","v":"encounters"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"50.00","key":{"t":"number","v":"50"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"2","key":{"t":"number","v":"2"}}]},{"cells":[{"display":"medications","key":{"t":"str","v":"medications"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"100.00","key":{"t":"number","v":"100"}},{"display":"2","key":{"t":"number","v":"2"}},{"display":"2","key":{"t":"number","v":"2"}}]}]},"rows":[{"entity_type":"encounters","failed_timestamp_validations":"1","quarantine_rate_pct":"50.00","quarantined_count":"1","total_count":"2"},{"entity_type":"medications","failed_timestamp_validations":"1","quarantine_rate_pct":"100.00","quarantined_count":"2","total_count":"2"}],"format":"csv"}},{"id":"unit_test.healthcare_analytics.mart_dq_summary.test_mart_dq_summary_zero_quarantined_when_all_valid","name":"test_mart_dq_summary_zero_quarantined_when_all_valid","target_model":"mart_dq_summary","changed":false,"description":"mart_dq_summary should report zero quarantined_count and 0.00\nquarantine_rate_pct when every upstream row passes data-quality\nvalidations. Uses sql format for the GIVEN mocks and dict format\nfor the EXPECT — dict expects only compare listed columns, so\nnon-deterministic outputs (`_generated_at` from\n`current_timestamp`) are excluded from comparison.\n","tags":[],"meta":{},"defined_in":"models/marts/analytics/_analytics__models.yml","authoring_yaml":"  # LEADING bracket for test 2 — sits between the blank-line\n  # terminator above and `- name:` below with no further gap, so the\n  # leading-wins tiebreaker is moot here (cute-dbt#69 / #73).\n  - name: test_mart_dq_summary_zero_quarantined_when_all_valid\n    description: |\n      mart_dq_summary should report zero quarantined_count and 0.00\n      quarantine_rate_pct when every upstream row passes data-quality\n      validations. Uses sql format for the GIVEN mocks and dict format\n      for the EXPECT — dict expects only compare listed columns, so\n      non-deterministic outputs (`_generated_at` from\n      `current_timestamp`) are excluded from comparison.\n    model: mart_dq_summary\n    # INSIDE bracket for test 2 — same rule as test 1 (cute-dbt#69 /\n    # #73). Demonstrates that the slicer ride-along applies to every\n    # unit_test, not just the first in the file.\n    given:\n      - input: ref('stg_synthea__encounters')\n        format: sql\n        rows: |\n          select\n            true as is_dq_valid\n            , true as valid_encounter_timestamps\n            , true as no_future_encounter_dates\n            , true as end_after_1900\n            , true as start_after_1900\n      - input: ref('stg_synthea__medications')\n        format: sql\n        rows: |\n          select\n            true as is_dq_valid\n            , true as valid_medication_dates\n            , true as no_future_medication_dates\n            , true as start_after_1900\n            , true as end_after_1900_if_present\n    expect:\n      format: dict\n      rows:\n        - entity_type: 'encounters'\n          quarantined_count: 0\n          total_count: 1\n          quarantine_rate_pct: 0.00\n        - entity_type: 'medications'\n          quarantined_count: 0\n          total_count: 1\n          quarantine_rate_pct: 0.00\n  # TRAILING bracket for test 2 — terminated by EOF (cute-dbt#69 /\n  # #73).","given":[{"input":"ref('stg_synthea__encounters')","bound_to_node":"encounter_metrics","rows":"select\n  true as is_dq_valid\n  , true as valid_encounter_timestamps\n  , true as no_future_encounter_dates\n  , true as end_after_1900\n  , true as start_after_1900","format":"sql"},{"input":"ref('stg_synthea__medications')","bound_to_node":"medication_metrics","rows":"select\n  true as is_dq_valid\n  , true as valid_medication_dates\n  , true as no_future_medication_dates\n  , true as start_after_1900\n  , true as end_after_1900_if_present","format":"sql"}],"expected":{"table":{"columns":["entity_type","quarantine_rate_pct","quarantined_count","total_count"],"rows":[{"cells":[{"display":"encounters","key":{"t":"str","v":"encounters"}},{"display":"0.0","key":{"t":"number","v":"0"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"1","key":{"t":"number","v":"1"}}]},{"cells":[{"display":"medications","key":{"t":"str","v":"medications"}},{"display":"0.0","key":{"t":"number","v":"0"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"1","key":{"t":"number","v":"1"}}]}]},"rows":[{"entity_type":"encounters","quarantine_rate_pct":0.0,"quarantined_count":0,"total_count":1},{"entity_type":"medications","quarantine_rate_pct":0.0,"quarantined_count":0,"total_count":1}],"format":"dict"}}],"is_recursive":false}]}</script>
 
 <script>
 /*! jQuery v3.7.1 | (c) OpenJS Foundation and other contributors | jquery.org/license */
@@ -4830,16 +4830,17 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       $sec.append(buildExternalFixtureAffordance(given.fixture));
       return $sec;
     }
-    var rows = extractRowsFromFixture(given);
+    // cute-dbt#138 — the Current view renders the Rust-computed POD directly.
+    var table = given.table || { columns: [], rows: [] };
+    var rowCount = table.rows.length;
     if (given.format && given.format !== "dict") {
       $hdr.append($("<span>").addClass("format-badge").text("format: " + given.format));
     }
     $hdr.append($("<span>").addClass("row-count-badge")
-      .text(rows.length + " row" + (rows.length === 1 ? "" : "s")));
+      .text(rowCount + " row" + (rowCount === 1 ? "" : "s")));
     $sec.append($hdr);
-    var cols = collectColumns(rows);
     var diff = givenDataDiff(dataDiff, given.input);
-    $sec.append(buildFixtureView(cols, rows, "given-table", diff));
+    $sec.append(buildFixtureView(table, "given-table", diff));
     return $sec;
   }
 
@@ -4867,14 +4868,15 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       $body.append(buildExternalFixtureAffordance(t.expected.fixture));
       return;
     }
-    var rows = extractRowsFromFixture(t.expected);
-    $panel.find(".expected-rowcount").text(rows.length + " row" + (rows.length === 1 ? "" : "s"));
-    var cols = collectColumns(rows);
+    // cute-dbt#138 — the Current view renders the Rust-computed POD directly.
+    var table = t.expected.table || { columns: [], rows: [] };
+    var rowCount = table.rows.length;
+    $panel.find(".expected-rowcount").text(rowCount + " row" + (rowCount === 1 ? "" : "s"));
     // The expect side's cell diff, when the test's expect fixture carried a
     // real change (cute-dbt#98). `data_diff.expect` already passed
     // `has_real_change()`, so its presence === "default this table to Diff".
     var diff = (t.data_diff && t.data_diff.expect) || undefined;
-    $body.append(buildFixtureView(cols, rows, "expected-table", diff));
+    $body.append(buildFixtureView(table, "expected-table", diff));
     initDataTablesIn($body);
   }
 
@@ -4898,26 +4900,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     return Boolean(obj && obj.format === "sql" && typeof obj.rows === "string");
   }
 
-  // Return a tabulable row array from a fixture, handling both
-  // array shapes (dict/csv-from-core) and raw-CSV-string shapes
-  // (csv-from-fusion). Returns `[]` for sql fixtures and other
-  // unexpected shapes — the sql path is dispatched separately by the
-  // caller via `isSqlStringFixture`.
-  function extractRowsFromFixture(fixture) {
-    if (!fixture) return [];
-    var rows = fixture.rows;
-    if (rows == null) return [];
-    if (Array.isArray(rows)) return rows;
-    if (typeof rows === "string" && fixture.format === "csv") {
-      return parseCsvRows(rows);
-    }
-    return [];
-  }
-
   // Render a sql-format fixture as a syntax-highlighted code block.
   // Reuses the compiled-SQL drawer's `.sql-block-wrap` shell so visual
   // style stays consistent. No copy button: the source of truth is the
-  // fixture in the manifest, not the rendered DOM.
+  // fixture in the manifest, not the rendered DOM. This is the ONE
+  // remaining non-tabulatable fallback path: a `format: sql` fixture has no
+  // cells, so the domain returns no `table` POD (cute-dbt#138) and the JS
+  // renders the raw SELECT here.
   function buildSqlCodeBlock(sql) {
     var $wrap = $("<div>").addClass("sql-block-wrap fixture-sql-block-wrap");
     var $pre = $("<pre>").addClass("sql-block").append(
@@ -4927,129 +4916,14 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     return $wrap;
   }
 
-  // RFC 4180 CSV parser — state machine over the input string.
-  //
-  // dbt-fusion 2.0-preview emits `format: csv` unit-test fixtures as
-  // a raw CSV body in the manifest. dbt-core 1.11+ pre-parses csv to
-  // an array of dicts. cute-dbt does the parse at render time so both
-  // engines render identically (cute-dbt#66).
-  //
-  // Behavior summary:
-  //   * First row is headers; subsequent rows are body values.
-  //   * Quoted fields strip the surrounding double-quotes.
-  //   * Double-quote inside a quoted field is the RFC 4180 escape:
-  //     `""` decodes to a literal `"`.
-  //   * Quoted fields may contain commas and newlines verbatim.
-  //   * A single trailing newline (LF or CRLF) is consumed — dbt YAML
-  //     `rows: |` block scalars always end in `\n`; preserving it
-  //     would create a spurious final empty row.
-  //   * An unterminated final row is accepted (graceful — the
-  //     renderer is not a validator).
-  //   * CRLF (`\r\n`) terminates a row as a single unit.
-  //   * Empty input or header-only input returns `[]`.
-  //
-  // Correctness is unit-tested via `tests/headless_csv_parser.rs` —
-  // the parser is exposed on `window.__cuteParseCsv` so that test can
-  // invoke it through the headless Chrome runtime.
-  function parseCsvRows(text) {
-    if (text == null) return [];
-    var t = String(text);
-    if (t.length === 0) return [];
-    // Strip exactly one trailing newline (LF or CRLF).
-    if (t.charAt(t.length - 1) === "\n") {
-      t = t.slice(0, -1);
-      if (t.length > 0 && t.charAt(t.length - 1) === "\r") {
-        t = t.slice(0, -1);
-      }
-    }
-    if (t.length === 0) return [];
-
-    var matrix = [];
-    var fields = [];
-    var field = "";
-    var inQuotes = false;
-    for (var i = 0; i < t.length; i++) {
-      var c = t.charAt(i);
-      if (inQuotes) {
-        if (c === '"') {
-          // RFC 4180 escape: doubled quote inside a quoted field
-          // collapses to a single literal quote.
-          if (i + 1 < t.length && t.charAt(i + 1) === '"') {
-            field += '"';
-            i++;
-            continue;
-          }
-          inQuotes = false;
-          continue;
-        }
-        field += c;
-        continue;
-      }
-      // Outside quotes.
-      if (c === '"' && field === "") {
-        inQuotes = true;
-        continue;
-      }
-      if (c === ',') {
-        fields.push(field);
-        field = "";
-        continue;
-      }
-      if (c === '\n' || c === '\r') {
-        fields.push(field);
-        matrix.push(fields);
-        fields = [];
-        field = "";
-        if (c === '\r' && i + 1 < t.length && t.charAt(i + 1) === '\n') {
-          i++;
-        }
-        continue;
-      }
-      field += c;
-    }
-    // Flush the final field/row. We always run this — the trailing-
-    // newline strip above guarantees at least one character of
-    // content survives to reach this branch in non-empty input.
-    fields.push(field);
-    matrix.push(fields);
-
-    if (matrix.length < 2) return [];
-    var headers = matrix[0];
-    var out = [];
-    for (var ri = 1; ri < matrix.length; ri++) {
-      var row = matrix[ri];
-      var obj = {};
-      for (var hi = 0; hi < headers.length; hi++) {
-        obj[headers[hi]] = hi < row.length ? row[hi] : "";
-      }
-      out.push(obj);
-    }
-    return out;
-  }
-
-  // Expose the parser on `window.__cuteParseCsv` so the headless
-  // integration test at `tests/headless_csv_parser.rs` can invoke it
-  // via `Runtime.Evaluate` and assert RFC 4180 edge cases (quoted
-  // fields, embedded commas, embedded newlines, escaped quotes,
-  // CRLF, empty input, header-only input). The `__` prefix marks it
-  // as a test-only seam; production code reaches it via the closure
-  // binding above.
-  if (typeof window !== "undefined") {
-    window.__cuteParseCsv = parseCsvRows;
-  }
-
-  function collectColumns(rows) {
-    var seen = {};
-    var order = [];
-    rows.forEach(function (row) {
-      if (row && typeof row === "object" && !Array.isArray(row)) {
-        Object.keys(row).forEach(function (k) {
-          if (!seen[k]) { seen[k] = true; order.push(k); }
-        });
-      }
-    });
-    return order;
-  }
+  // cute-dbt#138 — the JS csv/dict table parsers (`parseCsvRows`,
+  // `extractRowsFromFixture`, `collectColumns`) are RETIRED. The Current view
+  // now renders the Rust-computed `FixtureTable` POD that the domain ships on
+  // each given/expect payload (`table`), so csv/dict tabulation — and the
+  // engine-divergence handling above — happens once, in Rust
+  // (`table_from_manifest_rows`), and the template is a pure renderer. CSV
+  // RFC 4180 correctness is now owned by the Rust `parse_csv_rows` unit tests
+  // (the JS `__cuteParseCsv` headless seam retired with the function).
 
   function escapeHtml(s) {
     return String(s)
@@ -5406,7 +5280,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   function highlightYaml(yaml) { return emitTokens(tokenizeYaml(yaml)); }
 
   // Expose for headless JS unit tests (cute-dbt#69 / cute-dbt#132 — parallels
-  // the `__cuteParseCsv` seam introduced in cute-dbt#66).
+  // the `__cuteRenderYamlDiff` headless seam).
   window.__cuteHighlightYaml = highlightYaml;
   window.__cuteTokenizeSql = tokenizeSql;
   window.__cuteTokenizeYaml = tokenizeYaml;
@@ -5677,7 +5551,16 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     done(ok);
   }
 
-  function buildTable(columns, rows, cls) {
+  // The Current-view grid, rendered PURELY from the Rust-computed
+  // `FixtureTable` POD (cute-dbt#138). Each cell is a `{display, key}` Cell:
+  // the text is the authored `display` (so a csv `1.00` shows `1.00`, not the
+  // canonicalized `1`), while the numeric / NULL styling + sort order come
+  // from the canonical `key` (a `Number` key sorts numerically even when its
+  // display is `1.00`). The JS no longer parses csv/dict — the domain's
+  // `table_from_manifest_rows` owns that, and ships this POD on the wire.
+  function buildTable(table, cls) {
+    var columns = (table && table.columns) || [];
+    var rows = (table && table.rows) || [];
     var $wrap = $("<div>").addClass("table-fit");
     var $tbl = $("<table>").addClass(cls);
     var $thead = $("<thead>").appendTo($tbl);
@@ -5689,21 +5572,32 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     var $tbody = $("<tbody>").appendTo($tbl);
     rows.forEach(function (r) {
       var $tr = $("<tr>").appendTo($tbody);
-      columns.forEach(function (col) {
-        var cell = (r && typeof r === "object" && !Array.isArray(r)) ? r[col] : undefined;
-        var $td = $("<td>");
-        if (cell === null || cell === undefined) {
-          $td.addClass("cell-null").text("NULL");
-        } else if (typeof cell === "number") {
-          $td.addClass("cell-num").text(cell);
-        } else {
-          $td.text(String(cell));
-        }
-        $tr.append($td);
+      (r.cells || []).forEach(function (cell) {
+        $tr.append(decorateCurrentCell($("<td>"), cell));
       });
     });
     $wrap.append($tbl);
     return $wrap;
+  }
+
+  // Render one Current-view Cell (`{display, key}`) into a <td>: the text is
+  // the authored `display`; the styling/sort affordance is read from `key.t`
+  // (the canonical type), never from the display token (cute-dbt#138). Shares
+  // the null/number styling with `decorateValueCell` so Current and Diff read
+  // identically.
+  function decorateCurrentCell($td, cell) {
+    var key = cell && cell.key;
+    if (!key || key.t === "null") {
+      return $td.addClass("cell-null").text("NULL");
+    }
+    if (key.t === "absent") {
+      return $td.addClass("cell-absent").text("");
+    }
+    if (key.t === "number") {
+      // Sort numerically on the canonical value; show the authored display.
+      return $td.addClass("cell-num").attr("data-order", key.v).text(cell.display);
+    }
+    return $td.text(cell.display);
   }
 
   // cute-dbt#98 ----------------------------------------------------------
@@ -5737,14 +5631,14 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   // is present — also build the Diff grid and a Current↔Diff toggle that flips
   // exactly one view visible at a time (the inactive view carries `hidden`).
   // Default-Diff when a diff exists, else Current with no toggle.
-  function buildFixtureView(columns, rows, cls, diff) {
+  function buildFixtureView(table, cls, diff) {
     if (!diff) {
-      // No cell diff for this table → today's behavior, byte-for-byte.
-      return buildTable(columns, rows, cls);
+      // No cell diff for this table → the plain Current grid from the POD.
+      return buildTable(table, cls);
     }
     var $wrap = $("<div>").addClass("fixture-view");
     var $diffView = buildDiffTable(diff, cls);
-    var $currentView = buildTable(columns, rows, cls).prop("hidden", true);
+    var $currentView = buildTable(table, cls).prop("hidden", true);
 
     var $toggle = $("<div>").addClass("cell-diff-toggle");
     var $diffBtn = $("<button>").attr("type", "button")
@@ -5817,67 +5711,56 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       return decorateValueCell($td, cell.old);
     }
     if (rowKind === "added" || rowKind === "unchanged" || !cell.changed) {
+      // Not flagged (added/unchanged, or a format-only change where the keys
+      // are equal): show the NEW authored value, no red/green (cute-dbt#138).
       return decorateValueCell($td, cell.new);
     }
-    // Modified + changed → inline old → new. Each side is type-aware via
-    // diffToken: a real null/absent keeps its own neutral styling and never
-    // borrows the value-change red/green (cute-dbt#132).
-    $td.addClass("cell-changed").attr("data-order", cellValueText(cell.new));
+    // Modified + changed → inline old → new, each side showing its authored
+    // display. Each side is type-aware via diffToken: a real null/absent keeps
+    // its own neutral styling and never borrows the value-change red/green
+    // (cute-dbt#132). The sort key is the NEW cell's authored display.
+    $td.addClass("cell-changed").attr("data-order", cellText(cell.new));
     $td.append(diffToken(cell.old, "cell-old"));
     $td.append($("<span>").addClass("cell-arrow").html("&rarr;"));
     $td.append(diffToken(cell.new, "cell-new"));
     return $td;
   }
 
-  // One side of an inline `old → new` changed cell. Type-aware so a real null
-  // or absent cell reads in its own neutral styling rather than the brilliant
-  // red/green reserved for a real value change: null → italic muted-gray
-  // "NULL"; absent → blank; any concrete value (including the string 'null')
-  // → the side's color via `sideClass` (.cell-old = red, .cell-new = green).
-  // This is what keeps a real NULL visually distinct from a string 'null'
-  // even mid-diff (cute-dbt#132).
-  function diffToken(cv, sideClass) {
-    if (!cv || cv.t === "null") {
+  // One side of an inline `old → new` changed cell. `cell` is a `{display,
+  // key}` Cell (cute-dbt#138): the text is the authored `display`; the
+  // neutral-vs-value styling is read from `key.t` so a real null or absent
+  // cell reads in its own neutral styling rather than the brilliant red/green
+  // reserved for a real value change: null → italic muted-gray "NULL"; absent
+  // → blank; any concrete value (including the string 'null') → the side's
+  // color via `sideClass` (.cell-old = red, .cell-new = green). This keeps a
+  // real NULL visually distinct from a string 'null' even mid-diff (#132).
+  function diffToken(cell, sideClass) {
+    var key = cell && cell.key;
+    if (!key || key.t === "null") {
       return $("<span>").addClass("cell-null").text("NULL");
     }
-    if (cv.t === "absent") {
+    if (key.t === "absent") {
       return $("<span>").addClass("cell-absent").text("");
     }
-    return $("<span>").addClass(sideClass).text(cellValueText(cv));
+    return $("<span>").addClass(sideClass).text(cell.display);
   }
 
-  // Render a single CellValue into a plain value cell, matching `buildTable`'s
-  // null/number styling so the Current and Diff views read identically.
-  function decorateValueCell($td, cv) {
-    if (!cv || cv.t === "null") {
-      // A literal null reads as NULL, matching the Current grid's
-      // `cell === null` styling.
-      return $td.addClass("cell-null").text("NULL");
-    }
-    if (cv.t === "absent") {
-      // An absent cell (a unified-diff column the row's source table lacks)
-      // is NOT a null — render it blank so an Absent->Null change stays
-      // visible and added/removed-column cells don't read as literal nulls.
-      return $td.addClass("cell-absent").text("");
-    }
-    if (cv.t === "number") {
-      return $td.addClass("cell-num").attr("data-order", cv.v).text(cv.v);
-    }
-    return $td.text(cellValueText(cv));
+  // Render a single `{display, key}` Cell into a plain value cell, matching
+  // `buildTable`'s null/number styling so the Current and Diff views read
+  // identically. Text is the authored `display`; styling/sort from `key`.
+  function decorateValueCell($td, cell) {
+    return decorateCurrentCell($td, cell);
   }
 
-  // The display text of an adjacently-tagged CellValue ({t, v}). `absent`
-  // renders empty; `null` renders the word NULL; bool/number/str verbatim.
-  function cellValueText(cv) {
-    if (!cv) return "";
-    switch (cv.t) {
-      case "null":   return "NULL";
-      case "absent": return "";
-      case "bool":   return cv.v ? "true" : "false";
-      case "number": return String(cv.v);
-      case "str":    return String(cv.v);
-      default:       return cv.v == null ? "" : String(cv.v);
-    }
+  // The display text of a `{display, key}` Cell (cute-dbt#138): a `null` key
+  // renders the word NULL, an `absent` key renders empty, otherwise the
+  // authored `display` token verbatim. Used for the changed-cell sort key.
+  function cellText(cell) {
+    var key = cell && cell.key;
+    if (!key) return "";
+    if (key.t === "null") return "NULL";
+    if (key.t === "absent") return "";
+    return cell.display == null ? "" : String(cell.display);
   }
 
   // Re-measure DataTables column widths for any (now-visible) table under
@@ -5892,13 +5775,15 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     });
   }
   // Exposed for headless JS unit tests (cute-dbt#98 — parallels the
-  // `__cuteRenderYamlDiff` / `__cuteParseCsv` seams). Returns the outer
-  // wrapper element so a test can assert the toggle + tinted markup.
+  // `__cuteRenderYamlDiff` seam). Takes the Rust-computed `FixtureTable` POD
+  // (cute-dbt#138) + an optional cell diff and returns the outer wrapper
+  // element so a test can assert the authored-display rendering, the toggle,
+  // and the tinted markup.
   if (typeof window !== "undefined") {
-    window.__cuteBuildFixtureView = function (columns, rows, cls, diff) {
-      return buildFixtureView(columns, rows, cls, diff)[0];
+    window.__cuteBuildFixtureView = function (table, cls, diff) {
+      return buildFixtureView(table, cls, diff)[0];
     };
-    window.__cuteCellValueText = cellValueText;
+    window.__cuteCellText = cellText;
   }
 
   function initDataTablesIn($scope) {

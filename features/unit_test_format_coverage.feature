@@ -6,9 +6,10 @@
 #
 #   - `dict` rows arrive as an array of dicts (both engines).
 #   - `csv` rows arrive as an array of dicts (dbt-core 1.11+) OR as a
-#     raw CSV string (dbt-fusion 2.0-preview). cute-dbt's JS renderer
-#     contains a hand-rolled RFC 4180 parser for the fusion path
-#     (cute-dbt#66; tested via `tests/headless_csv_parser.rs`).
+#     raw CSV string (dbt-fusion 2.0-preview). cute-dbt parses the fusion
+#     path with a hand-rolled RFC 4180 parser in the domain
+#     (cute-dbt#66; `parse_csv_rows`, unit-tested by `g22`-`g26` in
+#     src/domain/unit_test_table.rs — the JS twin retired in cute-dbt#138).
 #   - `sql` rows arrive as a raw SELECT string (both engines) — cannot
 #     be tabulated without execution; rendered as a syntax-highlighted
 #     code block.

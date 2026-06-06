@@ -66,8 +66,9 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, BlockDiff, CteGraph, EdgeType, InScopeSet, Manifest, ModelInScopeSet, Node,
-    NodeId, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestYamlBlock, resolve_target_model,
+    BANNER_EMPTY_SCOPE, BlockDiff, CteGraph, EdgeType, FixtureTable, InScopeSet, Manifest,
+    ModelInScopeSet, Node, NodeId, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestYamlBlock,
+    resolve_target_model, table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -274,13 +275,23 @@ pub struct GivenPayload {
     /// copy on the bound node.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound_to_node: Option<String>,
+    /// The Rust-computed Current-view [`FixtureTable`] — the authoritative
+    /// tabulated cells (authored `display` + canonical `key` per cell),
+    /// computed in the domain via `table_from_manifest_rows` (cute-dbt#138).
+    /// `None` for a non-tabulatable fixture (sql/opaque, or external-`fixture:`
+    /// rows not in the manifest); the JS then renders the sql code block or the
+    /// external-fixture affordance from [`rows`](Self::rows) /
+    /// [`format`](Self::format) / [`fixture`](Self::fixture). When `Some`, the
+    /// template is a PURE renderer of this POD — it no longer parses
+    /// csv/dict in JS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<FixtureTable>,
     /// Tabular fixture rows lifted verbatim from the unit-test
-    /// `given[i].rows` field (kept as serde `Value` to accept the
-    /// heterogeneous shapes dbt allows). `Value::Null` when this given's
-    /// data lives in an external [`fixture`](Self::fixture) file (the rows
-    /// are not in the manifest) — the render layer then shows the
-    /// external-fixture affordance + YAML fallback rather than an empty
-    /// grid (cute-dbt#98, #126).
+    /// `given[i].rows` field (kept as serde `Value`). Retained for the
+    /// non-tabulatable fallback only: the sql code block, and external-fixture
+    /// detection (`rows == null`). When [`table`](Self::table) is `Some` the
+    /// renderer ignores this field (cute-dbt#138). `Value::Null` when this
+    /// given's data lives in an external [`fixture`](Self::fixture) file.
     pub rows: Value,
     /// Fixture format hint (`csv`, `yaml`, `dict`, etc.) when the
     /// manifest specified one; absent for inline-rows fixtures.
@@ -367,10 +378,19 @@ pub struct TestPayload {
 /// `expect` block lifted into payload shape.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExpectedPayload {
+    /// The Rust-computed Current-view [`FixtureTable`] for the `expect`
+    /// fixture (authored `display` + canonical `key` per cell, cute-dbt#138).
+    /// `None` for a non-tabulatable fixture (sql/opaque or external);
+    /// otherwise the template renders this POD directly. Same contract as
+    /// [`GivenPayload::table`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<FixtureTable>,
     /// Expected tabular rows lifted verbatim from the unit-test
-    /// `expect.rows` field (serde `Value` accepts the heterogeneous
-    /// shapes dbt allows). `Value::Null` when the data lives in an
-    /// external [`fixture`](Self::fixture) file (cute-dbt#98, #126).
+    /// `expect.rows` field (serde `Value`). Retained for the non-tabulatable
+    /// fallback only (sql code block; external-fixture detection). When
+    /// [`table`](Self::table) is `Some` the renderer ignores this field
+    /// (cute-dbt#138). `Value::Null` when the data lives in an external
+    /// [`fixture`](Self::fixture) file.
     pub rows: Value,
     /// Expected-block format hint (`csv`, `yaml`, `dict`, etc.) when
     /// the manifest specified one; absent for inline-rows fixtures.
@@ -787,6 +807,7 @@ fn build_test_payload(
             GivenPayload {
                 input: g.input().to_owned(),
                 bound_to_node,
+                table: current_view_table(g.rows(), g.format(), g.fixture()),
                 rows: g.rows().clone(),
                 format: g.format().map(str::to_owned),
                 fixture: g.fixture().map(str::to_owned),
@@ -807,11 +828,42 @@ fn build_test_payload(
         data_diff: data_diff.cloned(),
         given,
         expected: ExpectedPayload {
+            table: current_view_table(
+                unit_test.expect().rows(),
+                unit_test.expect().format(),
+                unit_test.expect().fixture(),
+            ),
             rows: unit_test.expect().rows().clone(),
             format: unit_test.expect().format().map(str::to_owned),
             fixture: unit_test.expect().fixture().map(str::to_owned),
         },
     }
+}
+
+/// Compute the Current-view [`FixtureTable`] POD for a fixture's `rows` +
+/// `format` (cute-dbt#138): the authoritative tabulated cells the template
+/// renders directly, so the JS never parses csv/dict.
+///
+/// Returns `None` for the two non-tabulatable cases so the JS falls back to
+/// its sql / external-fixture affordances:
+///
+/// 1. **External fixture** — `fixture:` is set AND `rows` is `Value::Null`
+///    (the data is not in the manifest). A `Null` `rows` would otherwise
+///    normalize to the *empty* table, hiding the "data in external file"
+///    affordance behind a silently-empty grid (cute-dbt#126). We gate on the
+///    `fixture:`+`Null` pair (NOT on `rows == Null` alone — a genuinely empty
+///    inline fixture still tabulates to the empty grid).
+/// 2. **sql / opaque** — [`table_from_manifest_rows`] returns `None` (a raw
+///    `SELECT` string has no cells); the JS renders the sql code block.
+fn current_view_table(
+    rows: &Value,
+    format: Option<&str>,
+    fixture: Option<&str>,
+) -> Option<FixtureTable> {
+    if fixture.is_some() && rows.is_null() {
+        return None; // external fixture → JS affordance, not an empty grid
+    }
+    table_from_manifest_rows(rows, format)
 }
 
 /// Locate the leaf CTE node that binds to `ref_name`.
@@ -2570,19 +2622,20 @@ mod tests {
     // ===== cute-dbt#98 — data_diff + fixture wire shape =====
 
     use crate::domain::{
-        CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff,
+        Cell, CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff,
         RowChange, RowChangeKind, UnitTestDataDiff,
     };
 
     /// A `TestPayload` carrying a `data_diff` serializes the cell-diff with the
-    /// EXACT JS contract the renderer will branch on: each `CellValue` is
-    /// adjacently tagged `{"t": <type>, "v": <value>}`, the `Absent` unit
-    /// variant is `{"t":"absent"}` (no `"v"`), and the row/column enums are
-    /// lowercase tokens. This pins the wire shape independently of the
-    /// domain's own round-trip test (which proves Rust↔Rust; this proves the
-    /// JSON the template consumes).
+    /// EXACT JS contract the renderer will branch on (cute-dbt#138): each cell
+    /// side is a `Cell` carrying BOTH `display` (the authored token) AND `key`
+    /// (an adjacently-tagged `{"t": <type>, "v": <value>}` `CellValue`). The
+    /// `Absent` key is `{"t":"absent"}` (no `"v"`), and the row/column enums
+    /// are lowercase tokens. This pins the dual-axis wire shape independently
+    /// of the domain's own round-trip test (which proves Rust↔Rust; this proves
+    /// the JSON the template consumes) — cute-dbt#139 reads both axes here.
     #[test]
-    fn data_diff_payload_wire_shape_has_adjacent_cellvalue_tags() {
+    fn data_diff_payload_wire_ships_both_display_and_key_axes() {
         let data_diff = UnitTestDataDiff {
             given: vec![NamedTableDiff {
                 input: "ref('a')".into(),
@@ -2600,14 +2653,22 @@ mod tests {
                     rows: vec![RowChange {
                         kind: RowChangeKind::Modified,
                         cells: vec![
+                            // A format-only cell: authored "1.00" on the NEW
+                            // side, "1" on the OLD side, but BOTH key to
+                            // Number("1") → changed: false (the headline #138
+                            // case: the diff shows the authored value yet does
+                            // NOT flag).
                             CellChange {
-                                old: CellValue::Number("1".into()),
-                                new: CellValue::Number("1".into()),
+                                old: Cell::with_display("1".into(), CellValue::Number("1".into())),
+                                new: Cell::with_display(
+                                    "1.00".into(),
+                                    CellValue::Number("1".into()),
+                                ),
                                 changed: false,
                             },
                             CellChange {
-                                old: CellValue::Absent,
-                                new: CellValue::Str("NYC".into()),
+                                old: Cell::new(CellValue::Absent),
+                                new: Cell::new(CellValue::Str("NYC".into())),
                                 changed: true,
                             },
                         ],
@@ -2618,25 +2679,37 @@ mod tests {
         };
         let json = serde_json::to_value(&data_diff).expect("data_diff serializes");
         let cells = &json["given"][0]["diff"]["rows"][0]["cells"];
-        // Adjacently-tagged number: {"t":"number","v":"1"}.
-        assert_eq!(cells[0]["old"]["t"], "number");
-        assert_eq!(cells[0]["old"]["v"], "1");
-        // Str cell.
-        assert_eq!(cells[1]["new"]["t"], "str");
-        assert_eq!(cells[1]["new"]["v"], "NYC");
-        // Absent is a bare unit variant — tag only, NO "v" key.
-        assert_eq!(cells[1]["old"]["t"], "absent");
-        assert!(
-            cells[1]["old"].get("v").is_none(),
-            "Absent serializes with no \"v\" key; got {}",
-            cells[1]["old"],
+        // BOTH axes ship: `display` is the authored token; `key` is the
+        // adjacently-tagged CellValue {"t":"number","v":"1"}.
+        assert_eq!(
+            cells[0]["new"]["display"], "1.00",
+            "authored token survives"
         );
+        assert_eq!(cells[0]["new"]["key"]["t"], "number");
+        assert_eq!(cells[0]["new"]["key"]["v"], "1", "key is canonical");
+        assert_eq!(cells[0]["old"]["display"], "1");
+        assert_eq!(cells[0]["old"]["key"]["v"], "1");
+        // A format-only change is NOT flagged (keys equal) yet shows the
+        // authored NEW display.
+        assert_eq!(cells[0]["changed"], false);
+        // Str cell: display mirrors the key string verbatim.
+        assert_eq!(cells[1]["new"]["display"], "NYC");
+        assert_eq!(cells[1]["new"]["key"]["t"], "str");
+        assert_eq!(cells[1]["new"]["key"]["v"], "NYC");
+        // Absent key is a bare unit variant — tag only, NO "v" key; its
+        // display is the empty string.
+        assert_eq!(cells[1]["old"]["key"]["t"], "absent");
+        assert!(
+            cells[1]["old"]["key"].get("v").is_none(),
+            "Absent key serializes with no \"v\" key; got {}",
+            cells[1]["old"]["key"],
+        );
+        assert_eq!(cells[1]["old"]["display"], "");
         // Row-kind + column-status enums are lowercase tokens.
         assert_eq!(json["given"][0]["diff"]["rows"][0]["kind"], "modified");
         assert_eq!(json["given"][0]["diff"]["columns"][0]["status"], "present");
         assert_eq!(json["given"][0]["diff"]["columns"][1]["status"], "added");
         // The precomputed `changed` verdict rides on each cell.
-        assert_eq!(cells[0]["changed"], false);
         assert_eq!(cells[1]["changed"], true);
     }
 
@@ -2676,8 +2749,8 @@ mod tests {
                 rows: vec![RowChange {
                     kind: RowChangeKind::Added,
                     cells: vec![CellChange {
-                        old: CellValue::Absent,
-                        new: CellValue::Number("9".into()),
+                        old: Cell::new(CellValue::Absent),
+                        new: Cell::new(CellValue::Number("9".into())),
                         changed: true,
                     }],
                 }],

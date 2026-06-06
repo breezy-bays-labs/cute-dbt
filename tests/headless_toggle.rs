@@ -25,9 +25,8 @@
 //!
 //! ## Runtime cost
 //!
-//! Shares the same CI job as `headless_zero_egress` / `headless_csv_parser`
-//! and is `#[ignore]` by default. One Chrome cold-start covers all the
-//! headless tests. Locally:
+//! Shares the same CI job as `headless_zero_egress` and is `#[ignore]` by
+//! default. One Chrome cold-start covers all the headless tests. Locally:
 //!
 //! ```bash
 //! cargo test --test headless_toggle -- --ignored
@@ -1475,7 +1474,7 @@ fn show_all_inputs(tab: &Tab) {
 /// `id` value goes 1 → 2 (the synthetic toggle fixture).
 fn one_cell_modified_data_diff(input: &str) -> UnitTestDataDiff {
     use cute_dbt::domain::{
-        CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff,
+        Cell, CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff,
         RowChange, RowChangeKind,
     };
     UnitTestDataDiff {
@@ -1489,8 +1488,8 @@ fn one_cell_modified_data_diff(input: &str) -> UnitTestDataDiff {
                 rows: vec![RowChange {
                     kind: RowChangeKind::Modified,
                     cells: vec![CellChange {
-                        old: CellValue::Number("1".into()),
-                        new: CellValue::Number("2".into()),
+                        old: Cell::new(CellValue::Number("1".into())),
+                        new: Cell::new(CellValue::Number("2".into())),
                         changed: true,
                     }],
                 }],
@@ -1505,7 +1504,7 @@ fn one_cell_modified_data_diff(input: &str) -> UnitTestDataDiff {
 /// the string literal `"null"` — the cute-dbt#132 null-vs-string distinction.
 fn null_vs_string_null_data_diff(input: &str) -> UnitTestDataDiff {
     use cute_dbt::domain::{
-        CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff,
+        Cell, CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff,
         RowChange, RowChangeKind,
     };
     UnitTestDataDiff {
@@ -1527,15 +1526,15 @@ fn null_vs_string_null_data_diff(input: &str) -> UnitTestDataDiff {
                     cells: vec![
                         // new side is a REAL null -> italic muted-gray .cell-null.
                         CellChange {
-                            old: CellValue::Number("1".into()),
-                            new: CellValue::Null,
+                            old: Cell::new(CellValue::Number("1".into())),
+                            new: Cell::new(CellValue::Null),
                             changed: true,
                         },
                         // new side is the STRING "null" -> a normal value
                         // (.cell-new), NOT .cell-null.
                         CellChange {
-                            old: CellValue::Str("completed".into()),
-                            new: CellValue::Str("null".into()),
+                            old: Cell::new(CellValue::Str("completed".into())),
+                            new: Cell::new(CellValue::Str("null".into())),
                             changed: true,
                         },
                     ],
@@ -1884,6 +1883,42 @@ fn fusion_csv_format_only_shows_no_diff_cell_but_value_change_shows_old_to_new()
     assert!(
         eval_bool(&tab, "document.querySelector('.cell-old') === null"),
         "format-only reformat shows NO inline old → new diff cell",
+    );
+    // cute-dbt#138 — the FIDELITY fix, asserted on the EXPECT grid. The
+    // fixture's NEW `expect` csv authors `1.00` for `quarantined_count` and
+    // `TRUE` for `is_dq_valid`; those authored tokens must survive to the cell
+    // text even though their canonical keys are Number("1") / Bool(true).
+    // Pre-#138 the Current grid normalized them to `1` / `true`.
+    assert!(
+        eval_bool(
+            &tab,
+            "Array.prototype.some.call(\
+               document.querySelectorAll('.expected-table td.cell-num'),\
+               function (td) { return td.textContent.trim() === '1.00'; })"
+        ),
+        "the EXPECT Current grid shows the AUTHORED `1.00`, not the normalized `1` (cute-dbt#138)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "Array.prototype.some.call(\
+               document.querySelectorAll('.expected-table td'),\
+               function (td) { return td.textContent.trim() === 'TRUE'; })"
+        ),
+        "the EXPECT Current grid shows the AUTHORED `TRUE`, not the normalized `true` (cute-dbt#138)",
+    );
+    // The `1.00` cell is still styled numeric (the class comes from the
+    // canonical key, not the display token), so the column sorts numerically.
+    assert!(
+        eval_bool(
+            &tab,
+            "Array.prototype.every.call(\
+               document.querySelectorAll('.expected-table td'),\
+               function (td) {\
+                 return td.textContent.trim() !== '1.00' || td.classList.contains('cell-num');\
+               })"
+        ),
+        "the authored `1.00` cell keeps numeric styling from its key (cute-dbt#138)",
     );
 
     // ===== Value-change report: Diff view tints the changed cell 9 → 1 =====
