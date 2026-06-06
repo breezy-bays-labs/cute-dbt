@@ -1180,6 +1180,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn g_added_row_absent_overlap_cell_is_unchanged_end_to_end() {
+        // cute-dbt#138 (CI stage review): the integration counterpart of
+        // `f_added_removed_rows_keep_absent_cells_unchanged`. A row add that
+        // COINCIDES with a column add makes the unified column axis project an
+        // `Absent` cell into the Added row. Building the tables through the
+        // production normalizer (not the builders directly) proves the
+        // end-to-end path leaves that `Absent -> Absent` cell unflagged.
+        use crate::domain::unit_test_table::table_from_manifest_rows;
+        let old = table_from_manifest_rows(&serde_json::json!([{"a": 1}]), Some("dict")).unwrap();
+        let new = table_from_manifest_rows(&serde_json::json!([{"a": 1}, {"b": 2}]), Some("dict"))
+            .unwrap();
+        let diff = diff_fixture_tables(&old, &new);
+        let a = diff
+            .columns
+            .iter()
+            .position(|c| c.name == "a")
+            .expect("col a");
+        let b = diff
+            .columns
+            .iter()
+            .position(|c| c.name == "b")
+            .expect("col b");
+        let added = diff
+            .rows
+            .iter()
+            .find(|r| r.kind == RowChangeKind::Added)
+            .expect("{b:2} is wholly added — shares no present cell with {a:1}");
+        assert_eq!(
+            added.cells[a].new.key,
+            CellValue::Absent,
+            "the added row lacks column a, so its a-cell is Absent",
+        );
+        assert!(
+            !added.cells[a].changed,
+            "Absent->Absent in the Added row stays unchanged (row-add overlaps column-add)",
+        );
+        assert!(
+            added.cells[b].changed,
+            "the present b-cell in the Added row is a change",
+        );
+    }
+
     // ----- Cross-source equivalence (the headline kill) -----
 
     #[test]
