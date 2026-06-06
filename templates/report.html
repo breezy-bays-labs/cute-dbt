@@ -265,6 +265,9 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
    is muted; italic to read as meta, not content. */
 .diff-fold { cursor: pointer; font-style: italic; color: #4338ca; background: rgba(67, 56, 202, 0.06); }
 .diff-fold:hover { background: rgba(67, 56, 202, 0.12); }
+/* cute-dbt#136 — an expanded fold stays visible as a "Hide N" collapse
+   affordance; a slightly stronger tint marks it among many hunks. */
+.diff-fold[aria-expanded="true"] { background: rgba(67, 56, 202, 0.10); }
 .diff-fold .diff-sigil { color: #9aa0b4; opacity: 0.85; }
 /* cute-dbt#132 — diff-view controls (PR-diff mode only): set how many
    unchanged context lines stay around each change, and expand/collapse every
@@ -1089,19 +1092,26 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     // to survive re-renders). Reveal is PARENT-SCOPED: `$(this).parent()`
     // isolates `.fold-<id>` to the SAME <code> block, so the call-local fold
     // ids never collide across the YAML drawer vs the model-SQL block.
-    function revealFold($ctrl) {
+    // Bidirectional toggle (#136): clicking a fold expands the hidden run AND
+    // keeps the control visible, relabeled to a "Hide N" collapse affordance;
+    // clicking again re-collapses just that hunk. Reveal stays PARENT-SCOPED to
+    // the enclosing <code> so duplicate call-local fold ids never cross-talk.
+    function toggleFold($ctrl) {
       var id = $ctrl.attr("data-fold");
-      $ctrl.parent().find(".fold-" + id).prop("hidden", false);
-      $ctrl.prop("hidden", true);
+      var willExpand = $ctrl.attr("aria-expanded") !== "true";
+      $ctrl.parent().find(".fold-" + id).prop("hidden", !willExpand);
+      $ctrl.attr("aria-expanded", willExpand ? "true" : "false");
+      $ctrl.find(".diff-fold-label").text(foldLabel(willExpand, $ctrl.attr("data-fold-count")));
     }
     $(document).on("click", ".diff-fold", function () {
-      revealFold($(this));
+      toggleFold($(this));
     });
     $(document).on("keydown", ".diff-fold", function (e) {
-      // Enter or Space activates; preventDefault on Space stops page scroll.
+      // Enter or Space activates (both directions); preventDefault on Space
+      // stops page scroll.
       if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
         e.preventDefault();
-        revealFold($(this));
+        toggleFold($(this));
       }
     });
     bindDiffViewControls();
@@ -1860,6 +1870,14 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
   var FOLD_MIN_HIDDEN = 2;
   var diffAllExpanded = false;
 
+  // The per-hunk fold control's label, shared by the per-hunk toggle and the
+  // global expand/collapse mirror so they never drift (#136). `count` is the
+  // `data-fold-count` string; expanded => a "Hide" (collapse) affordance.
+  function foldLabel(expanded, count) {
+    return (expanded ? "Hide " : "Show ") + count
+         + " unchanged line" + (count === "1" ? "" : "s");
+  }
+
   // Render a single DiffLine to its `.diff-line` span via the shared
   // tokenize + emphasis-overlay path. `extraClass` appends to the kind class
   // (the folded middle passes `diff-folded fold-<id>`); `hidden` toggles the
@@ -1919,11 +1937,17 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
         for (var h = runStart; h < runStart + head; h++) {
           html += renderOneDiffLine(lines[h], tokenizeFn, "", false);
         }
-        // The fold control.
+        // The fold control. Bidirectional (#136): it stays in the DOM and
+        // relabels Show<->Hide on toggle, so `data-fold-count` + a dedicated
+        // label span let toggleFold/setAllFolds rebuild the text without
+        // re-rendering. `aria-expanded` tracks the collapsed/expanded state.
         html += '<span class="diff-line diff-fold" data-fold="' + id + '"'
-              + ' role="button" tabindex="0">'
+              + ' data-fold-count="' + hidden + '"'
+              + ' role="button" tabindex="0" aria-expanded="false">'
               + '<span class="diff-sigil">···</span>'
+              + '<span class="diff-fold-label">'
               + 'Show ' + hidden + ' unchanged line' + (hidden === 1 ? "" : "s")
+              + '</span>'
               + '</span>';
         // The folded (hidden) middle lines.
         for (var m2 = runStart + head; m2 < j - tail; m2++) {
@@ -1947,18 +1971,23 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
 
   // cute-dbt#132 — global fold controls (configurable context lines +
   // expand-all/collapse-all). setAllFolds is a SYMMETRIC DOM MIRROR over the
-  // already-rendered diff: expand reveals every folded middle line and hides
-  // the now-redundant per-hunk "Show N" controls; collapse re-hides the middles
-  // and restores the controls — exactly reproducing renderBlockDiff's
-  // default-folded output WITHOUT a re-render, so the SQL File<->Diff toggle,
-  // mermaid, and scroll position are never disturbed. `root` scopes the op (the
-  // report passes `document`; the headless tests pass a mounted node).
+  // already-rendered diff: expand reveals every folded middle line; collapse
+  // re-hides them — exactly reproducing renderBlockDiff's default-folded output
+  // WITHOUT a re-render, so the SQL File<->Diff toggle, mermaid, and scroll
+  // position are never disturbed. The per-hunk controls stay VISIBLE and
+  // relabel Show<->Hide (#136 bidirectional), so an individual hunk can still
+  // be toggled after a global op. `root` scopes the op (the report passes
+  // `document`; the headless tests pass a mounted node).
   function setAllFolds(expanded, root) {
     var scope = root || document;
     var folded = scope.querySelectorAll(".diff-folded");
     for (var i = 0; i < folded.length; i++) folded[i].hidden = !expanded;
     var controls = scope.querySelectorAll(".diff-fold");
-    for (var k = 0; k < controls.length; k++) controls[k].hidden = expanded;
+    for (var k = 0; k < controls.length; k++) {
+      controls[k].setAttribute("aria-expanded", expanded ? "true" : "false");
+      var label = controls[k].querySelector(".diff-fold-label");
+      if (label) label.textContent = foldLabel(expanded, controls[k].getAttribute("data-fold-count"));
+    }
   }
   window.__cuteExpandAllFolds = function (root) { setAllFolds(true, root); };
   window.__cuteCollapseAllFolds = function (root) { setAllFolds(false, root); };

@@ -1,0 +1,25 @@
+diff --git a/models/marts/analytics/fct_provider_metrics.sql b/models/marts/analytics/fct_provider_metrics.sql
+--- a/models/marts/analytics/fct_provider_metrics.sql
++++ b/models/marts/analytics/fct_provider_metrics.sql
+@@ -50 +50 @@
+-        , count(distinct procedure_code) as procedure_count
++        , count(*) as procedure_count
+@@ -64 +64 @@
+-        , pr.procedure_count as procedure_count
++        , coalesce(pr.procedure_count, 0) as procedure_count
+@@ -93 +93 @@
+-        , sum(e.procedure_count) as procedure_total
++        , sum(e.procedure_count) as total_procedures
+diff --git a/models/marts/analytics/_analytics__models.yml b/models/marts/analytics/_analytics__models.yml
+--- a/models/marts/analytics/_analytics__models.yml
++++ b/models/marts/analytics/_analytics__models.yml
+@@ -1388,2 +1388,2 @@
+-          quarantined_count: null
+-          total_count: 2
++          quarantined_count: 0
++          total_count: 1
+@@ -1392,2 +1392,2 @@
+-          quarantined_count: 1
+-          total_count: 2
++          quarantined_count: 0
++          total_count: 1

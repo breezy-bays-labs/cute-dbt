@@ -58,13 +58,24 @@ jobs:
           - name: jaffle-shop
             current: tests/fixtures/jaffle-shop-current.json
             baseline: tests/fixtures/jaffle-shop-baseline.json
+            pr_diff: ""
             project_root: ""
           - name: playground
             current: tests/fixtures/playground-current.json
             baseline: tests/fixtures/playground-baseline.json
+            pr_diff: ""
             # Mirrors ci.yml's `example-report-check` playground row.
             # Source YAML lives in-repo so the regenerated report
             # populates the Authoring-YAML drawer (cute-dbt#69).
+            project_root: tests/fixtures/playground-source
+          # cute-dbt#134 — the durable --pr-diff showcase, mirrored from
+          # ci.yml's example-report-check. Renders in --pr-diff mode
+          # (synthetic patch, NO baseline) so the sticky card can offer
+          # the diff-view showcase report alongside the baseline examples.
+          - name: pr-diff-showcase
+            current: tests/fixtures/playground-current.json
+            baseline: ""
+            pr_diff: tests/fixtures/playground-pr-diff.patch
             project_root: tests/fixtures/playground-source
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -81,6 +92,7 @@ jobs:
           NAME: ${{ matrix.name }}
           CURRENT: ${{ matrix.current }}
           BASELINE: ${{ matrix.baseline }}
+          PR_DIFF: ${{ matrix.pr_diff }}
           PROJECT_ROOT: ${{ matrix.project_root }}
         run: |
           set -euo pipefail
@@ -93,9 +105,25 @@ jobs:
           if [ -n "$PROJECT_ROOT" ]; then
             project_root_args=(--project-root "$PROJECT_ROOT")
           fi
+          # Scope source: --pr-diff arm (cute-dbt#134 showcase row sets
+          # `pr_diff`, no baseline) vs the default baseline arm. Mirrors
+          # ci.yml's example-report-check.
+          # Fail-closed: exactly one scope source must be set, mirroring the
+          # clap `scope_source` ArgGroup the binary enforces. Guards against
+          # future matrix drift silently mis-selecting a mode.
+          if { [ -n "$PR_DIFF" ] && [ -n "$BASELINE" ]; } || \
+             { [ -z "$PR_DIFF" ] && [ -z "$BASELINE" ]; }; then
+            echo "::error::report-preview ($NAME): exactly one scope source is required (set either PR_DIFF or BASELINE, not both)"
+            exit 1
+          fi
+          if [ -n "$PR_DIFF" ]; then
+            scope_args=(--pr-diff "@$PR_DIFF")
+          else
+            scope_args=(--baseline-manifest "$BASELINE")
+          fi
           cargo run --quiet --locked --bin cute-dbt -- \
             --manifest "$CURRENT" \
-            --baseline-manifest "$BASELINE" \
+            "${scope_args[@]}" \
             "${project_root_args[@]}" \
             --out "$out"
           # Emit a size breadcrumb in the log so the sticky-comment body
