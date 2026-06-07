@@ -49,6 +49,7 @@ expression: skeleton
     <div class="selector-field">
       <label for="model-select">Model</label>
       <select id="model-select"></select>
+      <span class="incremental-badge" hidden>incremental</span>
     </div>
     <span class="selector-arrow" aria-hidden="true">→</span>
     <div class="selector-field">

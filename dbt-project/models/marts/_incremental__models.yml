@@ -1,0 +1,60 @@
+version: 2
+
+# SPIKE (cute-dbt#145 discovery). May become the committed dogfood fixture
+# after shaping settles scope. The unit test exercises the INCREMENTAL branch
+# (overrides.macros.is_incremental: true) and mocks the prior model state via
+# `given: - input: this`. Authored to inspect how fusion serializes `this`,
+# config.materialized, and overrides in manifest.json.
+
+models:
+  - name: order_events_incremental
+    description: >
+      Incremental order-events accumulator. On incremental runs it only
+      processes orders newer than the loaded high-water mark
+      (max(order_date) from {{ this }}).
+    columns:
+      - name: order_id
+        description: Order identifier (unique key for the incremental merge).
+      - name: order_date
+        description: Order date; the incremental high-water-mark column.
+      - name: status
+        description: Order status.
+
+unit_tests:
+  - name: test_order_events_incremental_only_new_rows
+    description: |
+      With is_incremental() true, the model filters to orders newer than the
+      high-water mark in the existing table. `given: - input: this` mocks the
+      prior model state (one order on 2024-01-01); stg_orders supplies a newer
+      2024-01-02 order. EXPECT is the rows the incremental run MERGES — just the
+      newer 2024-01-02 row — NOT the resulting (merged) table.
+    model: order_events_incremental
+    overrides:
+      macros:
+        is_incremental: true
+    given:
+      - input: this
+        format: dict
+        rows:
+          - order_id: 1
+            customer_id: 1
+            order_date: '2024-01-01'
+            status: 'completed'
+      - input: ref('stg_orders')
+        format: dict
+        rows:
+          - order_id: 1
+            customer_id: 1
+            order_date: '2024-01-01'
+            status: 'completed'
+          - order_id: 2
+            customer_id: 2
+            order_date: '2024-01-02'
+            status: 'placed'
+    expect:
+      format: dict
+      rows:
+        - order_id: 2
+          customer_id: 2
+          order_date: '2024-01-02'
+          status: 'placed'

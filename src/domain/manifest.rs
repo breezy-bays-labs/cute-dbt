@@ -184,6 +184,17 @@ impl NodeConfig {
     pub fn contract_enforced(&self) -> bool {
         self.contract_enforced
     }
+
+    /// `config.materialized` — the materialization strategy (`"table"` /
+    /// `"view"` / `"incremental"` / …), or `None` when the manifest omits
+    /// it or the value is not a string. A pure POD read over the config
+    /// dict (DRYs the inline `config().get("materialized")` reads); the
+    /// `== "incremental"` derivation lives in the render layer
+    /// (cute-dbt#145).
+    #[must_use]
+    pub fn materialized(&self) -> Option<&str> {
+        self.config.get("materialized").and_then(Value::as_str)
+    }
 }
 
 /// A dbt node (model / seed / snapshot / source / test / `unit_test`).
@@ -613,6 +624,22 @@ mod tests {
         let cfg = NodeConfig::default();
         assert!(cfg.config().is_empty());
         assert!(!cfg.contract_enforced());
+    }
+
+    #[test]
+    fn node_config_materialized_reads_string_value() {
+        let mut map = BTreeMap::new();
+        map.insert("materialized".to_owned(), Value::from("incremental"));
+        assert_eq!(
+            NodeConfig::new(map, false).materialized(),
+            Some("incremental")
+        );
+        // absent ⇒ None (tolerant — a config dict need not carry it)
+        assert_eq!(NodeConfig::default().materialized(), None);
+        // non-string value ⇒ None (tolerant — never panics on a bad shape)
+        let mut bad = BTreeMap::new();
+        bad.insert("materialized".to_owned(), Value::from(42));
+        assert_eq!(NodeConfig::new(bad, false).materialized(), None);
     }
 
     #[test]

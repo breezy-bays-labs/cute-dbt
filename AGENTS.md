@@ -114,6 +114,19 @@ deprecated test-args that core only warns about.
   repo cannot accept a PR targeting `main`).
 - **Worktrees** for parallel work: `git worktree add ../cute-dbt-issue-N -b
   <area>-<issue>-<slug>`.
+- **Research dbt-fusion source first.** Any feature work that touches a dbt
+  artifact or dbt concept starts by reading the
+  [`dbt-fusion`](https://github.com/dbt-labs/dbt-fusion) Rust source
+  (`dbt-schemas` for manifest/node types, `dbt-parser` for resolution,
+  `dbt-tasks-sa` for runtime/materialization semantics) — fusion is the
+  source-of-truth engine cute-dbt consumes, authoritative over docs or
+  training priors. Use it to pick the long-term-robust solution
+  (performant, maintainable, idiomatic Rust, on the product vision), confirm
+  the wire shape **and** its runtime meaning, pin citations to a commit SHA,
+  and then verify the new field against a **real committed fixture** — not
+  just synthetic JSON (fusion null-fills unset `Option` fields and emits
+  shapes synthetic tests miss; cute-dbt#145 caught `"overrides": null`
+  failing a bare wire field this way).
 - **TDD** — tests before implementation for all domain and adapter code.
 - **Domain purity** — `src/domain/` may import only `std` and `serde`
   (derive). No I/O, no parser libs, no clap, no askama.
@@ -193,28 +206,33 @@ provenance index) — see
 
 The diff-view feature set (highlighted diffs, hunk folds, cell-level data
 diffs, NULL-aware cells, the SQL/Jinja syntax palette) only manifests in
-**`--pr-diff` mode**. Two surfaces keep it visible + dogfooded:
+**`--pr-diff` mode**. Two surfaces keep it visible + dogfooded — and the
+sticky PR comment labels them distinctly so the **golden** (committed,
+byte-gated) artifact is never confused with the **live** dogfood:
 
-- **Durable, committed**: `examples/playground-pr-diff-report.html`, rendered
+- **Golden, committed**: `examples/diff-showcase-report.html`, rendered
   from the synthetic `playground-current.json` + the hand-crafted
-  `tests/fixtures/playground-pr-diff.patch` (`--pr-diff`, no baseline). It is a
-  matrix row in `example-report-check` (`ci.yml`) and `report-preview.yml`, so
-  it is byte-identity-gated and regenerated exactly like the baseline examples.
-  It **must be synthetic**: a report rendered from the real `dbt-project/` would
-  bake `metadata.root_path` (a home/runner absolute path) into the inlined HTML
-  — never commit such an artifact (the same invariant that git-ignores the
+  `tests/fixtures/playground-pr-diff.patch` (`--pr-diff`, no baseline). It is the
+  `diff-showcase` matrix row in `example-report-check` (`ci.yml`) and
+  `report-preview.yml`, so it is byte-identity-gated and regenerated exactly like
+  the other golden examples (`jaffle-shop`, `playground`). Stable across PRs — the
+  canonical reference report consumers/contributors browse. It **must be
+  synthetic**: a report rendered from the real `dbt-project/` would bake
+  `metadata.root_path` (a home/runner absolute path) into the inlined HTML —
+  never commit such an artifact (the same invariant that git-ignores the
   `dbt-project/target/` manifest).
-- **Live, transient**: every PR that touches `dbt-project/` self-renders its own
+- **Live, ephemeral**: every PR that touches `dbt-project/` self-renders its own
   `--pr-diff` report on the sticky preview (`report-preview.yml` →
-  `prdiff-preview`, from an **ephemeral** CI-compiled manifest — never
-  committed).
+  `prdiff-preview` → the `dbt-project` row, from an **ephemeral** CI-compiled
+  fusion manifest — never committed). Different every PR; this is the live
+  self-dogfood, not a golden example.
 
 **Convention:** a PR that changes how diffs render keeps
-`examples/playground-pr-diff-report.html` representative — extend the synthetic
+`examples/diff-showcase-report.html` representative — extend the synthetic
 patch (its `+` sides stay byte-aligned to the manifest `raw_code` / committed
 source YAML, the same-revision contract) and regenerate when a new diff
-affordance lands. The `--pr-diff` example is the canonical visual proof of the
-diff-view feature set.
+affordance lands. The golden `diff-showcase` example is the canonical visual
+proof of the diff-view feature set.
 
 ## Working commands
 

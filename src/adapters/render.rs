@@ -221,6 +221,16 @@ pub struct ModelPayload {
     /// query — the template surfaces a banner; the recursive arm has
     /// already been omitted from the graph by the CTE engine.
     pub is_recursive: bool,
+    /// `true` when `config.materialized == "incremental"` (cute-dbt#145).
+    /// Drives the model-header incremental badge and gates the per-test
+    /// mode badge / expect-semantics tooltip (the template reads this
+    /// enclosing-model flag — the `is_recursive` precedent — rather than
+    /// denormalizing it onto each test). Serialized only on incremental
+    /// models (`skip_serializing_if = std::ops::Not::not`) so the example
+    /// diff stays localized to incremental models; the template's
+    /// `!(m && m.is_incremental)` read is undefined-safe when omitted.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub is_incremental: bool,
 }
 
 /// One DAG node — id and role.
@@ -305,6 +315,15 @@ pub struct GivenPayload {
     /// text view instead of rendering a silently-empty grid (cute-dbt#126).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixture: Option<String>,
+    /// `true` when this given's `input` is the literal `this` — dbt's
+    /// convention for mocking the model's own prior state on an incremental
+    /// model (cute-dbt#145; fusion's own `input.as_str().eq("this")`
+    /// discriminator). The template marks the given "prior model state".
+    /// Serialized only when `true` (`skip_serializing_if =
+    /// std::ops::Not::not`); a normal `ref(...)` / `source(...)` given omits
+    /// the key.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub is_this: bool,
 }
 
 /// One unit test in the per-model payload.
@@ -369,6 +388,18 @@ pub struct TestPayload {
     /// when this is present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_diff: Option<UnitTestDataDiff>,
+    /// dbt incremental-mode flag, lifted from
+    /// `overrides.macros.is_incremental` (cute-dbt#145). `Some(true)` ⇒ the
+    /// test exercises the incremental branch — the template shows a
+    /// "incremental branch" mode badge AND the expect-semantics tooltip
+    /// (`expect` is the rows merged/inserted, not the final table);
+    /// `Some(false)` ⇒ explicit full-refresh branch (mode badge, NO
+    /// tooltip — there `expect` IS the final table); `None` (key omitted)
+    /// ⇒ no override. The mode badge renders only when the enclosing model
+    /// is incremental ([`ModelPayload::is_incremental`]); the tooltip rides
+    /// the authoritative bool (`=== true`), never the `this`-given proxy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_incremental_mode: Option<bool>,
     /// Ordered list of fixture inputs for the test (`given[…]`).
     pub given: Vec<GivenPayload>,
     /// Expected result block (`expect`).
@@ -704,6 +735,7 @@ fn build_model_payload(
         sql_diff,
         tests: test_payloads,
         is_recursive,
+        is_incremental: model.config().materialized() == Some("incremental"),
     }
 }
 
@@ -811,6 +843,7 @@ fn build_test_payload(
                 rows: g.rows().clone(),
                 format: g.format().map(str::to_owned),
                 fixture: g.fixture().map(str::to_owned),
+                is_this: g.input() == "this",
             }
         })
         .collect();
@@ -826,6 +859,7 @@ fn build_test_payload(
         authoring_yaml: authoring_yaml.map(|b| b.raw.clone()),
         yaml_diff: yaml_diff.cloned(),
         data_diff: data_diff.cloned(),
+        is_incremental_mode: unit_test.is_incremental_mode(),
         given,
         expected: ExpectedPayload {
             table: current_view_table(
@@ -2055,6 +2089,190 @@ mod tests {
             "b",
         );
         assert!(payload.models[0].is_recursive);
+    }
+
+    // ===== cute-dbt#145: incremental-model unit-test semantics =====
+
+    /// Build a model node whose `config.materialized == "incremental"`.
+    fn incremental_model_node(id: &str, compiled: Option<&str>) -> Node {
+        let mut cfg = BTreeMap::new();
+        cfg.insert("materialized".to_owned(), json!("incremental"));
+        Node::new(
+            NodeId::new(id),
+            "model",
+            checksum("body"),
+            compiled.map(str::to_owned),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(cfg, false),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn build_payload_marks_incremental_model_and_not_table() {
+        // Incremental model ⇒ is_incremental true.
+        let inc = incremental_model_node("model.shop.order_events", Some("select 1"));
+        let manifest = manifest_for(vec![inc], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.order_events")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        assert!(
+            payload.models[0].is_incremental,
+            "config.materialized==incremental ⇒ ModelPayload.is_incremental"
+        );
+
+        // Table model (NodeConfig::default — no materialized key) ⇒ false.
+        let tbl = model_node("model.shop.orders", "body", Some("select 1"));
+        let manifest = manifest_for(vec![tbl], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.orders")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        assert!(
+            !payload.models[0].is_incremental,
+            "table model ⇒ not incremental"
+        );
+    }
+
+    #[test]
+    fn build_payload_threads_incremental_mode_and_this_given() {
+        let node = incremental_model_node("model.shop.order_events", Some("select 1"));
+        let ut = UnitTest::new(
+            "test_order_events_incremental",
+            NodeId::new("order_events"),
+            vec![sample_given("this"), sample_given("ref('stg_orders')")],
+            UnitTestExpect::new(json!([]), None, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        )
+        .with_incremental_mode(Some(true));
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.t", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.t".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.order_events")]);
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let test = &payload.models[0].tests[0];
+        assert_eq!(
+            test.is_incremental_mode,
+            Some(true),
+            "overrides mode threaded onto TestPayload"
+        );
+        assert!(test.given[0].is_this, "input 'this' ⇒ is_this");
+        assert!(!test.given[1].is_this, "ref(...) given ⇒ not is_this");
+    }
+
+    /// The Rust→JS key contract (advisor-flagged blind spot): the template's
+    /// JS reads `m.is_incremental`, `t.is_incremental_mode`, and
+    /// `given.is_this` by those EXACT `snake_case` keys — no `#[serde(rename)]`.
+    /// An incremental-mode test's payload emits all three; a plain table/ref
+    /// payload OMITS them (`skip_serializing_if`), so non-incremental
+    /// fixtures stay byte-identical on the wire.
+    #[test]
+    fn payload_serde_wire_shape_for_incremental_keys() {
+        // Incremental model + incremental-mode test + `this` given ⇒ keys present.
+        let node = incremental_model_node("model.shop.order_events", Some("select 1"));
+        let ut = UnitTest::new(
+            "t",
+            NodeId::new("order_events"),
+            vec![sample_given("this")],
+            UnitTestExpect::new(json!([]), None, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        )
+        .with_incremental_mode(Some(true));
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.t", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.t".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.order_events")]);
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let json = serde_json::to_string(&payload.models[0]).unwrap();
+        assert!(
+            json.contains("\"is_incremental\":true"),
+            "model key: {json}"
+        );
+        assert!(
+            json.contains("\"is_incremental_mode\":true"),
+            "test key: {json}"
+        );
+        assert!(json.contains("\"is_this\":true"), "given key: {json}");
+
+        // Non-incremental: table model + ref given + no override ⇒ all three OMITTED.
+        let tbl = model_node("model.shop.orders", "body", Some("select 1"));
+        let ut2 = UnitTest::new(
+            "t2",
+            NodeId::new("orders"),
+            vec![sample_given("ref('stg_orders')")],
+            UnitTestExpect::new(json!([]), None, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        ); // no with_incremental_mode ⇒ None
+        let manifest = manifest_for(vec![tbl], vec![("unit_test.shop.t2", ut2)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.t2".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.orders")]);
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let json = serde_json::to_string(&payload.models[0]).unwrap();
+        // "is_incremental" is a substring of "is_incremental_mode", so its
+        // absence guards both model + test keys at once.
+        assert!(
+            !json.contains("is_incremental"),
+            "non-incremental model omits is_incremental + is_incremental_mode: {json}"
+        );
+        assert!(
+            !json.contains("is_this"),
+            "ref(...) given omits is_this: {json}"
+        );
     }
 
     // ===== payload_json_for_html_script =====

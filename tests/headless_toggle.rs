@@ -2859,3 +2859,316 @@ fn settings_persist_across_reload_where_supported() {
 
     let _ = tab.close(true);
 }
+
+// --- cute-dbt#145: incremental-model unit-test semantics ------------
+//
+// The rendered-DOM proof of the incremental affordances. The payload facts
+// (`is_incremental`, `is_incremental_mode`, `is_this`) are pinned by
+// `tests/steps/incremental_models.rs`; the badges + the expect-semantics
+// tooltip are JS-generated over the inlined payload and so are absent from the
+// static HTML — only a real runtime renders them. The headless harness renders
+// domain objects in-process via `render_report` (NO wire/subprocess path), so
+// the mode is set on the domain `UnitTest` directly via the cute-dbt#145
+// builder and the model's `config.materialized` via `NodeConfig` — the two
+// wire-shape divergences the BDD path injects do not apply on this path.
+
+/// A `model` node whose `config.materialized` is set, so the payload's
+/// `is_incremental` reflects `materialized == "incremental"`.
+fn model_node_materialized(full_id: &str, materialized: &str) -> Node {
+    Node::new(
+        NodeId::new(full_id),
+        "model",
+        Checksum::new("sha256", "ck"),
+        Some("select 1".to_owned()),
+        None,
+        DependsOn::default(),
+        None,
+        NodeConfig::new(
+            BTreeMap::from([(
+                "materialized".to_owned(),
+                serde_json::Value::String(materialized.to_owned()),
+            )]),
+            false,
+        ),
+        None,
+        BTreeMap::new(),
+    )
+}
+
+/// A `UnitTest` carrying an explicit incremental `mode` (the
+/// `overrides.macros.is_incremental` flag, set on the domain object via the
+/// cute-dbt#145 builder) plus `given` inputs. Rows are empty — the headless
+/// assertions key on the mode badge / tooltip / this-badge, not fixture data.
+fn incremental_unit_test(
+    name: &str,
+    model_bare: &str,
+    mode: Option<bool>,
+    given_inputs: &[&str],
+) -> UnitTest {
+    let givens = given_inputs
+        .iter()
+        .map(|inp| {
+            UnitTestGiven::new(
+                (*inp).to_owned(),
+                serde_json::Value::Array(Vec::new()),
+                None,
+                None,
+            )
+        })
+        .collect();
+    UnitTest::new(
+        name.to_owned(),
+        NodeId::new(model_bare),
+        givens,
+        UnitTestExpect::new(serde_json::Value::Null, None, None),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+    .with_incremental_mode(mode)
+}
+
+/// Select a unit test by its FULL node id — `#test-select` option values are
+/// `t.id` (unlike `#model-select`, which keys on the bare model name).
+fn select_test(tab: &Tab, test_id: &str) {
+    let _ = eval(
+        tab,
+        &format!(
+            "(function(){{var s=document.querySelector('#test-select');\
+             s.value='{test_id}';s.dispatchEvent(new Event('change'));}})()"
+        ),
+    );
+}
+
+/// Trimmed text of the `.this-badge` on the `given: - input: this` section,
+/// or `""` when absent. Iterates `.given-section` by `data-input-name` so the
+/// awkward `ref('orders')` attribute-selector quoting is avoided.
+fn this_given_badge_text(tab: &Tab) -> String {
+    eval_string(
+        tab,
+        "(function(){\
+           var s=Array.prototype.slice.call(document.querySelectorAll('.given-section'))\
+             .filter(function(x){return x.getAttribute('data-input-name')==='this';})[0];\
+           var b=s?s.querySelector('.this-badge'):null;return b?b.textContent.trim():'';})()",
+    )
+}
+
+/// `true` when NO non-`this` given section carries a `.this-badge` (e.g. the
+/// `ref('orders')` given must never be badged prior-model-state).
+fn non_this_givens_unbadged(tab: &Tab) -> bool {
+    eval_bool(
+        tab,
+        "Array.prototype.slice.call(document.querySelectorAll('.given-section'))\
+           .filter(function(x){return x.getAttribute('data-input-name')!=='this';})\
+           .every(function(x){return x.querySelector('.this-badge')===null;})",
+    )
+}
+
+const MODE_BADGE: &str = "document.querySelector('.expected-panel .panel-header .mode-badge')";
+const TOOLTIP: &str = "document.querySelector('.expected-panel .panel-header .expect-tooltip')";
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn incremental_badges_modes_tooltip_and_this_given() {
+    // One report, two models:
+    //   - dim_inc (incremental): mode_on  → Some(true)  + givens [this, ref]
+    //                            mode_off → Some(false) + given  [this]
+    //   - dim_tbl (table):       plain    → None        + given  [ref]
+    //
+    // The LOCKED D4 invariant: the expect-semantics tooltip rides the
+    // AUTHORITATIVE bool (is_incremental_mode === true), NEVER the `this`-given
+    // proxy, and NEVER on the full-refresh branch (there `expect` IS the final
+    // table → the tooltip would be wrong-help). mode_off CARRIES a `this` given
+    // precisely so its tooltip-absent assertion proves the gate keys off the
+    // bool, not the proxy — and the mode_on → mode_off transition (no reload)
+    // exercises the idempotent `.mode-badge, .expect-tooltip` clear on the
+    // persistent `.panel-header`.
+    // dim_empty is a modified-but-untested model (no unit tests) — selecting it
+    // drives currentTest() to null, the leak path for a stale mode badge /
+    // tooltip (renderExpectedPanel, which clears them, runs ONLY in the `if (t)`
+    // arm of renderForSelectedModel).
+    let url = render_to_file(
+        "headless_incremental.html",
+        vec![
+            model_node_materialized("model.shop.dim_inc", "incremental"),
+            model_node_materialized("model.shop.dim_tbl", "table"),
+            model_node_materialized("model.shop.dim_empty", "table"),
+        ],
+        vec![
+            (
+                "unit_test.shop.dim_inc.mode_on",
+                incremental_unit_test("mode_on", "dim_inc", Some(true), &["this", "ref('orders')"]),
+            ),
+            (
+                "unit_test.shop.dim_inc.mode_off",
+                incremental_unit_test("mode_off", "dim_inc", Some(false), &["this"]),
+            ),
+            (
+                "unit_test.shop.dim_tbl.plain",
+                incremental_unit_test("plain", "dim_tbl", None, &["ref('orders')"]),
+            ),
+        ],
+        &[
+            "model.shop.dim_inc",
+            "model.shop.dim_tbl",
+            "model.shop.dim_empty",
+        ],
+        &[], // 0 changed → auto-All mode → every in-scope test is selectable
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // ===== incremental model → the U1 model badge is visible =====
+    select_model(&tab, "dim_inc");
+    assert!(
+        !eval_bool(&tab, "document.querySelector('.incremental-badge').hidden"),
+        "the incremental-badge is visible for an incremental model",
+    );
+
+    // ===== incremental-mode test (mode_on): badge + tooltip =====
+    select_test(&tab, "unit_test.shop.dim_inc.mode_on");
+    assert_eq!(
+        eval_string(&tab, &format!("{MODE_BADGE}.textContent.trim()")),
+        "incremental branch",
+        "an incremental-mode test labels the Expected panel 'incremental branch'",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{MODE_BADGE}.classList.contains('mode-incremental')")
+        ),
+        "the incremental-branch badge carries the .mode-incremental class",
+    );
+    assert!(
+        eval_bool(&tab, &format!("{TOOLTIP} !== null")),
+        "an incremental-mode test shows the expect-semantics tooltip",
+    );
+    // cute-dbt#146 review — the tooltip is a FOCUSABLE button (keyboard + touch
+    // reachable), not a hover-only `<span title>`.
+    assert_eq!(
+        eval_string(&tab, &format!("{TOOLTIP}.tagName")),
+        "BUTTON",
+        "the expect-tooltip is a focusable <button>, not a hover-only span",
+    );
+    // The dbt gotcha wording lives in the VISIBLE CSS bubble AND the aria-label.
+    // Assert an ASCII substring — the tip contains em-dashes (U+2014), so a
+    // full-string compare would mismatch.
+    assert!(
+        eval_string(
+            &tab,
+            &format!("{TOOLTIP}.querySelector('.expect-tooltip-bubble').textContent")
+        )
+        .contains("merged or inserted"),
+        "the visible tooltip bubble explains Expected is the rows merged or inserted",
+    );
+    assert!(
+        eval_string(&tab, &format!("{TOOLTIP}.getAttribute('aria-label')"))
+            .contains("merged or inserted"),
+        "the tooltip aria-label carries the same dbt wording (a11y parity)",
+    );
+    // cute-dbt#146 review — the regression guard for "hover shows nothing": the
+    // bubble is hidden until hover/focus, and FOCUS reveals it (the keyboard
+    // path; `:hover` shares the same CSS rule, so a visible-on-focus bubble
+    // proves the hover path paints too).
+    const BUBBLE_VIS: &str = "getComputedStyle(document.querySelector('.expect-tooltip .expect-tooltip-bubble')).visibility";
+    assert_eq!(
+        eval_string(&tab, BUBBLE_VIS),
+        "hidden",
+        "the tooltip bubble is hidden until hover/focus",
+    );
+    let _ = eval(&tab, &format!("{TOOLTIP}.focus()"));
+    assert_eq!(
+        eval_string(&tab, BUBBLE_VIS),
+        "visible",
+        "focusing the tooltip reveals the bubble (the keyboard path a native title never had)",
+    );
+
+    // ===== the `this` given is prior-model-state; `ref(...)` is not =====
+    show_all_inputs(&tab);
+    assert_eq!(
+        this_given_badge_text(&tab),
+        "prior model state",
+        "a `given: - input: this` is badged 'prior model state'",
+    );
+    assert!(
+        non_this_givens_unbadged(&tab),
+        "a ref(...) given carries no prior-model-state badge",
+    );
+
+    // ===== full-refresh-mode test (mode_off): the LOCKED proxy proof =====
+    // mode_off carries a `this` given but is_incremental_mode === false → the
+    // badge reads 'full-refresh branch', there is NO tooltip (the gate keys off
+    // the bool, NOT the `this` proxy), and the mode_on tooltip was cleared.
+    select_test(&tab, "unit_test.shop.dim_inc.mode_off");
+    assert_eq!(
+        eval_string(&tab, &format!("{MODE_BADGE}.textContent.trim()")),
+        "full-refresh branch",
+        "a full-refresh-mode test labels the Expected panel 'full-refresh branch'",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{MODE_BADGE}.classList.contains('mode-full-refresh')")
+        ),
+        "the full-refresh badge carries the .mode-full-refresh class",
+    );
+    assert!(
+        eval_bool(&tab, &format!("{TOOLTIP} === null")),
+        "LOCKED: no expect-semantics tooltip on a full-refresh test — even one \
+         carrying a `this` given (the gate keys off is_incremental_mode, not the proxy); \
+         this also proves the mode_on tooltip was cleared idempotently",
+    );
+    // The this-badge still shows on mode_off's `this` given — it is gated on
+    // is_this alone, independent of the test's incremental branch.
+    show_all_inputs(&tab);
+    assert_eq!(
+        this_given_badge_text(&tab),
+        "prior model state",
+        "the this-badge shows on a `this` given regardless of the test's branch",
+    );
+
+    // ===== table model → no incremental affordances (cross-model clear) =====
+    select_model(&tab, "dim_tbl");
+    assert!(
+        eval_bool(&tab, "document.querySelector('.incremental-badge').hidden"),
+        "the incremental-badge is hidden for a table model",
+    );
+    select_test(&tab, "unit_test.shop.dim_tbl.plain");
+    assert!(
+        eval_bool(&tab, &format!("{MODE_BADGE} === null")),
+        "a test on a non-incremental model carries no mode badge (cross-model clear)",
+    );
+    assert!(
+        eval_bool(&tab, &format!("{TOOLTIP} === null")),
+        "a test on a non-incremental model shows no expect-semantics tooltip",
+    );
+
+    // ===== modified-but-untested model clears a LEAKED incremental tooltip =====
+    // Re-establish an incremental-mode tooltip, then select a model with no
+    // tests (currentTest() === null → renderExpectedPanel, which clears the
+    // badge/tooltip, is NOT called). renderForSelectedModel must clear them
+    // unconditionally, else the prior test's badge + tooltip leak onto the
+    // persistent `.panel-header` (gemini review, PR #146).
+    select_model(&tab, "dim_inc");
+    select_test(&tab, "unit_test.shop.dim_inc.mode_on");
+    assert!(
+        eval_bool(&tab, &format!("{TOOLTIP} !== null")),
+        "precondition: the incremental-mode tooltip is present before the switch",
+    );
+    select_model(&tab, "dim_empty");
+    assert!(
+        eval_bool(&tab, &format!("{MODE_BADGE} === null")),
+        "selecting a modified-but-untested model clears the leaked mode badge",
+    );
+    assert!(
+        eval_bool(&tab, &format!("{TOOLTIP} === null")),
+        "selecting a modified-but-untested model clears the leaked expect-semantics tooltip",
+    );
+
+    let _ = tab.close(true);
+}

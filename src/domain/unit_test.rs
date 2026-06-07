@@ -159,6 +159,16 @@ pub struct UnitTest {
     /// manifest (NOT under `config`). `None` when the manifest omits it.
     #[serde(default)]
     original_file_path: Option<String>,
+    /// dbt incremental-mode flag for this unit test, lifted by the adapter
+    /// from the nested `overrides.macros.is_incremental` in the wire
+    /// manifest (cute-dbt#145). `Some(true)` ⇒ the test exercises the
+    /// incremental branch — `expect` is the rows merged/inserted, not the
+    /// final table; `Some(false)` ⇒ explicit full-refresh branch; `None`
+    /// ⇒ no override (full-refresh default). Stored flat here per the
+    /// ADR-5 tolerant shape; the `Option` preserves the absent-vs-explicit
+    /// distinction that the render layer collapses for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    is_incremental_mode: Option<bool>,
 }
 
 impl UnitTest {
@@ -185,6 +195,7 @@ impl UnitTest {
             tags,
             meta,
             original_file_path,
+            is_incremental_mode: None,
         }
     }
 
@@ -243,6 +254,24 @@ impl UnitTest {
     #[must_use]
     pub fn original_file_path(&self) -> Option<&str> {
         self.original_file_path.as_deref()
+    }
+
+    /// Set the incremental-mode flag (builder). The adapter threads
+    /// `overrides.macros.is_incremental` here after constructing the
+    /// `UnitTest` (cute-dbt#145); a builder rather than a 10th positional
+    /// `new` param keeps the ~30 test constructors unchanged.
+    #[must_use]
+    pub fn with_incremental_mode(mut self, mode: Option<bool>) -> Self {
+        self.is_incremental_mode = mode;
+        self
+    }
+
+    /// dbt incremental-mode flag (`overrides.macros.is_incremental`) —
+    /// `Some(true)` incremental branch, `Some(false)` explicit full
+    /// refresh, `None` when the manifest carries no override.
+    #[must_use]
+    pub fn is_incremental_mode(&self) -> Option<bool> {
+        self.is_incremental_mode
     }
 }
 
@@ -486,5 +515,81 @@ mod tests {
             ut.original_file_path(),
             Some("models/staging/unit_tests.yml")
         );
+    }
+
+    fn bare_unit_test() -> UnitTest {
+        UnitTest::new(
+            "test_order_events_incremental",
+            NodeId::new("model.shop.order_events"),
+            vec![],
+            sample_expect(),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn with_incremental_mode_sets_field() {
+        let ut = bare_unit_test();
+        assert_eq!(ut.is_incremental_mode(), None, "new() defaults to None");
+        assert_eq!(
+            ut.clone()
+                .with_incremental_mode(Some(true))
+                .is_incremental_mode(),
+            Some(true),
+            "Some(true) ⇒ incremental branch"
+        );
+        assert_eq!(
+            ut.with_incremental_mode(Some(false)).is_incremental_mode(),
+            Some(false),
+            "Some(false) ⇒ explicit full-refresh branch"
+        );
+    }
+
+    #[test]
+    fn is_incremental_mode_flat_serde_roundtrip() {
+        // None ⇒ key absent on the wire (skip_serializing_if) ⇒ deserializes None.
+        // This is the FLAT domain shape; the adapter lifts the nested
+        // overrides.macros.is_incremental into it (cute-dbt#145).
+        let none = bare_unit_test();
+        let json = serde_json::to_string(&none).unwrap();
+        assert!(
+            !json.contains("is_incremental_mode"),
+            "None must skip the key (skip_serializing_if): {json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<UnitTest>(&json)
+                .unwrap()
+                .is_incremental_mode(),
+            None
+        );
+
+        // Some(true) ⇒ flat key present ⇒ round-trips losslessly.
+        let some = none.with_incremental_mode(Some(true));
+        let json = serde_json::to_string(&some).unwrap();
+        assert!(
+            json.contains("\"is_incremental_mode\":true"),
+            "Some(true) must emit the flat key: {json}"
+        );
+        let back: UnitTest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.is_incremental_mode(), Some(true));
+        assert_eq!(back, some, "flat round-trip preserves all fields");
+
+        // Some(false) ⇒ the explicit full-refresh wire state ⇒ flat key
+        // present (NOT skipped — only None skips) ⇒ round-trips losslessly.
+        // Distinct from None, which the comparator/UI treats identically but
+        // which carries no key (cute-dbt#145 D6: preserve absent vs explicit).
+        let some_false = bare_unit_test().with_incremental_mode(Some(false));
+        let json = serde_json::to_string(&some_false).unwrap();
+        assert!(
+            json.contains("\"is_incremental_mode\":false"),
+            "Some(false) must emit the flat key: {json}"
+        );
+        let back: UnitTest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.is_incremental_mode(), Some(false));
+        assert_eq!(back, some_false, "flat round-trip preserves all fields");
     }
 }
