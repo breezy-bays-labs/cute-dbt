@@ -114,6 +114,19 @@ deprecated test-args that core only warns about.
   repo cannot accept a PR targeting `main`).
 - **Worktrees** for parallel work: `git worktree add ../cute-dbt-issue-N -b
   <area>-<issue>-<slug>`.
+- **Research dbt-fusion source first.** Any feature work that touches a dbt
+  artifact or dbt concept starts by reading the
+  [`dbt-fusion`](https://github.com/dbt-labs/dbt-fusion) Rust source
+  (`dbt-schemas` for manifest/node types, `dbt-parser` for resolution,
+  `dbt-tasks-sa` for runtime/materialization semantics) — fusion is the
+  source-of-truth engine cute-dbt consumes, authoritative over docs or
+  training priors. Use it to pick the long-term-robust solution
+  (performant, maintainable, idiomatic Rust, on the product vision), confirm
+  the wire shape **and** its runtime meaning, pin citations to a commit SHA,
+  and then verify the new field against a **real committed fixture** — not
+  just synthetic JSON (fusion null-fills unset `Option` fields and emits
+  shapes synthetic tests miss; cute-dbt#145 caught `"overrides": null`
+  failing a bare wire field this way).
 - **TDD** — tests before implementation for all domain and adapter code.
 - **Domain purity** — `src/domain/` may import only `std` and `serde`
   (derive). No I/O, no parser libs, no clap, no askama.

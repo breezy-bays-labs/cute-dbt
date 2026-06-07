@@ -228,3 +228,74 @@ pub fn serialize_to_tmp(manifest: &Manifest, name: &str) -> PathBuf {
     std::fs::write(&path, json).expect("write synthetic manifest to temp file");
     path
 }
+
+// ---------------------------------------------------------------------
+// Incremental-model builders (incremental_models.feature — cute-dbt#145).
+// ---------------------------------------------------------------------
+
+/// Construct a `UnitTest` for the incremental scenarios — a bare target
+/// plus `given` inputs (empty rows; these scenarios assert badges, not
+/// fixture content). The `overrides.macros.is_incremental` mode is NOT set
+/// on the domain object: it lives only in the wire shape and is injected by
+/// [`serialize_incremental_to_tmp`] (the cute-dbt#145 wire-shape divergence
+/// — the domain stores the mode flat, the wire nests it under `overrides`).
+#[must_use]
+pub fn incremental_unit_test(name: &str, target_bare: &str, given_inputs: &[String]) -> UnitTest {
+    let givens = given_inputs
+        .iter()
+        .map(|input| UnitTestGiven::new(input.clone(), Value::Array(Vec::new()), None, None))
+        .collect();
+    UnitTest::new(
+        name,
+        NodeId::new(target_bare),
+        givens,
+        UnitTestExpect::new(Value::Array(Vec::new()), None, None),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+}
+
+/// Serialize a synthetic CURRENT manifest, injecting the two dbt WIRE
+/// shapes the flat-domain serialization cannot express (cute-dbt#145):
+///
+/// 1. **`config.materialized`** — the domain serializes `NodeConfig` as a
+///    nested `{ config: {...}, contract_enforced }` struct, but the wire
+///    reader **flattens** `config`, so a domain→JSON→wire round-trip loses
+///    `materialized`. Each `(bare, materialized)` entry rewrites the node's
+///    `config` to dbt's flat `{ "materialized": <m> }`.
+/// 2. **`overrides.macros.is_incremental`** — the domain stores the mode
+///    flat (`is_incremental_mode`); the wire reads it nested under
+///    `overrides`. Each `(bare test, is_incremental)` entry injects
+///    `overrides.macros.is_incremental`.
+///
+/// Everything else (checksums, compiled_code, `given` inputs, expect)
+/// round-trips natively, so the rest of the manifest comes straight from
+/// the domain serialization.
+#[must_use]
+pub fn serialize_incremental_to_tmp(
+    manifest: &Manifest,
+    name: &str,
+    materialized: &[(&str, &str)],
+    overrides: &[(&str, bool)],
+) -> PathBuf {
+    let mut value: Value = serde_json::to_value(manifest).expect("manifest serializes to Value");
+    for &(bare, mat) in materialized {
+        let id = model_id(bare);
+        value["nodes"][id.as_str()]["config"] = serde_json::json!({ "materialized": mat });
+    }
+    for &(test, is_incremental) in overrides {
+        let key = unit_test_key(test);
+        value["unit_tests"][key.as_str()]["overrides"] =
+            serde_json::json!({ "macros": { "is_incremental": is_incremental } });
+    }
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.json"));
+    std::fs::write(
+        &path,
+        serde_json::to_string(&value).expect("injected manifest serializes"),
+    )
+    .expect("write incremental manifest to temp file");
+    path
+}

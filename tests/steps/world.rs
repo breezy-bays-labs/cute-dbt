@@ -114,6 +114,45 @@ pub struct World {
     /// edits ONE fixture row in a chosen way. `None` outside the cell-diff
     /// feature.
     pub cell_diff_plan: Option<CellDiffPlan>,
+
+    /// cute-dbt#145: the incremental-model scenario accumulator. Filled by
+    /// the `incremental_models.feature` Givens (which model is incremental,
+    /// which is modified, which tests carry an `overrides.macros.is_incremental`
+    /// and which `given` inputs), then consumed by the self-contained
+    /// `When I render the incremental report` step to build + serialize a
+    /// synthetic current/baseline pair (with the wire-shape injection the
+    /// flat-domain serialization can't express) and run the subprocess.
+    pub incremental_plan: IncrementalPlan,
+}
+
+/// A cute-dbt#145 incremental scenario plan — the models (each with its
+/// `config.materialized`), which models are modified-vs-baseline, and the
+/// unit tests (each with an optional `overrides.macros.is_incremental` mode
+/// and its `given` inputs). Built up by the feature's Given steps and
+/// consumed once by the `When`.
+#[derive(Debug, Default, Clone)]
+pub struct IncrementalPlan {
+    /// `(bare model name, config.materialized value)` per model.
+    pub models: Vec<(String, String)>,
+    /// Bare names of models the scenario marks modified vs the baseline.
+    pub modified: Vec<String>,
+    /// Unit tests the scenario declares.
+    pub tests: Vec<IncrementalTest>,
+}
+
+/// One unit test in an [`IncrementalPlan`].
+#[derive(Debug, Default, Clone)]
+pub struct IncrementalTest {
+    /// Bare unit-test name (`test_order_events_incremental`).
+    pub name: String,
+    /// Bare target model name (the `model:` field).
+    pub target: String,
+    /// `overrides.macros.is_incremental`, when the scenario sets it
+    /// (`Some(true)` incremental branch / `Some(false)` full refresh);
+    /// `None` when no override is declared.
+    pub mode: Option<bool>,
+    /// Ordered `given` input strings (`this`, `ref('stg_orders')`, …).
+    pub givens: Vec<String>,
 }
 
 /// A cute-dbt#98 cell-diff scenario plan — the test name, fixture format,

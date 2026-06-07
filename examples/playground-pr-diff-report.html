@@ -365,6 +365,15 @@ g.dag-node:focus-visible { outline: 2px dashed #1d7484; outline-offset: 3px; }
 .node-role-badge.role-final     { color: #b07400; }
 .given-empty { padding: 0.75rem 1rem; color: #6a6a72; font-style: italic; border: 1px dashed #ccc; margin-bottom: 0.75rem; }
 .format-badge { font-size: 0.75em; color: #6a6a72; padding: 0.05rem 0.4rem; border: 1px solid #ccc; border-radius: 999px; }
+/* cute-dbt#145 — incremental-model unit-test semantics. Amber (matching
+   role-final / the recursive banner) for the incremental affordances;
+   neutral grey for the full-refresh branch. */
+.incremental-badge { font-size: 0.7em; padding: 0.1rem 0.5rem; border: 1px solid #b07400; color: #b07400; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.05em; }
+.mode-badge { font-size: 0.7em; padding: 0.1rem 0.5rem; border: 1px solid currentColor; border-radius: 999px; text-transform: uppercase; letter-spacing: 0.05em; }
+.mode-badge.mode-incremental { color: #b07400; }
+.mode-badge.mode-full-refresh { color: #6a6a72; }
+.this-badge { font-size: 0.7em; color: #b07400; padding: 0.1rem 0.5rem; border: 1px solid #b07400; border-radius: 999px; }
+.expect-tooltip { color: #1d7484; cursor: help; margin-left: 0.25rem; border-bottom: 1px dotted currentColor; font-size: 0.9em; }
 /* Fixture sql-block wrapper reuses the compiled-SQL drawer styling
    (.sql-block-wrap + .sql-block) but has no copy button, so the
    top padding reserved for the absolute-positioned `.sql-copy`
@@ -651,6 +660,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     <div class="selector-field">
       <label for="model-select">Model</label>
       <select id="model-select"></select>
+      <span class="incremental-badge" hidden>incremental</span>
     </div>
     <span class="selector-arrow" aria-hidden="true">→</span>
     <div class="selector-field">
@@ -4445,6 +4455,9 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     var m = currentModel();
     var t = currentTest();
     $(".recursive-banner").prop("hidden", !(m && m.is_recursive));
+    // cute-dbt#145 — model-level incremental badge; reads the enclosing
+    // model (the is_recursive precedent), undefined-safe when omitted.
+    $(".incremental-badge").prop("hidden", !(m && m.is_incremental));
     renderTestDetails(t);
     renderModelSql(m);
     renderDagLegend();
@@ -4942,6 +4955,12 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     var $sec = $("<section>").addClass("given-section").attr("data-input-name", given.input);
     var $hdr = $("<div>").addClass("table-header");
     $hdr.append($("<h4>").addClass("table-title").text("given · " + given.input));
+    // cute-dbt#145 — mark a `given: - input: this` as the model's prior
+    // state. $hdr is freshly built per call (renderAllInputs .empty()s the
+    // wrap), so no idempotent clear is needed here.
+    if (given.is_this) {
+      $hdr.append($("<span>").addClass("this-badge").text("prior model state"));
+    }
     if (isSqlCodeBlockFixture(given)) {
       $hdr.append($("<span>").addClass("format-badge").text("format: sql"));
       $sec.append($hdr);
@@ -4987,6 +5006,34 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   function renderExpectedPanel(t) {
     var $panel = $(".expected-panel");
     var $body = $panel.find(".expected-body").empty();
+    // cute-dbt#145 — per-test mode badge + expect-semantics tooltip.
+    // The .panel-header is a PERSISTENT static element reused across
+    // renders, so first clear any prior mode badge / tooltip (targeted —
+    // must NOT touch the static .expected-rowcount). The mode badge shows
+    // only when the enclosing model is incremental; the tooltip rides the
+    // AUTHORITATIVE bool (is_incremental_mode === true), NEVER the
+    // `this`-given proxy, and NEVER on the full-refresh branch (there
+    // `expect` IS the final table). Emitted BEFORE the sql / external
+    // early-returns: the mode is about the test, not the fixture format.
+    var $exHdr = $panel.find(".panel-header");
+    $exHdr.find(".mode-badge, .expect-tooltip").remove();
+    var em = currentModel();
+    if (em && em.is_incremental) {
+      var incrementalMode = t.is_incremental_mode === true;
+      $exHdr.append($("<span>")
+        .addClass("mode-badge " + (incrementalMode ? "mode-incremental" : "mode-full-refresh"))
+        .text(incrementalMode ? "incremental branch" : "full-refresh branch"));
+      if (incrementalMode) {
+        var tip = "For an incremental-mode unit test, Expected is the result of the "
+          + "materialization — the rows that will be merged or inserted — "
+          + "not the resulting model itself (the final table after the merge).";
+        $exHdr.append($("<span>")
+          .addClass("expect-tooltip")
+          .attr("title", tip)
+          .attr("aria-label", tip)
+          .text("ⓘ"));
+      }
+    }
     if (isSqlCodeBlockFixture(t.expected)) {
       $panel.find(".expected-rowcount").text("format: sql");
       $body.append(buildSqlCodeBlock(t.expected.rows));

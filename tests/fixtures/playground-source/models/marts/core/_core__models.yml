@@ -1211,3 +1211,49 @@ unit_tests:
   # indent as `- name:`, immediately following the test body and
   # terminated by EOF or a blank line, are attached to this test's
   # slice. Useful for cross-references and follow-up notes (cute-dbt#73).
+
+  # cute-dbt#145 — an incremental-model unit test. `overrides.macros.
+  # is_incremental: true` drives the model's is_incremental() branch,
+  # `given: - input: this` supplies the model's prior state, and Expected is
+  # the rows MERGED/INSERTED by the run — not the final table after the merge.
+  - name: test_fct_encounters_incremental_appends_new_encounters
+    description: |
+      fct_encounters_incremental appends encounters newer than the latest
+      already-loaded start_time. With is_incremental() true, only the new
+      encounter (e2) is merged; the prior row (e1, supplied via `this`) is
+      untouched, so Expected is the single inserted row — the materialization
+      delta, not the resulting table.
+    model: fct_encounters_incremental
+    overrides:
+      macros:
+        is_incremental: true
+    given:
+      - input: this
+        format: dict
+        rows:
+          - encounter_id: 'e1'
+            patient_id: 'p1'
+            encounter_type: 'wellness'
+            start_time: '2025-01-01 09:00:00'
+            total_cost: 100.0
+      - input: ref('stg_synthea__encounters')
+        format: dict
+        rows:
+          - encounter_id: 'e1'
+            patient_id: 'p1'
+            encounter_type: 'wellness'
+            start_time: '2025-01-01 09:00:00'
+            total_cost: 100.0
+          - encounter_id: 'e2'
+            patient_id: 'p2'
+            encounter_type: 'emergency'
+            start_time: '2025-02-01 14:30:00'
+            total_cost: 500.0
+    expect:
+      format: dict
+      rows:
+        - encounter_id: 'e2'
+          patient_id: 'p2'
+          encounter_type: 'emergency'
+          start_time: '2025-02-01 14:30:00'
+          total_cost: 500.0

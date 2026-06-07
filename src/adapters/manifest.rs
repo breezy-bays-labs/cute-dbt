@@ -192,6 +192,14 @@ struct WireUnitTest {
     /// Top-level path to the declaring `.yml` file (not under `config`).
     #[serde(default)]
     original_file_path: Option<String>,
+    /// Top-level `overrides` block — carries the `macros.is_incremental`
+    /// flag (cute-dbt#145). Sibling of `config`, not nested inside it.
+    /// `Option` because dbt-fusion emits an unset `overrides` as an
+    /// explicit JSON `null` (not an absent key): `#[serde(default)]`
+    /// covers the absent case, the `Option` covers the explicit-`null`
+    /// case — a bare struct field rejects `null` and fails the parse.
+    #[serde(default)]
+    overrides: Option<WireUnitTestOverrides>,
 }
 
 /// Tolerant wire projection of the `config` sub-object on a dbt unit-test
@@ -206,11 +214,62 @@ struct WireUnitTestConfig {
     meta: Option<Value>,
 }
 
+/// Tolerant wire projection of a unit test's top-level `overrides` block.
+///
+/// dbt-fusion types `overrides` as three sibling open maps — `env_vars`,
+/// `macros`, and `vars` — each a `name -> arbitrary value` map
+/// (`UnitTestOverrides` in `dbt-schemas`). cute-dbt consumes only the
+/// `macros.is_incremental` channel (cute-dbt#145); `env_vars` and `vars`
+/// are simply not modeled (tolerant default-discard, ADR-5 — no
+/// `deny_unknown_fields`). `macros` is kept as the same untyped
+/// passthrough map fusion uses, mirroring how `config.meta` is carried;
+/// the untyped → typed collapse happens at the domain boundary in
+/// [`WireUnitTestOverrides::is_incremental_mode`].
+#[derive(Debug, Default, Deserialize)]
+struct WireUnitTestOverrides {
+    /// `overrides.macros`. `Option` (not a bare map) because dbt-fusion
+    /// emits each unset override channel as an explicit JSON `null` rather
+    /// than omitting the key — verified against the committed jaffle-shop
+    /// fixture (`"overrides": null`, and when an overrides object is
+    /// present its unset channels serialize as `"macros": null`). A bare
+    /// `BTreeMap` rejects `null` and would fail the whole manifest parse
+    /// (ADR-5 violation). Values stay untyped passthrough.
+    #[serde(default)]
+    macros: Option<BTreeMap<String, Value>>,
+}
+
+impl WireUnitTestOverrides {
+    /// Collapse `macros.is_incremental` to the domain's typed flag.
+    ///
+    /// Tolerant truthiness, never an error (so one oddly-typed override can
+    /// never fail the whole manifest, ADR-5): a JSON bool is taken as-is;
+    /// the canonical `"true"` / `"false"` strings parse (faithful to
+    /// fusion's runtime, which stubs `is_incremental()` to return the raw
+    /// override value, and a string is Jinja-truthy); any other shape
+    /// (number, null, absent/null macros, absent key) ⇒ `None`, the
+    /// full-refresh default.
+    fn is_incremental_mode(&self) -> Option<bool> {
+        match self.macros.as_ref()?.get("is_incremental") {
+            Some(Value::Bool(b)) => Some(*b),
+            Some(Value::String(s)) => match s.trim().to_ascii_lowercase().as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
 impl WireUnitTest {
     /// Translate the wire projection into the domain [`UnitTest`], lifting
     /// `config.tags` and `config.meta` out of the nested `config` block and
     /// keeping `original_file_path` from the top level.
     fn into_domain(self) -> UnitTest {
+        let is_incremental_mode = self
+            .overrides
+            .as_ref()
+            .and_then(WireUnitTestOverrides::is_incremental_mode);
         UnitTest::new(
             self.name,
             self.model,
@@ -222,6 +281,7 @@ impl WireUnitTest {
             self.config.meta,
             self.original_file_path,
         )
+        .with_incremental_mode(is_incremental_mode)
     }
 }
 
@@ -1006,5 +1066,112 @@ mod tests {
             ut.original_file_path().is_none(),
             "original_file_path should be None when absent"
         );
+        assert!(
+            ut.is_incremental_mode().is_none(),
+            "is_incremental_mode should be None when overrides absent"
+        );
+    }
+
+    /// cute-dbt#145: the incremental-mode flag is lifted from the nested
+    /// `overrides.macros.is_incremental` into the flat domain
+    /// `is_incremental_mode`. A JSON bool round-trips directly.
+    #[test]
+    fn parse_manifest_extracts_incremental_mode_from_overrides() {
+        for (flag, expected) in [("true", Some(true)), ("false", Some(false))] {
+            let json = format!(
+                r#"{{
+                  "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+                  "unit_tests": {{
+                    "unit_test.shop.t": {{
+                      "name": "t", "model": "order_events",
+                      "given": [], "expect": {{ "rows": [] }},
+                      "overrides": {{ "macros": {{ "is_incremental": {flag} }} }}
+                    }}
+                  }}
+                }}"#
+            );
+            let manifest = parse_manifest(&json).expect("valid manifest");
+            let ut = manifest
+                .unit_test("unit_test.shop.t")
+                .expect("unit test present");
+            assert_eq!(ut.is_incremental_mode(), expected, "is_incremental: {flag}");
+        }
+    }
+
+    /// cute-dbt#145 regression: `is_incremental_mode` is `None` whenever the
+    /// `overrides.macros.is_incremental` channel is absent — no `overrides`,
+    /// an empty `overrides` block, an empty `macros` map, or only sibling
+    /// channels (`vars` / `env_vars`) and other macro stubs present. The
+    /// sibling channels and other macro keys are tolerantly discarded
+    /// (ADR-5 — we model only the `macros.is_incremental` channel).
+    #[test]
+    fn parse_manifest_incremental_mode_none_when_channel_absent() {
+        let tails = [
+            "",                                     // no overrides key at all
+            r#", "overrides": null"#,               // explicit null — dbt-fusion's unset shape
+            r#", "overrides": {}"#,                 // empty overrides
+            r#", "overrides": { "macros": {} }"#,   // empty macros map
+            r#", "overrides": { "macros": null }"#, // null macros channel (fusion null-fills)
+            // fusion's all-channels-present-but-null shape:
+            r#", "overrides": { "macros": null, "vars": null, "env_vars": null }"#,
+            // sibling channels + an unrelated macro stub, but no is_incremental:
+            r#", "overrides": { "vars": { "x": 1 }, "env_vars": { "E": "v" }, "macros": { "other_macro": true } }"#,
+        ];
+        for tail in tails {
+            let json = format!(
+                r#"{{
+                  "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+                  "unit_tests": {{
+                    "unit_test.shop.t": {{
+                      "name": "t", "model": "order_events",
+                      "given": [], "expect": {{ "rows": [] }}{tail}
+                    }}
+                  }}
+                }}"#
+            );
+            let manifest = parse_manifest(&json).expect("valid manifest (tolerant)");
+            let ut = manifest
+                .unit_test("unit_test.shop.t")
+                .expect("unit test present");
+            assert_eq!(ut.is_incremental_mode(), None, "tail = {tail:?}");
+        }
+    }
+
+    /// cute-dbt#145 + ADR-5: a non-bool `is_incremental` override must NEVER
+    /// fail the whole manifest parse — dbt-fusion types the value as an
+    /// untyped `BTreeMap<String, YmlValue>`, so a quoted/odd value is a
+    /// legal manifest cute-dbt must read. Canonical `"true"`/`"false"`
+    /// strings are honored (faithful to fusion's truthy runtime stub); any
+    /// other shape degrades to `None`. Every case parses successfully.
+    #[test]
+    fn parse_manifest_incremental_mode_tolerates_non_bool_override() {
+        for (value, expected) in [
+            (r#""true""#, Some(true)),
+            (r#""false""#, Some(false)),
+            (r#""TRUE""#, Some(true)),
+            (r"1", None),
+            (r"null", None),
+            (r#""yes""#, None),
+        ] {
+            let json = format!(
+                r#"{{
+                  "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+                  "unit_tests": {{
+                    "unit_test.shop.t": {{
+                      "name": "t", "model": "order_events",
+                      "given": [], "expect": {{ "rows": [] }},
+                      "overrides": {{ "macros": {{ "is_incremental": {value} }} }}
+                    }}
+                  }}
+                }}"#
+            );
+            let manifest = parse_manifest(&json).unwrap_or_else(|e| {
+                panic!("non-bool override must not fail parse: value={value}, err={e:?}")
+            });
+            let ut = manifest
+                .unit_test("unit_test.shop.t")
+                .expect("unit test present");
+            assert_eq!(ut.is_incremental_mode(), expected, "value = {value}");
+        }
     }
 }
