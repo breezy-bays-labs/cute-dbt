@@ -4424,6 +4424,14 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     // cute-dbt#145 — model-level incremental badge; reads the enclosing
     // model (the is_recursive precedent), undefined-safe when omitted.
     $(".incremental-badge").prop("hidden", !(m && m.is_incremental));
+    // cute-dbt#145 — the .expected-panel .panel-header is a PERSISTENT static
+    // element. renderExpectedPanel (which clears + re-appends the mode badge /
+    // expect-tooltip) runs ONLY in the `if (t)` arm below, so a switch to a
+    // modified-but-untested model (currentTest() === null) would otherwise
+    // leak a prior incremental-mode test's badge + tooltip. Clear them here
+    // unconditionally too (targeted — never touches .expected-rowcount).
+    // (gemini review, PR #146.)
+    $(".expected-panel .panel-header .mode-badge, .expected-panel .panel-header .expect-tooltip").remove();
     renderTestDetails(t);
     renderModelSql(m);
     renderDagLegend();

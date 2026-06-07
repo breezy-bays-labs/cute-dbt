@@ -2985,11 +2985,16 @@ fn incremental_badges_modes_tooltip_and_this_given() {
     // bool, not the proxy — and the mode_on → mode_off transition (no reload)
     // exercises the idempotent `.mode-badge, .expect-tooltip` clear on the
     // persistent `.panel-header`.
+    // dim_empty is a modified-but-untested model (no unit tests) — selecting it
+    // drives currentTest() to null, the leak path for a stale mode badge /
+    // tooltip (renderExpectedPanel, which clears them, runs ONLY in the `if (t)`
+    // arm of renderForSelectedModel).
     let url = render_to_file(
         "headless_incremental.html",
         vec![
             model_node_materialized("model.shop.dim_inc", "incremental"),
             model_node_materialized("model.shop.dim_tbl", "table"),
+            model_node_materialized("model.shop.dim_empty", "table"),
         ],
         vec![
             (
@@ -3005,7 +3010,11 @@ fn incremental_badges_modes_tooltip_and_this_given() {
                 incremental_unit_test("plain", "dim_tbl", None, &["ref('orders')"]),
             ),
         ],
-        &["model.shop.dim_inc", "model.shop.dim_tbl"],
+        &[
+            "model.shop.dim_inc",
+            "model.shop.dim_tbl",
+            "model.shop.dim_empty",
+        ],
         &[], // 0 changed → auto-All mode → every in-scope test is selectable
     );
 
@@ -3111,6 +3120,28 @@ fn incremental_badges_modes_tooltip_and_this_given() {
     assert!(
         eval_bool(&tab, &format!("{TOOLTIP} === null")),
         "a test on a non-incremental model shows no expect-semantics tooltip",
+    );
+
+    // ===== modified-but-untested model clears a LEAKED incremental tooltip =====
+    // Re-establish an incremental-mode tooltip, then select a model with no
+    // tests (currentTest() === null → renderExpectedPanel, which clears the
+    // badge/tooltip, is NOT called). renderForSelectedModel must clear them
+    // unconditionally, else the prior test's badge + tooltip leak onto the
+    // persistent `.panel-header` (gemini review, PR #146).
+    select_model(&tab, "dim_inc");
+    select_test(&tab, "unit_test.shop.dim_inc.mode_on");
+    assert!(
+        eval_bool(&tab, &format!("{TOOLTIP} !== null")),
+        "precondition: the incremental-mode tooltip is present before the switch",
+    );
+    select_model(&tab, "dim_empty");
+    assert!(
+        eval_bool(&tab, &format!("{MODE_BADGE} === null")),
+        "selecting a modified-but-untested model clears the leaked mode badge",
+    );
+    assert!(
+        eval_bool(&tab, &format!("{TOOLTIP} === null")),
+        "selecting a modified-but-untested model clears the leaked expect-semantics tooltip",
     );
 
     let _ = tab.close(true);
