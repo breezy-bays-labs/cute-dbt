@@ -991,4 +991,57 @@ unit_tests:
             );
         }
     }
+
+    // ----- cute-dbt#125: the slicer includes the `overrides:` block -----
+    //
+    // The foundational link of the #125 reframe (and the issue's explicit
+    // Discovery item): the working-tree YAML block span must include a test's
+    // `overrides:` lines, so the #96 text diff surfaces override-only edits.
+    // `overrides:` is just another field at field-indent (a sibling of
+    // given/expect), so the indent-based slicer carries it by construction —
+    // this exercises the REAL `extract_unit_test_block` (not a hand-built
+    // block) to confirm it, across all 3 dbt override kinds.
+    #[test]
+    fn overrides_block_and_all_three_kinds_are_included_in_the_slice() {
+        let src = yaml(
+            "
+unit_tests:
+  - name: test_inc
+    model: orders
+    overrides:
+      macros:
+        is_incremental: false
+      vars:
+        cutoff_days: 30
+      env_vars:
+        DBT_REGION: us-east-1
+    given: []
+    expect:
+      rows: []
+",
+        );
+        let block = extract_unit_test_block(&src, "test_inc").expect("test_inc present");
+        assert!(
+            block.raw.contains("    overrides:"),
+            "the overrides block rides along in the slice; got: {:?}",
+            block.raw,
+        );
+        for kind in ["macros:", "vars:", "env_vars:"] {
+            assert!(
+                block.raw.contains(kind),
+                "the {kind} override sub-key rides along; got: {:?}",
+                block.raw,
+            );
+        }
+        // A deep override value (the line an override-only edit would touch).
+        assert!(
+            block.raw.contains("is_incremental: false"),
+            "deep override values ride along; got: {:?}",
+            block.raw,
+        );
+        // And the slice still spans through to the sibling given/expect — the
+        // whole `- name:` entry, not truncated at `overrides:`.
+        assert!(block.raw.contains("    given: []"));
+        assert!(block.raw.contains("    expect:"));
+    }
 }

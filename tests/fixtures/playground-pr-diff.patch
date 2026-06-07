@@ -23,3 +23,6 @@ diff --git a/models/marts/analytics/_analytics__models.yml b/models/marts/analyt
 -          total_count: 2
 +          quarantined_count: 0
 +          total_count: 1
+@@ -1399 +1399 @@
+-        dq_quarantine_threshold: 10
++        dq_quarantine_threshold: 5

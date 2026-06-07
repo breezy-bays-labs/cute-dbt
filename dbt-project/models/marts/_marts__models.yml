@@ -34,6 +34,17 @@ unit_tests:
       With one paid order of $10 the grand total is $10, so the single row's
       share is 1.0. Uses dbt's dict format for both GIVEN and EXPECT.
     model: order_metrics
+    # cute-dbt#125 — an `overrides` block in the self-dogfood project so the
+    # PR-diff report's Authoring-YAML drawer surfaces override changes on a
+    # real consumed dbt project (not just synthetic fixtures). vars/env_vars
+    # are inert here (these models read neither) but are valid dbt and
+    # demonstrate the surface; meaningful macro overrides (is_incremental)
+    # arrive with the incremental-model work (cute-dbt#145).
+    overrides:
+      vars:
+        reporting_currency: 'USD'
+      env_vars:
+        DBT_ORDERS_REGION: 'us-east-1'
     given:
       - input: ref('stg_orders')
         format: dict

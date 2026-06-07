@@ -1392,5 +1392,12 @@ unit_tests:
           quarantined_count: 0
           total_count: 1
           quarantine_rate_pct: 0.00
+    overrides:
+      macros:
+        dbt.current_timestamp: "'2024-01-15 00:00:00'"
+      vars:
+        dq_quarantine_threshold: 5
+      env_vars:
+        DBT_DQ_REGION: 'us-east-1'
   # TRAILING bracket for test 2 — terminated by EOF (cute-dbt#69 /
   # #73).

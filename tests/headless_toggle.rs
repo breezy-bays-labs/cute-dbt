@@ -684,6 +684,166 @@ fn yaml_diff_drawer_defaults_to_diff_and_toggles_to_authored() {
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn override_only_edit_shows_text_diff_and_no_spurious_cell_diff() {
+    // cute-dbt#125 — the rendered-visibility proof (the domain test
+    // `override_only_edit_surfaces_in_text_diff_but_not_cell_diff_end_to_end`
+    // pins the payload computation; this pins what the reviewer SEES). A
+    // unit test with non-empty given/expect rows whose ONLY edit is inside
+    // the `overrides:` block (all 3 dbt override kinds present): the change
+    // must surface in the Authoring-YAML Diff view, while the given/expect
+    // cell grids carry NO cell-diff (data_diff is None → Current-only),
+    // so the drawer is the sole place the override change shows.
+    let id = "unit_test.shop.dim_a.override_only";
+    let raw = [
+        "  - name: override_only",
+        "    model: dim_a",
+        "    overrides:",
+        "      macros:",
+        "        is_incremental: false",
+        "      vars:",
+        "        cutoff_days: 30",
+        "      env_vars:",
+        "        DBT_REGION: us-east-1",
+        "    given:",
+        "      - input: ref('orders')",
+        "        format: dict",
+        "        rows:",
+        "          - id: 1",
+        "            amount: 100",
+        "    expect:",
+        "      format: dict",
+        "      rows:",
+        "        - id: 1",
+        "          total: 100",
+    ]
+    .join("\n");
+    // The reconstructed block diff: the whole entry as context, with ONLY the
+    // `vars.cutoff_days` line as a removed/added change pair. Sibling override
+    // keys + the given/expect data ride along as context (the slice spans the
+    // whole `- name:` entry — the #125 invariant).
+    let diff = BlockDiff {
+        lines: vec![
+            dl(DiffLineKind::Context, "  - name: override_only", None),
+            dl(DiffLineKind::Context, "    model: dim_a", None),
+            dl(DiffLineKind::Context, "    overrides:", None),
+            dl(DiffLineKind::Context, "      macros:", None),
+            dl(DiffLineKind::Context, "        is_incremental: false", None),
+            dl(DiffLineKind::Context, "      vars:", None),
+            // emphasis = the changed VALUE codepoints. `cutoff_days: ` is 13
+            // chars after the 8-space indent (indices 8..=20), so the value
+            // starts at codepoint 21 (Gemini PR#144): `7` → [21,22), `30` →
+            // [21,23). The assertions below key on the change LINES, not the
+            // emphasis, but the mock should still describe a faithful diff.
+            dl(
+                DiffLineKind::Removed,
+                "        cutoff_days: 7",
+                Some((21, 22)),
+            ),
+            dl(
+                DiffLineKind::Added,
+                "        cutoff_days: 30",
+                Some((21, 23)),
+            ),
+            dl(DiffLineKind::Context, "      env_vars:", None),
+            dl(DiffLineKind::Context, "        DBT_REGION: us-east-1", None),
+        ],
+    };
+
+    let ut = UnitTest::new(
+        "override_only",
+        NodeId::new("dim_a"),
+        vec![UnitTestGiven::new(
+            "ref('orders')",
+            serde_json::json!([{"id": 1, "amount": 100}]),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(
+            serde_json::json!([{"id": 1, "total": 100}]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+
+    let url = render_pr_diff_with_diffs(
+        "headless_override_only.html",
+        vec![model_node("model.shop.dim_a")],
+        vec![(id, ut)],
+        &["model.shop.dim_a"],
+        &[id],
+        vec![(id, &raw)],
+        vec![(id, diff)],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // (1) The override change is SHOWN — the Diff view (default) carries the
+    // new override value as an added line.
+    assert!(
+        !eval_bool(&tab, "document.querySelector('.yaml-diff-view').hidden"),
+        "the Authoring-YAML Diff view is the default (visible)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "Array.from(document.querySelectorAll('.yaml-diff-view .diff-added'))\
+             .some(function(e){return e.textContent.indexOf('cutoff_days: 30') !== -1;})"
+        ),
+        "the new override value shows as an added line in the drawer Diff view",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "Array.from(document.querySelectorAll('.yaml-diff-view .diff-removed'))\
+             .some(function(e){return e.textContent.indexOf('cutoff_days: 7') !== -1;})"
+        ),
+        "the old override value shows as a removed line in the drawer Diff view",
+    );
+
+    // (2) NO spurious cell diff on the expect side — `expect` is unchanged,
+    // so its grid renders Current-only (no cell-diff grid or toggle). The
+    // expect panel renders on test selection (no tab switch needed).
+    assert!(
+        eval_bool(&tab, "document.querySelector('.expected-table') !== null"),
+        "the expect fixture's Current grid renders",
+    );
+    assert!(
+        !eval_bool(&tab, "document.querySelector('.cell-diff-toggle') !== null"),
+        "an override-only edit must NOT produce a cell-diff Current↔Diff toggle",
+    );
+    assert!(
+        !eval_bool(&tab, "document.querySelector('.cell-diff-table') !== null"),
+        "an override-only edit must NOT render a cell-diff grid",
+    );
+
+    // (3) Same on the given side — the All-inputs view builds the given grid
+    // lazily; switch to it and confirm it renders Current-only (no cell diff).
+    let _ = eval(
+        &tab,
+        "document.querySelector('.panel-toggle [data-mode=\"inputs\"]').click()",
+    );
+    assert!(
+        eval_bool(&tab, "document.querySelector('.given-table') !== null"),
+        "the given fixture's Current grid renders in the All-inputs view",
+    );
+    assert!(
+        !eval_bool(&tab, "document.querySelector('.cell-diff-table') !== null"),
+        "the given side carries no cell-diff grid for an override-only edit",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn render_yaml_diff_js_emits_classes_sigils_and_codepoint_emphasis() {
     // Exercises the `__cuteRenderYamlDiff` JS seam directly (parallels
     // `__cuteHighlightYaml`). Any rendered report carries the function; the
