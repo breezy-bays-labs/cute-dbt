@@ -14,6 +14,9 @@ select
     status
 from orders
 {% if is_incremental() %}
--- on incremental runs, only process orders newer than the loaded high-water mark
-where order_date > (select max(order_date) from {{ this }})
+-- on incremental runs, only process orders newer than the loaded high-water
+-- mark. coalesce guards an existing-but-empty target: max() over zero rows is
+-- NULL, and `order_date > NULL` is NULL (never true), which would silently
+-- filter out every row on that run.
+where order_date > (select coalesce(max(order_date), '1900-01-01') from {{ this }})
 {% endif %}

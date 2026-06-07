@@ -3048,18 +3048,44 @@ fn incremental_badges_modes_tooltip_and_this_given() {
         eval_bool(&tab, &format!("{TOOLTIP} !== null")),
         "an incremental-mode test shows the expect-semantics tooltip",
     );
-    // The dbt gotcha wording lives in BOTH title and aria-label. Assert an
-    // ASCII substring — the tip contains em-dashes (U+2014), so a full-string
-    // compare would mismatch.
+    // cute-dbt#146 review — the tooltip is a FOCUSABLE button (keyboard + touch
+    // reachable), not a hover-only `<span title>`.
+    assert_eq!(
+        eval_string(&tab, &format!("{TOOLTIP}.tagName")),
+        "BUTTON",
+        "the expect-tooltip is a focusable <button>, not a hover-only span",
+    );
+    // The dbt gotcha wording lives in the VISIBLE CSS bubble AND the aria-label.
+    // Assert an ASCII substring — the tip contains em-dashes (U+2014), so a
+    // full-string compare would mismatch.
     assert!(
-        eval_string(&tab, &format!("{TOOLTIP}.getAttribute('title')"))
-            .contains("merged or inserted"),
-        "the tooltip title explains Expected is the rows merged or inserted",
+        eval_string(
+            &tab,
+            &format!("{TOOLTIP}.querySelector('.expect-tooltip-bubble').textContent")
+        )
+        .contains("merged or inserted"),
+        "the visible tooltip bubble explains Expected is the rows merged or inserted",
     );
     assert!(
         eval_string(&tab, &format!("{TOOLTIP}.getAttribute('aria-label')"))
             .contains("merged or inserted"),
         "the tooltip aria-label carries the same dbt wording (a11y parity)",
+    );
+    // cute-dbt#146 review — the regression guard for "hover shows nothing": the
+    // bubble is hidden until hover/focus, and FOCUS reveals it (the keyboard
+    // path; `:hover` shares the same CSS rule, so a visible-on-focus bubble
+    // proves the hover path paints too).
+    const BUBBLE_VIS: &str = "getComputedStyle(document.querySelector('.expect-tooltip .expect-tooltip-bubble')).visibility";
+    assert_eq!(
+        eval_string(&tab, BUBBLE_VIS),
+        "hidden",
+        "the tooltip bubble is hidden until hover/focus",
+    );
+    let _ = eval(&tab, &format!("{TOOLTIP}.focus()"));
+    assert_eq!(
+        eval_string(&tab, BUBBLE_VIS),
+        "visible",
+        "focusing the tooltip reveals the bubble (the keyboard path a native title never had)",
     );
 
     // ===== the `this` given is prior-model-state; `ref(...)` is not =====

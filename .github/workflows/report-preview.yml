@@ -68,11 +68,12 @@ jobs:
             # Source YAML lives in-repo so the regenerated report
             # populates the Authoring-YAML drawer (cute-dbt#69).
             project_root: tests/fixtures/playground-source
-          # cute-dbt#134 — the durable --pr-diff showcase, mirrored from
-          # ci.yml's example-report-check. Renders in --pr-diff mode
-          # (synthetic patch, NO baseline) so the sticky card can offer
+          # cute-dbt#134 — the durable diff-view showcase (a GOLDEN example,
+          # committed + byte-identity gated — NOT the live dogfood preview),
+          # mirrored from ci.yml's example-report-check. Renders in --pr-diff
+          # mode (synthetic patch, NO baseline) so the sticky card can offer
           # the diff-view showcase report alongside the baseline examples.
-          - name: pr-diff-showcase
+          - name: diff-showcase
             current: tests/fixtures/playground-current.json
             baseline: ""
             pr_diff: tests/fixtures/playground-pr-diff.patch
@@ -328,62 +329,70 @@ jobs:
             "/repos/${REPO}/actions/runs/${RUN_ID}/artifacts" \
             --jq '[.artifacts[] | select(.name | startswith("report-preview-"))]' \
             || echo '[]')
-          # Build one table row per artifact. The dbt-project artifact
-          # (cute-dbt#118) is the PR's OWN --pr-diff render, so it gets a
-          # distinct label vs. the baseline example previews; it is also
-          # absent entirely on PRs that don't touch `dbt-project/` (the
-          # prdiff-preview job skips upload), so this never claims a row
-          # that isn't there.
-          rows=$(printf '%s' "$artifacts_json" \
+          # Partition artifacts into the two buckets the sticky comment labels
+          # distinctly: GOLDEN examples (committed + byte-identity gated:
+          # jaffle-shop, playground, diff-showcase) vs the LIVE dogfood preview
+          # (the PR's OWN dbt-project render, cute-dbt#118 — present only when
+          # the PR touched dbt-project/, so the live section never claims a row
+          # that isn't there).
+          golden_rows=$(printf '%s' "$artifacts_json" \
             | jq -r --arg repo "$REPO" --arg run "$RUN_ID" '
-                def row_label:
-                  if . == "dbt-project"
-                  then "dbt-project (PrDiff — this PR'"'"'s own changes)"
-                  else . end;
-                if length == 0 then
-                  "| _(no artifacts uploaded — see [run log](https://github.com/\($repo)/actions/runs/\($run)) for details)_ | — |"
-                else
-                  map(
-                    (.name | sub("^report-preview-"; "")) as $slug
-                    | "| " + ($slug | row_label) + " — `" + $slug + "-report.html`"
+                [.[] | select((.name | sub("^report-preview-"; "")) != "dbt-project")]
+                | if length == 0 then
+                    "| _(none uploaded — see [run log](https://github.com/\($repo)/actions/runs/\($run)))_ | — |"
+                  else
+                    map(
+                      (.name | sub("^report-preview-"; "")) as $slug
+                      | "| `" + $slug + "-report.html`"
+                      + " | [Download](https://github.com/" + $repo + "/actions/runs/" + $run + "/artifacts/" + (.id | tostring) + ") |"
+                    ) | join("\n")
+                  end
+              ')
+          live_rows=$(printf '%s' "$artifacts_json" \
+            | jq -r --arg repo "$REPO" --arg run "$RUN_ID" '
+                [.[] | select((.name | sub("^report-preview-"; "")) == "dbt-project")]
+                | map(
+                    "| `dbt-project-report.html`"
                     + " | [Download](https://github.com/" + $repo + "/actions/runs/" + $run + "/artifacts/" + (.id | tostring) + ") |"
                   ) | join("\n")
-                end
               ')
           # Surface the regenerate result so the reviewer knows whether
           # the byte-identity gate (in ci.yml) is independently passing.
           status_line=$(case "$MATRIX_RESULT" in
-            success) echo "All examples regenerated cleanly." ;;
+            success) echo "All golden examples regenerated cleanly." ;;
             failure) echo "⚠️ At least one regenerate matrix worker failed — the rendered HTML may be partial. See \`Example report check\` in the [run log](${RUN_URL}) for details." ;;
             cancelled) echo "Run cancelled (likely superseded by a newer push)." ;;
             *) echo "Regenerate result: \`${MATRIX_RESULT}\`." ;;
           esac)
-          # Surface the PrDiff-preview job's fate. The job has NO job-level
-          # `if:`, so it runs to completion even on non-dbt PRs and reports
-          # `result: success` regardless — `.result` cannot tell "touched
-          # dbt-project/" from "didn't". Branch on its `touched` OUTPUT
-          # instead ('true' only when the PR changed dbt-project/ source;
-          # empty string if the job was ever genuinely skipped/cancelled, which
-          # the non-'true' branch absorbs into the no-row message).
-          if [ "${PRDIFF_TOUCHED}" = "true" ]; then
-            prdiff_line=$(case "$PRDIFF_RESULT" in
-              success) echo "This PR touches \`dbt-project/\` — the **dbt-project (PrDiff)** row below renders this PR's own \`--pr-diff\` diff." ;;
-              failure) echo "⚠️ The PrDiff self-preview job failed — see the [run log](${RUN_URL})." ;;
-              *) echo "" ;;
-            esac)
+          # Build the LIVE dogfood section. The prdiff-preview job has NO
+          # job-level `if:`, so it always reports `result: success`; branch on
+          # its `touched` OUTPUT ('true' only when the PR changed dbt-project/
+          # source) to tell a real row from "didn't touch".
+          if [ "${PRDIFF_TOUCHED}" = "true" ] && [ -n "$live_rows" ]; then
+            if [ "${PRDIFF_RESULT}" = "failure" ]; then
+              live_section="⚠️ The live dogfood preview job failed — see the [run log](${RUN_URL})."
+            else
+              live_section=$(printf '%s\n\n| Report | Download |\n|---|---|\n%s' \
+                "_This PR's own \`dbt-project/\` diff, freshly compiled by fusion into an **ephemeral** manifest (never committed) and rendered with \`--pr-diff\`. Regenerated every PR — the live self-dogfood, not a committed example._" \
+                "$live_rows")
+            fi
           else
-            prdiff_line="_This PR doesn't touch \`dbt-project/\`, so there's no PrDiff self-preview row._"
+            live_section="_This PR doesn't touch \`dbt-project/\`, so there's no live dogfood preview._"
           fi
           cat > target/sticky/body.md <<MARKDOWN
           ## 📄 Rendered report preview
 
           ${status_line}
 
-          ${prdiff_line}
+          ### 🟡 Golden examples
+          _Committed to \`examples/\` and byte-identity gated — the canonical reports contributors and consumers browse. Stable across PRs._
 
-          | Preview | Artifact |
+          | Report | Download |
           |---|---|
-          ${rows}
+          ${golden_rows}
+
+          ### 🐶 Live dogfood preview
+          ${live_section}
 
           Click **Download** to fetch the rendered HTML. Each artifact
           is a zip containing the single-file report — extract and open

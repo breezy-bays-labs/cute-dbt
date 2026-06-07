@@ -2,21 +2,29 @@
 
 A committed end-to-end demonstration of cute-dbt's output. Open one of
 these `.html` files in a browser to see what the tool produces against a
-real compiled dbt manifest.
+real compiled dbt manifest. These are the **golden examples** — committed
+and byte-identity gated, the canonical reports a consumer browses. (The
+live, per-PR dogfood of cute-dbt's *own* `dbt-project/` is a transient CI
+artifact on the sticky PR comment, not committed here.)
 
 ## Files
 
 | File | Source manifests | What it shows |
 |---|---|---|
 | [`jaffle-shop-report.html`](jaffle-shop-report.html) | [`tests/fixtures/jaffle-shop-current.json`](../tests/fixtures/jaffle-shop-current.json) + [`jaffle-shop-baseline.json`](../tests/fixtures/jaffle-shop-baseline.json) | One in-scope model (`stg_customers`) with 1 unit test carrying populated `tags` / `meta` / `original_file_path`. Three-node CTE DAG (`source` → `renamed` → `stg_customers`) demonstrating the import / transform / final role classification + edge coloring + click-to-inspect. |
-| [`playground-report.html`](playground-report.html) | [`tests/fixtures/playground-current.json`](../tests/fixtures/playground-current.json) + [`playground-baseline.json`](../tests/fixtures/playground-baseline.json) | The richer example. Three in-scope models from [`cmbays/dbt-playground`](https://github.com/cmbays/dbt-playground): `mart_dq_summary` (UNION-ALL of encounter + medication DQ metrics, 2 unit tests), `dim_payers` (UNION-ALL with unknown-sentinel, 1 unit test), and `int_dq_quarantine__encounters` (modified-no-tests → empty-state card). Exercises multi-model in-scope, multi-test-per-model, UNION arms in two distinct patterns, the empty-state card, AND dbt unit_test fixture-format diversity (`sql` given + mixed `dict` / `csv` expect). |
+| [`playground-report.html`](playground-report.html) | [`tests/fixtures/playground-current.json`](../tests/fixtures/playground-current.json) + [`playground-baseline.json`](../tests/fixtures/playground-baseline.json) | The richer example. Models from [`cmbays/dbt-playground`](https://github.com/cmbays/dbt-playground): `mart_dq_summary` (UNION-ALL of encounter + medication DQ metrics, 2 unit tests), `dim_payers` (UNION-ALL with unknown-sentinel, 1 unit test), `int_dq_quarantine__encounters` (modified-no-tests → empty-state card), and `fct_encounters_incremental` — an **incremental** model whose unit test surfaces the incremental-mode badge, the expect-semantics tooltip, and the `prior model state` (`given: - input: this`) badge (cute-dbt#145). Exercises multi-model in-scope, multi-test-per-model, UNION arms, the empty-state card, fixture-format diversity (`sql` given + mixed `dict` / `csv` expect), AND incremental-model semantics. Rendered with `--project-root` so the Authoring-YAML drawer populates. |
+| [`diff-showcase-report.html`](diff-showcase-report.html) | [`tests/fixtures/playground-current.json`](../tests/fixtures/playground-current.json) + [`tests/fixtures/playground-pr-diff.patch`](../tests/fixtures/playground-pr-diff.patch) (`--pr-diff`, no baseline) | The **diff-view showcase** — the `--pr-diff` feature set rendered against a synthetic hand-crafted patch: foldable inline SQL diffs, YAML block diffs, and cell-level data diffs with NULL-aware cells. Stays synthetic so no `root_path` leaks into the committed HTML. |
 
-Open either file directly (`open examples/jaffle-shop-report.html` /
-`open examples/playground-report.html` on macOS, `xdg-open` on Linux,
-or drag into a browser). Both pages make **zero** outbound requests;
-every asset (Sakura CSS, jQuery, DataTables, Mermaid) is inlined.
+Open any file directly (`open examples/jaffle-shop-report.html` on macOS,
+`xdg-open` on Linux, or drag into a browser). Every page makes **zero**
+outbound requests; every asset (Sakura CSS, jQuery, DataTables, Mermaid)
+is inlined.
 
 ## How to regenerate
+
+The flags must match the `example-report-check` matrix in `ci.yml`
+exactly (the byte-identity gate), including `--project-root` where the
+report slices Authoring YAML from committed source.
 
 ```bash
 # jaffle-shop
@@ -29,7 +37,15 @@ cargo run --bin cute-dbt -- \
 cargo run --bin cute-dbt -- \
   --manifest tests/fixtures/playground-current.json \
   --baseline-manifest tests/fixtures/playground-baseline.json \
+  --project-root tests/fixtures/playground-source \
   --out examples/playground-report.html
+
+# diff-showcase (--pr-diff against the synthetic patch, no baseline)
+cargo run --bin cute-dbt -- \
+  --manifest tests/fixtures/playground-current.json \
+  --pr-diff @tests/fixtures/playground-pr-diff.patch \
+  --project-root tests/fixtures/playground-source \
+  --out examples/diff-showcase-report.html
 ```
 
 CI verifies every committed example stays in sync with the renderer —

@@ -373,7 +373,13 @@ g.dag-node:focus-visible { outline: 2px dashed #1d7484; outline-offset: 3px; }
 .mode-badge.mode-incremental { color: #b07400; }
 .mode-badge.mode-full-refresh { color: #6a6a72; }
 .this-badge { font-size: 0.7em; color: #b07400; padding: 0.1rem 0.5rem; border: 1px solid #b07400; border-radius: 999px; }
-.expect-tooltip { color: #1d7484; cursor: help; margin-left: 0.25rem; border-bottom: 1px dotted currentColor; font-size: 0.9em; }
+/* cute-dbt#146 review — the expect-semantics tooltip is the load-bearing
+   affordance, so it must paint on hover AND keyboard focus (a native `title`
+   does neither reliably). A focusable button with a CSS bubble; zero-egress
+   (no asset, no JS lib). */
+.expect-tooltip { position: relative; display: inline-flex; align-items: center; border: none; background: transparent; padding: 0; margin-left: 0.25rem; font: inherit; font-size: 0.9em; color: #1d7484; cursor: help; border-bottom: 1px dotted currentColor; }
+.expect-tooltip-bubble { position: absolute; left: 50%; top: calc(100% + 6px); transform: translateX(-50%); z-index: 60; visibility: hidden; opacity: 0; transition: opacity 0.1s ease-in; width: 20rem; max-width: 70vw; padding: 0.5rem 0.65rem; background: #1d1d22; color: #f5f5f7; border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,0.35); font-size: 0.78rem; font-weight: normal; line-height: 1.45; text-align: left; text-transform: none; letter-spacing: normal; white-space: normal; pointer-events: none; }
+.expect-tooltip:hover .expect-tooltip-bubble, .expect-tooltip:focus .expect-tooltip-bubble, .expect-tooltip:focus-visible .expect-tooltip-bubble { visibility: visible; opacity: 1; }
 /* Fixture sql-block wrapper reuses the compiled-SQL drawer styling
    (.sql-block-wrap + .sql-block) but has no copy button, so the
    top padding reserved for the absolute-positioned `.sql-copy`
@@ -5001,11 +5007,22 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
         var tip = "For an incremental-mode unit test, Expected is the result of the "
           + "materialization — the rows that will be merged or inserted — "
           + "not the resulting model itself (the final table after the merge).";
-        $exHdr.append($("<span>")
+        // A focusable <button> carrying a CSS-rendered bubble shown on hover
+        // AND keyboard focus — a native `title` is hover-delayed, keyboard-
+        // unreachable, and frequently never paints (cute-dbt#146 review). The
+        // bubble is the visual surface; `aria-label` carries the same text for
+        // assistive tech (bubble is aria-hidden so it is not announced twice).
+        // Pure CSS — no asset, no JS tooltip lib — so the zero-egress gate holds.
+        var $tip = $("<button>")
+          .attr("type", "button")
           .addClass("expect-tooltip")
-          .attr("title", tip)
-          .attr("aria-label", tip)
-          .text("ⓘ"));
+          .attr("aria-label", tip);
+        $tip.append(document.createTextNode("ⓘ"));
+        $tip.append($("<span>")
+          .addClass("expect-tooltip-bubble")
+          .attr("aria-hidden", "true")
+          .text(tip));
+        $exHdr.append($tip);
       }
     }
     if (isSqlCodeBlockFixture(t.expected)) {

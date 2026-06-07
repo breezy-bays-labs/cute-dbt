@@ -561,18 +561,19 @@ jobs:
             # passes `--project-root` so the regenerated example matches
             # the committed one byte-for-byte.
             project_root: tests/fixtures/playground-source
-          # cute-dbt#134 — the durable diff-view showcase. Renders the
-          # playground manifest in --pr-diff mode against a synthetic
-          # hand-crafted patch (NO baseline), so the committed example
-          # exercises the #132/#133 overhaul: foldable inline SQL diff,
-          # YAML block diff, and a cell-level data diff with a real NULL.
-          # `pr_diff` set + `baseline` empty selects the --pr-diff arm in
-          # the run step below.
-          - name: pr-diff-showcase
+          # cute-dbt#134 — the durable diff-view showcase (a GOLDEN example:
+          # committed + byte-identity gated, NOT the live dogfood preview).
+          # Renders the playground manifest in --pr-diff mode against a
+          # synthetic hand-crafted patch (NO baseline), so the committed
+          # example exercises the #132/#133 overhaul: foldable inline SQL
+          # diff, YAML block diff, and a cell-level data diff with a real
+          # NULL. `pr_diff` set + `baseline` empty selects the --pr-diff arm
+          # in the run step below.
+          - name: diff-showcase
             current: tests/fixtures/playground-current.json
             baseline: ""
             pr_diff: tests/fixtures/playground-pr-diff.patch
-            output: examples/playground-pr-diff-report.html
+            output: examples/diff-showcase-report.html
             project_root: tests/fixtures/playground-source
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1

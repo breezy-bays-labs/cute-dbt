@@ -577,5 +577,19 @@ mod tests {
         let back: UnitTest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.is_incremental_mode(), Some(true));
         assert_eq!(back, some, "flat round-trip preserves all fields");
+
+        // Some(false) ⇒ the explicit full-refresh wire state ⇒ flat key
+        // present (NOT skipped — only None skips) ⇒ round-trips losslessly.
+        // Distinct from None, which the comparator/UI treats identically but
+        // which carries no key (cute-dbt#145 D6: preserve absent vs explicit).
+        let some_false = bare_unit_test().with_incremental_mode(Some(false));
+        let json = serde_json::to_string(&some_false).unwrap();
+        assert!(
+            json.contains("\"is_incremental_mode\":false"),
+            "Some(false) must emit the flat key: {json}"
+        );
+        let back: UnitTest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.is_incremental_mode(), Some(false));
+        assert_eq!(back, some_false, "flat round-trip preserves all fields");
     }
 }
