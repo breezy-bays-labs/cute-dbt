@@ -5,33 +5,40 @@ on:
     branches: [main]
   pull_request:
 
-# Workflow-scoped default. Job-level permissions narrow as needed
-# (the deploy job adds pages:write + id-token:write for OIDC).
+# Workflow-scoped default. The build job widens to `contents: write` for
+# the gh-pages push (main only); PR runs only build + validate and never
+# push.
 permissions:
   contents: read
 
-# Allow only one concurrent deployment, but don't cancel in-progress
-# runs (Pages deploys are sequential; an in-flight deploy completing
-# is preferable to cancelling it mid-upload).
+# Shared `gh-pages` group across EVERY workflow that pushes to the
+# gh-pages branch (this deploy + report-preview.yml's `publish-previews`
+# + pr-preview-cleanup.yml). peaceiris pushes can race + lose commits if
+# two run concurrently, so they must serialize. cancel-in-progress: false
+# — a push completing is preferable to cancelling it mid-flight.
 concurrency:
-  group: pages
+  group: gh-pages
   cancel-in-progress: false
 
 jobs:
   build:
+    # Name is load-bearing: `mdbook (book build)` is a REQUIRED status check
+    # on main (branch protection). Keep it verbatim or new PRs stall on a
+    # context that never reports. Accurate for the PR check (PRs only build);
+    # the deploy step below runs on main pushes only.
     name: mdbook (book build)
     runs-on: ubuntu-latest
-    # `configure-pages` + `upload-pages-artifact` need pages:write and
-    # id-token:write when they run (gated to main-push by `if:` on each
-    # step). On PR runs these steps skip and the workflow-level
-    # `contents: read` is sufficient.
+    # `contents: write` for the peaceiris push to gh-pages (gated to
+    # main-push by the `if:` on the deploy step). On PR runs the deploy
+    # step skips and nothing is pushed; on fork PRs the token is read-only
+    # regardless, so the push would no-op.
     permissions:
-      contents: read
-      pages: write
-      id-token: write
+      contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          # peaceiris authenticates with `github_token` directly, not the
+          # checkout credentials — so persist-credentials stays false.
           persist-credentials: false
       - uses: taiki-e/install-action@d9be7d8cda89035c9c843f78bd44d4f72d8403d4 # v2.79.7
         with:
@@ -51,29 +58,21 @@ jobs:
           cp -r book/book/. _site/
           mkdir -p _site/examples
           cp examples/*.html _site/examples/
-      - name: Configure Pages (main only)
+      - name: Deploy book to gh-pages root (main only)
+        # Pages serves from the `gh-pages` BRANCH (Settings → Pages →
+        # Deploy from a branch → gh-pages /). This pushes the book + the
+        # rendered examples to the branch root.
+        #
+        # `keep_files: true` is load-bearing: it preserves the per-PR
+        # preview directories (`pr-<N>/`, pushed by report-preview.yml's
+        # `publish-previews` job) instead of wiping them on each book
+        # deploy. Tradeoff: a *deleted* book page lingers until a manual
+        # full-clean — negligible for docs. peaceiris also drops a
+        # `.nojekyll` by default (enable_jekyll: false), so mdbook's
+        # assets are served as-is without Jekyll processing.
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
-      - name: Upload Pages artifact (main only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
         with:
-          path: _site
-
-  deploy:
-    name: mdbook (deploy to Pages)
-    # Only deploy on main pushes; PRs validate the build via the
-    # `mdbook (book build)` job above without uploading or deploying.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./_site
+          keep_files: true

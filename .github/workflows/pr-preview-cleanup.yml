@@ -1,0 +1,57 @@
+# Removes a PR's per-PR Pages preview directory (gh-pages/pr-<N>/) when
+# the PR closes, so stale previews don't accumulate on the gh-pages branch.
+# peaceiris (used by report-preview.yml's publish-previews + mdbook.yml)
+# has no built-in cleanup, so this is the companion teardown.
+#
+# Kept as its own workflow (NOT a `closed`-typed job inside
+# report-preview.yml) so the full render matrix doesn't run on PR close.
+
+name: PR preview cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+# Shared with mdbook.yml + report-preview.yml's publish-previews: every
+# gh-pages push serializes through one group so concurrent peaceiris/git
+# pushes can't race + lose commits.
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Remove gh-pages/pr-<N>/ on PR close
+    runs-on: ubuntu-latest
+    # Fork PRs get a read-only GITHUB_TOKEN, so the push can't succeed —
+    # skip cleanly (their previews were never published in the first place).
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: write   # push the cleanup commit to gh-pages
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: gh-pages
+          # persist-credentials TRUE (deviates from the repo-wide default of
+          # false set in cute-dbt#27): this job pushes the cleanup commit
+          # back to gh-pages using the checkout token.
+          persist-credentials: true
+      - name: Remove this PR's preview directory
+        env:
+          # PR number via env (not direct ${{ }} interpolation) — the safe
+          # workflow pattern; it's an integer, never user-controlled text.
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # actions/checkout configures no committer identity — set one, or
+          # `git commit` fails.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -r --ignore-unmatch "pr-${PR_NUMBER}"
+          # `|| exit 0`: if the dir never existed (nothing staged), there is
+          # nothing to commit — end green rather than fail red.
+          git commit -m "chore: clean up Pages preview for PR #${PR_NUMBER}" || exit 0
+          git push
