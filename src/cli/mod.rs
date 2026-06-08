@@ -43,11 +43,12 @@ use crate::adapters::render::{
     render_report_with_externals,
 };
 use crate::domain::{
-    BlockDiff, DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NamedTableDiff,
-    NormalizedDiffIndex, PreflightError, ScopeInput, ScopeSelection, UnitTestDataDiff,
-    UnitTestYamlBlock, effective_fixture_format, external_fixture_table, extract_unit_test_block,
-    preflight_compiled, reconstruct_block_diffs, reconstruct_external_fixture_diff,
-    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks, select_in_scope,
+    BlockDiff, DEFAULT_REPORT_TITLE, FixtureTableDiff, InScopeSet, Manifest, ModelInScopeSet,
+    NamedTableDiff, NormalizedDiffIndex, PreflightError, ScopeInput, ScopeSelection, UnitTest,
+    UnitTestDataDiff, UnitTestYamlBlock, effective_fixture_format, external_fixture_table,
+    extract_unit_test_block, preflight_compiled, reconstruct_block_diffs,
+    reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
+    refine_changed_by_hunks, select_in_scope,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -483,40 +484,8 @@ fn merge_external_data_diffs(
         let Some(unit_test) = current.unit_test(id) else {
             continue;
         };
-        let mut given_diffs: Vec<NamedTableDiff> = Vec::new();
-        // The hunk lookup keys on the manifest `fixture` path. For a dbt-core
-        // BARE-name fixture (AC#4), that bare name != the file the diff
-        // touched (`tests/fixtures/<name>.csv`), so `hunks_for` misses → no
-        // external cell diff (graceful: the grid still renders, just without a
-        // diff toggle). fusion — the verified primary — emits the resolved
-        // path here, so it is unaffected. Re-verify dbt-core at cute-dbt#64.
-        for (&ordinal, loaded) in &ext.given {
-            let Some(given) = unit_test.given().get(ordinal) else {
-                continue;
-            };
-            let Some(path) = given.fixture() else {
-                continue;
-            };
-            if let Some(diff) = reconstruct_external_fixture_diff(
-                &loaded.text,
-                loaded.format.as_deref(),
-                index.hunks_for(path),
-            ) {
-                given_diffs.push(NamedTableDiff {
-                    ordinal,
-                    input: given.input().to_owned(),
-                    diff,
-                });
-            }
-        }
-        let expect_diff = ext.expect.as_ref().and_then(|loaded| {
-            let path = unit_test.expect().fixture()?;
-            reconstruct_external_fixture_diff(
-                &loaded.text,
-                loaded.format.as_deref(),
-                index.hunks_for(path),
-            )
-        });
+        let given_diffs = external_given_diffs(unit_test, ext, index);
+        let expect_diff = external_expect_diff(unit_test, ext, index);
         if given_diffs.is_empty() && expect_diff.is_none() {
             continue;
         }
@@ -527,6 +496,59 @@ fn merge_external_data_diffs(
             entry.expect = Some(diff);
         }
     }
+}
+
+/// The external fixture FILE cell diffs for one test's `given` inputs
+/// (cute-dbt#126 AC#3), each tagged with its source ordinal.
+///
+/// The hunk lookup keys on the manifest `fixture` path. For a dbt-core
+/// BARE-name fixture (AC#4) that bare name != the file the diff touched
+/// (`tests/fixtures/<name>.csv`), so `hunks_for` misses → no external cell
+/// diff (graceful: the grid still renders, just without a diff toggle).
+/// fusion — the verified primary — emits the resolved path here, so it is
+/// unaffected. Re-verify dbt-core at cute-dbt#64.
+fn external_given_diffs(
+    unit_test: &UnitTest,
+    ext: &ExternalFixtures,
+    index: &NormalizedDiffIndex,
+) -> Vec<NamedTableDiff> {
+    let mut diffs = Vec::new();
+    for (&ordinal, loaded) in &ext.given {
+        let Some(given) = unit_test.given().get(ordinal) else {
+            continue;
+        };
+        let Some(path) = given.fixture() else {
+            continue;
+        };
+        if let Some(diff) = reconstruct_external_fixture_diff(
+            &loaded.text,
+            loaded.format.as_deref(),
+            index.hunks_for(path),
+        ) {
+            diffs.push(NamedTableDiff {
+                ordinal,
+                input: given.input().to_owned(),
+                diff,
+            });
+        }
+    }
+    diffs
+}
+
+/// The external fixture FILE cell diff for one test's `expect`, when its
+/// fixture file was touched by the PR diff (cute-dbt#126 AC#3).
+fn external_expect_diff(
+    unit_test: &UnitTest,
+    ext: &ExternalFixtures,
+    index: &NormalizedDiffIndex,
+) -> Option<FixtureTableDiff> {
+    let loaded = ext.expect.as_ref()?;
+    let path = unit_test.expect().fixture()?;
+    reconstruct_external_fixture_diff(
+        &loaded.text,
+        loaded.format.as_deref(),
+        index.hunks_for(path),
+    )
 }
 
 /// Resolve the rendered report's title + subtitle from `--config`,
