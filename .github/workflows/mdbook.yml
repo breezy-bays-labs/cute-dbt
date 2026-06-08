@@ -22,7 +22,11 @@ concurrency:
 
 jobs:
   build:
-    name: mdbook (build + deploy)
+    # Name is load-bearing: `mdbook (book build)` is a REQUIRED status check
+    # on main (branch protection). Keep it verbatim or new PRs stall on a
+    # context that never reports. Accurate for the PR check (PRs only build);
+    # the deploy step below runs on main pushes only.
+    name: mdbook (book build)
     runs-on: ubuntu-latest
     # `contents: write` for the peaceiris push to gh-pages (gated to
     # main-push by the `if:` on the deploy step). On PR runs the deploy

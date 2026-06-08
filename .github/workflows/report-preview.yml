@@ -317,6 +317,14 @@ jobs:
       group: gh-pages
       cancel-in-progress: false
     steps:
+      - name: Checkout (peaceiris needs a git workspace)
+        # peaceiris/actions-gh-pages runs git against the repo; without a
+        # checkout the workspace has no .git and the push fails.
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false   # peaceiris authenticates via github_token
+          fetch-depth: 1
       - name: Download rendered report artifacts
         if: github.event.pull_request.head.repo.full_name == github.repository
         env:
