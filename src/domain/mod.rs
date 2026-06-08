@@ -50,7 +50,8 @@ pub mod unit_test_yaml;
 
 pub use cell_diff::{
     CellChange, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff, RowChange,
-    RowChangeKind, UnitTestDataDiff, diff_fixture_tables, reconstruct_table_diffs,
+    RowChangeKind, UnitTestDataDiff, diff_fixture_tables, reconstruct_external_fixture_diff,
+    reconstruct_table_diffs,
 };
 pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};

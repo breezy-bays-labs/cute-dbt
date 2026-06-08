@@ -43,11 +43,11 @@ use crate::adapters::render::{
     render_report_with_externals,
 };
 use crate::domain::{
-    BlockDiff, DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NormalizedDiffIndex,
-    PreflightError, ScopeInput, ScopeSelection, UnitTestDataDiff, UnitTestYamlBlock,
-    effective_fixture_format, external_fixture_table, extract_unit_test_block, preflight_compiled,
-    reconstruct_block_diffs, reconstruct_model_sql_diffs, reconstruct_table_diffs,
-    refine_changed_by_hunks, select_in_scope,
+    BlockDiff, DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NamedTableDiff,
+    NormalizedDiffIndex, PreflightError, ScopeInput, ScopeSelection, UnitTestDataDiff,
+    UnitTestYamlBlock, effective_fixture_format, external_fixture_table, extract_unit_test_block,
+    preflight_compiled, reconstruct_block_diffs, reconstruct_external_fixture_diff,
+    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks, select_in_scope,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -200,7 +200,20 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
     // refined `changed` + `authoring_yaml` block map as `reconstruct_block_diffs`.
     let data_diffs: HashMap<String, UnitTestDataDiff> = match &scope_input {
         ScopeInput::PrDiff { index } => {
-            reconstruct_table_diffs(&current, &changed, &authoring_yaml, index)
+            let mut diffs = reconstruct_table_diffs(&current, &changed, &authoring_yaml, index);
+            // External fixture FILE cell diffs (cute-dbt#126 AC#3): merged in
+            // beside the YAML-block inline diffs. Keyed off the fixture file's
+            // OWN hunks (`index.hunks_for(fixture_path)`), INDEPENDENT of the
+            // YAML-block `changed` gate — a PR editing only the csv never
+            // touches the test's YAML block.
+            merge_external_data_diffs(
+                &mut diffs,
+                &current,
+                &render_test_ids,
+                &external_fixtures,
+                index,
+            );
+            diffs
         }
         ScopeInput::Baseline { .. } => HashMap::new(),
     };
@@ -446,6 +459,68 @@ fn read_external_fixture(
 /// `tests/fixtures/<name>.csv` path (cute-dbt#126 AC#4 cross-engine guard).
 fn is_bare_fixture_name(path: &str) -> bool {
     !path.contains('/')
+}
+
+/// Merge external fixture FILE cell diffs (cute-dbt#126 AC#3) into the
+/// YAML-block-derived `data_diffs`. For each rendered test's loaded external
+/// `given`/`expect`, reconstruct the file's old→new cell diff from its OWN
+/// hunks (`index.hunks_for(fixture_path)`) and splice it in by source ordinal.
+///
+/// A test's givens are inline XOR external by ordinal, so the YAML-block path
+/// (which yields nothing for an external given) and this path never collide;
+/// the merged `given` vec is re-sorted by ordinal for deterministic output.
+fn merge_external_data_diffs(
+    data_diffs: &mut HashMap<String, UnitTestDataDiff>,
+    current: &Manifest,
+    in_scope: &InScopeSet,
+    external_fixtures: &HashMap<String, ExternalFixtures>,
+    index: &NormalizedDiffIndex,
+) {
+    for id in in_scope.iter() {
+        let Some(ext) = external_fixtures.get(id) else {
+            continue;
+        };
+        let Some(unit_test) = current.unit_test(id) else {
+            continue;
+        };
+        let mut given_diffs: Vec<NamedTableDiff> = Vec::new();
+        for (&ordinal, loaded) in &ext.given {
+            let Some(given) = unit_test.given().get(ordinal) else {
+                continue;
+            };
+            let Some(path) = given.fixture() else {
+                continue;
+            };
+            if let Some(diff) = reconstruct_external_fixture_diff(
+                &loaded.text,
+                loaded.format.as_deref(),
+                index.hunks_for(path),
+            ) {
+                given_diffs.push(NamedTableDiff {
+                    ordinal,
+                    input: given.input().to_owned(),
+                    diff,
+                });
+            }
+        }
+        let expect_diff = ext.expect.as_ref().and_then(|loaded| {
+            let path = unit_test.expect().fixture()?;
+            reconstruct_external_fixture_diff(
+                &loaded.text,
+                loaded.format.as_deref(),
+                index.hunks_for(path),
+            )
+        });
+        if given_diffs.is_empty() && expect_diff.is_none() {
+            continue;
+        }
+        let entry = data_diffs.entry(id.to_owned()).or_default();
+        entry.given.extend(given_diffs);
+        entry.given.sort_by_key(|n| n.ordinal);
+        if let Some(diff) = expect_diff {
+            entry.expect = Some(diff);
+        }
+    }
 }
 
 /// Resolve the rendered report's title + subtitle from `--config`,
@@ -1136,5 +1211,106 @@ mod tests {
         let out =
             gather_external_fixtures_with_reader(&reader, &manifest, &in_scope_of(&["ut.m.t"]));
         assert!(out.is_empty(), "rejected path is a soft skip");
+    }
+
+    // -----------------------------------------------------------------
+    // merge_external_data_diffs (cute-dbt#126 AC#3) — splice the external
+    // fixture FILE cell diff into data_diffs, keyed off the file's own hunks.
+    // -----------------------------------------------------------------
+
+    fn loaded_csv(text: &str) -> LoadedFixture {
+        LoadedFixture {
+            text: text.to_owned(),
+            format: Some("csv".to_owned()),
+            table: external_fixture_table(text, Some("csv")),
+        }
+    }
+
+    fn index_for(path: &str, removed: &str, added: &str, line: usize) -> NormalizedDiffIndex {
+        use crate::domain::{FileHunks, Hunk, PrDiff};
+        let diff = PrDiff {
+            files: vec![FileHunks {
+                path: path.to_owned(),
+                hunks: vec![Hunk {
+                    new_start: line,
+                    new_len: 1,
+                    removed_lines: vec![removed.to_owned()],
+                    added_lines: vec![added.to_owned()],
+                }],
+            }],
+        };
+        NormalizedDiffIndex::new(&diff, None)
+    }
+
+    #[test]
+    fn merge_external_data_diffs_splices_a_csv_cell_diff_by_ordinal() {
+        use crate::domain::RowChangeKind;
+        let manifest = manifest_with(
+            "ut.m.t",
+            ut_with(
+                vec![external_given("ref('a')", "csv", "tests/fixtures/a.csv")],
+                null_expect(),
+            ),
+        );
+        let mut externals = StdHashMap::new();
+        let mut ext = ExternalFixtures::default();
+        ext.given.insert(0, loaded_csv("id,amount\n1,10\n2,99\n"));
+        externals.insert("ut.m.t".to_owned(), ext);
+        let index = index_for("tests/fixtures/a.csv", "2,20", "2,99", 3);
+
+        let mut data_diffs: StdHashMap<String, UnitTestDataDiff> = StdHashMap::new();
+        merge_external_data_diffs(
+            &mut data_diffs,
+            &manifest,
+            &in_scope_of(&["ut.m.t"]),
+            &externals,
+            &index,
+        );
+
+        let dd = data_diffs.get("ut.m.t").expect("external diff spliced in");
+        assert_eq!(dd.given.len(), 1);
+        assert_eq!(dd.given[0].ordinal, 0, "keyed by source ordinal");
+        assert!(
+            dd.given[0]
+                .diff
+                .rows
+                .iter()
+                .any(|r| r.kind == RowChangeKind::Modified),
+            "the touched csv cell is a Modified row",
+        );
+    }
+
+    #[test]
+    fn merge_external_data_diffs_skips_an_untouched_fixture() {
+        // The fixture loaded, but the PR diff did not touch THAT file (the
+        // index has hunks for a different path) → no cell diff entry (the grid
+        // renders without a diff toggle). This is the independence property:
+        // AC#3 keys off the fixture file's own hunks.
+        let manifest = manifest_with(
+            "ut.m.t",
+            ut_with(
+                vec![external_given("ref('a')", "csv", "tests/fixtures/a.csv")],
+                null_expect(),
+            ),
+        );
+        let mut externals = StdHashMap::new();
+        let mut ext = ExternalFixtures::default();
+        ext.given.insert(0, loaded_csv("id,amount\n1,10\n"));
+        externals.insert("ut.m.t".to_owned(), ext);
+        // Hunks for a DIFFERENT file — the fixture itself is untouched.
+        let index = index_for("models/other.sql", "x", "y", 1);
+
+        let mut data_diffs: StdHashMap<String, UnitTestDataDiff> = StdHashMap::new();
+        merge_external_data_diffs(
+            &mut data_diffs,
+            &manifest,
+            &in_scope_of(&["ut.m.t"]),
+            &externals,
+            &index,
+        );
+        assert!(
+            data_diffs.is_empty(),
+            "an untouched external fixture produces no cell diff",
+        );
     }
 }
