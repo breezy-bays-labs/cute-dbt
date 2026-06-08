@@ -16,8 +16,8 @@
         <link rel="icon" href="favicon-de23e50b.svg">
         <link rel="shortcut icon" href="favicon-8114d1fc.png">
         <link rel="stylesheet" href="css/variables-8adf115d.css">
-        <link rel="stylesheet" href="css/general-2459343d.css">
-        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/general-0392ca55.css">
+        <link rel="stylesheet" href="css/chrome-fc474251.css">
         <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
 
         <!-- Fonts -->
@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6b5a0bf4.js";
+            window.path_to_searchindex_js = "searchindex-e314b935.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-2471cf7e.js"></script>
+        <script src="toc-d338c274.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -1126,21 +1126,34 @@ on:
   pull_request:
     types: [closed]
 permissions:
-  contents: write
+  contents: read
+# Share one group with your preview-publish (and book-deploy, if any)
+# workflows so concurrent gh-pages pushes can't race + lose commits.
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
 jobs:
   cleanup:
     runs-on: ubuntu-latest
+    # Fork PRs get a read-only token → the push can't succeed; skip cleanly.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: gh-pages
-          persist-credentials: true
-      - run: |
+          persist-credentials: true   # this job pushes the cleanup commit
+      - env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}   # via env, not inline ${{ }}
+        run: |
           set -euo pipefail
-          git rm -rf "pr-${{ github.event.pull_request.number }}" || exit 0
-          git config user.name  github-actions
-          git config user.email github-actions@github.com
-          git commit -m "cleanup: remove pr-${{ github.event.pull_request.number }} preview" || exit 0
+          # actions/checkout sets no committer identity — set one or commit fails.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -r --ignore-unmatch "pr-${PR_NUMBER}"
+          # `|| exit 0`: nothing to remove → nothing to commit → end green.
+          git commit -m "chore: clean up Pages preview for PR #${PR_NUMBER}" || exit 0
           git push
 </code></pre>
 <h2 id="9-troubleshooting"><a class="header" href="#9-troubleshooting">9. Troubleshooting</a></h2>
@@ -1365,11 +1378,11 @@ in the zero-egress property.</p>
 
         <script src="elasticlunr-ef4e11c1.min.js"></script>
         <script src="mark-09e88c2c.min.js"></script>
-        <script src="searcher-c2a407aa.js"></script>
+        <script src="searcher-09f2665d.js"></script>
 
         <script src="clipboard-1626706a.min.js"></script>
         <script src="highlight-abc7f01d.js"></script>
-        <script src="book-a0b12cfe.js"></script>
+        <script src="book-c22b7243.js"></script>
 
         <!-- Custom JS scripts -->
 
