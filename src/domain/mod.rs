@@ -69,8 +69,8 @@ pub use state::{
 };
 pub use unit_test::{UnitTest, UnitTestExpect, UnitTestGiven};
 pub use unit_test_table::{
-    Cell, CellValue, FixtureFormat, FixtureTable, TableRow, parse_block_dict_rows, parse_csv_rows,
-    parse_inline_flow_row, table_from_manifest_rows, table_from_yaml_fragment, type_cell_scalar,
-    type_cell_value, type_csv_token,
+    Cell, CellValue, FixtureFormat, FixtureTable, TableRow, external_fixture_table,
+    parse_block_dict_rows, parse_csv_rows, parse_inline_flow_row, table_from_manifest_rows,
+    table_from_yaml_fragment, type_cell_scalar, type_cell_value, type_csv_token,
 };
 pub use unit_test_yaml::{UnitTestYamlBlock, extract_unit_test_block};
