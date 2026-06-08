@@ -1465,13 +1465,17 @@ pub fn effective_fixture_format(manifest_format: Option<&str>, path: &str) -> Op
     if let Some(f) = manifest_format {
         return Some(f.to_owned());
     }
-    let lower = path.to_ascii_lowercase();
-    if lower.ends_with(".csv") {
-        Some("csv".to_owned())
-    } else if lower.ends_with(".sql") {
-        Some("sql".to_owned())
-    } else {
-        None
+    // `Path::extension` (pure std, no I/O) over the literal `ends_with(".csv")`
+    // — the latter trips `clippy::case_sensitive_file_extension_comparisons`.
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("csv") => Some("csv".to_owned()),
+        Some("sql") => Some("sql".to_owned()),
+        _ => None,
     }
 }
 

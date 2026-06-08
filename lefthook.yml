@@ -168,7 +168,7 @@ pre-push:
             print line
           }
         ' "$manifest" | sort -u > "$tmpdir/pd_listed"
-        git ls-files dbt-project/seeds/ \
+        git ls-files dbt-project/seeds/ dbt-project/tests/fixtures/ \
           | sort -u > "$tmpdir/pd_tracked"
         pd_unlisted=$(comm -23 "$tmpdir/pd_tracked" "$tmpdir/pd_listed" | sed '/^$/d')
         pd_missing=$(comm -13 "$tmpdir/pd_tracked" "$tmpdir/pd_listed" | sed '/^$/d')

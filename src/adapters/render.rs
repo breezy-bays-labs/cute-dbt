@@ -901,7 +901,7 @@ fn build_compiled_sql(
 /// One external fixture file loaded for a given/expect (cute-dbt#126).
 ///
 /// Produced by the cli `gather_external_fixtures` step from the
-/// `ProjectFileReader` port; consumed by [`build_test_payload`] to
+/// `ProjectFileReader` port; consumed by `build_test_payload` to
 /// **inline** the file content into the render payload so an external
 /// fixture renders identically to an inline one. `text` is the raw file
 /// body (becomes the payload `rows` String — drives the sql code-block
