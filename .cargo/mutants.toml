@@ -63,22 +63,34 @@ exclude_globs = []
 # cute-dbt#30 — filed with PR C.
 #
 # Classified-equivalent mutation: `replace - with + in dedent` at
-# unit_test_table.rs:839 (the per-line slice-start clamp
+# unit_test_table.rs:1532 (the per-line slice-start clamp
 # `min_indent.min(l.len() - l.trim_start().len())`). `min_indent` is the
 # MINIMUM leading-whitespace width over all non-blank lines, so every
 # non-blank line's own indent is >= min_indent → the `.min()` always returns
 # min_indent; the `+` mutation makes the clamped term strictly larger still,
 # so `.min()` still returns min_indent → byte-identical output for every
 # input. The clamp only guards a slice-overflow panic that min_indent's
-# definition already precludes. The sibling 830 mutant (the min_indent
+# definition already precludes. The sibling 1523 mutant (the min_indent
 # computation) IS discriminating and is killed by
 # `dedent_strips_only_the_common_prefix_and_preserves_deeper_indent`.
-# The exclude_re below pins the line (`:839:`) so it excludes ONLY the
-# equivalent clamp mutant — the sibling `830:26` `- with +` in the
+# The exclude_re below pins the line (`:1532:`) so it excludes ONLY the
+# equivalent clamp mutant — the sibling `1523:26` `- with +` in the
 # min_indent computation shares the same mutant *name* but is discriminating
 # and stays gated (and killed).
-# tracked: cute-dbt#129 — equivalent dedent clamp mutant (#98 mutation gate).
+#
+# The line pin (`:1532:`) is intrinsically fragile: the discriminating sibling
+# shares the identical mutant name (`replace - with + in dedent`), so the line
+# number — not the name — is the only discriminator, and it drifts whenever
+# unit_test_table.rs grows above the `dedent` fn. Re-pin via `cargo mutants
+# --list | rg dedent` whenever it moves (last re-pin: cute-dbt#131, 839→1532).
+# The mutation gate self-detects a stale pin: a drifted line stops excluding
+# the equivalent clamp, which then surfaces as a false survivor (a red gate) —
+# which is how the original `:839:` staleness was caught.
+# tracked: cute-dbt#129 — equivalent dedent clamp mutant (#98 mutation gate);
+# stays OPEN as the exclusion tracker (restoration: lift if `dedent` is ever
+# refactored so the per-line slice start can legitimately differ from
+# min_indent). cute-dbt#128 is a literal duplicate of #129 (closed as dup).
 exclude_re = [
   "delete ! in StateComparator::models_in_scope",
-  "unit_test_table\\.rs:839:.*replace - with \\+ in dedent",
+  "unit_test_table\\.rs:1532:.*replace - with \\+ in dedent",
 ]

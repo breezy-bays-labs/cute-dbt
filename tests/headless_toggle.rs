@@ -1639,6 +1639,7 @@ fn one_cell_modified_data_diff(input: &str) -> UnitTestDataDiff {
     };
     UnitTestDataDiff {
         given: vec![NamedTableDiff {
+            ordinal: 0,
             input: input.to_owned(),
             diff: FixtureTableDiff {
                 columns: vec![DiffColumn {
@@ -1669,6 +1670,7 @@ fn null_vs_string_null_data_diff(input: &str) -> UnitTestDataDiff {
     };
     UnitTestDataDiff {
         given: vec![NamedTableDiff {
+            ordinal: 0,
             input: input.to_owned(),
             diff: FixtureTableDiff {
                 columns: vec![
@@ -1703,6 +1705,136 @@ fn null_vs_string_null_data_diff(input: &str) -> UnitTestDataDiff {
         }],
         expect: None,
     }
+}
+
+/// cute-dbt#131 — two `given:` blocks against the SAME `ref('a')`, each with a
+/// DISTINCT one-cell change, tagged by SOURCE ORDINAL (0 and 1). The renderer
+/// must bind each given-section to its OWN diff by ordinal; keying by `input`
+/// text (the pre-#131 behavior) would collapse both onto the first match.
+fn two_same_ref_givens_distinct_diffs() -> UnitTestDataDiff {
+    use cute_dbt::domain::{
+        Cell, CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff,
+        RowChange, RowChangeKind,
+    };
+    fn one(ordinal: usize, old: &str, new: &str) -> NamedTableDiff {
+        NamedTableDiff {
+            ordinal,
+            // BOTH givens share this `input` on purpose — the ordinal, not the
+            // text, is the identity.
+            input: "ref('a')".to_owned(),
+            diff: FixtureTableDiff {
+                columns: vec![DiffColumn {
+                    name: "amt".into(),
+                    status: ColumnStatus::Present,
+                }],
+                rows: vec![RowChange {
+                    kind: RowChangeKind::Modified,
+                    cells: vec![CellChange {
+                        old: Cell::new(CellValue::Number(old.into())),
+                        new: Cell::new(CellValue::Number(new.into())),
+                        changed: true,
+                    }],
+                }],
+            },
+        }
+    }
+    UnitTestDataDiff {
+        given: vec![one(0, "100", "111"), one(1, "200", "222")],
+        expect: None,
+    }
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn same_ref_givens_each_render_their_own_cell_diff() {
+    // cute-dbt#131 — the end-to-end (template-binding) guard for per-given
+    // identity. The domain test `data_diff_ordinal_is_source_position_not_push_index`
+    // pins the ordinal *computation*; THIS test pins the JS binding that the bug
+    // actually lived in. A test with two `given:` blocks against the SAME
+    // `ref('a')`, both carrying a real (distinct) cell change, renders one
+    // given-section per given IN SOURCE ORDER. Each section must show ITS OWN
+    // cell diff: section 0 -> 111, section 1 -> 222. Pre-#131 `givenDataDiff`
+    // matched by `input` text + first hit, so BOTH sections rendered ordinal 0's
+    // diff ("111"); binding by source ordinal fixes section 1 to show "222".
+    let id = "unit_test.shop.dim_a.dup";
+    let ut = UnitTest::new(
+        "dup",
+        NodeId::new("dim_a"),
+        vec![
+            UnitTestGiven::new(
+                "ref('a')".to_owned(),
+                serde_json::json!([{"amt": 111}]),
+                Some("dict".to_owned()),
+                None,
+            ),
+            UnitTestGiven::new(
+                "ref('a')".to_owned(),
+                serde_json::json!([{"amt": 222}]),
+                Some("dict".to_owned()),
+                None,
+            ),
+        ],
+        UnitTestExpect::new(serde_json::Value::Null, None, None),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+    let url = render_pr_diff_with_data_diffs(
+        "headless_same_ref_givens.html",
+        vec![model_node_with_src("model.shop.dim_a")],
+        vec![(id, ut)],
+        &["model.shop.dim_a"],
+        &[id],
+        vec![(id, two_same_ref_givens_distinct_diffs())],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    show_all_inputs(&tab);
+
+    // Two given-sections (both for `ref('a')`), in source order.
+    assert_eq!(
+        eval_i64(&tab, "document.querySelectorAll('.given-section').length"),
+        2,
+        "two same-ref givens render two given-sections",
+    );
+
+    // Each section's cell diff shows ITS OWN new value — the per-section new
+    // value is the `.cell-new` inside the changed cell.
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelectorAll('.given-section')[0]\
+             .querySelector('.cell-diff-table .cell-changed .cell-new').textContent.trim()"
+        ),
+        "111",
+        "the first given-section (ordinal 0) shows its own cell diff",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelectorAll('.given-section')[1]\
+             .querySelector('.cell-diff-table .cell-changed .cell-new').textContent.trim()"
+        ),
+        "222",
+        "the second given-section (ordinal 1) shows ITS OWN cell diff, not ordinal 0's",
+    );
+    // Regression guard: section 1 must NOT carry ordinal 0's value (the pre-#131
+    // mis-bind, where both sections resolved to the first `ref('a')` diff).
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelectorAll('.given-section')[1]\
+             .querySelector('.cell-diff-table').textContent.indexOf('111') !== -1"
+        ),
+        "section 1's diff must not leak ordinal 0's value",
+    );
+
+    let _ = tab.close(true);
 }
 
 #[test]
@@ -2530,6 +2662,7 @@ fn format_only_plus_real_data_diff(input: &str) -> UnitTestDataDiff {
     };
     UnitTestDataDiff {
         given: vec![NamedTableDiff {
+            ordinal: 0,
             input: input.to_owned(),
             diff: FixtureTableDiff {
                 columns: vec![
