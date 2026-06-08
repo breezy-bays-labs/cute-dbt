@@ -484,6 +484,12 @@ fn merge_external_data_diffs(
             continue;
         };
         let mut given_diffs: Vec<NamedTableDiff> = Vec::new();
+        // The hunk lookup keys on the manifest `fixture` path. For a dbt-core
+        // BARE-name fixture (AC#4), that bare name != the file the diff
+        // touched (`tests/fixtures/<name>.csv`), so `hunks_for` misses → no
+        // external cell diff (graceful: the grid still renders, just without a
+        // diff toggle). fusion — the verified primary — emits the resolved
+        // path here, so it is unaffected. Re-verify dbt-core at cute-dbt#64.
         for (&ordinal, loaded) in &ext.given {
             let Some(given) = unit_test.given().get(ordinal) else {
                 continue;
