@@ -396,8 +396,14 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm -r --ignore-unmatch "pr-${PR_NUMBER}"
-          # `|| exit 0`: nothing to remove → nothing to commit → end green.
-          git commit -m "chore: clean up Pages preview for PR #${PR_NUMBER}" || exit 0
+          # Commit + push only when there's a staged removal. An explicit
+          # staged check (not `git commit … || exit 0`, which also masks a
+          # genuine commit failure and silently leaves a stale dir).
+          if git diff --cached --quiet; then
+            echo "No pr-${PR_NUMBER}/ preview to remove."
+            exit 0
+          fi
+          git commit -m "chore: clean up Pages preview for PR #${PR_NUMBER}"
           git push
 ```
 
