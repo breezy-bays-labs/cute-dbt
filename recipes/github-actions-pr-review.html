@@ -1,0 +1,691 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>GitHub Actions PR review - cute-dbt — Unit Test Explorer for dbt</title>
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Product documentation for cute-dbt — a zero-compute Rust CLI that turns a dbt manifest.json into one self-contained interactive HTML report visualizing dbt unit tests in CTE context.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="../favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="../favicon-8114d1fc.png">
+        <link rel="stylesheet" href="../css/variables-8adf115d.css">
+        <link rel="stylesheet" href="../css/general-2459343d.css">
+        <link rel="stylesheet" href="../css/chrome-ae938929.css">
+        <link rel="stylesheet" href="../css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="../fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="../highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="../tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="../ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "../";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "../searchindex-6b5a0bf4.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="../toc-2471cf7e.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="../toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">cute-dbt — Unit Test Explorer for dbt</h1>
+
+                    <div class="right-buttons">
+                        <a href="../print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/breezy-bays-labs/cute-dbt" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/breezy-bays-labs/cute-dbt/edit/main/book/src/src/recipes/github-actions-pr-review.md" title="Suggest an edit" aria-label="Suggest an edit" rel="edit">
+                            <span class=fa-svg id="git-edit-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M421.7 220.3l-11.3 11.3-22.6 22.6-205 205c-6.6 6.6-14.8 11.5-23.8 14.1L30.8 511c-8.4 2.5-17.5 .2-23.7-6.1S-1.5 489.7 1 481.2L38.7 353.1c2.6-9 7.5-17.2 14.1-23.8l205-205 22.6-22.6 11.3-11.3 33.9 33.9 62.1 62.1 33.9 33.9zM96 353.9l-9.3 9.3c-.9 .9-1.6 2.1-2 3.4l-25.3 86 86-25.3c1.3-.4 2.5-1.1 3.4-2l9.3-9.3H112c-8.8 0-16-7.2-16-16V353.9zM453.3 19.3l39.4 39.4c25 25 25 65.5 0 90.5l-14.5 14.5-22.6 22.6-11.3 11.3-33.9-33.9-62.1-62.1L314.3 67.7l11.3-11.3 22.6-22.6 14.5-14.5c25-25 65.5-25 90.5 0z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback"><a class="header" href="#ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback">CI recipe: GitHub Actions PR review (Pages preview + artifact fallback)</a></h1>
+<p>Wire cute-dbt into your dbt repo’s pull-request workflow so every PR gets
+a <strong>diff-scoped</strong> unit-test report — scoped to the models and tests the
+PR actually changed, with no baseline-manifest publishing job to
+maintain. Reviewers open the report in one or two clicks.</p>
+<p>This recipe uses the <code>--pr-diff</code> flag (cute-dbt v0.1.x): the workflow runs
+<code>git diff --unified=0 &lt;base&gt;...&lt;head&gt;</code> and hands the resulting patch to
+cute-dbt, which scopes the report to the models/tests those changed paths
+touch and uses the diff’s hunks to flag the tests the PR actually edited.
+It is the CI counterpart to the local <a href="../how-it-works.html"><code>--baseline-manifest</code></a> flow.</p>
+<p>Two delivery options:</p>
+<ul>
+<li><strong>Pages preview</strong> (public repos): publishes the report to a per-PR
+GitHub Pages subdirectory and posts a clickable link. ≤2-click reviewer
+UX.</li>
+<li><strong>Artifact link</strong> (private repos / Pages-less): uploads the report as a
+workflow artifact and links to it.</li>
+</ul>
+<blockquote>
+<p>⚠️ <strong>Privacy — read this before choosing.</strong> GitHub Pages on a
+<strong>private</strong> repository is <strong>still publicly reachable by URL</strong> — Pages
+does not authenticate visitors on the Free or Pro tier. If your dbt
+models, fixtures, or column names are sensitive, <strong>use the artifact
+link</strong> (artifacts are gated behind repo-read auth). The Pages preview is
+only safe for data you would publish openly. cute-dbt does not detect
+this mismatch for you in v0.1 — the choice is yours to make.</p>
+</blockquote>
+<h2 id="1-what-this-gives-you"><a class="header" href="#1-what-this-gives-you">1. What this gives you</a></h2>
+<p>On each pull request:</p>
+<ol>
+<li>CI compiles the dbt project at the PR head and renders a cute-dbt
+report scoped to the PR’s changed files.</li>
+<li>The report is published (Pages) or uploaded (artifact).</li>
+<li>A sticky PR comment links to it — one comment per PR, updated in place
+on each push.</li>
+</ol>
+<p>The report is a single self-contained HTML file with
+<a href="../zero-egress.html">zero external resource requests</a>, so it opens offline
+in any browser.</p>
+<h2 id="2-prerequisites"><a class="header" href="#2-prerequisites">2. Prerequisites</a></h2>
+<ul>
+<li><strong>A dbt project</strong> in your repo (this recipe assumes it lives in a
+<code>dbt_project/</code> subdirectory; adjust paths if yours is at the repo root).</li>
+<li><strong><code>dbt compile</code> must work in CI.</strong> cute-dbt’s fail-closed contract
+rejects an in-scope model whose <code>compiled_code</code> is null, so <code>dbt parse</code>
+alone is not enough — you need <code>dbt compile</code>, which needs a working
+adapter connection. <a href="https://duckdb.org">DuckDB</a> (<code>dbt-duckdb</code>) compiles
+with <strong>no external warehouse and no secrets</strong> and is the easiest CI
+choice; cloud adapters (Snowflake, BigQuery, …) need credentials wired
+as repository secrets and a CI <code>profiles.yml</code> target.</li>
+<li><strong>A dbt profile CI can find.</strong> dbt reads connection config from a
+<code>profiles.yml</code> whose top-level key matches <code>profile:</code> in your
+<code>dbt_project.yml</code>. Setup is adopter-specific: either commit a
+<code>profiles.yml</code> and pass <code>--profiles-dir</code>, or write a throwaway CI
+profile to <code>~/.dbt/profiles.yml</code> (dbt’s default location) as the
+workflow below does. The DuckDB <code>:memory:</code> profile shown needs no
+secrets. Likewise, install dbt however your project does — <code>pip</code>,
+<code>uv</code>, or <code>poetry</code> all work; the recipe shows <code>pip</code>.</li>
+<li><strong><code>fetch-depth: 0</code></strong> on <code>actions/checkout</code> — the SHA-based diff needs
+both the base and head commits present locally.</li>
+<li><strong>For the Pages preview only:</strong> GitHub Pages enabled for the repo, publishing
+from the <code>gh-pages</code> branch (Settings → Pages → Source: <em>Deploy from a
+branch</em> → <code>gh-pages</code>). The first run creates the branch; enable Pages
+to point at it.</li>
+</ul>
+<h2 id="3-the-shared-cute-dbt-invocation"><a class="header" href="#3-the-shared-cute-dbt-invocation">3. The shared cute-dbt invocation</a></h2>
+<p>Both options share the same diff + render core. The diff uses the PR
+event’s <strong>base and head SHAs</strong> (deterministic, fork-safe — it does not
+depend on <code>origin</code> remote semantics or branch-name resolution), with
+<code>--unified=0</code> so cute-dbt sees the exact changed hunks:</p>
+<pre><code class="language-bash">mkdir -p _site
+git diff --unified=0 \
+  "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
+  &gt; diff.patch
+
+cute-dbt \
+  --manifest dbt_project/target/manifest.json \
+  --pr-diff @diff.patch \
+  --project-root dbt_project \
+  --out _site/report.html
+</code></pre>
+<p><code>--pr-diff @diff.patch</code> reads the unified diff (the leading <code>@</code> means
+“read from this file”). cute-dbt parses the diff’s <code>+++ b/&lt;path&gt;</code> headers
+to pick the in-scope set and its <code>@@ … @@</code> hunks to flag which tests the
+PR actually edited (block-precise updated detection + the inline YAML diff
+drawer key off the hunk spans). When a hunk changes a model’s <code>.sql</code>, the
+Model SQL section also shows an inline <strong>SQL diff</strong> of the model’s raw
+Jinja with a Raw ↔ Diff toggle — same diff engine, keyed off the same
+hunks. Both inline diffs ignore whitespace-only edits as standard (a pure
+re-indent shows the plain view, not a noisy diff). <code>--project-root dbt_project</code> rewrites the repo-relative diff paths so they match the
+manifest’s project-relative <code>original_file_path</code>s (drop it if your dbt
+project is at the repo root).
+cute-dbt parses the diff you hand it — it never shells out to <code>git</code> or
+reads <code>GITHUB_EVENT_PATH</code>, so the workflow stays in control of <em>how</em> the
+diff is produced.</p>
+<p><strong>Same-revision contract.</strong> Take the diff <code>base...head</code> and compile the
+manifest at <code>head</code> (the recipe below does both). Then the diff hunks line
+up with the working-tree YAML, which is what makes block precision and the
+inline diff trustworthy. If you feed cute-dbt a diff that no longer
+matches the compiled head (revision drift), it degrades gracefully — it
+keeps the file-granular “updated” mark and drops the inline diff rather
+than mislabel a test.</p>
+<p>cute-dbt writes only <code>report.html</code>; isolating it in a dedicated <code>_site/</code>
+dir (hence <code>mkdir -p _site</code> + <code>--out _site/report.html</code>) keeps the Pages
+publish in § 4 from pushing your <strong>whole checkout</strong> to the <code>gh-pages</code>
+branch — <code>publish_dir</code> points at <code>_site/</code>, not <code>.</code>.</p>
+<h2 id="4-pages-preview-public-repos"><a class="header" href="#4-pages-preview-public-repos">4. Pages preview (public repos)</a></h2>
+<p>Copy this into <code>.github/workflows/cute-dbt-pr-review.yml</code>. Edit
+<code>dbt_project</code>, the dbt adapter, and <code>CUTE_DBT_REV</code> (see § 6 install note).</p>
+<pre><code class="language-yaml">name: cute-dbt PR review
+on:
+  pull_request:
+    paths: ['dbt_project/**', '**/*.sql', '**/*.yml']
+
+# Least-privilege default; the job widens what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: cute-dbt-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write        # peaceiris/actions-gh-pages pushes to gh-pages
+      pull-requests: write    # sticky comment
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0           # base + head SHAs must be present
+          persist-credentials: false
+
+      # --- Compile the dbt project at the PR head. `dbt compile` (not
+      #     `dbt parse`) so compiled_code is populated. Adapter, toolchain,
+      #     and profile are adopter-specific — see § 2. ---
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - run: pip install dbt-core dbt-duckdb   # edit: your adapter (uv/poetry work too)
+      - name: Write a CI dbt profile
+        run: |
+          mkdir -p ~/.dbt
+          cat &gt; ~/.dbt/profiles.yml &lt;&lt;'PROFILE'
+          my_dbt_profile:        # edit: must match `profile:` in dbt_project.yml
+            target: ci
+            outputs:
+              ci:
+                type: duckdb     # edit: your adapter; cloud adapters read secrets from env
+                path: ':memory:'
+                threads: 4
+          PROFILE
+      - run: dbt deps --project-dir dbt_project
+      - run: dbt compile --project-dir dbt_project
+
+      # --- Install cute-dbt (see § 6 for the binstall form once published) ---
+      - uses: cargo-bins/cargo-binstall@aaa84a43aec4955a42c5ffc65d258961e39f276e # v1.19.1
+      - name: Install cute-dbt
+        env:
+          CUTE_DBT_REV: PUT_A_CUTE_DBT_MAIN_SHA_HERE   # edit: pin a commit
+        run: cargo install --locked --git https://github.com/breezy-bays-labs/cute-dbt --rev "$CUTE_DBT_REV"
+
+      # --- Diff (SHA-based: deterministic + fork-safe) + render.
+      #     `--unified=0` so cute-dbt sees the exact changed hunks
+      #     (block-precise updated-test detection + the inline YAML diff
+      #     drawer key off hunk spans, not just changed filenames). The
+      #     diff is taken base...head and the manifest was compiled at head
+      #     above, so the hunks line up with the working tree
+      #     (same-revision contract). ---
+      - name: Render diff-scoped report
+        run: |
+          set -euo pipefail
+          mkdir -p _site
+          git diff --unified=0 \
+            "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
+            &gt; diff.patch
+          cute-dbt \
+            --manifest dbt_project/target/manifest.json \
+            --pr-diff @diff.patch \
+            --project-root dbt_project \
+            --out _site/report.html
+
+      # --- Publish ONLY the report dir to a per-PR Pages subdirectory.
+      #     publish_dir: ./_site (NOT .) so the whole checkout never lands
+      #     on the gh-pages branch. ---
+      - uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./_site
+          keep_files: true
+          destination_dir: pr-${{ github.event.pull_request.number }}
+
+      # --- Sticky comment with the report link ---
+      - uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
+        with:
+          header: cute-dbt-pr-review
+          message: |
+            ## 📊 cute-dbt review ready
+
+            [**Open the diff-scoped report ↗**](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/pr-${{ github.event.pull_request.number }}/report.html)
+
+            Scoped to the models + unit tests this PR changed.
+</code></pre>
+<h2 id="5-artifact-link-private-repos--pages-less"><a class="header" href="#5-artifact-link-private-repos--pages-less">5. Artifact link (private repos / Pages-less)</a></h2>
+<p><strong>Identical to the Pages preview</strong> except: the job needs no
+<code>contents: write</code>, and the
+<code>peaceiris/actions-gh-pages</code> step is replaced by an artifact upload + a
+download link in the comment.</p>
+<pre><code class="language-yaml">    permissions:
+      contents: read
+      actions: read          # for the artifacts API call below
+      pull-requests: write
+
+    # ... same checkout / dbt compile / install / render steps as above ...
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cute-dbt-report
+          path: _site/report.html    # render step writes here (same as above)
+          retention-days: 30
+
+      - uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
+        with:
+          header: cute-dbt-pr-review
+          message: |
+            ## 📊 cute-dbt review ready
+
+            [**Download the diff-scoped report ↗**](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+            Download the `cute-dbt-report` artifact, unzip, open `report.html`
+            in your browser. Scoped to the models + unit tests this PR changed.
+</code></pre>
+<p>Artifact download requires the reviewer to be logged in with repo read
+access — which is exactly the auth gate that makes the artifact link the
+safe choice for private data.</p>
+<h2 id="6-trigger-patterns-opt-in-vs-always-on"><a class="header" href="#6-trigger-patterns-opt-in-vs-always-on">6. Trigger patterns (opt-in vs. always-on)</a></h2>
+<p>Teams that don’t want cute-dbt on <em>every</em> PR can gate the workflow. Each
+pattern <strong>replaces only the <code>on:</code> block (and adds a job-level <code>if:</code> where
+noted)</strong> — the job body from § 4 / § 5 is unchanged.</p>
+<h3 id="t1--always-on-the-default-above"><a class="header" href="#t1--always-on-the-default-above">T1 — Always-on (the default above)</a></h3>
+<pre><code class="language-yaml">on:
+  pull_request:
+    paths: ['dbt_project/**', '**/*.sql', '**/*.yml']
+</code></pre>
+<p>The <code>paths:</code> filter already skips PRs with zero dbt changes (cute-dbt
+would render a zero-scope report anyway; this just saves CI minutes).</p>
+<h3 id="t2--opt-in-by-label"><a class="header" href="#t2--opt-in-by-label">T2 — Opt-in by label</a></h3>
+<p>A reviewer adds a <code>dbt-review</code> label to the PR:</p>
+<pre><code class="language-yaml">on:
+  pull_request:
+    types: [labeled, synchronize]
+jobs:
+  review:
+    if: &gt;
+      (github.event.action == 'labeled' &amp;&amp; github.event.label.name == 'dbt-review')
+      || (github.event.action == 'synchronize' &amp;&amp; contains(github.event.pull_request.labels.*.name, 'dbt-review'))
+    # ... rest of the job ...
+</code></pre>
+<p><code>labeled</code> fires the first run; <code>synchronize</code> keeps the report fresh on
+later pushes while the label is present.</p>
+<h3 id="t3--opt-in-by-pr-comment"><a class="header" href="#t3--opt-in-by-pr-comment">T3 — Opt-in by PR comment</a></h3>
+<p>Anyone with write access comments <code>/cute-dbt</code>:</p>
+<pre><code class="language-yaml">on:
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    if: &gt;
+      github.event.issue.pull_request
+      &amp;&amp; contains(github.event.comment.body, '/cute-dbt')
+      &amp;&amp; github.event.comment.author_association != 'NONE'
+    runs-on: ubuntu-latest
+    steps:
+      # issue_comment runs in BASE-repo context, not on the PR head — you
+      # must check out the PR ref explicitly before the dbt/render steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: gh pr checkout ${{ github.event.issue.number }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # ... then the dbt compile / install / render / publish steps ...
+</code></pre>
+<p>The <code>author_association != 'NONE'</code> check stops drive-by triggers from
+non-contributors. Note the SHA-based diff in § 3 reads
+<code>github.event.pull_request.*</code>, which is absent on <code>issue_comment</code> — under
+T3, derive the base/head SHAs from <code>gh pr view ${{ github.event.issue.number }} --json baseRefOid,headRefOid</code> instead.</p>
+<h3 id="t4--manual-button"><a class="header" href="#t4--manual-button">T4 — Manual button</a></h3>
+<pre><code class="language-yaml">on:
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: PR number to review
+        required: true
+</code></pre>
+<p>Read <code>inputs.pr-number</code>, <code>gh pr checkout</code> it, derive its SHAs as in T3.
+Best paired with T1/T2 for the always-on path and used for one-off
+re-runs.</p>
+<p>Patterns compose — T1 + T4 on one workflow (always-on plus a manual
+re-run button) is common.</p>
+<h2 id="7-customization"><a class="header" href="#7-customization">7. Customization</a></h2>
+<ul>
+<li><strong>dbt project at the repo root:</strong> drop <code>--project-root</code> and set
+<code>--manifest target/manifest.json</code>.</li>
+<li><strong>A different dbt version / engine:</strong> edit the <code>pip install</code> line. Both
+dbt-core 1.8+ and dbt-fusion 2.0-preview emit manifest schema v12, which
+cute-dbt reads identically — see <a href="../how-it-works.html">How it works</a>. To
+compile with <strong>dbt-fusion</strong> instead of dbt-core, see the standalone-binary
+variant in § 11 below (no pip).</li>
+<li><strong>Custom comment body:</strong> the <code>message:</code> is plain markdown; add a model
+count, a CHANGELOG link, whatever your reviewers want.</li>
+<li><strong>Branch protection:</strong> make the <code>review</code> job a required status check so
+a PR can’t merge until the report renders.</li>
+</ul>
+<h2 id="8-cleanup-on-pr-close-pages-preview"><a class="header" href="#8-cleanup-on-pr-close-pages-preview">8. Cleanup on PR close (Pages preview)</a></h2>
+<p>The Pages <code>pr-&lt;N&gt;/</code> subdirectories accumulate. A small companion workflow
+removes each when its PR closes:</p>
+<pre><code class="language-yaml">name: cute-dbt PR review cleanup
+on:
+  pull_request:
+    types: [closed]
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: gh-pages
+          persist-credentials: true
+      - run: |
+          set -euo pipefail
+          git rm -rf "pr-${{ github.event.pull_request.number }}" || exit 0
+          git config user.name  github-actions
+          git config user.email github-actions@github.com
+          git commit -m "cleanup: remove pr-${{ github.event.pull_request.number }} preview" || exit 0
+          git push
+</code></pre>
+<h2 id="9-troubleshooting"><a class="header" href="#9-troubleshooting">9. Troubleshooting</a></h2>
+<ul>
+<li><strong><code>project root does not exist</code></strong> — <code>--project-root</code> is validated against
+the working directory. Make sure the path matches where <code>dbt_project/</code>
+is checked out.</li>
+<li><strong>An in-scope model fails with <code>NotCompiled</code> / “run dbt compile”</strong> — the
+manifest was produced by <code>dbt parse</code>, not <code>dbt compile</code>. Use <code>dbt compile</code> (§ 2) so <code>compiled_code</code> is populated.</li>
+<li><strong><code>dbt compile</code> fails: “Could not find profile” / credentials error</strong> —
+the <code>profiles.yml</code> top-level key must match <code>profile:</code> in your
+<code>dbt_project.yml</code>, and cloud adapters need their credential env vars set
+(§ 2). The CI-profile step writes to <code>~/.dbt/profiles.yml</code>, dbt’s default
+location, so no <code>--profiles-dir</code> is needed.</li>
+<li><strong>Empty report (“0 unit tests in scope”)</strong> — the PR changed no files
+that map to a model <code>.sql</code> or a unit-test <code>.yml</code>. Confirm <code>--project-root</code>
+matches your layout (repo-relative diff paths vs. project-relative
+manifest paths) and that <code>fetch-depth: 0</code> is set so the diff resolves.</li>
+<li><strong>Pages link 404s</strong> — Pages isn’t enabled, or it’s pointed at the wrong
+branch. Enable it on <code>gh-pages</code> (§ 2), or switch to the artifact link.</li>
+<li><strong>Fork PRs:</strong> with <code>pull_request</code> (not <code>pull_request_target</code>), forks get
+a read-only <code>GITHUB_TOKEN</code>, so the Pages-publish and sticky-comment steps
+silently no-op on fork PRs (same-repo branches are unaffected). If you
+need fork coverage, either run <em>only the comment step</em> under
+<code>pull_request_target</code> (never checking out PR code), or split the workflow
+so a <a href="https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#workflow_run"><code>workflow_run</code></a>-triggered
+job posts the comment in base-repo context.</li>
+<li><strong>Comment trigger (T3) not firing</strong> — check the <code>author_association</code>
+gate and that the comment contains <code>/cute-dbt</code> verbatim.</li>
+</ul>
+<h3 id="install-note--6-reference"><a class="header" href="#install-note--6-reference">Install note (§ 6 reference)</a></h3>
+<p>While cute-dbt is <strong>unpublished</strong>, install from a pinned commit:
+<code>cargo install --locked --git https://github.com/breezy-bays-labs/cute-dbt --rev &lt;SHA&gt;</code>
+(set <code>CUTE_DBT_REV</code> to a <code>main</code> SHA you trust — pinning is mandatory per
+the <a href="../release-discipline.html">workflow-hardening convention</a>). Once
+cute-dbt is on crates.io, replace those two steps with the faster
+<code>cargo binstall cute-dbt --version 0.1 --no-confirm</code> (the <code>0.1</code> requirement
+resolves to the latest compatible <code>0.1.x</code> patch).</p>
+<h2 id="10-v01-fidelity-limits"><a class="header" href="#10-v01-fidelity-limits">10. v0.1 fidelity limits</a></h2>
+<p>PR-diff scoping picks the in-scope set from the diff’s <strong>changed file
+paths</strong>; scope selection stays path-granular even though the diff’s hunks
+now drive block-precise updated-test detection. A few cases are out of
+scope by design (use <code>--baseline-manifest</code> if you need them):</p>
+<ul>
+<li>A <code>packages.yml</code> / <code>dbt deps</code> change that alters compiled output without
+touching a <code>.sql</code>/<code>.yml</code> model file — the diff carries no path that maps
+to an affected node.</li>
+<li>A <strong>renamed</strong> model (the diff shows a deleted path + an added path; the
+deleted path maps to no current-manifest node).</li>
+</ul>
+<p>A YAML <strong>config-block</strong> edit no longer mislabels a sibling test as
+updated: block precision flags only the tests whose block a diff hunk
+actually touched, so a change confined to a <code>config:</code> block won’t mark the
+<code>unit_tests:</code> in the same file as updated.</p>
+<p>See <a href="../features/index.html">Features</a> for the full fidelity matrix.</p>
+<h2 id="11-variant-compile-with-dbt-fusion-standalone-binary-no-pip"><a class="header" href="#11-variant-compile-with-dbt-fusion-standalone-binary-no-pip">11. Variant: compile with dbt-fusion (standalone binary, no pip)</a></h2>
+<p><a href="https://docs.getdbt.com/docs/fusion/about-fusion">dbt-fusion</a> is a
+standalone Rust binary — <strong>no Python, no pip, no virtualenv</strong>. If your
+project compiles under fusion, swap the <code>setup-python</code> + <code>pip install</code> +
+<code>~/.dbt/profiles.yml</code> steps in § 4 / § 5 for the installer below. Everything
+else (the diff + render core in § 3, the sticky comment, the trigger
+patterns) is unchanged — fusion and dbt-core both emit manifest schema v12,
+which cute-dbt reads identically.</p>
+<pre><code class="language-yaml">      # Install dbt-fusion via the official standalone-binary installer,
+      # PINNED to a specific version (never floating `latest`). The
+      # installer drops `dbt` into ~/.local/bin.
+      - name: Install dbt-fusion
+        env:
+          FUSION_VERSION: 2.0.0-preview.177   # edit: pin your fusion version
+        run: |
+          set -euo pipefail
+          # `--version VER` pins the install; `--update` only updates an
+          # existing install (wrong for a fresh CI runner).
+          curl -fsSL https://public.cdn.getdbt.com/fs/install/install.sh \
+            | sh -s -- --version "$FUSION_VERSION"
+          echo "$HOME/.local/bin" &gt;&gt; "$GITHUB_PATH"
+          # Fail loud if the pin didn't land the intended release (PATH update
+          # above applies only to later steps, so call dbt by full path here).
+          "$HOME/.local/bin/dbt" --version | head -1 | grep -q "$FUSION_VERSION" \
+            || { echo "::error::expected dbt-fusion $FUSION_VERSION"; exit 1; }
+
+      # Compile. With an in-project `profiles.yml` (duckdb `:memory:`),
+      # compile runs fully offline — no warehouse, no secrets, no network.
+      # If your project has no dbt packages there is no `dbt deps` step.
+      - name: Compile dbt project (dbt-fusion)
+        working-directory: dbt_project   # edit: your project dir
+        run: |
+          set -euo pipefail
+          dbt --version
+          dbt compile --profiles-dir .   # profiles.yml committed in-project
+</code></pre>
+<p>Notes:</p>
+<ul>
+<li><strong>Pin the version.</strong> A floating <code>latest</code> makes CI non-reproducible and
+can break on a fusion release. Pin a <code>2.0.0-preview.NNN</code> tag you have
+tested (the installer takes <code>--version</code> via <code>sh -s -- --version &lt;tag&gt;</code>,
+no <code>v</code> prefix).</li>
+<li><strong>In-project <code>profiles.yml</code> + <code>--profiles-dir .</code></strong> is the offline-friendly
+setup — <code>compile</code> only parses and renders SQL, so the duckdb <code>:memory:</code>
+target is never materialized and needs no secrets. (Alternatively keep
+the <code>~/.dbt/profiles.yml</code> approach from § 4.)</li>
+<li><strong>Deprecated test-arg format.</strong> Fusion rejects dbt’s deprecated
+generic-test argument format that dbt-core only warns about. If
+<code>dbt compile</code> errors on that, run the official autofix ephemerally (no
+venv, no pip): <code>uvx dbt-autofix@latest deprecations --path .</code>.</li>
+<li>This is exactly the path the cute-dbt repo’s own
+<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/.github/workflows/report-preview.yml"><code>report-preview.yml</code></a>
+uses to self-dogfood <code>--pr-diff</code> against an embedded fusion example
+project — CI recompiles an <strong>ephemeral</strong> manifest at the PR head and
+renders the PR’s own diff into the sticky comment.</li>
+</ul>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+                            <a rel="prev" href="../release-discipline.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                            </a>
+
+                            <a rel="next prefetch" href="../zero-egress.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                                <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                            </a>
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+                    <a rel="prev" href="../release-discipline.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
+                    </a>
+
+                    <a rel="next prefetch" href="../zero-egress.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                        <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
+                    </a>
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="../elasticlunr-ef4e11c1.min.js"></script>
+        <script src="../mark-09e88c2c.min.js"></script>
+        <script src="../searcher-c2a407aa.js"></script>
+
+        <script src="../clipboard-1626706a.min.js"></script>
+        <script src="../highlight-abc7f01d.js"></script>
+        <script src="../book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+
+
+    </div>
+    </body>
+</html>

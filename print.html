@@ -1,0 +1,1385 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>cute-dbt — Unit Test Explorer for dbt</title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="Product documentation for cute-dbt — a zero-compute Rust CLI that turns a dbt manifest.json into one self-contained interactive HTML report visualizing dbt unit tests in CTE context.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-2459343d.css">
+        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-6b5a0bf4.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-2471cf7e.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">cute-dbt — Unit Test Explorer for dbt</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/breezy-bays-labs/cute-dbt" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="introduction"><a class="header" href="#introduction">Introduction</a></h1>
+<blockquote>
+<p><strong>Status: v0.x — unstable.</strong> cute-dbt is available on crates.io from
+<code>v0.1.0</code> (<code>cargo install cute-dbt</code>).
+v0.x follows Cargo SemVer convention: every minor bump (<code>0.1 → 0.2</code>)
+MAY carry breaking changes. v1.0 ships the first stability commitment.</p>
+</blockquote>
+<h2 id="the-problem"><a class="header" href="#the-problem">The problem</a></h2>
+<p>Reading dbt unit tests during code review is harder than it should be.</p>
+<ul>
+<li>The test lives in a YAML file. The model lives in <code>.sql</code>. The CTE
+structure under test is invisible in the diff.</li>
+<li>A reviewer asking <em>“what does this <code>given</code> row exercise?”</em> has to
+cross-reference the model body, find the matching CTE, and reason
+about whether the test actually touches the changed code path.</li>
+<li>Diff-scope is ambiguous. A PR that touches three models pulls in
+unit tests for all of them — but which ones actually changed body
+semantics? Which tests are still in scope for <em>this</em> diff?</li>
+</ul>
+<p>The information is in the manifest. It’s just not surfaced anywhere a
+reviewer naturally looks.</p>
+<h2 id="what-cute-dbt-does-about-it"><a class="header" href="#what-cute-dbt-does-about-it">What cute-dbt does about it</a></h2>
+<p>cute-dbt is a <strong>zero-compute Rust CLI</strong> that reads a dbt
+<code>manifest.json</code> and emits <strong>one self-contained interactive HTML
+report</strong>. Open the file directly from your filesystem — no server,
+no warehouse connection, no telemetry, no outbound requests.</p>
+<p>For each in-scope unit test, the report renders:</p>
+<ul>
+<li>A header (test name, target model, description).</li>
+<li><strong>Given</strong> and <strong>Expected</strong> data panels as searchable, sortable
+tables.</li>
+<li>A <strong>CTE dependency DAG</strong> of the target model — a left-to-right
+Mermaid diagram whose edges are colored by edge type
+(<code>from</code> / <code>inner</code> / <code>left</code> / <code>right</code> / <code>full</code> / <code>cross</code> /
+<code>union_all</code> / <code>union_distinct</code>).</li>
+<li>A diff-scope banner naming the scope source and the in-scope test
+count.</li>
+</ul>
+<p>In-scope means <strong>changed by this diff</strong>. cute-dbt learns what changed
+in one of two ways:</p>
+<ul>
+<li><strong>Local dev</strong> — supply a <code>--baseline-manifest</code>; cute-dbt diffs the
+current manifest against it and selects models whose <strong>body</strong> changed
+(<code>state:modified.body</code> — the <code>checksum</code> differs).</li>
+<li><strong>CI / PR review</strong> — supply <code>--pr-diff</code> with the PR’s unified diff
+(<code>git diff --unified=0</code>); cute-dbt maps the changed paths to manifest
+nodes, with no baseline-manifest publishing job to maintain.</li>
+</ul>
+<p>Either way, the report surfaces every unit test that targets an
+in-scope model — plus tests whose own definition changed, even if the
+target model didn’t.</p>
+<p>This page is the introduction. The next chapter sketches <a href="#what-cute-dbt-is">what
+cute-dbt is at a glance</a>; <a href="#getting-started">Getting
+started</a> walks the install + first-report path;
+and teams wiring cute-dbt into pull-request CI can jump straight to the
+<a href="#ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback">GitHub Actions PR-review recipe</a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="what-cute-dbt-is"><a class="header" href="#what-cute-dbt-is">What cute-dbt is</a></h1>
+<p>A single static, local, single-binary tool. The form factor:</p>
+<pre><code class="language-text">manifest.json  +  one scope source
+                  ├─ --baseline-manifest    (local dev)
+                  └─ --pr-diff               (CI / PR review)
+                       │
+                       ▼
+                   cute-dbt
+                       │
+                       ▼
+              report.html  ← open via file://
+</code></pre>
+<h2 id="three-properties-that-matter"><a class="header" href="#three-properties-that-matter">Three properties that matter</a></h2>
+<ul>
+<li><strong>Zero compute.</strong> Parses <code>manifest.json</code> only. No DB connection,
+no SQL execution, no warehouse driver. Reads bytes; writes one HTML
+file. The tool is fast (≪1s on real manifests) because there’s
+no work to do beyond reading + rendering.</li>
+<li><strong>Zero telemetry.</strong> No analytics, no crash reporting, no
+auto-update.</li>
+<li><strong>Zero egress.</strong> All assets — Sakura CSS, jQuery, DataTables,
+Mermaid — are vendored and inlined at compile time. The generated
+report has no <code>&lt;script src&gt;</code>, <code>&lt;link href&gt;</code>, <code>&lt;img src&gt;</code>,
+CSS <code>@import</code> / <code>url()</code>, or protocol-relative <code>//</code> external
+references. Proven by a headless-browser network-block test —
+re-runnable by anyone with the repo checked out. See
+<a href="#zero-egress--the-privacy-property">the privacy property page</a> for the audit
+details.</li>
+</ul>
+<h2 id="what-you-get-per-in-scope-unit-test"><a class="header" href="#what-you-get-per-in-scope-unit-test">What you get per in-scope unit test</a></h2>
+<p>A model card with one section per unit test on that model. Each
+section:</p>
+<ul>
+<li>Test name, target model, optional description.</li>
+<li>Tags, meta, defined-in path (when present in the manifest).</li>
+<li>A <strong>Given</strong> panel per <code>given[i]</code> fixture — bound to its import-CTE
+node when the engine matches <code>ref('…')</code> to a CTE.</li>
+<li>An <strong>Expected</strong> panel for the <code>expect</code> block.</li>
+<li>The model’s <strong>CTE dependency DAG</strong> — a Mermaid <code>graph LR</code> with
+join-colored edges + an always-visible colorblind-safe legend.</li>
+</ul>
+<h2 id="what-it-does-not-do"><a class="header" href="#what-it-does-not-do">What it does NOT do</a></h2>
+<ul>
+<li>It does not run dbt for you. You bring a compiled <code>manifest.json</code>
+plus one scope source — a baseline manifest (local) or the PR’s
+unified diff (<code>git diff --unified=0</code>, CI). (See <a href="#getting-started">Getting
+started</a>.)</li>
+<li>It does not execute SQL or talk to a warehouse.</li>
+<li>Its <strong>default</strong> in-scope detector is <code>state:modified.body</code> —
+body-checksum diffs — so a pure config / contract / relation / macros
+change is not flagged by default. The four sub-selector modifiers
+(<code>.configs</code> / <code>.relation</code> / <code>.macros</code> / <code>.contract</code>) now exist as
+additive <code>StateModifier</code> impls and compose via
+<code>StateComparator::with_sub_selectors()</code>; a CLI flag to opt into the
+wider scope is a follow-up, so the default path stays body-only.</li>
+<li>It does not (yet) export markdown or JSON. v0.1 ships HTML only.</li>
+</ul>
+<h2 id="scope-discipline"><a class="header" href="#scope-discipline">Scope discipline</a></h2>
+<p>cute-dbt is a <strong>PR-review tool</strong>. The first-class workflow:</p>
+<ol>
+<li>A reviewer opens the PR.</li>
+<li>CI compiles the PR head and runs cute-dbt, scoping the report to the
+PR’s diff via <code>--pr-diff</code> (the <code>git diff --unified=0</code> output) — no
+baseline-manifest publishing job to maintain. (Locally, you scope the
+same report with a <code>--baseline-manifest</code> instead.)</li>
+<li>The report shows <strong>only the tests in scope for this diff</strong> — with
+their CTE context, fixture data, and expected results, in one HTML
+file that opens offline.</li>
+</ol>
+<p>The diff-scope banner names the scope source and the in-scope test
+count, so what the report covers is unambiguous. The
+<a href="#ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback">GitHub Actions PR-review recipe</a>
+wires this into any dbt repo with a copy-paste workflow.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="getting-started"><a class="header" href="#getting-started">Getting started</a></h1>
+<h2 id="install"><a class="header" href="#install">Install</a></h2>
+<blockquote>
+<p><strong>Not yet on crates.io</strong> — cute-dbt is a v0.x walking-skeleton. The
+first crates.io release will be <code>v0.1.0</code>. This page assumes that
+release; if you are reading this before <code>v0.1.0</code> lands, build from
+source via <code>cargo install --git https://github.com/breezy-bays-labs/cute-dbt</code>.</p>
+</blockquote>
+<p>Once <code>v0.1.0</code> is published:</p>
+<pre><code class="language-sh">cargo install cute-dbt
+</code></pre>
+<p>Verify:</p>
+<pre><code class="language-sh">cute-dbt --help
+</code></pre>
+<h2 id="generate-a-report"><a class="header" href="#generate-a-report">Generate a report</a></h2>
+<p>cute-dbt always reads a <strong>current</strong> <code>manifest.json</code>, plus exactly one
+<strong>scope source</strong> telling it what changed:</p>
+<ul>
+<li><strong>Local dev</strong> (this page): a <code>--baseline-manifest</code> to diff against.</li>
+<li><strong>CI / PR review</strong>: <code>--pr-diff</code> with the PR’s unified diff (<code>git diff --unified=0</code>) — see the <a href="#ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback">GitHub Actions PR-review
+recipe</a>, the headline team
+path. (<a href="#which-scope-source">Which should I use?</a>)</li>
+</ul>
+<p>The local flow below uses a baseline manifest.</p>
+<pre><code class="language-sh">cute-dbt \
+    --manifest         target/manifest.json \
+    --baseline-manifest path/to/baseline-manifest.json \
+    --out              report.html
+</code></pre>
+<p>Then open <code>report.html</code> directly:</p>
+<pre><code class="language-sh"># macOS
+open report.html
+
+# Linux
+xdg-open report.html
+</code></pre>
+<p>The HTML opens via <code>file://</code>. No server. No outbound requests. Your
+data does not leave your machine.</p>
+<h2 id="producing-the-manifests"><a class="header" href="#producing-the-manifests">Producing the manifests</a></h2>
+<p>cute-dbt expects compiled dbt manifests (i.e. produced by <code>dbt compile</code> or any command that compiles, like <code>dbt run</code>/<code>dbt build</code>).
+A <code>dbt parse</code>-only manifest will fail the second-stage compiled-SQL
+preflight check.</p>
+<p>A typical PR-review setup:</p>
+<pre><code class="language-sh"># Compile the diff
+dbt compile
+
+# Snapshot the baseline (target branch)
+git fetch origin main
+git stash --include-untracked
+git checkout origin/main
+dbt compile
+cp target/manifest.json /tmp/baseline-manifest.json
+git checkout -    # back to your branch
+git stash pop
+
+# Render the report
+cute-dbt \
+    --manifest          target/manifest.json \
+    --baseline-manifest /tmp/baseline-manifest.json \
+    --out               report.html
+</code></pre>
+<p>Wrapping this in a make target / shell function is a common
+ergonomic. cute-dbt itself is intentionally unopinionated about how
+you produce the two manifests.</p>
+<h2 id="what-youll-see"><a class="header" href="#what-youll-see">What you’ll see</a></h2>
+<p>If the diff has at least one in-scope unit test:</p>
+<ul>
+<li>A <strong>diff-scope banner</strong> at the top naming the baseline and the
+in-scope unit-test count.</li>
+<li>One <strong>model card</strong> per in-scope model, with each in-scope test as
+a nested section.</li>
+<li>A <strong>Mermaid CTE DAG</strong> per model with join-colored edges and the
+always-visible legend.</li>
+</ul>
+<p>If the diff has zero in-scope models or zero unit tests on the
+in-scope models, the report is a valid empty-scope report with a
+“0 unit tests in scope” banner. This is <strong>exit-0 by design</strong> — an
+empty scope is information, not failure.</p>
+<h2 id="what-can-fail"><a class="header" href="#what-can-fail">What can fail</a></h2>
+<p>The CLI fails closed on a small set of preflight conditions, each
+mapped to a non-zero exit code:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Condition</th><th>Exit</th><th>What to do</th></tr>
+</thead>
+<tbody>
+<tr><td>Manifest file not found / not JSON</td><td>non-zero</td><td>Check the path; confirm the file is valid JSON</td></tr>
+<tr><td>Pre-1.8 dbt schema</td><td>non-zero</td><td>Upgrade dbt (cute-dbt requires <code>metadata.dbt_schema_version</code> ≥ 1.8)</td></tr>
+<tr><td>Baseline path missing or mismatched</td><td>non-zero</td><td>Verify <code>--baseline-manifest</code> resolves</td></tr>
+<tr><td>In-scope unit test targets a model with <code>compiled_code: null</code></td><td>non-zero</td><td>Compile fully (<code>dbt compile</code>, not <code>dbt parse</code>)</td></tr>
+<tr><td>No scope source — neither <code>--baseline-manifest</code> nor <code>--pr-diff</code>, or both at once</td><td>clap usage error (exit 2)</td><td>Pass exactly one scope source</td></tr>
+</tbody>
+</table>
+</div>
+<p>There is never a partial report. Either you get a complete report or
+a non-zero exit explaining what’s missing.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="how-it-works"><a class="header" href="#how-it-works">How it works</a></h1>
+<p>A product-focused look at what cute-dbt does to your manifest. (For
+the engineering-level view — the hexagonal layering, the
+StateComparator strategy, the fail-closed contract — see
+<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/ARCHITECTURE.md"><code>ARCHITECTURE.md</code></a>
+in the repo.)</p>
+<h2 id="the-pipeline"><a class="header" href="#the-pipeline">The pipeline</a></h2>
+<pre><code class="language-text">┌─────────────────────┐    ┌─────────────────────────────┐
+│ current manifest    │    │ one scope source:           │
+│ (your PR's diff)    │    │  • baseline manifest, OR    │
+│                     │    │  • PR unified diff          │
+└──────────┬──────────┘    └──────────────┬──────────────┘
+           │                              │
+           └──────────────┬───────────────┘
+                          ▼
+              ┌───────────────────┐
+              │ Diff-scope        │ ← baseline: state:modified.body
+              │ selection         │   pr-diff: changed paths → nodes
+              └─────────┬─────────┘
+                        ▼
+              ┌───────────────────┐
+              │ In-scope models   │ ∪ in-scope tests
+              └─────────┬─────────┘
+                        ▼
+              ┌───────────────────┐
+              │ Per-model CTE     │ ← sqlparser-rs on compiled SQL
+              │ graph extraction  │
+              └─────────┬─────────┘
+                        ▼
+              ┌───────────────────┐
+              │ Render            │ ← askama + inlined CSS/JS/Mermaid
+              └─────────┬─────────┘
+                        ▼
+              ┌───────────────────┐
+              │ report.html       │ ← one self-contained file
+              └───────────────────┘
+</code></pre>
+<h2 id="diff-scope-selection"><a class="header" href="#diff-scope-selection">Diff-scope selection</a></h2>
+<p>cute-dbt’s first-class workflow is reviewing a <strong>diff</strong>, not the whole
+project. You give it the current manifest plus <strong>one scope source</strong>
+naming which models the diff touched. There are two.</p>
+<h3 id="source-1--baseline-manifest---baseline-manifest"><a class="header" href="#source-1--baseline-manifest---baseline-manifest">Source 1 — baseline manifest (<code>--baseline-manifest</code>)</a></h3>
+<p>For local dev. cute-dbt diffs the current manifest against a baseline
+you supply and selects models whose SQL <strong>body checksum</strong> differs —
+<code>state:modified.body</code>, the same selector <code>dbt run --select state:modified</code> recognizes. cute-dbt mirrors it.</p>
+<h3 id="source-2--pr-unified-diff---pr-diff"><a class="header" href="#source-2--pr-unified-diff---pr-diff">Source 2 — PR unified diff (<code>--pr-diff</code>)</a></h3>
+<p>For CI / PR review. The workflow runs <code>git diff --unified=0 &lt;base&gt;...&lt;head&gt;</code>
+and hands cute-dbt the resulting patch (the <code>@&lt;path&gt;</code> value-parser reads
+the diff from a file — the leading <code>@</code> means “read from this file”; an
+inline literal also works). cute-dbt parses the diff’s <code>+++ b/&lt;path&gt;</code>
+headers — mapping each changed path to its manifest node via
+<code>original_file_path</code> — and the per-block <code>@@ … @@</code> hunks, which drive
+block-precise updated-test detection (below). No baseline to publish or
+cache — the diff GitHub already computed <em>is</em> the scope signal. cute-dbt
+never shells out to <code>git</code> or reads the GitHub event itself; the workflow
+owns <em>how</em> the diff is produced. The <a href="#ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback">GitHub Actions PR-review
+recipe</a> wires this up copy-paste.</p>
+<h3 id="which-scope-source"><a class="header" href="#which-scope-source">Which scope source?</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th><code>--baseline-manifest</code></th><th><code>--pr-diff</code></th></tr>
+</thead>
+<tbody>
+<tr><td><strong>Use for</strong></td><td>local dev, ad-hoc review</td><td>CI / pull-request review</td></tr>
+<tr><td><strong>Needs</strong></td><td>a baseline manifest to diff against</td><td>the PR’s unified diff (<code>git diff --unified=0</code>)</td></tr>
+<tr><td><strong>Detects change by</strong></td><td>body-checksum diff (<code>state:modified.body</code>)</td><td>changed file paths → manifest nodes</td></tr>
+<tr><td><strong>Setup cost</strong></td><td>snapshot/publish a baseline</td><td>none — reuse GitHub’s diff</td></tr>
+</tbody>
+</table>
+</div>
+<p>Exactly one is required; passing neither or both is a usage error
+(exit 2). Whichever you pick, a unit test is in scope if:</p>
+<ul>
+<li>Its <strong>target model</strong> is in the in-scope set, OR</li>
+<li>Its <strong>own definition</strong> changed (a changed test on an unchanged model
+is still in scope).</li>
+</ul>
+<p>If both sets are empty, the report is a valid empty-scope report with a
+“0 unit tests in scope” banner — exit-0 by design. (Empty scope is
+information, not failure.)</p>
+<h3 id="updated-vs-context-tests"><a class="header" href="#updated-vs-context-tests">Updated vs context tests</a></h3>
+<p>Within the in-scope set, cute-dbt classifies each test as <strong>updated</strong> or
+<strong>context</strong>:</p>
+<ul>
+<li><strong>Updated</strong> — this diff changed the test’s own definition (the report
+foregrounds these).</li>
+<li><strong>Context</strong> — the test is in scope only because its target model is in
+scope; the test itself is unchanged.</li>
+</ul>
+<p>The report opens in <strong>Updated only</strong> mode by default, so a reviewer sees
+the tests the PR actually touched. A global <strong>Updated only ↔ All tests</strong>
+toggle reveals the context tests (and the per-model count tracks the
+toggle: the updated count in Updated-only mode, the total in All-tests
+mode). When a diff updated <em>no</em> tests at all — the common SQL-only PR —
+the report opens in All-tests mode so you land on content rather than an
+empty view.</p>
+<p>How “updated” is derived depends on the scope source. Both are precise,
+but they read different inputs:</p>
+<ul>
+<li><strong><code>--baseline-manifest</code></strong> — a test is updated when its parsed
+<code>unit_test</code> differs from the baseline (a structural <code>StateComparator</code>
+diff over the two manifests), independent of which file it lives in.</li>
+<li><strong><code>--pr-diff</code></strong> — <strong>block-precise</strong>: a test is updated <strong>iff a changed
+diff hunk overlaps that test’s YAML block span</strong>. A changed multi-test
+file no longer marks <em>every</em> test it declares as updated — only the
+tests whose block a <code>@@ … @@</code> hunk actually touched. The other tests in
+that file stay in scope as <strong>context</strong> (their target model is still
+changed); they’re just not flagged as updated.</li>
+</ul>
+<p>Two conservative fallbacks keep the block-precise signal honest:</p>
+<ul>
+<li>A pure <strong>deletion</strong> inside a block counts as touching it — the test
+stays updated even though the hunk only removed lines.</li>
+<li>If the supplied diff no longer lines up with the working-tree YAML
+(revision drift — the diff was taken against a different head), <strong>or</strong> a
+block moved but is itself unchanged, cute-dbt <strong>degrades gracefully</strong>:
+it keeps the file-granular “updated” mark for that file and drops the
+inline diff, rather than risk mislabeling a test. The
+<a href="#ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback">same-revision contract</a> in the
+CI recipe (diff taken <code>base...head</code>, manifest compiled at <code>head</code>) is
+what keeps the hunks lined up so this fallback rarely fires.</li>
+</ul>
+<h3 id="v01-fidelity-limits-pr-diff-scoping"><a class="header" href="#v01-fidelity-limits-pr-diff-scoping">v0.1 fidelity limits (PR-diff scoping)</a></h3>
+<p><code>--pr-diff</code> reads the diff’s changed <strong>paths</strong> to pick the in-scope set
+and its <strong>hunks</strong> to flag updated tests — but <strong>scope selection stays
+path-granular</strong>. So in v0.1:</p>
+<ul>
+<li>A changed <code>.yml</code> still brings <strong>every unit test that file declares</strong>
+into scope as <strong>context</strong> (the path can’t, on its own, tell which test
+changed body semantics). Block precision then flags only the
+hunk-overlapping tests as <strong>updated</strong>, so the multi-test-file
+false-positive that used to mark every test as updated is gone.</li>
+<li>A <code>packages.yml</code> / <code>dbt deps</code> change that alters compiled output
+without touching a model <code>.sql</code> / <code>.yml</code> is not detected — the diff
+carries no path that maps to an affected node.</li>
+<li>A <strong>renamed</strong> model shows as deleted-path + added-path; the deleted
+path maps to no current node.</li>
+</ul>
+<p>Need any of these? Use <code>--baseline-manifest</code>, which compares compiled
+bodies directly. The <a href="#ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback">recipe</a>
+carries the same list at its adopter-facing layer.</p>
+<h2 id="cte-graph-extraction"><a class="header" href="#cte-graph-extraction">CTE graph extraction</a></h2>
+<p>For each in-scope model, cute-dbt parses the model’s <strong>compiled SQL</strong>
+(the <code>compiled_code</code> field of the manifest) using
+<a href="https://github.com/sqlparser-rs/sqlparser-rs"><code>sqlparser-rs</code></a> and
+extracts:</p>
+<ul>
+<li>The list of CTEs.</li>
+<li>The edges between them, classified by edge type:
+<code>from</code>, <code>inner</code>, <code>left</code>, <code>right</code>, <code>full</code>, <code>cross</code>, <code>union_all</code>,
+<code>union_distinct</code>.</li>
+<li>A terminal node representing the model’s final <code>SELECT</code>.</li>
+<li>A node-role classification: <code>import</code> (CTEs whose body is a simple
+<code>SELECT * FROM ref('…')</code> or <code>source('…')</code>), <code>transform</code> (everything
+else), <code>final</code> (the terminal node).</li>
+<li>For each CTE, the <strong>leaf table refs</strong> in its <code>FROM</code> clause — used to
+bind unit-test <code>given[i]</code> fixtures to the import-CTE node they
+exercise.</li>
+</ul>
+<h2 id="render"><a class="header" href="#render">Render</a></h2>
+<p>The askama template walks the per-model payload and emits one
+self-contained HTML file. Every asset (CSS, JS, Mermaid library) is
+embedded at compile time via <code>include_str!</code> and <code>include_bytes!</code>;
+nothing is loaded from the network at runtime.</p>
+<p>The report’s privacy property — that <code>file://</code> open makes zero
+outbound requests — is the <strong>load-bearing trait</strong> of the tool. See
+<a href="#zero-egress--the-privacy-property">the zero-egress page</a> for how this is mechanically
+guaranteed and how you can re-verify it.</p>
+<h3 id="per-test-layout"><a class="header" href="#per-test-layout">Per-test layout</a></h3>
+<p>When a reviewer selects a unit test in the rendered report, the
+page lays out as:</p>
+<ol>
+<li>
+<p><strong>Header chrome</strong> — model + unit-test selectors.</p>
+</li>
+<li>
+<p><strong>CTE dependency graph</strong> — the Mermaid panel mapping how the unit
+test’s target model composes its CTEs.</p>
+</li>
+<li>
+<p><strong>Description banner</strong> — the test’s <code>description:</code> from the
+authoring YAML, surfaced in a clearly-bounded banner directly
+above the inspect/expected substance. Authored descriptions are
+the analytics-engineer’s hypothesis statement (“this test asserts
+that the join produces no nulls in the foreign key column”); the
+banner lives here so reviewers read it next to the rows that
+prove it. An empty description suppresses the banner entirely.</p>
+</li>
+<li>
+<p><strong>Inspect / Expected panels</strong> — the unit test’s <code>given</code> fixture(s)
+alongside the <code>expected</code> rows.</p>
+</li>
+<li>
+<p><strong>Authoring YAML drawer</strong> — the raw <code>unit_test</code> slice from the
+source <code>.yml</code> (collapsible, defaults open). The drawer carries
+leading + inside + trailing <code>#</code>-comment lines per the slicer’s
+bracketing rule, plus the full description as authored. For an
+<strong>updated</strong> test under <code>--pr-diff</code>, the drawer adds an <strong>Authored ↔
+Diff</strong> toggle and opens on the <strong>Diff</strong> view (its summary reads
+“Authoring YAML — diff”), showing the inline YAML diff of just that
+test’s block. When a test has no inline diff — it’s a context test,
+the supplied diff is stale, or the change landed outside the test’s
+block — the drawer shows the plain authored YAML exactly as before.
+The inline diff is <strong><code>--pr-diff</code>-only</strong>: baseline mode computes
+<code>changed</code> from a structural manifest diff with no hunks, so it has no
+inline YAML diff and the drawer always shows the authored YAML.</p>
+<p>Because this drawer’s inline diff is a <strong>text</strong> diff over the <em>whole</em>
+<code>- name:</code> block slice, changes to a test’s <strong><code>overrides</code></strong> block
+(<code>macros</code> / <code>vars</code> / <code>env_vars</code> — where dbt pins <code>is_incremental</code>,
+<code>current_timestamp</code>, project vars, … to deterministic values) surface
+here like any other line change. An <strong>override-only edit</strong> is the one
+case that <em>needs</em> this fallback: it leaves the <code>given</code>/<code>expect</code> cells
+byte-identical, so the cell-level data-table diff (the Inspect /
+Expected panels, cute-dbt#98) correctly shows <strong>no</strong> change — the YAML
+drawer is the only place the edit is visible. cute-dbt does not parse
+the structured <code>overrides</code> payload at all (it is dropped on
+deserialize), and it does not need to: the text-diff fallback reads
+only the working-tree YAML the <code>--project-root</code> slice already provides
+(cute-dbt#125).</p>
+</li>
+<li>
+<p><strong>Model SQL section</strong> — the model’s <strong>raw Jinja source</strong> (<code>raw_code</code>
+from the manifest — the diffable layer; compiled SQL is generated and
+un-diffable). When the PR diff changed the model’s <code>.sql</code>, this section
+adds a <strong>Raw ↔ Diff</strong> toggle and opens on the <strong>Diff</strong> view, showing
+the inline diff of the model’s SQL (cute-dbt#111). The diff reuses the
+exact line-diff substrate the Authoring YAML drawer uses — same
+change-pair rendering, same intra-line emphasis, same N7b drift guard.
+<code>raw_code</code> is read straight from the manifest (no <code>--project-root</code>
+filesystem read needed, unlike the YAML drawer), so the SQL diff fires
+on any changed model <code>.sql</code>. When there’s no SQL diff — baseline mode,
+the model is in scope only via a changed <em>test</em>, the diff is stale, or
+the change was whitespace-only — the section shows the plain raw SQL
+exactly as before. dbt engines differ in one detail cute-dbt
+normalizes away: dbt-core ships <code>raw_code</code> with the file’s trailing
+newline stripped, dbt-fusion ships it byte-identical but keeping the
+trailing newline; cute-dbt strips a single trailing newline so the SQL
+diff renders identically regardless of which engine compiled the
+manifest.</p>
+</li>
+</ol>
+<h3 id="whitespace-only-changes-are-ignored-standard"><a class="header" href="#whitespace-only-changes-are-ignored-standard">Whitespace-only changes are ignored (standard)</a></h3>
+<p>Both inline diffs (the YAML drawer and the Model SQL diff) <strong>ignore
+whitespace-only differences</strong> as standard behavior — no flag, no opt-in.
+A re-indentation, a trailing-whitespace edit, or a blank-line churn that
+leaves the substantive content unchanged renders as <strong>context</strong>, not as a
+change (<code>git --ignore-all-space</code> semantics, compared per line-pair). If
+<em>every</em> change in a block is whitespace-only, cute-dbt emits <strong>no inline
+diff</strong> and shows the plain view. The drift guard upstream stays
+whitespace-exact (a whitespace divergence between the diff and the
+working tree is genuine revision drift, not a no-op), so whitespace
+insensitivity applies only to the change/no-change decision, never to the
+staleness check.</p>
+<p>This is a best-effort filter over git’s pre-computed <code>--unified=0</code> hunks,
+not a re-diff: cute-dbt cannot re-pair lines git already split. The
+dominant cases (re-indentation, trailing whitespace, blank-line churn)
+are handled; for a multi-line replacement that mixes a re-indent with a
+real edit, the removed line may render at the hunk’s top rather than
+paired to its own offset — the change-set stays correct, only the line
+placement is approximate. For YAML, an indentation change that alters
+<em>structure</em> still surfaces via the accompanying value changes.</p>
+<p>The description banner started life at the top of the test-selection
+section. It moved to between the CTE DAG and the inspect/expected
+panels (cute-dbt#74) so reviewers don’t scroll back and forth between
+hypothesis and proof. The Authoring YAML drawer below remains the
+catch-all home for long-form context.</p>
+<h2 id="what-cute-dbt-is-not-doing"><a class="header" href="#what-cute-dbt-is-not-doing">What cute-dbt is NOT doing</a></h2>
+<ul>
+<li><strong>Not</strong> running dbt. You compile; cute-dbt reads the artifact.</li>
+<li><strong>Not</strong> executing SQL. Manifest parsing only.</li>
+<li><strong>Not</strong> computing rows. Every fixture row + expected row is lifted
+verbatim from the manifest’s unit-test payload.</li>
+<li><strong>Not</strong> running a server. The HTML is static and opens from
+<code>file://</code>.</li>
+<li><strong>Not</strong> doing any telemetry. There is no analytics, no crash
+reporting, no auto-update.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="features"><a class="header" href="#features">Features</a></h1>
+<p>What cute-dbt does, by capability. Each is backed by an executable
+<a href="https://github.com/breezy-bays-labs/cute-dbt/tree/main/features">Gherkin spec</a>
+that doubles as its acceptance test — so the documentation and the
+behaviour can’t drift.</p>
+<h2 id="report-generation"><a class="header" href="#report-generation">Report generation</a></h2>
+<p>Reads a compiled <code>manifest.json</code> (plus a scope source) and emits one
+self-contained <code>report.html</code>: a model card per in-scope model, each unit
+test rendered with its <strong>Given</strong> / <strong>Expected</strong> data and the model’s CTE
+dependency graph.</p>
+<h2 id="diff-scoping"><a class="header" href="#diff-scoping">Diff scoping</a></h2>
+<p>Scopes the report to what a change actually touched — via a
+<code>--baseline-manifest</code> diff (<code>state:modified.body</code>) for local dev, or the
+PR’s unified diff (<code>--pr-diff</code>, the <code>git diff --unified=0</code> output) for
+CI / PR review. An empty scope is a valid exit-0 report, not an error.
+See <a href="#how-it-works">How it works</a>.</p>
+<h2 id="cte-dependency-graph"><a class="header" href="#cte-dependency-graph">CTE dependency graph</a></h2>
+<p>Parses each in-scope model’s compiled SQL and renders its CTE DAG with
+join-typed, colour-coded edges (<code>from</code> / <code>inner</code> / <code>left</code> / <code>right</code> /
+<code>full</code> / <code>cross</code> / <code>union_all</code> / <code>union_distinct</code>) and an always-visible
+colourblind-safe legend.</p>
+<h2 id="unit-test-fixture-rendering"><a class="header" href="#unit-test-fixture-rendering">Unit-test fixture rendering</a></h2>
+<p>Renders <code>given</code> / <code>expect</code> fixtures whatever the authored format — dict,
+CSV, or raw SQL — into uniform, searchable tables, and surfaces the raw
+<code>unit_test</code> YAML (comments included) alongside the data.</p>
+<h2 id="fail-closed-safety"><a class="header" href="#fail-closed-safety">Fail-closed safety</a></h2>
+<p>A two-stage preflight refuses to emit a partial or misleading report:
+schema-level checks (unreadable / pre-1.8 / unusable baseline) and a
+semantic check that an in-scope model was actually <strong>compiled</strong> (<code>dbt compile</code>, not <code>dbt parse</code>). Every failure is a non-zero exit with a
+remediation message.</p>
+<h2 id="zero-egress"><a class="header" href="#zero-egress">Zero egress</a></h2>
+<p>The generated report makes <strong>zero</strong> outbound network requests — every
+asset is inlined at compile time. This is the load-bearing privacy
+property; see <a href="#zero-egress--the-privacy-property">zero egress</a>.</p>
+<h2 id="configurable-report"><a class="header" href="#configurable-report">Configurable report</a></h2>
+<p><code>--config &lt;PATH&gt;</code> supplies a custom report title + subtitle via a small
+TOML file.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="examples"><a class="header" href="#examples">Examples</a></h1>
+<p>cute-dbt commits rendered example reports under
+<a href="https://github.com/breezy-bays-labs/cute-dbt/tree/main/examples"><code>examples/</code></a>.
+Open one to see exactly what the CLI emits.</p>
+<h2 id="jaffle-shop"><a class="header" href="#jaffle-shop">jaffle-shop</a></h2>
+<p>👉 <strong><a href="examples/jaffle-shop-report.html">Open the rendered jaffle-shop report</a></strong>
+(<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/jaffle-shop-report.html">source</a>)</p>
+<p>The structural minimum: one in-scope model, one unit test, a 3-node CTE
+DAG. Good for “what does the output look like?”</p>
+<p><strong>See the privacy property for yourself.</strong> Open the page, then open
+DevTools → Network and reload: <strong>zero outbound requests</strong> — every asset is
+inlined, so your data never leaves your machine. The audit-grade version is
+an automated headless-browser proof that opens the report via <code>file://</code>
+with all network access denied:</p>
+<pre><code class="language-sh">git clone https://github.com/breezy-bays-labs/cute-dbt
+cd cute-dbt
+cargo test --test headless_zero_egress -- --ignored
+</code></pre>
+<p>See <a href="#zero-egress--the-privacy-property">the zero-egress page</a> for how it works.</p>
+<h2 id="dbt-playground"><a class="header" href="#dbt-playground">dbt-playground</a></h2>
+<p>👉 <strong><a href="examples/playground-report.html">Open the rendered playground report</a></strong>
+(<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/playground-report.html">source</a>)</p>
+<p>The richer example — cute-dbt run against a real dbt project
+(<a href="https://github.com/cmbays/dbt-playground"><code>cmbays/dbt-playground</code></a>, built
+on synthetic <a href="https://synthetichealth.github.io/synthea/">Synthea</a> patient
+data). One diff touches three models, so the report shows off:</p>
+<ul>
+<li><strong>multiple model cards</strong> side by side,</li>
+<li><strong>UNION arm rendering</strong> in the CTE DAG (the dashed-orange edge + legend),</li>
+<li>an <strong>empty-state card</strong> (a model in scope with no unit tests wired).</li>
+</ul>
+<p>Open it and click around — the fastest way to get a feel for a real-world
+report.</p>
+<h2 id="diff-view-showcase-pr-diff-mode"><a class="header" href="#diff-view-showcase-pr-diff-mode">diff-view showcase (PR-diff mode)</a></h2>
+<p>👉 <strong><a href="examples/playground-pr-diff-report.html">Open the rendered diff-view showcase</a></strong>
+(<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/playground-pr-diff-report.html">source</a>)</p>
+<p>The two reports above run in <strong>baseline</strong> mode. This one runs in <strong><code>--pr-diff</code>
+mode</strong> — the way cute-dbt runs inside a CI PR review — so it shows the diff-view
+feature set in action:</p>
+<ul>
+<li>an <strong>inline SQL diff</strong> with <strong>hunk contraction</strong> (three separated mid-file
+changes in a 158-line model collapse the long unchanged runs — including a
+folded section <em>between</em> each change — behind “Show N unchanged lines”
+controls you can expand <strong>and re-collapse</strong>, per-hunk or all at once),</li>
+<li>the <strong>SQL/Jinja syntax palette</strong> overlaid on the diff lines,</li>
+<li>a <strong>YAML block diff</strong> of the changed unit test, and</li>
+<li>a <strong>cell-level data diff</strong> across both expect rows, including a real <strong>NULL</strong>
+(rendered as muted italic, distinct from a string <code>"null"</code>).</li>
+</ul>
+<p>It’s rendered from a synthetic hand-crafted patch against the playground
+fixtures (so it stays committable + zero-egress), and it’s byte-identity-gated
+in CI like the others.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="release-discipline"><a class="header" href="#release-discipline">Release discipline</a></h1>
+<p>cute-dbt is published to crates.io from <strong><code>v0.1.0</code>+</strong> via
+<a href="https://release-plz.dev/"><code>release-plz</code></a> with OIDC trusted publishing —
+no long-lived registry token, no manual <code>cargo publish</code>.</p>
+<p>What you need to know as a user:</p>
+<ul>
+<li><strong>Install:</strong> <code>cargo install cute-dbt</code> (from <code>v0.1.0</code>+).</li>
+<li><strong>SemVer, with a v0.x caveat.</strong> Per Cargo convention, while cute-dbt is
+<code>0.x</code> a <strong>minor</strong> bump (<code>0.1 → 0.2</code>) MAY break — CLI flags, output shape,
+or exit codes can change; patch bumps (<code>0.1.0 → 0.1.1</code>) are bug-fix or
+additive only. So <strong>pin to a minor</strong> (<code>cute-dbt = "0.1"</code>) and skim the
+CHANGELOG before moving to <code>0.2</code>. <code>v1.0</code> ships the first stability
+commitment.</li>
+<li><strong>The CHANGELOG is canonical</strong> —
+<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/CHANGELOG.md"><code>CHANGELOG.md</code></a>.</li>
+<li><strong>Yanks</strong> happen only for security or licensing issues; cute-dbt never
+amends a published version, it ships the next one.</li>
+</ul>
+<p>The contract SemVer covers at <code>v1.0</code>+ is the <strong>CLI surface</strong> (<code>cute-dbt --help</code>), the <strong>exit-code mapping</strong>, and the <strong>zero-egress property</strong> — not
+the Rust library, which stays internal during v0.x. Contributor-facing
+release mechanics (conventional-commit version inference, tag policy) live
+in
+<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/AGENTS.md#release-discipline"><code>AGENTS.md</code></a>.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback"><a class="header" href="#ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback">CI recipe: GitHub Actions PR review (Pages preview + artifact fallback)</a></h1>
+<p>Wire cute-dbt into your dbt repo’s pull-request workflow so every PR gets
+a <strong>diff-scoped</strong> unit-test report — scoped to the models and tests the
+PR actually changed, with no baseline-manifest publishing job to
+maintain. Reviewers open the report in one or two clicks.</p>
+<p>This recipe uses the <code>--pr-diff</code> flag (cute-dbt v0.1.x): the workflow runs
+<code>git diff --unified=0 &lt;base&gt;...&lt;head&gt;</code> and hands the resulting patch to
+cute-dbt, which scopes the report to the models/tests those changed paths
+touch and uses the diff’s hunks to flag the tests the PR actually edited.
+It is the CI counterpart to the local <a href="#how-it-works"><code>--baseline-manifest</code></a> flow.</p>
+<p>Two delivery options:</p>
+<ul>
+<li><strong>Pages preview</strong> (public repos): publishes the report to a per-PR
+GitHub Pages subdirectory and posts a clickable link. ≤2-click reviewer
+UX.</li>
+<li><strong>Artifact link</strong> (private repos / Pages-less): uploads the report as a
+workflow artifact and links to it.</li>
+</ul>
+<blockquote>
+<p>⚠️ <strong>Privacy — read this before choosing.</strong> GitHub Pages on a
+<strong>private</strong> repository is <strong>still publicly reachable by URL</strong> — Pages
+does not authenticate visitors on the Free or Pro tier. If your dbt
+models, fixtures, or column names are sensitive, <strong>use the artifact
+link</strong> (artifacts are gated behind repo-read auth). The Pages preview is
+only safe for data you would publish openly. cute-dbt does not detect
+this mismatch for you in v0.1 — the choice is yours to make.</p>
+</blockquote>
+<h2 id="1-what-this-gives-you"><a class="header" href="#1-what-this-gives-you">1. What this gives you</a></h2>
+<p>On each pull request:</p>
+<ol>
+<li>CI compiles the dbt project at the PR head and renders a cute-dbt
+report scoped to the PR’s changed files.</li>
+<li>The report is published (Pages) or uploaded (artifact).</li>
+<li>A sticky PR comment links to it — one comment per PR, updated in place
+on each push.</li>
+</ol>
+<p>The report is a single self-contained HTML file with
+<a href="#zero-egress--the-privacy-property">zero external resource requests</a>, so it opens offline
+in any browser.</p>
+<h2 id="2-prerequisites"><a class="header" href="#2-prerequisites">2. Prerequisites</a></h2>
+<ul>
+<li><strong>A dbt project</strong> in your repo (this recipe assumes it lives in a
+<code>dbt_project/</code> subdirectory; adjust paths if yours is at the repo root).</li>
+<li><strong><code>dbt compile</code> must work in CI.</strong> cute-dbt’s fail-closed contract
+rejects an in-scope model whose <code>compiled_code</code> is null, so <code>dbt parse</code>
+alone is not enough — you need <code>dbt compile</code>, which needs a working
+adapter connection. <a href="https://duckdb.org">DuckDB</a> (<code>dbt-duckdb</code>) compiles
+with <strong>no external warehouse and no secrets</strong> and is the easiest CI
+choice; cloud adapters (Snowflake, BigQuery, …) need credentials wired
+as repository secrets and a CI <code>profiles.yml</code> target.</li>
+<li><strong>A dbt profile CI can find.</strong> dbt reads connection config from a
+<code>profiles.yml</code> whose top-level key matches <code>profile:</code> in your
+<code>dbt_project.yml</code>. Setup is adopter-specific: either commit a
+<code>profiles.yml</code> and pass <code>--profiles-dir</code>, or write a throwaway CI
+profile to <code>~/.dbt/profiles.yml</code> (dbt’s default location) as the
+workflow below does. The DuckDB <code>:memory:</code> profile shown needs no
+secrets. Likewise, install dbt however your project does — <code>pip</code>,
+<code>uv</code>, or <code>poetry</code> all work; the recipe shows <code>pip</code>.</li>
+<li><strong><code>fetch-depth: 0</code></strong> on <code>actions/checkout</code> — the SHA-based diff needs
+both the base and head commits present locally.</li>
+<li><strong>For the Pages preview only:</strong> GitHub Pages enabled for the repo, publishing
+from the <code>gh-pages</code> branch (Settings → Pages → Source: <em>Deploy from a
+branch</em> → <code>gh-pages</code>). The first run creates the branch; enable Pages
+to point at it.</li>
+</ul>
+<h2 id="3-the-shared-cute-dbt-invocation"><a class="header" href="#3-the-shared-cute-dbt-invocation">3. The shared cute-dbt invocation</a></h2>
+<p>Both options share the same diff + render core. The diff uses the PR
+event’s <strong>base and head SHAs</strong> (deterministic, fork-safe — it does not
+depend on <code>origin</code> remote semantics or branch-name resolution), with
+<code>--unified=0</code> so cute-dbt sees the exact changed hunks:</p>
+<pre><code class="language-bash">mkdir -p _site
+git diff --unified=0 \
+  "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
+  &gt; diff.patch
+
+cute-dbt \
+  --manifest dbt_project/target/manifest.json \
+  --pr-diff @diff.patch \
+  --project-root dbt_project \
+  --out _site/report.html
+</code></pre>
+<p><code>--pr-diff @diff.patch</code> reads the unified diff (the leading <code>@</code> means
+“read from this file”). cute-dbt parses the diff’s <code>+++ b/&lt;path&gt;</code> headers
+to pick the in-scope set and its <code>@@ … @@</code> hunks to flag which tests the
+PR actually edited (block-precise updated detection + the inline YAML diff
+drawer key off the hunk spans). When a hunk changes a model’s <code>.sql</code>, the
+Model SQL section also shows an inline <strong>SQL diff</strong> of the model’s raw
+Jinja with a Raw ↔ Diff toggle — same diff engine, keyed off the same
+hunks. Both inline diffs ignore whitespace-only edits as standard (a pure
+re-indent shows the plain view, not a noisy diff). <code>--project-root dbt_project</code> rewrites the repo-relative diff paths so they match the
+manifest’s project-relative <code>original_file_path</code>s (drop it if your dbt
+project is at the repo root).
+cute-dbt parses the diff you hand it — it never shells out to <code>git</code> or
+reads <code>GITHUB_EVENT_PATH</code>, so the workflow stays in control of <em>how</em> the
+diff is produced.</p>
+<p><strong>Same-revision contract.</strong> Take the diff <code>base...head</code> and compile the
+manifest at <code>head</code> (the recipe below does both). Then the diff hunks line
+up with the working-tree YAML, which is what makes block precision and the
+inline diff trustworthy. If you feed cute-dbt a diff that no longer
+matches the compiled head (revision drift), it degrades gracefully — it
+keeps the file-granular “updated” mark and drops the inline diff rather
+than mislabel a test.</p>
+<p>cute-dbt writes only <code>report.html</code>; isolating it in a dedicated <code>_site/</code>
+dir (hence <code>mkdir -p _site</code> + <code>--out _site/report.html</code>) keeps the Pages
+publish in § 4 from pushing your <strong>whole checkout</strong> to the <code>gh-pages</code>
+branch — <code>publish_dir</code> points at <code>_site/</code>, not <code>.</code>.</p>
+<h2 id="4-pages-preview-public-repos"><a class="header" href="#4-pages-preview-public-repos">4. Pages preview (public repos)</a></h2>
+<p>Copy this into <code>.github/workflows/cute-dbt-pr-review.yml</code>. Edit
+<code>dbt_project</code>, the dbt adapter, and <code>CUTE_DBT_REV</code> (see § 6 install note).</p>
+<pre><code class="language-yaml">name: cute-dbt PR review
+on:
+  pull_request:
+    paths: ['dbt_project/**', '**/*.sql', '**/*.yml']
+
+# Least-privilege default; the job widens what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: cute-dbt-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write        # peaceiris/actions-gh-pages pushes to gh-pages
+      pull-requests: write    # sticky comment
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0           # base + head SHAs must be present
+          persist-credentials: false
+
+      # --- Compile the dbt project at the PR head. `dbt compile` (not
+      #     `dbt parse`) so compiled_code is populated. Adapter, toolchain,
+      #     and profile are adopter-specific — see § 2. ---
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - run: pip install dbt-core dbt-duckdb   # edit: your adapter (uv/poetry work too)
+      - name: Write a CI dbt profile
+        run: |
+          mkdir -p ~/.dbt
+          cat &gt; ~/.dbt/profiles.yml &lt;&lt;'PROFILE'
+          my_dbt_profile:        # edit: must match `profile:` in dbt_project.yml
+            target: ci
+            outputs:
+              ci:
+                type: duckdb     # edit: your adapter; cloud adapters read secrets from env
+                path: ':memory:'
+                threads: 4
+          PROFILE
+      - run: dbt deps --project-dir dbt_project
+      - run: dbt compile --project-dir dbt_project
+
+      # --- Install cute-dbt (see § 6 for the binstall form once published) ---
+      - uses: cargo-bins/cargo-binstall@aaa84a43aec4955a42c5ffc65d258961e39f276e # v1.19.1
+      - name: Install cute-dbt
+        env:
+          CUTE_DBT_REV: PUT_A_CUTE_DBT_MAIN_SHA_HERE   # edit: pin a commit
+        run: cargo install --locked --git https://github.com/breezy-bays-labs/cute-dbt --rev "$CUTE_DBT_REV"
+
+      # --- Diff (SHA-based: deterministic + fork-safe) + render.
+      #     `--unified=0` so cute-dbt sees the exact changed hunks
+      #     (block-precise updated-test detection + the inline YAML diff
+      #     drawer key off hunk spans, not just changed filenames). The
+      #     diff is taken base...head and the manifest was compiled at head
+      #     above, so the hunks line up with the working tree
+      #     (same-revision contract). ---
+      - name: Render diff-scoped report
+        run: |
+          set -euo pipefail
+          mkdir -p _site
+          git diff --unified=0 \
+            "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
+            &gt; diff.patch
+          cute-dbt \
+            --manifest dbt_project/target/manifest.json \
+            --pr-diff @diff.patch \
+            --project-root dbt_project \
+            --out _site/report.html
+
+      # --- Publish ONLY the report dir to a per-PR Pages subdirectory.
+      #     publish_dir: ./_site (NOT .) so the whole checkout never lands
+      #     on the gh-pages branch. ---
+      - uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./_site
+          keep_files: true
+          destination_dir: pr-${{ github.event.pull_request.number }}
+
+      # --- Sticky comment with the report link ---
+      - uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
+        with:
+          header: cute-dbt-pr-review
+          message: |
+            ## 📊 cute-dbt review ready
+
+            [**Open the diff-scoped report ↗**](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/pr-${{ github.event.pull_request.number }}/report.html)
+
+            Scoped to the models + unit tests this PR changed.
+</code></pre>
+<h2 id="5-artifact-link-private-repos--pages-less"><a class="header" href="#5-artifact-link-private-repos--pages-less">5. Artifact link (private repos / Pages-less)</a></h2>
+<p><strong>Identical to the Pages preview</strong> except: the job needs no
+<code>contents: write</code>, and the
+<code>peaceiris/actions-gh-pages</code> step is replaced by an artifact upload + a
+download link in the comment.</p>
+<pre><code class="language-yaml">    permissions:
+      contents: read
+      actions: read          # for the artifacts API call below
+      pull-requests: write
+
+    # ... same checkout / dbt compile / install / render steps as above ...
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cute-dbt-report
+          path: _site/report.html    # render step writes here (same as above)
+          retention-days: 30
+
+      - uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
+        with:
+          header: cute-dbt-pr-review
+          message: |
+            ## 📊 cute-dbt review ready
+
+            [**Download the diff-scoped report ↗**](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+            Download the `cute-dbt-report` artifact, unzip, open `report.html`
+            in your browser. Scoped to the models + unit tests this PR changed.
+</code></pre>
+<p>Artifact download requires the reviewer to be logged in with repo read
+access — which is exactly the auth gate that makes the artifact link the
+safe choice for private data.</p>
+<h2 id="6-trigger-patterns-opt-in-vs-always-on"><a class="header" href="#6-trigger-patterns-opt-in-vs-always-on">6. Trigger patterns (opt-in vs. always-on)</a></h2>
+<p>Teams that don’t want cute-dbt on <em>every</em> PR can gate the workflow. Each
+pattern <strong>replaces only the <code>on:</code> block (and adds a job-level <code>if:</code> where
+noted)</strong> — the job body from § 4 / § 5 is unchanged.</p>
+<h3 id="t1--always-on-the-default-above"><a class="header" href="#t1--always-on-the-default-above">T1 — Always-on (the default above)</a></h3>
+<pre><code class="language-yaml">on:
+  pull_request:
+    paths: ['dbt_project/**', '**/*.sql', '**/*.yml']
+</code></pre>
+<p>The <code>paths:</code> filter already skips PRs with zero dbt changes (cute-dbt
+would render a zero-scope report anyway; this just saves CI minutes).</p>
+<h3 id="t2--opt-in-by-label"><a class="header" href="#t2--opt-in-by-label">T2 — Opt-in by label</a></h3>
+<p>A reviewer adds a <code>dbt-review</code> label to the PR:</p>
+<pre><code class="language-yaml">on:
+  pull_request:
+    types: [labeled, synchronize]
+jobs:
+  review:
+    if: &gt;
+      (github.event.action == 'labeled' &amp;&amp; github.event.label.name == 'dbt-review')
+      || (github.event.action == 'synchronize' &amp;&amp; contains(github.event.pull_request.labels.*.name, 'dbt-review'))
+    # ... rest of the job ...
+</code></pre>
+<p><code>labeled</code> fires the first run; <code>synchronize</code> keeps the report fresh on
+later pushes while the label is present.</p>
+<h3 id="t3--opt-in-by-pr-comment"><a class="header" href="#t3--opt-in-by-pr-comment">T3 — Opt-in by PR comment</a></h3>
+<p>Anyone with write access comments <code>/cute-dbt</code>:</p>
+<pre><code class="language-yaml">on:
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    if: &gt;
+      github.event.issue.pull_request
+      &amp;&amp; contains(github.event.comment.body, '/cute-dbt')
+      &amp;&amp; github.event.comment.author_association != 'NONE'
+    runs-on: ubuntu-latest
+    steps:
+      # issue_comment runs in BASE-repo context, not on the PR head — you
+      # must check out the PR ref explicitly before the dbt/render steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: gh pr checkout ${{ github.event.issue.number }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # ... then the dbt compile / install / render / publish steps ...
+</code></pre>
+<p>The <code>author_association != 'NONE'</code> check stops drive-by triggers from
+non-contributors. Note the SHA-based diff in § 3 reads
+<code>github.event.pull_request.*</code>, which is absent on <code>issue_comment</code> — under
+T3, derive the base/head SHAs from <code>gh pr view ${{ github.event.issue.number }} --json baseRefOid,headRefOid</code> instead.</p>
+<h3 id="t4--manual-button"><a class="header" href="#t4--manual-button">T4 — Manual button</a></h3>
+<pre><code class="language-yaml">on:
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: PR number to review
+        required: true
+</code></pre>
+<p>Read <code>inputs.pr-number</code>, <code>gh pr checkout</code> it, derive its SHAs as in T3.
+Best paired with T1/T2 for the always-on path and used for one-off
+re-runs.</p>
+<p>Patterns compose — T1 + T4 on one workflow (always-on plus a manual
+re-run button) is common.</p>
+<h2 id="7-customization"><a class="header" href="#7-customization">7. Customization</a></h2>
+<ul>
+<li><strong>dbt project at the repo root:</strong> drop <code>--project-root</code> and set
+<code>--manifest target/manifest.json</code>.</li>
+<li><strong>A different dbt version / engine:</strong> edit the <code>pip install</code> line. Both
+dbt-core 1.8+ and dbt-fusion 2.0-preview emit manifest schema v12, which
+cute-dbt reads identically — see <a href="#how-it-works">How it works</a>. To
+compile with <strong>dbt-fusion</strong> instead of dbt-core, see the standalone-binary
+variant in § 11 below (no pip).</li>
+<li><strong>Custom comment body:</strong> the <code>message:</code> is plain markdown; add a model
+count, a CHANGELOG link, whatever your reviewers want.</li>
+<li><strong>Branch protection:</strong> make the <code>review</code> job a required status check so
+a PR can’t merge until the report renders.</li>
+</ul>
+<h2 id="8-cleanup-on-pr-close-pages-preview"><a class="header" href="#8-cleanup-on-pr-close-pages-preview">8. Cleanup on PR close (Pages preview)</a></h2>
+<p>The Pages <code>pr-&lt;N&gt;/</code> subdirectories accumulate. A small companion workflow
+removes each when its PR closes:</p>
+<pre><code class="language-yaml">name: cute-dbt PR review cleanup
+on:
+  pull_request:
+    types: [closed]
+permissions:
+  contents: write
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: gh-pages
+          persist-credentials: true
+      - run: |
+          set -euo pipefail
+          git rm -rf "pr-${{ github.event.pull_request.number }}" || exit 0
+          git config user.name  github-actions
+          git config user.email github-actions@github.com
+          git commit -m "cleanup: remove pr-${{ github.event.pull_request.number }} preview" || exit 0
+          git push
+</code></pre>
+<h2 id="9-troubleshooting"><a class="header" href="#9-troubleshooting">9. Troubleshooting</a></h2>
+<ul>
+<li><strong><code>project root does not exist</code></strong> — <code>--project-root</code> is validated against
+the working directory. Make sure the path matches where <code>dbt_project/</code>
+is checked out.</li>
+<li><strong>An in-scope model fails with <code>NotCompiled</code> / “run dbt compile”</strong> — the
+manifest was produced by <code>dbt parse</code>, not <code>dbt compile</code>. Use <code>dbt compile</code> (§ 2) so <code>compiled_code</code> is populated.</li>
+<li><strong><code>dbt compile</code> fails: “Could not find profile” / credentials error</strong> —
+the <code>profiles.yml</code> top-level key must match <code>profile:</code> in your
+<code>dbt_project.yml</code>, and cloud adapters need their credential env vars set
+(§ 2). The CI-profile step writes to <code>~/.dbt/profiles.yml</code>, dbt’s default
+location, so no <code>--profiles-dir</code> is needed.</li>
+<li><strong>Empty report (“0 unit tests in scope”)</strong> — the PR changed no files
+that map to a model <code>.sql</code> or a unit-test <code>.yml</code>. Confirm <code>--project-root</code>
+matches your layout (repo-relative diff paths vs. project-relative
+manifest paths) and that <code>fetch-depth: 0</code> is set so the diff resolves.</li>
+<li><strong>Pages link 404s</strong> — Pages isn’t enabled, or it’s pointed at the wrong
+branch. Enable it on <code>gh-pages</code> (§ 2), or switch to the artifact link.</li>
+<li><strong>Fork PRs:</strong> with <code>pull_request</code> (not <code>pull_request_target</code>), forks get
+a read-only <code>GITHUB_TOKEN</code>, so the Pages-publish and sticky-comment steps
+silently no-op on fork PRs (same-repo branches are unaffected). If you
+need fork coverage, either run <em>only the comment step</em> under
+<code>pull_request_target</code> (never checking out PR code), or split the workflow
+so a <a href="https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#workflow_run"><code>workflow_run</code></a>-triggered
+job posts the comment in base-repo context.</li>
+<li><strong>Comment trigger (T3) not firing</strong> — check the <code>author_association</code>
+gate and that the comment contains <code>/cute-dbt</code> verbatim.</li>
+</ul>
+<h3 id="install-note--6-reference"><a class="header" href="#install-note--6-reference">Install note (§ 6 reference)</a></h3>
+<p>While cute-dbt is <strong>unpublished</strong>, install from a pinned commit:
+<code>cargo install --locked --git https://github.com/breezy-bays-labs/cute-dbt --rev &lt;SHA&gt;</code>
+(set <code>CUTE_DBT_REV</code> to a <code>main</code> SHA you trust — pinning is mandatory per
+the <a href="#release-discipline">workflow-hardening convention</a>). Once
+cute-dbt is on crates.io, replace those two steps with the faster
+<code>cargo binstall cute-dbt --version 0.1 --no-confirm</code> (the <code>0.1</code> requirement
+resolves to the latest compatible <code>0.1.x</code> patch).</p>
+<h2 id="10-v01-fidelity-limits"><a class="header" href="#10-v01-fidelity-limits">10. v0.1 fidelity limits</a></h2>
+<p>PR-diff scoping picks the in-scope set from the diff’s <strong>changed file
+paths</strong>; scope selection stays path-granular even though the diff’s hunks
+now drive block-precise updated-test detection. A few cases are out of
+scope by design (use <code>--baseline-manifest</code> if you need them):</p>
+<ul>
+<li>A <code>packages.yml</code> / <code>dbt deps</code> change that alters compiled output without
+touching a <code>.sql</code>/<code>.yml</code> model file — the diff carries no path that maps
+to an affected node.</li>
+<li>A <strong>renamed</strong> model (the diff shows a deleted path + an added path; the
+deleted path maps to no current-manifest node).</li>
+</ul>
+<p>A YAML <strong>config-block</strong> edit no longer mislabels a sibling test as
+updated: block precision flags only the tests whose block a diff hunk
+actually touched, so a change confined to a <code>config:</code> block won’t mark the
+<code>unit_tests:</code> in the same file as updated.</p>
+<p>See <a href="#features">Features</a> for the full fidelity matrix.</p>
+<h2 id="11-variant-compile-with-dbt-fusion-standalone-binary-no-pip"><a class="header" href="#11-variant-compile-with-dbt-fusion-standalone-binary-no-pip">11. Variant: compile with dbt-fusion (standalone binary, no pip)</a></h2>
+<p><a href="https://docs.getdbt.com/docs/fusion/about-fusion">dbt-fusion</a> is a
+standalone Rust binary — <strong>no Python, no pip, no virtualenv</strong>. If your
+project compiles under fusion, swap the <code>setup-python</code> + <code>pip install</code> +
+<code>~/.dbt/profiles.yml</code> steps in § 4 / § 5 for the installer below. Everything
+else (the diff + render core in § 3, the sticky comment, the trigger
+patterns) is unchanged — fusion and dbt-core both emit manifest schema v12,
+which cute-dbt reads identically.</p>
+<pre><code class="language-yaml">      # Install dbt-fusion via the official standalone-binary installer,
+      # PINNED to a specific version (never floating `latest`). The
+      # installer drops `dbt` into ~/.local/bin.
+      - name: Install dbt-fusion
+        env:
+          FUSION_VERSION: 2.0.0-preview.177   # edit: pin your fusion version
+        run: |
+          set -euo pipefail
+          # `--version VER` pins the install; `--update` only updates an
+          # existing install (wrong for a fresh CI runner).
+          curl -fsSL https://public.cdn.getdbt.com/fs/install/install.sh \
+            | sh -s -- --version "$FUSION_VERSION"
+          echo "$HOME/.local/bin" &gt;&gt; "$GITHUB_PATH"
+          # Fail loud if the pin didn't land the intended release (PATH update
+          # above applies only to later steps, so call dbt by full path here).
+          "$HOME/.local/bin/dbt" --version | head -1 | grep -q "$FUSION_VERSION" \
+            || { echo "::error::expected dbt-fusion $FUSION_VERSION"; exit 1; }
+
+      # Compile. With an in-project `profiles.yml` (duckdb `:memory:`),
+      # compile runs fully offline — no warehouse, no secrets, no network.
+      # If your project has no dbt packages there is no `dbt deps` step.
+      - name: Compile dbt project (dbt-fusion)
+        working-directory: dbt_project   # edit: your project dir
+        run: |
+          set -euo pipefail
+          dbt --version
+          dbt compile --profiles-dir .   # profiles.yml committed in-project
+</code></pre>
+<p>Notes:</p>
+<ul>
+<li><strong>Pin the version.</strong> A floating <code>latest</code> makes CI non-reproducible and
+can break on a fusion release. Pin a <code>2.0.0-preview.NNN</code> tag you have
+tested (the installer takes <code>--version</code> via <code>sh -s -- --version &lt;tag&gt;</code>,
+no <code>v</code> prefix).</li>
+<li><strong>In-project <code>profiles.yml</code> + <code>--profiles-dir .</code></strong> is the offline-friendly
+setup — <code>compile</code> only parses and renders SQL, so the duckdb <code>:memory:</code>
+target is never materialized and needs no secrets. (Alternatively keep
+the <code>~/.dbt/profiles.yml</code> approach from § 4.)</li>
+<li><strong>Deprecated test-arg format.</strong> Fusion rejects dbt’s deprecated
+generic-test argument format that dbt-core only warns about. If
+<code>dbt compile</code> errors on that, run the official autofix ephemerally (no
+venv, no pip): <code>uvx dbt-autofix@latest deprecations --path .</code>.</li>
+<li>This is exactly the path the cute-dbt repo’s own
+<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/.github/workflows/report-preview.yml"><code>report-preview.yml</code></a>
+uses to self-dogfood <code>--pr-diff</code> against an embedded fusion example
+project — CI recompiles an <strong>ephemeral</strong> manifest at the PR head and
+renders the PR’s own diff into the sticky comment.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="zero-egress--the-privacy-property"><a class="header" href="#zero-egress--the-privacy-property">Zero egress — the privacy property</a></h1>
+<p>cute-dbt’s load-bearing trait is that the generated <code>report.html</code>
+opens via <code>file://</code> and makes <strong>zero outbound network requests</strong>.
+Your manifest data — schema names, column names, fixture rows — never
+leaves your machine through the report.</p>
+<p>This page explains what that means, how it is mechanically enforced,
+and how anyone (you, your security team, an auditor) can re-verify
+it without taking our word for anything.</p>
+<h2 id="what-zero-egress-means-concretely"><a class="header" href="#what-zero-egress-means-concretely">What “zero egress” means concretely</a></h2>
+<p>When you open <code>report.html</code> in a browser via <code>file://</code>:</p>
+<ul>
+<li>No <code>&lt;script src="https://…"&gt;</code> loads.</li>
+<li>No <code>&lt;link rel="stylesheet" href="https://…"&gt;</code> loads.</li>
+<li>No <code>&lt;img src="https://…"&gt;</code> loads.</li>
+<li>No CSS <code>@import url("https://…")</code>.</li>
+<li>No CSS <code>url("…")</code> resolving to a remote resource.</li>
+<li>No protocol-relative <code>//cdn.example.com/…</code> references.</li>
+<li>No fetch / XMLHttpRequest from inlined JavaScript.</li>
+<li>No Mermaid runtime fetching webfonts or remote layouts (Mermaid is
+embedded as a UMD bundle, initialized with <code>securityLevel: 'strict'</code>
+and an explicit system-font stack).</li>
+</ul>
+<p>The report is, structurally, a self-contained text file. Open it on
+an airplane; open it with <code>--disable-network</code> in your browser; open
+it in a network-blocked sandbox. The behavior is identical.</p>
+<h2 id="how-this-is-enforced"><a class="header" href="#how-this-is-enforced">How this is enforced</a></h2>
+<p>Two mechanical checks, both re-runnable from a fresh clone:</p>
+<h3 id="primary-headless-browser-network-block-proof"><a class="header" href="#primary-headless-browser-network-block-proof">Primary: headless-browser network-block proof</a></h3>
+<p>A test in the repo opens the committed <code>examples/jaffle-shop-report.html</code>
+in a real headless Chromium via <code>file://</code>, <strong>with all network access
+denied via Chrome DevTools Protocol</strong>, and subscribes to every
+<code>Network.requestWillBeSent</code> event. Any HTTP / HTTPS / WebSocket
+request — even an inert pre-flight — fails the test.</p>
+<pre><code class="language-sh"># From a fresh clone (the test is `#[ignore]` by default so it
+# doesn't slow down standard `cargo nextest run` invocations).
+cargo test --test headless_zero_egress -- --ignored
+</code></pre>
+<p>This is the <strong>load-bearing artifact</strong>. It runs on every PR in CI as
+the <code>Headless zero-egress proof (file://, network blocked)</code> required
+check.</p>
+<h3 id="secondary-structured-resource-ref-lint"><a class="header" href="#secondary-structured-resource-ref-lint">Secondary: structured resource-ref lint</a></h3>
+<p>A separate test parses the generated HTML with a real HTML parser
+(<code>tl</code>) and rejects every “real loading construct” — the bullet list
+above (<code>&lt;script src&gt;</code>, <code>&lt;link href&gt;</code>, <code>&lt;img src&gt;</code>, CSS <code>@import</code>,
+CSS <code>url()</code>, protocol-relative <code>//</code>). This is <strong>not</strong> a <code>grep http</code>
+— minified JavaScript bundles carry hundreds of inert URL string
+literals that a naive grep would false-positive on. The structured
+parser scopes the lint to <strong>DOM positions that actually trigger
+loads</strong>.</p>
+<p>This is the <code>Resource-ref lint (real loading constructs)</code> required
+check.</p>
+<h2 id="why-two-checks"><a class="header" href="#why-two-checks">Why two checks</a></h2>
+<ul>
+<li>The <strong>structured lint</strong> is fast and tells you <em>what</em> loading
+construct was introduced, with a precise line number.</li>
+<li>The <strong>headless network-block proof</strong> is the <em>truth</em> — it asks the
+browser, “did anything try to leave the file://?” That’s the
+question the user actually cares about.</li>
+</ul>
+<p>If a future change introduces a load via a path the structured lint
+hasn’t been taught about (e.g., a service worker, an iframe, a
+dynamic <code>import()</code>), the headless proof still catches it. The two
+checks are belt-and-braces.</p>
+<h2 id="what-is-not-bundled"><a class="header" href="#what-is-not-bundled">What is NOT bundled</a></h2>
+<p>cute-dbt is also <strong>zero telemetry</strong> — no analytics, no crash
+reporting, no auto-update — but that’s a property of the <strong>CLI
+binary</strong>, not the report. This page is specifically about the
+generated HTML.</p>
+<h2 id="vendored-assets"><a class="header" href="#vendored-assets">Vendored assets</a></h2>
+<p>Every embedded asset (Sakura CSS, jQuery, DataTables, Mermaid) is
+listed in
+<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/assets/MANIFEST.toml"><code>assets/MANIFEST.toml</code></a>
+with its pinned version, SHA-256, and SPDX license. A CI guard refuses
+to merge if <code>assets/</code> contains a file not listed in <code>MANIFEST.toml</code>.</p>
+<p>The <code>AUDIT.md</code> file at the repo root indexes the full re-runnable
+auditability package — the two checks above, plus the manifest, plus
+<code>Cargo.lock</code>, plus the synthetic-only fixture manifest. A reviewer
+running every artifact in <code>AUDIT.md</code> ends with end-to-end confidence
+in the zero-egress property.</p>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-c2a407aa.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+
+        <script>
+        window.addEventListener('load', function() {
+            window.setTimeout(window.print, 100);
+        });
+        </script>
+
+
+    </div>
+    </body>
+</html>
