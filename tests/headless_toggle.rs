@@ -42,12 +42,14 @@ use headless_chrome::protocol::cdp::Runtime;
 use headless_chrome::{Browser, LaunchOptionsBuilder, Tab};
 
 use cute_dbt::adapters::manifest::FileManifestSource;
-use cute_dbt::adapters::render::{ScopeSource, render_report};
+use cute_dbt::adapters::render::{
+    ExternalFixtures, LoadedFixture, ScopeSource, render_report, render_report_with_externals,
+};
 use cute_dbt::domain::{
     BlockDiff, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, FileHunks, Hunk,
     InScopeSet, Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId,
     NormalizedDiffIndex, PrDiff, UnitTest, UnitTestDataDiff, UnitTestExpect, UnitTestGiven,
-    UnitTestYamlBlock, reconstruct_table_diffs,
+    UnitTestYamlBlock, external_fixture_table, reconstruct_table_diffs,
 };
 use cute_dbt::ports::ManifestSource;
 
@@ -3301,6 +3303,187 @@ fn incremental_badges_modes_tooltip_and_this_given() {
     assert!(
         eval_bool(&tab, &format!("{TOOLTIP} === null")),
         "selecting a modified-but-untested model clears the leaked expect-semantics tooltip",
+    );
+
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#126 external fixture file rendering --------------------
+
+/// Render a report whose tests carry external fixtures, threading the loaded
+/// `ExternalFixtures` (what the cli `gather_external_fixtures` step produces)
+/// through `render_report_with_externals`.
+fn render_with_external_fixtures(
+    filename: &str,
+    nodes: Vec<Node>,
+    tests: Vec<(&str, UnitTest)>,
+    model_ids: &[&str],
+    externals: HashMap<String, ExternalFixtures>,
+) -> String {
+    let all_ids: Vec<String> = tests.iter().map(|(id, _)| (*id).to_owned()).collect();
+    let m = manifest(nodes, tests);
+    let in_scope: InScopeSet = all_ids.iter().cloned().collect();
+    let models: ModelInScopeSet = model_ids.iter().map(|id| NodeId::new(*id)).collect();
+    let changed: InScopeSet = all_ids.into_iter().collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &changed,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &externals,
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    format!("file://{p}")
+}
+
+/// A unit test with one external-fixture given (`rows: null` + a `fixture`
+/// path — the confirmed fusion shape).
+fn ut_external_given(name: &str, model_bare: &str, fixture: &str, format: &str) -> UnitTest {
+    UnitTest::new(
+        name.to_owned(),
+        NodeId::new(model_bare),
+        vec![UnitTestGiven::new(
+            "ref('a')",
+            serde_json::Value::Null,
+            Some(format.to_owned()),
+            Some(fixture.to_owned()),
+        )],
+        UnitTestExpect::new(serde_json::Value::Null, None, None),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+}
+
+/// The `ExternalFixtures` the cli would build for a LOADED csv/sql given 0.
+fn loaded_given_0(text: &str, format: &str) -> ExternalFixtures {
+    let mut ext = ExternalFixtures::default();
+    ext.given.insert(
+        0,
+        LoadedFixture {
+            text: text.to_owned(),
+            format: Some(format.to_owned()),
+            table: external_fixture_table(text, Some(format)),
+        },
+    );
+    ext
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn external_csv_fixture_renders_grid_with_provenance_and_no_affordance() {
+    // The #126 happy path: a `fixture: tests/fixtures/a.csv` given whose file
+    // the reader loaded renders a REAL cell grid (not the #98 silently-empty
+    // affordance) + a "from <path>" provenance chip.
+    let test_id = "unit_test.shop.m.t";
+    let mut externals = HashMap::new();
+    externals.insert(
+        test_id.to_owned(),
+        loaded_given_0("id,amount\n1,10\n2,20\n", "csv"),
+    );
+    let url = render_with_external_fixtures(
+        "headless_ext_csv.html",
+        vec![model_node("model.shop.m")],
+        vec![(
+            test_id,
+            ut_external_given("t", "m", "tests/fixtures/a.csv", "csv"),
+        )],
+        &["model.shop.m"],
+        externals,
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    show_all_inputs(&tab);
+
+    assert!(
+        visible(&tab, ".given-section table.given-table"),
+        "an external csv fixture that loaded renders a real grid",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.given-section table.given-table tbody tr').length",
+        ),
+        2,
+        "the two loaded csv rows render",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.given-section .external-fixture-note') === null",
+        ),
+        "the silently-empty-grid affordance must NOT appear when the fixture loaded",
+    );
+    assert!(
+        eval_string(
+            &tab,
+            "(document.querySelector('.given-section .fixture-provenance') || {}).textContent || ''",
+        )
+        .contains("tests/fixtures/a.csv"),
+        "the provenance chip names the external fixture path",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn unreadable_external_fixture_shows_affordance_not_grid() {
+    // The fixture file could not be read (no project root / missing file): the
+    // cli leaves it out of the externals map, so `rows` stays null and the
+    // template falls back to the #98 affordance — never a grid, never a chip.
+    let test_id = "unit_test.shop.m.t";
+    let url = render_with_external_fixtures(
+        "headless_ext_unreadable.html",
+        vec![model_node("model.shop.m")],
+        vec![(
+            test_id,
+            ut_external_given("t", "m", "tests/fixtures/a.csv", "csv"),
+        )],
+        &["model.shop.m"],
+        HashMap::new(),
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    show_all_inputs(&tab);
+
+    assert!(
+        visible(&tab, ".given-section .external-fixture-note"),
+        "an unreadable external fixture falls back to the #98 affordance",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.given-section table.given-table') === null",
+        ),
+        "no grid renders when the fixture is unreadable",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.given-section .fixture-provenance') === null",
+        ),
+        "no provenance chip on the unreadable affordance path",
     );
 
     let _ = tab.close(true);

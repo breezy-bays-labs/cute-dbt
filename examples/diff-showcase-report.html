@@ -365,6 +365,9 @@ g.dag-node:focus-visible { outline: 2px dashed #1d7484; outline-offset: 3px; }
 .node-role-badge.role-final     { color: #b07400; }
 .given-empty { padding: 0.75rem 1rem; color: #6a6a72; font-style: italic; border: 1px dashed #ccc; margin-bottom: 0.75rem; }
 .format-badge { font-size: 0.75em; color: #6a6a72; padding: 0.05rem 0.4rem; border: 1px solid #ccc; border-radius: 999px; }
+/* cute-dbt#126 — external fixture provenance chip ("from <path>"). */
+.fixture-provenance { font-size: 0.75em; color: #6a6a72; }
+.fixture-provenance code { font-size: 0.95em; }
 /* cute-dbt#145 — incremental-model unit-test semantics. Amber (matching
    role-final / the recursive banner) for the incremental affordances;
    neutral grey for the full-refresh branch. */
@@ -4986,6 +4989,15 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     if (given.is_this) {
       $hdr.append($("<span>").addClass("this-badge").text("prior model state"));
     }
+    // cute-dbt#126 — provenance chip when the data was LOADED from an external
+    // fixture file (`fixture:` set AND rows present, i.e. the reader inlined
+    // it). Shown in BOTH the grid and the sql-code-block paths below; the
+    // UNREADABLE case (rows still null) keeps the buildExternalFixtureAffordance
+    // instead. Inline fixtures omit `fixture`, so the chip never fires for them
+    // and existing reports stay byte-identical.
+    if (isLoadedExternalFixture(given)) {
+      $hdr.append(buildFixtureProvenanceChip(given.fixture));
+    }
     if (isSqlCodeBlockFixture(given)) {
       $hdr.append($("<span>").addClass("format-badge").text("format: sql"));
       $sec.append($hdr);
@@ -5069,6 +5081,11 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
           .text(tip));
         $exHdr.append($tip);
       }
+    }
+    // cute-dbt#126 — external-fixture provenance for the expect side (loaded
+    // from a file). `$body` is emptied each render, so no cleanup is needed.
+    if (isLoadedExternalFixture(t.expected)) {
+      $body.append(buildFixtureProvenanceChip(t.expected.fixture));
     }
     if (isSqlCodeBlockFixture(t.expected)) {
       $panel.find(".expected-rowcount").text("format: sql");
@@ -5892,6 +5909,23 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   // key is set AND `rows` is null (the manifest does NOT inline the data).
   function isExternalFixture(obj) {
     return Boolean(obj && obj.fixture && (obj.rows === null || obj.rows === undefined));
+  }
+
+  // cute-dbt#126 — the fixture data lives in an external file AND was LOADED
+  // (the reader inlined it, so `rows` is the file body). The complement of
+  // isExternalFixture over a `fixture`-bearing obj: loaded → render the grid /
+  // sql code block + a provenance chip; unloaded (unreadable) → the affordance.
+  function isLoadedExternalFixture(obj) {
+    return Boolean(obj && obj.fixture && obj.rows !== null && obj.rows !== undefined);
+  }
+
+  // A small "from <path>" chip noting the fixture's external source, shown
+  // alongside the loaded grid / sql code block. Inline fixtures omit `fixture`
+  // so this never renders for them (byte-identity of existing reports holds).
+  function buildFixtureProvenanceChip(name) {
+    return $("<span>").addClass("fixture-provenance")
+      .append(document.createTextNode("from "))
+      .append($("<code>").text(String(name)));
   }
 
   // The external-fixture affordance: never a silently-empty grid. Names the
