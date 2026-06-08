@@ -14,7 +14,7 @@
 //! [`crate::adapters::render::render_report`], so the explicit
 //! `parse_ctes` step is purely greppable scaffolding that mirrors the
 //! ARCHITECTURE diagram. The `gather_authoring_yaml` step reads each
-//! in-scope unit-test's source YAML through the [`SourceYamlReader`]
+//! in-scope unit-test's source YAML through the [`ProjectFileReader`]
 //! port and slices the authored block — soft-failing per test so a
 //! missing file or unsupported manifest never breaks the report
 //! (cute-dbt#69). The `render` step invokes the askama renderer.
@@ -37,15 +37,15 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::adapters::manifest::{FileManifestSource, load_baseline};
+use crate::adapters::project_file::FsProjectFileReader;
 use crate::adapters::render::{ScopeSource, index_tests_for_models, render_report};
-use crate::adapters::source_yaml::FsSourceYamlReader;
 use crate::domain::{
     BlockDiff, DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NormalizedDiffIndex,
     PreflightError, ScopeInput, ScopeSelection, UnitTestDataDiff, UnitTestYamlBlock,
     extract_unit_test_block, preflight_compiled, reconstruct_block_diffs,
     reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks, select_in_scope,
 };
-use crate::ports::{ManifestSource, SourceYamlReader};
+use crate::ports::{ManifestSource, ProjectFileReader};
 
 use args::Cli;
 
@@ -268,14 +268,14 @@ fn gather_authoring_yaml(
             project_root.display(),
         );
     }
-    let reader = FsSourceYamlReader::new(project_root);
+    let reader = FsProjectFileReader::new(project_root);
     gather_authoring_yaml_with_reader(&reader, current, in_scope)
 }
 
-/// Pure composition step over the [`SourceYamlReader`] port — testable
+/// Pure composition step over the [`ProjectFileReader`] port — testable
 /// without touching the filesystem by passing an in-memory impl.
 fn gather_authoring_yaml_with_reader(
-    reader: &dyn SourceYamlReader,
+    reader: &dyn ProjectFileReader,
     current: &Manifest,
     in_scope: &InScopeSet,
 ) -> HashMap<String, UnitTestYamlBlock> {
@@ -567,7 +567,7 @@ mod tests {
         entries: StdHashMap<String, StubResult>,
     }
 
-    impl SourceYamlReader for StubReader {
+    impl ProjectFileReader for StubReader {
         fn read(&self, project_relative: &str) -> io::Result<String> {
             match self.entries.get(project_relative) {
                 Some(StubResult::Ok(s)) => Ok(s.clone()),
