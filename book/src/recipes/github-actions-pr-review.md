@@ -370,21 +370,34 @@ on:
   pull_request:
     types: [closed]
 permissions:
-  contents: write
+  contents: read
+# Share one group with your preview-publish (and book-deploy, if any)
+# workflows so concurrent gh-pages pushes can't race + lose commits.
+concurrency:
+  group: gh-pages
+  cancel-in-progress: false
 jobs:
   cleanup:
     runs-on: ubuntu-latest
+    # Fork PRs get a read-only token → the push can't succeed; skip cleanly.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           ref: gh-pages
-          persist-credentials: true
-      - run: |
+          persist-credentials: true   # this job pushes the cleanup commit
+      - env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}   # via env, not inline ${{ }}
+        run: |
           set -euo pipefail
-          git rm -rf "pr-${{ github.event.pull_request.number }}" || exit 0
-          git config user.name  github-actions
-          git config user.email github-actions@github.com
-          git commit -m "cleanup: remove pr-${{ github.event.pull_request.number }} preview" || exit 0
+          # actions/checkout sets no committer identity — set one or commit fails.
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -r --ignore-unmatch "pr-${PR_NUMBER}"
+          # `|| exit 0`: nothing to remove → nothing to commit → end green.
+          git commit -m "chore: clean up Pages preview for PR #${PR_NUMBER}" || exit 0
           git push
 ```
 
