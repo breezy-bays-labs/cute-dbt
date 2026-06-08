@@ -2858,6 +2858,7 @@ mod tests {
     fn data_diff_payload_wire_ships_both_display_and_key_axes() {
         let data_diff = UnitTestDataDiff {
             given: vec![NamedTableDiff {
+                ordinal: 0,
                 input: "ref('a')".into(),
                 diff: FixtureTableDiff {
                     columns: vec![

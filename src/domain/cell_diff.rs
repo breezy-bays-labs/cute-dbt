@@ -86,13 +86,16 @@ use crate::domain::unit_test_yaml::UnitTestYamlBlock;
 /// (Workflow 2) onto a test's render payload under `data_diff`, the sibling
 /// of the #96 `yaml_diff`.
 ///
-/// `given` carries one [`NamedTableDiff`] per changed `given` input
-/// (keyed by its `input` reference). `expect` carries the `expect`
-/// fixture's diff, or `None` when `expect` is sql/opaque or unchanged.
+/// `given` carries one [`NamedTableDiff`] per *changed* `given` input
+/// (each identified by its source ordinal, since two givens may share an
+/// `input` reference). `expect` carries the `expect` fixture's diff, or
+/// `None` when `expect` is sql/opaque or unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct UnitTestDataDiff {
-    /// Per-`given`-input table diffs, in `given` order, keyed by `input`.
-    /// Only inputs whose fixture data actually changed appear here.
+    /// Per-`given`-input table diffs, in source order, each tagged with its
+    /// source [`ordinal`](NamedTableDiff::ordinal). Only givens whose fixture
+    /// data actually changed appear here, so this vec is a *subset* of the
+    /// test's givens — the ordinal (not the vec index) is the identity.
     pub given: Vec<NamedTableDiff>,
     /// The `expect` fixture's diff — `None` when `expect` is sql/opaque or
     /// carried no real change.
@@ -109,11 +112,25 @@ impl UnitTestDataDiff {
     }
 }
 
-/// One `given` input's table diff, keyed by its `input` reference (e.g.
-/// `ref('stg_orders')`).
+/// One `given` input's table diff, identified by its **source ordinal**
+/// (its 0-based position in the test's `given:` list).
+///
+/// The ordinal — not the `input` text — is the stable identity, because
+/// two `given` blocks can carry the *same* `ref(...)` input (e.g. two
+/// fixtures against one upstream model); keying by `input` would collapse
+/// both onto the first match. The render loop binds each rendered
+/// given-section to its diff by this ordinal (cute-dbt#131).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedTableDiff {
-    /// The `given` input reference this diff belongs to.
+    /// 0-based position of this `given` in the test's `given:` list — the
+    /// stable per-given identity. Robust to the fact that
+    /// [`UnitTestDataDiff::given`] is *filtered* to changed givens only, so
+    /// a dense index into that vec would not align with the full given list
+    /// the renderer iterates.
+    pub ordinal: usize,
+    /// The `given` input reference this diff belongs to (e.g.
+    /// `ref('stg_orders')`). Display/debug only — NOT the identity, since
+    /// two givens may share it.
     pub input: String,
     /// The cell-level diff of that input's fixture rows.
     pub diff: FixtureTableDiff,
@@ -617,7 +634,11 @@ fn data_diff_for_test(
 /// manifest unit test (NEW) and the reconstructed OLD YAML text.
 fn build_data_diff(ut: &UnitTest, old_text: &str) -> UnitTestDataDiff {
     let mut data = UnitTestDataDiff::default();
-    for g in ut.given() {
+    // `ordinal` is the given's position in the test's `given:` list — the
+    // stable identity threaded onto each `NamedTableDiff`. Because only
+    // *changed* givens are pushed, the source ordinal (not the push index)
+    // is what the renderer binds on (cute-dbt#131).
+    for (ordinal, g) in ut.given().iter().enumerate() {
         let new_tbl = table_from_manifest_rows(g.rows(), g.format());
         let old = slice_named_region(old_text, "input", Some(g.input()));
         // Build the OLD table ONCE (borrowing `old`); both the rejection check
@@ -629,6 +650,7 @@ fn build_data_diff(ut: &UnitTest, old_text: &str) -> UnitTestDataDiff {
         let old_rejected = is_rejected_sql_old(old.as_ref(), old_tbl.as_ref());
         if let Some(diff) = table_diff_if_changed(old_tbl, new_tbl, old_rejected, new_rejected) {
             data.given.push(NamedTableDiff {
+                ordinal,
                 input: g.input().to_owned(),
                 diff,
             });
@@ -1443,6 +1465,85 @@ mod tests {
         );
     }
 
+    // ----- cute-dbt#131: per-given ordinal is the SOURCE position -----
+    //
+    // When an *earlier* given is unchanged, the later changed given's
+    // `NamedTableDiff` must carry its SOURCE ordinal (1), not a dense
+    // push-index (0). The renderer binds each given-section to its diff by
+    // this ordinal, so a dense index would mis-bind two givens that share a
+    // `ref(...)`. Fails if `build_data_diff` ever numbers by push order.
+    #[test]
+    fn data_diff_ordinal_is_source_position_not_push_index() {
+        use crate::domain::manifest::{DependsOn, NodeId};
+        use crate::domain::unit_test::{UnitTest, UnitTestExpect, UnitTestGiven};
+
+        // OLD working-tree text: given[0] ref('a') (id/name), given[1]
+        // ref('b') (id/v=1), expect (id/ok).
+        let old_text = [
+            "  - name: t",
+            "    model: m",
+            "    given:",
+            "      - input: ref('a')",
+            "        format: dict",
+            "        rows:",
+            "          - id: 1",
+            "            name: alice",
+            "      - input: ref('b')",
+            "        format: dict",
+            "        rows:",
+            "          - id: 1",
+            "            v: 1",
+            "    expect:",
+            "      format: dict",
+            "      rows:",
+            "        - id: 1",
+            "          ok: 1",
+        ]
+        .join("\n");
+
+        // NEW (manifest): given[0] UNCHANGED, given[1] v 1 → 2 (changed),
+        // expect unchanged.
+        let ut = UnitTest::new(
+            "t",
+            NodeId::new("model.shop.m"),
+            vec![
+                UnitTestGiven::new(
+                    "ref('a')",
+                    serde_json::json!([{"id": 1, "name": "alice"}]),
+                    Some("dict".to_owned()),
+                    None,
+                ),
+                UnitTestGiven::new(
+                    "ref('b')",
+                    serde_json::json!([{"id": 1, "v": 2}]),
+                    Some("dict".to_owned()),
+                    None,
+                ),
+            ],
+            UnitTestExpect::new(
+                serde_json::json!([{"id": 1, "ok": 1}]),
+                Some("dict".to_owned()),
+                None,
+            ),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            Some("models/_ut.yml".to_owned()),
+        );
+
+        let data = build_data_diff(&ut, &old_text);
+        // Only the SECOND given changed → exactly one entry, tagged with its
+        // SOURCE ordinal 1 (not the dense push-index 0).
+        assert_eq!(data.given.len(), 1, "only given[1] changed");
+        assert_eq!(
+            data.given[0].ordinal, 1,
+            "the changed given is at source position 1, not a dense index",
+        );
+        assert_eq!(data.given[0].input, "ref('b')");
+        assert!(data.expect.is_none(), "expect rows are unchanged");
+    }
+
     // ----- Cross-source equivalence (the headline kill) -----
 
     #[test]
@@ -1763,6 +1864,7 @@ mod tests {
     fn j_unit_test_data_diff_round_trips() {
         let diff = UnitTestDataDiff {
             given: vec![NamedTableDiff {
+                ordinal: 0,
                 input: "ref('a')".into(),
                 diff: FixtureTableDiff {
                     columns: vec![DiffColumn {
@@ -1856,6 +1958,7 @@ mod tests {
                             };
                             let diff = UnitTestDataDiff {
                                 given: vec![NamedTableDiff {
+                                    ordinal: 0,
                                     input: "ref('a')".into(),
                                     diff: table.clone(),
                                 }],
