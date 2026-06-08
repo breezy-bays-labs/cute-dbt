@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-e314b935.js";
+            window.path_to_searchindex_js = "../searchindex-6b04bb24.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-d338c274.js"></script>
@@ -531,8 +531,14 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm -r --ignore-unmatch "pr-${PR_NUMBER}"
-          # `|| exit 0`: nothing to remove → nothing to commit → end green.
-          git commit -m "chore: clean up Pages preview for PR #${PR_NUMBER}" || exit 0
+          # Commit + push only when there's a staged removal. An explicit
+          # staged check (not `git commit … || exit 0`, which also masks a
+          # genuine commit failure and silently leaves a stale dir).
+          if git diff --cached --quiet; then
+            echo "No pr-${PR_NUMBER}/ preview to remove."
+            exit 0
+          fi
+          git commit -m "chore: clean up Pages preview for PR #${PR_NUMBER}"
           git push
 </code></pre>
 <h2 id="9-troubleshooting"><a class="header" href="#9-troubleshooting">9. Troubleshooting</a></h2>
