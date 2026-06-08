@@ -140,3 +140,32 @@ unit_tests:
           last_name: 'Lovelace'
           number_of_orders: 1
           customer_lifetime_value: 10
+
+  # EXTERNAL FIXTURE format (cute-dbt#126). Same shape as
+  # test_orders_sums_payment_methods, but the stg_payments GIVEN is sourced
+  # from an external csv fixture file (tests/fixtures/stg_payments_credit_card.csv)
+  # via `fixture:` instead of inline `rows:`. The rows live in the file, not
+  # the manifest, so cute-dbt must READ the file to render the given grid +
+  # old→new cell diff. Without the reader the given renders a silently-empty
+  # grid / "data in external file" affordance (cute-dbt#98).
+  - name: test_orders_from_external_csv_fixture
+    description: |
+      orders pivots payments into per-method columns and a total amount.
+      Identical to test_orders_sums_payment_methods except the stg_payments
+      mock is an EXTERNAL csv fixture (cute-dbt#126) — the fixture data is not
+      inlined in the manifest, it lives in tests/fixtures/.
+    model: orders
+    given:
+      - input: ref('stg_orders')
+        format: csv
+        rows: |
+          order_id,customer_id,order_date,status
+          1,1,2024-01-01,completed
+      - input: ref('stg_payments')
+        format: csv
+        fixture: stg_payments_credit_card
+    expect:
+      format: csv
+      rows: |
+        order_id,customer_id,order_date,status,credit_card_amount,coupon_amount,bank_transfer_amount,gift_card_amount,amount
+        1,1,2024-01-01,completed,10,0,0,0,10

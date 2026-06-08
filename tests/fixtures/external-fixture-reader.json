@@ -1,0 +1,60 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "2.0.0-preview",
+    "generated_at": "1970-01-01T00:00:00Z",
+    "invocation_id": "00000000-0000-0000-0000-000000000000",
+    "project_name": "external_fixture_demo",
+    "project_id": "0000000000000000000000000000000000000000",
+    "user_id": "00000000-0000-0000-0000-000000000000",
+    "send_anonymous_usage_stats": false,
+    "adapter_type": "duckdb"
+  },
+  "nodes": {
+    "model.external_fixture_demo.orders": {
+      "database": "external_fixture_demo",
+      "schema": "main",
+      "name": "orders",
+      "resource_type": "model",
+      "package_name": "external_fixture_demo",
+      "path": "orders.sql",
+      "original_file_path": "models/orders.sql",
+      "unique_id": "model.external_fixture_demo.orders",
+      "fqn": ["external_fixture_demo", "orders"],
+      "alias": "orders",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "EXTERNAL_FIXTURE_READER_SYNTHETIC_SENTINEL_0001"
+      },
+      "raw_code": "{# Synthetic cute-dbt#126 fixture. #}\nselect * from {{ ref('stg_orders') }}",
+      "compiled_code": "select * from \"external_fixture_demo\".\"main\".\"stg_orders\"",
+      "depends_on": {
+        "nodes": ["model.external_fixture_demo.stg_orders"]
+      }
+    }
+  },
+  "unit_tests": {
+    "unit_test.external_fixture_demo.test_orders_external_fixture": {
+      "name": "test_orders_external_fixture",
+      "model": "orders",
+      "package_name": "external_fixture_demo",
+      "resource_type": "unit_test",
+      "unique_id": "unit_test.external_fixture_demo.test_orders_external_fixture",
+      "original_file_path": "models/_unit_tests.yml",
+      "given": [
+        {
+          "input": "ref('stg_orders')",
+          "format": "csv",
+          "rows": null,
+          "fixture": "tests/fixtures/orders_seed.csv"
+        }
+      ],
+      "expect": {
+        "format": "csv",
+        "rows": null,
+        "fixture": "tests/fixtures/orders_expected.csv"
+      },
+      "description": "Synthetic cute-dbt#126 fixture: an EXTERNAL csv `given` AND `expect` (rows:null + a resolved `fixture` path — the confirmed dbt-fusion wire shape). The row data lives in tests/fixtures/*.csv files that the `external_fixture_reader` integration test writes into a temp --project-root; cute-dbt must READ them off disk through the ProjectFileReader to render the grids. Pure synthetic data only — orders/stg_orders and the rows are fictitious."
+    }
+  }
+}

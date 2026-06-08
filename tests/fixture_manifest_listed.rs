@@ -81,13 +81,18 @@ fn repo_root() -> PathBuf {
 ///
 /// Enumerated via `git ls-files` (never a filesystem walk) so a dev's
 /// local `dbt compile` output under `dbt-project/target/` cannot leak in
-/// and fail the gate. Scope = the seeds directory (exhaustive). The
-/// compiled `target/manifest.json` is gitignored build output (recompiled
-/// fresh, never committed — cute-dbt#115), so it is not a committed data
-/// carrier and is intentionally not enumerated here.
+/// and fail the gate. Scope = the seed CSVs (`dbt-project/seeds/`) AND the
+/// external unit-test fixture data (`dbt-project/tests/fixtures/`, cute-dbt#126)
+/// — both exhaustive. The compiled `target/manifest.json` is gitignored
+/// build output (recompiled fresh, never committed — cute-dbt#115), so it
+/// is not a committed data carrier and is intentionally not enumerated here.
 fn git_tracked_project_data() -> BTreeSet<String> {
     let output = Command::new("git")
-        .args(["ls-files", "dbt-project/seeds/"])
+        .args([
+            "ls-files",
+            "dbt-project/seeds/",
+            "dbt-project/tests/fixtures/",
+        ])
         .current_dir(repo_root())
         .output()
         .expect("`git ls-files` runs (the gate enumerates tracked data carriers)");
