@@ -1327,7 +1327,11 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     // nothing extra (most non-import CTEs carry no fixture by design).
     var bound = t.given.filter(function (g) { return g.bound_to_node === node.id; });
     if (bound.length > 0) {
-      bound.forEach(function (g) { $detail.append(renderGivenSection(g, t.data_diff)); });
+      // cute-dbt#131 — `bound` is a FILTERED view of `t.given`, so its own
+      // index is not the source ordinal; recover the true position via
+      // `indexOf` (filter preserves object references) so the cell-diff binds
+      // to the right given even when two givens share a `ref(...)`.
+      bound.forEach(function (g) { $detail.append(renderGivenSection(g, t.data_diff, t.given.indexOf(g))); });
     } else if (node.role === "import") {
       $detail.append(
         $("<div>").addClass("given-empty")
@@ -1343,13 +1347,20 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
   // test's own block was edited; `given[]` carries an entry only for inputs
   // whose fixture data carried a real cell change (the domain already gated on
   // `has_real_change()`), so presence === "default this table to Diff".
-  function givenDataDiff(dataDiff, input) {
+  // cute-dbt#131 — resolve a given's cell diff by its SOURCE ORDINAL (its
+  // position in the test's `given:` list), NOT its `input` text. Two givens
+  // can share the same `ref(...)` input, and `dataDiff.given` is filtered to
+  // changed givens only — so neither `input` nor a dense index into
+  // `dataDiff.given` identifies a given. The ordinal (carried on each
+  // NamedTableDiff) is the stable key; the caller passes the render loop index,
+  // which is the same source position since `t.given` is the full in-order list.
+  function givenDataDiff(dataDiff, ordinal) {
     if (!dataDiff || !dataDiff.given) return undefined;
-    var hit = dataDiff.given.filter(function (g) { return g.input === input; })[0];
+    var hit = dataDiff.given.filter(function (g) { return g.ordinal === ordinal; })[0];
     return hit ? hit.diff : undefined;
   }
 
-  function renderGivenSection(given, dataDiff) {
+  function renderGivenSection(given, dataDiff, ordinal) {
     var $sec = $("<section>").addClass("given-section").attr("data-input-name", given.input);
     var $hdr = $("<div>").addClass("table-header");
     $hdr.append($("<h4>").addClass("table-title").text("given · " + given.input));
@@ -1386,7 +1397,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     $hdr.append($("<span>").addClass("row-count-badge")
       .text(rowCount + " row" + (rowCount === 1 ? "" : "s")));
     $sec.append($hdr);
-    var diff = givenDataDiff(dataDiff, given.input);
+    var diff = givenDataDiff(dataDiff, ordinal);
     $sec.append(buildFixtureView(table, "given-table", diff));
     return $sec;
   }
@@ -1397,7 +1408,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
       $wrap.append($("<div>").addClass("empty-hint").text("No fixtures defined for this test."));
       return;
     }
-    t.given.forEach(function (given) { $wrap.append(renderGivenSection(given, t.data_diff)); });
+    t.given.forEach(function (given, idx) { $wrap.append(renderGivenSection(given, t.data_diff, idx)); });
     initDataTablesIn($wrap);
   }
 
