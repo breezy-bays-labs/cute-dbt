@@ -154,6 +154,26 @@ reflected in the rendered HTML. No real data.\
 """
 
 [[fixture]]
+path = "external-fixture-reader.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/126"
+sha256 = "955ffc5a95bcd8e7203d45131bd8a41ab71b73a0299583a2201fe900cc403f49"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Synthetic single-model v12 manifest for the cute-dbt#126 external-fixture \
+reader end-to-end test (`tests/external_fixture_reader.rs`). Its `orders` \
+unit test sources BOTH the `given` and the `expect` from EXTERNAL csv \
+fixtures (`rows: null` + a resolved `fixture: tests/fixtures/*.csv` path — \
+the confirmed dbt-fusion wire shape). The csv row data is NOT in the \
+manifest; the integration test writes it into a temp --project-root so \
+cute-dbt must read it off disk through the ProjectFileReader. Pure \
+synthetic data only — `external_fixture_demo`, `orders`/`stg_orders`, and \
+the marker rows are fictitious.\
+"""
+
+[[fixture]]
 path = "config-title-only.toml"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/24"
@@ -480,4 +500,21 @@ license = "Apache-2.0"
 description = """
 jaffle_shop_duckdb `raw_payments` seed (verbatim). Faker-style demo \
 payment records — pure synthetic data.\
+"""
+
+[[project_data]]
+path = "dbt-project/tests/fixtures/stg_payments_credit_card.csv"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/126"
+sha256 = "865a7523c0dd9f4ce487a543cdc54c46756a453b304b7f7ebaf1a6923ad9c1bf"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+External unit-test fixture for the dbt-project dogfood (cute-dbt#126): the \
+`test_orders_from_external_csv_fixture` unit test sources its stg_payments \
+`given` from this csv via `fixture:` instead of inline `rows:`, so the live \
+report-preview self-dogfood renders a real grid from an EXTERNAL fixture \
+file. Synthetic Faker-style payment row (the same single credit_card row the \
+sibling inline-csv test uses) — pure synthetic data, no real records.\
 """

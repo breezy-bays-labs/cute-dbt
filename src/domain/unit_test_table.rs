@@ -1395,6 +1395,90 @@ pub fn table_from_manifest_rows(rows: &Value, format: Option<&str>) -> Option<Fi
     }
 }
 
+/// Parse an external unit-test fixture **file** body into a [`FixtureTable`]
+/// (cute-dbt#126).
+///
+/// dbt lets a `given`/`expect` source its rows from an external fixture
+/// file (`fixture: <path>`) instead of an inline `rows:` block — the v12
+/// manifest carries `rows: null` + the resolved path, so the data is read
+/// from the working tree at render time (via the `ProjectFileReader`
+/// port). The file body is [normalized](normalize_fixture_file_text) then
+/// tabulated like the same-format inline `rows:` String:
+///
+/// - `format: csv` → header-keyed value-inferred rows ([`parse_csv_rows`]
+///   → [`type_csv_token`]);
+/// - `format: sql` → the literal-row table, or `None` for a non-literal
+///   `SELECT` (the cute-dbt#96/#137 sql code-block fallback);
+/// - `format: dict` / unknown / absent → `None` (a *dict* fixture file is
+///   not a dbt construct; the caller resolves the effective `format` via
+///   [`effective_fixture_format`] before calling).
+///
+/// **External files carry artifacts an inline manifest string never does** —
+/// a leading UTF-8 BOM (Excel-exported csv) and trailing blank lines (an
+/// editor's terminating newline). [`normalize_fixture_file_text`] strips
+/// both, so an external fixture is robust where the raw inline path is not;
+/// this is a **deliberate** divergence from [`table_from_manifest_rows`] for
+/// those file-only inputs (for clean inputs the two paths converge). An
+/// empty (but readable) file → `Some` empty grid, never `None` — the `None`
+/// case is reserved for the unreadable / non-tabulatable affordance.
+#[must_use]
+pub fn external_fixture_table(text: &str, format: Option<&str>) -> Option<FixtureTable> {
+    let normalized = normalize_fixture_file_text(text);
+    table_from_manifest_rows(&Value::String(normalized), format)
+}
+
+/// Normalize an external fixture **file** body before tabulation
+/// (cute-dbt#126): strip a leading UTF-8 BOM and trailing newline/CR
+/// characters.
+///
+/// Both are artifacts of real files that an inline manifest `rows:` String
+/// never carries:
+/// - a leading `U+FEFF` (Excel + some editors prepend one to a csv) would
+///   otherwise corrupt the first column name (`"\u{feff}id"`);
+/// - trailing newline/CR characters (editors terminate files with one)
+///   would otherwise tabulate a phantom all-NULL row — and, worse, under
+///   the cute-dbt#126 old→new cell diff a trailing-whitespace-only edit
+///   would fabricate a spurious row-add. Only the trailing newline/CR
+///   *characters* are trimmed; a genuine all-empty-fields row (which
+///   carries commas) is preserved.
+#[must_use]
+pub fn normalize_fixture_file_text(text: &str) -> String {
+    text.strip_prefix('\u{FEFF}')
+        .unwrap_or(text)
+        .trim_end_matches(['\n', '\r'])
+        .to_owned()
+}
+
+/// The effective `format` of an external fixture (cute-dbt#126): the
+/// manifest's `format:` field when present, else derived from the resolved
+/// path's extension (`.csv` → `"csv"`, `.sql` → `"sql"`), else `None`.
+///
+/// fusion always emits `format` on an external fixture; **dbt-core MAY omit
+/// it** — without this fallback a dbt-core external `.csv` whose manifest
+/// `format` is absent would resolve to the `dict` default and tabulate to
+/// `None`, rendering the empty-grid affordance instead of the data
+/// (cross-engine guard; re-verified against dbt-core at cute-dbt#64). The
+/// manifest field is **authoritative** — a present `format` always wins
+/// over a disagreeing extension.
+#[must_use]
+pub fn effective_fixture_format(manifest_format: Option<&str>, path: &str) -> Option<String> {
+    if let Some(f) = manifest_format {
+        return Some(f.to_owned());
+    }
+    // `Path::extension` (pure std, no I/O) over the literal `ends_with(".csv")`
+    // — the latter trips `clippy::case_sensitive_file_extension_comparisons`.
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("csv") => Some("csv".to_owned()),
+        Some("sql") => Some("sql".to_owned()),
+        _ => None,
+    }
+}
+
 /// Build the OLD-side [`FixtureTable`] from a reconstructed YAML `rows`
 /// region + `format`. The diff-sourced sibling of [`table_from_manifest_rows`],
 /// terminating in the same canonicalization so the two sides are
@@ -2663,5 +2747,171 @@ mod tests {
         )
         .unwrap();
         assert_eq!(new_tbl, old_tbl);
+    }
+
+    // ----- K10. external fixture FILE body (cute-dbt#126) -----
+
+    #[test]
+    fn external_fixture_csv_value_inferred_grid() {
+        // A csv fixture file body tabulates header-keyed with the same
+        // value inference as an inline csv String (#66/#127): the `amount`
+        // tokens become Numbers, not Strs.
+        let t = external_fixture_table("id,amount\n1,10\n2,20\n", Some("csv"))
+            .expect("csv fixture tabulates");
+        assert_eq!(t.columns, vec!["id".to_string(), "amount".to_string()]);
+        assert_eq!(t.rows.len(), 2);
+        assert_eq!(t.rows[0].cells[1].key, CellValue::Number("10".into()));
+        assert_eq!(t.rows[1].cells[1].key, CellValue::Number("20".into()));
+    }
+
+    #[test]
+    fn external_fixture_csv_empty_cell_is_null() {
+        // dbt's empty-equals-null convention holds for file bodies too.
+        let t = external_fixture_table("id,name\n1,\n", Some("csv")).unwrap();
+        assert_eq!(t.rows[0].cells[1].key, CellValue::Null);
+    }
+
+    #[test]
+    fn external_fixture_csv_header_only_is_empty_grid() {
+        // A header row with no data rows → a real (empty) grid (`Some`, NOT
+        // the affordance fallback). Columns are derived from the DATA rows
+        // (the shared `parse_csv_rows` behavior — identical to an inline
+        // header-only csv), so a zero-row fixture yields an empty table. The
+        // load-bearing point is `Some(empty)`, not `None`: the renderer shows
+        // an (empty) grid, never the "data in external file" affordance.
+        let t =
+            external_fixture_table("id,amount\n", Some("csv")).expect("header-only csv is Some");
+        assert!(t.rows.is_empty());
+        assert!(
+            t.columns.is_empty(),
+            "columns are derived from data rows; a header-only csv has none"
+        );
+    }
+
+    #[test]
+    fn external_fixture_sql_literal_tabulates() {
+        let t = external_fixture_table(
+            "select 1 as id, 'alice' as name union all select 2 as id, 'bob' as name",
+            Some("sql"),
+        )
+        .expect("literal-row sql fixture tabulates");
+        assert_eq!(t.columns, vec!["id".to_string(), "name".to_string()]);
+        assert_eq!(t.rows.len(), 2);
+    }
+
+    #[test]
+    fn external_fixture_sql_non_literal_returns_none() {
+        // A non-literal sql fixture file is opaque → None → the renderer
+        // shows the sql code block (AC#5, matching #98 inline-sql).
+        assert_eq!(
+            external_fixture_table("select id, name from src", Some("sql")),
+            None
+        );
+    }
+
+    #[test]
+    fn external_fixture_unknown_or_dict_format_returns_none() {
+        // A `dict` (or unknown/absent) format on a FILE body is not a dbt
+        // construct → None (the affordance fallback). The caller resolves
+        // the effective format (manifest field or extension) to csv/sql.
+        assert_eq!(external_fixture_table("id,amount\n1,10\n", None), None);
+        assert_eq!(
+            external_fixture_table("id,amount\n1,10\n", Some("dict")),
+            None
+        );
+    }
+
+    #[test]
+    fn external_fixture_equals_inline_string_of_same_format() {
+        // The no-divergence contract: an external fixture file tabulates
+        // EXACTLY as the same-format inline `rows:` String (#138 dual axis),
+        // so external + inline fixtures render identically.
+        for (text, fmt) in [
+            ("id,amount\n1,10\n2,20\n", "csv"),
+            ("select 1 as id union all select 2 as id", "sql"),
+        ] {
+            assert_eq!(
+                external_fixture_table(text, Some(fmt)),
+                table_from_manifest_rows(&Value::String(text.to_owned()), Some(fmt)),
+                "external != inline String for format {fmt}"
+            );
+        }
+    }
+
+    #[test]
+    fn external_csv_strips_leading_utf8_bom() {
+        // An Excel-exported csv FILE routinely carries a leading U+FEFF BOM;
+        // a manifest JSON string never does. Without a strip the first column
+        // name is corrupted to "\u{feff}id". STANDALONE (not a parity check —
+        // the raw inline path is equally broken, so parity would pass-and-be-
+        // wrong): external file normalization must fix it.
+        let t = external_fixture_table("\u{FEFF}id,amount\n1,2\n", Some("csv")).unwrap();
+        assert_eq!(t.columns, vec!["id".to_string(), "amount".to_string()]);
+    }
+
+    #[test]
+    fn external_csv_trailing_blank_line_no_phantom_null_row() {
+        // A file ending in a blank line (\n\n) must NOT tabulate a phantom
+        // all-NULL row — under the #126 old→new diff a trailing-whitespace
+        // edit would otherwise fabricate a spurious row-add. The single
+        // terminating \n already handled stays 1 row.
+        let two_nl = external_fixture_table("id\n1\n\n", Some("csv")).unwrap();
+        assert_eq!(two_nl.rows.len(), 1, "trailing blank line is not a row");
+        let one_nl = external_fixture_table("id\n1\n", Some("csv")).unwrap();
+        assert_eq!(one_nl.rows.len(), 1);
+        // The two normalize to the same table (so a \n vs \n\n edit is a non-diff).
+        assert_eq!(two_nl, one_nl);
+    }
+
+    #[test]
+    fn external_empty_readable_is_some_default_not_none() {
+        // A READABLE-but-empty file is Some(empty grid) — distinct from an
+        // UNREADABLE fixture (which the run loop leaves as rows:null → table
+        // None → the "data in external file" affordance). Pin Some(default) so
+        // it can't collapse to None and collide with the unreadable path.
+        assert_eq!(
+            external_fixture_table("", Some("csv")),
+            Some(FixtureTable::default())
+        );
+    }
+
+    #[test]
+    fn effective_fixture_format_manifest_wins_over_extension() {
+        // A present manifest `format` is authoritative — it beats a
+        // disagreeing path extension (a misnamed file must not flip format).
+        assert_eq!(
+            effective_fixture_format(Some("csv"), "tests/fixtures/weird.sql").as_deref(),
+            Some("csv")
+        );
+        assert_eq!(
+            effective_fixture_format(Some("sql"), "tests/fixtures/weird.csv").as_deref(),
+            Some("sql")
+        );
+    }
+
+    #[test]
+    fn effective_fixture_format_derives_from_extension_when_absent() {
+        // dbt-core MAY omit `format` on an external fixture — the path
+        // extension fills it so the data still tabulates (cross-engine guard).
+        assert_eq!(
+            effective_fixture_format(None, "tests/fixtures/payments.csv").as_deref(),
+            Some("csv")
+        );
+        assert_eq!(
+            effective_fixture_format(None, "tests/fixtures/seed.SQL").as_deref(),
+            Some("sql"),
+            "extension match is case-insensitive"
+        );
+    }
+
+    #[test]
+    fn effective_fixture_format_unknown_extension_absent_is_none() {
+        // No manifest format AND an unknown/dot-less path → None → the
+        // affordance fallback (graceful, never a panic or a half-grid).
+        assert_eq!(
+            effective_fixture_format(None, "tests/fixtures/payments"),
+            None
+        );
+        assert_eq!(effective_fixture_format(None, "weird.txt"), None);
     }
 }

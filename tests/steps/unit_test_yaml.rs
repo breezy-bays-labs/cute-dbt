@@ -78,7 +78,7 @@ fn when_without_project_root(world: &mut World) {
 fn when_project_root_empty_dir(world: &mut World) {
     // Create (or reuse) an empty directory inside CARGO_TARGET_TMPDIR
     // that contains no `models/_unit_tests.yml` — the gather stage's
-    // FsSourceYamlReader should soft-fail per test and the payload
+    // FsProjectFileReader should soft-fail per test and the payload
     // should carry no `authoring_yaml` field for any unit test.
     let empty_root = common::tmp("source-yaml-empty-root");
     std::fs::create_dir_all(&empty_root)

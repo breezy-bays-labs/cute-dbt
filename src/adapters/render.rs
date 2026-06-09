@@ -594,6 +594,38 @@ pub fn build_payload(
     data_diffs: &HashMap<String, UnitTestDataDiff>,
     baseline_label: &str,
 ) -> ReportPayload {
+    build_payload_with_externals(
+        current,
+        changed,
+        models_in_scope,
+        authoring_yaml,
+        yaml_diffs,
+        sql_diffs,
+        data_diffs,
+        &HashMap::new(),
+        baseline_label,
+    )
+}
+
+/// Like [`build_payload`] but inlines any external fixture files read for
+/// each in-scope test (cute-dbt#126). `external_fixtures` is keyed by test
+/// id; an absent entry (or an absent given ordinal within it) leaves that
+/// given/expect on its inline-manifest path. The cli's run loop builds the
+/// map from the `ProjectFileReader`; baseline mode + every render path with
+/// no external `fixture:` files use the [`build_payload`] convenience.
+#[must_use]
+#[allow(clippy::implicit_hasher)]
+pub fn build_payload_with_externals(
+    current: &Manifest,
+    changed: &InScopeSet,
+    models_in_scope: &ModelInScopeSet,
+    authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
+    yaml_diffs: &HashMap<String, BlockDiff>,
+    sql_diffs: &HashMap<String, BlockDiff>,
+    data_diffs: &HashMap<String, UnitTestDataDiff>,
+    external_fixtures: &HashMap<String, ExternalFixtures>,
+    baseline_label: &str,
+) -> ReportPayload {
     let model_tests = index_tests_for_models(current, models_in_scope);
     let empty: Vec<(&str, &UnitTest)> = Vec::new();
     let mut models = Vec::new();
@@ -610,6 +642,7 @@ pub fn build_payload(
             yaml_diffs,
             sql_diffs,
             data_diffs,
+            external_fixtures,
         ));
     }
     ReportPayload {
@@ -654,7 +687,51 @@ pub fn render_report(
     report_title: &str,
     report_subtitle: Option<&str>,
 ) -> io::Result<()> {
-    let payload = build_payload(
+    render_report_with_externals(
+        out,
+        current,
+        in_scope,
+        models_in_scope,
+        changed,
+        authoring_yaml,
+        yaml_diffs,
+        sql_diffs,
+        data_diffs,
+        &HashMap::new(),
+        baseline_label,
+        scope_source,
+        report_title,
+        report_subtitle,
+    )
+}
+
+/// Like [`render_report`] but inlines any external fixture files read for
+/// the in-scope tests (cute-dbt#126). The cli's run loop calls this with
+/// the `gather_external_fixtures` map; [`render_report`] is the
+/// no-external-fixtures convenience used by baseline mode + the tests.
+///
+/// # Errors
+///
+/// Same as [`render_report`]: the underlying [`io::Error`] when the
+/// rendered HTML cannot be written to `out`.
+#[allow(clippy::implicit_hasher, clippy::too_many_arguments)]
+pub fn render_report_with_externals(
+    out: &Path,
+    current: &Manifest,
+    in_scope: &InScopeSet,
+    models_in_scope: &ModelInScopeSet,
+    changed: &InScopeSet,
+    authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
+    yaml_diffs: &HashMap<String, BlockDiff>,
+    sql_diffs: &HashMap<String, BlockDiff>,
+    data_diffs: &HashMap<String, UnitTestDataDiff>,
+    external_fixtures: &HashMap<String, ExternalFixtures>,
+    baseline_label: &str,
+    scope_source: ScopeSource,
+    report_title: &str,
+    report_subtitle: Option<&str>,
+) -> io::Result<()> {
+    let payload = build_payload_with_externals(
         current,
         changed,
         models_in_scope,
@@ -662,6 +739,7 @@ pub fn render_report(
         yaml_diffs,
         sql_diffs,
         data_diffs,
+        external_fixtures,
         baseline_label,
     );
     // The empty-scope banner contract reads the TRUE in-scope set, not the
@@ -698,6 +776,7 @@ fn build_model_payload(
     yaml_diffs: &HashMap<String, BlockDiff>,
     sql_diffs: &HashMap<String, BlockDiff>,
     data_diffs: &HashMap<String, UnitTestDataDiff>,
+    external_fixtures: &HashMap<String, ExternalFixtures>,
 ) -> ModelPayload {
     let bare_name = leaf_segment(model.id().as_str()).to_owned();
     let compiled_code = model.compiled_code().unwrap_or_default();
@@ -724,6 +803,7 @@ fn build_model_payload(
                 authoring_yaml.get(*id),
                 yaml_diffs.get(*id),
                 data_diffs.get(*id),
+                external_fixtures.get(*id),
             )
         })
         .collect();
@@ -818,9 +898,75 @@ fn build_compiled_sql(
     map
 }
 
+/// One external fixture file loaded for a given/expect (cute-dbt#126).
+///
+/// Produced by the cli `gather_external_fixtures` step from the
+/// `ProjectFileReader` port; consumed by `build_test_payload` to
+/// **inline** the file content into the render payload so an external
+/// fixture renders identically to an inline one. `text` is the raw file
+/// body (becomes the payload `rows` String — drives the sql code-block
+/// fallback + suppresses the external-fixture affordance); `table` is the
+/// parsed grid POD (`None` for a non-literal sql file → code block);
+/// `format` is the *effective* format (manifest `format:`, else derived
+/// from the path extension) so the template's format-aware branches behave
+/// even when an engine omits `format` on an external fixture.
+#[derive(Debug, Clone)]
+pub struct LoadedFixture {
+    /// Raw file body read from the working tree.
+    pub text: String,
+    /// Effective `format` (manifest value or extension-derived).
+    pub format: Option<String>,
+    /// Parsed grid, or `None` for a non-literal-sql / non-tabulatable file.
+    pub table: Option<FixtureTable>,
+}
+
+/// The external fixtures successfully READ for one unit test (cute-dbt#126).
+///
+/// `given` is keyed by the given's **source ordinal** (its position in the
+/// test's `given:` list) — the same identity the cell-diff binds on
+/// (cute-dbt#131) — because a test may mix inline and external givens, and
+/// two givens may share a fixture path. Only successfully-read external
+/// fixtures appear: an unreadable one is simply absent, so the payload
+/// keeps `rows: null` + `fixture` and the template shows the #98 affordance.
+#[derive(Debug, Clone, Default)]
+pub struct ExternalFixtures {
+    /// Loaded external givens, keyed by source ordinal.
+    pub given: BTreeMap<usize, LoadedFixture>,
+    /// The loaded external `expect`, when present.
+    pub expect: Option<LoadedFixture>,
+}
+
+/// Resolve a given/expect's `(rows, table, format)` payload triple —
+/// inlining a loaded external fixture (cute-dbt#126) when one was read,
+/// else the inline manifest values. With a [`LoadedFixture`] the payload
+/// `rows` carries the file text (so the template renders it like an inline
+/// fixture and the external affordance is suppressed) and `table`/`format`
+/// come from the load; the caller retains `fixture` as provenance.
+fn resolve_fixture_payload(
+    rows: &Value,
+    format: Option<&str>,
+    fixture: Option<&str>,
+    loaded: Option<&LoadedFixture>,
+) -> (Value, Option<FixtureTable>, Option<String>) {
+    match loaded {
+        Some(lf) => (
+            Value::String(lf.text.clone()),
+            lf.table.clone(),
+            lf.format.clone(),
+        ),
+        None => (
+            rows.clone(),
+            current_view_table(rows, format, fixture),
+            format.map(str::to_owned),
+        ),
+    }
+}
+
 /// Build a single test's payload, including import-CTE binding for each
 /// given. `changed` is the set of updated test ids — `id`'s membership
-/// sets [`TestPayload::changed`] (cute-dbt#91).
+/// sets [`TestPayload::changed`] (cute-dbt#91). `external` carries any
+/// external fixture files read for this test (cute-dbt#126), inlined into
+/// the given/expect payloads.
 fn build_test_payload(
     id: &str,
     unit_test: &UnitTest,
@@ -829,24 +975,35 @@ fn build_test_payload(
     authoring_yaml: Option<&UnitTestYamlBlock>,
     yaml_diff: Option<&BlockDiff>,
     data_diff: Option<&UnitTestDataDiff>,
+    external: Option<&ExternalFixtures>,
 ) -> TestPayload {
     let given = unit_test
         .given()
         .iter()
-        .map(|g| {
+        .enumerate()
+        .map(|(ordinal, g)| {
             let bound_to_node =
                 parse_ref_name(g.input()).and_then(|ref_name| find_import_node_id(graph, ref_name));
+            let loaded = external.and_then(|e| e.given.get(&ordinal));
+            let (rows, table, format) =
+                resolve_fixture_payload(g.rows(), g.format(), g.fixture(), loaded);
             GivenPayload {
                 input: g.input().to_owned(),
                 bound_to_node,
-                table: current_view_table(g.rows(), g.format(), g.fixture()),
-                rows: g.rows().clone(),
-                format: g.format().map(str::to_owned),
+                table,
+                rows,
+                format,
                 fixture: g.fixture().map(str::to_owned),
                 is_this: g.input() == "this",
             }
         })
         .collect();
+    let (expect_rows, expect_table, expect_format) = resolve_fixture_payload(
+        unit_test.expect().rows(),
+        unit_test.expect().format(),
+        unit_test.expect().fixture(),
+        external.and_then(|e| e.expect.as_ref()),
+    );
     TestPayload {
         id: id.to_owned(),
         name: unit_test.name().to_owned(),
@@ -862,13 +1019,9 @@ fn build_test_payload(
         is_incremental_mode: unit_test.is_incremental_mode(),
         given,
         expected: ExpectedPayload {
-            table: current_view_table(
-                unit_test.expect().rows(),
-                unit_test.expect().format(),
-                unit_test.expect().fixture(),
-            ),
-            rows: unit_test.expect().rows().clone(),
-            format: unit_test.expect().format().map(str::to_owned),
+            table: expect_table,
+            rows: expect_rows,
+            format: expect_format,
             fixture: unit_test.expect().fixture().map(str::to_owned),
         },
     }
@@ -2943,8 +3096,16 @@ mod tests {
         let ut = simple_unit_test("m", "t");
         let graph = CteGraph::default();
         let changed = InScopeSet::new();
-        let payload =
-            build_test_payload("unit_test.shop.t", &ut, &graph, &changed, None, None, None);
+        let payload = build_test_payload(
+            "unit_test.shop.t",
+            &ut,
+            &graph,
+            &changed,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(payload.data_diff.is_none());
         let json = serde_json::to_string(&payload).expect("payload serializes");
         assert!(
@@ -2985,6 +3146,7 @@ mod tests {
             None,
             None,
             Some(&data_diff),
+            None,
         );
         assert_eq!(payload.data_diff.as_ref(), Some(&data_diff));
         let json = serde_json::to_string(&payload).expect("payload serializes");
@@ -3023,6 +3185,7 @@ mod tests {
             &ut,
             &graph,
             &InScopeSet::new(),
+            None,
             None,
             None,
             None,

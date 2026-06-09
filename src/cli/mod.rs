@@ -14,7 +14,7 @@
 //! [`crate::adapters::render::render_report`], so the explicit
 //! `parse_ctes` step is purely greppable scaffolding that mirrors the
 //! ARCHITECTURE diagram. The `gather_authoring_yaml` step reads each
-//! in-scope unit-test's source YAML through the [`SourceYamlReader`]
+//! in-scope unit-test's source YAML through the [`ProjectFileReader`]
 //! port and slices the authored block — soft-failing per test so a
 //! missing file or unsupported manifest never breaks the report
 //! (cute-dbt#69). The `render` step invokes the askama renderer.
@@ -37,15 +37,20 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::adapters::manifest::{FileManifestSource, load_baseline};
-use crate::adapters::render::{ScopeSource, index_tests_for_models, render_report};
-use crate::adapters::source_yaml::FsSourceYamlReader;
-use crate::domain::{
-    BlockDiff, DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NormalizedDiffIndex,
-    PreflightError, ScopeInput, ScopeSelection, UnitTestDataDiff, UnitTestYamlBlock,
-    extract_unit_test_block, preflight_compiled, reconstruct_block_diffs,
-    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks, select_in_scope,
+use crate::adapters::project_file::FsProjectFileReader;
+use crate::adapters::render::{
+    ExternalFixtures, LoadedFixture, ScopeSource, index_tests_for_models,
+    render_report_with_externals,
 };
-use crate::ports::{ManifestSource, SourceYamlReader};
+use crate::domain::{
+    BlockDiff, DEFAULT_REPORT_TITLE, FixtureTableDiff, InScopeSet, Manifest, ModelInScopeSet,
+    NamedTableDiff, NormalizedDiffIndex, PreflightError, ScopeInput, ScopeSelection, UnitTest,
+    UnitTestDataDiff, UnitTestYamlBlock, effective_fixture_format, external_fixture_table,
+    extract_unit_test_block, preflight_compiled, reconstruct_block_diffs,
+    reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
+    refine_changed_by_hunks, select_in_scope,
+};
+use crate::ports::{ManifestSource, ProjectFileReader};
 
 use args::Cli;
 
@@ -147,6 +152,11 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
     // (cute-dbt#91).
     let render_test_ids = render_test_ids(&current, &models_in_scope);
     let authoring_yaml = gather_authoring_yaml(cli, &current, &render_test_ids);
+    // External fixture files (cute-dbt#126): read each rendered test's
+    // external `given`/`expect` fixture so the report inlines a real grid
+    // instead of the #98 affordance. Reads the working tree at generation
+    // time only (zero-egress unaffected); soft-fails per fixture.
+    let external_fixtures = gather_external_fixtures(cli, &current, &render_test_ids);
     // Block-precise narrowing (cute-dbt#96): on the PR-diff path, narrow the
     // file-granular `changed` label down to the tests whose sliced YAML block
     // a diff hunk actually touches. The slice spans (`authoring_yaml`) are
@@ -191,7 +201,20 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
     // refined `changed` + `authoring_yaml` block map as `reconstruct_block_diffs`.
     let data_diffs: HashMap<String, UnitTestDataDiff> = match &scope_input {
         ScopeInput::PrDiff { index } => {
-            reconstruct_table_diffs(&current, &changed, &authoring_yaml, index)
+            let mut diffs = reconstruct_table_diffs(&current, &changed, &authoring_yaml, index);
+            // External fixture FILE cell diffs (cute-dbt#126 AC#3): merged in
+            // beside the YAML-block inline diffs. Keyed off the fixture file's
+            // OWN hunks (`index.hunks_for(fixture_path)`), INDEPENDENT of the
+            // YAML-block `changed` gate — a PR editing only the csv never
+            // touches the test's YAML block.
+            merge_external_data_diffs(
+                &mut diffs,
+                &current,
+                &render_test_ids,
+                &external_fixtures,
+                index,
+            );
+            diffs
         }
         ScopeInput::Baseline { .. } => HashMap::new(),
     };
@@ -215,6 +238,7 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
         &yaml_diffs,
         &sql_diffs,
         &data_diffs,
+        &external_fixtures,
         &baseline_label,
         scope_source,
         &report_title,
@@ -268,14 +292,14 @@ fn gather_authoring_yaml(
             project_root.display(),
         );
     }
-    let reader = FsSourceYamlReader::new(project_root);
+    let reader = FsProjectFileReader::new(project_root);
     gather_authoring_yaml_with_reader(&reader, current, in_scope)
 }
 
-/// Pure composition step over the [`SourceYamlReader`] port — testable
+/// Pure composition step over the [`ProjectFileReader`] port — testable
 /// without touching the filesystem by passing an in-memory impl.
 fn gather_authoring_yaml_with_reader(
-    reader: &dyn SourceYamlReader,
+    reader: &dyn ProjectFileReader,
     current: &Manifest,
     in_scope: &InScopeSet,
 ) -> HashMap<String, UnitTestYamlBlock> {
@@ -301,6 +325,230 @@ fn gather_authoring_yaml_with_reader(
         out.insert(id.to_owned(), block);
     }
     out
+}
+
+/// The `gather_external_fixtures` stage (cute-dbt#126) — for each rendered
+/// unit test, read any external `given[i].fixture` / `expect.fixture` file
+/// through the [`ProjectFileReader`] port and parse it, so the render layer
+/// inlines a real grid instead of the cute-dbt#98 silently-empty-grid
+/// affordance.
+///
+/// Same project-root resolution + per-test soft-failure as
+/// [`gather_authoring_yaml`]: an unresolvable project root yields an empty
+/// map, and an unreadable / non-tabulatable fixture is silently skipped
+/// (the report falls back to the affordance). The fixture data never leaves
+/// the working tree — this is a render-time read, so the zero-egress
+/// property of the generated HTML is untouched.
+fn gather_external_fixtures(
+    cli: &Cli,
+    current: &Manifest,
+    in_scope: &InScopeSet,
+) -> HashMap<String, ExternalFixtures> {
+    let (resolved, _derived) =
+        args::resolve_project_root(cli.project_root.as_deref(), &cli.manifest);
+    let Some(project_root) = resolved else {
+        return HashMap::new();
+    };
+    let reader = FsProjectFileReader::new(project_root);
+    gather_external_fixtures_with_reader(&reader, current, in_scope)
+}
+
+/// Pure composition step over the [`ProjectFileReader`] port — testable
+/// without touching the filesystem by passing an in-memory impl.
+fn gather_external_fixtures_with_reader(
+    reader: &dyn ProjectFileReader,
+    current: &Manifest,
+    in_scope: &InScopeSet,
+) -> HashMap<String, ExternalFixtures> {
+    let mut out: HashMap<String, ExternalFixtures> = HashMap::new();
+    for id in in_scope.iter() {
+        let Some(unit_test) = current.unit_test(id) else {
+            continue;
+        };
+        let mut ext = ExternalFixtures::default();
+        for (ordinal, given) in unit_test.given().iter().enumerate() {
+            if let Some(loaded) =
+                load_external_fixture(reader, id, given.fixture(), given.rows(), given.format())
+            {
+                ext.given.insert(ordinal, loaded);
+            }
+        }
+        let expect = unit_test.expect();
+        if let Some(loaded) =
+            load_external_fixture(reader, id, expect.fixture(), expect.rows(), expect.format())
+        {
+            ext.expect = Some(loaded);
+        }
+        if !ext.given.is_empty() || ext.expect.is_some() {
+            out.insert(id.to_owned(), ext);
+        }
+    }
+    out
+}
+
+/// Load one external fixture, or `None` when this given/expect is not an
+/// external fixture or the file cannot be read.
+///
+/// The trigger is **exactly** `fixture: Some` AND `rows: null` — the
+/// confirmed fusion shape (the data lives in the file). A `fixture` present
+/// *alongside* inline `rows` (a shape a dbt-core engine MAY emit by
+/// inlining the fixture) renders from the inline rows and is left untouched,
+/// so the reader is never invoked for it.
+fn load_external_fixture(
+    reader: &dyn ProjectFileReader,
+    id: &str,
+    fixture: Option<&str>,
+    rows: &serde_json::Value,
+    format: Option<&str>,
+) -> Option<LoadedFixture> {
+    let path = fixture?;
+    if !rows.is_null() {
+        return None; // fixture + inline rows ⇒ render inline, do not read
+    }
+    let (text, effective_format) = read_external_fixture(reader, id, path, format)?;
+    let table = external_fixture_table(&text, effective_format.as_deref());
+    Some(LoadedFixture {
+        text,
+        format: effective_format,
+        table,
+    })
+}
+
+/// Read an external fixture file through the reader, returning its body +
+/// the effective format (manifest `format:`, else the path extension).
+///
+/// Honors the cute-dbt#126 AC#4 **bare-name fallback**: a dbt-core engine
+/// MAY emit a bare fixture name (no path separator) rather than fusion's
+/// resolved `tests/fixtures/<name>.csv`; when the bare name is not found,
+/// retry the dbt convention `tests/fixtures/<name>.csv` (re-verified
+/// against dbt-core at cute-dbt#64).
+///
+/// Soft-fails: a [`io::ErrorKind::NotFound`] (including a rejected
+/// `..`/absolute path, which the adapter maps to `InvalidInput` — also
+/// non-fatal here) is silent; any other read error warns on stderr but
+/// never fails the run.
+fn read_external_fixture(
+    reader: &dyn ProjectFileReader,
+    id: &str,
+    path: &str,
+    format: Option<&str>,
+) -> Option<(String, Option<String>)> {
+    match reader.read(path) {
+        Ok(text) => Some((text, effective_fixture_format(format, path))),
+        Err(err) if err.kind() == io::ErrorKind::NotFound && is_bare_fixture_name(path) => {
+            let fallback = format!("tests/fixtures/{path}.csv");
+            reader
+                .read(&fallback)
+                .ok()
+                .map(|text| (text, effective_fixture_format(format, &fallback)))
+        }
+        Err(err)
+            if err.kind() == io::ErrorKind::NotFound
+                || err.kind() == io::ErrorKind::InvalidInput =>
+        {
+            None
+        }
+        Err(err) => {
+            eprintln!("cute-dbt: warning: could not read external fixture {path} for {id}: {err}");
+            None
+        }
+    }
+}
+
+/// A bare fixture name has no path separator (a single segment) — the shape
+/// a dbt-core engine MAY emit instead of fusion's resolved
+/// `tests/fixtures/<name>.csv` path (cute-dbt#126 AC#4 cross-engine guard).
+fn is_bare_fixture_name(path: &str) -> bool {
+    !path.contains('/')
+}
+
+/// Merge external fixture FILE cell diffs (cute-dbt#126 AC#3) into the
+/// YAML-block-derived `data_diffs`. For each rendered test's loaded external
+/// `given`/`expect`, reconstruct the file's old→new cell diff from its OWN
+/// hunks (`index.hunks_for(fixture_path)`) and splice it in by source ordinal.
+///
+/// A test's givens are inline XOR external by ordinal, so the YAML-block path
+/// (which yields nothing for an external given) and this path never collide;
+/// the merged `given` vec is re-sorted by ordinal for deterministic output.
+fn merge_external_data_diffs(
+    data_diffs: &mut HashMap<String, UnitTestDataDiff>,
+    current: &Manifest,
+    in_scope: &InScopeSet,
+    external_fixtures: &HashMap<String, ExternalFixtures>,
+    index: &NormalizedDiffIndex,
+) {
+    for id in in_scope.iter() {
+        let Some(ext) = external_fixtures.get(id) else {
+            continue;
+        };
+        let Some(unit_test) = current.unit_test(id) else {
+            continue;
+        };
+        let given_diffs = external_given_diffs(unit_test, ext, index);
+        let expect_diff = external_expect_diff(unit_test, ext, index);
+        if given_diffs.is_empty() && expect_diff.is_none() {
+            continue;
+        }
+        let entry = data_diffs.entry(id.to_owned()).or_default();
+        entry.given.extend(given_diffs);
+        entry.given.sort_by_key(|n| n.ordinal);
+        if let Some(diff) = expect_diff {
+            entry.expect = Some(diff);
+        }
+    }
+}
+
+/// The external fixture FILE cell diffs for one test's `given` inputs
+/// (cute-dbt#126 AC#3), each tagged with its source ordinal.
+///
+/// The hunk lookup keys on the manifest `fixture` path. For a dbt-core
+/// BARE-name fixture (AC#4) that bare name != the file the diff touched
+/// (`tests/fixtures/<name>.csv`), so `hunks_for` misses → no external cell
+/// diff (graceful: the grid still renders, just without a diff toggle).
+/// fusion — the verified primary — emits the resolved path here, so it is
+/// unaffected. Re-verify dbt-core at cute-dbt#64.
+fn external_given_diffs(
+    unit_test: &UnitTest,
+    ext: &ExternalFixtures,
+    index: &NormalizedDiffIndex,
+) -> Vec<NamedTableDiff> {
+    let mut diffs = Vec::new();
+    for (&ordinal, loaded) in &ext.given {
+        let Some(given) = unit_test.given().get(ordinal) else {
+            continue;
+        };
+        let Some(path) = given.fixture() else {
+            continue;
+        };
+        if let Some(diff) = reconstruct_external_fixture_diff(
+            &loaded.text,
+            loaded.format.as_deref(),
+            index.hunks_for(path),
+        ) {
+            diffs.push(NamedTableDiff {
+                ordinal,
+                input: given.input().to_owned(),
+                diff,
+            });
+        }
+    }
+    diffs
+}
+
+/// The external fixture FILE cell diff for one test's `expect`, when its
+/// fixture file was touched by the PR diff (cute-dbt#126 AC#3).
+fn external_expect_diff(
+    unit_test: &UnitTest,
+    ext: &ExternalFixtures,
+    index: &NormalizedDiffIndex,
+) -> Option<FixtureTableDiff> {
+    let loaded = ext.expect.as_ref()?;
+    let path = unit_test.expect().fixture()?;
+    reconstruct_external_fixture_diff(
+        &loaded.text,
+        loaded.format.as_deref(),
+        index.hunks_for(path),
+    )
 }
 
 /// Resolve the rendered report's title + subtitle from `--config`,
@@ -423,8 +671,8 @@ fn parse_ctes() {}
 /// `ScopeSource::Baseline` names the baseline manifest (the
 /// `--baseline-manifest` path verbatim); `ScopeSource::PrDiff` omits the
 /// baseline clause (`baseline_label` is then empty).
-// Thin pass-through to `render_report`; mirrors its argument list (the
-// composition-root rationale lives there).
+// Thin pass-through to `render_report_with_externals`; mirrors its argument
+// list (the composition-root rationale lives there).
 #[allow(clippy::too_many_arguments)]
 fn render(
     out: &Path,
@@ -436,12 +684,13 @@ fn render(
     yaml_diffs: &HashMap<String, BlockDiff>,
     sql_diffs: &HashMap<String, BlockDiff>,
     data_diffs: &HashMap<String, UnitTestDataDiff>,
+    external_fixtures: &HashMap<String, ExternalFixtures>,
     baseline_label: &str,
     scope_source: ScopeSource,
     report_title: &str,
     report_subtitle: Option<&str>,
 ) -> Result<(), io::Error> {
-    render_report(
+    render_report_with_externals(
         out,
         current,
         in_scope,
@@ -451,6 +700,7 @@ fn render(
         yaml_diffs,
         sql_diffs,
         data_diffs,
+        external_fixtures,
         baseline_label,
         scope_source,
         report_title,
@@ -556,7 +806,9 @@ mod tests {
 
     use std::collections::HashMap as StdHashMap;
 
-    use crate::domain::{DependsOn, Manifest, ManifestMetadata, NodeId, UnitTest, UnitTestExpect};
+    use crate::domain::{
+        DependsOn, Manifest, ManifestMetadata, NodeId, UnitTest, UnitTestExpect, UnitTestGiven,
+    };
 
     enum StubResult {
         Ok(String),
@@ -567,7 +819,7 @@ mod tests {
         entries: StdHashMap<String, StubResult>,
     }
 
-    impl SourceYamlReader for StubReader {
+    impl ProjectFileReader for StubReader {
         fn read(&self, project_relative: &str) -> io::Result<String> {
             match self.entries.get(project_relative) {
                 Some(StubResult::Ok(s)) => Ok(s.clone()),
@@ -724,5 +976,369 @@ mod tests {
         );
 
         assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // gather_external_fixtures_with_reader (cute-dbt#126) — the external
+    // fixture file reader over the ProjectFileReader port.
+    // -----------------------------------------------------------------
+
+    fn stub_reader(entries: &[(&str, StubResult)]) -> StubReader {
+        let mut map = StdHashMap::new();
+        for (k, v) in entries {
+            let cloned = match v {
+                StubResult::Ok(s) => StubResult::Ok(s.clone()),
+                StubResult::Err(kind, msg) => StubResult::Err(*kind, msg),
+            };
+            map.insert((*k).to_owned(), cloned);
+        }
+        StubReader { entries: map }
+    }
+
+    /// An external given: `rows: null` + a `fixture` path (the confirmed
+    /// fusion shape).
+    fn external_given(input: &str, format: &str, fixture: &str) -> UnitTestGiven {
+        UnitTestGiven::new(
+            input,
+            serde_json::Value::Null,
+            Some(format.to_owned()),
+            Some(fixture.to_owned()),
+        )
+    }
+
+    fn ut_with(given: Vec<UnitTestGiven>, expect: UnitTestExpect) -> UnitTest {
+        UnitTest::new(
+            "t",
+            NodeId::new("model.shop.m"),
+            given,
+            expect,
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            Some("models/_ut.yml".to_owned()),
+        )
+    }
+
+    fn null_expect() -> UnitTestExpect {
+        UnitTestExpect::new(serde_json::Value::Null, None, None)
+    }
+
+    #[test]
+    fn external_csv_given_is_loaded_with_grid() {
+        let manifest = manifest_with(
+            "ut.m.t",
+            ut_with(
+                vec![external_given("ref('a')", "csv", "tests/fixtures/a.csv")],
+                null_expect(),
+            ),
+        );
+        let reader = stub_reader(&[(
+            "tests/fixtures/a.csv",
+            StubResult::Ok("id,amount\n1,10\n".to_owned()),
+        )]);
+        let out =
+            gather_external_fixtures_with_reader(&reader, &manifest, &in_scope_of(&["ut.m.t"]));
+        let ext = out.get("ut.m.t").expect("test has loaded externals");
+        let loaded = ext.given.get(&0).expect("given 0 loaded");
+        assert_eq!(loaded.text, "id,amount\n1,10\n");
+        assert_eq!(loaded.format.as_deref(), Some("csv"));
+        let table = loaded.table.as_ref().expect("csv tabulates to a grid");
+        assert_eq!(table.rows.len(), 1);
+    }
+
+    #[test]
+    fn inline_given_is_not_loaded() {
+        // fixture: None → not external → reader never consulted.
+        let given = UnitTestGiven::new(
+            "ref('a')",
+            serde_json::json!([{"id": 1}]),
+            Some("dict".to_owned()),
+            None,
+        );
+        let manifest = manifest_with("ut.m.t", ut_with(vec![given], null_expect()));
+        let reader = stub_reader(&[]);
+        let out =
+            gather_external_fixtures_with_reader(&reader, &manifest, &in_scope_of(&["ut.m.t"]));
+        assert!(out.is_empty(), "inline given produces no external entry");
+    }
+
+    #[test]
+    fn fixture_with_inline_rows_is_not_read() {
+        // A `fixture` present ALONGSIDE inline rows (a shape dbt-core MAY emit
+        // by inlining the fixture) renders inline — the reader is NOT invoked,
+        // so even a poisoned reader entry is never hit.
+        let given = UnitTestGiven::new(
+            "ref('a')",
+            serde_json::json!([{"id": 1}]),
+            Some("csv".to_owned()),
+            Some("tests/fixtures/a.csv".to_owned()),
+        );
+        let manifest = manifest_with("ut.m.t", ut_with(vec![given], null_expect()));
+        let reader = stub_reader(&[(
+            "tests/fixtures/a.csv",
+            StubResult::Err(io::ErrorKind::Other, "reader must not be called"),
+        )]);
+        let out =
+            gather_external_fixtures_with_reader(&reader, &manifest, &in_scope_of(&["ut.m.t"]));
+        assert!(out.is_empty(), "fixture + inline rows stays inline");
+    }
+
+    #[test]
+    fn unreadable_external_fixture_is_skipped() {
+        // NotFound → silent skip → the test has no external entry → the
+        // template falls back to the #98 affordance.
+        let manifest = manifest_with(
+            "ut.m.t",
+            ut_with(
+                vec![external_given(
+                    "ref('a')",
+                    "csv",
+                    "tests/fixtures/missing.csv",
+                )],
+                null_expect(),
+            ),
+        );
+        let reader = stub_reader(&[]);
+        let out =
+            gather_external_fixtures_with_reader(&reader, &manifest, &in_scope_of(&["ut.m.t"]));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn bare_name_fixture_falls_back_to_tests_fixtures() {
+        // AC#4 cross-engine guard: a bare name not found as-is retries the
+        // dbt convention tests/fixtures/<name>.csv.
+        let manifest = manifest_with(
+            "ut.m.t",
+            ut_with(
+                vec![external_given("ref('a')", "csv", "stg_a")],
+                null_expect(),
+            ),
+        );
+        let reader = stub_reader(&[(
+            "tests/fixtures/stg_a.csv",
+            StubResult::Ok("id\n1\n".to_owned()),
+        )]);
+        let out =
+            gather_external_fixtures_with_reader(&reader, &manifest, &in_scope_of(&["ut.m.t"]));
+        let ext = out.get("ut.m.t").expect("bare-name fallback loaded");
+        assert!(ext.given.get(&0).expect("given 0").table.is_some());
+    }
+
+    #[test]
+    fn expect_side_external_fixture_is_loaded() {
+        let expect = UnitTestExpect::new(
+            serde_json::Value::Null,
+            Some("csv".to_owned()),
+            Some("tests/fixtures/exp.csv".to_owned()),
+        );
+        let manifest = manifest_with("ut.m.t", ut_with(vec![], expect));
+        let reader = stub_reader(&[(
+            "tests/fixtures/exp.csv",
+            StubResult::Ok("id\n9\n".to_owned()),
+        )]);
+        let out =
+            gather_external_fixtures_with_reader(&reader, &manifest, &in_scope_of(&["ut.m.t"]));
+        let ext = out.get("ut.m.t").expect("expect external loaded");
+        assert!(ext.given.is_empty());
+        assert!(ext.expect.is_some(), "expect-side external fixture loaded");
+    }
+
+    #[test]
+    fn two_givens_sharing_a_fixture_both_load_by_ordinal() {
+        // Two givens against the SAME fixture path each load under their own
+        // ordinal (the #131 per-given identity).
+        let manifest = manifest_with(
+            "ut.m.t",
+            ut_with(
+                vec![
+                    external_given("ref('a')", "csv", "tests/fixtures/shared.csv"),
+                    external_given("ref('a')", "csv", "tests/fixtures/shared.csv"),
+                ],
+                null_expect(),
+            ),
+        );
+        let reader = stub_reader(&[(
+            "tests/fixtures/shared.csv",
+            StubResult::Ok("id\n1\n".to_owned()),
+        )]);
+        let out =
+            gather_external_fixtures_with_reader(&reader, &manifest, &in_scope_of(&["ut.m.t"]));
+        let ext = out.get("ut.m.t").expect("loaded");
+        assert!(ext.given.contains_key(&0));
+        assert!(ext.given.contains_key(&1));
+    }
+
+    #[test]
+    fn external_sql_nonliteral_loads_text_without_a_grid() {
+        // A non-literal sql fixture file loads its TEXT (for the code-block
+        // fallback) but tabulates to no grid (table None → AC#5).
+        let manifest = manifest_with(
+            "ut.m.t",
+            ut_with(
+                vec![external_given("ref('a')", "sql", "tests/fixtures/a.sql")],
+                null_expect(),
+            ),
+        );
+        let reader = stub_reader(&[(
+            "tests/fixtures/a.sql",
+            StubResult::Ok("select id, name from src".to_owned()),
+        )]);
+        let out =
+            gather_external_fixtures_with_reader(&reader, &manifest, &in_scope_of(&["ut.m.t"]));
+        let loaded = out
+            .get("ut.m.t")
+            .and_then(|e| e.given.get(&0))
+            .expect("sql fixture loaded");
+        assert!(loaded.table.is_none(), "non-literal sql → no grid");
+        assert_eq!(loaded.text, "select id, name from src");
+    }
+
+    #[test]
+    fn absent_manifest_format_derives_from_extension() {
+        // dbt-core MAY omit `format` — the .csv extension fills it so the
+        // data still tabulates (cross-engine guard).
+        let given = UnitTestGiven::new(
+            "ref('a')",
+            serde_json::Value::Null,
+            None, // no manifest format
+            Some("tests/fixtures/a.csv".to_owned()),
+        );
+        let manifest = manifest_with("ut.m.t", ut_with(vec![given], null_expect()));
+        let reader = stub_reader(&[(
+            "tests/fixtures/a.csv",
+            StubResult::Ok("id,amount\n1,10\n".to_owned()),
+        )]);
+        let out =
+            gather_external_fixtures_with_reader(&reader, &manifest, &in_scope_of(&["ut.m.t"]));
+        let loaded = out
+            .get("ut.m.t")
+            .and_then(|e| e.given.get(&0))
+            .expect("loaded");
+        assert_eq!(loaded.format.as_deref(), Some("csv"));
+        assert!(loaded.table.is_some(), "extension-derived csv tabulates");
+    }
+
+    #[test]
+    fn path_traversal_fixture_is_skipped_softly() {
+        // The adapter rejects a `..`/absolute path with InvalidInput; the
+        // gather treats it as a soft skip (no arbitrary read, no crash) — the
+        // test simply has no external entry.
+        let manifest = manifest_with(
+            "ut.m.t",
+            ut_with(
+                vec![external_given("ref('a')", "csv", "../../../etc/passwd")],
+                null_expect(),
+            ),
+        );
+        let reader = stub_reader(&[(
+            "../../../etc/passwd",
+            StubResult::Err(io::ErrorKind::InvalidInput, "rejected by path guard"),
+        )]);
+        let out =
+            gather_external_fixtures_with_reader(&reader, &manifest, &in_scope_of(&["ut.m.t"]));
+        assert!(out.is_empty(), "rejected path is a soft skip");
+    }
+
+    // -----------------------------------------------------------------
+    // merge_external_data_diffs (cute-dbt#126 AC#3) — splice the external
+    // fixture FILE cell diff into data_diffs, keyed off the file's own hunks.
+    // -----------------------------------------------------------------
+
+    fn loaded_csv(text: &str) -> LoadedFixture {
+        LoadedFixture {
+            text: text.to_owned(),
+            format: Some("csv".to_owned()),
+            table: external_fixture_table(text, Some("csv")),
+        }
+    }
+
+    fn index_for(path: &str, removed: &str, added: &str, line: usize) -> NormalizedDiffIndex {
+        use crate::domain::{FileHunks, Hunk, PrDiff};
+        let diff = PrDiff {
+            files: vec![FileHunks {
+                path: path.to_owned(),
+                hunks: vec![Hunk {
+                    new_start: line,
+                    new_len: 1,
+                    removed_lines: vec![removed.to_owned()],
+                    added_lines: vec![added.to_owned()],
+                }],
+            }],
+        };
+        NormalizedDiffIndex::new(&diff, None)
+    }
+
+    #[test]
+    fn merge_external_data_diffs_splices_a_csv_cell_diff_by_ordinal() {
+        use crate::domain::RowChangeKind;
+        let manifest = manifest_with(
+            "ut.m.t",
+            ut_with(
+                vec![external_given("ref('a')", "csv", "tests/fixtures/a.csv")],
+                null_expect(),
+            ),
+        );
+        let mut externals = StdHashMap::new();
+        let mut ext = ExternalFixtures::default();
+        ext.given.insert(0, loaded_csv("id,amount\n1,10\n2,99\n"));
+        externals.insert("ut.m.t".to_owned(), ext);
+        let index = index_for("tests/fixtures/a.csv", "2,20", "2,99", 3);
+
+        let mut data_diffs: StdHashMap<String, UnitTestDataDiff> = StdHashMap::new();
+        merge_external_data_diffs(
+            &mut data_diffs,
+            &manifest,
+            &in_scope_of(&["ut.m.t"]),
+            &externals,
+            &index,
+        );
+
+        let dd = data_diffs.get("ut.m.t").expect("external diff spliced in");
+        assert_eq!(dd.given.len(), 1);
+        assert_eq!(dd.given[0].ordinal, 0, "keyed by source ordinal");
+        assert!(
+            dd.given[0]
+                .diff
+                .rows
+                .iter()
+                .any(|r| r.kind == RowChangeKind::Modified),
+            "the touched csv cell is a Modified row",
+        );
+    }
+
+    #[test]
+    fn merge_external_data_diffs_skips_an_untouched_fixture() {
+        // The fixture loaded, but the PR diff did not touch THAT file (the
+        // index has hunks for a different path) → no cell diff entry (the grid
+        // renders without a diff toggle). This is the independence property:
+        // AC#3 keys off the fixture file's own hunks.
+        let manifest = manifest_with(
+            "ut.m.t",
+            ut_with(
+                vec![external_given("ref('a')", "csv", "tests/fixtures/a.csv")],
+                null_expect(),
+            ),
+        );
+        let mut externals = StdHashMap::new();
+        let mut ext = ExternalFixtures::default();
+        ext.given.insert(0, loaded_csv("id,amount\n1,10\n"));
+        externals.insert("ut.m.t".to_owned(), ext);
+        // Hunks for a DIFFERENT file — the fixture itself is untouched.
+        let index = index_for("models/other.sql", "x", "y", 1);
+
+        let mut data_diffs: StdHashMap<String, UnitTestDataDiff> = StdHashMap::new();
+        merge_external_data_diffs(
+            &mut data_diffs,
+            &manifest,
+            &in_scope_of(&["ut.m.t"]),
+            &externals,
+            &index,
+        );
+        assert!(
+            data_diffs.is_empty(),
+            "an untouched external fixture produces no cell diff",
+        );
     }
 }

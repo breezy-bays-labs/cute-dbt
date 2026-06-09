@@ -50,7 +50,8 @@ pub mod unit_test_yaml;
 
 pub use cell_diff::{
     CellChange, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff, RowChange,
-    RowChangeKind, UnitTestDataDiff, diff_fixture_tables, reconstruct_table_diffs,
+    RowChangeKind, UnitTestDataDiff, diff_fixture_tables, reconstruct_external_fixture_diff,
+    reconstruct_table_diffs,
 };
 pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};
@@ -69,7 +70,8 @@ pub use state::{
 };
 pub use unit_test::{UnitTest, UnitTestExpect, UnitTestGiven};
 pub use unit_test_table::{
-    Cell, CellValue, FixtureFormat, FixtureTable, TableRow, parse_block_dict_rows, parse_csv_rows,
+    Cell, CellValue, FixtureFormat, FixtureTable, TableRow, effective_fixture_format,
+    external_fixture_table, normalize_fixture_file_text, parse_block_dict_rows, parse_csv_rows,
     parse_inline_flow_row, table_from_manifest_rows, table_from_yaml_fragment, type_cell_scalar,
     type_cell_value, type_csv_token,
 };

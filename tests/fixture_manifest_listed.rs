@@ -20,14 +20,16 @@
 //!
 //! cute-dbt#115 widens the gate to the same three assertions over
 //! `[[project_data]]` — the committed DATA carriers of the embedded
-//! `dbt-project/`: the seed CSVs under `dbt-project/seeds/`. The covered set
-//! is enumerated via `git ls-files` (never a filesystem walk — a dev's local
-//! `dbt compile` leaves build-output under `dbt-project/target/` that a walk
-//! would list and fail on), scoped to the seeds directory exhaustively. The
-//! compiled `target/manifest.json` is gitignored build output (recompiled
-//! fresh by CI/local, never committed — cute-dbt#115), so it is not a
-//! committed data carrier and is not covered. dbt-project source SQL / YAML /
-//! config is code, not data, and is intentionally not listed.
+//! `dbt-project/`: the seed CSVs under `dbt-project/seeds/` AND (cute-dbt#126)
+//! the external unit-test fixture data under `dbt-project/tests/fixtures/`.
+//! The covered set is enumerated via `git ls-files` (never a filesystem walk
+//! — a dev's local `dbt compile` leaves build-output under
+//! `dbt-project/target/` that a walk would list and fail on), scoped to those
+//! two directories exhaustively. The compiled `target/manifest.json` is
+//! gitignored build output (recompiled fresh by CI/local, never committed —
+//! cute-dbt#115), so it is not a committed data carrier and is not covered.
+//! dbt-project source SQL / YAML / config is code, not data, and is
+//! intentionally not listed.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -81,13 +83,18 @@ fn repo_root() -> PathBuf {
 ///
 /// Enumerated via `git ls-files` (never a filesystem walk) so a dev's
 /// local `dbt compile` output under `dbt-project/target/` cannot leak in
-/// and fail the gate. Scope = the seeds directory (exhaustive). The
-/// compiled `target/manifest.json` is gitignored build output (recompiled
-/// fresh, never committed — cute-dbt#115), so it is not a committed data
-/// carrier and is intentionally not enumerated here.
+/// and fail the gate. Scope = the seed CSVs (`dbt-project/seeds/`) AND the
+/// external unit-test fixture data (`dbt-project/tests/fixtures/`, cute-dbt#126)
+/// — both exhaustive. The compiled `target/manifest.json` is gitignored
+/// build output (recompiled fresh, never committed — cute-dbt#115), so it
+/// is not a committed data carrier and is intentionally not enumerated here.
 fn git_tracked_project_data() -> BTreeSet<String> {
     let output = Command::new("git")
-        .args(["ls-files", "dbt-project/seeds/"])
+        .args([
+            "ls-files",
+            "dbt-project/seeds/",
+            "dbt-project/tests/fixtures/",
+        ])
         .current_dir(repo_root())
         .output()
         .expect("`git ls-files` runs (the gate enumerates tracked data carriers)");

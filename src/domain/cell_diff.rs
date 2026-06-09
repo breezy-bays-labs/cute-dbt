@@ -73,7 +73,8 @@ use crate::domain::pr_diff::{
 use crate::domain::state::InScopeSet;
 use crate::domain::unit_test::UnitTest;
 use crate::domain::unit_test_table::{
-    Cell, CellValue, FixtureTable, TableRow, table_from_manifest_rows, table_from_yaml_fragment,
+    Cell, CellValue, FixtureTable, TableRow, external_fixture_table, table_from_manifest_rows,
+    table_from_yaml_fragment,
 };
 use crate::domain::unit_test_yaml::UnitTestYamlBlock;
 
@@ -590,6 +591,71 @@ pub fn reconstruct_table_diffs(
         }
     }
     out
+}
+
+/// Reconstruct the old→new cell diff of an **external fixture file**
+/// (cute-dbt#126 AC#3).
+///
+/// Unlike [`reconstruct_table_diffs`], whose OLD side is sliced from the
+/// reconstructed unit-test **YAML block**, an external fixture's data lives
+/// in its own file (`given[i].fixture` / `expect.fixture`). `new_text` is
+/// that file's current body (read by the cli via the `ProjectFileReader`);
+/// `hunks` are the PR diff's hunks for **that file's** path
+/// (`index.hunks_for(fixture_path)`) — looked up **independently** of the
+/// unit-test YAML's `changed` set, because a PR that edits ONLY the csv file
+/// never touches the YAML block.
+///
+/// The OLD file body is reconstructed by reverse-applying the hunks over a
+/// **whole-file** [`BlockSpan`] (the same primitive the cute-dbt#111 model-SQL
+/// diff uses), taking every non-`Added` line. Both sides are parsed via
+/// [`external_fixture_table`] (which normalizes BOM / trailing newlines, so a
+/// whitespace-only file edit is a non-diff) and diffed with
+/// [`diff_fixture_tables`].
+///
+/// `None` when: there are no hunks for the file; the diff is stale
+/// ([`block_aligns_with_hunks`] fails) or touches nothing; either side is a
+/// non-tabulatable (non-literal sql) fixture (→ the plain text/code view); or
+/// the diff carries no real change (a format-only / whitespace edit).
+#[must_use]
+pub fn reconstruct_external_fixture_diff(
+    new_text: &str,
+    format: Option<&str>,
+    hunks: &[Hunk],
+) -> Option<FixtureTableDiff> {
+    if hunks.is_empty() {
+        return None;
+    }
+    // Whole-file span over the NEW file body, git's single trailing
+    // terminator stripped (mirrors `reconstruct_model_sql_diffs`, cute-dbt#111).
+    let span_text = new_text.strip_suffix('\n').unwrap_or(new_text);
+    let span = BlockSpan::new(span_text, 1, span_text.split('\n').count());
+    if !block_aligns_with_hunks(&span, hunks) {
+        return None; // stale diff → plain grid (no cell diff)
+    }
+    let touching: Vec<&Hunk> = hunks
+        .iter()
+        .filter(|h| hunk_touches_block(span.start, span.end, h))
+        .collect();
+    if touching.is_empty() {
+        return None;
+    }
+    let bd = block_diff_for(&span, &touching);
+    // The complete pre-edit (OLD) file = every line that is NOT an addition,
+    // i.e. Context + Removed lines, in order.
+    let old_text: String = bd
+        .lines
+        .iter()
+        .filter(|l| l.kind != DiffLineKind::Added)
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    // A non-literal sql fixture (or otherwise non-tabulatable) on either side
+    // → `None` → the file falls back to its plain text/code view, never a
+    // phantom all-added/all-removed cell grid.
+    let new_tbl = external_fixture_table(new_text, format)?;
+    let old_tbl = external_fixture_table(&old_text, format)?;
+    let diff = diff_fixture_tables(&old_tbl, &new_tbl);
+    diff.has_real_change().then_some(diff)
 }
 
 /// Build one test's [`UnitTestDataDiff`], or `None` when the gating
@@ -1973,5 +2039,92 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ----- external fixture FILE old→new diff (cute-dbt#126 AC#3) -----
+
+    /// One `--unified=0` hunk replacing line `n` (1-based) with `added`,
+    /// removing `removed`.
+    fn replace_hunk(n: usize, removed: &str, added: &str) -> Hunk {
+        Hunk {
+            new_start: n,
+            new_len: 1,
+            removed_lines: vec![removed.to_owned()],
+            added_lines: vec![added.to_owned()],
+        }
+    }
+
+    #[test]
+    fn external_diff_csv_cell_change_is_a_modified_row() {
+        // The fixture FILE's line 3 changed `2,20` → `2,99`. OLD is
+        // reconstructed by reverse-applying the hunk; the cell diff is one
+        // Modified row whose `amount` cell goes 20 → 99.
+        let new_text = "id,amount\n1,10\n2,99\n";
+        let hunks = [replace_hunk(3, "2,20", "2,99")];
+        let diff = reconstruct_external_fixture_diff(new_text, Some("csv"), &hunks)
+            .expect("a real cell change diffs");
+        let modified: Vec<&RowChange> = diff
+            .rows
+            .iter()
+            .filter(|r| r.kind == RowChangeKind::Modified)
+            .collect();
+        assert_eq!(modified.len(), 1, "exactly one modified row");
+        let amount = &modified[0].cells[1];
+        assert_eq!(amount.old.key, CellValue::Number("20".into()));
+        assert_eq!(amount.new.key, CellValue::Number("99".into()));
+        assert!(amount.changed, "the amount cell is flagged changed");
+    }
+
+    #[test]
+    fn external_diff_no_hunks_is_none() {
+        // A fixture file the PR did not touch → no hunks → no cell diff (the
+        // grid renders without a diff toggle).
+        assert_eq!(
+            reconstruct_external_fixture_diff("id,amount\n1,10\n", Some("csv"), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn external_diff_added_row() {
+        // A pure-insertion hunk at new-side line 3 (`new_len` 1, no removed).
+        let new_text = "id,amount\n1,10\n2,20\n";
+        let hunks = [Hunk {
+            new_start: 3,
+            new_len: 1,
+            removed_lines: vec![],
+            added_lines: vec!["2,20".to_owned()],
+        }];
+        let diff = reconstruct_external_fixture_diff(new_text, Some("csv"), &hunks)
+            .expect("an added row diffs");
+        assert!(
+            diff.rows.iter().any(|r| r.kind == RowChangeKind::Added),
+            "the new row is an Added row",
+        );
+    }
+
+    #[test]
+    fn external_diff_format_only_change_is_none() {
+        // `2,20` → `2,20.0` is a format-only numeric reformat: both cells key
+        // to Number("20"), so the rows match and there is no real change.
+        let new_text = "id,amount\n1,10\n2,20.0\n";
+        let hunks = [replace_hunk(3, "2,20", "2,20.0")];
+        assert_eq!(
+            reconstruct_external_fixture_diff(new_text, Some("csv"), &hunks),
+            None,
+            "a format-only reformat is not a cell diff",
+        );
+    }
+
+    #[test]
+    fn external_diff_non_literal_sql_is_none() {
+        // A non-literal sql fixture file is not tabulatable → no cell diff (the
+        // file falls back to its code-block view, never a phantom grid).
+        let new_text = "select id, amount from src where id > 1";
+        let hunks = [replace_hunk(1, "select id from src", new_text)];
+        assert_eq!(
+            reconstruct_external_fixture_diff(new_text, Some("sql"), &hunks),
+            None,
+        );
     }
 }

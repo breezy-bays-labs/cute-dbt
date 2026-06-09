@@ -407,7 +407,7 @@ jobs:
           # Use `git ls-files` (NOT find) so a local `dbt compile` leaving
           # build output under dbt-project/target/ cannot leak in and fail
           # the gate.
-          pd_tracked=$(git ls-files dbt-project/seeds/ | sort -u)
+          pd_tracked=$(git ls-files dbt-project/seeds/ dbt-project/tests/fixtures/ | sort -u)
 
           pd_unlisted=$(comm -23 <(printf '%s\n' "$pd_tracked") <(printf '%s\n' "$pd_listed") | sed '/^$/d')
           pd_missing=$(comm -13 <(printf '%s\n' "$pd_tracked") <(printf '%s\n' "$pd_listed") | sed '/^$/d')

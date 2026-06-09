@@ -1,24 +1,25 @@
-//! Real-file `SourceYamlReader` impl + path-safety guard.
+//! Real-file `ProjectFileReader` impl + path-safety guard.
 //!
-//! `FsSourceYamlReader` reads UTF-8 YAML files from a fixed
-//! `project_root`, with the project-relative path validated against
-//! absolute-path and `..` traversal to keep this adapter from being
-//! weaponized into an arbitrary-read primitive.
+//! `FsProjectFileReader` reads UTF-8 files from a fixed `project_root`
+//! (unit-test source YAML for the authoring drawer, and external
+//! `given`/`expect` fixture CSV/SQL files), with the project-relative
+//! path validated against absolute-path and `..` traversal to keep this
+//! adapter from being weaponized into an arbitrary-read primitive.
 //!
-//! Soft failure surface — see `ports::source_yaml::SourceYamlReader`
+//! Soft failure surface — see `ports::project_file::ProjectFileReader`
 //! for the contract: `NotFound` is the "this test has no surfaceable
-//! YAML" signal, not a fatal error.
+//! content" signal, not a fatal error.
 
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use crate::ports::SourceYamlReader;
+use crate::ports::ProjectFileReader;
 
-/// Reads project-relative YAML files from a fixed `project_root`.
+/// Reads project-relative files from a fixed `project_root`.
 ///
 /// The project-relative path passed to [`read`](Self::read) (or to the
-/// `SourceYamlReader` trait impl) must:
+/// `ProjectFileReader` trait impl) must:
 ///
 /// - be a relative path (no leading `/`);
 /// - contain no `..` components (no parent traversal);
@@ -28,11 +29,11 @@ use crate::ports::SourceYamlReader;
 /// the filesystem. Files outside `project_root` are unreachable
 /// through this adapter.
 #[derive(Debug, Clone)]
-pub struct FsSourceYamlReader {
+pub struct FsProjectFileReader {
     project_root: PathBuf,
 }
 
-impl FsSourceYamlReader {
+impl FsProjectFileReader {
     /// Construct a reader rooted at `project_root`. The path is taken
     /// verbatim (no canonicalization); callers are expected to have
     /// resolved it from `--project-root` or the manifest-path derive.
@@ -48,7 +49,7 @@ impl FsSourceYamlReader {
     }
 }
 
-impl SourceYamlReader for FsSourceYamlReader {
+impl ProjectFileReader for FsProjectFileReader {
     fn read(&self, project_relative: &str) -> io::Result<String> {
         validate_project_relative(project_relative)?;
         let full = self.project_root.join(project_relative);
@@ -92,7 +93,7 @@ mod tests {
     fn temp_root(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
         p.push(format!(
-            "cute-dbt-fs-source-yaml-{name}-{}",
+            "cute-dbt-fs-project-file-{name}-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&p);
@@ -107,7 +108,7 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         fs::write(nested.join("foo.yml"), "version: 2\n").unwrap();
 
-        let r = FsSourceYamlReader::new(root.clone());
+        let r = FsProjectFileReader::new(root.clone());
         let contents = r.read("models/marts/foo.yml").unwrap();
         assert_eq!(contents, "version: 2\n");
 
@@ -115,9 +116,25 @@ mod tests {
     }
 
     #[test]
+    fn reads_a_project_relative_fixture_csv() {
+        // The second consumer (cute-dbt#126): an external fixture path
+        // under `tests/fixtures/` reads through the same adapter.
+        let root = temp_root("read-fixture-csv");
+        let nested = root.join("tests").join("fixtures");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("stg_orders.csv"), "id,name\n1,alice\n").unwrap();
+
+        let r = FsProjectFileReader::new(root.clone());
+        let contents = r.read("tests/fixtures/stg_orders.csv").unwrap();
+        assert_eq!(contents, "id,name\n1,alice\n");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn rejects_absolute_path_with_invalid_input() {
         let root = temp_root("reject-abs");
-        let r = FsSourceYamlReader::new(root.clone());
+        let r = FsProjectFileReader::new(root.clone());
         let err = r.read("/etc/passwd").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         let _ = fs::remove_dir_all(&root);
@@ -126,7 +143,7 @@ mod tests {
     #[test]
     fn rejects_parent_traversal_with_invalid_input() {
         let root = temp_root("reject-dotdot");
-        let r = FsSourceYamlReader::new(root.clone());
+        let r = FsProjectFileReader::new(root.clone());
         let err = r.read("models/../../../etc/passwd").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         let _ = fs::remove_dir_all(&root);
@@ -135,7 +152,7 @@ mod tests {
     #[test]
     fn missing_file_surfaces_as_not_found() {
         let root = temp_root("missing");
-        let r = FsSourceYamlReader::new(root.clone());
+        let r = FsProjectFileReader::new(root.clone());
         let err = r.read("models/does_not_exist.yml").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         let _ = fs::remove_dir_all(&root);
@@ -151,7 +168,7 @@ mod tests {
         fs::create_dir_all(&nested).unwrap();
         fs::write(nested.join("bar.yml"), "x: 1\n").unwrap();
 
-        let r = FsSourceYamlReader::new(root.clone());
+        let r = FsProjectFileReader::new(root.clone());
         let contents = r.read("./models/bar.yml").unwrap();
         assert_eq!(contents, "x: 1\n");
         let _ = fs::remove_dir_all(&root);

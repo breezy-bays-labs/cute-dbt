@@ -4,15 +4,17 @@
 //! (#6): real-file impl in `adapters/manifest.rs`, in-memory test impl
 //! in the test suite.
 //!
-//! v0.2 adds the source-YAML reader port (`SourceYamlReader`, cute-dbt#69):
-//! real-file impl in `adapters/source_yaml.rs` plus an in-memory test
-//! impl used by BDD scenarios that inject synthetic YAML without
-//! touching the filesystem.
+//! v0.2 adds the project-file reader port (`ProjectFileReader`,
+//! cute-dbt#69 + cute-dbt#126): real-file impl in
+//! `adapters/project_file.rs` plus an in-memory test impl used by BDD
+//! scenarios that inject synthetic file contents without touching the
+//! filesystem. Two consumers read through it — the authoring-YAML
+//! drawer and the external unit-test fixture reader.
 //!
 //! The renderer is NOT a port — v0.x has one output format.
 
 pub mod manifest_source;
-pub mod source_yaml;
+pub mod project_file;
 
 pub use manifest_source::ManifestSource;
-pub use source_yaml::SourceYamlReader;
+pub use project_file::ProjectFileReader;
