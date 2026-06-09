@@ -110,7 +110,7 @@ g.dag-node:focus-visible { outline: 2px dashed #1d7484; outline-offset: 3px; }
 .legend-edge { display: inline-block; width: 28px; height: 3px; border-radius: 2px; }
 
 .panel-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.5rem; margin: 1.5rem 0; }
-.panel-row.is-stacked { grid-template-columns: 1fr; }
+.panel-row.is-stacked { grid-template-columns: minmax(0, 1fr); }
 .panel-toggle { display: inline-flex; gap: 4px; }
 .panel-toggle button { font-size: 0.85em; padding: 4px 10px; }
 .panel-toggle button:not(.is-active) { opacity: 0.55; }
