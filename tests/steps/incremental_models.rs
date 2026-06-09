@@ -199,30 +199,30 @@ fn test_full_refresh_branch(world: &mut World, test: String) {
     );
 }
 
-#[then(
-    regex = r#"^the section for "([^"]+)" explains that Expected is the rows merged or inserted, not the final table$"#
-)]
-fn explains_merged_rows(world: &mut World, test: String) {
+#[then(regex = r#"^the section for "([^"]+)" explains the incremental expect semantics$"#)]
+fn explains_incremental_expect(world: &mut World, test: String) {
     // The expect-semantics tooltip rides the authoritative payload bool: it
     // renders iff is_incremental_mode === true. cucumber asserts that
     // driving payload fact; `headless_toggle.rs` asserts the rendered text.
+    // cute-dbt#159: the rendered copy is strategy-invariant (true for all 5
+    // incremental strategies, not just merge/append).
     let p = payload(world);
     let t = find_test(&p, &test);
     assert_eq!(
         t["is_incremental_mode"].as_bool(),
         Some(true),
-        "the merged-rows tooltip requires is_incremental_mode===true; got {t}"
+        "the incremental expect-semantics tooltip requires is_incremental_mode===true; got {t}"
     );
 }
 
-#[then(regex = r#"^the section for "([^"]+)" does not explain the merged-rows expect semantics$"#)]
-fn no_merged_rows_tooltip(world: &mut World, test: String) {
+#[then(regex = r#"^the section for "([^"]+)" does not explain the incremental expect semantics$"#)]
+fn no_incremental_expect_tooltip(world: &mut World, test: String) {
     let p = payload(world);
     let t = find_test(&p, &test);
     assert_ne!(
         t["is_incremental_mode"].as_bool(),
         Some(true),
-        "the merged-rows tooltip must be absent unless is_incremental_mode===true; got {t}"
+        "the incremental expect-semantics tooltip must be absent unless is_incremental_mode===true; got {t}"
     );
 }
 

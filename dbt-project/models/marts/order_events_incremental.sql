@@ -1,7 +1,7 @@
 -- SPIKE (cute-dbt#145 discovery) — incremental model to inspect how fusion
 -- serializes `given: - input: this`, config.materialized, and overrides in
 -- manifest.json. May become the committed dogfood fixture after shaping.
-{{ config(materialized='incremental', unique_key='order_id') }}
+{{ config(materialized='incremental', unique_key='order_id', incremental_strategy='merge') }}
 
 with orders as (
     select * from {{ ref('stg_orders') }}

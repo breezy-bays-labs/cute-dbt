@@ -3204,19 +3204,30 @@ fn incremental_badges_modes_tooltip_and_this_given() {
     );
     // The dbt gotcha wording lives in the VISIBLE CSS bubble AND the aria-label.
     // Assert an ASCII substring — the tip contains em-dashes (U+2014), so a
-    // full-string compare would mismatch.
-    assert!(
-        eval_string(
-            &tab,
-            &format!("{TOOLTIP}.querySelector('.expect-tooltip-bubble').textContent")
-        )
-        .contains("merged or inserted"),
-        "the visible tooltip bubble explains Expected is the rows merged or inserted",
+    // full-string compare would mismatch. cute-dbt#159: the copy is now
+    // strategy-invariant ("the rows the configured incremental strategy will
+    // apply to the table") — true for all 5 strategies, where the old
+    // "merged or inserted" was wrong for insert_overwrite / microbatch.
+    let bubble_text = eval_string(
+        &tab,
+        &format!("{TOOLTIP}.querySelector('.expect-tooltip-bubble').textContent"),
     );
     assert!(
-        eval_string(&tab, &format!("{TOOLTIP}.getAttribute('aria-label')"))
-            .contains("merged or inserted"),
-        "the tooltip aria-label carries the same dbt wording (a11y parity)",
+        bubble_text.contains("incremental strategy will apply to the table"),
+        "the visible tooltip bubble explains Expected is the rows the strategy applies, got {bubble_text:?}",
+    );
+    assert!(
+        !bubble_text.contains("merged or inserted"),
+        "the bubble must NOT carry the old merge/append-centric wording (cute-dbt#159), got {bubble_text:?}",
+    );
+    let aria = eval_string(&tab, &format!("{TOOLTIP}.getAttribute('aria-label')"));
+    assert!(
+        aria.contains("incremental strategy will apply to the table"),
+        "the tooltip aria-label carries the same strategy-invariant wording (a11y parity), got {aria:?}",
+    );
+    assert!(
+        !aria.contains("merged or inserted"),
+        "the aria-label must NOT carry the old merge/append-centric wording (cute-dbt#159), got {aria:?}",
     );
     // cute-dbt#146 review — the regression guard for "hover shows nothing": the
     // bubble is hidden until hover/focus, and FOCUS reveals it (the keyboard
