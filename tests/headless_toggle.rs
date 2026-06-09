@@ -323,8 +323,8 @@ fn launch_browser_sized(window_size: Option<(u32, u32)>) -> Browser {
     if let Some(size) = window_size {
         builder.window_size(Some(size));
     }
-    if let Some(p) = chrome_path.as_ref() {
-        builder.path(Some(p.clone()));
+    if let Some(p) = chrome_path {
+        builder.path(Some(p));
     }
     let opts = builder.build().expect("LaunchOptions must build");
     Browser::new(opts).expect("Chromium must launch")
