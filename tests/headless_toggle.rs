@@ -298,6 +298,15 @@ fn select_model(tab: &Tab, model: &str) {
 }
 
 fn launch_browser() -> Browser {
+    launch_browser_sized(None)
+}
+
+/// Like `launch_browser`, but with an optional launch window size
+/// (`--window-size=W,H`). In headless Chrome `window.innerWidth` tracks the
+/// launch window size, so this is the lever that drives a narrow (mobile)
+/// layout for the cute-dbt#157 viewport regression — `None` preserves the
+/// historic default-width behaviour every other headless test relies on.
+fn launch_browser_sized(window_size: Option<(u32, u32)>) -> Browser {
     let chrome_path = std::env::var_os("CHROME").map(PathBuf::from);
     let host_resolver = OsStr::new("--host-resolver-rules=MAP * ~NOTFOUND");
     let no_first_run = OsStr::new("--no-first-run");
@@ -311,6 +320,9 @@ fn launch_browser() -> Browser {
         no_default_check,
         disable_breakpad,
     ]);
+    if let Some(size) = window_size {
+        builder.window_size(Some(size));
+    }
     if let Some(p) = chrome_path.as_ref() {
         builder.path(Some(p.clone()));
     }
@@ -3600,6 +3612,163 @@ fn self_named_import_cte_renders_distinct_dag_nodes_not_a_cycle() {
     assert!(
         !detail_sql.contains("from final"),
         "the import node SQL is not overwritten by the terminal's: {detail_sql}",
+    );
+
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#157: mobile viewport blowout on the stacked panel -------
+
+/// Build `n_rows` JSON dict rows each with `n_cols` columns of long,
+/// unbreakable string values. The given/expected table cells are
+/// `white-space: nowrap` (templates/report.html:172) and the table is
+/// `width: max-content` (:170), so a row this wide overflows a half-viewport
+/// column and trips the JS `reflowPanelsForOverflow` stack toggle at 375px —
+/// the precise path that exposed the `.is-stacked { grid-template-columns:
+/// 1fr }` blowout (the bare `1fr` = `minmax(auto,1fr)` whose `auto` floor
+/// sized the single stacked track to the table's min-content).
+fn wide_cols_rows(n_cols: usize, n_rows: usize) -> serde_json::Value {
+    let rows: Vec<serde_json::Value> = (0..n_rows)
+        .map(|r| {
+            let mut obj = serde_json::Map::new();
+            for c in 0..n_cols {
+                obj.insert(
+                    format!("dimension_column_{c:02}"),
+                    serde_json::Value::String(format!("value_r{r:02}_c{c:02}_unbreakable_token")),
+                );
+            }
+            serde_json::Value::Object(obj)
+        })
+        .collect();
+    serde_json::Value::Array(rows)
+}
+
+/// A unit test with a WIDE given table AND a WIDE expect table (both inline
+/// dict fixtures), so both panels are populated with content wide enough to
+/// trip the stack toggle.
+fn wide_unit_test(name: &str, model_bare: &str) -> UnitTest {
+    UnitTest::new(
+        name.to_owned(),
+        NodeId::new(model_bare),
+        vec![UnitTestGiven::new(
+            format!("ref('{model_bare}')"),
+            wide_cols_rows(12, 3),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(wide_cols_rows(12, 3), Some("dict".to_owned()), None),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn stacked_panel_does_not_blow_out_viewport_at_375px() {
+    // cute-dbt#157 — on a narrow (phone) viewport the report's JS responsive
+    // helper collapses the two-column Inspect/Expected `.panel-row` to one
+    // column by adding `.is-stacked`. The bug: `.is-stacked` set the track to
+    // a bare `1fr` (= `minmax(auto,1fr)`), whose `auto` floor sized the single
+    // stacked track to the wide given/expected DataTable's min-content,
+    // ballooning `<body>` past the viewport. The fix clamps the track to
+    // `minmax(0,1fr)` (matching the desktop rule) so the table scrolls inside
+    // its `.table-fit` wrapper as designed. This test drives a real Chromium at
+    // a 375px (iPhone-class) viewport, populates BOTH panels with a wide table,
+    // forces the reflow, and asserts no page-level horizontal overflow. On the
+    // unfixed CSS it FAILS (documentElement.scrollWidth > innerWidth).
+
+    let url = render_to_file(
+        "headless_responsive_375.html",
+        vec![model_node("model.shop.dim_wide")],
+        vec![("unit_test.shop.dim_wide.t", wide_unit_test("t", "dim_wide"))],
+        &["model.shop.dim_wide"],
+        &["unit_test.shop.dim_wide.t"],
+    );
+
+    // Launch a DEDICATED 375x812 (iPhone-class) headless window. In headless
+    // Chrome `window.innerWidth` tracks the launch window size (`--window-size`),
+    // and the report's `width=device-width` viewport meta makes the layout
+    // viewport follow it — the lever that actually drives a narrow layout
+    // (CDP `Emulation.setDeviceMetricsOverride` silently no-ops on
+    // `window.innerWidth` in headless_chrome 1.0.21). A dedicated browser keeps
+    // the shared `launch_browser()` (and the desktop-width DOM the sibling
+    // headless tests assert) untouched.
+    let browser = launch_browser_sized(Some((375, 812)));
+    let tab = browser.new_tab().expect("new tab");
+
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // The expected panel populates on the auto-selected test; ALSO switch the
+    // left panel to "All inputs" so the wide given table renders there too —
+    // both panels populated exercises the stacked path robustly (an
+    // empty-panel fixture would not trip the toggle).
+    let _ = eval(
+        &tab,
+        "document.querySelector('.panel-toggle [data-mode=\"inputs\"]').click()",
+    );
+
+    // The reflow helper runs inside requestAnimationFrame after each
+    // DataTables init and on resize, and is closure-scoped (not a `window.__*`
+    // seam), so nudge the bound `resize` listener and poll for `.is-stacked`.
+    let _ = eval(&tab, "window.dispatchEvent(new Event('resize'))");
+    let mut stacked = false;
+    for _ in 0..40 {
+        if eval_bool(
+            &tab,
+            "document.querySelector('.panel-row.is-stacked') !== null",
+        ) {
+            stacked = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // Path guard: the stacked branch MUST have been exercised, else a future
+    // CSS regression on `.is-stacked` would silently pass here (this holds on
+    // BOTH the broken and fixed CSS — it proves the path, not the fix).
+    assert!(
+        stacked,
+        "the responsive helper collapsed `.panel-row` to `.is-stacked` at 375px \
+         (the stacked path must be exercised for this regression to be meaningful)",
+    );
+
+    // The effective `window.innerWidth` of the narrow launch window. Headless
+    // Chrome does not honour an EXACT CSS width (the `--window-size=375,812`
+    // launch lands near 500 in this harness), so we do NOT assert a specific
+    // width — `.is-stacked` above already proves the stacked layout path is
+    // exercised, which is the real precondition the bug needs, and the
+    // assertion below is a relative `scrollWidth <= innerWidth` check that
+    // holds at whatever width the harness produces (cross-platform robust).
+    let inner_width = eval_i64(&tab, "window.innerWidth");
+
+    // The bug: the stacked track sized to the wide table's min-content and
+    // dragged `<body>` past the viewport → a horizontal page scroll. The fix
+    // clamps the track so the table scrolls inside its own `.table-fit`
+    // wrapper instead. Assert no page-level horizontal overflow (1px
+    // tolerance for sub-pixel rounding).
+    let scroll_width = eval_i64(&tab, "document.documentElement.scrollWidth");
+    assert!(
+        scroll_width <= inner_width + 1,
+        "no horizontal page overflow at 375px: \
+         documentElement.scrollWidth={scroll_width} must be <= innerWidth={inner_width} + 1 \
+         (cute-dbt#157 — the stacked `.panel-row` track must not blow out the viewport)",
+    );
+
+    // Stronger proof the table is CONTAINED rather than the overflow merely
+    // vanishing: the wide given/expected table scrolls INSIDE its `.table-fit`
+    // wrapper (`scrollWidth > clientWidth`), which is the intended behaviour
+    // the zero-floored track restores.
+    assert!(
+        eval_bool(
+            &tab,
+            "Array.from(document.querySelectorAll('.panel-row .table-fit'))\
+             .some(function(w){return w.scrollWidth > w.clientWidth + 1;})",
+        ),
+        "the wide fixture table scrolls inside its `.table-fit` wrapper (containment, not erasure)",
     );
 
     let _ = tab.close(true);
