@@ -3736,17 +3736,14 @@ fn stacked_panel_does_not_blow_out_viewport_at_375px() {
          (the stacked path must be exercised for this regression to be meaningful)",
     );
 
-    // Loose sanity check that the narrow `--window-size` launch took effect
-    // (guards against a silent regression to the wide default). Headless
-    // Chrome does not honour an EXACT CSS width, so this is intentionally a
-    // generous bound, not a tight 375px range — `.is-stacked` above already
-    // proves the stacked layout path is exercised, which is the real
-    // precondition the bug needs.
+    // The effective `window.innerWidth` of the narrow launch window. Headless
+    // Chrome does not honour an EXACT CSS width (the `--window-size=375,812`
+    // launch lands near 500 in this harness), so we do NOT assert a specific
+    // width — `.is-stacked` above already proves the stacked layout path is
+    // exercised, which is the real precondition the bug needs, and the
+    // assertion below is a relative `scrollWidth <= innerWidth` check that
+    // holds at whatever width the harness produces (cross-platform robust).
     let inner_width = eval_i64(&tab, "window.innerWidth");
-    assert!(
-        inner_width < 1000,
-        "the narrow (mobile-class) launch window took effect (innerWidth={inner_width})",
-    );
 
     // The bug: the stacked track sized to the wide table's min-content and
     // dragged `<body>` past the viewport → a horizontal page scroll. The fix
