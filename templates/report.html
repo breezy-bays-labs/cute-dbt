@@ -1090,7 +1090,10 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     dag.nodes.forEach(function (n, i) { safeIds[n.id] = "n" + i; });
 
     dag.nodes.forEach(function (n) {
-      var safe = String(n.id).replace(/"/g, "&quot;");
+      // Display the label (e.g. `orders.sql` for the terminal) when present;
+      // fall back to the stable id for CTE nodes. Node identity stays keyed
+      // by id everywhere else (cute-dbt#155).
+      var safe = String(n.label || n.id).replace(/"/g, "&quot;");
       var shape;
       if (n.role === "import") {
         shape = "([\"" + safe + "\"])";
@@ -1305,7 +1308,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
       .attr("data-node-role", node.role);
 
     var $hdr = $("<div>").addClass("node-detail-header");
-    $hdr.append($("<h3>").addClass("node-detail-title").text(node.id));
+    $hdr.append($("<h3>").addClass("node-detail-title").text(node.label || node.id));
     $hdr.append($("<span>").addClass("node-role-badge role-" + node.role).text(node.role));
     $detail.append($hdr);
 

@@ -3488,3 +3488,106 @@ fn unreadable_external_fixture_shows_affordance_not_grid() {
 
     let _ = tab.close(true);
 }
+
+/// A `model` node whose compiled SQL is exactly `compiled` — so the CTE
+/// engine builds a real DAG from it (cute-dbt#155).
+fn model_node_with_compiled(full_id: &str, compiled: &str) -> Node {
+    Node::new(
+        NodeId::new(full_id),
+        "model",
+        Checksum::new("sha256", "ck"),
+        Some(compiled.to_owned()),
+        None,
+        DependsOn::default(),
+        None,
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn self_named_import_cte_renders_distinct_dag_nodes_not_a_cycle() {
+    // cute-dbt#155 end-to-end: a model named `orders` whose import CTE is
+    // also named `orders` (`with orders as (...)`). Pre-fix the terminal's
+    // id was the model name, so it collapsed with the import CTE into ONE
+    // Mermaid node — a spurious `orders ↔ final` cycle, and the import
+    // node's compiled-SQL panel was clobbered with the terminal's
+    // `select * from final`. The fix keys node identity by the stable engine
+    // name and labels the terminal `orders.sql`.
+    let url = render_to_file(
+        "headless_cte_name_collision.html",
+        vec![model_node_with_compiled(
+            "model.shop.orders",
+            "with orders as (select * from raw_orders), \
+                  final as (select * from orders) \
+             select * from final",
+        )],
+        vec![("unit_test.shop.orders.t", unit_test("t", "orders"))],
+        &["model.shop.orders"],
+        &[],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate collision report");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // The single in-scope model auto-selects on load; wait for Mermaid to
+    // render its DAG SVG (startOnLoad: false → renders on demand).
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-mermaid svg",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("Mermaid DAG SVG renders");
+
+    // Three DISTINCT nodes — orders (import), final (transform), and the
+    // terminal labelled `orders.sql`. Pre-fix the collapse yielded two
+    // nodes and the string `orders.sql` appeared nowhere.
+    let node_count = eval(
+        &tab,
+        "document.querySelectorAll('.cte-dag-mermaid svg g.node').length",
+    )
+    .as_u64()
+    .unwrap_or(0);
+    assert_eq!(
+        node_count, 3,
+        "three distinct DAG nodes render (no name-collision collapse)",
+    );
+    let svg_text = eval_string(
+        &tab,
+        "document.querySelector('.cte-dag-mermaid svg').textContent",
+    );
+    assert!(
+        svg_text.contains("orders.sql"),
+        "the terminal node is labelled `orders.sql`, distinct from the import CTE: {svg_text}",
+    );
+
+    // The literal reported bug: click the import CTE node and assert its
+    // compiled-SQL panel shows ITS OWN body (`raw_orders`), not the
+    // terminal's `from final`.
+    let clicked = eval_bool(
+        &tab,
+        "(function(){var g=document.querySelector('.cte-dag-mermaid svg g.node[data-node-id=\"orders\"]');\
+          if(!g){return false;}g.dispatchEvent(new MouseEvent('click',{bubbles:true}));return true;})()",
+    );
+    assert!(
+        clicked,
+        "the import CTE node is present + clickable by its own id `orders`"
+    );
+    let detail_sql = eval_string(
+        &tab,
+        "(document.querySelector('.node-detail .sql-block')||{}).textContent||''",
+    );
+    assert!(
+        detail_sql.contains("raw_orders"),
+        "the import node shows its OWN compiled SQL: {detail_sql}",
+    );
+    assert!(
+        !detail_sql.contains("from final"),
+        "the import node SQL is not overwritten by the terminal's: {detail_sql}",
+    );
+
+    let _ = tab.close(true);
+}
