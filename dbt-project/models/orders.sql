@@ -1,3 +1,8 @@
+-- cute-dbt#155 dogfood: this model's import CTE is named `orders` — the same
+-- name as the model itself (the idiomatic jaffle-shop shape). It exercises the
+-- DAG node-identity fix: the lineage graph renders `orders` (import) → `final`
+-- → `orders.sql` (the model's final select) as three distinct nodes, with no
+-- spurious `orders ↔ final` self-cycle and the import node showing its own SQL.
 {% set payment_methods = ['credit_card', 'coupon', 'bank_transfer', 'gift_card'] %}
 
 with orders as (
