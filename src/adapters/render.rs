@@ -233,13 +233,25 @@ pub struct ModelPayload {
     pub is_incremental: bool,
 }
 
-/// One DAG node — id and role.
+/// One DAG node — stable id, display label, and role.
 #[derive(Debug, Clone, Serialize)]
 pub struct NodePayload {
-    /// Stable node id used by both the DAG (Mermaid `g.node[id]`) and
-    /// the `compiled_sql` map. For non-terminal nodes this is the CTE
-    /// name; for the terminal node this is the model's bare name.
+    /// Stable node id — the key for the DAG (Mermaid node), the
+    /// `compiled_sql` map, edge endpoints, and given→node binding. Always
+    /// the engine's node name: a CTE alias for CTE nodes, or the
+    /// collision-proof [`TERMINAL_NODE_NAME`] for the terminal. The model's
+    /// bare name is NEVER the id (it rides in [`Self::label`]) — keeping it
+    /// out of the id is what stops a self-named import CTE (`with orders as
+    /// (...)` on the `orders` model) from collapsing into the terminal node
+    /// (cute-dbt#155).
     pub id: String,
+    /// Human-facing label for the DAG node + the node-detail title.
+    /// `Some(model_name)` for the terminal (so it reads as the model, not
+    /// the literal `(final select)`); `None` for CTE nodes, where the
+    /// template falls back to [`Self::id`]. Omitted from JSON when `None`
+    /// so CTE node payloads — and the byte-gated examples — stay minimal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// Render-layer classification (see [`NodeRole`]).
     pub role: NodeRole,
 }
@@ -783,7 +795,7 @@ fn build_model_payload(
     let graph = parse_cte_graph(compiled_code).unwrap_or_default();
     let is_recursive = graph.is_recursive();
     let nodes = build_node_payloads(&graph, &bare_name);
-    let edges = build_edge_payloads(&graph, &bare_name);
+    let edges = build_edge_payloads(&graph);
     let compiled_sql = build_compiled_sql(&graph, &bare_name, compiled_code);
     let raw_sql = model
         .raw_code()
@@ -819,8 +831,14 @@ fn build_model_payload(
     }
 }
 
-/// Build [`NodePayload`]s for every graph node, mapping the terminal
-/// node's name to the model's bare name.
+/// Build [`NodePayload`]s for every graph node.
+///
+/// `id` is always the engine's node name (stable + unique within a model);
+/// the terminal node's display [`label`](NodePayload::label) is the model's
+/// file name (`<model>.sql`), never its id — so a CTE that shares the
+/// model's name neither collapses into the terminal (distinct ids) nor
+/// reads ambiguously on the graph (the `.sql` suffix marks the model's own
+/// final select apart from a same-named import CTE) (cute-dbt#155).
 fn build_node_payloads(graph: &CteGraph, model_name: &str) -> Vec<NodePayload> {
     graph
         .nodes()
@@ -828,53 +846,46 @@ fn build_node_payloads(graph: &CteGraph, model_name: &str) -> Vec<NodePayload> {
         .enumerate()
         .map(|(idx, node)| {
             let role = classify_node_role(graph, idx);
-            let id = if role == NodeRole::Final {
-                model_name.to_owned()
-            } else {
-                node.name().to_owned()
-            };
-            NodePayload { id, role }
-        })
-        .collect()
-}
-
-/// Build [`EdgePayload`]s, swapping the terminal node's index id for the
-/// model's bare name on both endpoints.
-fn build_edge_payloads(graph: &CteGraph, model_name: &str) -> Vec<EdgePayload> {
-    graph
-        .edges()
-        .iter()
-        .map(|edge| {
-            let from = endpoint_id(graph, edge.from(), model_name);
-            let to = endpoint_id(graph, edge.to(), model_name);
-            EdgePayload {
-                from,
-                to,
-                edge_type: edge.edge_type(),
+            let label = (role == NodeRole::Final).then(|| format!("{model_name}.sql"));
+            NodePayload {
+                id: node.name().to_owned(),
+                label,
+                role,
             }
         })
         .collect()
 }
 
-/// Resolve a graph-node index to its rendered id (CTE name, or model
-/// name for the terminal node).
-fn endpoint_id(graph: &CteGraph, index: usize, model_name: &str) -> String {
-    let Some(node) = graph.nodes().get(index) else {
-        return String::new();
-    };
-    if node.name() == TERMINAL_NODE_NAME {
-        model_name.to_owned()
-    } else {
-        node.name().to_owned()
-    }
+/// Build [`EdgePayload`]s, keyed by each endpoint's stable node id.
+fn build_edge_payloads(graph: &CteGraph) -> Vec<EdgePayload> {
+    graph
+        .edges()
+        .iter()
+        .map(|edge| EdgePayload {
+            from: endpoint_id(graph, edge.from()),
+            to: endpoint_id(graph, edge.to()),
+            edge_type: edge.edge_type(),
+        })
+        .collect()
 }
 
-/// Build the `compiled_sql` map: per-CTE `raw_sql` keyed by node id,
-/// plus the terminal node keyed by the model's bare name.
+/// Resolve a graph-node index to its stable rendered id — the engine's
+/// node name (a CTE alias, or [`TERMINAL_NODE_NAME`] for the terminal).
+fn endpoint_id(graph: &CteGraph, index: usize) -> String {
+    graph
+        .nodes()
+        .get(index)
+        .map(|node| node.name().to_owned())
+        .unwrap_or_default()
+}
+
+/// Build the `compiled_sql` map: per-node `raw_sql` keyed by the stable
+/// node id (a CTE alias, or [`TERMINAL_NODE_NAME`] for the terminal).
 ///
-/// Falls back to the model's full compiled code on the terminal node
-/// when the engine emitted no per-CTE body (empty graph from a model
-/// with no `WITH` clause).
+/// The empty-graph branch (a model with no `WITH` clause emits no nodes)
+/// falls back to the full compiled code keyed by the model's bare name so
+/// the renderer still surfaces SOMETHING; that key is never reached by the
+/// node-keyed lookup (there are no nodes), so it cannot collide.
 fn build_compiled_sql(
     graph: &CteGraph,
     model_name: &str,
@@ -886,13 +897,8 @@ fn build_compiled_sql(
         return map;
     }
     for node in graph.nodes() {
-        let id = if node.name() == TERMINAL_NODE_NAME {
-            model_name.to_owned()
-        } else {
-            node.name().to_owned()
-        };
         if let Some(sql) = node.raw_sql() {
-            map.insert(id, sql.to_owned());
+            map.insert(node.name().to_owned(), sql.to_owned());
         }
     }
     map
@@ -1813,7 +1819,11 @@ mod tests {
     }
 
     #[test]
-    fn build_payload_terminal_node_renders_with_model_bare_name() {
+    fn build_payload_terminal_node_carries_model_name_as_label_not_id() {
+        // cute-dbt#155: the terminal node's *id* is the stable engine name
+        // (`TERMINAL_NODE_NAME`); the model's bare name rides as a *display
+        // label* only. Keeping the model name out of the id is what stops a
+        // self-named import CTE from colliding with the terminal.
         let compiled = "with src as (select * from raw_x) select * from src";
         let node = model_node("model.shop.final_one", "body", Some(compiled));
         let manifest = manifest_for(vec![node], vec![]);
@@ -1835,7 +1845,15 @@ mod tests {
             .iter()
             .find(|n| n.role == NodeRole::Final)
             .expect("terminal node present");
-        assert_eq!(terminal.id, "final_one");
+        assert_eq!(
+            terminal.id, TERMINAL_NODE_NAME,
+            "terminal id is the stable engine name, not the model name",
+        );
+        assert_eq!(
+            terminal.label.as_deref(),
+            Some("final_one.sql"),
+            "the terminal's DISPLAY label is the model's `.sql` file name",
+        );
     }
 
     #[test]
@@ -1861,8 +1879,105 @@ mod tests {
             model.compiled_sql.keys().collect::<Vec<_>>(),
         );
         assert!(
-            model.compiled_sql.contains_key("x"),
-            "terminal node compiled SQL keyed by model bare name",
+            model.compiled_sql.contains_key(TERMINAL_NODE_NAME),
+            "terminal node compiled SQL keyed by the stable terminal id (cute-dbt#155)",
+        );
+    }
+
+    #[test]
+    fn self_named_import_cte_does_not_collapse_into_the_terminal() {
+        // cute-dbt#155 regression: a model named `orders` whose import CTE
+        // is *also* named `orders` (the idiomatic `with orders as (...)`)
+        // must render TWO distinct DAG nodes — not collapse into one node
+        // with a spurious `orders ↔ final` cycle and the terminal's SQL
+        // clobbering the import CTE's body in the compiled_sql map.
+        let compiled = "with orders as (select * from raw_orders), \
+                              final as (select * from orders) \
+                         select * from final";
+        let node = model_node("model.shop.orders", "body", Some(compiled));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.orders")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let model = &payload.models[0];
+
+        // (1) every node id is unique — the core invariant the bug violated.
+        let ids: Vec<&str> = model.dag.nodes.iter().map(|n| n.id.as_str()).collect();
+        let unique: std::collections::BTreeSet<&str> = ids.iter().copied().collect();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "node ids must be unique, got {ids:?}"
+        );
+
+        // (2) the import CTE and the terminal are SEPARATE nodes with the
+        //     correct roles (no Import/Final inversion).
+        let import = model
+            .dag
+            .nodes
+            .iter()
+            .find(|n| n.id == "orders")
+            .expect("import CTE node keyed by its own name");
+        assert_eq!(
+            import.role,
+            NodeRole::Import,
+            "import keeps the Import role"
+        );
+        let terminal = model
+            .dag
+            .nodes
+            .iter()
+            .find(|n| n.role == NodeRole::Final)
+            .expect("terminal node present");
+        assert_ne!(
+            terminal.id, "orders",
+            "terminal id must NOT collide with the import CTE",
+        );
+        assert_eq!(
+            terminal.label.as_deref(),
+            Some("orders.sql"),
+            "terminal DISPLAYS the model's `.sql` file name — visually distinct \
+             from the same-named import CTE",
+        );
+
+        // (3) no self-cycle: no edge whose endpoints are the same id, and
+        //     specifically not the spurious `final -> orders` back-edge.
+        assert!(
+            model.dag.edges.iter().all(|e| e.from != e.to),
+            "no edge may point a node at itself: {:?}",
+            model
+                .dag
+                .edges
+                .iter()
+                .map(|e| (&e.from, &e.to))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !model
+                .dag
+                .edges
+                .iter()
+                .any(|e| e.from == "final" && e.to == "orders"),
+            "the spurious final->orders back-edge must be gone",
+        );
+
+        // (4) the import node shows ITS OWN body, not the terminal's.
+        let import_sql = &model.compiled_sql["orders"];
+        assert!(
+            import_sql.contains("raw_orders"),
+            "import node keeps its own SQL: {import_sql}",
+        );
+        assert!(
+            !import_sql.contains("from final"),
+            "import node SQL must not be overwritten by the terminal's: {import_sql}",
         );
     }
 
