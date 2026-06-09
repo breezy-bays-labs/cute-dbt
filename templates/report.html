@@ -1159,7 +1159,11 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
       groups = svgHost.querySelectorAll('g.node[id*="-flowchart-"]');
     }
     var safeToOriginal = {};
-    m.dag.nodes.forEach(function (n, i) { safeToOriginal["n" + i] = n.id; });
+    var safeToLabel = {};
+    m.dag.nodes.forEach(function (n, i) {
+      safeToOriginal["n" + i] = n.id;
+      safeToLabel["n" + i] = n.label || n.id;
+    });
     groups.forEach(function (g) {
       var raw = g.getAttribute("id") || "";
       var stripped = raw.replace(prefix, "");
@@ -1176,7 +1180,9 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
       // Enter/Space activate via the same selection path as click.
       g.setAttribute("tabindex", "0");
       g.setAttribute("role", "button");
-      g.setAttribute("aria-label", "Inspect DAG node: " + originalId);
+      // Announce the visible label (e.g. `orders.sql`), not the internal id
+      // — they diverge for the terminal node (cute-dbt#155).
+      g.setAttribute("aria-label", "Inspect DAG node: " + (safeToLabel[safeId] || originalId));
       g.style.cursor = "pointer";
       function activate() {
         state.selectedNodeId = originalId;

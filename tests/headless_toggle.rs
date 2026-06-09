@@ -3564,6 +3564,19 @@ fn self_named_import_cte_renders_distinct_dag_nodes_not_a_cycle() {
         "the terminal node is labelled `orders.sql`, distinct from the import CTE: {svg_text}",
     );
 
+    // a11y: the terminal node's aria-label announces its VISIBLE label
+    // (`orders.sql`), not the internal id `(final select)` — they diverge
+    // for the terminal (cute-dbt#155).
+    let aria_matches_label = eval_bool(
+        &tab,
+        "Array.from(document.querySelectorAll('.cte-dag-mermaid svg g.node'))\
+         .some(function(g){return (g.getAttribute('aria-label')||'').indexOf('orders.sql')>=0;})",
+    );
+    assert!(
+        aria_matches_label,
+        "the terminal node's aria-label announces its visible `orders.sql` label",
+    );
+
     // The literal reported bug: click the import CTE node and assert its
     // compiled-SQL panel shows ITS OWN body (`raw_orders`), not the
     // terminal's `from final`.
