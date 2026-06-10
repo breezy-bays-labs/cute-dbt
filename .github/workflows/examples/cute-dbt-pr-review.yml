@@ -85,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _site
-          git diff --unified=0 \
+          git diff --unified=0 --find-renames \
             "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
             > diff.patch
           cute-dbt \
