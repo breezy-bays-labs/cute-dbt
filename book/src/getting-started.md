@@ -40,6 +40,21 @@ cute-dbt \
     --out              report.html
 ```
 
+By default the baseline diff detects model **body** changes
+(`state:modified.body`). To also catch config-only / relation /
+macro-dependency / contract changes, opt into the wider fidelity with
+`--modified-selectors` — the tokens match dbt's `state:modified.<sub>`
+sub-selector vocabulary and compose alongside the always-on body
+checksum (baseline mode only; the flag conflicts with `--pr-diff`):
+
+```sh
+cute-dbt \
+    --manifest          target/manifest.json \
+    --baseline-manifest path/to/baseline-manifest.json \
+    --modified-selectors configs,relation,macros,contract \
+    --out               report.html
+```
+
 Then open `report.html` directly:
 
 ```sh
