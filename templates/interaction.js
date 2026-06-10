@@ -510,9 +510,11 @@
     });
     $wrap.append($copy);
     // cute-dbt#178 — GitHub-style code-card header with the model's file
-    // name. The payload carries no path, so synthesize `<name>.sql` (matches
+    // path. cute-dbt#179: the payload carries the full project-relative
+    // `m.path` (`models/…/x.sql`); when the manifest had no
+    // original_file_path the fallback synthesizes `<name>.sql` (matches
     // the DAG terminal-node label, cute-dbt#155).
-    var modelFile = (m && m.name ? m.name : "model") + ".sql";
+    var modelFile = (m && m.path) || ((m && m.name ? m.name : "model") + ".sql");
     var $mHeader = $("<div>").addClass("code-header");
     $mHeader.append($("<span>").addClass("code-filename").attr("title", modelFile).text(modelFile));
     // cute-dbt#145 incremental badge — relocated here (cute-dbt#178), right
