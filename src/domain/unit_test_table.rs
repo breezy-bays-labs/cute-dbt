@@ -3077,7 +3077,8 @@ mod tests {
     // two adjacent quotes, so the cur content AND the final quote state are
     // byte-identical. An exhaustive brute force over all 21 845 strings of
     // length ≤7 over {`'`, `,`, `a`, `b`} found ZERO distinguishing inputs.
-    // tracked: cute-dbt#143 (and see the local config's exclude_re rationale).
+    // tracked: cute-dbt#129 — the open equivalent-mutant exclusion tracker
+    // (full rationale block in `.cargo/mutants.toml`).
     //
     // This test is kept as a behavioral-regression pin for the `''`-escape
     // semantics themselves (NOT as the 847 kill — there is no such kill).
@@ -3255,7 +3256,8 @@ mod tests {
         // (classified in `.cargo/mutants.toml`, not killed here): the
         // multiplicand `'\''.len_utf8()` is the compile-time constant 1, so
         // `2 * 1 == 2 / 1 == 2` for every input — no distinguishing case
-        // exists. tracked: cute-dbt#143.
+        // exists. tracked: cute-dbt#129 — the open equivalent-mutant
+        // exclusion tracker.
         // `'abcd''x'` is 9 bytes; the closing quote is the 9th, so the byte
         // index just past it is exactly 9. Each killable arithmetic mutant
         // shifts it.
@@ -3342,10 +3344,10 @@ mod tests {
     //   - body-replacement mutants (`→ 0` / `→ 1` / `→ ()`) in helpers
     //     WITHOUT internal loops: a DIRECT unit call terminates
     //     instantly and the wrong return/state fails an assertion.
-    //   Only `+= → *=` mutants INSIDE a helper's own loop (the stuck
-    //   index spins in-function; every terminating input is output-
-    //   identical) have no bounded distinguisher — those are CLASSIFIED
-    //   non-terminating (see the K13 note at the end of this module).
+    //   `+= → *=` mutants INSIDE a helper's own loop hang the test
+    //   process itself; those are caught by the nextest mutation
+    //   profile, not by a bounded input (see the K13 note at the end
+    //   of this module).
     // -----------------------------------------------------------------
 
     #[test]
@@ -3549,29 +3551,25 @@ mod tests {
         assert_eq!(cur, "'x'");
     }
 
-    // K13 — NON-TERMINATING classification note (the durable in-repo
-    // reference for the matching `exclude_re` entries in
-    // `.cargo/mutants.toml`).
+    // K13 — the in-loop `+= → *=` hang class (caught via nextest, not via
+    // a bounded input).
     //
-    // Exactly EIGHT timeout survivors are genuinely non-terminating: every
-    // one is a `+= → *=` cursor mutation INSIDE a helper's own scan loop.
-    // The stuck index spins in-function (`x *= 1 == x`; `0 *= k == 0`), so
-    // even a direct unit call hangs on any input that would expose a
-    // difference, while every input that terminates is output-identical
-    // (the loop body was never needed for it). No bounded distinguishing
-    // test exists — cargo-mutants reports TIMEOUT (it cannot tell a hang
-    // from slow):
+    // Eight timeout survivors were `+= → *=` cursor mutations INSIDE a
+    // helper's own scan loop (scan_csv_matrix 658, skip_line_comment 1018,
+    // skip_block_comment 1028, split_union_all_arms 1056, single_quote_end
+    // 1180, tokenize_sql_words 1284/1287, consume_quoted_run 1313). The
+    // stuck index spins in-function (`x *= 1 == x`; `0 *= k == 0`), so the
+    // test exercising the loop HANGS rather than fails — no bounded input
+    // distinguishes them.
     //
-    //   scan_csv_matrix      `i += feed(..)`  → *=   (658)  0 stays 0
-    //   skip_line_comment    `self.i += 1`    → *=   (1018) i*1 == i
-    //   skip_block_comment   `self.i += 1`    → *=   (1028) i*1 == i
-    //   split_union_all_arms `idx += 1`       → *=   (1056) idx*1 == idx
-    //   single_quote_end     `i += 1`         → *=   (1180) i*1 == i
-    //   tokenize_sql_words   `i += 1` (ws)    → *=   (1284) 0 stays 0
-    //   tokenize_sql_words   `i += 1` (char)  → *=   (1287) i*1 == i
-    //   consume_quoted_run   `i += 1`         → *=   (1313) i*1 == i
-    //
-    // The practical detector for this class is the wall-clock timeout
-    // itself: a non-terminating mutation hangs the suite and the CI
-    // per-run timeout fires. tracked: cute-dbt#143.
+    // Under plain `cargo test` (one process for the whole suite) the hung
+    // sibling prevented the binary from exiting to report THIS module's
+    // kill-test failures, degrading the verdict to an inconclusive TIMEOUT.
+    // The fix is harness-level, not test-level: `test_tool = "nextest"` in
+    // `.cargo/mutants.toml` plus the `[profile.mutants]` slow-timeout
+    // (terminate-after) in `.config/nextest.toml` — nextest runs each test
+    // in its own process and TERMINATES a hung test as a FAILURE, so the
+    // hang itself becomes the kill. Verified (#143): 141 mutants over this
+    // file → 140 caught, 1 unviable, 0 timeouts, 0 missed — no
+    // non-terminating exclusions needed.
 }
