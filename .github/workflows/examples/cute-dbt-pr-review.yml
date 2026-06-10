@@ -60,9 +60,12 @@ jobs:
         run: |
           set -euo pipefail
           repo_private=$(gh api "repos/${REPO}" --jq '.private')
-          if [ "$repo_private" != "true" ]; then
+          if [ "$repo_private" = "false" ]; then
             echo "Privacy guard: repository is public — publishing to Pages exposes nothing new."
             exit 0
+          elif [ "$repo_private" != "true" ]; then
+            echo "::error title=Privacy guard::Could not reliably determine repository privacy status (received: '${repo_private}'). Failing closed."
+            exit 1
           fi
           # The repo is private (or internal). Publishing is safe only when
           # the Pages site itself is private (Enterprise Cloud). A 404

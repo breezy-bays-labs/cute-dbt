@@ -161,9 +161,12 @@ jobs:
         run: |
           set -euo pipefail
           repo_private=$(gh api "repos/${REPO}" --jq '.private')
-          if [ "$repo_private" != "true" ]; then
+          if [ "$repo_private" = "false" ]; then
             echo "Privacy guard: repository is public — publishing to Pages exposes nothing new."
             exit 0
+          elif [ "$repo_private" != "true" ]; then
+            echo "::error title=Privacy guard::Could not reliably determine repository privacy status (received: '${repo_private}'). Failing closed."
+            exit 1
           fi
           # The repo is private (or internal). Publishing is safe only when
           # the Pages site itself is private (Enterprise Cloud). A 404
@@ -284,13 +287,17 @@ permissions, set above):
 
 | Repo | Pages visibility | Outcome |
 |---|---|---|
-| public | any | ✅ pass — publishing exposes nothing new |
+| public (explicit `false`) | any | ✅ pass — publishing exposes nothing new |
 | private / internal | `private` (Enterprise) | ✅ pass |
 | private / internal | `public` | ❌ **fail before publishing** |
 | private / internal | unknown (Pages not enabled yet, or no `pages: read`) | ❌ **fail before publishing** (fail-closed) |
+| anomaly (`.private` read returns neither `true` nor `false`) | any | ❌ **fail before publishing** (fail-closed, regardless of `ALLOW_PUBLIC_PAGES`) |
 | private / internal | not `private`, `ALLOW_PUBLIC_PAGES=true` | ⚠️ warn + publish (explicit opt-in) |
 
-The "unknown" row is deliberate: when Pages isn't enabled yet, the first
+Both "unknown" rows are deliberate. The guard bypasses only on an
+**explicit `false`** from the repository-privacy read — an empty string,
+`null`, or any other API anomaly fails closed rather than silently
+skipping the guard. And when Pages isn't enabled yet, the first
 publish creates the `gh-pages` branch and a later "enable Pages" click
 defaults the site to public — so the guard refuses until the safe state
 is provable.
