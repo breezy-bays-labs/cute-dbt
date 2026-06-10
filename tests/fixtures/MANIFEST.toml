@@ -254,7 +254,7 @@ test. Pure synthetic data only — the `sql_literal_demo` package, `dq_flags` / 
 path = "playground-baseline.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"
-sha256 = "84a7656dad1b415a40fd67ca1ba9efdb86e441b4edaead18a39b70064377d921"
+sha256 = "f2e92fda02cd3b5b6a1e69be91b95147926c81cc830d851055b9a84501f6f9c4"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -279,7 +279,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"
-sha256 = "2a67bd9e79b51e22d54640dcf885bb60d30e56b86f233840d95657134c16435c"
+sha256 = "7f3762f8ca9b472c4b2eeed0d4d477e1d017a8b4b3e3fa743e68636d0a5a58a6"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -350,7 +350,7 @@ design.\
 path = "playground-source/models/marts/core/_core__models.yml"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"
-sha256 = "42ab1805cf0f530a64bb66f2cd5d7590f3f8e7de822eb3f199c4c1fe0bd518f6"
+sha256 = "a4a595c29c72fddf08857e1fa3d106c0edc9a247956b9b34b1daebd048db6098"
 synthetic_only = true
 license = "MIT"
 description = """

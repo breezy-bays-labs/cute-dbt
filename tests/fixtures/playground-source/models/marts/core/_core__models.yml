@@ -1145,6 +1145,29 @@ models:
       - name: _loaded_at
         description: Timestamp when record was loaded
 
+  # cute-dbt#165 — column-header tooltip dogfood on the incremental model:
+  # authored descriptions + unique/not_null on the merge key, so the
+  # playground golden surfaces the th tooltips on this model's `this`
+  # given, ref given, and expect tables.
+  - name: fct_encounters_incremental
+    description: >
+      Incremental encounter accumulator. On incremental runs it only merges
+      encounters newer than the loaded start_time high-water mark.
+    columns:
+      - name: encounter_id
+        description: Natural key of the encounter (unique per visit)
+        data_tests:
+          - unique
+          - not_null
+      - name: patient_id
+        description: Patient the encounter belongs to
+      - name: encounter_type
+        description: Visit class (wellness, emergency, ...)
+      - name: start_time
+        description: Encounter start timestamp - the incremental high-water mark
+      - name: total_cost
+        description: Total claim cost for the encounter
+
 
 # ============================================================================
 # UNIT TESTS
