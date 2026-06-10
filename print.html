@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-25b4af0c.js";
+            window.path_to_searchindex_js = "searchindex-11b6e832.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-d338c274.js"></script>
@@ -337,6 +337,18 @@ path. (<a href="#which-scope-source">Which should I use?</a>)</li>
     --manifest         target/manifest.json \
     --baseline-manifest path/to/baseline-manifest.json \
     --out              report.html
+</code></pre>
+<p>By default the baseline diff detects model <strong>body</strong> changes
+(<code>state:modified.body</code>). To also catch config-only / relation /
+macro-dependency / contract changes, opt into the wider fidelity with
+<code>--modified-selectors</code> — the tokens match dbt’s <code>state:modified.&lt;sub&gt;</code>
+sub-selector vocabulary and compose alongside the always-on body
+checksum (baseline mode only; the flag conflicts with <code>--pr-diff</code>):</p>
+<pre><code class="language-sh">cute-dbt \
+    --manifest          target/manifest.json \
+    --baseline-manifest path/to/baseline-manifest.json \
+    --modified-selectors configs,relation,macros,contract \
+    --out               report.html
 </code></pre>
 <p>Then open <code>report.html</code> directly:</p>
 <pre><code class="language-sh"># macOS
