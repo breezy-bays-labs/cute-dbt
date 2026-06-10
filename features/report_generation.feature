@@ -44,7 +44,7 @@ Feature: Generate a self-contained report from a compiled dbt manifest
     Given the model "stg_orders" was modified relative to the baseline
     And "stg_orders" has a unit test "test_stg_orders_dedup"
     When I run cute-dbt with --manifest current.json --baseline-manifest baseline.json --out report.html
-    Then the report payload lists column tests "unique" and "not_null" for the expected column "customer_id"
+    Then the report payload lists column tests "unique" and "not null" for the expected column "customer_id"
     And the report payload carries no column-header metadata for the expected column "first_name"
 
   # The locked v0.1 policy: --baseline-manifest is REQUIRED. Omitting it is

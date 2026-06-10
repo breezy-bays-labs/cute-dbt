@@ -872,10 +872,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: var(--dif
    (flex:1; min-width:0) so long lines never produce a horizontal scrollbar;
    wrapped continuation lines hang-indent under the code start, not the gutter.
    The gutter stays sticky-left and stretches to the (possibly multi-line) row
-   height.
-   NOTE (PR-1): the pre-engine DOM has no gutter or .diff-code wrapper; the
-   PR-1 bridge layer at the bottom restores block layout for `.diff-line`
-   until the engine PR lands the new line DOM. */
+   height. (The engine emits this line DOM since cute-dbt#178.) */
 .diff-line, .code-line { display: flex; align-items: stretch; white-space: normal; }
 .code-line:hover { background: var(--code-line-hover); }
 
@@ -917,8 +914,8 @@ th.col-removed { text-decoration: line-through; text-decoration-color: var(--dif
 
 /* ---- split (side-by-side) diff --------------------------------------- */
 /* both layouts are emitted; show exactly one per html[data-difflayout].
-   (PR-1: the pre-engine DOM emits neither wrapper class — every rule in
-   this section is inert until the engine PR lands.) */
+   (Live since cute-dbt#178: diffViewsHtml emits the unified <code> AND the
+   split <table> side by side.) */
 .diff-unified { display: block; }
 .diff-split { display: none; width: 100%; border-collapse: collapse; table-layout: fixed; font-variant-numeric: tabular-nums; }
 .diff-split td { vertical-align: top; padding: 0; border: 0; }
@@ -959,15 +956,15 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
 .model-sql-block { height: 24rem; min-height: 8rem; overflow: auto; resize: vertical; }
 
 /* ---- column-header info tooltip --------------------------------------- */
-/* OMITTED from PR-1 (deliberate divergence from the handoff's base.css):
-   the redesign's `.col-tooltip` is a body-appended position:fixed bubble
-   keyed off `th.has-col-meta` — DOM that arrives with the engine + the
-   column_meta payload reconciliation (PR-2/PR-3). The shipped cute-dbt#165
-   and cute-dbt#166 contract reuses the `.col-tooltip` class name for a focusable
-   <button> trigger INSIDE the th, so carrying the handoff block verbatim
-   would restyle the live trigger into a broken fixed-position bubble. The
-   shipped contract's tokenized rules live in the reconciliation layer below;
-   the engine PR swaps them for the handoff block when the DOM changes. */
+/* DELIBERATE divergence from the handoff's base.css (decided at PR-1, kept
+   at the engine PR cute-dbt#178): the redesign's `.col-tooltip` was a
+   body-appended position:fixed bubble keyed off `th.has-col-meta` and fed by
+   a ModelPayload.column_meta contract that does not exist yet. The SHIPPED
+   cute-dbt#165 / cute-dbt#166 contract — a focusable <button> trigger inside
+   the th with a CSS bubble on :hover AND :focus, headless-guarded — wins;
+   its tokenized rules live in the reconciliation layer below. Any swap to
+   the handoff's renderer belongs to the column_meta PR (handoff PR-3), with
+   the headless guards carried forward. */
 
 /* ---- density override (Tweak; wins over the direction's :root values) - */
 :root[data-density="compact"] {
@@ -991,58 +988,57 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
    until their owning feature PR replaces them explicitly.
    ========================================================================== */
 
-/* cute-dbt#165 + cute-dbt#166 — column-header tooltip: the column's authored
-   description + its column-level data tests. Mirrors the #146 expect-tooltip
-   contract (focusable <button> + CSS bubble on :hover AND :focus; aria-label
-   for AT; never a native `title`). The ONE divergence: the bubble is
-   position:FIXED with JS-set coordinates — the th lives inside the .table-fit
-   overflow-x scroller, which would clip an absolutely-positioned bubble.
-   Visibility itself stays pure CSS. Tokenized onto the chassis (accent +
-   tooltip tokens); PR-2/PR-3 swap this for the redesign's body-appended
-   bubble when the engine DOM lands. */
-.col-tooltip { position: relative; display: inline-flex; align-items: center; border: none; background: transparent; padding: 0; margin-left: 0.3rem; font: inherit; font-size: 0.85em; font-weight: normal; color: var(--accent); cursor: help; }
-.col-tooltip-bubble { position: fixed; left: 0; top: 0; transform: translateX(-50%); z-index: 60; visibility: hidden; opacity: 0; transition: opacity 0.1s ease-in; width: 18rem; max-width: 70vw; padding: 0.5rem 0.65rem; background: var(--tooltip-bg); color: var(--tooltip-fg); border-radius: var(--radius-pan); box-shadow: 0 2px 10px rgba(0,0,0,0.35); font-size: 0.78rem; font-weight: normal; line-height: 1.45; text-align: left; text-transform: none; letter-spacing: normal; white-space: normal; pointer-events: none; }
-.col-tooltip:hover .col-tooltip-bubble, .col-tooltip:focus .col-tooltip-bubble, .col-tooltip:focus-visible .col-tooltip-bubble { visibility: visible; opacity: 1; }
-.col-tooltip-desc { display: block; }
-.col-tooltip-desc + .col-tooltip-tests-label { margin-top: 0.35rem; }
-.col-tooltip-tests-label { display: block; font-weight: 700; color: #b8e6c9; }
-.col-tooltip-tests { display: block; margin: 0; padding: 0; list-style: none; }
-.col-tooltip-tests li { margin: 0; padding-left: 0.85rem; text-indent: -0.85rem; }
+/* cute-dbt#165 + cute-dbt#166 + cute-dbt#178 — column-header tooltip, now
+   the handoff spec (rules ported from its base.css): the WHOLE header cell
+   is the hover/focus trigger — no per-column icon, no native title. The
+   bubble is the single body-appended #col-tooltip, position:fixed with
+   JS-set coordinates (the th lives inside the .table-fit overflow-x
+   scroller, which would clip an absolutely-positioned bubble; fixed +
+   horizontal clamp + the flip-above fallback never clips). The #166 a11y
+   contract carries forward on the th itself: tabindex makes it
+   keyboard-focusable, aria-label is the AT surface, the bubble stays
+   aria-hidden, hover AND focus both reveal. */
+th.has-col-meta { cursor: help; }
+th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.col-tooltip {
+  position: fixed; z-index: 90; max-width: 24rem; min-width: 12rem;
+  background: var(--tooltip-bg); color: var(--tooltip-fg);
+  border-radius: var(--radius-pan); box-shadow: 0 6px 22px rgba(0,0,0,0.32);
+  padding: 0.7rem 0.8rem; font-size: 12px; line-height: 1.45;
+  font-weight: normal; text-transform: none; letter-spacing: normal; pointer-events: none;
+}
+.col-tooltip .ct-desc { font-size: 1.12em; line-height: 1.5; opacity: 0.97; }
+.col-tooltip .ct-tests-label { margin-top: 0.6rem; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.07em; opacity: 0.6; }
+.col-tooltip .ct-tests { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.3rem; }
+.col-tooltip .ct-test { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.45rem; }
+.col-tooltip .ct-key { font-family: var(--font-mono); font-weight: 700; color: var(--accent); }
+.col-tooltip .ct-vals { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
+.col-tooltip .ct-val { background: rgba(255,255,255,0.14); border-radius: 4px; padding: 0.05rem 0.42rem; font-family: var(--font-mono); font-size: 0.9em; white-space: nowrap; }
+.col-tooltip .ct-detail { color: rgba(255,255,255,0.75); font-family: var(--font-mono); font-size: 0.95em; overflow-wrap: anywhere; }
 
 /* ============================================================================
-   6. PR-1 BRIDGE LAYER (remove with the engine PR, cute-dbt#178)
+   6. ENGINE-PR ADDITIONS (cute-dbt#178)
    ----------------------------------------------------------------------------
-   The chassis CSS above styles the redesign's line DOM ([gutter][sigil][code]
-   flex rows, code-card headers). That DOM arrives with the engine PR. Until
-   then the report's inline JS emits the pre-redesign DOM; this layer restores
-   its layout on top of the chassis tokens so the intermediate state stays
-   coherent. Every rule here is expected to be DELETED by cute-dbt#178.
+   The PR-1 bridge layer that lived here (block-layout .diff-line shims, the
+   legacy .sql-block copy-button clearance, the text-glyph cog sizing) is
+   DELETED per its own contract: the engine now emits the redesign's line DOM
+   ([gutter][sigil][code] flex rows, code-card headers, the SVG cog), so the
+   chassis rules above apply directly. What remains below is the small chrome
+   the static settings-panel markup needs.
    ========================================================================== */
 
-/* Pre-engine diff lines are flat spans inside a <pre> — no gutter, no
-   .diff-code wrapper. Block layout gives the full-width row tint; the
-   inherited pre whitespace keeps SQL/YAML indentation (the chassis flex +
-   white-space:normal pair would collapse it). */
-.diff-line { display: block; width: fit-content; min-width: 100%; white-space: pre; }
-.diff-line .diff-sigil { display: inline-block; width: 1ch; padding-left: 0; margin-right: 0.5ch; }
 /* cute-dbt#136 — an expanded fold stays visible as a "Hide N" collapse
-   affordance; mark it among many hunks (the engine restyles folds wholesale). */
+   affordance; mark it among many hunks. */
 .diff-fold[aria-expanded="true"] { filter: brightness(0.96); }
 
-/* Pre-engine code blocks have no .code-header strip: keep the legacy
-   clearance for the absolute-positioned copy button and a side inset (the
-   chassis 0.4rem/0 padding assumes the gutter rail provides the inset). */
-.sql-block { padding: 2.5rem 0.75rem 0.6rem; }
-/* Sit further from the right edge so the button doesn't overlap the vertical
-   scrollbar that appears when the SQL is long. */
-.model-sql-wrap .sql-copy { right: 22px; }
-
-/* The Model SQL section keeps its rhythm (the chassis spaces sections via
-   .panel and friends; .model-sql is not in that list pre-engine). */
+/* The Model SQL section keeps its vertical rhythm (it sits outside the
+   .panel spacing list). */
 .model-sql { margin-bottom: var(--gap-section); }
 
-/* The settings cog is still the ⚙ text glyph pre-engine (the SVG icon set
-   arrives with the engine); keep it legible at the cog's button size. */
-.settings-cog { font-size: 1.2em; }
+/* Stacked settings rows (the appearance section): the control grid sits
+   UNDER its label, full-width — the prototype expressed this with inline
+   styles; the static template markup uses this class instead. */
+.settings-row.settings-row-stack { display: block; }
+.settings-row.settings-row-stack > label { display: block; margin-bottom: 0.35rem; }
 
 /* end of cute-dbt report chassis v1 (cute-dbt#177) */

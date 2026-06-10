@@ -67,6 +67,26 @@ pub const MERMAID_JS: &str = include_str!("../../assets/mermaid-11.15.0.umd.min.
 /// a rule) in this module's test block.
 pub const REPORT_CSS: &str = include_str!("../../templates/report.css");
 
+/// The report's first-party interaction engine (cute-dbt#178) — model/test
+/// selectors, the Mermaid DAG, the unified + split diff renderers with
+/// word-level emphasis and hunk folds, the fixture grids, copy buttons,
+/// code-card headers and the #139 settings rows.
+///
+/// First-party, NOT vendored: lives at `templates/interaction.js` (the
+/// same rationale as [`REPORT_CSS`] — the `assets/` provenance gate walks
+/// every file there and is reserved for third-party pins). Integrity
+/// gates: the banner-pin + end-of-file sentinel test in this module.
+pub const INTERACTION_JS: &str = include_str!("../../templates/interaction.js");
+
+/// The report's first-party appearance engine (cute-dbt#178) — theme /
+/// style / accent / density / diff-style / diff-layout wiring with
+/// `localStorage` persistence (key `cute-dbt.appearance.v1`) and the
+/// `DataTables` dark-mode sync (`html.dark`).
+///
+/// First-party, NOT vendored: lives at `templates/theme.js`. Integrity
+/// gates: the banner-pin + end-of-file sentinel test in this module.
+pub const THEME_JS: &str = include_str!("../../templates/theme.js");
+
 /// An empty `data:` URI favicon.
 ///
 /// Emitted as `<link rel="icon" href="data:,">`, this resolves the
@@ -121,6 +141,44 @@ mod tests {
                 .trim_end()
                 .ends_with("/* end of cute-dbt report chassis v1 (cute-dbt#177) */"),
             "report.css end-of-file sentinel (truncation guard)",
+        );
+    }
+
+    #[test]
+    fn the_interaction_js_carries_its_banner_and_is_not_truncated() {
+        // First-party sibling of the REPORT_CSS banner-pin test: proves
+        // `include_str!` grabbed the interaction engine at its declared
+        // version. The HEAD banner catches a renamed/replaced file; the
+        // END-OF-FILE sentinel catches a truncated copy.
+        assert!(
+            INTERACTION_JS.contains("cute-dbt report interaction engine v1"),
+            "interaction.js head banner",
+        );
+        assert!(
+            INTERACTION_JS
+                .trim_end()
+                .ends_with("/* end of cute-dbt report interaction engine v1 (cute-dbt#178) */"),
+            "interaction.js end-of-file sentinel (truncation guard)",
+        );
+    }
+
+    #[test]
+    fn the_theme_js_carries_its_banner_and_is_not_truncated() {
+        assert!(
+            THEME_JS.contains("cute-dbt appearance engine v1"),
+            "theme.js head banner",
+        );
+        assert!(
+            THEME_JS
+                .trim_end()
+                .ends_with("/* end of cute-dbt appearance engine v1 (cute-dbt#178) */"),
+            "theme.js end-of-file sentinel (truncation guard)",
+        );
+        // The appearance persistence key is a stable consumer contract
+        // (AC3, cute-dbt#178) — pin it here so a rename is a conscious act.
+        assert!(
+            THEME_JS.contains("\"cute-dbt.appearance.v1\""),
+            "theme.js persists under the cute-dbt.appearance.v1 key",
         );
     }
 

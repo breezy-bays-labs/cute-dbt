@@ -1112,10 +1112,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: var(--dif
    (flex:1; min-width:0) so long lines never produce a horizontal scrollbar;
    wrapped continuation lines hang-indent under the code start, not the gutter.
    The gutter stays sticky-left and stretches to the (possibly multi-line) row
-   height.
-   NOTE (PR-1): the pre-engine DOM has no gutter or .diff-code wrapper; the
-   PR-1 bridge layer at the bottom restores block layout for `.diff-line`
-   until the engine PR lands the new line DOM. */
+   height. (The engine emits this line DOM since cute-dbt#178.) */
 .diff-line, .code-line { display: flex; align-items: stretch; white-space: normal; }
 .code-line:hover { background: var(--code-line-hover); }
 
@@ -1157,8 +1154,8 @@ th.col-removed { text-decoration: line-through; text-decoration-color: var(--dif
 
 /* ---- split (side-by-side) diff --------------------------------------- */
 /* both layouts are emitted; show exactly one per html[data-difflayout].
-   (PR-1: the pre-engine DOM emits neither wrapper class — every rule in
-   this section is inert until the engine PR lands.) */
+   (Live since cute-dbt#178: diffViewsHtml emits the unified <code> AND the
+   split <table> side by side.) */
 .diff-unified { display: block; }
 .diff-split { display: none; width: 100%; border-collapse: collapse; table-layout: fixed; font-variant-numeric: tabular-nums; }
 .diff-split td { vertical-align: top; padding: 0; border: 0; }
@@ -1199,15 +1196,15 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
 .model-sql-block { height: 24rem; min-height: 8rem; overflow: auto; resize: vertical; }
 
 /* ---- column-header info tooltip --------------------------------------- */
-/* OMITTED from PR-1 (deliberate divergence from the handoff's base.css):
-   the redesign's `.col-tooltip` is a body-appended position:fixed bubble
-   keyed off `th.has-col-meta` — DOM that arrives with the engine + the
-   column_meta payload reconciliation (PR-2/PR-3). The shipped cute-dbt#165
-   and cute-dbt#166 contract reuses the `.col-tooltip` class name for a focusable
-   <button> trigger INSIDE the th, so carrying the handoff block verbatim
-   would restyle the live trigger into a broken fixed-position bubble. The
-   shipped contract's tokenized rules live in the reconciliation layer below;
-   the engine PR swaps them for the handoff block when the DOM changes. */
+/* DELIBERATE divergence from the handoff's base.css (decided at PR-1, kept
+   at the engine PR cute-dbt#178): the redesign's `.col-tooltip` was a
+   body-appended position:fixed bubble keyed off `th.has-col-meta` and fed by
+   a ModelPayload.column_meta contract that does not exist yet. The SHIPPED
+   cute-dbt#165 / cute-dbt#166 contract — a focusable <button> trigger inside
+   the th with a CSS bubble on :hover AND :focus, headless-guarded — wins;
+   its tokenized rules live in the reconciliation layer below. Any swap to
+   the handoff's renderer belongs to the column_meta PR (handoff PR-3), with
+   the headless guards carried forward. */
 
 /* ---- density override (Tweak; wins over the direction's :root values) - */
 :root[data-density="compact"] {
@@ -1231,59 +1228,58 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
    until their owning feature PR replaces them explicitly.
    ========================================================================== */
 
-/* cute-dbt#165 + cute-dbt#166 — column-header tooltip: the column's authored
-   description + its column-level data tests. Mirrors the #146 expect-tooltip
-   contract (focusable <button> + CSS bubble on :hover AND :focus; aria-label
-   for AT; never a native `title`). The ONE divergence: the bubble is
-   position:FIXED with JS-set coordinates — the th lives inside the .table-fit
-   overflow-x scroller, which would clip an absolutely-positioned bubble.
-   Visibility itself stays pure CSS. Tokenized onto the chassis (accent +
-   tooltip tokens); PR-2/PR-3 swap this for the redesign's body-appended
-   bubble when the engine DOM lands. */
-.col-tooltip { position: relative; display: inline-flex; align-items: center; border: none; background: transparent; padding: 0; margin-left: 0.3rem; font: inherit; font-size: 0.85em; font-weight: normal; color: var(--accent); cursor: help; }
-.col-tooltip-bubble { position: fixed; left: 0; top: 0; transform: translateX(-50%); z-index: 60; visibility: hidden; opacity: 0; transition: opacity 0.1s ease-in; width: 18rem; max-width: 70vw; padding: 0.5rem 0.65rem; background: var(--tooltip-bg); color: var(--tooltip-fg); border-radius: var(--radius-pan); box-shadow: 0 2px 10px rgba(0,0,0,0.35); font-size: 0.78rem; font-weight: normal; line-height: 1.45; text-align: left; text-transform: none; letter-spacing: normal; white-space: normal; pointer-events: none; }
-.col-tooltip:hover .col-tooltip-bubble, .col-tooltip:focus .col-tooltip-bubble, .col-tooltip:focus-visible .col-tooltip-bubble { visibility: visible; opacity: 1; }
-.col-tooltip-desc { display: block; }
-.col-tooltip-desc + .col-tooltip-tests-label { margin-top: 0.35rem; }
-.col-tooltip-tests-label { display: block; font-weight: 700; color: #b8e6c9; }
-.col-tooltip-tests { display: block; margin: 0; padding: 0; list-style: none; }
-.col-tooltip-tests li { margin: 0; padding-left: 0.85rem; text-indent: -0.85rem; }
+/* cute-dbt#165 + cute-dbt#166 + cute-dbt#178 — column-header tooltip, now
+   the handoff spec (rules ported from its base.css): the WHOLE header cell
+   is the hover/focus trigger — no per-column icon, no native title. The
+   bubble is the single body-appended #col-tooltip, position:fixed with
+   JS-set coordinates (the th lives inside the .table-fit overflow-x
+   scroller, which would clip an absolutely-positioned bubble; fixed +
+   horizontal clamp + the flip-above fallback never clips). The #166 a11y
+   contract carries forward on the th itself: tabindex makes it
+   keyboard-focusable, aria-label is the AT surface, the bubble stays
+   aria-hidden, hover AND focus both reveal. */
+th.has-col-meta { cursor: help; }
+th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.col-tooltip {
+  position: fixed; z-index: 90; max-width: 24rem; min-width: 12rem;
+  background: var(--tooltip-bg); color: var(--tooltip-fg);
+  border-radius: var(--radius-pan); box-shadow: 0 6px 22px rgba(0,0,0,0.32);
+  padding: 0.7rem 0.8rem; font-size: 12px; line-height: 1.45;
+  font-weight: normal; text-transform: none; letter-spacing: normal; pointer-events: none;
+}
+.col-tooltip .ct-desc { font-size: 1.12em; line-height: 1.5; opacity: 0.97; }
+.col-tooltip .ct-tests-label { margin-top: 0.6rem; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.07em; opacity: 0.6; }
+.col-tooltip .ct-tests { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.3rem; }
+.col-tooltip .ct-test { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.45rem; }
+.col-tooltip .ct-key { font-family: var(--font-mono); font-weight: 700; color: var(--accent); }
+.col-tooltip .ct-vals { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
+.col-tooltip .ct-val { background: rgba(255,255,255,0.14); border-radius: 4px; padding: 0.05rem 0.42rem; font-family: var(--font-mono); font-size: 0.9em; white-space: nowrap; }
+.col-tooltip .ct-detail { color: rgba(255,255,255,0.75); font-family: var(--font-mono); font-size: 0.95em; overflow-wrap: anywhere; }
 
 /* ============================================================================
-   6. PR-1 BRIDGE LAYER (remove with the engine PR, cute-dbt#178)
+   6. ENGINE-PR ADDITIONS (cute-dbt#178)
    ----------------------------------------------------------------------------
-   The chassis CSS above styles the redesign's line DOM ([gutter][sigil][code]
-   flex rows, code-card headers). That DOM arrives with the engine PR. Until
-   then the report's inline JS emits the pre-redesign DOM; this layer restores
-   its layout on top of the chassis tokens so the intermediate state stays
-   coherent. Every rule here is expected to be DELETED by cute-dbt#178.
+   The PR-1 bridge layer that lived here (block-layout .diff-line shims, the
+   legacy .sql-block copy-button clearance, the text-glyph cog sizing) is
+   DELETED per its own contract: the engine now emits the redesign's line DOM
+   ([gutter][sigil][code] flex rows, code-card headers, the SVG cog), so the
+   chassis rules above apply directly. What remains below is the small chrome
+   the static settings-panel markup needs.
    ========================================================================== */
 
-/* Pre-engine diff lines are flat spans inside a <pre> — no gutter, no
-   .diff-code wrapper. Block layout gives the full-width row tint; the
-   inherited pre whitespace keeps SQL/YAML indentation (the chassis flex +
-   white-space:normal pair would collapse it). */
-.diff-line { display: block; width: fit-content; min-width: 100%; white-space: pre; }
-.diff-line .diff-sigil { display: inline-block; width: 1ch; padding-left: 0; margin-right: 0.5ch; }
 /* cute-dbt#136 — an expanded fold stays visible as a "Hide N" collapse
-   affordance; mark it among many hunks (the engine restyles folds wholesale). */
+   affordance; mark it among many hunks. */
 .diff-fold[aria-expanded="true"] { filter: brightness(0.96); }
 
-/* Pre-engine code blocks have no .code-header strip: keep the legacy
-   clearance for the absolute-positioned copy button and a side inset (the
-   chassis 0.4rem/0 padding assumes the gutter rail provides the inset). */
-.sql-block { padding: 2.5rem 0.75rem 0.6rem; }
-/* Sit further from the right edge so the button doesn't overlap the vertical
-   scrollbar that appears when the SQL is long. */
-.model-sql-wrap .sql-copy { right: 22px; }
-
-/* The Model SQL section keeps its rhythm (the chassis spaces sections via
-   .panel and friends; .model-sql is not in that list pre-engine). */
+/* The Model SQL section keeps its vertical rhythm (it sits outside the
+   .panel spacing list). */
 .model-sql { margin-bottom: var(--gap-section); }
 
-/* The settings cog is still the ⚙ text glyph pre-engine (the SVG icon set
-   arrives with the engine); keep it legible at the cog's button size. */
-.settings-cog { font-size: 1.2em; }
+/* Stacked settings rows (the appearance section): the control grid sits
+   UNDER its label, full-width — the prototype expressed this with inline
+   styles; the static template markup uses this class instead. */
+.settings-row.settings-row-stack { display: block; }
+.settings-row.settings-row-stack > label { display: block; margin-bottom: 0.35rem; }
 
 /* end of cute-dbt report chassis v1 (cute-dbt#177) */
 
@@ -1307,31 +1303,90 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
   </div>
 </section>
 
+
 <div class="settings-cog-wrap">
   <button type="button" class="settings-cog" aria-label="Report settings"
           aria-haspopup="true" aria-expanded="false" aria-controls="settings-panel">
-    <span aria-hidden="true">&#9881;</span>
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09A1.65 1.65 0 0 0 9 4.6V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
   </button>
   <div class="settings-panel" id="settings-panel" role="dialog"
        aria-label="Report settings" hidden>
     <h2>Settings</h2>
-    <div class="settings-row">
-      <label for="settings-context-input">Diff context lines
-        <span class="settings-hint">unchanged lines kept around each change</span>
-      </label>
-      <input type="number" class="settings-context-input" id="settings-context-input"
-             min="0" max="20" step="1" value="3"
-             aria-label="Unchanged context lines shown around each change">
+    <div class="settings-section appearance-section">
+      <h2>Appearance</h2>
+      <div class="settings-row settings-row-stack">
+        <label>Style</label>
+        <div class="style-grid">
+          <button type="button" class="style-opt" data-style-id="soft">Soft</button>
+          <button type="button" class="style-opt" data-style-id="paper">Paper</button>
+          <button type="button" class="style-opt" data-style-id="swiss">Swiss</button>
+          <button type="button" class="style-opt" data-style-id="terminal">Terminal</button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Theme</label>
+        <div class="theme-grid">
+          <button type="button" class="theme-chip" data-theme-id="light"><span class="swatch-dots"><i style="background:#ffffff"></i><i style="background:#1d7484"></i><i style="background:#33363d"></i></span><span class="theme-name">Light</span></button>
+          <button type="button" class="theme-chip" data-theme-id="dark"><span class="swatch-dots"><i style="background:#15171c"></i><i style="background:#5fb3c4"></i><i style="background:#d7dae1"></i></span><span class="theme-name">Dark</span></button>
+          <button type="button" class="theme-chip" data-theme-id="tokyo"><span class="swatch-dots"><i style="background:#1a1b26"></i><i style="background:#7aa2f7"></i><i style="background:#bb9af7"></i></span><span class="theme-name">Tokyo Night</span></button>
+          <button type="button" class="theme-chip" data-theme-id="solarized"><span class="swatch-dots"><i style="background:#fdf6e3"></i><i style="background:#268bd2"></i><i style="background:#b58900"></i></span><span class="theme-name">Solarized</span></button>
+          <button type="button" class="theme-chip" data-theme-id="gruvbox"><span class="swatch-dots"><i style="background:#282828"></i><i style="background:#83a598"></i><i style="background:#fabd2f"></i></span><span class="theme-name">Gruvbox</span></button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Accent</label>
+        <div class="accent-row">
+          <button type="button" class="accent-swatch" data-accent="theme" aria-label="Theme default accent" title="Theme default accent"></button>
+          <button type="button" class="accent-swatch" data-accent="teal" style="background:#1d7484" aria-label="teal accent" title="teal accent"></button>
+          <button type="button" class="accent-swatch" data-accent="blue" style="background:#2a6fdb" aria-label="blue accent" title="blue accent"></button>
+          <button type="button" class="accent-swatch" data-accent="violet" style="background:#7c3aed" aria-label="violet accent" title="violet accent"></button>
+          <button type="button" class="accent-swatch" data-accent="green" style="background:#1f8a5b" aria-label="green accent" title="green accent"></button>
+          <button type="button" class="accent-swatch" data-accent="amber" style="background:#b45c0c" aria-label="amber accent" title="amber accent"></button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Density</label>
+        <div class="seg-radio density-seg">
+          <button type="button" data-density="compact">Compact</button>
+          <button type="button" data-density="cozy">Cozy</button>
+          <button type="button" data-density="comfortable">Roomy</button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Diff cells<span class="settings-hint">colour, or +/&minus; marks</span></label>
+        <div class="seg-radio diff-seg">
+          <button type="button" data-diffstyle="color">Colour</button>
+          <button type="button" data-diffstyle="marks">Marks</button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Diff layout<span class="settings-hint">side-by-side when there&rsquo;s room</span></label>
+        <div class="seg-radio difflayout-seg">
+          <button type="button" data-difflayout="auto">Auto</button>
+          <button type="button" data-difflayout="unified">Unified</button>
+          <button type="button" data-difflayout="split">Split</button>
+        </div>
+      </div>
     </div>
-    <div class="settings-row">
-      <label for="settings-normalize-input">Hide format-only changes
-        <span class="settings-hint">treat reformatted-but-equal cells as unchanged</span>
-      </label>
-      <span class="settings-switch">
-        <input type="checkbox" id="settings-normalize-input"
-               aria-label="Hide format-only (normalized-equal) cell changes" checked>
-        <span class="switch-track" aria-hidden="true"></span>
-      </span>
+    <div class="settings-section">
+      <div class="settings-row">
+        <label for="settings-context-input">Diff context lines
+          <span class="settings-hint">unchanged lines kept around each change</span>
+        </label>
+        <input type="number" class="settings-context-input" id="settings-context-input"
+               min="0" max="20" step="1" value="3"
+               aria-label="Unchanged context lines shown around each change">
+      </div>
+      <div class="settings-row">
+        <label for="settings-normalize-input">Hide format-only changes
+          <span class="settings-hint">treat reformatted-but-equal cells as unchanged</span>
+        </label>
+        <span class="settings-switch">
+          <input type="checkbox" id="settings-normalize-input"
+                 aria-label="Hide format-only (normalized-equal) cell changes" checked>
+          <span class="switch-track" aria-hidden="true"></span>
+        </span>
+      </div>
     </div>
   </div>
 </div>
@@ -1360,7 +1415,7 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
     <div class="selector-field">
       <label for="model-select">Model</label>
       <select id="model-select"></select>
-      <span class="incremental-badge" hidden>incremental</span>
+      
     </div>
     <span class="selector-arrow" aria-hidden="true">→</span>
     <div class="selector-field">
@@ -1444,7 +1499,7 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
 
 </div>
 
-<script type="application/json" id="cute-dbt-data">{"baseline":"","models":[{"name":"fct_provider_metrics","dag":{"nodes":[{"id":"encounters","role":"import"},{"id":"dim_date","role":"import"},{"id":"procedures","role":"import"},{"id":"encounters_with_date","role":"transform"},{"id":"provider_month_agg","role":"transform"},{"id":"final","role":"transform"},{"id":"(final select)","label":"fct_provider_metrics.sql","role":"final"}],"edges":[{"from":"encounters","to":"encounters_with_date","edge_type":"from"},{"from":"dim_date","to":"encounters_with_date","edge_type":"inner"},{"from":"procedures","to":"encounters_with_date","edge_type":"left"},{"from":"encounters_with_date","to":"provider_month_agg","edge_type":"from"},{"from":"provider_month_agg","to":"final","edge_type":"from"},{"from":"final","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select * from final","dim_date":"dim_date as (\n    select\n        date_key\n        , year_actual\n        , month_actual\n    from \"memory\".\"main_marts\".\"dim_date\"\n)","encounters":"encounters as (\n    select\n        encounter_key\n        , encounter_id\n        , patient_key\n        , patient_id\n        , provider_key\n        , provider_id\n        , organization_key\n        , organization_id\n        , encounter_start_date_key\n        , total_claim_cost\n        , payer_coverage\n        , duration_minutes\n        , patient_age_at_encounter\n    from \"memory\".\"main_marts\".\"fct_encounters\"\n    where provider_key != -1\n)","encounters_with_date":"encounters_with_date as (\n    select\n        e.*\n        , d.year_actual\n        , d.month_actual\n        , cast(d.year_actual as varchar)\n            || '-'\n            || lpad(cast(d.month_actual as varchar), 2, '0') as year_month_str\n        , coalesce(pr.procedure_count, 0) as procedure_count\n    from encounters as e\n    inner join dim_date as d on e.encounter_start_date_key = d.date_key\n    left join procedures as pr on e.encounter_id = pr.encounter_id\n    where e.encounter_start_date_key != -1\n)","final":"final as (\n    select\n        -- surrogate key\n        md5(cast(provider_id as varchar) || '-' || year_month_str) as provider_metrics_key\n\n        -- dimension keys\n        , provider_key\n        , provider_id\n        , organization_key\n        , organization_id\n\n        -- time grain\n        , year_actual\n        , month_actual\n        , year_month_str\n\n        -- measures: counts\n        , encounter_count\n        , unique_patient_count\n        , total_procedures\n\n        -- measures: averages\n        , round(avg_patient_age, 2) as avg_patient_age\n        , round(avg_encounter_duration_minutes, 2) as avg_encounter_duration_minutes\n\n        -- measures: costs\n        , coalesce(total_cost, 0) as total_cost\n        , coalesce(total_payer_coverage, 0) as total_payer_coverage\n\n        -- measures: derived ratios\n        , case\n            when encounter_count > 0\n            then round(total_cost / encounter_count, 2)\n            else 0\n        end as avg_cost_per_encounter\n\n        , case\n            when unique_patient_count > 0\n            then round(cast(encounter_count as decimal) / unique_patient_count, 2)\n            else 0\n        end as encounters_per_patient_avg\n\n        -- metadata\n        , current_timestamp as _loaded_at\n\n    from provider_month_agg\n)","procedures":"procedures as (\n    select\n        encounter_id\n        , count(*) as procedure_count\n    from \"memory\".\"main_staging\".\"stg_synthea__procedures\"\n    group by encounter_id\n)","provider_month_agg":"provider_month_agg as (\n    select\n        e.provider_id\n        , e.provider_key\n        , e.organization_id\n        , e.organization_key\n        , e.year_actual\n        , e.month_actual\n        , e.year_month_str\n\n        -- counts\n        , count(*) as encounter_count\n        , count(distinct e.patient_id) as unique_patient_count\n\n        -- patient metrics\n        , avg(e.patient_age_at_encounter) as avg_patient_age\n\n        -- encounter metrics\n        , avg(e.duration_minutes) as avg_encounter_duration_minutes\n\n        -- procedure metrics\n        , sum(e.procedure_count) as total_procedures\n\n        -- cost metrics\n        , sum(e.total_claim_cost) as total_cost\n        , sum(e.payer_coverage) as total_payer_coverage\n\n    from encounters_with_date as e\n    group by\n        e.provider_id\n        , e.provider_key\n        , e.organization_id\n        , e.organization_key\n        , e.year_actual\n        , e.month_actual\n        , e.year_month_str\n)"},"raw_sql":"{{\n    config(\n        materialized='table',\n        unique_key='provider_metrics_key',\n        tags=['analytics', 'marts', 'fact']\n    )\n}}\n\n{#\n    Monthly Provider Metrics Fact\n\n    Purpose: Provider-level utilization and performance metrics\n    Grain: One row per provider per calendar month\n    Use cases: Provider performance dashboards, utilization trending, quality measures\n\n    Aggregates encounters, patients, procedures, and costs by provider and month.\n    Calculates derived metrics like avg cost per encounter and encounters per patient.\n#}\n\nwith encounters as (\n    select\n        encounter_key\n        , encounter_id\n        , patient_key\n        , patient_id\n        , provider_key\n        , provider_id\n        , organization_key\n        , organization_id\n        , encounter_start_date_key\n        , total_claim_cost\n        , payer_coverage\n        , duration_minutes\n        , patient_age_at_encounter\n    from {{ ref('fct_encounters') }}\n    where provider_key != -1\n),\n\ndim_date as (\n    select\n        date_key\n        , year_actual\n        , month_actual\n    from {{ ref('dim_date') }}\n),\n\nprocedures as (\n    select\n        encounter_id\n        , count(*) as procedure_count\n    from {{ ref('stg_synthea__procedures') }}\n    group by encounter_id\n),\n\n-- join encounters to date dimension to get year/month\nencounters_with_date as (\n    select\n        e.*\n        , d.year_actual\n        , d.month_actual\n        , cast(d.year_actual as varchar)\n            || '-'\n            || lpad(cast(d.month_actual as varchar), 2, '0') as year_month_str\n        , coalesce(pr.procedure_count, 0) as procedure_count\n    from encounters as e\n    inner join dim_date as d on e.encounter_start_date_key = d.date_key\n    left join procedures as pr on e.encounter_id = pr.encounter_id\n    where e.encounter_start_date_key != -1\n),\n\n-- aggregate by provider and year-month\nprovider_month_agg as (\n    select\n        e.provider_id\n        , e.provider_key\n        , e.organization_id\n        , e.organization_key\n        , e.year_actual\n        , e.month_actual\n        , e.year_month_str\n\n        -- counts\n        , count(*) as encounter_count\n        , count(distinct e.patient_id) as unique_patient_count\n\n        -- patient metrics\n        , avg(e.patient_age_at_encounter) as avg_patient_age\n\n        -- encounter metrics\n        , avg(e.duration_minutes) as avg_encounter_duration_minutes\n\n        -- procedure metrics\n        , sum(e.procedure_count) as total_procedures\n\n        -- cost metrics\n        , sum(e.total_claim_cost) as total_cost\n        , sum(e.payer_coverage) as total_payer_coverage\n\n    from encounters_with_date as e\n    group by\n        e.provider_id\n        , e.provider_key\n        , e.organization_id\n        , e.organization_key\n        , e.year_actual\n        , e.month_actual\n        , e.year_month_str\n),\n\nfinal as (\n    select\n        -- surrogate key\n        md5(cast(provider_id as varchar) || '-' || year_month_str) as provider_metrics_key\n\n        -- dimension keys\n        , provider_key\n        , provider_id\n        , organization_key\n        , organization_id\n\n        -- time grain\n        , year_actual\n        , month_actual\n        , year_month_str\n\n        -- measures: counts\n        , encounter_count\n        , unique_patient_count\n        , total_procedures\n\n        -- measures: averages\n        , round(avg_patient_age, 2) as avg_patient_age\n        , round(avg_encounter_duration_minutes, 2) as avg_encounter_duration_minutes\n\n        -- measures: costs\n        , coalesce(total_cost, 0) as total_cost\n        , coalesce(total_payer_coverage, 0) as total_payer_coverage\n\n        -- measures: derived ratios\n        , case\n            when encounter_count > 0\n            then round(total_cost / encounter_count, 2)\n            else 0\n        end as avg_cost_per_encounter\n\n        , case\n            when unique_patient_count > 0\n            then round(cast(encounter_count as decimal) / unique_patient_count, 2)\n            else 0\n        end as encounters_per_patient_avg\n\n        -- metadata\n        , current_timestamp as _loaded_at\n\n    from provider_month_agg\n)\n\nselect * from final","sql_diff":{"lines":[{"kind":"context","text":"{{","emphasis":null},{"kind":"context","text":"    config(","emphasis":null},{"kind":"context","text":"        materialized='table',","emphasis":null},{"kind":"context","text":"        unique_key='provider_metrics_key',","emphasis":null},{"kind":"context","text":"        tags=['analytics', 'marts', 'fact']","emphasis":null},{"kind":"context","text":"    )","emphasis":null},{"kind":"context","text":"}}","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"{#","emphasis":null},{"kind":"context","text":"    Monthly Provider Metrics Fact","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"    Purpose: Provider-level utilization and performance metrics","emphasis":null},{"kind":"context","text":"    Grain: One row per provider per calendar month","emphasis":null},{"kind":"context","text":"    Use cases: Provider performance dashboards, utilization trending, quality measures","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"    Aggregates encounters, patients, procedures, and costs by provider and month.","emphasis":null},{"kind":"context","text":"    Calculates derived metrics like avg cost per encounter and encounters per patient.","emphasis":null},{"kind":"context","text":"#}","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"with encounters as (","emphasis":null},{"kind":"context","text":"    select","emphasis":null},{"kind":"context","text":"        encounter_key","emphasis":null},{"kind":"context","text":"        , encounter_id","emphasis":null},{"kind":"context","text":"        , patient_key","emphasis":null},{"kind":"context","text":"        , patient_id","emphasis":null},{"kind":"context","text":"        , provider_key","emphasis":null},{"kind":"context","text":"        , provider_id","emphasis":null},{"kind":"context","text":"        , organization_key","emphasis":null},{"kind":"context","text":"        , organization_id","emphasis":null},{"kind":"context","text":"        , encounter_start_date_key","emphasis":null},{"kind":"context","text":"        , total_claim_cost","emphasis":null},{"kind":"context","text":"        , payer_coverage","emphasis":null},{"kind":"context","text":"        , duration_minutes","emphasis":null},{"kind":"context","text":"        , patient_age_at_encounter","emphasis":null},{"kind":"context","text":"    from {{ ref('fct_encounters') }}","emphasis":null},{"kind":"context","text":"    where provider_key != -1","emphasis":null},{"kind":"context","text":"),","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"dim_date as (","emphasis":null},{"kind":"context","text":"    select","emphasis":null},{"kind":"context","text":"        date_key","emphasis":null},{"kind":"context","text":"        , year_actual","emphasis":null},{"kind":"context","text":"        , month_actual","emphasis":null},{"kind":"context","text":"    from {{ ref('dim_date') }}","emphasis":null},{"kind":"context","text":"),","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"procedures as (","emphasis":null},{"kind":"context","text":"    select","emphasis":null},{"kind":"context","text":"        encounter_id","emphasis":null},{"kind":"removed","text":"        , count(distinct procedure_code) as procedure_count","emphasis":[16,39]},{"kind":"added","text":"        , count(*) as procedure_count","emphasis":[16,17]},{"kind":"context","text":"    from {{ ref('stg_synthea__procedures') }}","emphasis":null},{"kind":"context","text":"    group by encounter_id","emphasis":null},{"kind":"context","text":"),","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"-- join encounters to date dimension to get year/month","emphasis":null},{"kind":"context","text":"encounters_with_date as (","emphasis":null},{"kind":"context","text":"    select","emphasis":null},{"kind":"context","text":"        e.*","emphasis":null},{"kind":"context","text":"        , d.year_actual","emphasis":null},{"kind":"context","text":"        , d.month_actual","emphasis":null},{"kind":"context","text":"        , cast(d.year_actual as varchar)","emphasis":null},{"kind":"context","text":"            || '-'","emphasis":null},{"kind":"context","text":"            || lpad(cast(d.month_actual as varchar), 2, '0') as year_month_str","emphasis":null},{"kind":"removed","text":"        , pr.procedure_count as procedure_count","emphasis":[10,28]},{"kind":"added","text":"        , coalesce(pr.procedure_count, 0) as procedure_count","emphasis":[10,41]},{"kind":"context","text":"    from encounters as e","emphasis":null},{"kind":"context","text":"    inner join dim_date as d on e.encounter_start_date_key = d.date_key","emphasis":null},{"kind":"context","text":"    left join procedures as pr on e.encounter_id = pr.encounter_id","emphasis":null},{"kind":"context","text":"    where e.encounter_start_date_key != -1","emphasis":null},{"kind":"context","text":"),","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"-- aggregate by provider and year-month","emphasis":null},{"kind":"context","text":"provider_month_agg as (","emphasis":null},{"kind":"context","text":"    select","emphasis":null},{"kind":"context","text":"        e.provider_id","emphasis":null},{"kind":"context","text":"        , e.provider_key","emphasis":null},{"kind":"context","text":"        , e.organization_id","emphasis":null},{"kind":"context","text":"        , e.organization_key","emphasis":null},{"kind":"context","text":"        , e.year_actual","emphasis":null},{"kind":"context","text":"        , e.month_actual","emphasis":null},{"kind":"context","text":"        , e.year_month_str","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- counts","emphasis":null},{"kind":"context","text":"        , count(*) as encounter_count","emphasis":null},{"kind":"context","text":"        , count(distinct e.patient_id) as unique_patient_count","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- patient metrics","emphasis":null},{"kind":"context","text":"        , avg(e.patient_age_at_encounter) as avg_patient_age","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- encounter metrics","emphasis":null},{"kind":"context","text":"        , avg(e.duration_minutes) as avg_encounter_duration_minutes","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- procedure metrics","emphasis":null},{"kind":"removed","text":"        , sum(e.procedure_count) as procedure_total","emphasis":[36,51]},{"kind":"added","text":"        , sum(e.procedure_count) as total_procedures","emphasis":[36,52]},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- cost metrics","emphasis":null},{"kind":"context","text":"        , sum(e.total_claim_cost) as total_cost","emphasis":null},{"kind":"context","text":"        , sum(e.payer_coverage) as total_payer_coverage","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"    from encounters_with_date as e","emphasis":null},{"kind":"context","text":"    group by","emphasis":null},{"kind":"context","text":"        e.provider_id","emphasis":null},{"kind":"context","text":"        , e.provider_key","emphasis":null},{"kind":"context","text":"        , e.organization_id","emphasis":null},{"kind":"context","text":"        , e.organization_key","emphasis":null},{"kind":"context","text":"        , e.year_actual","emphasis":null},{"kind":"context","text":"        , e.month_actual","emphasis":null},{"kind":"context","text":"        , e.year_month_str","emphasis":null},{"kind":"context","text":"),","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"final as (","emphasis":null},{"kind":"context","text":"    select","emphasis":null},{"kind":"context","text":"        -- surrogate key","emphasis":null},{"kind":"context","text":"        md5(cast(provider_id as varchar) || '-' || year_month_str) as provider_metrics_key","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- dimension keys","emphasis":null},{"kind":"context","text":"        , provider_key","emphasis":null},{"kind":"context","text":"        , provider_id","emphasis":null},{"kind":"context","text":"        , organization_key","emphasis":null},{"kind":"context","text":"        , organization_id","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- time grain","emphasis":null},{"kind":"context","text":"        , year_actual","emphasis":null},{"kind":"context","text":"        , month_actual","emphasis":null},{"kind":"context","text":"        , year_month_str","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- measures: counts","emphasis":null},{"kind":"context","text":"        , encounter_count","emphasis":null},{"kind":"context","text":"        , unique_patient_count","emphasis":null},{"kind":"context","text":"        , total_procedures","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- measures: averages","emphasis":null},{"kind":"context","text":"        , round(avg_patient_age, 2) as avg_patient_age","emphasis":null},{"kind":"context","text":"        , round(avg_encounter_duration_minutes, 2) as avg_encounter_duration_minutes","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- measures: costs","emphasis":null},{"kind":"context","text":"        , coalesce(total_cost, 0) as total_cost","emphasis":null},{"kind":"context","text":"        , coalesce(total_payer_coverage, 0) as total_payer_coverage","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- measures: derived ratios","emphasis":null},{"kind":"context","text":"        , case","emphasis":null},{"kind":"context","text":"            when encounter_count > 0","emphasis":null},{"kind":"context","text":"            then round(total_cost / encounter_count, 2)","emphasis":null},{"kind":"context","text":"            else 0","emphasis":null},{"kind":"context","text":"        end as avg_cost_per_encounter","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        , case","emphasis":null},{"kind":"context","text":"            when unique_patient_count > 0","emphasis":null},{"kind":"context","text":"            then round(cast(encounter_count as decimal) / unique_patient_count, 2)","emphasis":null},{"kind":"context","text":"            else 0","emphasis":null},{"kind":"context","text":"        end as encounters_per_patient_avg","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- metadata","emphasis":null},{"kind":"context","text":"        , current_timestamp as _loaded_at","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"    from provider_month_agg","emphasis":null},{"kind":"context","text":")","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"select * from final","emphasis":null}]},"tests":[],"is_recursive":false,"findings":[{"check":"grain.unique-key-unbacked","tier":"total","instrument":"data-test","model_id":"model.healthcare_analytics.fct_provider_metrics","construct":"config.unique_key","verdict":{"status":"covered","by":["test.healthcare_analytics.unique_fct_provider_metrics_provider_metrics_key.d58939d602"]},"evidence":[{"label":"unique_key","value":"provider_metrics_key"}]}]},{"name":"mart_dq_summary","dag":{"nodes":[{"id":"encounter_metrics","role":"import"},{"id":"medication_metrics","role":"import"},{"id":"combined_metrics","role":"transform"},{"id":"(final select)","label":"mart_dq_summary.sql","role":"final"}],"edges":[{"from":"encounter_metrics","to":"combined_metrics","edge_type":"union_all"},{"from":"medication_metrics","to":"combined_metrics","edge_type":"union_all"},{"from":"combined_metrics","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select\n    entity_type\n    , quarantined_count\n    , total_count\n    , quarantine_rate_pct\n    , failed_timestamp_validations\n    , failed_future_date_validations\n    , failed_historical_end_validations\n    , failed_historical_start_validations\n    , current_timestamp as _generated_at\nfrom combined_metrics\norder by entity_type\n\n-- cute-dbt fixture: synthetic body mod","combined_metrics":"combined_metrics as (\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_encounter_timestamps as failed_timestamp_validations\n        , failed_no_future_encounter_dates as failed_future_date_validations\n        , failed_end_after_1900 as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from encounter_metrics\n\n    union all\n\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_medication_dates as failed_timestamp_validations\n        , failed_no_future_medication_dates as failed_future_date_validations\n        , failed_end_after_1900_if_present as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from medication_metrics\n)","encounter_metrics":"encounter_metrics as (\n    select\n        'encounters' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_encounter_timestamps) as failed_valid_encounter_timestamps\n        , count(*) filter (where not no_future_encounter_dates) as failed_no_future_encounter_dates\n        , count(*) filter (where not end_after_1900) as failed_end_after_1900\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n    from \"memory\".\"main_staging\".\"stg_synthea__encounters\"\n)","medication_metrics":"medication_metrics as (\n    select\n        'medications' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_medication_dates) as failed_valid_medication_dates\n        , count(*) filter (where not no_future_medication_dates) as failed_no_future_medication_dates\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n        , count(*) filter (where not end_after_1900_if_present) as failed_end_after_1900_if_present\n    from \"memory\".\"main_staging\".\"stg_synthea__medications\"\n)"},"raw_sql":"{{\n    config(\n        materialized='table',\n        tags=['analytics', 'data_quality']\n    )\n}}\n\nwith encounter_metrics as (\n    select\n        'encounters' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_encounter_timestamps) as failed_valid_encounter_timestamps\n        , count(*) filter (where not no_future_encounter_dates) as failed_no_future_encounter_dates\n        , count(*) filter (where not end_after_1900) as failed_end_after_1900\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n    from {{ ref('stg_synthea__encounters') }}\n),\n\nmedication_metrics as (\n    select\n        'medications' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_medication_dates) as failed_valid_medication_dates\n        , count(*) filter (where not no_future_medication_dates) as failed_no_future_medication_dates\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n        , count(*) filter (where not end_after_1900_if_present) as failed_end_after_1900_if_present\n    from {{ ref('stg_synthea__medications') }}\n),\n\ncombined_metrics as (\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_encounter_timestamps as failed_timestamp_validations\n        , failed_no_future_encounter_dates as failed_future_date_validations\n        , failed_end_after_1900 as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from encounter_metrics\n\n    union all\n\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_medication_dates as failed_timestamp_validations\n        , failed_no_future_medication_dates as failed_future_date_validations\n        , failed_end_after_1900_if_present as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from medication_metrics\n)\n\nselect\n    entity_type\n    , quarantined_count\n    , total_count\n    , quarantine_rate_pct\n    , failed_timestamp_validations\n    , failed_future_date_validations\n    , failed_historical_end_validations\n    , failed_historical_start_validations\n    , current_timestamp as _generated_at\nfrom combined_metrics\norder by entity_type\n\n-- cute-dbt fixture: synthetic body mod","tests":[{"id":"unit_test.healthcare_analytics.mart_dq_summary.test_mart_dq_summary_combines_encounter_and_medication_metrics","name":"test_mart_dq_summary_combines_encounter_and_medication_metrics","target_model":"mart_dq_summary","changed":false,"description":"mart_dq_summary UNION-ALLs metrics from stg_synthea__encounters\nand stg_synthea__medications. This test mocks two encounter rows\n(one invalid) and two medication rows (both invalid), then asserts\nthe per-entity counts + quarantine rate. Uses csv format for both\nGIVEN and EXPECT — compact tabular form across many boolean\ndq-flag columns.\n","tags":[],"meta":{},"defined_in":"models/marts/analytics/_analytics__models.yml","authoring_yaml":"  # LEADING bracket for test 1 — the slicer attaches contiguous\n  # `#`-comment lines at the SAME indent as `- name:` immediately above\n  # the test (no blank-line gap below) to this test's authored slice\n  # (cute-dbt#69 / #73).\n  - name: test_mart_dq_summary_combines_encounter_and_medication_metrics\n    description: |\n      mart_dq_summary UNION-ALLs metrics from stg_synthea__encounters\n      and stg_synthea__medications. This test mocks two encounter rows\n      (one invalid) and two medication rows (both invalid), then asserts\n      the per-entity counts + quarantine rate. Uses csv format for both\n      GIVEN and EXPECT — compact tabular form across many boolean\n      dq-flag columns.\n    model: mart_dq_summary\n    # INSIDE bracket for test 1 — comments at deeper indent than\n    # `- name:` ride along with the body slice as raw text (cute-dbt#69\n    # / #73).\n    given:\n      - input: ref('stg_synthea__encounters')\n        format: csv\n        rows: |\n          is_dq_valid,valid_encounter_timestamps,no_future_encounter_dates,end_after_1900,start_after_1900\n          false,false,true,true,true\n          true,true,true,true,true\n      - input: ref('stg_synthea__medications')\n        format: csv\n        rows: |\n          is_dq_valid,valid_medication_dates,no_future_medication_dates,start_after_1900,end_after_1900_if_present\n          false,false,true,true,true\n          false,true,false,true,true\n    expect:\n      format: csv\n      rows: |\n        entity_type,quarantined_count,total_count,quarantine_rate_pct,failed_timestamp_validations\n        encounters,1,2,50.00,1\n        medications,2,2,100.00,1\n  # TRAILING bracket for test 1 — the comment block butts against the\n  # body above (no blank-line gap) and is terminated below by the blank\n  # line separating the two tests (cute-dbt#69 / #73).","given":[{"input":"ref('stg_synthea__encounters')","bound_to_node":"encounter_metrics","table":{"columns":["end_after_1900","is_dq_valid","no_future_encounter_dates","start_after_1900","valid_encounter_timestamps"],"rows":[{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}}]},{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}}]}]},"rows":[{"end_after_1900":"true","is_dq_valid":"false","no_future_encounter_dates":"true","start_after_1900":"true","valid_encounter_timestamps":"false"},{"end_after_1900":"true","is_dq_valid":"true","no_future_encounter_dates":"true","start_after_1900":"true","valid_encounter_timestamps":"true"}],"format":"csv"},{"input":"ref('stg_synthea__medications')","bound_to_node":"medication_metrics","table":{"columns":["end_after_1900_if_present","is_dq_valid","no_future_medication_dates","start_after_1900","valid_medication_dates"],"rows":[{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}}]},{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}},{"display":"false","key":{"t":"bool","v":false}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}}]}]},"rows":[{"end_after_1900_if_present":"true","is_dq_valid":"false","no_future_medication_dates":"true","start_after_1900":"true","valid_medication_dates":"false"},{"end_after_1900_if_present":"true","is_dq_valid":"false","no_future_medication_dates":"false","start_after_1900":"true","valid_medication_dates":"true"}],"format":"csv"}],"expected":{"table":{"columns":["entity_type","failed_timestamp_validations","quarantine_rate_pct","quarantined_count","total_count"],"rows":[{"cells":[{"display":"encounters","key":{"t":"str","v":"encounters"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"50.00","key":{"t":"number","v":"50"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"2","key":{"t":"number","v":"2"}}]},{"cells":[{"display":"medications","key":{"t":"str","v":"medications"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"100.00","key":{"t":"number","v":"100"}},{"display":"2","key":{"t":"number","v":"2"}},{"display":"2","key":{"t":"number","v":"2"}}]}]},"rows":[{"entity_type":"encounters","failed_timestamp_validations":"1","quarantine_rate_pct":"50.00","quarantined_count":"1","total_count":"2"},{"entity_type":"medications","failed_timestamp_validations":"1","quarantine_rate_pct":"100.00","quarantined_count":"2","total_count":"2"}],"format":"csv","column_meta":{"entity_type":{"description":"Type of entity being measured (encounters, medications)","tests":["accepted_values (values: encounters, medications)","not_null"]},"failed_timestamp_validations":{"description":"Count of records failing timestamp/date sequence validations"},"quarantine_rate_pct":{"description":"Percentage of records quarantined (quarantined_count / total_count * 100)","tests":["dbt_expectations.expect_column_values_to_be_between"]},"quarantined_count":{"description":"Number of records failing data quality validations","tests":["not_null"]},"total_count":{"description":"Total number of records (valid + quarantined)","tests":["not_null"]}}}},{"id":"unit_test.healthcare_analytics.mart_dq_summary.test_mart_dq_summary_zero_quarantined_when_all_valid","name":"test_mart_dq_summary_zero_quarantined_when_all_valid","target_model":"mart_dq_summary","changed":true,"description":"mart_dq_summary should report zero quarantined_count and 0.00\nquarantine_rate_pct when every upstream row passes data-quality\nvalidations. Uses sql format for the GIVEN mocks and dict format\nfor the EXPECT — dict expects only compare listed columns, so\nnon-deterministic outputs (`_generated_at` from\n`current_timestamp`) are excluded from comparison.\n","tags":[],"meta":{},"defined_in":"models/marts/analytics/_analytics__models.yml","authoring_yaml":"  # LEADING bracket for test 2 — sits between the blank-line\n  # terminator above and `- name:` below with no further gap, so the\n  # leading-wins tiebreaker is moot here (cute-dbt#69 / #73).\n  - name: test_mart_dq_summary_zero_quarantined_when_all_valid\n    description: |\n      mart_dq_summary should report zero quarantined_count and 0.00\n      quarantine_rate_pct when every upstream row passes data-quality\n      validations. Uses sql format for the GIVEN mocks and dict format\n      for the EXPECT — dict expects only compare listed columns, so\n      non-deterministic outputs (`_generated_at` from\n      `current_timestamp`) are excluded from comparison.\n    model: mart_dq_summary\n    # INSIDE bracket for test 2 — same rule as test 1 (cute-dbt#69 /\n    # #73). Demonstrates that the slicer ride-along applies to every\n    # unit_test, not just the first in the file.\n    given:\n      - input: ref('stg_synthea__encounters')\n        format: sql\n        rows: |\n          select\n            true as is_dq_valid\n            , true as valid_encounter_timestamps\n            , true as no_future_encounter_dates\n            , true as end_after_1900\n            , true as start_after_1900\n      - input: ref('stg_synthea__medications')\n        format: sql\n        rows: |\n          select\n            true as is_dq_valid\n            , true as valid_medication_dates\n            , true as no_future_medication_dates\n            , true as start_after_1900\n            , true as end_after_1900_if_present\n    expect:\n      format: dict\n      rows:\n        - entity_type: 'encounters'\n          quarantined_count: 0\n          total_count: 1\n          quarantine_rate_pct: 0.00\n        - entity_type: 'medications'\n          quarantined_count: 0\n          total_count: 1\n          quarantine_rate_pct: 0.00\n    overrides:\n      macros:\n        dbt.current_timestamp: \"'2024-01-15 00:00:00'\"\n      vars:\n        dq_quarantine_threshold: 5\n      env_vars:\n        DBT_DQ_REGION: 'us-east-1'\n  # TRAILING bracket for test 2 — terminated by EOF (cute-dbt#69 /\n  # #73).","yaml_diff":{"lines":[{"kind":"context","text":"  # LEADING bracket for test 2 — sits between the blank-line","emphasis":null},{"kind":"context","text":"  # terminator above and `- name:` below with no further gap, so the","emphasis":null},{"kind":"context","text":"  # leading-wins tiebreaker is moot here (cute-dbt#69 / #73).","emphasis":null},{"kind":"context","text":"  - name: test_mart_dq_summary_zero_quarantined_when_all_valid","emphasis":null},{"kind":"context","text":"    description: |","emphasis":null},{"kind":"context","text":"      mart_dq_summary should report zero quarantined_count and 0.00","emphasis":null},{"kind":"context","text":"      quarantine_rate_pct when every upstream row passes data-quality","emphasis":null},{"kind":"context","text":"      validations. Uses sql format for the GIVEN mocks and dict format","emphasis":null},{"kind":"context","text":"      for the EXPECT — dict expects only compare listed columns, so","emphasis":null},{"kind":"context","text":"      non-deterministic outputs (`_generated_at` from","emphasis":null},{"kind":"context","text":"      `current_timestamp`) are excluded from comparison.","emphasis":null},{"kind":"context","text":"    model: mart_dq_summary","emphasis":null},{"kind":"context","text":"    # INSIDE bracket for test 2 — same rule as test 1 (cute-dbt#69 /","emphasis":null},{"kind":"context","text":"    # #73). Demonstrates that the slicer ride-along applies to every","emphasis":null},{"kind":"context","text":"    # unit_test, not just the first in the file.","emphasis":null},{"kind":"context","text":"    given:","emphasis":null},{"kind":"context","text":"      - input: ref('stg_synthea__encounters')","emphasis":null},{"kind":"context","text":"        format: sql","emphasis":null},{"kind":"context","text":"        rows: |","emphasis":null},{"kind":"context","text":"          select","emphasis":null},{"kind":"context","text":"            true as is_dq_valid","emphasis":null},{"kind":"context","text":"            , true as valid_encounter_timestamps","emphasis":null},{"kind":"context","text":"            , true as no_future_encounter_dates","emphasis":null},{"kind":"context","text":"            , true as end_after_1900","emphasis":null},{"kind":"context","text":"            , true as start_after_1900","emphasis":null},{"kind":"context","text":"      - input: ref('stg_synthea__medications')","emphasis":null},{"kind":"context","text":"        format: sql","emphasis":null},{"kind":"context","text":"        rows: |","emphasis":null},{"kind":"context","text":"          select","emphasis":null},{"kind":"context","text":"            true as is_dq_valid","emphasis":null},{"kind":"context","text":"            , true as valid_medication_dates","emphasis":null},{"kind":"context","text":"            , true as no_future_medication_dates","emphasis":null},{"kind":"context","text":"            , true as start_after_1900","emphasis":null},{"kind":"context","text":"            , true as end_after_1900_if_present","emphasis":null},{"kind":"context","text":"    expect:","emphasis":null},{"kind":"context","text":"      format: dict","emphasis":null},{"kind":"context","text":"      rows:","emphasis":null},{"kind":"context","text":"        - entity_type: 'encounters'","emphasis":null},{"kind":"removed","text":"          quarantined_count: null","emphasis":[29,33]},{"kind":"removed","text":"          total_count: 2","emphasis":[23,24]},{"kind":"added","text":"          quarantined_count: 0","emphasis":[29,30]},{"kind":"added","text":"          total_count: 1","emphasis":[23,24]},{"kind":"context","text":"          quarantine_rate_pct: 0.00","emphasis":null},{"kind":"context","text":"        - entity_type: 'medications'","emphasis":null},{"kind":"removed","text":"          quarantined_count: 1","emphasis":[29,30]},{"kind":"removed","text":"          total_count: 2","emphasis":[23,24]},{"kind":"added","text":"          quarantined_count: 0","emphasis":[29,30]},{"kind":"added","text":"          total_count: 1","emphasis":[23,24]},{"kind":"context","text":"          quarantine_rate_pct: 0.00","emphasis":null},{"kind":"context","text":"    overrides:","emphasis":null},{"kind":"context","text":"      macros:","emphasis":null},{"kind":"context","text":"        dbt.current_timestamp: \"'2024-01-15 00:00:00'\"","emphasis":null},{"kind":"context","text":"      vars:","emphasis":null},{"kind":"removed","text":"        dq_quarantine_threshold: 10","emphasis":[33,35]},{"kind":"added","text":"        dq_quarantine_threshold: 5","emphasis":[33,34]},{"kind":"context","text":"      env_vars:","emphasis":null},{"kind":"context","text":"        DBT_DQ_REGION: 'us-east-1'","emphasis":null},{"kind":"context","text":"  # TRAILING bracket for test 2 — terminated by EOF (cute-dbt#69 /","emphasis":null},{"kind":"context","text":"  # #73).","emphasis":null}]},"data_diff":{"given":[],"expect":{"columns":[{"name":"entity_type","status":"present"},{"name":"quarantine_rate_pct","status":"present"},{"name":"quarantined_count","status":"present"},{"name":"total_count","status":"present"}],"rows":[{"kind":"modified","cells":[{"old":{"display":"encounters","key":{"t":"str","v":"encounters"}},"new":{"display":"encounters","key":{"t":"str","v":"encounters"}},"changed":false},{"old":{"display":"0.00","key":{"t":"number","v":"0"}},"new":{"display":"0.0","key":{"t":"number","v":"0"}},"changed":false},{"old":{"display":"","key":{"t":"null"}},"new":{"display":"0","key":{"t":"number","v":"0"}},"changed":true},{"old":{"display":"2","key":{"t":"number","v":"2"}},"new":{"display":"1","key":{"t":"number","v":"1"}},"changed":true}]},{"kind":"modified","cells":[{"old":{"display":"medications","key":{"t":"str","v":"medications"}},"new":{"display":"medications","key":{"t":"str","v":"medications"}},"changed":false},{"old":{"display":"0.00","key":{"t":"number","v":"0"}},"new":{"display":"0.0","key":{"t":"number","v":"0"}},"changed":false},{"old":{"display":"1","key":{"t":"number","v":"1"}},"new":{"display":"0","key":{"t":"number","v":"0"}},"changed":true},{"old":{"display":"2","key":{"t":"number","v":"2"}},"new":{"display":"1","key":{"t":"number","v":"1"}},"changed":true}]}]}},"given":[{"input":"ref('stg_synthea__encounters')","bound_to_node":"encounter_metrics","table":{"columns":["is_dq_valid","valid_encounter_timestamps","no_future_encounter_dates","end_after_1900","start_after_1900"],"rows":[{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}}]}]},"rows":"select\n  true as is_dq_valid\n  , true as valid_encounter_timestamps\n  , true as no_future_encounter_dates\n  , true as end_after_1900\n  , true as start_after_1900","format":"sql"},{"input":"ref('stg_synthea__medications')","bound_to_node":"medication_metrics","table":{"columns":["is_dq_valid","valid_medication_dates","no_future_medication_dates","start_after_1900","end_after_1900_if_present"],"rows":[{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}}]}]},"rows":"select\n  true as is_dq_valid\n  , true as valid_medication_dates\n  , true as no_future_medication_dates\n  , true as start_after_1900\n  , true as end_after_1900_if_present","format":"sql"}],"expected":{"table":{"columns":["entity_type","quarantine_rate_pct","quarantined_count","total_count"],"rows":[{"cells":[{"display":"encounters","key":{"t":"str","v":"encounters"}},{"display":"0.0","key":{"t":"number","v":"0"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"1","key":{"t":"number","v":"1"}}]},{"cells":[{"display":"medications","key":{"t":"str","v":"medications"}},{"display":"0.0","key":{"t":"number","v":"0"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"1","key":{"t":"number","v":"1"}}]}]},"rows":[{"entity_type":"encounters","quarantine_rate_pct":0.0,"quarantined_count":0,"total_count":1},{"entity_type":"medications","quarantine_rate_pct":0.0,"quarantined_count":0,"total_count":1}],"format":"dict","column_meta":{"entity_type":{"description":"Type of entity being measured (encounters, medications)","tests":["accepted_values (values: encounters, medications)","not_null"]},"quarantine_rate_pct":{"description":"Percentage of records quarantined (quarantined_count / total_count * 100)","tests":["dbt_expectations.expect_column_values_to_be_between"]},"quarantined_count":{"description":"Number of records failing data quality validations","tests":["not_null"]},"total_count":{"description":"Total number of records (valid + quarantined)","tests":["not_null"]}}}}],"is_recursive":false}]}</script>
+<script type="application/json" id="cute-dbt-data">{"baseline":"","models":[{"name":"fct_provider_metrics","dag":{"nodes":[{"id":"encounters","role":"import"},{"id":"dim_date","role":"import"},{"id":"procedures","role":"import"},{"id":"encounters_with_date","role":"transform"},{"id":"provider_month_agg","role":"transform"},{"id":"final","role":"transform"},{"id":"(final select)","label":"fct_provider_metrics.sql","role":"final"}],"edges":[{"from":"encounters","to":"encounters_with_date","edge_type":"from"},{"from":"dim_date","to":"encounters_with_date","edge_type":"inner"},{"from":"procedures","to":"encounters_with_date","edge_type":"left"},{"from":"encounters_with_date","to":"provider_month_agg","edge_type":"from"},{"from":"provider_month_agg","to":"final","edge_type":"from"},{"from":"final","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select * from final","dim_date":"dim_date as (\n    select\n        date_key\n        , year_actual\n        , month_actual\n    from \"memory\".\"main_marts\".\"dim_date\"\n)","encounters":"encounters as (\n    select\n        encounter_key\n        , encounter_id\n        , patient_key\n        , patient_id\n        , provider_key\n        , provider_id\n        , organization_key\n        , organization_id\n        , encounter_start_date_key\n        , total_claim_cost\n        , payer_coverage\n        , duration_minutes\n        , patient_age_at_encounter\n    from \"memory\".\"main_marts\".\"fct_encounters\"\n    where provider_key != -1\n)","encounters_with_date":"encounters_with_date as (\n    select\n        e.*\n        , d.year_actual\n        , d.month_actual\n        , cast(d.year_actual as varchar)\n            || '-'\n            || lpad(cast(d.month_actual as varchar), 2, '0') as year_month_str\n        , coalesce(pr.procedure_count, 0) as procedure_count\n    from encounters as e\n    inner join dim_date as d on e.encounter_start_date_key = d.date_key\n    left join procedures as pr on e.encounter_id = pr.encounter_id\n    where e.encounter_start_date_key != -1\n)","final":"final as (\n    select\n        -- surrogate key\n        md5(cast(provider_id as varchar) || '-' || year_month_str) as provider_metrics_key\n\n        -- dimension keys\n        , provider_key\n        , provider_id\n        , organization_key\n        , organization_id\n\n        -- time grain\n        , year_actual\n        , month_actual\n        , year_month_str\n\n        -- measures: counts\n        , encounter_count\n        , unique_patient_count\n        , total_procedures\n\n        -- measures: averages\n        , round(avg_patient_age, 2) as avg_patient_age\n        , round(avg_encounter_duration_minutes, 2) as avg_encounter_duration_minutes\n\n        -- measures: costs\n        , coalesce(total_cost, 0) as total_cost\n        , coalesce(total_payer_coverage, 0) as total_payer_coverage\n\n        -- measures: derived ratios\n        , case\n            when encounter_count > 0\n            then round(total_cost / encounter_count, 2)\n            else 0\n        end as avg_cost_per_encounter\n\n        , case\n            when unique_patient_count > 0\n            then round(cast(encounter_count as decimal) / unique_patient_count, 2)\n            else 0\n        end as encounters_per_patient_avg\n\n        -- metadata\n        , current_timestamp as _loaded_at\n\n    from provider_month_agg\n)","procedures":"procedures as (\n    select\n        encounter_id\n        , count(*) as procedure_count\n    from \"memory\".\"main_staging\".\"stg_synthea__procedures\"\n    group by encounter_id\n)","provider_month_agg":"provider_month_agg as (\n    select\n        e.provider_id\n        , e.provider_key\n        , e.organization_id\n        , e.organization_key\n        , e.year_actual\n        , e.month_actual\n        , e.year_month_str\n\n        -- counts\n        , count(*) as encounter_count\n        , count(distinct e.patient_id) as unique_patient_count\n\n        -- patient metrics\n        , avg(e.patient_age_at_encounter) as avg_patient_age\n\n        -- encounter metrics\n        , avg(e.duration_minutes) as avg_encounter_duration_minutes\n\n        -- procedure metrics\n        , sum(e.procedure_count) as total_procedures\n\n        -- cost metrics\n        , sum(e.total_claim_cost) as total_cost\n        , sum(e.payer_coverage) as total_payer_coverage\n\n    from encounters_with_date as e\n    group by\n        e.provider_id\n        , e.provider_key\n        , e.organization_id\n        , e.organization_key\n        , e.year_actual\n        , e.month_actual\n        , e.year_month_str\n)"},"raw_sql":"{{\n    config(\n        materialized='table',\n        unique_key='provider_metrics_key',\n        tags=['analytics', 'marts', 'fact']\n    )\n}}\n\n{#\n    Monthly Provider Metrics Fact\n\n    Purpose: Provider-level utilization and performance metrics\n    Grain: One row per provider per calendar month\n    Use cases: Provider performance dashboards, utilization trending, quality measures\n\n    Aggregates encounters, patients, procedures, and costs by provider and month.\n    Calculates derived metrics like avg cost per encounter and encounters per patient.\n#}\n\nwith encounters as (\n    select\n        encounter_key\n        , encounter_id\n        , patient_key\n        , patient_id\n        , provider_key\n        , provider_id\n        , organization_key\n        , organization_id\n        , encounter_start_date_key\n        , total_claim_cost\n        , payer_coverage\n        , duration_minutes\n        , patient_age_at_encounter\n    from {{ ref('fct_encounters') }}\n    where provider_key != -1\n),\n\ndim_date as (\n    select\n        date_key\n        , year_actual\n        , month_actual\n    from {{ ref('dim_date') }}\n),\n\nprocedures as (\n    select\n        encounter_id\n        , count(*) as procedure_count\n    from {{ ref('stg_synthea__procedures') }}\n    group by encounter_id\n),\n\n-- join encounters to date dimension to get year/month\nencounters_with_date as (\n    select\n        e.*\n        , d.year_actual\n        , d.month_actual\n        , cast(d.year_actual as varchar)\n            || '-'\n            || lpad(cast(d.month_actual as varchar), 2, '0') as year_month_str\n        , coalesce(pr.procedure_count, 0) as procedure_count\n    from encounters as e\n    inner join dim_date as d on e.encounter_start_date_key = d.date_key\n    left join procedures as pr on e.encounter_id = pr.encounter_id\n    where e.encounter_start_date_key != -1\n),\n\n-- aggregate by provider and year-month\nprovider_month_agg as (\n    select\n        e.provider_id\n        , e.provider_key\n        , e.organization_id\n        , e.organization_key\n        , e.year_actual\n        , e.month_actual\n        , e.year_month_str\n\n        -- counts\n        , count(*) as encounter_count\n        , count(distinct e.patient_id) as unique_patient_count\n\n        -- patient metrics\n        , avg(e.patient_age_at_encounter) as avg_patient_age\n\n        -- encounter metrics\n        , avg(e.duration_minutes) as avg_encounter_duration_minutes\n\n        -- procedure metrics\n        , sum(e.procedure_count) as total_procedures\n\n        -- cost metrics\n        , sum(e.total_claim_cost) as total_cost\n        , sum(e.payer_coverage) as total_payer_coverage\n\n    from encounters_with_date as e\n    group by\n        e.provider_id\n        , e.provider_key\n        , e.organization_id\n        , e.organization_key\n        , e.year_actual\n        , e.month_actual\n        , e.year_month_str\n),\n\nfinal as (\n    select\n        -- surrogate key\n        md5(cast(provider_id as varchar) || '-' || year_month_str) as provider_metrics_key\n\n        -- dimension keys\n        , provider_key\n        , provider_id\n        , organization_key\n        , organization_id\n\n        -- time grain\n        , year_actual\n        , month_actual\n        , year_month_str\n\n        -- measures: counts\n        , encounter_count\n        , unique_patient_count\n        , total_procedures\n\n        -- measures: averages\n        , round(avg_patient_age, 2) as avg_patient_age\n        , round(avg_encounter_duration_minutes, 2) as avg_encounter_duration_minutes\n\n        -- measures: costs\n        , coalesce(total_cost, 0) as total_cost\n        , coalesce(total_payer_coverage, 0) as total_payer_coverage\n\n        -- measures: derived ratios\n        , case\n            when encounter_count > 0\n            then round(total_cost / encounter_count, 2)\n            else 0\n        end as avg_cost_per_encounter\n\n        , case\n            when unique_patient_count > 0\n            then round(cast(encounter_count as decimal) / unique_patient_count, 2)\n            else 0\n        end as encounters_per_patient_avg\n\n        -- metadata\n        , current_timestamp as _loaded_at\n\n    from provider_month_agg\n)\n\nselect * from final","sql_diff":{"lines":[{"kind":"context","text":"{{","emphasis":null},{"kind":"context","text":"    config(","emphasis":null},{"kind":"context","text":"        materialized='table',","emphasis":null},{"kind":"context","text":"        unique_key='provider_metrics_key',","emphasis":null},{"kind":"context","text":"        tags=['analytics', 'marts', 'fact']","emphasis":null},{"kind":"context","text":"    )","emphasis":null},{"kind":"context","text":"}}","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"{#","emphasis":null},{"kind":"context","text":"    Monthly Provider Metrics Fact","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"    Purpose: Provider-level utilization and performance metrics","emphasis":null},{"kind":"context","text":"    Grain: One row per provider per calendar month","emphasis":null},{"kind":"context","text":"    Use cases: Provider performance dashboards, utilization trending, quality measures","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"    Aggregates encounters, patients, procedures, and costs by provider and month.","emphasis":null},{"kind":"context","text":"    Calculates derived metrics like avg cost per encounter and encounters per patient.","emphasis":null},{"kind":"context","text":"#}","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"with encounters as (","emphasis":null},{"kind":"context","text":"    select","emphasis":null},{"kind":"context","text":"        encounter_key","emphasis":null},{"kind":"context","text":"        , encounter_id","emphasis":null},{"kind":"context","text":"        , patient_key","emphasis":null},{"kind":"context","text":"        , patient_id","emphasis":null},{"kind":"context","text":"        , provider_key","emphasis":null},{"kind":"context","text":"        , provider_id","emphasis":null},{"kind":"context","text":"        , organization_key","emphasis":null},{"kind":"context","text":"        , organization_id","emphasis":null},{"kind":"context","text":"        , encounter_start_date_key","emphasis":null},{"kind":"context","text":"        , total_claim_cost","emphasis":null},{"kind":"context","text":"        , payer_coverage","emphasis":null},{"kind":"context","text":"        , duration_minutes","emphasis":null},{"kind":"context","text":"        , patient_age_at_encounter","emphasis":null},{"kind":"context","text":"    from {{ ref('fct_encounters') }}","emphasis":null},{"kind":"context","text":"    where provider_key != -1","emphasis":null},{"kind":"context","text":"),","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"dim_date as (","emphasis":null},{"kind":"context","text":"    select","emphasis":null},{"kind":"context","text":"        date_key","emphasis":null},{"kind":"context","text":"        , year_actual","emphasis":null},{"kind":"context","text":"        , month_actual","emphasis":null},{"kind":"context","text":"    from {{ ref('dim_date') }}","emphasis":null},{"kind":"context","text":"),","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"procedures as (","emphasis":null},{"kind":"context","text":"    select","emphasis":null},{"kind":"context","text":"        encounter_id","emphasis":null},{"kind":"removed","text":"        , count(distinct procedure_code) as procedure_count","emphasis":[16,39]},{"kind":"added","text":"        , count(*) as procedure_count","emphasis":[16,17]},{"kind":"context","text":"    from {{ ref('stg_synthea__procedures') }}","emphasis":null},{"kind":"context","text":"    group by encounter_id","emphasis":null},{"kind":"context","text":"),","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"-- join encounters to date dimension to get year/month","emphasis":null},{"kind":"context","text":"encounters_with_date as (","emphasis":null},{"kind":"context","text":"    select","emphasis":null},{"kind":"context","text":"        e.*","emphasis":null},{"kind":"context","text":"        , d.year_actual","emphasis":null},{"kind":"context","text":"        , d.month_actual","emphasis":null},{"kind":"context","text":"        , cast(d.year_actual as varchar)","emphasis":null},{"kind":"context","text":"            || '-'","emphasis":null},{"kind":"context","text":"            || lpad(cast(d.month_actual as varchar), 2, '0') as year_month_str","emphasis":null},{"kind":"removed","text":"        , pr.procedure_count as procedure_count","emphasis":[10,28]},{"kind":"added","text":"        , coalesce(pr.procedure_count, 0) as procedure_count","emphasis":[10,41]},{"kind":"context","text":"    from encounters as e","emphasis":null},{"kind":"context","text":"    inner join dim_date as d on e.encounter_start_date_key = d.date_key","emphasis":null},{"kind":"context","text":"    left join procedures as pr on e.encounter_id = pr.encounter_id","emphasis":null},{"kind":"context","text":"    where e.encounter_start_date_key != -1","emphasis":null},{"kind":"context","text":"),","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"-- aggregate by provider and year-month","emphasis":null},{"kind":"context","text":"provider_month_agg as (","emphasis":null},{"kind":"context","text":"    select","emphasis":null},{"kind":"context","text":"        e.provider_id","emphasis":null},{"kind":"context","text":"        , e.provider_key","emphasis":null},{"kind":"context","text":"        , e.organization_id","emphasis":null},{"kind":"context","text":"        , e.organization_key","emphasis":null},{"kind":"context","text":"        , e.year_actual","emphasis":null},{"kind":"context","text":"        , e.month_actual","emphasis":null},{"kind":"context","text":"        , e.year_month_str","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- counts","emphasis":null},{"kind":"context","text":"        , count(*) as encounter_count","emphasis":null},{"kind":"context","text":"        , count(distinct e.patient_id) as unique_patient_count","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- patient metrics","emphasis":null},{"kind":"context","text":"        , avg(e.patient_age_at_encounter) as avg_patient_age","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- encounter metrics","emphasis":null},{"kind":"context","text":"        , avg(e.duration_minutes) as avg_encounter_duration_minutes","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- procedure metrics","emphasis":null},{"kind":"removed","text":"        , sum(e.procedure_count) as procedure_total","emphasis":[36,51]},{"kind":"added","text":"        , sum(e.procedure_count) as total_procedures","emphasis":[36,52]},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- cost metrics","emphasis":null},{"kind":"context","text":"        , sum(e.total_claim_cost) as total_cost","emphasis":null},{"kind":"context","text":"        , sum(e.payer_coverage) as total_payer_coverage","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"    from encounters_with_date as e","emphasis":null},{"kind":"context","text":"    group by","emphasis":null},{"kind":"context","text":"        e.provider_id","emphasis":null},{"kind":"context","text":"        , e.provider_key","emphasis":null},{"kind":"context","text":"        , e.organization_id","emphasis":null},{"kind":"context","text":"        , e.organization_key","emphasis":null},{"kind":"context","text":"        , e.year_actual","emphasis":null},{"kind":"context","text":"        , e.month_actual","emphasis":null},{"kind":"context","text":"        , e.year_month_str","emphasis":null},{"kind":"context","text":"),","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"final as (","emphasis":null},{"kind":"context","text":"    select","emphasis":null},{"kind":"context","text":"        -- surrogate key","emphasis":null},{"kind":"context","text":"        md5(cast(provider_id as varchar) || '-' || year_month_str) as provider_metrics_key","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- dimension keys","emphasis":null},{"kind":"context","text":"        , provider_key","emphasis":null},{"kind":"context","text":"        , provider_id","emphasis":null},{"kind":"context","text":"        , organization_key","emphasis":null},{"kind":"context","text":"        , organization_id","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- time grain","emphasis":null},{"kind":"context","text":"        , year_actual","emphasis":null},{"kind":"context","text":"        , month_actual","emphasis":null},{"kind":"context","text":"        , year_month_str","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- measures: counts","emphasis":null},{"kind":"context","text":"        , encounter_count","emphasis":null},{"kind":"context","text":"        , unique_patient_count","emphasis":null},{"kind":"context","text":"        , total_procedures","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- measures: averages","emphasis":null},{"kind":"context","text":"        , round(avg_patient_age, 2) as avg_patient_age","emphasis":null},{"kind":"context","text":"        , round(avg_encounter_duration_minutes, 2) as avg_encounter_duration_minutes","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- measures: costs","emphasis":null},{"kind":"context","text":"        , coalesce(total_cost, 0) as total_cost","emphasis":null},{"kind":"context","text":"        , coalesce(total_payer_coverage, 0) as total_payer_coverage","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- measures: derived ratios","emphasis":null},{"kind":"context","text":"        , case","emphasis":null},{"kind":"context","text":"            when encounter_count > 0","emphasis":null},{"kind":"context","text":"            then round(total_cost / encounter_count, 2)","emphasis":null},{"kind":"context","text":"            else 0","emphasis":null},{"kind":"context","text":"        end as avg_cost_per_encounter","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        , case","emphasis":null},{"kind":"context","text":"            when unique_patient_count > 0","emphasis":null},{"kind":"context","text":"            then round(cast(encounter_count as decimal) / unique_patient_count, 2)","emphasis":null},{"kind":"context","text":"            else 0","emphasis":null},{"kind":"context","text":"        end as encounters_per_patient_avg","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"        -- metadata","emphasis":null},{"kind":"context","text":"        , current_timestamp as _loaded_at","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"    from provider_month_agg","emphasis":null},{"kind":"context","text":")","emphasis":null},{"kind":"context","text":"","emphasis":null},{"kind":"context","text":"select * from final","emphasis":null}]},"tests":[],"is_recursive":false,"findings":[{"check":"grain.unique-key-unbacked","tier":"total","instrument":"data-test","model_id":"model.healthcare_analytics.fct_provider_metrics","construct":"config.unique_key","verdict":{"status":"covered","by":["test.healthcare_analytics.unique_fct_provider_metrics_provider_metrics_key.d58939d602"]},"evidence":[{"label":"unique_key","value":"provider_metrics_key"}]}]},{"name":"mart_dq_summary","dag":{"nodes":[{"id":"encounter_metrics","role":"import"},{"id":"medication_metrics","role":"import"},{"id":"combined_metrics","role":"transform"},{"id":"(final select)","label":"mart_dq_summary.sql","role":"final"}],"edges":[{"from":"encounter_metrics","to":"combined_metrics","edge_type":"union_all"},{"from":"medication_metrics","to":"combined_metrics","edge_type":"union_all"},{"from":"combined_metrics","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select\n    entity_type\n    , quarantined_count\n    , total_count\n    , quarantine_rate_pct\n    , failed_timestamp_validations\n    , failed_future_date_validations\n    , failed_historical_end_validations\n    , failed_historical_start_validations\n    , current_timestamp as _generated_at\nfrom combined_metrics\norder by entity_type\n\n-- cute-dbt fixture: synthetic body mod","combined_metrics":"combined_metrics as (\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_encounter_timestamps as failed_timestamp_validations\n        , failed_no_future_encounter_dates as failed_future_date_validations\n        , failed_end_after_1900 as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from encounter_metrics\n\n    union all\n\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_medication_dates as failed_timestamp_validations\n        , failed_no_future_medication_dates as failed_future_date_validations\n        , failed_end_after_1900_if_present as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from medication_metrics\n)","encounter_metrics":"encounter_metrics as (\n    select\n        'encounters' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_encounter_timestamps) as failed_valid_encounter_timestamps\n        , count(*) filter (where not no_future_encounter_dates) as failed_no_future_encounter_dates\n        , count(*) filter (where not end_after_1900) as failed_end_after_1900\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n    from \"memory\".\"main_staging\".\"stg_synthea__encounters\"\n)","medication_metrics":"medication_metrics as (\n    select\n        'medications' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_medication_dates) as failed_valid_medication_dates\n        , count(*) filter (where not no_future_medication_dates) as failed_no_future_medication_dates\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n        , count(*) filter (where not end_after_1900_if_present) as failed_end_after_1900_if_present\n    from \"memory\".\"main_staging\".\"stg_synthea__medications\"\n)"},"raw_sql":"{{\n    config(\n        materialized='table',\n        tags=['analytics', 'data_quality']\n    )\n}}\n\nwith encounter_metrics as (\n    select\n        'encounters' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_encounter_timestamps) as failed_valid_encounter_timestamps\n        , count(*) filter (where not no_future_encounter_dates) as failed_no_future_encounter_dates\n        , count(*) filter (where not end_after_1900) as failed_end_after_1900\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n    from {{ ref('stg_synthea__encounters') }}\n),\n\nmedication_metrics as (\n    select\n        'medications' as entity_type\n        , count(*) filter (where is_dq_valid = false) as quarantined_count\n        , count(*) as total_count\n        , round(100.0 * count(*) filter (where is_dq_valid = false) / count(*), 2) as quarantine_rate_pct\n        , count(*) filter (where not valid_medication_dates) as failed_valid_medication_dates\n        , count(*) filter (where not no_future_medication_dates) as failed_no_future_medication_dates\n        , count(*) filter (where not start_after_1900) as failed_start_after_1900\n        , count(*) filter (where not end_after_1900_if_present) as failed_end_after_1900_if_present\n    from {{ ref('stg_synthea__medications') }}\n),\n\ncombined_metrics as (\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_encounter_timestamps as failed_timestamp_validations\n        , failed_no_future_encounter_dates as failed_future_date_validations\n        , failed_end_after_1900 as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from encounter_metrics\n\n    union all\n\n    select\n        entity_type\n        , quarantined_count\n        , total_count\n        , quarantine_rate_pct\n        , failed_valid_medication_dates as failed_timestamp_validations\n        , failed_no_future_medication_dates as failed_future_date_validations\n        , failed_end_after_1900_if_present as failed_historical_end_validations\n        , failed_start_after_1900 as failed_historical_start_validations\n    from medication_metrics\n)\n\nselect\n    entity_type\n    , quarantined_count\n    , total_count\n    , quarantine_rate_pct\n    , failed_timestamp_validations\n    , failed_future_date_validations\n    , failed_historical_end_validations\n    , failed_historical_start_validations\n    , current_timestamp as _generated_at\nfrom combined_metrics\norder by entity_type\n\n-- cute-dbt fixture: synthetic body mod","tests":[{"id":"unit_test.healthcare_analytics.mart_dq_summary.test_mart_dq_summary_combines_encounter_and_medication_metrics","name":"test_mart_dq_summary_combines_encounter_and_medication_metrics","target_model":"mart_dq_summary","changed":false,"description":"mart_dq_summary UNION-ALLs metrics from stg_synthea__encounters\nand stg_synthea__medications. This test mocks two encounter rows\n(one invalid) and two medication rows (both invalid), then asserts\nthe per-entity counts + quarantine rate. Uses csv format for both\nGIVEN and EXPECT — compact tabular form across many boolean\ndq-flag columns.\n","tags":[],"meta":{},"defined_in":"models/marts/analytics/_analytics__models.yml","authoring_yaml":"  # LEADING bracket for test 1 — the slicer attaches contiguous\n  # `#`-comment lines at the SAME indent as `- name:` immediately above\n  # the test (no blank-line gap below) to this test's authored slice\n  # (cute-dbt#69 / #73).\n  - name: test_mart_dq_summary_combines_encounter_and_medication_metrics\n    description: |\n      mart_dq_summary UNION-ALLs metrics from stg_synthea__encounters\n      and stg_synthea__medications. This test mocks two encounter rows\n      (one invalid) and two medication rows (both invalid), then asserts\n      the per-entity counts + quarantine rate. Uses csv format for both\n      GIVEN and EXPECT — compact tabular form across many boolean\n      dq-flag columns.\n    model: mart_dq_summary\n    # INSIDE bracket for test 1 — comments at deeper indent than\n    # `- name:` ride along with the body slice as raw text (cute-dbt#69\n    # / #73).\n    given:\n      - input: ref('stg_synthea__encounters')\n        format: csv\n        rows: |\n          is_dq_valid,valid_encounter_timestamps,no_future_encounter_dates,end_after_1900,start_after_1900\n          false,false,true,true,true\n          true,true,true,true,true\n      - input: ref('stg_synthea__medications')\n        format: csv\n        rows: |\n          is_dq_valid,valid_medication_dates,no_future_medication_dates,start_after_1900,end_after_1900_if_present\n          false,false,true,true,true\n          false,true,false,true,true\n    expect:\n      format: csv\n      rows: |\n        entity_type,quarantined_count,total_count,quarantine_rate_pct,failed_timestamp_validations\n        encounters,1,2,50.00,1\n        medications,2,2,100.00,1\n  # TRAILING bracket for test 1 — the comment block butts against the\n  # body above (no blank-line gap) and is terminated below by the blank\n  # line separating the two tests (cute-dbt#69 / #73).","given":[{"input":"ref('stg_synthea__encounters')","bound_to_node":"encounter_metrics","table":{"columns":["end_after_1900","is_dq_valid","no_future_encounter_dates","start_after_1900","valid_encounter_timestamps"],"rows":[{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}}]},{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}}]}]},"rows":[{"end_after_1900":"true","is_dq_valid":"false","no_future_encounter_dates":"true","start_after_1900":"true","valid_encounter_timestamps":"false"},{"end_after_1900":"true","is_dq_valid":"true","no_future_encounter_dates":"true","start_after_1900":"true","valid_encounter_timestamps":"true"}],"format":"csv"},{"input":"ref('stg_synthea__medications')","bound_to_node":"medication_metrics","table":{"columns":["end_after_1900_if_present","is_dq_valid","no_future_medication_dates","start_after_1900","valid_medication_dates"],"rows":[{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}}]},{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"false","key":{"t":"bool","v":false}},{"display":"false","key":{"t":"bool","v":false}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}}]}]},"rows":[{"end_after_1900_if_present":"true","is_dq_valid":"false","no_future_medication_dates":"true","start_after_1900":"true","valid_medication_dates":"false"},{"end_after_1900_if_present":"true","is_dq_valid":"false","no_future_medication_dates":"false","start_after_1900":"true","valid_medication_dates":"true"}],"format":"csv"}],"expected":{"table":{"columns":["entity_type","failed_timestamp_validations","quarantine_rate_pct","quarantined_count","total_count"],"rows":[{"cells":[{"display":"encounters","key":{"t":"str","v":"encounters"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"50.00","key":{"t":"number","v":"50"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"2","key":{"t":"number","v":"2"}}]},{"cells":[{"display":"medications","key":{"t":"str","v":"medications"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"100.00","key":{"t":"number","v":"100"}},{"display":"2","key":{"t":"number","v":"2"}},{"display":"2","key":{"t":"number","v":"2"}}]}]},"rows":[{"entity_type":"encounters","failed_timestamp_validations":"1","quarantine_rate_pct":"50.00","quarantined_count":"1","total_count":"2"},{"entity_type":"medications","failed_timestamp_validations":"1","quarantine_rate_pct":"100.00","quarantined_count":"2","total_count":"2"}],"format":"csv","column_meta":{"entity_type":{"description":"Type of entity being measured (encounters, medications)","tests":[{"name":"accepted values","values":["encounters","medications"]},{"name":"not null"}]},"failed_timestamp_validations":{"description":"Count of records failing timestamp/date sequence validations"},"quarantine_rate_pct":{"description":"Percentage of records quarantined (quarantined_count / total_count * 100)","tests":[{"name":"dbt_expectations.expect_column_values_to_be_between"}]},"quarantined_count":{"description":"Number of records failing data quality validations","tests":[{"name":"not null"}]},"total_count":{"description":"Total number of records (valid + quarantined)","tests":[{"name":"not null"}]}}}},{"id":"unit_test.healthcare_analytics.mart_dq_summary.test_mart_dq_summary_zero_quarantined_when_all_valid","name":"test_mart_dq_summary_zero_quarantined_when_all_valid","target_model":"mart_dq_summary","changed":true,"description":"mart_dq_summary should report zero quarantined_count and 0.00\nquarantine_rate_pct when every upstream row passes data-quality\nvalidations. Uses sql format for the GIVEN mocks and dict format\nfor the EXPECT — dict expects only compare listed columns, so\nnon-deterministic outputs (`_generated_at` from\n`current_timestamp`) are excluded from comparison.\n","tags":[],"meta":{},"defined_in":"models/marts/analytics/_analytics__models.yml","authoring_yaml":"  # LEADING bracket for test 2 — sits between the blank-line\n  # terminator above and `- name:` below with no further gap, so the\n  # leading-wins tiebreaker is moot here (cute-dbt#69 / #73).\n  - name: test_mart_dq_summary_zero_quarantined_when_all_valid\n    description: |\n      mart_dq_summary should report zero quarantined_count and 0.00\n      quarantine_rate_pct when every upstream row passes data-quality\n      validations. Uses sql format for the GIVEN mocks and dict format\n      for the EXPECT — dict expects only compare listed columns, so\n      non-deterministic outputs (`_generated_at` from\n      `current_timestamp`) are excluded from comparison.\n    model: mart_dq_summary\n    # INSIDE bracket for test 2 — same rule as test 1 (cute-dbt#69 /\n    # #73). Demonstrates that the slicer ride-along applies to every\n    # unit_test, not just the first in the file.\n    given:\n      - input: ref('stg_synthea__encounters')\n        format: sql\n        rows: |\n          select\n            true as is_dq_valid\n            , true as valid_encounter_timestamps\n            , true as no_future_encounter_dates\n            , true as end_after_1900\n            , true as start_after_1900\n      - input: ref('stg_synthea__medications')\n        format: sql\n        rows: |\n          select\n            true as is_dq_valid\n            , true as valid_medication_dates\n            , true as no_future_medication_dates\n            , true as start_after_1900\n            , true as end_after_1900_if_present\n    expect:\n      format: dict\n      rows:\n        - entity_type: 'encounters'\n          quarantined_count: 0\n          total_count: 1\n          quarantine_rate_pct: 0.00\n        - entity_type: 'medications'\n          quarantined_count: 0\n          total_count: 1\n          quarantine_rate_pct: 0.00\n    overrides:\n      macros:\n        dbt.current_timestamp: \"'2024-01-15 00:00:00'\"\n      vars:\n        dq_quarantine_threshold: 5\n      env_vars:\n        DBT_DQ_REGION: 'us-east-1'\n  # TRAILING bracket for test 2 — terminated by EOF (cute-dbt#69 /\n  # #73).","yaml_diff":{"lines":[{"kind":"context","text":"  # LEADING bracket for test 2 — sits between the blank-line","emphasis":null},{"kind":"context","text":"  # terminator above and `- name:` below with no further gap, so the","emphasis":null},{"kind":"context","text":"  # leading-wins tiebreaker is moot here (cute-dbt#69 / #73).","emphasis":null},{"kind":"context","text":"  - name: test_mart_dq_summary_zero_quarantined_when_all_valid","emphasis":null},{"kind":"context","text":"    description: |","emphasis":null},{"kind":"context","text":"      mart_dq_summary should report zero quarantined_count and 0.00","emphasis":null},{"kind":"context","text":"      quarantine_rate_pct when every upstream row passes data-quality","emphasis":null},{"kind":"context","text":"      validations. Uses sql format for the GIVEN mocks and dict format","emphasis":null},{"kind":"context","text":"      for the EXPECT — dict expects only compare listed columns, so","emphasis":null},{"kind":"context","text":"      non-deterministic outputs (`_generated_at` from","emphasis":null},{"kind":"context","text":"      `current_timestamp`) are excluded from comparison.","emphasis":null},{"kind":"context","text":"    model: mart_dq_summary","emphasis":null},{"kind":"context","text":"    # INSIDE bracket for test 2 — same rule as test 1 (cute-dbt#69 /","emphasis":null},{"kind":"context","text":"    # #73). Demonstrates that the slicer ride-along applies to every","emphasis":null},{"kind":"context","text":"    # unit_test, not just the first in the file.","emphasis":null},{"kind":"context","text":"    given:","emphasis":null},{"kind":"context","text":"      - input: ref('stg_synthea__encounters')","emphasis":null},{"kind":"context","text":"        format: sql","emphasis":null},{"kind":"context","text":"        rows: |","emphasis":null},{"kind":"context","text":"          select","emphasis":null},{"kind":"context","text":"            true as is_dq_valid","emphasis":null},{"kind":"context","text":"            , true as valid_encounter_timestamps","emphasis":null},{"kind":"context","text":"            , true as no_future_encounter_dates","emphasis":null},{"kind":"context","text":"            , true as end_after_1900","emphasis":null},{"kind":"context","text":"            , true as start_after_1900","emphasis":null},{"kind":"context","text":"      - input: ref('stg_synthea__medications')","emphasis":null},{"kind":"context","text":"        format: sql","emphasis":null},{"kind":"context","text":"        rows: |","emphasis":null},{"kind":"context","text":"          select","emphasis":null},{"kind":"context","text":"            true as is_dq_valid","emphasis":null},{"kind":"context","text":"            , true as valid_medication_dates","emphasis":null},{"kind":"context","text":"            , true as no_future_medication_dates","emphasis":null},{"kind":"context","text":"            , true as start_after_1900","emphasis":null},{"kind":"context","text":"            , true as end_after_1900_if_present","emphasis":null},{"kind":"context","text":"    expect:","emphasis":null},{"kind":"context","text":"      format: dict","emphasis":null},{"kind":"context","text":"      rows:","emphasis":null},{"kind":"context","text":"        - entity_type: 'encounters'","emphasis":null},{"kind":"removed","text":"          quarantined_count: null","emphasis":[29,33]},{"kind":"removed","text":"          total_count: 2","emphasis":[23,24]},{"kind":"added","text":"          quarantined_count: 0","emphasis":[29,30]},{"kind":"added","text":"          total_count: 1","emphasis":[23,24]},{"kind":"context","text":"          quarantine_rate_pct: 0.00","emphasis":null},{"kind":"context","text":"        - entity_type: 'medications'","emphasis":null},{"kind":"removed","text":"          quarantined_count: 1","emphasis":[29,30]},{"kind":"removed","text":"          total_count: 2","emphasis":[23,24]},{"kind":"added","text":"          quarantined_count: 0","emphasis":[29,30]},{"kind":"added","text":"          total_count: 1","emphasis":[23,24]},{"kind":"context","text":"          quarantine_rate_pct: 0.00","emphasis":null},{"kind":"context","text":"    overrides:","emphasis":null},{"kind":"context","text":"      macros:","emphasis":null},{"kind":"context","text":"        dbt.current_timestamp: \"'2024-01-15 00:00:00'\"","emphasis":null},{"kind":"context","text":"      vars:","emphasis":null},{"kind":"removed","text":"        dq_quarantine_threshold: 10","emphasis":[33,35]},{"kind":"added","text":"        dq_quarantine_threshold: 5","emphasis":[33,34]},{"kind":"context","text":"      env_vars:","emphasis":null},{"kind":"context","text":"        DBT_DQ_REGION: 'us-east-1'","emphasis":null},{"kind":"context","text":"  # TRAILING bracket for test 2 — terminated by EOF (cute-dbt#69 /","emphasis":null},{"kind":"context","text":"  # #73).","emphasis":null}]},"data_diff":{"given":[],"expect":{"columns":[{"name":"entity_type","status":"present"},{"name":"quarantine_rate_pct","status":"present"},{"name":"quarantined_count","status":"present"},{"name":"total_count","status":"present"}],"rows":[{"kind":"modified","cells":[{"old":{"display":"encounters","key":{"t":"str","v":"encounters"}},"new":{"display":"encounters","key":{"t":"str","v":"encounters"}},"changed":false},{"old":{"display":"0.00","key":{"t":"number","v":"0"}},"new":{"display":"0.0","key":{"t":"number","v":"0"}},"changed":false},{"old":{"display":"","key":{"t":"null"}},"new":{"display":"0","key":{"t":"number","v":"0"}},"changed":true},{"old":{"display":"2","key":{"t":"number","v":"2"}},"new":{"display":"1","key":{"t":"number","v":"1"}},"changed":true}]},{"kind":"modified","cells":[{"old":{"display":"medications","key":{"t":"str","v":"medications"}},"new":{"display":"medications","key":{"t":"str","v":"medications"}},"changed":false},{"old":{"display":"0.00","key":{"t":"number","v":"0"}},"new":{"display":"0.0","key":{"t":"number","v":"0"}},"changed":false},{"old":{"display":"1","key":{"t":"number","v":"1"}},"new":{"display":"0","key":{"t":"number","v":"0"}},"changed":true},{"old":{"display":"2","key":{"t":"number","v":"2"}},"new":{"display":"1","key":{"t":"number","v":"1"}},"changed":true}]}]}},"given":[{"input":"ref('stg_synthea__encounters')","bound_to_node":"encounter_metrics","table":{"columns":["is_dq_valid","valid_encounter_timestamps","no_future_encounter_dates","end_after_1900","start_after_1900"],"rows":[{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}}]}]},"rows":"select\n  true as is_dq_valid\n  , true as valid_encounter_timestamps\n  , true as no_future_encounter_dates\n  , true as end_after_1900\n  , true as start_after_1900","format":"sql"},{"input":"ref('stg_synthea__medications')","bound_to_node":"medication_metrics","table":{"columns":["is_dq_valid","valid_medication_dates","no_future_medication_dates","start_after_1900","end_after_1900_if_present"],"rows":[{"cells":[{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}},{"display":"true","key":{"t":"bool","v":true}}]}]},"rows":"select\n  true as is_dq_valid\n  , true as valid_medication_dates\n  , true as no_future_medication_dates\n  , true as start_after_1900\n  , true as end_after_1900_if_present","format":"sql"}],"expected":{"table":{"columns":["entity_type","quarantine_rate_pct","quarantined_count","total_count"],"rows":[{"cells":[{"display":"encounters","key":{"t":"str","v":"encounters"}},{"display":"0.0","key":{"t":"number","v":"0"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"1","key":{"t":"number","v":"1"}}]},{"cells":[{"display":"medications","key":{"t":"str","v":"medications"}},{"display":"0.0","key":{"t":"number","v":"0"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"1","key":{"t":"number","v":"1"}}]}]},"rows":[{"entity_type":"encounters","quarantine_rate_pct":0.0,"quarantined_count":0,"total_count":1},{"entity_type":"medications","quarantine_rate_pct":0.0,"quarantined_count":0,"total_count":1}],"format":"dict","column_meta":{"entity_type":{"description":"Type of entity being measured (encounters, medications)","tests":[{"name":"accepted values","values":["encounters","medications"]},{"name":"not null"}]},"quarantine_rate_pct":{"description":"Percentage of records quarantined (quarantined_count / total_count * 100)","tests":[{"name":"dbt_expectations.expect_column_values_to_be_between"}]},"quarantined_count":{"description":"Number of records failing data quality validations","tests":[{"name":"not null"}]},"total_count":{"description":"Total number of records (valid + quarantined)","tests":[{"name":"not null"}]}}}}],"is_recursive":false}]}</script>
 
 <script>
 /*! jQuery v3.7.1 | (c) OpenJS Foundation and other contributors | jquery.org/license */
@@ -4868,7 +4923,15 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
 
 <script>
 
-
+/* cute-dbt report interaction engine v1 (cute-dbt#178)
+   ----------------------------------------------------------------------------
+   First-party, NOT vendored: this file lives at templates/interaction.js
+   (beside the template it drives), embedded at compile time via
+   asset_embed::INTERACTION_JS (include_str!) and interpolated inline by the
+   askama renderer — never a runtime asset, never an external script tag
+   (the zero-egress contract). Its integrity gates are the banner-pin +
+   end-of-file-sentinel tests in src/adapters/asset_embed.rs (a truncated
+   copy fails CI). */
 // cute-dbt report.html — interactive layer.
 //
 // DOM + class + data-* attributes are the askama template contract.
@@ -4886,7 +4949,14 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   // (duplicates preserved) and blue for `union_distinct` (deduplicated).
   // `right` reuses the same blue family — fine because joins render
   // solid, UNION renders dashed; the dash pattern is the visual cue.
-  var JOIN_COLORS = {
+  // cute-dbt#178 — FIXED categorical hue mapping (Okabe-Ito). The dark-bg
+  // variant preserves hue IDENTITY (blue stays blue) but lifts lightness so
+  // the page-drawn edges + the near-black `from` anchor stay legible on dark
+  // themes. Node FILLS stay light in every theme (light fill + dark label
+  // reads high-contrast on any bg), so only the edges/anchor flip.
+  // One key per line — the edge-vocab-completeness CI gate and the BDD
+  // legend steps line-anchor their greps on `<wire_key>:`.
+  var JOIN_COLORS_LIGHT = {
     from:           "#1c1c1f",
     inner:          "#009E73",
     left:           "#0072B2",
@@ -4896,6 +4966,18 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     union_all:      "#E69F00",
     union_distinct: "#0072B2"
   };
+  var JOIN_COLORS_DARK = {
+    from:           "#cbd0da",
+    inner:          "#34d399",
+    left:           "#5aa6f0",
+    right:          "#7cc4f2",
+    cross:          "#e08fc0",
+    full:           "#e472a3",
+    union_all:      "#f0b020",
+    union_distinct: "#5aa6f0"
+  };
+  function dagIsDark() { return document.documentElement.classList.contains("dark"); }
+  function dagEdges() { return dagIsDark() ? JOIN_COLORS_DARK : JOIN_COLORS_LIGHT; }
 
   var ROLE_LABEL = {
     import:    "Import CTE",
@@ -5011,6 +5093,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     renderForSelectedModel();
     bindGlobalHandlers();
     bindSettingsMenu();
+    // cute-dbt#178 — theme switches re-tint the DAG: re-render legend +
+    // Mermaid so edge/anchor colours pick up the light/dark variant.
+    // theme.js calls this hook after flipping [data-theme] / the .dark class.
+    window.__cuteRerenderDag = function () { renderDagLegend(); renderDag(); };
+    // cute-dbt#178 — delegated hover/focus handlers for the column-header
+    // tooltips (the th.has-col-meta triggers decorateColHeader marks).
+    bindColTooltips();
   });
 
   // cute-dbt#91 — scope-toggle helpers --------------------------------
@@ -5155,9 +5244,10 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     var m = currentModel();
     var t = currentTest();
     $(".recursive-banner").prop("hidden", !(m && m.is_recursive));
-    // cute-dbt#145 — model-level incremental badge; reads the enclosing
-    // model (the is_recursive precedent), undefined-safe when omitted.
-    $(".incremental-badge").prop("hidden", !(m && m.is_incremental));
+    // cute-dbt#145 / cute-dbt#178 — the model-level incremental badge now
+    // lives in the Model-SQL code-card header, created per-render by
+    // renderModelSql (the static template span is gone), so no hidden-toggle
+    // is needed here.
     // cute-dbt#145 — the .expected-panel .panel-header is a PERSISTENT static
     // element. renderExpectedPanel (which clears + re-appends the mode badge /
     // expect-tooltip) runs ONLY in the `if (t)` arm below, so a switch to a
@@ -5195,7 +5285,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       $(".left-panel-body").empty().append(
         $("<div>").addClass("no-tests-empty").text(leftMsg)
       );
-      $(".expected-panel .expected-rowcount").text("0 rows");
+      // cute-dbt#178 — the row-count badge is a PERSISTENT static element a
+      // prior render may have relocated into the fixture-view bar (inside
+      // .expected-body); return it to the header BEFORE the wipe so the
+      // .empty() below can never destroy it.
+      var $erc0 = $(".expected-panel .expected-rowcount");
+      $(".expected-panel .panel-header").append($erc0);
+      $erc0.text("0 rows");
       $(".expected-body").empty().append(
         $("<div>").addClass("no-tests-empty")
           .text("No unit test selected.")
@@ -5235,7 +5331,11 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     }
     $body.append($metaLine);
 
-    if (t.defined_in) {
+    // cute-dbt#178 — the authoring-YAML drawer's code-card header now shows
+    // this path (GitHub-style). Keep this row ONLY as a fallback for tests
+    // with no authoring YAML (no drawer, no header), so the path is never
+    // lost.
+    if (t.defined_in && !t.authoring_yaml) {
       $body.append(
         $("<div>").addClass("td-line td-defined-in-line")
           .append($("<span>").addClass("td-label").text("Defined in "))
@@ -5258,12 +5358,21 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       var $yamlDet = $("<details>").addClass("authoring-yaml").attr("open", "open");
       $yamlDet.append($("<summary>").text(hasDiff ? "Authoring YAML — diff" : "Authoring YAML"));
       var $yamlWrap = $("<div>").addClass("sql-block-wrap fixture-sql-block-wrap");
+      // cute-dbt#178 — GitHub-style code-card header: the file path sits left
+      // of the Diff/File toggle. `defined_in` is the test's authoring-YAML
+      // path (the manifest original_file_path).
+      var $yamlHeader = $("<div>").addClass("code-header");
+      if (t.defined_in) {
+        $yamlHeader.append($("<span>").addClass("code-filename")
+          .attr("title", t.defined_in).text(t.defined_in));
+      }
+      $yamlHeader.append($("<span>").addClass("code-header-spacer"));
       if (hasDiff) {
         var $authPre = $("<pre>").addClass("sql-block yaml-authored-view").prop("hidden", true).append(
-          $("<code>").html(highlightYaml(t.authoring_yaml))
+          $("<code>").html(highlightLinesYaml(t.authoring_yaml))
         );
-        var $diffPre = $("<pre>").addClass("sql-block yaml-diff-view").append(
-          $("<code>").html(renderYamlDiff(t.yaml_diff))
+        var $diffPre = $("<pre>").addClass("sql-block yaml-diff-view").html(
+          diffViewsHtml(t.yaml_diff, tokenizeYaml)
         );
         var $toggle = $("<div>").addClass("yaml-diff-toggle");
         var $diffBtn = $("<button>").attr("type", "button")
@@ -5278,11 +5387,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
           $diffPre.prop("hidden", view !== "diff");
           $authPre.prop("hidden", view !== "authored");
         });
-        $yamlWrap.append($toggle).append($diffPre).append($authPre);
+        $yamlHeader.append($toggle);
+        $yamlWrap.append($yamlHeader).append($diffPre).append($authPre);
       } else {
         var $yamlPre = $("<pre>").addClass("sql-block").append(
-          $("<code>").html(highlightYaml(t.authoring_yaml))
+          $("<code>").html(highlightLinesYaml(t.authoring_yaml))
         );
+        if (t.defined_in) $yamlWrap.append($yamlHeader);
         $yamlWrap.append($yamlPre);
       }
       $yamlDet.append($yamlWrap);
@@ -5323,12 +5434,25 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       copySql(raw, $(this));
     });
     $wrap.append($copy);
+    // cute-dbt#178 — GitHub-style code-card header with the model's file
+    // name. The payload carries no path, so synthesize `<name>.sql` (matches
+    // the DAG terminal-node label, cute-dbt#155).
+    var modelFile = (m && m.name ? m.name : "model") + ".sql";
+    var $mHeader = $("<div>").addClass("code-header");
+    $mHeader.append($("<span>").addClass("code-filename").attr("title", modelFile).text(modelFile));
+    // cute-dbt#145 incremental badge — relocated here (cute-dbt#178), right
+    // of the file name. Created only when the model is incremental (the
+    // static template span is gone).
+    if (m && m.is_incremental) {
+      $mHeader.append($("<span>").addClass("incremental-badge").text("incremental"));
+    }
+    $mHeader.append($("<span>").addClass("code-header-spacer"));
     if (hasDiff) {
-      var $diffPre = $("<pre>").addClass("sql-block model-sql-block sql-diff-view").append(
-        $("<code>").addClass("model-sql-code").html(renderBlockDiff(m.sql_diff, tokenizeSql))
+      var $diffPre = $("<pre>").addClass("sql-block model-sql-block sql-diff-view").html(
+        diffViewsHtml(m.sql_diff, tokenizeSql, "model-sql-code")
       );
       var $rawPre = $("<pre>").addClass("sql-block model-sql-block sql-raw-view").prop("hidden", true).append(
-        $("<code>").addClass("model-sql-code").html(highlightSql(raw))
+        $("<code>").addClass("model-sql-code").html(highlightLinesSql(raw))
       );
       var $toggle = $("<div>").addClass("yaml-diff-toggle model-sql-toggle");
       var $diffBtn = $("<button>").attr("type", "button")
@@ -5343,12 +5467,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
         $diffPre.prop("hidden", view !== "diff");
         $rawPre.prop("hidden", view !== "raw");
       });
-      $wrap.append($toggle).append($diffPre).append($rawPre);
+      $mHeader.append($toggle);
+      $wrap.append($mHeader).append($diffPre).append($rawPre);
     } else {
       var $pre = $("<pre>").addClass("sql-block model-sql-block").append(
-        $("<code>").addClass("model-sql-code").html(highlightSql(raw))
+        $("<code>").addClass("model-sql-code").html(highlightLinesSql(raw))
       );
-      $wrap.append($pre);
+      $wrap.append($mHeader).append($pre);
     }
   }
 
@@ -5372,11 +5497,11 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       if (j === "union_all" || j === "union_distinct") {
         $edge.addClass("is-dashed").css({
           background: "transparent",
-          "border-top": "3px dashed " + JOIN_COLORS[j],
+          "border-top": "3px dashed " + dagEdges()[j],
           height: "0"
         });
       } else {
-        $edge.css("background", JOIN_COLORS[j]);
+        $edge.css("background", dagEdges()[j]);
       }
       $joins.append(
         $("<span>").addClass("legend-item join-" + j)
@@ -5421,7 +5546,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     lines.push("    classDef selected stroke:#E91E63,stroke-width:4px;");
 
     dag.edges.forEach(function (e, i) {
-      var color = JOIN_COLORS[e.edge_type] || "#8a8a90";
+      var color = dagEdges()[e.edge_type] || "#8a8a90";
       var dash = (e.edge_type === "union_all" || e.edge_type === "union_distinct") ? ",stroke-dasharray:5 3" : "";
       lines.push("    linkStyle " + i + " stroke:" + color + ",stroke-width:1.8px,fill:none" + dash + ";");
     });
@@ -5631,7 +5756,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     var $sqlWrap = $("<div>").addClass("sql-block-wrap");
     var $copy = $("<button>").attr("type", "button").addClass("sql-copy").text("Copy")
       .on("click", function (e) { e.preventDefault(); e.stopPropagation(); copySql(sql, $(this)); });
-    var $pre = $("<pre>").addClass("sql-block").append($("<code>").html(highlightSql(sql)));
+    var $pre = $("<pre>").addClass("sql-block").append($("<code>").html(highlightLinesSql(sql)));
     $sqlWrap.append($copy).append($pre);
     $det.append($sqlWrap);
     $detail.append($det);
@@ -5742,7 +5867,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
 
   function renderExpectedPanel(t) {
     var $panel = $(".expected-panel");
-    var $body = $panel.find(".expected-body").empty();
+    var $exHdr = $panel.find(".panel-header");
+    // cute-dbt#178 — the row-count badge is a PERSISTENT static element. A
+    // prior render may have relocated it into the fixture-view bar (below);
+    // return it to the header BEFORE the body wipe so $body.empty() can
+    // never destroy it.
+    var $rowcount = $panel.find(".expected-rowcount");
+    $exHdr.append($rowcount);
     // cute-dbt#145 — per-test mode badge + expect-semantics tooltip.
     // The .panel-header is a PERSISTENT static element reused across
     // renders, so first clear any prior mode badge / tooltip (targeted —
@@ -5752,8 +5883,8 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     // `this`-given proxy, and NEVER on the full-refresh branch (there
     // `expect` IS the final table). Emitted BEFORE the sql / external
     // early-returns: the mode is about the test, not the fixture format.
-    var $exHdr = $panel.find(".panel-header");
     $exHdr.find(".mode-badge, .expect-tooltip").remove();
+    var $body = $panel.find(".expected-body").empty();
     var em = currentModel();
     if (em && em.is_incremental) {
       var incrementalMode = t.is_incremental_mode === true;
@@ -5801,12 +5932,23 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     // cute-dbt#138 — the Current view renders the Rust-computed POD directly.
     var table = t.expected.table || { columns: [], rows: [] };
     var rowCount = table.rows.length;
-    $panel.find(".expected-rowcount").text(rowCount + " row" + (rowCount === 1 ? "" : "s"));
+    $rowcount.text(rowCount + " row" + (rowCount === 1 ? "" : "s"));
     // The expect side's cell diff, when the test's expect fixture carried a
     // real change (cute-dbt#98). `data_diff.expect` already passed
     // `has_real_change()`, so its presence === "default this table to Diff".
     var diff = (t.data_diff && t.data_diff.expect) || undefined;
     $body.append(buildFixtureView(table, "expected-table", diff, t.expected.column_meta));
+    // cute-dbt#178 — when a Diff/File toggle bar exists, relocate the header
+    // meta onto that bar, to its right, in reading order: [mode badge]
+    // [N rows] [expect-tooltip]. .append() MOVES the nodes (no copy), so
+    // nothing is duplicated. No bar (sql/external/no-diff) => the meta stays
+    // in the header as the fallback (the pre-#178 layout).
+    var $bar = $body.find(".fixture-view-bar").first();
+    if ($bar.length) {
+      $bar.append($exHdr.find(".mode-badge")); // empty set when not incremental
+      $bar.append($rowcount);
+      $bar.append($exHdr.find(".expect-tooltip"));
+    }
     initDataTablesIn($body);
   }
 
@@ -5852,7 +5994,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   function buildSqlCodeBlock(sql) {
     var $wrap = $("<div>").addClass("sql-block-wrap fixture-sql-block-wrap");
     var $pre = $("<pre>").addClass("sql-block").append(
-      $("<code>").html(highlightSql(String(sql)))
+      $("<code>").html(highlightLinesSql(String(sql)))
     );
     $wrap.append($pre);
     return $wrap;
@@ -6221,6 +6363,27 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   function highlightSql(sql) { return emitTokens(tokenizeSql(sql)); }
   function highlightYaml(yaml) { return emitTokens(tokenizeYaml(yaml)); }
 
+  // cute-dbt#178 — plain (non-diff) code block with a GitHub-style single
+  // line-number gutter. Splits on newlines and tokenizes each line
+  // independently (same per-line contract the diff path already relies on),
+  // wrapping each in a .code-line so a robust numbered gutter renders without
+  // depending on <pre> newline counting. The trailing blank line is trimmed
+  // so we don't show a stray empty numbered row.
+  function highlightLines(text, tokenizeFn) {
+    var src = String(text == null ? "" : text).replace(/\n+$/, "");
+    var rows = src.split("\n");
+    var out = "";
+    for (var i = 0; i < rows.length; i++) {
+      out += '<span class="code-line">'
+           + '<span class="code-gutter" aria-hidden="true">' + (i + 1) + '</span>'
+           + '<span class="diff-code">' + emitTokens(tokenizeFn(rows[i])) + '</span>'
+           + '</span>';
+    }
+    return out;
+  }
+  function highlightLinesSql(sql) { return highlightLines(sql, tokenizeSql); }
+  function highlightLinesYaml(yaml) { return highlightLines(yaml, tokenizeYaml); }
+
   // Expose for headless JS unit tests (cute-dbt#69 / cute-dbt#132 — parallels
   // the `__cuteRenderYamlDiff` headless seam).
   window.__cuteHighlightYaml = highlightYaml;
@@ -6316,21 +6479,49 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   // (the folded middle passes `diff-folded fold-<id>`); `hidden` toggles the
   // `hidden` attribute (relies on the #122 `[hidden]{display:none!important}`
   // rule, since Sakura's `.diff-line{display:block}` defeats a bare [hidden]).
-  function renderOneDiffLine(ln, tokenizeFn, extraClass, hidden) {
+  // cute-dbt#178 — GitHub-style two-column gutter (old line no | new line
+  // no). `null` => blank cell (added lines have no old number; removed have
+  // no new). aria-hidden so screen readers read the code, not the numbering
+  // scaffold.
+  function diffGutter(o, n) {
+    return '<span class="diff-gutter" aria-hidden="true">'
+         + '<span class="dln dln-o">' + (o == null ? "" : o) + '</span>'
+         + '<span class="dln dln-n">' + (n == null ? "" : n) + '</span></span>';
+  }
+
+  // Shared: the inner code HTML for a diff line (syntax + optional word-level
+  // emphasis overlay). Used by both the unified and split renderers.
+  function diffBody(ln, tokenizeFn) {
+    var tokens = tokenizeFn(ln.text);
+    if (ln.kind !== "context" && ln.emphasis) {
+      return emitTokensWithEmphasis(tokens, ln.emphasis[0], ln.emphasis[1]);
+    }
+    return emitTokens(tokens);
+  }
+
+  // Old/new line-number pair for every line, in document order (unified-diff
+  // numbering): added has no old number, removed has no new number.
+  function diffNumbers(lines) {
+    var nums = new Array(lines.length), o = 1, nw = 1;
+    for (var p = 0; p < lines.length; p++) {
+      var kk = lines[p].kind;
+      if (kk === "added")        { nums[p] = { o: null, n: nw++ }; }
+      else if (kk === "removed") { nums[p] = { o: o++,  n: null }; }
+      else                       { nums[p] = { o: o++,  n: nw++ }; }
+    }
+    return nums;
+  }
+
+  function renderOneDiffLine(ln, tokenizeFn, extraClass, hidden, num) {
     var cls = ln.kind === "added" ? "diff-added"
             : ln.kind === "removed" ? "diff-removed"
             : "diff-context";
     var sigil = ln.kind === "added" ? "+" : ln.kind === "removed" ? "-" : " ";
-    var tokens = tokenizeFn(ln.text);
-    var body;
-    if (ln.kind !== "context" && ln.emphasis) {
-      body = emitTokensWithEmphasis(tokens, ln.emphasis[0], ln.emphasis[1]);
-    } else {
-      body = emitTokens(tokens);
-    }
     return '<span class="diff-line ' + cls + (extraClass ? " " + extraClass : "") + '"'
          + (hidden ? " hidden" : "") + '>'
-         + '<span class="diff-sigil">' + sigil + '</span>' + body
+         + diffGutter(num ? num.o : null, num ? num.n : null)
+         + '<span class="diff-sigil">' + sigil + '</span>'
+         + '<span class="diff-code">' + diffBody(ln, tokenizeFn) + '</span>'
          + '</span>';
   }
 
@@ -6342,12 +6533,15 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       ? padOverride : diffFoldPad;
     var lines = diff.lines;
     var n = lines.length;
+    // Precompute the old/new line-number pair for every line, in document
+    // order, so the gutters read like a unified diff regardless of folding.
+    var nums = diffNumbers(lines);
     var html = "";
     var foldId = 0; // counter LOCAL to this call — parent-scoping makes it safe.
     var i = 0;
     while (i < n) {
       if (lines[i].kind !== "context") {
-        html += renderOneDiffLine(lines[i], tokenizeFn, "", false);
+        html += renderOneDiffLine(lines[i], tokenizeFn, "", false, nums[i]);
         i += 1;
         continue;
       }
@@ -6362,13 +6556,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       if (hidden < FOLD_MIN_HIDDEN) {
         // Short run (or short hidden middle): render the whole run normally.
         for (var k = runStart; k < j; k++) {
-          html += renderOneDiffLine(lines[k], tokenizeFn, "", false);
+          html += renderOneDiffLine(lines[k], tokenizeFn, "", false, nums[k]);
         }
       } else {
         var id = foldId++;
         // head context lines (adjacent to the preceding change).
         for (var h = runStart; h < runStart + head; h++) {
-          html += renderOneDiffLine(lines[h], tokenizeFn, "", false);
+          html += renderOneDiffLine(lines[h], tokenizeFn, "", false, nums[h]);
         }
         // The fold control. Bidirectional (#136): it stays in the DOM and
         // relabels Show<->Hide on toggle, so `data-fold-count` + a dedicated
@@ -6377,18 +6571,19 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
         html += '<span class="diff-line diff-fold" data-fold="' + id + '"'
               + ' data-fold-count="' + hidden + '"'
               + ' role="button" tabindex="0" aria-expanded="false">'
-              + '<span class="diff-sigil">···</span>'
+              + '<span class="diff-gutter diff-gutter-hunk" aria-hidden="true"></span>'
+              + '<span class="diff-sigil">⋯</span>'
               + '<span class="diff-fold-label">'
               + 'Show ' + hidden + ' unchanged line' + (hidden === 1 ? "" : "s")
               + '</span>'
               + '</span>';
         // The folded (hidden) middle lines.
         for (var m2 = runStart + head; m2 < j - tail; m2++) {
-          html += renderOneDiffLine(lines[m2], tokenizeFn, "diff-folded fold-" + id, true);
+          html += renderOneDiffLine(lines[m2], tokenizeFn, "diff-folded fold-" + id, true, nums[m2]);
         }
         // tail context lines (adjacent to the following change).
         for (var tIdx = j - tail; tIdx < j; tIdx++) {
-          html += renderOneDiffLine(lines[tIdx], tokenizeFn, "", false);
+          html += renderOneDiffLine(lines[tIdx], tokenizeFn, "", false, nums[tIdx]);
         }
       }
       i = j;
@@ -6401,6 +6596,65 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   function renderYamlDiff(diff) { return renderBlockDiff(diff, tokenizeYaml); }
   window.__cuteRenderBlockDiff = renderBlockDiff;
   window.__cuteRenderYamlDiff = renderYamlDiff;
+
+  // cute-dbt#178 — SPLIT (side-by-side) diff. Old lines on the left, new on
+  // the right, paired index-wise within each change block; context appears on
+  // both sides. No folding in split mode (these blocks are short — showing
+  // every context line reads cleaner than wiring a second fold mechanism).
+  // Rendered as a fixed-layout table so the two halves stay aligned; each
+  // code cell soft-wraps. The CSS picks unified vs split per
+  // html[data-difflayout] (+ a responsive fallback), so BOTH are emitted and
+  // exactly one is shown. Consumes the same BlockDiff lines verbatim — the
+  // Rust diff engine is unchanged.
+  function splitCell(side) {
+    if (!side) {
+      return '<td class="ds-num ds-empty"></td><td class="ds-code ds-empty"></td>';
+    }
+    return '<td class="ds-num ds-' + side.cls + '">' + (side.num == null ? "" : side.num) + '</td>'
+         + '<td class="ds-code ds-' + side.cls + '"><div class="ds-codewrap">'
+         + '<span class="diff-sigil">' + side.sigil + '</span>'
+         + '<span class="diff-code">' + side.body + '</span></div></td>';
+  }
+  function renderSplitDiff(diff, tokenizeFn) {
+    var lines = diff.lines, n = lines.length, nums = diffNumbers(lines);
+    var rows = "", i = 0;
+    while (i < n) {
+      if (lines[i].kind === "context") {
+        var body = diffBody(lines[i], tokenizeFn);
+        rows += '<tr class="ds-row">'
+              + splitCell({ cls: "context", num: nums[i].o, sigil: " ", body: body })
+              + splitCell({ cls: "context", num: nums[i].n, sigil: " ", body: body })
+              + '</tr>';
+        i += 1;
+        continue;
+      }
+      // Maximal change block; pair removed (left) with added (right).
+      var rem = [], add = [];
+      while (i < n && lines[i].kind !== "context") {
+        if (lines[i].kind === "removed") rem.push(i); else add.push(i);
+        i += 1;
+      }
+      var maxL = Math.max(rem.length, add.length);
+      for (var x = 0; x < maxL; x++) {
+        var L = x < rem.length
+          ? { cls: "removed", num: nums[rem[x]].o, sigil: "-", body: diffBody(lines[rem[x]], tokenizeFn) } : null;
+        var R = x < add.length
+          ? { cls: "added", num: nums[add[x]].n, sigil: "+", body: diffBody(lines[add[x]], tokenizeFn) } : null;
+        rows += '<tr class="ds-row">' + splitCell(L) + splitCell(R) + '</tr>';
+      }
+    }
+    return '<table class="diff-split"><tbody>' + rows + '</tbody></table>';
+  }
+
+  // Emit BOTH layouts into a diff <pre>: the unified <code> + the split
+  // table. CSS shows exactly one (html[data-difflayout] + the responsive
+  // fallback). `codeClass` lets the Model-SQL caller keep its hook class.
+  function diffViewsHtml(diff, tokenizeFn, codeClass) {
+    return '<code class="diff-unified' + (codeClass ? " " + codeClass : "") + '">'
+         + renderBlockDiff(diff, tokenizeFn) + '</code>'
+         + renderSplitDiff(diff, tokenizeFn);
+  }
+  window.__cuteRenderSplitDiff = renderSplitDiff;
 
   // cute-dbt#132 — global fold controls (configurable context lines +
   // expand-all/collapse-all). setAllFolds is a SYMMETRIC DOM MIRROR over the
@@ -6553,63 +6807,94 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   // from the canonical `key` (a `Number` key sorts numerically even when its
   // display is `1.00`). The JS no longer parses csv/dict — the domain's
   // `table_from_manifest_rows` owns that, and ships this POD on the wire.
-  // cute-dbt#165 — the column-header tooltip button for one column's
-  // Rust-computed metadata POD ({description, tests}). Mirrors the #146
-  // expect-tooltip contract: a focusable <button> with a CSS bubble shown on
-  // hover AND keyboard focus (a native `title` is hover-delayed, keyboard-
-  // unreachable, touch-invisible); `aria-label` carries the same text for
-  // assistive tech (the bubble is aria-hidden so it is not announced twice).
-  // DOM is built from text nodes only — payload strings never parse as HTML.
-  function buildColTooltip(colName, meta) {
+  // cute-dbt#165 / cute-dbt#178 — column-header tooltips, the handoff spec:
+  // the WHOLE header cell is the hover/focus trigger (no per-column icon).
+  // decorateColHeader marks a metadata-bearing th with `.has-col-meta` +
+  // data-attrs; showColTip fills + positions a single body-appended
+  // `#col-tooltip` bubble (position:fixed, so the .table-fit overflow
+  // scroller never clips it; horizontally clamped; flips above on bottom
+  // overflow). Data source: OUR shipped per-table `column_meta` payload
+  // ({description, tests:[{name, values, detail}]}) — Rust computes the
+  // README §2.2 display mapping, the JS only renders. Every interpolation
+  // below passes through escapeHtml, so payload strings never parse as HTML.
+  //
+  // A11y (the #146/#166 contract carried forward): a bare th is not
+  // focusable, so decorated headers gain tabindex="0" (keyboard users reach
+  // the tip via focusin); the th carries an aria-label summarizing the same
+  // content (the bubble is aria-hidden so it is never announced twice);
+  // hover AND focus both reveal. The native `title` is REMOVED from
+  // decorated headers — it would double-show over the bubble.
+  function colTestSummary(t) {
+    var extra = (t.values && t.values.length) ? " " + t.values.join(", ")
+              : t.detail ? " " + t.detail : "";
+    return t.name + extra;
+  }
+  function decorateColHeader($th, name, meta) {
+    if (!meta || (!meta.description && !(meta.tests && meta.tests.length))) return;
     var tests = meta.tests || [];
-    var parts = [];
+    var parts = ["Column " + name];
     if (meta.description) parts.push(meta.description);
-    if (tests.length) parts.push("column tests: " + tests.join("; "));
-    var $btn = $("<button>")
-      .attr("type", "button")
-      .addClass("col-tooltip")
-      .attr("aria-label", "Column " + colName + " — " + parts.join(" — "));
-    $btn.append(document.createTextNode("ⓘ"));
-    var $bubble = $("<span>").addClass("col-tooltip-bubble").attr("aria-hidden", "true");
-    if (meta.description) {
-      $bubble.append($("<span>").addClass("col-tooltip-desc").text(meta.description));
+    if (tests.length) parts.push("column tests: " + tests.map(colTestSummary).join("; "));
+    $th.removeAttr("title")
+      .addClass("has-col-meta")
+      .attr("tabindex", "0")
+      .attr("aria-label", parts.join(" — "))
+      .attr("data-col-name", name)
+      .attr("data-col-desc", meta.description || "")
+      .attr("data-col-tests", JSON.stringify(tests));
+  }
+  // The singleton bubble, lazily appended to <body> (one element serves
+  // every header). aria-hidden: the th aria-label is the AT surface.
+  function ensureColTooltip() {
+    var el = document.getElementById("col-tooltip");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "col-tooltip"; el.className = "col-tooltip"; el.hidden = true;
+      el.setAttribute("aria-hidden", "true");
+      document.body.appendChild(el);
     }
+    return el;
+  }
+  function showColTip(trigger) {
+    var el = ensureColTooltip();
+    var name = trigger.getAttribute("data-col-name");
+    var desc = trigger.getAttribute("data-col-desc");
+    var tests = [];
+    try { tests = JSON.parse(trigger.getAttribute("data-col-tests") || "[]"); } catch (e) { tests = []; }
+    var h = '<div class="ct-desc">' + escapeHtml(desc || name) + "</div>";
     if (tests.length) {
-      $bubble.append($("<span>").addClass("col-tooltip-tests-label").text("column tests"));
-      var $list = $("<ul>").addClass("col-tooltip-tests");
-      tests.forEach(function (t) { $list.append($("<li>").text(t)); });
-      $bubble.append($list);
+      h += '<div class="ct-tests-label">Data tests</div><div class="ct-tests">'
+         + tests.map(function (t) {
+             var inner = '<span class="ct-key">' + escapeHtml(t.name) + "</span>";
+             if (t.values && t.values.length) {
+               inner += '<span class="ct-vals">'
+                 + t.values.map(function (v) { return '<span class="ct-val">' + escapeHtml(String(v)) + "</span>"; }).join("")
+                 + "</span>";
+             } else if (t.detail) {
+               inner += '<span class="ct-detail">' + escapeHtml(t.detail) + "</span>";
+             }
+             return '<div class="ct-test">' + inner + "</div>";
+           }).join("")
+         + "</div>";
     }
-    $btn.append($bubble);
-    return $btn;
+    el.innerHTML = h;
+    el.hidden = false;
+    var r = trigger.getBoundingClientRect();
+    var tw = el.offsetWidth, th = el.offsetHeight;
+    var left = r.left;
+    if (left + tw > window.innerWidth - 8) left = window.innerWidth - 8 - tw;
+    if (left < 8) left = 8;
+    var top = r.bottom + 6;
+    if (top + th > window.innerHeight - 8) top = r.top - 6 - th; // flip above
+    el.style.left = Math.round(left) + "px";
+    el.style.top = Math.round(top) + "px";
   }
-
-  // cute-dbt#165 — the bubble is position:fixed so it escapes the .table-fit
-  // overflow scroller (which clips absolutely-positioned descendants); the
-  // coordinates are set here on hover/focus while VISIBILITY stays pure CSS
-  // (the #146 :hover/:focus contract). Horizontally clamped so a first/last-
-  // column bubble stays on-viewport. A hidden bubble still has layout
-  // geometry (visibility:hidden, not display:none), so offsetWidth is real.
-  function positionColTooltip(btn) {
-    var bubble = btn.querySelector(".col-tooltip-bubble");
-    if (!bubble) return;
-    var r = btn.getBoundingClientRect();
-    var half = bubble.offsetWidth / 2;
-    var margin = 8;
-    var cx = r.left + r.width / 2;
-    cx = Math.max(margin + half, Math.min(cx, window.innerWidth - margin - half));
-    bubble.style.left = cx + "px";
-    bubble.style.top = (r.bottom + 6) + "px";
+  function hideColTip() { var el = document.getElementById("col-tooltip"); if (el) el.hidden = true; }
+  function bindColTooltips() {
+    $(document)
+      .on("mouseenter focusin", ".has-col-meta", function () { showColTip(this); })
+      .on("mouseleave focusout", ".has-col-meta", function () { hideColTip(); });
   }
-  $(document).on("mouseenter focusin", ".col-tooltip", function () {
-    positionColTooltip(this);
-  });
-  // A th click sorts the DataTable; clicking/tapping the info button must
-  // only reveal the bubble (via focus), never also re-sort the column.
-  $(document).on("click", ".col-tooltip", function (e) {
-    e.preventDefault();
-    e.stopPropagation();
-  });
 
   // `colMeta` (cute-dbt#165) is the per-table column-metadata map keyed by
   // column name (absent key/entry => no affordance on that th).
@@ -6623,8 +6908,9 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     columns.forEach(function (c) {
       var html = escapeHtml(c).replace(/_/g, "_<wbr>");
       var $th = $("<th>").attr("title", c).html(html);
-      var meta = colMeta && colMeta[c];
-      if (meta) $th.append(buildColTooltip(c, meta));
+      // cute-dbt#178 — decorate (and de-title) the th when metadata exists;
+      // the header cell itself becomes the tooltip trigger.
+      decorateColHeader($th, c, colMeta && colMeta[c]);
       $hr.append($th);
     });
     var $tbody = $("<tbody>").appendTo($tbl);
@@ -6718,8 +7004,11 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     var $toggle = $("<div>").addClass("cell-diff-toggle");
     var $diffBtn = $("<button>").attr("type", "button")
       .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
+    // cute-dbt#178 — labelled "File" for consistency with the other
+    // Diff/File toggles (the data-view stays "current": it is the test's
+    // current fixture data as authored in the file).
     var $curBtn = $("<button>").attr("type", "button")
-      .addClass("yaml-view-btn").attr("data-view", "current").text("Current");
+      .addClass("yaml-view-btn").attr("data-view", "current").text("File");
     $toggle.append($diffBtn).append($curBtn);
     // Bind to the LOCAL $toggle (not a global `.yaml-view-btn` delegate) so it
     // can never catch the #96/#111 drawer toggles elsewhere in the document.
@@ -6738,7 +7027,11 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       adjustDataTablesIn($shown);
     });
 
-    $wrap.append($toggle).append($diffView).append($currentView);
+    // cute-dbt#178 — the toggle rides a .fixture-view-bar strip so
+    // renderExpectedPanel can relocate the header meta (mode badge, row
+    // count, expect-tooltip) onto the same row, GitHub-toolbar style.
+    $wrap.append($("<div>").addClass("fixture-view-bar").append($toggle))
+         .append($diffView).append($currentView);
     return $wrap;
   }
 
@@ -6795,9 +7088,9 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       }
       // cute-dbt#165 — the Diff grid's unified column axis shares the same
       // metadata map (a removed column simply has no entry — the map is
-      // filtered to the CURRENT table's columns in Rust).
-      var meta = colMeta && colMeta[c.name];
-      if (meta) $th.append(buildColTooltip(c.name, meta));
+      // filtered to the CURRENT table's columns in Rust). cute-dbt#178: the
+      // th itself is the tooltip trigger.
+      decorateColHeader($th, c.name, colMeta && colMeta[c.name]);
       $hr.append($th);
     });
     var $tbody = $("<tbody>").appendTo($tbl);
@@ -6953,6 +7246,222 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   $(window).on("resize", reflowPanelsForOverflow);
 
 })();
+/* end of cute-dbt report interaction engine v1 (cute-dbt#178) */
+
+</script>
+<script>
+
+/* cute-dbt appearance engine v1 (cute-dbt#178)
+   ----------------------------------------------------------------------------
+   Wires the theme / style / accent / density / diff-style / diff-layout
+   controls in the report's settings panel (the markup is static in
+   templates/report.html — the askama DOM contract), persists the choices in
+   localStorage (key cute-dbt.appearance.v1) with a graceful in-memory
+   fallback, and syncs DataTables dark mode by toggling html.dark. Plain
+   vanilla JS, no framework, zero egress.
+
+   First-party, NOT vendored: this file lives at templates/theme.js, embedded
+   at compile time via asset_embed::THEME_JS (include_str!) and interpolated
+   inline by the askama renderer. Banner-pin + end-of-file-sentinel tests in
+   src/adapters/asset_embed.rs guard the include.
+
+   The handoff prototype also carried a Cytoscape DAG-engine picker here; that
+   is Bucket 2 (cute-dbt#101 territory) and is deliberately ABSENT from this
+   file — adding it back rides the vendored-Cytoscape PR, never this one. */
+(function () {
+  "use strict";
+
+  // The five [data-theme] packs the chassis CSS ships (templates/report.css).
+  // `dark` drives the html.dark class DataTables' vendored dark rules key on.
+  var THEMES = [
+    { id: "light",     dark: false },
+    { id: "dark",      dark: true  },
+    { id: "tokyo",     dark: true  },
+    { id: "solarized", dark: false },
+    { id: "gruvbox",   dark: true  }
+  ];
+
+  // Accent palettes: value / hover / tint triples applied as inline custom
+  // properties on <html>. "theme" = remove the override (the active theme's
+  // own accent shows through).
+  var ACCENTS = [
+    { id: "theme" },
+    { id: "teal",   v: "#1d7484", h: "#155c69", t: "#e3f0f2" },
+    { id: "blue",   v: "#2a6fdb", h: "#1f57b0", t: "#e6eefb" },
+    { id: "violet", v: "#7c3aed", h: "#6027c4", t: "#efe8fd" },
+    { id: "green",  v: "#1f8a5b", h: "#176d47", t: "#e2f3ec" },
+    { id: "amber",  v: "#b45c0c", h: "#8f4708", t: "#fbeede" }
+  ];
+
+  // The public localStorage key for the appearance state — a stable consumer
+  // contract (cute-dbt#178 AC3), not a credential.
+  var KEY = "cute-dbt.appearance.v1"; // gitleaks:allow — a public storage key name, no secret
+  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", diffstyle: "color", difflayout: "auto" };
+
+  // Read the persisted appearance, string-typed keys only. Any storage error
+  // (file:// SecurityError, disabled storage) leaves the defaults intact.
+  function load() {
+    var raw;
+    try { raw = window.localStorage && window.localStorage.getItem(KEY); } catch (e) { raw = null; }
+    if (!raw) return;
+    try {
+      var p = JSON.parse(raw);
+      if (p && typeof p === "object") {
+        ["theme", "style", "accent", "density", "diffstyle", "difflayout"].forEach(function (k) {
+          if (typeof p[k] === "string") pref[k] = p[k];
+        });
+      }
+    } catch (e) { /* ignore — defaults hold */ }
+  }
+  // Persist the current appearance. Swallows any storage error (zero-egress
+  // in-memory fallback, mirrors interaction.js saveSettings).
+  function save() {
+    try { if (window.localStorage) window.localStorage.setItem(KEY, JSON.stringify(pref)); } catch (e) { /* in-memory only */ }
+  }
+
+  var root = document.documentElement;
+
+  // ES5-safe NodeList iteration (gemini review, PR #188): older engines ship
+  // querySelectorAll results without NodeList.prototype.forEach; iterate via
+  // an index loop so this file keeps its deliberate ES5 posture throughout.
+  function qsaForEach(selector, fn) {
+    var list = document.querySelectorAll(selector);
+    for (var i = 0; i < list.length; i++) fn(list[i]);
+  }
+
+  function themeById(id) {
+    for (var i = 0; i < THEMES.length; i++) if (THEMES[i].id === id) return THEMES[i];
+    return THEMES[0];
+  }
+
+  function applyTheme(id) {
+    var t = themeById(id);
+    root.setAttribute("data-theme", t.id);
+    root.classList.toggle("dark", t.dark); // DataTables dark rules follow html.dark
+    pref.theme = t.id;
+  }
+  function applyAccent(id) {
+    var a = null;
+    for (var i = 0; i < ACCENTS.length; i++) if (ACCENTS[i].id === id) a = ACCENTS[i];
+    if (!a || a.id === "theme") {
+      root.style.removeProperty("--accent");
+      root.style.removeProperty("--accent-hover");
+      root.style.removeProperty("--accent-tint");
+      pref.accent = "theme";
+    } else {
+      root.style.setProperty("--accent", a.v);
+      root.style.setProperty("--accent-hover", a.h);
+      root.style.setProperty("--accent-tint", a.t);
+      pref.accent = a.id;
+    }
+  }
+  function applyDensity(d) {
+    if (d === "auto") root.removeAttribute("data-density");
+    else root.setAttribute("data-density", d);
+    pref.density = d;
+  }
+  function applyDiffStyle(s) {
+    if (s === "color") root.removeAttribute("data-diffstyle");
+    else root.setAttribute("data-diffstyle", s);
+    pref.diffstyle = s;
+  }
+  function applyDiffLayout(v) {
+    root.setAttribute("data-difflayout", v);
+    pref.difflayout = v;
+  }
+  function applyStyle(s) {
+    root.setAttribute("data-style", s);
+    pref.style = s;
+  }
+
+  // Re-tint the DAG after a theme flip (the light/dark edge + anchor
+  // variants live in interaction.js, which owns the legend + Mermaid).
+  function rerenderDag() {
+    if (typeof window.__cuteRerenderDag === "function") window.__cuteRerenderDag();
+  }
+
+  /* ---- sync visual state of the (static) controls to prefs ------------- */
+  function syncControls() {
+    qsaForEach(".style-opt", function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-style-id") === pref.style ? "true" : "false");
+    });
+    qsaForEach(".theme-chip", function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-theme-id") === pref.theme ? "true" : "false");
+    });
+    qsaForEach(".accent-swatch", function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-accent") === pref.accent ? "true" : "false");
+    });
+    qsaForEach(".density-seg button", function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-density") === pref.density ? "true" : "false");
+    });
+    qsaForEach(".diff-seg button", function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-diffstyle") === pref.diffstyle ? "true" : "false");
+    });
+    qsaForEach(".difflayout-seg button", function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-difflayout") === pref.difflayout ? "true" : "false");
+    });
+  }
+
+  function wire() {
+    qsaForEach(".style-opt", function (b) {
+      b.addEventListener("click", function () { applyStyle(b.getAttribute("data-style-id")); save(); syncControls(); reflowTables(); rerenderDag(); });
+    });
+    qsaForEach(".theme-chip", function (b) {
+      b.addEventListener("click", function () { applyTheme(b.getAttribute("data-theme-id")); save(); syncControls(); reflowTables(); rerenderDag(); });
+    });
+    qsaForEach(".accent-swatch", function (b) {
+      b.addEventListener("click", function () { applyAccent(b.getAttribute("data-accent")); save(); syncControls(); });
+    });
+    qsaForEach(".density-seg button", function (b) {
+      b.addEventListener("click", function () { applyDensity(b.getAttribute("data-density")); save(); syncControls(); reflowTables(); });
+    });
+    qsaForEach(".diff-seg button", function (b) {
+      b.addEventListener("click", function () { applyDiffStyle(b.getAttribute("data-diffstyle")); save(); syncControls(); });
+    });
+    qsaForEach(".difflayout-seg button", function (b) {
+      b.addEventListener("click", function () { applyDiffLayout(b.getAttribute("data-difflayout")); save(); syncControls(); });
+    });
+  }
+
+  // DataTables column widths shift when the font-size changes (density /
+  // style / theme flips); re-adjust the visible ones. jQuery is bound
+  // locally (gemini review, PR #188) so the lookup is explicit and a bare
+  // global `jQuery` reference can never throw mid-iteration.
+  function reflowTables() {
+    var $ = window.jQuery;
+    if ($ && $.fn && $.fn.DataTable) {
+      $("table.given-table, table.expected-table").each(function () {
+        if ($.fn.DataTable.isDataTable(this) && this.offsetParent !== null) {
+          try { $(this).DataTable().columns.adjust(); } catch (e) { /* hidden */ }
+        }
+      });
+    }
+  }
+
+  function boot() {
+    load();
+    // Default theme: saved -> prefers-color-scheme -> light.
+    if (!pref.theme) {
+      pref.theme = (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
+    }
+    applyStyle(pref.style);
+    applyTheme(pref.theme);
+    applyAccent(pref.accent);
+    applyDensity(pref.density);
+    applyDiffStyle(pref.diffstyle);
+    applyDiffLayout(pref.difflayout);
+    syncControls();
+    wire();
+    // Re-tint the legend + Mermaid host once the theme's .dark class is on:
+    // interaction.js drew them on DOM-ready BEFORE this boot applied the
+    // theme, so the edge swatches would otherwise keep the light palette.
+    setTimeout(rerenderDag, 0);
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+})();
+/* end of cute-dbt appearance engine v1 (cute-dbt#178) */
 
 </script>
 </body>

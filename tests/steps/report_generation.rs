@@ -288,11 +288,14 @@ fn banner_states(world: &mut World, expected: String) {
 fn payload_expected_column_tests(world: &mut World, t1: String, t2: String, column: String) {
     let meta = expected_column_meta(world, &column)
         .unwrap_or_else(|| panic!("no expected-table column_meta entry for column {column:?}"));
+    // cute-dbt#178 — tests are STRUCTURED entries ({name, values?, detail?},
+    // the handoff README §2.2 display mapping); the scenario names match on
+    // the display `name` field.
     let tests: Vec<String> = meta["tests"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|t| t.as_str().map(str::to_owned))
+        .filter_map(|t| t["name"].as_str().map(str::to_owned))
         .collect();
     for wanted in [&t1, &t2] {
         assert!(

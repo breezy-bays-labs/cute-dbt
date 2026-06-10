@@ -25,6 +25,74 @@ expression: skeleton
   </p>
 </section>
 
+
+<div class="settings-cog-wrap">
+  <button type="button" class="settings-cog" aria-label="Report settings"
+          aria-haspopup="true" aria-expanded="false" aria-controls="settings-panel">
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09A1.65 1.65 0 0 0 9 4.6V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+  </button>
+  <div class="settings-panel" id="settings-panel" role="dialog"
+       aria-label="Report settings" hidden>
+    <h2>Settings</h2>
+    <div class="settings-section appearance-section">
+      <h2>Appearance</h2>
+      <div class="settings-row settings-row-stack">
+        <label>Style</label>
+        <div class="style-grid">
+          <button type="button" class="style-opt" data-style-id="soft">Soft</button>
+          <button type="button" class="style-opt" data-style-id="paper">Paper</button>
+          <button type="button" class="style-opt" data-style-id="swiss">Swiss</button>
+          <button type="button" class="style-opt" data-style-id="terminal">Terminal</button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Theme</label>
+        <div class="theme-grid">
+          <button type="button" class="theme-chip" data-theme-id="light"><span class="swatch-dots"><i style="background:#ffffff"></i><i style="background:#1d7484"></i><i style="background:#33363d"></i></span><span class="theme-name">Light</span></button>
+          <button type="button" class="theme-chip" data-theme-id="dark"><span class="swatch-dots"><i style="background:#15171c"></i><i style="background:#5fb3c4"></i><i style="background:#d7dae1"></i></span><span class="theme-name">Dark</span></button>
+          <button type="button" class="theme-chip" data-theme-id="tokyo"><span class="swatch-dots"><i style="background:#1a1b26"></i><i style="background:#7aa2f7"></i><i style="background:#bb9af7"></i></span><span class="theme-name">Tokyo Night</span></button>
+          <button type="button" class="theme-chip" data-theme-id="solarized"><span class="swatch-dots"><i style="background:#fdf6e3"></i><i style="background:#268bd2"></i><i style="background:#b58900"></i></span><span class="theme-name">Solarized</span></button>
+          <button type="button" class="theme-chip" data-theme-id="gruvbox"><span class="swatch-dots"><i style="background:#282828"></i><i style="background:#83a598"></i><i style="background:#fabd2f"></i></span><span class="theme-name">Gruvbox</span></button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Accent</label>
+        <div class="accent-row">
+          <button type="button" class="accent-swatch" data-accent="theme" aria-label="Theme default accent" title="Theme default accent"></button>
+          <button type="button" class="accent-swatch" data-accent="teal" style="background:#1d7484" aria-label="teal accent" title="teal accent"></button>
+          <button type="button" class="accent-swatch" data-accent="blue" style="background:#2a6fdb" aria-label="blue accent" title="blue accent"></button>
+          <button type="button" class="accent-swatch" data-accent="violet" style="background:#7c3aed" aria-label="violet accent" title="violet accent"></button>
+          <button type="button" class="accent-swatch" data-accent="green" style="background:#1f8a5b" aria-label="green accent" title="green accent"></button>
+          <button type="button" class="accent-swatch" data-accent="amber" style="background:#b45c0c" aria-label="amber accent" title="amber accent"></button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Density</label>
+        <div class="seg-radio density-seg">
+          <button type="button" data-density="compact">Compact</button>
+          <button type="button" data-density="cozy">Cozy</button>
+          <button type="button" data-density="comfortable">Roomy</button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Diff cells<span class="settings-hint">colour, or +/&minus; marks</span></label>
+        <div class="seg-radio diff-seg">
+          <button type="button" data-diffstyle="color">Colour</button>
+          <button type="button" data-diffstyle="marks">Marks</button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Diff layout<span class="settings-hint">side-by-side when there&rsquo;s room</span></label>
+        <div class="seg-radio difflayout-seg">
+          <button type="button" data-difflayout="auto">Auto</button>
+          <button type="button" data-difflayout="unified">Unified</button>
+          <button type="button" data-difflayout="split">Split</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <section class="error-card" role="alert" aria-label="Manifest error">
   <h2>This manifest can't be visualized</h2>
   <div class="error-node-id">node: <code>—</code></div>
@@ -49,7 +117,7 @@ expression: skeleton
     <div class="selector-field">
       <label for="model-select">Model</label>
       <select id="model-select"></select>
-      <span class="incremental-badge" hidden>incremental</span>
+      
     </div>
     <span class="selector-arrow" aria-hidden="true">→</span>
     <div class="selector-field">
@@ -139,6 +207,7 @@ expression: skeleton
 <script></script>
 <script></script>
 
+<script></script>
 <script></script>
 </body>
 </html>
