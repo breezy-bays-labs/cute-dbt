@@ -1268,6 +1268,7 @@ mod tests {
     fn index_for(path: &str, removed: &str, added: &str, line: usize) -> NormalizedDiffIndex {
         use crate::domain::{FileHunks, Hunk, PrDiff};
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![FileHunks {
                 path: path.to_owned(),
                 hunks: vec![Hunk {

@@ -18,7 +18,8 @@
 //! `models/...` relative to `dbt_project/`); double slashes collapse.
 //! Windows-style `\` separators are explicitly **not** supported in v0.1
 //! — dbt manifests on macOS/Linux emit forward slashes. Promoting to
-//! cross-platform path-set semantics is a v0.2+ follow-up.
+//! cross-platform path-set semantics is a v0.2+ follow-up
+//! (tracked: cute-dbt#183).
 
 use std::path::Path;
 
@@ -30,7 +31,7 @@ use std::path::Path;
 ///
 /// Returns the normalized path as a `String` (cheap — most fixtures are
 /// short). Windows-style `\` separators are passed through unchanged
-/// (v0.1 limitation; tracked: cute-dbt#80 deferred follow-ups).
+/// (v0.1 limitation; tracked: cute-dbt#183).
 #[must_use]
 pub fn normalize_path(p: &str, strip_prefix: Option<&Path>) -> String {
     let mut remaining = p;
