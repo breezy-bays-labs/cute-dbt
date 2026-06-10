@@ -145,8 +145,13 @@ path-granular**. So in v0.1:
 - A `packages.yml` / `dbt deps` change that alters compiled output
   without touching a model `.sql` / `.yml` is not detected — the diff
   carries no path that maps to an affected node.
-- A **renamed** model shows as deleted-path + added-path; the deleted
-  path maps to no current node.
+
+A **renamed** model is handled: `git diff` detects renames by default
+(since git 2.9) and emits a `rename from`/`rename to` header pair;
+cute-dbt maps **both** paths onto the scope match, and the current
+manifest (compiled at the PR head) resolves the new path to the renamed
+node — so even a *pure* rename (100% similarity, no hunks at all)
+scopes the model under its new name.
 
 Need any of these? Use `--baseline-manifest`, which compares compiled
 bodies directly. The [recipe](./recipes/github-actions-pr-review.md)

@@ -21,10 +21,11 @@
 //! owned end-to-end by [`NormalizedDiffIndex`] (module DAG
 //! `scope → pr_diff → path`) — `scope` no longer normalizes paths
 //! directly, so the diff-side keyset and the declaring-side lookup
-//! cannot diverge.
-// tracked: cute-dbt#80 — git-rename detection layer on top of `git diff
-// --name-only` (a rename appears as one deleted path + one added path
-// today; the deleted path maps to no current-manifest node).
+//! cannot diverge. Git-detected renames (cute-dbt#80) are handled inside
+//! the index: both sides of every `rename from`/`rename to` pair join
+//! the changed-file keyset, so a **pure** rename (which carries no
+//! `+++` header and no hunks) still scopes the current node at its new
+//! path — no scope-level code is rename-aware.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -216,6 +217,7 @@ mod tests {
     /// `pr_diff` overlap tests; here only the changed-file keyset matters).
     fn prdiff_from_paths(paths: &[&str]) -> PrDiff {
         PrDiff {
+            renames: Vec::new(),
             files: paths
                 .iter()
                 .map(|p| FileHunks {
@@ -510,6 +512,207 @@ mod tests {
             "a path-changed non-model node must not render as a model card",
         );
         assert_eq!(models.len(), 0);
+    }
+
+    // ----- select_in_scope: git renames (cute-dbt#80) -----
+
+    /// A [`ScopeInput::PrDiff`] for a diff carrying rename pairs (and
+    /// optionally plain changed files).
+    fn pr_diff_input_with_renames(
+        paths: &[&str],
+        renames: &[(&str, &str)],
+        strip: Option<&Path>,
+    ) -> ScopeInput {
+        let mut diff = prdiff_from_paths(paths);
+        diff.renames = renames
+            .iter()
+            .map(|(f, t)| crate::domain::pr_diff::RenamePair {
+                from: (*f).to_owned(),
+                to: (*t).to_owned(),
+            })
+            .collect();
+        ScopeInput::PrDiff {
+            index: NormalizedDiffIndex::new(&diff, strip),
+        }
+    }
+
+    #[test]
+    fn pr_diff_arm_pure_rename_scopes_the_renamed_model_at_its_new_path() {
+        // models/marts/dim_a.sql → models/marts/dim_b.sql, 100% similar:
+        // the diff carries ONLY the rename pair (no file entry). The
+        // current manifest (compiled at head) has the node at the NEW
+        // path; it must scope, and its unit test is in scope as context
+        // (the test's declaring YAML is untouched → not `changed`).
+        let dim_b = NodeId::new("model.shop.dim_b");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim_b.clone(),
+            model_node_with_path(&dim_b, "ck1", "models/marts/dim_b.sql"),
+        );
+
+        let test_id = "unit_test.shop.dim_b.checks_rows";
+        let mut tests = HashMap::new();
+        tests.insert(
+            test_id.to_owned(),
+            test_with_path("checks_rows", "dim_b", Some("models/marts/_models.yml")),
+        );
+
+        let current = Manifest::new(ManifestMetadata::new("v12"), nodes, tests, HashMap::new());
+
+        let input = pr_diff_input_with_renames(
+            &[],
+            &[("models/marts/dim_a.sql", "models/marts/dim_b.sql")],
+            None,
+        );
+        let selection = select_in_scope(&current, &input);
+
+        assert!(
+            selection.models_in_scope.contains(&dim_b),
+            "the renamed model scopes under its NEW path",
+        );
+        assert!(selection.in_scope.contains(test_id));
+        assert!(
+            !selection.changed.contains(test_id),
+            "a pure model rename does not mark the test's YAML changed",
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_rename_with_edit_scopes_the_model_once_not_twice() {
+        // Rename + edit: the new path appears BOTH as a file entry (with
+        // hunks) and as the rename `to`. The model must scope exactly
+        // once, and nothing extra may enter the scope sets.
+        let dim_b = NodeId::new("model.shop.dim_b");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim_b.clone(),
+            model_node_with_path(&dim_b, "ck1", "models/marts/dim_b.sql"),
+        );
+
+        let test_id = "unit_test.shop.dim_b.checks_rows";
+        let mut tests = HashMap::new();
+        tests.insert(
+            test_id.to_owned(),
+            test_with_path("checks_rows", "dim_b", Some("models/marts/_models.yml")),
+        );
+
+        let current = Manifest::new(ManifestMetadata::new("v12"), nodes, tests, HashMap::new());
+
+        let input = pr_diff_input_with_renames(
+            &["models/marts/dim_b.sql"],
+            &[("models/marts/dim_a.sql", "models/marts/dim_b.sql")],
+            None,
+        );
+        let selection = select_in_scope(&current, &input);
+
+        assert_eq!(
+            selection.models_in_scope.len(),
+            1,
+            "the renamed-and-edited model scopes once, not twice",
+        );
+        assert!(selection.models_in_scope.contains(&dim_b));
+        assert_eq!(selection.in_scope.len(), 1);
+        assert!(selection.in_scope.contains(test_id));
+    }
+
+    #[test]
+    fn pr_diff_arm_rename_old_path_matching_no_current_node_is_inert() {
+        // The rename's old path maps to no current-manifest node (the
+        // node moved). It must scope nothing — no phantom models, no
+        // phantom tests.
+        let unrelated = NodeId::new("model.shop.stg_x");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            unrelated.clone(),
+            model_node_with_path(&unrelated, "ck1", "models/staging/stg_x.sql"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        // Neither rename side exists in the manifest (e.g. a non-dbt file
+        // was renamed, or the manifest predates the new path).
+        let input =
+            pr_diff_input_with_renames(&[], &[("docs/old_readme.md", "docs/new_readme.md")], None);
+        let selection = select_in_scope(&current, &input);
+
+        assert_eq!(selection.in_scope.len(), 0);
+        assert_eq!(selection.models_in_scope.len(), 0);
+    }
+
+    #[test]
+    fn pr_diff_arm_pure_rename_of_declaring_yaml_marks_its_tests_in_scope() {
+        // A purely renamed unit-test YAML: the test's current
+        // original_file_path is the NEW path, which is in the rename
+        // keyset → in scope AND file-granular `changed` (the post-scope
+        // block-precise refinement then narrows it to context, since a
+        // pure rename carries zero hunks — existing #96 machinery).
+        let dim = NodeId::new("model.shop.dim_payers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim.clone(),
+            model_node_with_path(&dim, "ck1", "models/marts/dim_payers.sql"),
+        );
+
+        let test_id = "unit_test.shop.dim_payers.checks_rows";
+        let mut tests = HashMap::new();
+        tests.insert(
+            test_id.to_owned(),
+            test_with_path(
+                "checks_rows",
+                "dim_payers",
+                Some("models/marts/_renamed__models.yml"),
+            ),
+        );
+
+        let current = Manifest::new(ManifestMetadata::new("v12"), nodes, tests, HashMap::new());
+
+        let input = pr_diff_input_with_renames(
+            &[],
+            &[(
+                "models/marts/_old__models.yml",
+                "models/marts/_renamed__models.yml",
+            )],
+            None,
+        );
+        let selection = select_in_scope(&current, &input);
+
+        assert!(selection.in_scope.contains(test_id));
+        assert!(
+            selection.changed.contains(test_id),
+            "file-granular changed at scope level (refinement narrows later)",
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_rename_honors_project_root_strip_on_both_sides() {
+        let dim_b = NodeId::new("model.shop.dim_b");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim_b.clone(),
+            model_node_with_path(&dim_b, "ck1", "models/marts/dim_b.sql"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let input = pr_diff_input_with_renames(
+            &[],
+            &[(
+                "dbt_project/models/marts/dim_a.sql",
+                "dbt_project/models/marts/dim_b.sql",
+            )],
+            Some(Path::new("dbt_project")),
+        );
+        let selection = select_in_scope(&current, &input);
+
+        assert!(selection.models_in_scope.contains(&dim_b));
     }
 
     #[test]

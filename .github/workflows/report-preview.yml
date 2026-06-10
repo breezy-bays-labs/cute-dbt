@@ -202,7 +202,7 @@ jobs:
           # consumed from git), so changes there are not a model/test SOURCE
           # change and must NOT trigger the full fusion-install + compile +
           # render for an empty-scope report.
-          git diff --unified=0 "${BASE_SHA}...${HEAD_SHA}" \
+          git diff --unified=0 --find-renames "${BASE_SHA}...${HEAD_SHA}" \
             -- dbt-project/ ':(exclude)dbt-project/target/' \
             > target/report-preview/prdiff.patch
           if [ -s target/report-preview/prdiff.patch ]; then

@@ -2160,6 +2160,7 @@ fn reconstruct_fusion_data_diffs(
         added_lines: vec![format!("          encounters,{new_count},false")],
     };
     let diff = PrDiff {
+        renames: Vec::new(),
         files: vec![FileHunks {
             path: "models/marts/_unit_tests.yml".to_owned(),
             hunks: vec![hunk],

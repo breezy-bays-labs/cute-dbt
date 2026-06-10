@@ -98,12 +98,30 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Then the exit code is 0
     And the rendered report shows the "0 unit tests in scope" banner
 
-  # Renamed-model behavior is a documented fidelity limit (PR-diff sees the
-  # rename as one deleted path + one added path; the deleted path maps to no
-  # current-manifest node, the added path maps to the new node).
-  # tracked: cute-dbt#80 — restoration condition: if rename detection becomes
-  # load-bearing, layer a git-rename signal on top of `git diff --name-only`.
-  # Not blocking v0.1.x.
+  # --- Renamed models (cute-dbt#80) ---
+  # `git diff` detects renames by default (since git 2.9) and emits a
+  # `rename from`/`rename to` header pair. A PURE rename (100% similarity)
+  # carries no `+++ b/` header and no hunks — before cute-dbt#80 it scoped
+  # nothing. cute-dbt now maps BOTH rename sides onto the scope match; the
+  # current manifest (compiled at the PR head) resolves the new path to the
+  # renamed node, so the model scopes under its new name.
+
+  Scenario: A pure model rename puts the renamed model in scope under its new name
+    Given a PR diff that renames "models/marts/core/dim_payers.sql" to "models/marts/core/payer_dimensions.sql" with no content change
+    And the manifest contains a model with original_file_path "models/marts/core/payer_dimensions.sql"
+    And the model "payer_dimensions" has a unit test "test_payer_dimensions_injects_unknown_sentinel"
+    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report's models-in-scope listing contains "payer_dimensions"
+    And the rendered report's models-in-scope listing does NOT contain "dim_payers"
+    And the rendered report's test rows include "test_payer_dimensions_injects_unknown_sentinel"
+
+  Scenario: A rename with edits puts the renamed model in scope under its new name
+    Given a PR diff that renames "models/marts/core/dim_payers.sql" to "models/marts/core/payer_dimensions.sql" and edits it
+    And the manifest contains a model with original_file_path "models/marts/core/payer_dimensions.sql"
+    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report's models-in-scope listing contains "payer_dimensions"
 
   # --- Malformed input (clap usage error; cute-dbt#96) ---
 

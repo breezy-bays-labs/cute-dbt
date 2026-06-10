@@ -9,9 +9,10 @@
 //! themselves so a regression in `normalize_path` / `match_changed_path`
 //! cannot hide behind a coarse-grained BDD pass.
 //!
-//! Windows-style `\` separators are **not** supported in v0.1 — see the
-//! tracked follow-up cute-dbt#80 (deferred — git-rename detection layer
-//! on top of `git diff --name-only` and Windows path normalization).
+//! Windows-style `\` separators are **not** supported in v0.1.
+//! tracked: cute-dbt#183 — Windows-style path separators in PR-diff path
+//! matching (split out of cute-dbt#80, which closed with git-rename
+//! detection only).
 
 use std::path::Path;
 
