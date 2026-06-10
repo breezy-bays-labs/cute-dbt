@@ -304,6 +304,7 @@ jobs:
     #   - 11 after cell_table_diff (cute-dbt#98)
     #   - 12 after incremental_models (cute-dbt#145)
     #   - 13 after coverage_checks (cute-dbt#169)
+    #   - 14 after check_selection (cute-dbt#171)
     # The README is not a feature. The job name deliberately carries no
     # number (cute-dbt#68 — the old `==6` display label went stale across
     # several bumps): the enforced count lives ONLY in the `expected=`
@@ -321,7 +322,7 @@ jobs:
       - name: features/*.feature count matches expected
         run: |
           set -euo pipefail
-          expected=13
+          expected=14
           count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
           echo "feature-count: expected ${expected}, found ${count}"
           if [ "$count" != "$expected" ]; then

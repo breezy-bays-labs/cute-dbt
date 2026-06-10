@@ -10,6 +10,7 @@
 
 pub mod builders;
 pub mod cell_table_diff;
+pub mod check_selection;
 pub mod config;
 pub mod consumer_report_contract;
 pub mod coverage_checks;

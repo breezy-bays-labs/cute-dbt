@@ -140,6 +140,16 @@ pub struct World {
     /// the flat-config + test-node wire-shape injection) and run the
     /// subprocess. The Thens assert the embedded payload's `findings`.
     pub coverage_plan: CoveragePlan,
+
+    /// cute-dbt#171: the check-selection/suppression scenario
+    /// accumulator. Filled by the `check_selection.feature` Givens
+    /// (models with an unbacked `unique_key`, optional raw SQL carrying
+    /// an inline pragma, and the `[checks]` config TOML), then consumed
+    /// by the self-contained `When I render the check-selection report`
+    /// step (synthetic current/baseline pair + a temp `--config` file +
+    /// the real subprocess). The Thens assert the embedded payload's
+    /// `findings` (presence, removal, and the `suppressed` mark).
+    pub selection_plan: SelectionPlan,
 }
 
 /// A cute-dbt#145 incremental scenario plan — the models (each with its
@@ -197,6 +207,31 @@ pub struct CoverageDataTest {
     pub columns: Vec<String>,
     /// `config.enabled` on the test node.
     pub enabled: bool,
+}
+
+/// A cute-dbt#171 check-selection scenario plan — models (each with an
+/// unbacked `config.unique_key` and optional raw SQL for the inline
+/// pragma) plus the `[checks]`-bearing config TOML. Every declared model
+/// is modified vs the baseline so it is in scope.
+#[derive(Debug, Default, Clone)]
+pub struct SelectionPlan {
+    /// The models the scenario declares.
+    pub models: Vec<SelectionModel>,
+    /// The `--config` TOML content, written to a temp file by the
+    /// `When`; `None` ⇒ no `--config` flag is passed.
+    pub config_toml: Option<String>,
+}
+
+/// One model in a [`SelectionPlan`].
+#[derive(Debug, Clone)]
+pub struct SelectionModel {
+    /// Bare model name (`orders`).
+    pub bare: String,
+    /// The `config.unique_key` wire value (a string column name).
+    pub unique_key: String,
+    /// Raw Jinja SQL (`raw_code`) — set when the scenario plants an
+    /// inline `-- cute-dbt: ignore(...)` pragma; `None` otherwise.
+    pub raw_sql: Option<String>,
 }
 
 /// A cute-dbt#98 cell-diff scenario plan — the test name, fixture format,

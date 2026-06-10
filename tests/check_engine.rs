@@ -14,10 +14,15 @@
 //! `dbt_utils.unique_combination_of_columns` node (`fct_patient_summary`)
 //! — plus models with NO unique_key and an explicit-`null` config arm.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cute_dbt::adapters::cte_engine::parse_cte_graph;
-use cute_dbt::domain::{Finding, HeuristicId, Manifest, NodeId, Verdict, model_findings};
+use cute_dbt::adapters::render::build_payload_with_externals;
+use cute_dbt::domain::{
+    CheckPolicy, ChecksConfig, Finding, HeuristicId, InScopeSet, Manifest, ModelInScopeSet, NodeId,
+    SuppressRule, SuppressionSource, Verdict, model_findings, resolve_check_policy,
+};
 use cute_dbt::ports::ManifestSource;
 
 /// Absolute path to a committed fixture under `tests/fixtures/`.
@@ -124,6 +129,141 @@ fn jaffle_shop_models_without_unique_key_carry_no_findings() {
             );
         }
     }
+}
+
+/// Build the real render payload for one playground model under a
+/// display policy (cute-dbt#171) and return its serialized JSON.
+fn payload_json_for(model_id: &str, policy: &CheckPolicy<HeuristicId>) -> serde_json::Value {
+    let manifest = load("playground-current.json");
+    let models: ModelInScopeSet = [NodeId::new(model_id)].into_iter().collect();
+    let changed: InScopeSet = std::iter::empty::<String>().collect();
+    let payload = build_payload_with_externals(
+        &manifest,
+        &changed,
+        &models,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "baseline.json",
+        policy,
+    );
+    serde_json::to_value(&payload.models[0]).expect("model payload serializes")
+}
+
+const MONTHLY: &str = "model.healthcare_analytics.fct_encounters_monthly";
+
+#[test]
+fn disabling_the_grain_group_removes_the_finding_from_the_real_payload() {
+    // The cute-dbt#171 selection path over real data: `disable =
+    // ["grain.*"]` resolved against the production registry empties the
+    // model's findings (and the key is serde-skipped entirely).
+    let config = ChecksConfig {
+        disable: Some(vec!["grain.*".to_owned()]),
+        ..Default::default()
+    };
+    let policy = resolve_check_policy::<HeuristicId>(&config).expect("policy resolves");
+    let model = payload_json_for(MONTHLY, &policy);
+    assert!(
+        model.get("findings").is_none(),
+        "disabled findings must be removed (and serde-skipped): {model}"
+    );
+}
+
+#[test]
+fn a_suppressed_finding_stays_in_the_real_payload_with_its_reason() {
+    // The cute-dbt#171 suppression path over real data: the finding is
+    // KEPT (verdict intact) and marked with source + reason — the
+    // payload contract the findings surface renders.
+    let policy = CheckPolicy {
+        suppressions: vec![SuppressRule {
+            check: HeuristicId::GrainUniqueKeyUnbacked,
+            model: "fct_encounters_monthly".to_owned(), // bare-name match
+            reason: Some("monthly grain duplicates accepted during backfill".to_owned()),
+            source: SuppressionSource::Config,
+        }],
+        ..Default::default()
+    };
+    let model = payload_json_for(MONTHLY, &policy);
+    let finding = &model["findings"][0];
+    assert_eq!(finding["check"], "grain.unique-key-unbacked");
+    assert_eq!(finding["verdict"]["status"], "uncovered");
+    assert_eq!(finding["suppressed"]["source"], "config");
+    assert_eq!(
+        finding["suppressed"]["reason"],
+        "monthly grain duplicates accepted during backfill"
+    );
+}
+
+#[test]
+fn union_arm_coverage_obeys_the_display_layer_invariant_on_real_data() {
+    // cute-dbt#171 invariant extended to the cute-dbt#172 check:
+    // disabling or suppressing union.arm-coverage is display-layer ONLY.
+    // fct_clinical_events trips the union check UNCOVERED on the real
+    // fixture; the suppressed finding must be byte-identical to the
+    // default-policy finding apart from the `suppressed` mark (proof
+    // that the policy altered neither evaluation nor supersedes
+    // resolution), and disabling `union.*` must remove exactly it.
+    const EVENTS: &str = "model.healthcare_analytics.fct_clinical_events";
+
+    let baseline = payload_json_for(EVENTS, &CheckPolicy::default());
+    let union_default = baseline["findings"]
+        .as_array()
+        .expect("findings present under the default policy")
+        .iter()
+        .find(|f| f["check"] == "union.arm-coverage")
+        .expect("union.arm-coverage fires on fct_clinical_events")
+        .clone();
+    assert_eq!(union_default["verdict"]["status"], "uncovered");
+
+    // Disable arm: `union.*` removes the union finding, nothing else.
+    let config = ChecksConfig {
+        disable: Some(vec!["union.*".to_owned()]),
+        ..Default::default()
+    };
+    let policy = resolve_check_policy::<HeuristicId>(&config).expect("policy resolves");
+    let disabled = payload_json_for(EVENTS, &policy);
+    let remaining: Vec<&serde_json::Value> = disabled["findings"]
+        .as_array()
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    assert!(
+        remaining.iter().all(|f| f["check"] != "union.arm-coverage"),
+        "disabling union.* removes the union finding: {remaining:?}"
+    );
+
+    // Suppress arm: the finding is kept and marked; stripping the mark
+    // recovers the default-policy finding exactly.
+    let policy = CheckPolicy {
+        suppressions: vec![SuppressRule {
+            check: HeuristicId::UnionArmCoverage,
+            model: "fct_clinical_events".to_owned(),
+            reason: Some("event arms exercised downstream".to_owned()),
+            source: SuppressionSource::Config,
+        }],
+        ..Default::default()
+    };
+    let suppressed = payload_json_for(EVENTS, &policy);
+    let mut union_suppressed = suppressed["findings"]
+        .as_array()
+        .expect("suppression never removes findings")
+        .iter()
+        .find(|f| f["check"] == "union.arm-coverage")
+        .expect("union finding stays present when suppressed")
+        .clone();
+    assert_eq!(
+        union_suppressed["suppressed"]["reason"],
+        "event arms exercised downstream"
+    );
+    union_suppressed
+        .as_object_mut()
+        .expect("finding is an object")
+        .remove("suppressed");
+    assert_eq!(
+        union_suppressed, union_default,
+        "suppression marks the finding and changes NOTHING else"
+    );
 }
 
 #[test]

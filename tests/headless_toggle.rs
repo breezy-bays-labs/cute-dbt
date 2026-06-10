@@ -3754,6 +3754,7 @@ fn render_with_external_fixtures(
         ScopeSource::PrDiff,
         DEFAULT_REPORT_TITLE,
         None,
+        &cute_dbt::domain::CheckPolicy::default(),
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");

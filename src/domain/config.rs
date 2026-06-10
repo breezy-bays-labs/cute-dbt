@@ -7,10 +7,11 @@
 //! plain `&str` parameters and never imports `toml` or
 //! `AnalysisConfig` directly.
 //!
-//! v0.1 surface is intentionally narrow: two optional keys under
-//! `[report]`. Additional sections (e.g. `[output]`) are additive POD
-//! additions in v0.2+ — each is a new `pub` field on `AnalysisConfig`
-//! with `#[serde(default)]`, never a comparator / scoping rewrite.
+//! The surface grows by additive POD sections, each a new `pub` field
+//! on `AnalysisConfig` with `#[serde(default)]`, never a comparator /
+//! scoping rewrite: `[report]` (two optional keys, PR 14) and
+//! `[checks]` (selection + suppression, cute-dbt#171 — POD in
+//! `crate::domain::check_config`).
 //!
 //! `#[serde(deny_unknown_fields)]` is applied at both nesting levels so
 //! a misnamed key (`report.tilte`, `repotr.title`) fails the
@@ -22,6 +23,8 @@
 //! baseline-missing precedent).
 
 use serde::Deserialize;
+
+use crate::domain::check_config::ChecksConfig;
 
 /// Default `<title>` and `<h1>` text when no `--config` is supplied or
 /// the config omits `report.title`.
@@ -47,6 +50,15 @@ pub struct AnalysisConfig {
     /// `<p class="report-subtitle">` element.
     #[serde(default)]
     pub report: ReportConfig,
+    /// `[checks]` section (cute-dbt#171) — check selection
+    /// (opt-out/opt-in modes with id/group-glob lists) and
+    /// `[[checks.suppress]]` acknowledgements. Cross-field legality and
+    /// id/glob resolution against the check registry are validated by
+    /// [`crate::domain::check_config::resolve_check_policy`] at
+    /// `--config` parse time (the same clap usage-error surface as a
+    /// TOML syntax error).
+    #[serde(default)]
+    pub checks: ChecksConfig,
 }
 
 /// `[report]` table — both keys optional.
@@ -169,6 +181,54 @@ tilte = "typo'd"
         let err = toml::from_str::<AnalysisConfig>("not valid toml { = =").expect_err("garbage");
         let msg = err.to_string();
         assert!(!msg.is_empty(), "error has a description: {msg}");
+    }
+
+    #[test]
+    fn checks_section_parses_through_analysis_config() {
+        // The [checks] POD lives in domain::check_config; this pins the
+        // AnalysisConfig wiring (section name + serde(default)).
+        let cfg: AnalysisConfig = toml::from_str(
+            r#"
+[checks]
+mode = "opt-in"
+enable = ["grain.*"]
+
+[[checks.suppress]]
+check = "grain.unique-key-unbacked"
+model = "orders"
+reason = "we know and don't care"
+"#,
+        )
+        .expect("checks section parses");
+        assert_eq!(
+            cfg.checks.mode,
+            crate::domain::check_config::ChecksMode::OptIn
+        );
+        assert_eq!(
+            cfg.checks.enable.as_deref(),
+            Some(&["grain.*".to_owned()][..])
+        );
+        assert_eq!(cfg.checks.suppress.len(), 1);
+    }
+
+    #[test]
+    fn absent_checks_section_yields_the_default() {
+        let cfg: AnalysisConfig = toml::from_str("[report]\ntitle = \"t\"\n").expect("parses");
+        assert_eq!(
+            cfg.checks,
+            crate::domain::check_config::ChecksConfig::default()
+        );
+    }
+
+    #[test]
+    fn unknown_checks_key_is_rejected() {
+        let err = toml::from_str::<AnalysisConfig>("[checks]\nenabel = [\"grain.*\"]\n")
+            .expect_err("typo'd checks key");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("enabel") || msg.contains("unknown field"),
+            "error names the unknown field: {msg}"
+        );
     }
 
     #[test]

@@ -43,12 +43,13 @@ use crate::adapters::render::{
     render_report_with_externals,
 };
 use crate::domain::{
-    BlockDiff, DEFAULT_REPORT_TITLE, FixtureTableDiff, InScopeSet, Manifest, ModelInScopeSet,
-    NamedTableDiff, NormalizedDiffIndex, PreflightError, ScopeInput, ScopeSelection, UnitTest,
-    UnitTestDataDiff, UnitTestYamlBlock, effective_fixture_format, external_fixture_table,
-    extract_unit_test_block, preflight_compiled, reconstruct_block_diffs,
-    reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
-    refine_changed_by_hunks, select_in_scope,
+    BlockDiff, CheckPolicy, DEFAULT_REPORT_TITLE, FixtureTableDiff, HeuristicId, InScopeSet,
+    Manifest, ModelInScopeSet, NamedTableDiff, NormalizedDiffIndex, PreflightError, ScopeInput,
+    ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock,
+    check_by_id, effective_fixture_format, external_fixture_table, extract_unit_test_block,
+    preflight_compiled, reconstruct_block_diffs, reconstruct_external_fixture_diff,
+    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks,
+    resolve_check_policy, scan_pragmas, select_in_scope,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -228,6 +229,11 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
     }
     let (report_title, report_subtitle) = resolve_report_strings(cli);
     let (baseline_label, scope_source) = scope_banner(cli, &scope_input);
+    // Check selection + suppression (cute-dbt#171): the `[checks]` config
+    // policy plus inline SQL pragmas scanned from each in-scope model's
+    // manifest `raw_code`. Display-layer only — applied inside payload
+    // assembly strictly after supersedes resolution.
+    let check_policy = build_check_policy(cli, &current, &models_in_scope);
     render(
         &cli.out,
         &current,
@@ -243,6 +249,7 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
         scope_source,
         &report_title,
         report_subtitle.as_deref(),
+        &check_policy,
     )?;
     Ok(())
 }
@@ -567,6 +574,65 @@ fn resolve_report_strings(cli: &Cli) -> (String, Option<String>) {
     (title, subtitle)
 }
 
+/// Build the resolved check display policy (cute-dbt#171): the
+/// `[checks]` config selection + suppress entries, extended with the
+/// inline `-- cute-dbt: ignore(check-id, "reason")` pragmas scanned
+/// from each in-scope model's raw SQL.
+///
+/// The pragma source is the manifest's `raw_code` — the verbatim
+/// authored model file (the cute-dbt#111 precedent: no filesystem read,
+/// so pragmas work in both scope modes with or without
+/// `--project-root`). A pragma naming an unknown check id is **not** a
+/// run failure (it is source text, not config — the config arm fails
+/// closed at `--config` parse time instead): it warns on stderr via
+/// [`warn_unknown_pragma`] and is otherwise inert.
+///
+/// The `[checks]` section was already validated by the `--config`
+/// value-parser ([`crate::adapters::config_reader::load_config`]), so
+/// re-resolving here cannot fail; the `expect` pins that invariant for
+/// any future caller constructing [`Cli`] by hand.
+fn build_check_policy(
+    cli: &Cli,
+    current: &Manifest,
+    models_in_scope: &ModelInScopeSet,
+) -> CheckPolicy<HeuristicId> {
+    let mut policy = cli.config.as_ref().map_or_else(CheckPolicy::default, |c| {
+        resolve_check_policy::<HeuristicId>(&c.checks)
+            .expect("[checks] was validated by the --config value-parser at parse time")
+    });
+    // Model order is deterministic (the scope set iterates in node-id
+    // order), so pragma rule order — and warning order — is stable.
+    for model_id in models_in_scope.iter() {
+        let Some(raw_code) = current.node(model_id).and_then(|node| node.raw_code()) else {
+            continue;
+        };
+        for pragma in scan_pragmas(raw_code) {
+            match check_by_id::<HeuristicId>(&pragma.check) {
+                Some(check) => policy.suppressions.push(SuppressRule {
+                    check,
+                    model: model_id.as_str().to_owned(),
+                    reason: pragma.reason,
+                    source: SuppressionSource::Pragma,
+                }),
+                None => warn_unknown_pragma(model_id.as_str(), &pragma.check),
+            }
+        }
+    }
+    policy
+}
+
+/// Emit a stderr note for an inline pragma naming an unknown check id
+/// (cute-dbt#171). The pragma is inert — without this note a typo'd id
+/// would silently suppress nothing while the author believes it does.
+fn warn_unknown_pragma(model_id: &str, check: &str) {
+    eprintln!(
+        "cute-dbt: warning: {model_id} carries the pragma `-- cute-dbt: \
+         ignore({check}, ...)` but {check:?} is not a registered check; \
+         the pragma has no effect (see heuristics/registry.toml for \
+         known check ids)"
+    );
+}
+
 /// Stage-1 pre-flight: load the primary `--manifest` through the
 /// file-backed [`ManifestSource`].
 ///
@@ -699,6 +765,7 @@ fn render(
     scope_source: ScopeSource,
     report_title: &str,
     report_subtitle: Option<&str>,
+    check_policy: &CheckPolicy<HeuristicId>,
 ) -> Result<(), io::Error> {
     render_report_with_externals(
         out,
@@ -715,6 +782,7 @@ fn render(
         scope_source,
         report_title,
         report_subtitle,
+        check_policy,
     )
 }
 
@@ -761,6 +829,7 @@ mod tests {
                 title: None,
                 subtitle: Some("PR 1234".to_owned()),
             },
+            checks: crate::domain::ChecksConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, DEFAULT_REPORT_TITLE);
@@ -775,6 +844,7 @@ mod tests {
                 title: Some("Q3 review".to_owned()),
                 subtitle: Some("PR 1234 / staging diff".to_owned()),
             },
+            checks: crate::domain::ChecksConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, "Q3 review");
@@ -789,10 +859,141 @@ mod tests {
                 title: Some("title-only".to_owned()),
                 subtitle: None,
             },
+            checks: crate::domain::ChecksConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, "title-only");
         assert!(subtitle.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // build_check_policy (cute-dbt#171) — config selection + pragma
+    // scanning over the in-scope models' raw_code.
+    // -----------------------------------------------------------------
+
+    fn model_with_raw(id: &str, raw_code: Option<&str>) -> crate::domain::Node {
+        crate::domain::Node::new(
+            NodeId::new(id),
+            "model",
+            crate::domain::Checksum::new("sha256", "x"),
+            Some("select 1".to_owned()),
+            raw_code.map(str::to_owned),
+            DependsOn::default(),
+            None,
+            crate::domain::NodeConfig::default(),
+            None,
+            std::collections::BTreeMap::new(),
+        )
+    }
+
+    fn manifest_of_models(nodes: Vec<crate::domain::Node>) -> Manifest {
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+            StdHashMap::new(),
+            StdHashMap::new(),
+        )
+    }
+
+    fn scope_of(ids: &[&str]) -> ModelInScopeSet {
+        ids.iter().map(|s| NodeId::new(*s)).collect()
+    }
+
+    fn cli_with_checks(checks: crate::domain::ChecksConfig) -> Cli {
+        let mut cli = cli("report.html");
+        cli.config = Some(crate::domain::AnalysisConfig {
+            report: crate::domain::ReportConfig::default(),
+            checks,
+        });
+        cli
+    }
+
+    #[test]
+    fn build_check_policy_without_config_or_pragmas_is_the_default() {
+        let manifest = manifest_of_models(vec![model_with_raw("model.shop.orders", None)]);
+        let policy = build_check_policy(
+            &cli("report.html"),
+            &manifest,
+            &scope_of(&["model.shop.orders"]),
+        );
+        assert_eq!(policy, CheckPolicy::default());
+    }
+
+    #[test]
+    fn build_check_policy_resolves_the_config_selection() {
+        // Registry-shape-robust: `grain.*` removes exactly the grain
+        // group; every other registered check (e.g. union.arm-coverage,
+        // cute-dbt#172) stays displayed.
+        let manifest = manifest_of_models(vec![model_with_raw("model.shop.orders", None)]);
+        let policy = build_check_policy(
+            &cli_with_checks(crate::domain::ChecksConfig {
+                disable: Some(vec!["grain.*".to_owned()]),
+                ..Default::default()
+            }),
+            &manifest,
+            &scope_of(&["model.shop.orders"]),
+        );
+        let expected: Vec<HeuristicId> = CheckPolicy::default()
+            .displayed
+            .into_iter()
+            .filter(|id: &HeuristicId| {
+                use crate::domain::CheckId as _;
+                id.spec().group != "grain"
+            })
+            .collect();
+        assert_eq!(policy.displayed, expected, "grain.* removes only grain");
+        assert!(
+            !expected.is_empty(),
+            "the registry carries non-grain checks (union.arm-coverage)"
+        );
+    }
+
+    #[test]
+    fn build_check_policy_collects_pragmas_from_in_scope_raw_code() {
+        let manifest = manifest_of_models(vec![model_with_raw(
+            "model.shop.orders",
+            Some("-- cute-dbt: ignore(grain.unique-key-unbacked, \"backfill dupes\")\nselect 1"),
+        )]);
+        let policy = build_check_policy(
+            &cli("report.html"),
+            &manifest,
+            &scope_of(&["model.shop.orders"]),
+        );
+        assert_eq!(
+            policy.suppressions,
+            vec![SuppressRule {
+                check: HeuristicId::GrainUniqueKeyUnbacked,
+                model: "model.shop.orders".to_owned(),
+                reason: Some("backfill dupes".to_owned()),
+                source: SuppressionSource::Pragma,
+            }],
+        );
+    }
+
+    #[test]
+    fn build_check_policy_skips_unknown_pragma_ids_and_out_of_scope_models() {
+        let manifest = manifest_of_models(vec![
+            model_with_raw(
+                "model.shop.orders",
+                Some("-- cute-dbt: ignore(join.nonexistent, \"typo\")\nselect 1"),
+            ),
+            // In the manifest but NOT in scope: its pragma must not fire.
+            model_with_raw(
+                "model.shop.customers",
+                Some("-- cute-dbt: ignore(grain.unique-key-unbacked)\nselect 1"),
+            ),
+        ]);
+        let policy = build_check_policy(
+            &cli("report.html"),
+            &manifest,
+            &scope_of(&["model.shop.orders"]),
+        );
+        assert!(
+            policy.suppressions.is_empty(),
+            "unknown id warns + stays inert; out-of-scope models are not scanned: {:?}",
+            policy.suppressions
+        );
+        assert_eq!(policy.displayed, CheckPolicy::default().displayed);
     }
 
     #[test]
