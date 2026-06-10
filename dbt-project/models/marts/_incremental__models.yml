@@ -7,6 +7,28 @@ version: 2
 # config.materialized, and overrides in manifest.json.
 
 models:
+  # cute-dbt#169 dogfood — composite unique_key (customer_id, order_date)
+  # with deliberately NO uniqueness data test: the committed
+  # grain.unique-key-unbacked UNCOVERED gap the live PR-diff preview
+  # surfaces at the payload level. Do NOT add a unique /
+  # dbt_utils.unique_combination_of_columns test here — the gap is the
+  # fixture (paired-fixture rule, epic cute-dbt#168).
+  - name: customer_order_days
+    description: >
+      Per-customer order-day rollup at the (customer_id, order_date)
+      grain. Incremental delete+insert keyed on the composite unique_key;
+      no uniqueness test backs the declared grain — the cute-dbt#169
+      walking-skeleton coverage gap.
+    columns:
+      - name: customer_id
+        description: Customer identifier (half of the composite grain).
+        tests:
+          - not_null
+      - name: order_date
+        description: Order date (the other half of the composite grain).
+      - name: orders_placed
+        description: Number of orders the customer placed that day.
+
   - name: order_events_incremental
     description: >
       Incremental order-events accumulator. On incremental runs it only
