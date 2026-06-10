@@ -1,6 +1,7 @@
 # cute-dbt BDD acceptance specs
 
-These six `.feature` files are the **ATDD outer loop** for cute-dbt v0.1.
+The `.feature` files in this directory are the **ATDD outer loop** for
+cute-dbt v0.1.
 Step definitions and the `cargo test --test bdd` harness land in PR 10
 (#TBD) via cucumber-rs (`harness = false`; NOT nextest-compatible — set
 `test_tool = "cargo"` in `.cargo/mutants.toml` to keep mutation testing
@@ -34,9 +35,12 @@ fixture completeness is the same shape — enforced by
   exercises the usage-error path itself). The `baseline-required-grep`
   CI job enforces this structurally.
 
-## File count is pinned (==6)
+## File count is pinned
 
-The `feature-count` CI job asserts exactly six `.feature` files exist
-under `features/`. The bump from 5 → 6 landed in PR 14 (cute-dbt#24)
-when `config.feature` joined the contract. Adding a seventh requires
-updating the job.
+The `feature-count` CI job (mirrored by the `feature-count` pre-push
+hook in `lefthook.yml`) asserts the exact number of `.feature` files
+under `features/`. The enforced count lives **only** in the `expected=`
+line of those two scripts — this README deliberately names no number,
+because hardcoded counts in labels and prose went stale repeatedly
+(cute-dbt#68). Adding a feature file requires bumping both `expected=`
+lines atomically in the same PR.

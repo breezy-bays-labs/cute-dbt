@@ -14,7 +14,7 @@
       "Non-mirror guard (no workspace / no deny.wrappers / no API shim)",
       "EdgeType enum/label completeness guard",
       "Baseline-required scenario invariant",
-      "Feature file count (==6)",
+      "Feature file count",
       "Synthetic-only fixture gate (every fixture listed in MANIFEST.toml)",
       "Asset-provenance gate (every asset listed in MANIFEST.toml)",
       "Example report is byte-identical to renderer output",

@@ -297,22 +297,28 @@ jobs:
     #   - 10 after pr_diff_scoping (cute-dbt#84)
     #   - 11 after cell_table_diff (cute-dbt#98)
     #   - 12 after incremental_models (cute-dbt#145)
-    # The README is not a feature. Display-label drift (`==6`) is
-    # tracked by cute-dbt#68 (rename coordination with branch protection
-    # required).
-    name: Feature file count (==6)
+    # The README is not a feature. The job name deliberately carries no
+    # number (cute-dbt#68 — the old `==6` display label went stale across
+    # several bumps): the enforced count lives ONLY in the `expected=`
+    # line below and is echoed into the run log at runtime. The job name
+    # is a required status check — a rename must update
+    # `.github/branch-protection.json`, the live branch-protection
+    # contexts, and `CONTRIBUTING.md` atomically.
+    name: Feature file count
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
-      - name: features/*.feature count
+      - name: features/*.feature count matches expected
         run: |
           set -euo pipefail
+          expected=12
           count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
-          if [ "$count" != "12" ]; then
-            echo "::error::feature-count: expected 12 .feature files, found $count"
+          echo "feature-count: expected ${expected}, found ${count}"
+          if [ "$count" != "$expected" ]; then
+            echo "::error::feature-count: expected ${expected} .feature files, found ${count}"
             exit 1
           fi
 
