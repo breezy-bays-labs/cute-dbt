@@ -87,6 +87,23 @@ fn model_node_with_raw(full_id: &str, raw_code: &str) -> Node {
     )
 }
 
+/// A `model` node carrying `raw_code` AND `original_file_path` — the
+/// cute-dbt#179 Model-SQL code-card full-path header rides the latter.
+fn model_node_with_raw_and_path(full_id: &str, raw_code: &str, path: &str) -> Node {
+    Node::new(
+        NodeId::new(full_id),
+        "model",
+        Checksum::new("sha256", "ck"),
+        Some("select 1".to_owned()),
+        Some(raw_code.to_owned()),
+        DependsOn::default(),
+        Some(path.to_owned()),
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+}
+
 fn unit_test(name: &str, model_bare: &str) -> UnitTest {
     UnitTest::new(
         name.to_owned(),
@@ -1288,15 +1305,18 @@ fn model_sql_section_defaults_to_diff_and_toggles_to_raw() {
         ),
         "the Raw↔Diff toggle is present in the Model SQL section",
     );
-    // cute-dbt#178 — the code-card header names the model file (the DAG
-    // terminal label, `<name>.sql`) and hosts the toggle.
+    // cute-dbt#178 — the code-card header names the model file and hosts
+    // the toggle. This node carries NO original_file_path, so this is the
+    // cute-dbt#179 FALLBACK arm: the synthesized `<name>.sql` (the DAG
+    // terminal label); the full-path arm is asserted by
+    // `model_sql_header_shows_the_full_model_path`.
     assert_eq!(
         eval_string(
             &tab,
             "document.querySelector('.model-sql .code-header .code-filename').textContent.trim()"
         ),
         "dim_a.sql",
-        "the Model-SQL code-card header shows the model's file name",
+        "absent original_file_path ⇒ the header falls back to the model's file name",
     );
     assert!(
         !eval_bool(
@@ -1398,6 +1418,53 @@ fn model_sql_section_shows_plain_sql_when_no_diff() {
             "document.querySelector('.model-sql .model-sql-code') !== null"
         ),
         "the plain Model SQL code block renders",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn model_sql_header_shows_the_full_model_path() {
+    // cute-dbt#179 — founder call: when the manifest carries the model's
+    // original_file_path, the Model-SQL code-card header names the FULL
+    // project-relative path (`models/…/x.sql`), not the bare `<name>.sql`
+    // synthesis (that stays the fallback — see
+    // `model_sql_section_defaults_to_diff_and_toggles_to_raw`).
+    let url = render_pr_diff_with_sql_diffs(
+        "headless_sql_full_path.html",
+        vec![model_node_with_raw_and_path(
+            "model.shop.dim_c",
+            "select id\nfrom t",
+            "models/marts/core/dim_c.sql",
+        )],
+        vec![("unit_test.shop.dim_c.t", unit_test("t", "dim_c"))],
+        &["model.shop.dim_c"],
+        vec![], // no SQL diff — the plain-raw card still carries the header
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .code-filename').textContent.trim()"
+        ),
+        "models/marts/core/dim_c.sql",
+        "the Model-SQL code-card header shows the model's full project-relative path",
+    );
+    // The title attribute mirrors the path so a CSS-truncated header is
+    // still fully readable on hover.
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .code-filename').getAttribute('title')"
+        ),
+        "models/marts/core/dim_c.sql",
+        "the header's title attribute carries the full path (truncation affordance)",
     );
 
     let _ = tab.close(true);

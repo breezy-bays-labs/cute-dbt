@@ -47,6 +47,17 @@ Feature: Generate a self-contained report from a compiled dbt manifest
     Then the report payload lists column tests "unique" and "not null" for the expected column "customer_id"
     And the report payload carries no column-header metadata for the expected column "first_name"
 
+  # cute-dbt#179 — the Model-SQL code-card header names the model's FULL
+  # project-relative source path (`models/…/x.sql`, never just the
+  # filename). The committed fixture's in-scope model is stg_customers;
+  # the payload fact asserted here is the wire contract the header JS
+  # renders (the DOM render + the `<name>.sql` fallback are asserted in
+  # tests/headless_toggle.rs).
+  Scenario: The report payload carries the in-scope model's full source path
+    Given the model "stg_orders" was modified relative to the baseline
+    When I run cute-dbt with --manifest current.json --baseline-manifest baseline.json --out report.html
+    Then the report payload carries the model source path "models/staging/stg_customers.sql"
+
   # The locked v0.1 policy: --baseline-manifest is REQUIRED. Omitting it is
   # a clap usage error raised BEFORE the manifest is read (NOT a
   # PreflightError; full-manifest reports are a documented trick — pass an

@@ -193,6 +193,15 @@ pub struct ModelPayload {
     /// Bare model name (e.g. `customer_rollup`) — the model selector
     /// label and the terminal-node id in the DAG.
     pub name: String,
+    /// Full project-relative path of the model's source file
+    /// (`Node::original_file_path`, e.g. `models/staging/stg_orders.sql`)
+    /// — the Model-SQL code-card file-path header (cute-dbt#179; founder
+    /// call: the full `models/…/x.sql`, not the bare filename). `None`
+    /// (key omitted, older fixtures stay byte-stable) when the manifest
+    /// carries no `original_file_path`; the JS then falls back to the
+    /// synthesized `<name>.sql` (the cute-dbt#155 terminal label).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// DAG nodes + edges, keyed for the design's JS.
     pub dag: DagPayload,
     /// Per-node compiled SQL, keyed by node id (CTE name or model name
@@ -1109,6 +1118,10 @@ fn build_model_payload(
         .collect();
     ModelPayload {
         name: bare_name,
+        // cute-dbt#179 — the full project-relative source path for the
+        // Model-SQL code-card header (None on synthetic manifests; the
+        // template JS falls back to `<name>.sql`).
+        path: model.original_file_path().map(str::to_owned),
         dag: DagPayload { nodes, edges },
         compiled_sql,
         raw_sql,
@@ -1872,6 +1885,77 @@ mod tests {
         assert!(
             model.tests[0].changed,
             "test_one is in the changed set → tagged updated",
+        );
+    }
+
+    #[test]
+    fn model_payload_threads_the_models_original_file_path() {
+        // cute-dbt#179 — the Model-SQL code-card header shows the model's
+        // full project-relative path (`models/…/x.sql`, never just the
+        // filename). `path` rides `Node::original_file_path`.
+        let node = Node::new(
+            NodeId::new("model.shop.stg_orders"),
+            "model",
+            checksum("body"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            Some("models/staging/stg_orders.sql".to_owned()),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        );
+        let ut = simple_unit_test("stg_orders", "test_one");
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.stg_orders")]);
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        assert_eq!(
+            payload.models[0].path.as_deref(),
+            Some("models/staging/stg_orders.sql"),
+            "ModelPayload.path carries the manifest original_file_path verbatim",
+        );
+        let json = serde_json::to_string(&payload).expect("payload serializes");
+        assert!(
+            json.contains(r#""path":"models/staging/stg_orders.sql""#),
+            "the full path is on the wire for the code-card header",
+        );
+    }
+
+    #[test]
+    fn model_payload_path_is_omitted_when_the_manifest_carries_none() {
+        // cute-dbt#179 — synthetic / pre-1.8 manifests carry no
+        // original_file_path: the key is omitted from the wire (the JS
+        // falls back to `<name>.sql`, the cute-dbt#155 terminal label).
+        let node = model_node("model.shop.stg_orders", "body", Some("select 1"));
+        let ut = simple_unit_test("stg_orders", "test_one");
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.stg_orders")]);
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        assert!(payload.models[0].path.is_none());
+        let json = serde_json::to_string(&payload).expect("payload serializes");
+        assert!(
+            !json.contains(r#""path""#),
+            "absent original_file_path ⇒ no path key on the wire (older fixtures stay stable)",
         );
     }
 

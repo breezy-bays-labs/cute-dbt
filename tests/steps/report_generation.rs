@@ -334,6 +334,24 @@ fn payload_no_column_meta(world: &mut World, column: String) {
     );
 }
 
+#[then(regex = r#"^the report payload carries the model source path "([^"]+)"$"#)]
+fn payload_model_source_path(world: &mut World, path: String) {
+    // cute-dbt#179 — the wire contract behind the Model-SQL code-card
+    // file-path header: ModelPayload.path carries the manifest's full
+    // project-relative original_file_path verbatim.
+    let payload = report_payload(world);
+    let paths: Vec<String> = payload["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["path"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        paths.iter().any(|p| p == &path),
+        "expected a model payload entry with source path {path:?}; got {paths:?}"
+    );
+}
+
 /// Parse the embedded `cute-dbt-data` JSON payload from the rendered report.
 fn report_payload(world: &World) -> serde_json::Value {
     let html = world
