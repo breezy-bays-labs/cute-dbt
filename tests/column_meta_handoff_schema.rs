@@ -32,11 +32,16 @@ struct AuthoredTest {
     metadata: TestMetadata,
 }
 
-/// Parse a YAML scalar token as authored: single-quoted → string,
-/// `true`/`false` → bool, integer → number, anything else verbatim.
+/// Parse a YAML scalar token as authored: quoted (single OR double) →
+/// string, `true`/`false` → bool, integer → number, anything else
+/// verbatim.
 fn scalar(token: &str) -> Value {
     let t = token.trim();
-    if let Some(stripped) = t.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')) {
+    if let Some(stripped) = t
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+        .or_else(|| t.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
+    {
         return Value::String(stripped.to_owned());
     }
     match t {
@@ -89,7 +94,13 @@ fn extract_authored_tests() -> Vec<AuthoredTest> {
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
-        if let Some(name) = line.strip_prefix(COLUMN) {
+        if line.starts_with("  - name:") {
+            // New MODEL block — drop the previous model's column state so
+            // nothing can leak across the boundary (a misplaced entry then
+            // fails the "follows a column" expect loudly).
+            column = None;
+            in_data_tests = false;
+        } else if let Some(name) = line.strip_prefix(COLUMN) {
             column = Some(name.trim().to_owned());
             in_data_tests = false;
         } else if line.starts_with(DATA_TESTS) {
@@ -103,11 +114,17 @@ fn extract_authored_tests() -> Vec<AuthoredTest> {
                 let mut kwargs = Map::new();
                 while i + 1 < lines.len() && lines[i + 1].starts_with(ARG) {
                     i += 1;
-                    let (key, value) = lines[i]
-                        .trim()
-                        .split_once(": ")
+                    let trimmed = lines[i].trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                        continue;
+                    }
+                    // Split on the first ':' and trim both sides — YAML
+                    // tolerates any amount of post-colon whitespace.
+                    let (key, value) = trimmed
+                        .split_once(':')
+                        .map(|(k, v)| (k.trim(), v.trim()))
                         .unwrap_or_else(|| panic!("malformed arg line {:?}", lines[i]));
-                    let parsed = if value.trim_start().starts_with('[') {
+                    let parsed = if value.starts_with('[') {
                         flow_seq(value)
                     } else {
                         scalar(value)
