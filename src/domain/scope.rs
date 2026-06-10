@@ -298,6 +298,53 @@ mod tests {
         assert!(!models.contains(&unchanged_id));
     }
 
+    #[test]
+    fn baseline_arm_excludes_a_new_non_model_node_from_model_scope() {
+        // Regression (cute-dbt#167, observed live on PR #166): a newly
+        // added generic test node is `state:modified` (absent from the
+        // baseline) and has zero unit tests targeting it, but it must NOT
+        // surface as a model card in baseline mode.
+        let stg_orders = NodeId::new("model.shop.stg_orders");
+        let generic_test = NodeId::new("test.shop.not_null_stg_orders_id");
+
+        let mut current_nodes = HashMap::new();
+        current_nodes.insert(stg_orders.clone(), model_node(&stg_orders, "ck-same", None));
+        current_nodes.insert(
+            generic_test.clone(),
+            typed_node(&generic_test, "test", "ck-new"),
+        );
+
+        let mut baseline_nodes = HashMap::new();
+        baseline_nodes.insert(stg_orders.clone(), model_node(&stg_orders, "ck-same", None));
+
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            current_nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let baseline = Manifest::new(
+            ManifestMetadata::new("v12"),
+            baseline_nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let input = ScopeInput::Baseline { manifest: baseline };
+        let ScopeSelection {
+            in_scope,
+            models_in_scope: models,
+            ..
+        } = select_in_scope(&current, &input);
+
+        assert_eq!(in_scope.len(), 0);
+        assert!(
+            !models.contains(&generic_test),
+            "a modified non-model node must not render as a model card",
+        );
+        assert_eq!(models.len(), 0);
+    }
+
     // ----- select_in_scope: PrDiff arm -----
 
     #[test]
@@ -426,6 +473,46 @@ mod tests {
     }
 
     #[test]
+    fn pr_diff_arm_excludes_a_changed_non_model_node_from_model_scope() {
+        // The PrDiff analog of the cute-dbt#167 baseline gap: a generic
+        // test node whose declaring SQL file is in the diff must not
+        // surface as a model card. Pins the existing `resource_type ==
+        // "model"` filter in `select_in_scope_pr_diff` so the two arms
+        // cannot drift apart.
+        let generic_test = NodeId::new("test.shop.assert_positive_total");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            generic_test.clone(),
+            typed_node_with_path(
+                &generic_test,
+                "test",
+                "ck1",
+                "tests/assert_positive_total.sql",
+            ),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let input = pr_diff_input(&["tests/assert_positive_total.sql"], None);
+        let ScopeSelection {
+            in_scope,
+            models_in_scope: models,
+            ..
+        } = select_in_scope(&current, &input);
+
+        assert_eq!(in_scope.len(), 0);
+        assert!(
+            !models.contains(&generic_test),
+            "a path-changed non-model node must not render as a model card",
+        );
+        assert_eq!(models.len(), 0);
+    }
+
+    #[test]
     fn pr_diff_arm_honors_project_root_strip() {
         let dim_payers = NodeId::new("model.shop.dim_payers");
         let mut nodes = HashMap::new();
@@ -543,6 +630,40 @@ mod tests {
 
     fn model_node_with_path(id: &NodeId, ck: &str, ofp: &str) -> Node {
         model_node(id, ck, Some(ofp))
+    }
+
+    /// A node of an arbitrary `resource_type` (cute-dbt#167 — the arm-2
+    /// resource-type filter regression tests).
+    fn typed_node(id: &NodeId, resource_type: &str, ck: &str) -> Node {
+        Node::new(
+            id.clone(),
+            resource_type,
+            checksum(ck),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    /// A non-model node with an `original_file_path` (the `PrDiff` arm's
+    /// path-matching input).
+    fn typed_node_with_path(id: &NodeId, resource_type: &str, ck: &str, ofp: &str) -> Node {
+        Node::new(
+            id.clone(),
+            resource_type,
+            checksum(ck),
+            None,
+            None,
+            DependsOn::default(),
+            Some(ofp.to_owned()),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
     }
 
     fn test_for(name: &str, model_bare: &str) -> UnitTest {

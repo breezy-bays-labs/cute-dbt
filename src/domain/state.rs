@@ -437,8 +437,12 @@ impl StateComparator {
     /// 1. Every model that is the resolved target of an in-scope unit test
     ///    (the same models the existing `in_scope_unit_tests` would surface
     ///    via `resolve_target_model`).
-    /// 2. Every modified model that has **zero** unit tests targeting it in
-    ///    the current manifest — the "no tests wired" signal.
+    /// 2. Every modified **`model`** node that has **zero** unit tests
+    ///    targeting it in the current manifest — the "no tests wired"
+    ///    signal. The modified set itself is resource-agnostic (dbt's
+    ///    `state:modified` matches every node type), so this arm filters
+    ///    to `resource_type == "model"`: a modified generic test, seed,
+    ///    or snapshot never renders as a model card (cute-dbt#167).
     ///
     /// Together these give the render layer a complete per-model view:
     /// models with tests in scope appear with their tests; modified models
@@ -466,10 +470,19 @@ impl StateComparator {
             }
         }
 
-        // Arm 2: every modified model that has zero unit tests targeting it.
+        // Arm 2: every modified model that has zero unit tests targeting
+        // it. The modified set spans every `nodes` resource type (fusion's
+        // `state:modified` matcher is resource-agnostic; generic test /
+        // seed / snapshot nodes all qualify), but only `model` nodes render
+        // as cards — so arm 2 projects to `resource_type == "model"`
+        // exactly as arm 1 does via `resolve_target_model` and as the
+        // PrDiff arm does in `select_in_scope_pr_diff` (cute-dbt#167).
         for modified_id in modified.iter() {
+            let is_model = current
+                .node(modified_id)
+                .is_some_and(|node| node.resource_type() == "model");
             let has_tests = test_targets.get(modified_id).is_some_and(|v| !v.is_empty());
-            if !has_tests {
+            if is_model && !has_tests {
                 ids.insert(modified_id.clone());
             }
         }
@@ -715,10 +728,16 @@ mod tests {
 
     /// A node of an arbitrary `resource_type` (for resolution tests).
     fn typed_node(full_id: &str, resource_type: &str) -> Node {
+        typed_node_with_checksum(full_id, resource_type, "x")
+    }
+
+    /// A node of an arbitrary `resource_type` with an explicit body
+    /// checksum (for arm-2 resource-type filter tests, cute-dbt#167).
+    fn typed_node_with_checksum(full_id: &str, resource_type: &str, checksum: &str) -> Node {
         Node::new(
             NodeId::new(full_id),
             resource_type,
-            Checksum::new("sha256", "x"),
+            Checksum::new("sha256", checksum),
             None,
             None,
             DependsOn::default(),
@@ -2054,5 +2073,78 @@ mod tests {
         );
         let models = StateComparator::body_only().models_in_scope(&current, &baseline);
         assert!(models.is_empty());
+    }
+
+    #[test]
+    fn models_in_scope_excludes_modified_non_model_nodes_across_resource_types() {
+        // Arm-2 regression (cute-dbt#167): the modified set spans every
+        // `nodes` resource type (a new generic test node is "modified" —
+        // absent from baseline), but only `model` nodes may render as
+        // cards. A modified non-model node with zero unit tests must NOT
+        // leak into models_in_scope; a model under the same conditions
+        // must (the control row).
+        let cases: &[(&str, bool)] = &[
+            ("test", false),
+            ("seed", false),
+            ("snapshot", false),
+            ("analysis", false),
+            ("operation", false),
+            ("model", true), // control: same conditions, model IS scoped
+        ];
+        for (resource_type, expected_in_scope) in cases {
+            let node_id = format!("{resource_type}.shop.brand_new");
+            let current = manifest(vec![typed_node(&node_id, resource_type)], vec![]);
+            let baseline = manifest(vec![], vec![]); // node is new → modified
+            let models = StateComparator::body_only().models_in_scope(&current, &baseline);
+            assert_eq!(
+                models.contains(&id(&node_id)),
+                *expected_in_scope,
+                "resource_type {resource_type:?}: expected in-scope = {expected_in_scope}",
+            );
+            assert_eq!(models.len(), usize::from(*expected_in_scope));
+        }
+    }
+
+    #[test]
+    fn models_in_scope_excludes_a_checksum_modified_test_node() {
+        // The #166 live shape's second half: a generic test node present
+        // in BOTH manifests whose checksum changed is modified, but still
+        // must not render as a model card.
+        let current = manifest(
+            vec![typed_node_with_checksum(
+                "test.shop.not_null_orders_id",
+                "test",
+                "new",
+            )],
+            vec![],
+        );
+        let baseline = manifest(
+            vec![typed_node_with_checksum(
+                "test.shop.not_null_orders_id",
+                "test",
+                "old",
+            )],
+            vec![],
+        );
+        let models = StateComparator::body_only().models_in_scope(&current, &baseline);
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn models_in_scope_admits_only_the_model_when_model_and_test_node_both_modified() {
+        // Mixed modified set: a no-test model AND a generic test node are
+        // both modified — arm 2 admits exactly the model.
+        let current = manifest(
+            vec![
+                model("model.shop.stg_orders", "new"),
+                typed_node("test.shop.not_null_orders_id", "test"),
+            ],
+            vec![],
+        );
+        let baseline = manifest(vec![model("model.shop.stg_orders", "old")], vec![]);
+        let models = StateComparator::body_only().models_in_scope(&current, &baseline);
+        assert_eq!(models.len(), 1);
+        assert!(models.contains(&id("model.shop.stg_orders")));
+        assert!(!models.contains(&id("test.shop.not_null_orders_id")));
     }
 }
