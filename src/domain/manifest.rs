@@ -197,6 +197,63 @@ impl NodeConfig {
     }
 }
 
+/// dbt's `test_metadata` block on a **generic-test** node (cute-dbt#165).
+///
+/// Present only on tests instantiated from a generic test definition
+/// (`unique`, `not_null`, `accepted_values`, `relationships`,
+/// `dbt_utils.*`, …); a singular (SQL-file) test carries no
+/// `test_metadata` (fusion's `DbtTestAttr.test_metadata:
+/// Option<TestMetadata>`, `dbt-schemas` `nodes.rs`).
+///
+/// - `name` — the generic test's bare name (e.g. `"unique"`).
+/// - `namespace` — the providing package when the test is
+///   package-qualified (e.g. `"dbt_utils"`, `"dbt_expectations"`);
+///   `None`/`null` for dbt-core built-ins.
+/// - `kwargs` — the rendered test arguments, kept as untyped [`Value`]
+///   passthrough (fusion types this `BTreeMap<String, YmlValue>`); the
+///   render layer reads the key args it summarizes
+///   (`accepted_values.values`, `relationships.to`/`field`) and never
+///   interprets the rest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestMetadata {
+    name: String,
+    #[serde(default)]
+    namespace: Option<String>,
+    #[serde(default)]
+    kwargs: Value,
+}
+
+impl TestMetadata {
+    /// Canonical constructor.
+    #[must_use]
+    pub fn new(name: impl Into<String>, namespace: Option<String>, kwargs: Value) -> Self {
+        Self {
+            name: name.into(),
+            namespace,
+            kwargs,
+        }
+    }
+
+    /// Bare generic-test name (e.g. `"unique"`, `"accepted_values"`).
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Providing package for a package-qualified test (e.g.
+    /// `"dbt_utils"`); `None` for dbt-core built-ins.
+    #[must_use]
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
+    }
+
+    /// Rendered test arguments, untyped passthrough.
+    #[must_use]
+    pub fn kwargs(&self) -> &Value {
+        &self.kwargs
+    }
+}
+
 /// A dbt node (model / seed / snapshot / source / test / `unit_test`).
 ///
 /// Field set is the v0.1 consumption subset — see ADR-5 ("tolerant
@@ -236,6 +293,11 @@ impl NodeConfig {
 ///   the column-set half of the `.contract` diff. A top-level wire
 ///   sibling of `config`, stored as a [`BTreeMap`] for deterministic
 ///   comparison.
+// `attached_node` (clippy::struct_field_names: ends with the struct's
+// name) mirrors the dbt v12 wire key verbatim — renaming it would force
+// a serde rename and obscure the field↔wire correspondence ADR-5 leans
+// on.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     id: NodeId,
@@ -255,6 +317,31 @@ pub struct Node {
     relation_name: Option<String>,
     #[serde(default)]
     columns: BTreeMap<String, Option<String>>,
+    /// Authored per-column descriptions from the model node's `columns`
+    /// map (cute-dbt#165) — only columns with a **non-empty** description
+    /// appear (fusion serializes an unset description as `""`, never
+    /// omitting the key — `serialize_dbt_column_desc` in `dbt-schemas`
+    /// `dbt_column.rs`). A separate field from [`Self::columns`] so the
+    /// `.contract` sub-selector's column-set comparison stays
+    /// name + `data_type` only — a description edit must never flag
+    /// `state:modified.contract`.
+    #[serde(default)]
+    column_descriptions: BTreeMap<String, String>,
+    /// `column_name` on a generic-test node (cute-dbt#165) — set iff the
+    /// test is **column-scoped** (declared under a column's `tests:`).
+    /// `None` on non-test nodes AND on model-level tests that merely take
+    /// a column argument.
+    #[serde(default)]
+    column_name: Option<String>,
+    /// `attached_node` on a test node — the model the test is declared
+    /// on (fusion's `DbtTestAttr.attached_node`). `None` on non-test
+    /// nodes.
+    #[serde(default)]
+    attached_node: Option<NodeId>,
+    /// `test_metadata` on a generic-test node; `None` on singular
+    /// (SQL-file) tests and non-test nodes.
+    #[serde(default)]
+    test_metadata: Option<TestMetadata>,
 }
 
 impl Node {
@@ -284,7 +371,44 @@ impl Node {
             config,
             relation_name,
             columns,
+            column_descriptions: BTreeMap::new(),
+            column_name: None,
+            attached_node: None,
+            test_metadata: None,
         }
+    }
+
+    /// Attach authored per-column descriptions (cute-dbt#165). A builder
+    /// rather than an 11th positional `new` param keeps the many existing
+    /// test constructors unchanged (the
+    /// [`UnitTest::with_incremental_mode`](crate::domain::unit_test::UnitTest::with_incremental_mode)
+    /// precedent).
+    #[must_use]
+    pub fn with_column_descriptions(
+        mut self,
+        column_descriptions: BTreeMap<String, String>,
+    ) -> Self {
+        self.column_descriptions = column_descriptions;
+        self
+    }
+
+    /// Attach the test-node attribution fields (cute-dbt#165):
+    /// `column_name` (set iff the test is column-scoped), `attached_node`
+    /// (the model the test is declared on), and `test_metadata` (the
+    /// generic-test name + namespace + kwargs; `None` for singular
+    /// tests). Builder for the same reason as
+    /// [`Self::with_column_descriptions`].
+    #[must_use]
+    pub fn with_test_attachment(
+        mut self,
+        column_name: Option<String>,
+        attached_node: Option<NodeId>,
+        test_metadata: Option<TestMetadata>,
+    ) -> Self {
+        self.column_name = column_name;
+        self.attached_node = attached_node;
+        self.test_metadata = test_metadata;
+        self
     }
 
     /// Node id (unique within a manifest).
@@ -357,6 +481,36 @@ impl Node {
     #[must_use]
     pub fn columns(&self) -> &BTreeMap<String, Option<String>> {
         &self.columns
+    }
+
+    /// Authored per-column descriptions (cute-dbt#165) — only columns
+    /// with a non-empty description appear. Empty for nodes without a
+    /// columns block (and for every pre-#165 fixture).
+    #[must_use]
+    pub fn column_descriptions(&self) -> &BTreeMap<String, String> {
+        &self.column_descriptions
+    }
+
+    /// `column_name` on a test node — `Some` iff the test is
+    /// column-scoped (cute-dbt#165). `None` for non-test nodes and
+    /// model-level tests.
+    #[must_use]
+    pub fn column_name(&self) -> Option<&str> {
+        self.column_name.as_deref()
+    }
+
+    /// `attached_node` on a test node — the model the test is declared
+    /// on. `None` for non-test nodes.
+    #[must_use]
+    pub fn attached_node(&self) -> Option<&NodeId> {
+        self.attached_node.as_ref()
+    }
+
+    /// `test_metadata` on a generic-test node. `None` for singular
+    /// (SQL-file) tests and non-test nodes.
+    #[must_use]
+    pub fn test_metadata(&self) -> Option<&TestMetadata> {
+        self.test_metadata.as_ref()
     }
 }
 
@@ -713,6 +867,129 @@ mod tests {
             back.original_file_path(),
             Some("models/marts/core/dim_payers.sql")
         );
+    }
+
+    // ----- cute-dbt#165 — column descriptions + test attribution -----
+
+    #[test]
+    fn node_new_defaults_column_meta_fields_empty() {
+        let n = Node::new(
+            NodeId::new("model.shop.bare"),
+            "model",
+            sample_checksum(),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        );
+        assert!(n.column_descriptions().is_empty());
+        assert!(n.column_name().is_none());
+        assert!(n.attached_node().is_none());
+        assert!(n.test_metadata().is_none());
+    }
+
+    #[test]
+    fn with_column_descriptions_sets_field() {
+        let mut descriptions = BTreeMap::new();
+        descriptions.insert("id".to_owned(), "Primary key".to_owned());
+        let n = Node::new(
+            NodeId::new("model.shop.x"),
+            "model",
+            sample_checksum(),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_column_descriptions(descriptions);
+        assert_eq!(
+            n.column_descriptions().get("id").map(String::as_str),
+            Some("Primary key")
+        );
+    }
+
+    #[test]
+    fn with_test_attachment_sets_fields() {
+        let tm = TestMetadata::new(
+            "accepted_values",
+            None,
+            serde_json::json!({ "values": ["a", "b"] }),
+        );
+        let n = Node::new(
+            NodeId::new("test.shop.accepted_values_x_status"),
+            "test",
+            sample_checksum(),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_test_attachment(
+            Some("status".to_owned()),
+            Some(NodeId::new("model.shop.x")),
+            Some(tm.clone()),
+        );
+        assert_eq!(n.column_name(), Some("status"));
+        assert_eq!(n.attached_node(), Some(&NodeId::new("model.shop.x")));
+        assert_eq!(n.test_metadata(), Some(&tm));
+    }
+
+    #[test]
+    fn test_metadata_constructor_and_getters() {
+        let tm = TestMetadata::new(
+            "expect_column_values_to_be_between",
+            Some("dbt_expectations".to_owned()),
+            serde_json::json!({ "min_value": 0 }),
+        );
+        assert_eq!(tm.name(), "expect_column_values_to_be_between");
+        assert_eq!(tm.namespace(), Some("dbt_expectations"));
+        assert_eq!(tm.kwargs()["min_value"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn test_metadata_tolerates_missing_optional_fields() {
+        // Only `name` is structurally required; `namespace` and `kwargs`
+        // default (ADR-5 tolerance — fusion's TestMetadata defaults
+        // kwargs and namespace is an Option).
+        let tm: TestMetadata = serde_json::from_str(r#"{ "name": "unique" }"#).unwrap();
+        assert_eq!(tm.name(), "unique");
+        assert_eq!(tm.namespace(), None);
+        assert!(tm.kwargs().is_null());
+    }
+
+    #[test]
+    fn node_column_meta_fields_round_trip_through_serde() {
+        let mut descriptions = BTreeMap::new();
+        descriptions.insert("id".to_owned(), "Primary key".to_owned());
+        let n = Node::new(
+            NodeId::new("test.shop.unique_x_id"),
+            "test",
+            sample_checksum(),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_column_descriptions(descriptions)
+        .with_test_attachment(
+            Some("id".to_owned()),
+            Some(NodeId::new("model.shop.x")),
+            Some(TestMetadata::new("unique", None, Value::Null)),
+        );
+        let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
+        assert_eq!(back, n);
     }
 
     #[test]

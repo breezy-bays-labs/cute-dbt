@@ -13,8 +13,14 @@ models:
       processes orders newer than the loaded high-water mark
       (max(order_date) from {{ this }}).
     columns:
+      # cute-dbt#165 dogfood — unique/not_null on the merge key so the
+      # unit test's given/this/expect tables surface a description+tests
+      # column-header tooltip in the live PR-diff preview report.
       - name: order_id
         description: Order identifier (unique key for the incremental merge).
+        tests:
+          - unique
+          - not_null
       - name: order_date
         description: Order date; the incremental high-water-mark column.
       - name: status

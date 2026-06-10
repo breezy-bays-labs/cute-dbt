@@ -156,6 +156,22 @@ g.dag-node:focus-visible { outline: 2px dashed #1d7484; outline-offset: 3px; }
 .expect-tooltip { position: relative; display: inline-flex; align-items: center; border: none; background: transparent; padding: 0; margin-left: 0.25rem; font: inherit; font-size: 0.9em; color: #1d7484; cursor: help; border-bottom: 1px dotted currentColor; }
 .expect-tooltip-bubble { position: absolute; left: 50%; top: calc(100% + 6px); transform: translateX(-50%); z-index: 60; visibility: hidden; opacity: 0; transition: opacity 0.1s ease-in; width: 20rem; max-width: 70vw; padding: 0.5rem 0.65rem; background: #1d1d22; color: #f5f5f7; border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,0.35); font-size: 0.78rem; font-weight: normal; line-height: 1.45; text-align: left; text-transform: none; letter-spacing: normal; white-space: normal; pointer-events: none; }
 .expect-tooltip:hover .expect-tooltip-bubble, .expect-tooltip:focus .expect-tooltip-bubble, .expect-tooltip:focus-visible .expect-tooltip-bubble { visibility: visible; opacity: 1; }
+/* cute-dbt#165 — column-header tooltip: the column's authored description +
+   its column-level data tests. Mirrors the #146 expect-tooltip contract
+   (focusable <button> + CSS bubble on :hover AND :focus; aria-label for AT;
+   never a native `title`). The ONE divergence: the bubble is position:FIXED
+   with JS-set coordinates — the th lives inside the .table-fit overflow-x
+   scroller, which would clip an absolutely-positioned bubble (#146's bubble
+   hangs off the un-clipped panel header; this one cannot). Visibility itself
+   stays pure CSS. */
+.col-tooltip { position: relative; display: inline-flex; align-items: center; border: none; background: transparent; padding: 0; margin-left: 0.3rem; font: inherit; font-size: 0.85em; font-weight: normal; color: #1d7484; cursor: help; }
+.col-tooltip-bubble { position: fixed; left: 0; top: 0; transform: translateX(-50%); z-index: 60; visibility: hidden; opacity: 0; transition: opacity 0.1s ease-in; width: 18rem; max-width: 70vw; padding: 0.5rem 0.65rem; background: #1d1d22; color: #f5f5f7; border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,0.35); font-size: 0.78rem; font-weight: normal; line-height: 1.45; text-align: left; text-transform: none; letter-spacing: normal; white-space: normal; pointer-events: none; }
+.col-tooltip:hover .col-tooltip-bubble, .col-tooltip:focus .col-tooltip-bubble, .col-tooltip:focus-visible .col-tooltip-bubble { visibility: visible; opacity: 1; }
+.col-tooltip-desc { display: block; }
+.col-tooltip-desc + .col-tooltip-tests-label { margin-top: 0.35rem; }
+.col-tooltip-tests-label { display: block; font-weight: 700; color: #b8e6c9; }
+.col-tooltip-tests { display: block; margin: 0; padding: 0; list-style: none; }
+.col-tooltip-tests li { margin: 0; padding-left: 0.85rem; text-indent: -0.85rem; }
 /* Fixture sql-block wrapper reuses the compiled-SQL drawer styling
    (.sql-block-wrap + .sql-block) but has no copy button, so the
    top padding reserved for the absolute-positioned `.sql-copy`
@@ -1419,7 +1435,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
       .text(rowCount + " row" + (rowCount === 1 ? "" : "s")));
     $sec.append($hdr);
     var diff = givenDataDiff(dataDiff, ordinal);
-    $sec.append(buildFixtureView(table, "given-table", diff));
+    $sec.append(buildFixtureView(table, "given-table", diff, given.column_meta));
     return $sec;
   }
 
@@ -1499,7 +1515,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     // real change (cute-dbt#98). `data_diff.expect` already passed
     // `has_real_change()`, so its presence === "default this table to Diff".
     var diff = (t.data_diff && t.data_diff.expect) || undefined;
-    $body.append(buildFixtureView(table, "expected-table", diff));
+    $body.append(buildFixtureView(table, "expected-table", diff, t.expected.column_meta));
     initDataTablesIn($body);
   }
 
@@ -2246,7 +2262,67 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
   // from the canonical `key` (a `Number` key sorts numerically even when its
   // display is `1.00`). The JS no longer parses csv/dict — the domain's
   // `table_from_manifest_rows` owns that, and ships this POD on the wire.
-  function buildTable(table, cls) {
+  // cute-dbt#165 — the column-header tooltip button for one column's
+  // Rust-computed metadata POD ({description, tests}). Mirrors the #146
+  // expect-tooltip contract: a focusable <button> with a CSS bubble shown on
+  // hover AND keyboard focus (a native `title` is hover-delayed, keyboard-
+  // unreachable, touch-invisible); `aria-label` carries the same text for
+  // assistive tech (the bubble is aria-hidden so it is not announced twice).
+  // DOM is built from text nodes only — payload strings never parse as HTML.
+  function buildColTooltip(colName, meta) {
+    var tests = meta.tests || [];
+    var parts = [];
+    if (meta.description) parts.push(meta.description);
+    if (tests.length) parts.push("column tests: " + tests.join("; "));
+    var $btn = $("<button>")
+      .attr("type", "button")
+      .addClass("col-tooltip")
+      .attr("aria-label", "Column " + colName + " — " + parts.join(" — "));
+    $btn.append(document.createTextNode("ⓘ"));
+    var $bubble = $("<span>").addClass("col-tooltip-bubble").attr("aria-hidden", "true");
+    if (meta.description) {
+      $bubble.append($("<span>").addClass("col-tooltip-desc").text(meta.description));
+    }
+    if (tests.length) {
+      $bubble.append($("<span>").addClass("col-tooltip-tests-label").text("column tests"));
+      var $list = $("<ul>").addClass("col-tooltip-tests");
+      tests.forEach(function (t) { $list.append($("<li>").text(t)); });
+      $bubble.append($list);
+    }
+    $btn.append($bubble);
+    return $btn;
+  }
+
+  // cute-dbt#165 — the bubble is position:fixed so it escapes the .table-fit
+  // overflow scroller (which clips absolutely-positioned descendants); the
+  // coordinates are set here on hover/focus while VISIBILITY stays pure CSS
+  // (the #146 :hover/:focus contract). Horizontally clamped so a first/last-
+  // column bubble stays on-viewport. A hidden bubble still has layout
+  // geometry (visibility:hidden, not display:none), so offsetWidth is real.
+  function positionColTooltip(btn) {
+    var bubble = btn.querySelector(".col-tooltip-bubble");
+    if (!bubble) return;
+    var r = btn.getBoundingClientRect();
+    var half = bubble.offsetWidth / 2;
+    var margin = 8;
+    var cx = r.left + r.width / 2;
+    cx = Math.max(margin + half, Math.min(cx, window.innerWidth - margin - half));
+    bubble.style.left = cx + "px";
+    bubble.style.top = (r.bottom + 6) + "px";
+  }
+  $(document).on("mouseenter focusin", ".col-tooltip", function () {
+    positionColTooltip(this);
+  });
+  // A th click sorts the DataTable; clicking/tapping the info button must
+  // only reveal the bubble (via focus), never also re-sort the column.
+  $(document).on("click", ".col-tooltip", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  // `colMeta` (cute-dbt#165) is the per-table column-metadata map keyed by
+  // column name (absent key/entry => no affordance on that th).
+  function buildTable(table, cls, colMeta) {
     var columns = (table && table.columns) || [];
     var rows = (table && table.rows) || [];
     var $wrap = $("<div>").addClass("table-fit");
@@ -2255,7 +2331,10 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
     var $hr = $("<tr>").appendTo($thead);
     columns.forEach(function (c) {
       var html = escapeHtml(c).replace(/_/g, "_<wbr>");
-      $hr.append($("<th>").attr("title", c).html(html));
+      var $th = $("<th>").attr("title", c).html(html);
+      var meta = colMeta && colMeta[c];
+      if (meta) $th.append(buildColTooltip(c, meta));
+      $hr.append($th);
     });
     var $tbody = $("<tbody>").appendTo($tbl);
     rows.forEach(function (r) {
@@ -2336,14 +2415,14 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
   // is present — also build the Diff grid and a Current↔Diff toggle that flips
   // exactly one view visible at a time (the inactive view carries `hidden`).
   // Default-Diff when a diff exists, else Current with no toggle.
-  function buildFixtureView(table, cls, diff) {
+  function buildFixtureView(table, cls, diff, colMeta) {
     if (!diff) {
       // No cell diff for this table → the plain Current grid from the POD.
-      return buildTable(table, cls);
+      return buildTable(table, cls, colMeta);
     }
     var $wrap = $("<div>").addClass("fixture-view");
-    var $diffView = buildDiffTable(diff, cls);
-    var $currentView = buildTable(table, cls).prop("hidden", true);
+    var $diffView = buildDiffTable(diff, cls, colMeta);
+    var $currentView = buildTable(table, cls, colMeta).prop("hidden", true);
 
     var $toggle = $("<div>").addClass("cell-diff-toggle");
     var $diffBtn = $("<button>").attr("type", "button")
@@ -2410,7 +2489,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
   // added/removed column badges from DiffColumn.status) and rows tinted by
   // RowChangeKind. A `Modified` cell flagged by the active lens (cellChanged)
   // renders inline `old → new`; otherwise the cell shows its current value.
-  function buildDiffTable(diff, cls) {
+  function buildDiffTable(diff, cls, colMeta) {
     var $wrap = $("<div>").addClass("table-fit");
     var $tbl = $("<table>").addClass(cls).addClass("cell-diff-table");
     var $thead = $("<thead>").appendTo($tbl);
@@ -2423,6 +2502,11 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
       } else if (c.status === "removed") {
         $th.addClass("col-removed").append($("<span>").addClass("col-status").text("removed"));
       }
+      // cute-dbt#165 — the Diff grid's unified column axis shares the same
+      // metadata map (a removed column simply has no entry — the map is
+      // filtered to the CURRENT table's columns in Rust).
+      var meta = colMeta && colMeta[c.name];
+      if (meta) $th.append(buildColTooltip(c.name, meta));
       $hr.append($th);
     });
     var $tbody = $("<tbody>").appendTo($tbl);
@@ -2524,8 +2608,8 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
   // element so a test can assert the authored-display rendering, the toggle,
   // and the tinted markup.
   if (typeof window !== "undefined") {
-    window.__cuteBuildFixtureView = function (table, cls, diff) {
-      return buildFixtureView(table, cls, diff)[0];
+    window.__cuteBuildFixtureView = function (table, cls, diff, colMeta) {
+      return buildFixtureView(table, cls, diff, colMeta)[0];
     };
     window.__cuteCellText = cellText;
     // cute-dbt#139 — the cell-change lens + the settings object, exposed so the

@@ -1,9 +1,14 @@
 version: 2
 
+# cute-dbt#165 dogfood — the staging columns mocked by the marts unit
+# tests carry authored descriptions, so the given-table column-header
+# tooltips surface description + column tests in the live PR-diff
+# preview report.
 models:
   - name: stg_customers
     columns:
       - name: customer_id
+        description: Unique identifier for a customer (staging grain)
         tests:
           - unique
           - not_null
@@ -11,10 +16,12 @@ models:
   - name: stg_orders
     columns:
       - name: order_id
+        description: Unique identifier for an order (staging grain)
         tests:
           - unique
           - not_null
       - name: status
+        description: Order lifecycle status as exported from the app
         tests:
           - accepted_values:
               arguments:
@@ -23,10 +30,12 @@ models:
   - name: stg_payments
     columns:
       - name: payment_id
+        description: Unique identifier for a payment (staging grain)
         tests:
           - unique
           - not_null
       - name: payment_method
+        description: Payment instrument used for this payment
         tests:
           - accepted_values:
               arguments:

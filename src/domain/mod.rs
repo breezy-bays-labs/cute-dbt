@@ -55,7 +55,9 @@ pub use cell_diff::{
 };
 pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};
-pub use manifest::{Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId};
+pub use manifest::{
+    Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, TestMetadata,
+};
 pub use path::{match_changed_path, normalize_path};
 pub use pr_diff::{
     BlockDiff, DiffLine, DiffLineKind, FileHunks, Hunk, NormalizedDiffIndex, PrDiff,
