@@ -67,10 +67,10 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, BlockDiff, CteGraph, EdgeType, Finding, FixtureTable, HeuristicId,
-    InScopeSet, Manifest, ModelInScopeSet, Node, NodeId, TestMetadata, UnitTest, UnitTestDataDiff,
-    UnitTestGiven, UnitTestYamlBlock, model_findings, resolve_target_model,
-    table_from_manifest_rows,
+    BANNER_EMPTY_SCOPE, BlockDiff, CheckPolicy, CteGraph, EdgeType, Finding, FixtureTable,
+    HeuristicId, InScopeSet, Manifest, ModelInScopeSet, Node, NodeId, TestMetadata, UnitTest,
+    UnitTestDataDiff, UnitTestGiven, UnitTestYamlBlock, apply_check_policy, model_findings,
+    resolve_target_model, table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -900,6 +900,7 @@ pub fn build_payload(
         data_diffs,
         &HashMap::new(),
         baseline_label,
+        &CheckPolicy::default(),
     )
 }
 
@@ -909,8 +910,16 @@ pub fn build_payload(
 /// given/expect on its inline-manifest path. The cli's run loop builds the
 /// map from the `ProjectFileReader`; baseline mode + every render path with
 /// no external `fixture:` files use the [`build_payload`] convenience.
+///
+/// `check_policy` (cute-dbt#171) is the resolved display policy applied to
+/// each model's findings AFTER supersedes resolution (the cli builds it
+/// from `--config` `[checks]` + scanned SQL pragmas; the [`build_payload`]
+/// convenience passes `CheckPolicy::default()` — everything displayed,
+/// nothing suppressed).
 #[must_use]
-#[allow(clippy::implicit_hasher)]
+// `too_many_arguments`: see `render_report` — the composition root threads
+// the run loop's already-built artifacts straight through.
+#[allow(clippy::implicit_hasher, clippy::too_many_arguments)]
 pub fn build_payload_with_externals(
     current: &Manifest,
     changed: &InScopeSet,
@@ -921,6 +930,7 @@ pub fn build_payload_with_externals(
     data_diffs: &HashMap<String, UnitTestDataDiff>,
     external_fixtures: &HashMap<String, ExternalFixtures>,
     baseline_label: &str,
+    check_policy: &CheckPolicy<HeuristicId>,
 ) -> ReportPayload {
     let model_tests = index_tests_for_models(current, models_in_scope);
     let empty: Vec<(&str, &UnitTest)> = Vec::new();
@@ -940,6 +950,7 @@ pub fn build_payload_with_externals(
             sql_diffs,
             data_diffs,
             external_fixtures,
+            check_policy,
         ));
     }
     ReportPayload {
@@ -999,6 +1010,7 @@ pub fn render_report(
         scope_source,
         report_title,
         report_subtitle,
+        &CheckPolicy::default(),
     )
 }
 
@@ -1027,6 +1039,7 @@ pub fn render_report_with_externals(
     scope_source: ScopeSource,
     report_title: &str,
     report_subtitle: Option<&str>,
+    check_policy: &CheckPolicy<HeuristicId>,
 ) -> io::Result<()> {
     let payload = build_payload_with_externals(
         current,
@@ -1038,6 +1051,7 @@ pub fn render_report_with_externals(
         data_diffs,
         external_fixtures,
         baseline_label,
+        check_policy,
     );
     // The empty-scope banner contract reads the TRUE in-scope set, not the
     // widened render set or the changed subset (cute-dbt#91).
@@ -1081,6 +1095,7 @@ fn build_model_payload(
     sql_diffs: &HashMap<String, BlockDiff>,
     data_diffs: &HashMap<String, UnitTestDataDiff>,
     external_fixtures: &HashMap<String, ExternalFixtures>,
+    check_policy: &CheckPolicy<HeuristicId>,
 ) -> ModelPayload {
     let bare_name = leaf_segment(model.id().as_str()).to_owned();
     let compiled_code = model.compiled_code().unwrap_or_default();
@@ -1134,7 +1149,11 @@ fn build_model_payload(
         // run loop's per-model work happens one stage downstream). The
         // already-parsed graph rides along so graph-fact checks
         // (cute-dbt#172) reuse the single parse pass.
-        findings: model_findings(current, model, Some(&graph)),
+        // cute-dbt#171 — the display policy applies strictly AFTER
+        // model_findings' evaluate-all → resolve-supersedes pipeline:
+        // selection removes, suppression marks (reason rides into the
+        // payload). The default policy is a no-op.
+        findings: apply_check_policy(model_findings(current, model, Some(&graph)), check_policy),
     }
 }
 

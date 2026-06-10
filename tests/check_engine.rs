@@ -14,10 +14,15 @@
 //! `dbt_utils.unique_combination_of_columns` node (`fct_patient_summary`)
 //! — plus models with NO unique_key and an explicit-`null` config arm.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cute_dbt::adapters::cte_engine::parse_cte_graph;
-use cute_dbt::domain::{Finding, HeuristicId, Manifest, NodeId, Verdict, model_findings};
+use cute_dbt::adapters::render::build_payload_with_externals;
+use cute_dbt::domain::{
+    CheckPolicy, ChecksConfig, Finding, HeuristicId, InScopeSet, Manifest, ModelInScopeSet, NodeId,
+    SuppressRule, SuppressionSource, Verdict, model_findings, resolve_check_policy,
+};
 use cute_dbt::ports::ManifestSource;
 
 /// Absolute path to a committed fixture under `tests/fixtures/`.
@@ -124,6 +129,71 @@ fn jaffle_shop_models_without_unique_key_carry_no_findings() {
             );
         }
     }
+}
+
+/// Build the real render payload for one playground model under a
+/// display policy (cute-dbt#171) and return its serialized JSON.
+fn payload_json_for(model_id: &str, policy: &CheckPolicy<HeuristicId>) -> serde_json::Value {
+    let manifest = load("playground-current.json");
+    let models: ModelInScopeSet = [NodeId::new(model_id)].into_iter().collect();
+    let changed: InScopeSet = std::iter::empty::<String>().collect();
+    let payload = build_payload_with_externals(
+        &manifest,
+        &changed,
+        &models,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "baseline.json",
+        policy,
+    );
+    serde_json::to_value(&payload.models[0]).expect("model payload serializes")
+}
+
+const MONTHLY: &str = "model.healthcare_analytics.fct_encounters_monthly";
+
+#[test]
+fn disabling_the_grain_group_removes_the_finding_from_the_real_payload() {
+    // The cute-dbt#171 selection path over real data: `disable =
+    // ["grain.*"]` resolved against the production registry empties the
+    // model's findings (and the key is serde-skipped entirely).
+    let config = ChecksConfig {
+        disable: Some(vec!["grain.*".to_owned()]),
+        ..Default::default()
+    };
+    let policy = resolve_check_policy::<HeuristicId>(&config).expect("policy resolves");
+    let model = payload_json_for(MONTHLY, &policy);
+    assert!(
+        model.get("findings").is_none(),
+        "disabled findings must be removed (and serde-skipped): {model}"
+    );
+}
+
+#[test]
+fn a_suppressed_finding_stays_in_the_real_payload_with_its_reason() {
+    // The cute-dbt#171 suppression path over real data: the finding is
+    // KEPT (verdict intact) and marked with source + reason — the
+    // payload contract the findings surface renders.
+    let policy = CheckPolicy {
+        suppressions: vec![SuppressRule {
+            check: HeuristicId::GrainUniqueKeyUnbacked,
+            model: "fct_encounters_monthly".to_owned(), // bare-name match
+            reason: Some("monthly grain duplicates accepted during backfill".to_owned()),
+            source: SuppressionSource::Config,
+        }],
+        ..Default::default()
+    };
+    let model = payload_json_for(MONTHLY, &policy);
+    let finding = &model["findings"][0];
+    assert_eq!(finding["check"], "grain.unique-key-unbacked");
+    assert_eq!(finding["verdict"]["status"], "uncovered");
+    assert_eq!(finding["suppressed"]["source"], "config");
+    assert_eq!(
+        finding["suppressed"]["reason"],
+        "monthly grain duplicates accepted during backfill"
+    );
 }
 
 #[test]
