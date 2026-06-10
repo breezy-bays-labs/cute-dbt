@@ -275,6 +275,110 @@ fn banner_states(world: &mut World, expected: String) {
     );
 }
 
+// --- cute-dbt#165 — column-header metadata payload facts --------------
+//
+// cucumber asserts the PAYLOAD facts through the real subprocess + the
+// committed jaffle-shop fixture (the wire round-trip); the rendered
+// tooltip DOM (focus reveals the bubble; no button on a bare column) is
+// asserted by `tests/headless_toggle.rs`.
+
+#[then(
+    regex = r#"^the report payload lists column tests "([^"]+)" and "([^"]+)" for the expected column "([^"]+)"$"#
+)]
+fn payload_expected_column_tests(world: &mut World, t1: String, t2: String, column: String) {
+    let meta = expected_column_meta(world, &column)
+        .unwrap_or_else(|| panic!("no expected-table column_meta entry for column {column:?}"));
+    let tests: Vec<String> = meta["tests"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t.as_str().map(str::to_owned))
+        .collect();
+    for wanted in [&t1, &t2] {
+        assert!(
+            tests.iter().any(|t| t == wanted),
+            "expected column {column:?} to list test {wanted:?}; got {tests:?}"
+        );
+    }
+    // The fixture's authored description for this column is EMPTY (fusion's
+    // unset shape) — it must be dropped, never carried as an empty string.
+    assert!(
+        meta.get("description").is_none(),
+        "an empty authored description must be dropped (no empty bubbles); got {meta}"
+    );
+}
+
+#[then(
+    regex = r#"^the report payload carries no column-header metadata for the expected column "([^"]+)"$"#
+)]
+fn payload_no_column_meta(world: &mut World, column: String) {
+    // Guard against vacuous truth: the column must actually be rendered in
+    // some expected table before we assert its metadata is absent.
+    let rendered = expected_tables(&report_payload(world)).iter().any(|t| {
+        t["columns"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|c| c.as_str() == Some(&column))
+    });
+    assert!(
+        rendered,
+        "column {column:?} is not in any expected table — the negative assertion would be vacuous"
+    );
+    assert!(
+        expected_column_meta(world, &column).is_none(),
+        "an undescribed, untested column must have NO column_meta entry"
+    );
+}
+
+/// Parse the embedded `cute-dbt-data` JSON payload from the rendered report.
+fn report_payload(world: &World) -> serde_json::Value {
+    let html = world
+        .report_html
+        .as_ref()
+        .unwrap_or_else(|| panic!("report.html was not written; stderr={}", world.last_stderr));
+    let dom = tl::parse(html, tl::ParserOptions::default()).expect("report HTML must parse");
+    let parser = dom.parser();
+    let node = dom
+        .get_element_by_id("cute-dbt-data")
+        .expect("report must include <script id=\"cute-dbt-data\">")
+        .get(parser)
+        .expect("payload node resolves");
+    serde_json::from_str(&node.inner_text(parser)).expect("embedded payload must be valid JSON")
+}
+
+/// Every test's `expected.table` object across every model in the payload.
+fn expected_tables(payload: &serde_json::Value) -> Vec<serde_json::Value> {
+    payload["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["tests"].as_array())
+        .flatten()
+        .filter_map(|t| {
+            let table = &t["expected"]["table"];
+            (!table.is_null()).then(|| table.clone())
+        })
+        .collect()
+}
+
+/// The `expected.column_meta[column]` entry of the first test that carries
+/// one, or `None` when no expected table has metadata for `column`.
+fn expected_column_meta(world: &World, column: &str) -> Option<serde_json::Value> {
+    let payload = report_payload(world);
+    payload["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["tests"].as_array())
+        .flatten()
+        .filter_map(|t| {
+            let entry = &t["expected"]["column_meta"][column];
+            (!entry.is_null()).then(|| entry.clone())
+        })
+        .next()
+}
+
 #[then(regex = r#"^stderr names the missing "--baseline-manifest" argument$"#)]
 fn stderr_names_missing_baseline(world: &mut World) {
     assert!(

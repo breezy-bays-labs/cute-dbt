@@ -48,8 +48,8 @@ use cute_dbt::adapters::render::{
 use cute_dbt::domain::{
     BlockDiff, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, FileHunks, Hunk,
     InScopeSet, Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId,
-    NormalizedDiffIndex, PrDiff, UnitTest, UnitTestDataDiff, UnitTestExpect, UnitTestGiven,
-    UnitTestYamlBlock, external_fixture_table, reconstruct_table_diffs,
+    NormalizedDiffIndex, PrDiff, TestMetadata, UnitTest, UnitTestDataDiff, UnitTestExpect,
+    UnitTestGiven, UnitTestYamlBlock, external_fixture_table, reconstruct_table_diffs,
 };
 use cute_dbt::ports::ManifestSource;
 
@@ -3839,6 +3839,204 @@ fn stacked_panel_does_not_blow_out_viewport_at_375px() {
              .some(function(w){return w.scrollWidth > w.clientWidth + 1;})",
         ),
         "the wide fixture table scrolls inside its `.table-fit` wrapper (containment, not erasure)",
+    );
+
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#165 — column-header tooltips ---------------------------
+
+/// A column-scoped generic-test node attached to `model_id` — the
+/// manifest shape `column_meta_for_model` resolves (column_name +
+/// attached_node + test_metadata).
+fn column_test_node(id: &str, model_id: &str, column: &str, test_name: &str) -> Node {
+    Node::new(
+        NodeId::new(id),
+        "test",
+        Checksum::new("sha256", "ck"),
+        None,
+        None,
+        DependsOn::default(),
+        None,
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+    .with_test_attachment(
+        Some(column.to_owned()),
+        Some(NodeId::new(model_id)),
+        Some(TestMetadata::new(test_name, None, serde_json::Value::Null)),
+    )
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn column_header_tooltips_focus_reveal_and_skip_bare_columns() {
+    // cute-dbt#165 — dim_x's `id` column is described AND carries
+    // unique/not_null column tests; its `status` column has neither. The
+    // expect table renders both columns, so its thead must carry exactly
+    // ONE tooltip button (on `id`) — the negative path pins the
+    // "no empty bubbles" contract. The stg_src given verifies a given
+    // table resolves ITS OWN input model's metadata, not the target's.
+    // Mirrors the #146 expect-tooltip guards: focusable <button>, bubble
+    // hidden until hover/focus, FOCUS reveals it (keyboard path), aria
+    // parity.
+    let mut dim_desc = BTreeMap::new();
+    dim_desc.insert("id".to_owned(), "Primary key for dim_x".to_owned());
+    let dim = model_node("model.shop.dim_x").with_column_descriptions(dim_desc);
+    let mut src_desc = BTreeMap::new();
+    src_desc.insert("src_id".to_owned(), "Source key for stg_src".to_owned());
+    let src = model_node("model.shop.stg_src").with_column_descriptions(src_desc);
+
+    let ut = UnitTest::new(
+        "cols".to_owned(),
+        NodeId::new("dim_x"),
+        vec![UnitTestGiven::new(
+            "ref('stg_src')".to_owned(),
+            serde_json::json!([{ "src_id": 1, "bare_col": 2 }]),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1, "status": "ok" }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+
+    let url = render_to_file(
+        "headless_col_tooltips.html",
+        vec![
+            dim,
+            src,
+            column_test_node(
+                "test.shop.unique_dim_x_id",
+                "model.shop.dim_x",
+                "id",
+                "unique",
+            ),
+            column_test_node(
+                "test.shop.not_null_dim_x_id",
+                "model.shop.dim_x",
+                "id",
+                "not_null",
+            ),
+        ],
+        vec![("unit_test.shop.dim_x.cols", ut)],
+        &["model.shop.dim_x"],
+        &[], // 0 changed → auto-All mode → the test is selected with content
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    select_model(&tab, "dim_x");
+
+    // ===== expected table: exactly one tooltip, on the `id` th =====
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelectorAll('.expected-panel th .col-tooltip').length"
+        )
+        .as_u64(),
+        Some(1),
+        "exactly one column-tooltip button in the expect thead (id yes, status no)",
+    );
+    const BTN: &str = "document.querySelector('.expected-panel th .col-tooltip')";
+    assert_eq!(
+        eval_string(&tab, &format!("{BTN}.tagName")),
+        "BUTTON",
+        "the column tooltip is a focusable <button>, not a hover-only span (#146 pattern)",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{BTN}.closest('th').getAttribute('title')")),
+        "id",
+        "the tooltip rides the described+tested column's th",
+    );
+    // The negative path: the metadata-less column has NO affordance.
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.expected-panel th[title=\"status\"] .col-tooltip') === null"
+        ),
+        "a column with no description and no tests gets no tooltip button",
+    );
+
+    // ===== bubble content: description + summarized column tests =====
+    let bubble_text = eval_string(
+        &tab,
+        &format!("{BTN}.querySelector('.col-tooltip-bubble').textContent"),
+    );
+    assert!(
+        bubble_text.contains("Primary key for dim_x"),
+        "the bubble carries the authored description, got {bubble_text:?}",
+    );
+    assert!(
+        bubble_text.contains("unique") && bubble_text.contains("not_null"),
+        "the bubble lists the column-level data tests, got {bubble_text:?}",
+    );
+    let aria = eval_string(&tab, &format!("{BTN}.getAttribute('aria-label')"));
+    assert!(
+        aria.contains("Primary key for dim_x") && aria.contains("unique"),
+        "the aria-label carries the same content for assistive tech, got {aria:?}",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "{BTN}.querySelector('.col-tooltip-bubble').getAttribute('aria-hidden') === 'true'"
+            )
+        ),
+        "the bubble is aria-hidden so the content is not announced twice",
+    );
+
+    // ===== visibility: hidden until focus; FOCUS reveals (keyboard path) =====
+    const BUBBLE_VIS: &str = "getComputedStyle(document.querySelector('.expected-panel th .col-tooltip .col-tooltip-bubble')).visibility";
+    assert_eq!(
+        eval_string(&tab, BUBBLE_VIS),
+        "hidden",
+        "the bubble is hidden until hover/focus",
+    );
+    let _ = eval(&tab, &format!("{BTN}.focus()"));
+    assert_eq!(
+        eval_string(&tab, BUBBLE_VIS),
+        "visible",
+        "focusing the button reveals the bubble (the keyboard path a native title never had)",
+    );
+
+    // ===== given table: the INPUT model's metadata, filtered the same =====
+    show_all_inputs(&tab);
+    const GIVEN_BTN: &str = "document.querySelector('.given-section th .col-tooltip')";
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelectorAll('.given-section th .col-tooltip').length"
+        )
+        .as_u64(),
+        Some(1),
+        "exactly one tooltip in the given thead (src_id yes, bare_col no)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{GIVEN_BTN}.closest('th').getAttribute('title')")
+        ),
+        "src_id",
+        "the given tooltip rides the input model's described column",
+    );
+    let given_bubble = eval_string(
+        &tab,
+        &format!("{GIVEN_BTN}.querySelector('.col-tooltip-bubble').textContent"),
+    );
+    assert!(
+        given_bubble.contains("Source key for stg_src"),
+        "the given bubble carries the INPUT model's description, got {given_bubble:?}",
     );
 
     let _ = tab.close(true);

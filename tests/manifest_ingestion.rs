@@ -111,6 +111,80 @@ fn golden_baseline_manifest_digest() {
 }
 
 #[test]
+fn real_fixture_carries_column_descriptions_and_column_test_attribution() {
+    // cute-dbt#165 verified against the REAL fusion-compiled jaffle-shop
+    // fixture (not just synthetic JSON — fusion null-fills unset Options
+    // and serializes an unset column description as `""`, shapes
+    // synthetic tests miss).
+    let manifest = FileManifestSource
+        .load(&fixture("jaffle-shop-current.json"))
+        .expect("the current fixture is a valid compiled v12 manifest");
+
+    // Authored column description on the customers model.
+    let customers = manifest
+        .node(&NodeId::new("model.jaffle_shop.customers"))
+        .expect("customers model present");
+    assert_eq!(
+        customers
+            .column_descriptions()
+            .get("customer_id")
+            .map(String::as_str),
+        Some("This is a unique identifier for a customer"),
+    );
+
+    // fusion serializes stg_customers.customer_id's UNSET description as
+    // `""` — the adapter must drop it (no empty-bubble noise downstream).
+    let stg_customers = manifest
+        .node(&NodeId::new("model.jaffle_shop.stg_customers"))
+        .expect("stg_customers model present");
+    assert!(stg_customers.columns().contains_key("customer_id"));
+    assert!(
+        !stg_customers
+            .column_descriptions()
+            .contains_key("customer_id"),
+        "an empty wire description must not survive ingestion",
+    );
+
+    // Column-scoped generic tests: unique + not_null on
+    // stg_customers.customer_id, attributed via attached_node +
+    // column_name + test_metadata.
+    let mut names: Vec<&str> = manifest
+        .nodes()
+        .values()
+        .filter(|n| {
+            n.resource_type() == "test"
+                && n.attached_node() == Some(&NodeId::new("model.jaffle_shop.stg_customers"))
+                && n.column_name() == Some("customer_id")
+        })
+        .filter_map(|n| n.test_metadata().map(cute_dbt::domain::TestMetadata::name))
+        .collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["not_null", "unique"],
+        "stg_customers.customer_id carries its two column-scoped tests",
+    );
+
+    // accepted_values kwargs pass through untyped (the render layer
+    // summarizes `values`).
+    let accepted = manifest
+        .nodes()
+        .values()
+        .find(|n| {
+            n.attached_node() == Some(&NodeId::new("model.jaffle_shop.orders"))
+                && n.column_name() == Some("status")
+                && n.test_metadata()
+                    .is_some_and(|tm| tm.name() == "accepted_values")
+        })
+        .expect("the fixture carries an accepted_values test on orders.status");
+    let tm = accepted.test_metadata().expect("metadata present");
+    assert!(
+        tm.kwargs()["values"].is_array(),
+        "accepted_values kwargs carry the authored values list",
+    );
+}
+
+#[test]
 fn baseline_and_current_form_the_modified_stg_customers_diff_pair() {
     // PR 5's StateComparator diffs node body checksums; PR 4b must carry
     // that signal through translation intact. The fixtures are a pair:
