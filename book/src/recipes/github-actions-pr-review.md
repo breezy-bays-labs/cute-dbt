@@ -23,11 +23,14 @@ Two delivery options:
 
 > ⚠️ **Privacy — read this before choosing.** GitHub Pages on a
 > **private** repository is **still publicly reachable by URL** — Pages
-> does not authenticate visitors on the Free or Pro tier. If your dbt
+> does not authenticate visitors on the Free or Pro tier (private Pages
+> visibility exists only on GitHub Enterprise Cloud). If your dbt
 > models, fixtures, or column names are sensitive, **use the artifact
 > link** (artifacts are gated behind repo-read auth). The Pages preview is
-> only safe for data you would publish openly. cute-dbt does not detect
-> this mismatch for you in v0.1 — the choice is yours to make.
+> only safe for data you would publish openly. The Pages workflow below
+> includes a **privacy guard** step ([§ 4a](#4a-the-privacy-guard-step))
+> that detects the private-repo → public-Pages mismatch and **fails the
+> run before anything is published**.
 
 ## 1. What this gives you
 
@@ -151,7 +154,48 @@ jobs:
     permissions:
       contents: write        # peaceiris/actions-gh-pages pushes to gh-pages
       pull-requests: write    # sticky comment
+      pages: read            # the privacy guard reads the Pages visibility
     steps:
+      # --- Privacy guard: refuse to publish a PRIVATE repo's report to
+      #     PUBLIC GitHub Pages. Runs FIRST so a refused run spends no
+      #     compile minutes and publishes nothing. Fail-closed — see § 4a
+      #     for what it checks and the ALLOW_PUBLIC_PAGES opt-in. ---
+      - name: Privacy guard — private repo vs public Pages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ALLOW_PUBLIC_PAGES: ${{ vars.ALLOW_PUBLIC_PAGES }}
+        run: |
+          set -euo pipefail
+          repo_private=$(gh api "repos/${REPO}" --jq '.private')
+          if [ "$repo_private" = "false" ]; then
+            echo "Privacy guard: repository is public — publishing to Pages exposes nothing new."
+            exit 0
+          elif [ "$repo_private" != "true" ]; then
+            echo "::error title=Privacy guard::Could not reliably determine repository privacy status (received: '${repo_private}'). Failing closed."
+            exit 1
+          fi
+          # The repo is private (or internal). Publishing is safe only when
+          # the Pages site itself is private (Enterprise Cloud). A 404
+          # (Pages not enabled yet) or 403 (token lacks pages: read) lands
+          # in the fail-closed arm below.
+          pages_visibility=$(gh api "repos/${REPO}/pages" --jq '.visibility // "unknown"' 2>/dev/null || echo "unreadable")
+          if [ "$pages_visibility" = "private" ]; then
+            echo "Privacy guard: private repo with private (Enterprise) Pages — safe to publish."
+            exit 0
+          fi
+          if [ "${ALLOW_PUBLIC_PAGES:-}" = "true" ]; then
+            echo "::warning title=Privacy guard overridden::ALLOW_PUBLIC_PAGES=true — publishing a PRIVATE repo's report to a Pages site with visibility '${pages_visibility}'. Anyone with the URL can read it."
+            exit 0
+          fi
+          echo "::error title=Privacy guard::This repository is PRIVATE but its GitHub Pages site is not confirmed private (visibility: '${pages_visibility}'). Publishing would expose the report to anyone with the URL."
+          echo "Remediation:"
+          echo "  1. Use the artifact-link variant instead (downloads are auth-gated):"
+          echo "     https://breezy-bays-labs.github.io/cute-dbt/recipes/github-actions-pr-review.html"
+          echo "  2. On GitHub Enterprise Cloud, set the Pages site visibility to 'private'."
+          echo "  3. To knowingly publish anyway, set the repository variable ALLOW_PUBLIC_PAGES=true."
+          exit 1
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0           # base + head SHAs must be present
@@ -228,10 +272,62 @@ jobs:
             Scoped to the models + unit tests this PR changed.
 ```
 
+## 4a. The privacy guard step
+
+The first step of the Pages workflow refuses to publish a **private**
+repository's report to a **public** Pages site. Org/user Pages sites are
+publicly URL-reachable even when the repo is private — Pages does not
+authenticate visitors unless the site's visibility is `private`, which is
+a [GitHub Enterprise Cloud feature](https://docs.github.com/en/enterprise-cloud@latest/pages/getting-started-with-github-pages/changing-the-visibility-of-your-github-pages-site).
+A team wiring this recipe into a private dbt repo would otherwise publish
+its model names, fixture data, and column names to the open web on the
+first PR.
+
+What it checks, via two GitHub API reads (both served by the default
+`GITHUB_TOKEN`; the Pages read needs `pages: read` in the job
+permissions, set above):
+
+1. `gh api repos/$REPO --jq '.private'` — is the repository private (or
+   internal)?
+2. `gh api repos/$REPO/pages --jq '.visibility'` — is the Pages site
+   itself private?
+
+| Repo | Pages visibility | Outcome |
+|---|---|---|
+| public (explicit `false`) | any | ✅ pass — publishing exposes nothing new |
+| private / internal | `private` (Enterprise) | ✅ pass |
+| private / internal | `public` | ❌ **fail before publishing** |
+| private / internal | unknown (Pages not enabled yet, or no `pages: read`) | ❌ **fail before publishing** (fail-closed) |
+| anomaly (`.private` read returns neither `true` nor `false`) | any | ❌ **fail before publishing** (fail-closed, regardless of `ALLOW_PUBLIC_PAGES`) |
+| private / internal | not `private`, `ALLOW_PUBLIC_PAGES=true` | ⚠️ warn + publish (explicit opt-in) |
+
+Both "unknown" rows are deliberate. The guard bypasses only on an
+**explicit `false`** from the repository-privacy read — an empty string,
+`null`, or any other API anomaly fails closed rather than silently
+skipping the guard. And when Pages isn't enabled yet, the first
+publish creates the `gh-pages` branch and a later "enable Pages" click
+defaults the site to public — so the guard refuses until the safe state
+is provable.
+
+If you understand the exposure and want the Pages preview anyway (e.g. a
+private playground repo with synthetic data), set the **repository
+variable** `ALLOW_PUBLIC_PAGES` to `true` (Settings → Secrets and
+variables → Actions → Variables). The guard then downgrades to a warning
+annotation instead of failing. Otherwise the remediation is the
+[artifact-link variant](#5-artifact-link-private-repos--pages-less) below
+— artifact downloads sit behind repo-read auth, so it needs no guard —
+or Enterprise private Pages.
+
+The guard never sends your data anywhere — it makes two metadata reads
+against your own repo and exits; the report itself still
+[makes zero external requests](../zero-egress.md).
+
 ## 5. Artifact link (private repos / Pages-less)
 
 **Identical to the Pages preview** except: the job needs no
-`contents: write`, and the
+`contents: write` and no `pages: read`, the privacy-guard step is dropped
+(nothing is published — artifact downloads sit behind repo-read auth, so
+there is no mismatch to guard), and the
 `peaceiris/actions-gh-pages` step is replaced by an artifact upload + a
 download link in the comment.
 
@@ -433,6 +529,15 @@ jobs:
   manifest paths) and that `fetch-depth: 0` is set so the diff resolves.
 - **Pages link 404s** — Pages isn't enabled, or it's pointed at the wrong
   branch. Enable it on `gh-pages` (§ 2), or switch to the artifact link.
+- **`Privacy guard: This repository is PRIVATE but its GitHub Pages site
+  is not confirmed private`** — working as intended (§ 4a): your repo is
+  private and publishing to Pages would expose the report publicly.
+  Switch to the artifact-link variant (§ 5), move to Enterprise private
+  Pages, or — only if you accept the public exposure — set the repository
+  variable `ALLOW_PUBLIC_PAGES=true`. The guard also fires when Pages
+  isn't enabled yet or the job lacks `pages: read` (it fails closed when
+  the safe state can't be verified — check the `permissions:` block
+  matches § 4).
 - **Fork PRs:** with `pull_request` (not `pull_request_target`), forks get
   a read-only `GITHUB_TOKEN`, so the Pages-publish and sticky-comment steps
   silently no-op on fork PRs (same-repo branches are unaffected). If you

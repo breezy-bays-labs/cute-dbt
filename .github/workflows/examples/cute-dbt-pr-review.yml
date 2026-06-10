@@ -11,9 +11,12 @@
 # callout — lives at
 # https://breezy-bays-labs.github.io/cute-dbt/recipes/github-actions-pr-review.html
 #
-# ⚠ PRIVACY: GitHub Pages on a PRIVATE repo is still publicly URL-reachable.
-# If your dbt models / data are sensitive, use Variant 2B (artifact link)
-# from the recipe page instead — do NOT publish to Pages.
+# ⚠ PRIVACY: GitHub Pages on a PRIVATE repo is still publicly URL-reachable
+# (private Pages visibility exists only on GitHub Enterprise Cloud). The
+# "Privacy guard" step below detects that mismatch and FAILS the run
+# before anything is published (cute-dbt#79). If your dbt models / data
+# are sensitive, use Variant 2B (artifact link) from the recipe page
+# instead — artifact downloads are auth-gated and need no guard.
 
 name: cute-dbt PR review
 
@@ -35,7 +38,56 @@ jobs:
     permissions:
       contents: write        # peaceiris/actions-gh-pages pushes to gh-pages
       pull-requests: write   # sticky comment (see fork-PR caveat in the recipe)
+      pages: read            # the privacy guard reads the Pages visibility
     steps:
+      # --- Privacy guard (cute-dbt#79): refuse to publish a PRIVATE repo's
+      #     report to PUBLIC GitHub Pages. Pages sites are publicly
+      #     URL-reachable even when the repo is private — private Pages
+      #     visibility exists only on GitHub Enterprise Cloud. Runs FIRST so
+      #     a refused run spends no compile minutes and publishes nothing.
+      #     Fail-closed: a private repo whose Pages visibility cannot be
+      #     confirmed `private` (including Pages not enabled yet — it
+      #     defaults to public when enabled) fails here. Needs `pages: read`
+      #     (set above). Remediation options are printed by the step. ---
+      - name: Privacy guard — private repo vs public Pages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          # Repository variable (Settings → Secrets and variables → Actions
+          # → Variables). Set to 'true' ONLY to explicitly acknowledge that
+          # the published report becomes publicly reachable.
+          ALLOW_PUBLIC_PAGES: ${{ vars.ALLOW_PUBLIC_PAGES }}
+        run: |
+          set -euo pipefail
+          repo_private=$(gh api "repos/${REPO}" --jq '.private')
+          if [ "$repo_private" = "false" ]; then
+            echo "Privacy guard: repository is public — publishing to Pages exposes nothing new."
+            exit 0
+          elif [ "$repo_private" != "true" ]; then
+            echo "::error title=Privacy guard::Could not reliably determine repository privacy status (received: '${repo_private}'). Failing closed."
+            exit 1
+          fi
+          # The repo is private (or internal). Publishing is safe only when
+          # the Pages site itself is private (Enterprise Cloud). A 404
+          # (Pages not enabled yet) or 403 (token lacks pages: read) lands
+          # in the fail-closed arm below.
+          pages_visibility=$(gh api "repos/${REPO}/pages" --jq '.visibility // "unknown"' 2>/dev/null || echo "unreadable")
+          if [ "$pages_visibility" = "private" ]; then
+            echo "Privacy guard: private repo with private (Enterprise) Pages — safe to publish."
+            exit 0
+          fi
+          if [ "${ALLOW_PUBLIC_PAGES:-}" = "true" ]; then
+            echo "::warning title=Privacy guard overridden::ALLOW_PUBLIC_PAGES=true — publishing a PRIVATE repo's report to a Pages site with visibility '${pages_visibility}'. Anyone with the URL can read it."
+            exit 0
+          fi
+          echo "::error title=Privacy guard::This repository is PRIVATE but its GitHub Pages site is not confirmed private (visibility: '${pages_visibility}'). Publishing would expose the report to anyone with the URL."
+          echo "Remediation:"
+          echo "  1. Use the artifact-link variant instead (downloads are auth-gated):"
+          echo "     https://breezy-bays-labs.github.io/cute-dbt/recipes/github-actions-pr-review.html"
+          echo "  2. On GitHub Enterprise Cloud, set the Pages site visibility to 'private'."
+          echo "  3. To knowingly publish anyway, set the repository variable ALLOW_PUBLIC_PAGES=true."
+          exit 1
+
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0           # base + head SHAs must be present for the diff
