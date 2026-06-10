@@ -62,7 +62,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::adapters::asset_embed::{
-    DATATABLES_CSS, DATATABLES_JS, FAVICON_DATA_URI, JQUERY_JS, MERMAID_JS, SAKURA_CSS,
+    DATATABLES_CSS, DATATABLES_JS, FAVICON_DATA_URI, JQUERY_JS, MERMAID_JS, REPORT_CSS, SAKURA_CSS,
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
@@ -643,6 +643,10 @@ pub enum ScopeSource {
 struct ReportTemplate<'a> {
     sakura_css: &'a str,
     datatables_css: &'a str,
+    /// First-party chassis CSS (cute-dbt#177) — the semantic-token +
+    /// theme + style-pack + density layer that fills the template's
+    /// custom `<style>` block. [`REPORT_CSS`], not a vendored asset.
+    report_css: &'a str,
     jquery_js: &'a str,
     datatables_js: &'a str,
     mermaid_js: &'a str,
@@ -921,6 +925,7 @@ pub fn render_report_with_externals(
     let template = ReportTemplate {
         sakura_css: SAKURA_CSS,
         datatables_css: DATATABLES_CSS,
+        report_css: REPORT_CSS,
         jquery_js: JQUERY_JS,
         datatables_js: DATATABLES_JS,
         mermaid_js: MERMAID_JS,

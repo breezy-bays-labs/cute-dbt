@@ -107,6 +107,7 @@ fn replace(new_start: usize, removed: &[&str], added: &[&str]) -> Hunk {
 /// Build the single-file `NormalizedDiffIndex` for [`OFP`].
 fn index_for(hunks: Vec<Hunk>) -> NormalizedDiffIndex {
     let diff = PrDiff {
+        renames: Vec::new(),
         files: vec![FileHunks {
             path: OFP.to_owned(),
             hunks,

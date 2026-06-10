@@ -42,7 +42,9 @@ use super::builders::{
     empty_manifest, model_node_with_original_file_path, serialize_to_tmp, unit_test_for,
     unit_test_with_path, with_node, with_unit_test,
 };
-use super::world::{BlockTarget, BlockTargetKind, ModelSqlTarget, ModelSqlTargetKind};
+use super::world::{
+    BlockTarget, BlockTargetKind, ModelSqlTarget, ModelSqlTargetKind, RenameDirective,
+};
 
 /// Synthetic compiled SQL with one import CTE, so a rendered model card
 /// carries a non-empty CTE DAG (the `contains a CTE diagram for …`
@@ -308,6 +310,29 @@ fn synthesize_pr_diff(
     project_root: &str,
 ) -> PathBuf {
     let mut patch = String::new();
+    // Git-rename header blocks (cute-dbt#80) — the exact shape `git diff`
+    // emits with rename detection on (verified against git 2.51): a pure
+    // rename is ONLY the extended headers; a rename-with-edit adds the
+    // `---`/`+++` file headers and its hunks.
+    for rename in &world.renames {
+        let (from, to) = (&rename.from, &rename.to);
+        if rename.edited {
+            patch.push_str(&format!(
+                "diff --git a/{from} b/{to}\nsimilarity index 76%\nrename from {from}\nrename to {to}\n--- a/{from}\n+++ b/{to}\n"
+            ));
+            push_hunk(
+                &mut patch,
+                1,
+                1,
+                &["old line".to_owned()],
+                &["new line".to_owned()],
+            );
+        } else {
+            patch.push_str(&format!(
+                "diff --git a/{from} b/{to}\nsimilarity index 100%\nrename from {from}\nrename to {to}\n"
+            ));
+        }
+    }
     for changed in &world.changed_files {
         let is_yaml = changed.ends_with(".yml") || changed.ends_with(".yaml");
         let tests = tests_declared_in(manifest, changed, project_root);
@@ -365,6 +390,26 @@ fn pr_diff_changes_one(world: &mut World, path: String) {
 #[given(regex = r#"^a PR diff that changes (?:only )?"([^"]+)" and "([^"]+)"$"#)]
 fn pr_diff_changes_two(world: &mut World, a: String, b: String) {
     world.changed_files = vec![a, b];
+}
+
+// --- Given: git renames (cute-dbt#80) --------------------------------
+
+#[given(regex = r#"^a PR diff that renames "([^"]+)" to "([^"]+)" with no content change$"#)]
+fn pr_diff_pure_rename(world: &mut World, from: String, to: String) {
+    world.renames.push(RenameDirective {
+        from,
+        to,
+        edited: false,
+    });
+}
+
+#[given(regex = r#"^a PR diff that renames "([^"]+)" to "([^"]+)" and edits it$"#)]
+fn pr_diff_rename_with_edit(world: &mut World, from: String, to: String) {
+    world.renames.push(RenameDirective {
+        from,
+        to,
+        edited: true,
+    });
 }
 
 #[given("a PR diff file whose contents are not a valid unified diff")]

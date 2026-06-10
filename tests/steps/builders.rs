@@ -81,6 +81,35 @@ pub fn model_node(bare: &str, checksum: &str, compiled: Option<&str>) -> Node {
     )
 }
 
+/// Construct a model `Node` like [`model_node`] but carrying an explicit
+/// resolved config dict (cute-dbt#160 — the config-only-change
+/// scenarios). Contract stays unenforced; the other facets mirror
+/// [`model_node`].
+#[must_use]
+pub fn model_node_with_config(
+    bare: &str,
+    checksum: &str,
+    compiled: Option<&str>,
+    config: &[(&str, &str)],
+) -> Node {
+    let map: BTreeMap<String, Value> = config
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), Value::from(*v)))
+        .collect();
+    Node::new(
+        model_id(bare),
+        "model",
+        Checksum::new("sha256", checksum),
+        compiled.map(str::to_owned),
+        None,
+        DependsOn::default(),
+        None,
+        NodeConfig::new(map, false),
+        None,
+        BTreeMap::new(),
+    )
+}
+
 /// Construct a minimal `UnitTest` targeting the model `target` with
 /// empty given/expect blocks. The scenarios only assert scoping
 /// membership and identity — the fixture rows are noise here.
@@ -226,6 +255,37 @@ pub fn serialize_to_tmp(manifest: &Manifest, name: &str) -> PathBuf {
     let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.json"));
     let json = serde_json::to_string(manifest).expect("synthetic manifest serializes");
     std::fs::write(&path, json).expect("write synthetic manifest to temp file");
+    path
+}
+
+/// Serialize a synthetic `Manifest` like [`serialize_to_tmp`], but
+/// rewriting each node's `config` to dbt's FLAT wire dict (cute-dbt#160).
+///
+/// The cute-dbt#145 wire-shape divergence applies: the domain serializes
+/// [`NodeConfig`] as a nested `{ config: {...}, contract_enforced }`
+/// struct while the wire reader **flattens** `config`, so a plain
+/// domain→JSON→wire round-trip would mangle the config dict — and with
+/// it the config-only divergence the `--modified-selectors configs`
+/// scenarios assert. Each node's domain config map is injected verbatim
+/// as the wire `config` object instead.
+#[must_use]
+pub fn serialize_with_wire_config_to_tmp(manifest: &Manifest, name: &str) -> PathBuf {
+    let mut value: Value = serde_json::to_value(manifest).expect("manifest serializes to Value");
+    for (id, node) in manifest.nodes() {
+        let config: serde_json::Map<String, Value> = node
+            .config()
+            .config()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        value["nodes"][id.as_str()]["config"] = Value::Object(config);
+    }
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.json"));
+    std::fs::write(
+        &path,
+        serde_json::to_string(&value).expect("injected manifest serializes"),
+    )
+    .expect("write synthetic manifest to temp file");
     path
 }
 

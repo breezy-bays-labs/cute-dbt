@@ -213,8 +213,13 @@ changed (or whose test definition itself changed). The **default**
 comparator ships honest body-checksum fidelity; the four sub-selectors
 (`.configs` / `.relation` / `.macros` / `.contract`) have landed as
 additive trait impls (cute-dbt#17), composable via
-`StateComparator::with_sub_selectors()` and opt-in (the default path
-stays body-only until a CLI selector flag wires them).
+`StateComparator::with_sub_selectors()` and opt-in. The CLI selector
+flag that wires them is `--modified-selectors` (cute-dbt#160): the
+chosen kinds compose via `StateComparator::from_selectors()` alongside
+the always-registered body modifier, the tokens mirror dbt's
+`state:modified.<sub>` vocabulary, and the no-flag default path stays
+body-only (baseline arm only — the PrDiff arm never constructs a
+comparator, so the flag conflicts with `--pr-diff` at parse time).
 
 **`StateComparator` is a domain strategy, not a port.** It is pure
 computation over two already-parsed domain manifests with no I/O. Putting
@@ -239,7 +244,11 @@ pub struct StateComparator { modifiers: Vec<Box<dyn StateModifier>> }
 
 `StateComparator::body_only()` constructs the default (body modifier
 only); `StateComparator::with_sub_selectors()` registers the body modifier
-plus all four sub-selectors. `modified_set()` applies **OR-union
+plus all four sub-selectors; `StateComparator::from_selectors()` (the
+`--modified-selectors` seam, cute-dbt#160) registers the body modifier
+plus exactly the requested kinds, deduped, in canonical order —
+`from_selectors(&[])` is behaviorally identical to `body_only()`.
+`modified_set()` applies **OR-union
 semantics** across registered modifiers (matching dbt's behavior across
 sub-selectors), so the choice of constructor only widens what counts as
 modified — it never restructures the comparator.
@@ -260,7 +269,8 @@ The default body-checksum comparator misses a pure `.configs` /
 `.relation` / `.macros` / `.contract` change; the README and the
 diff-scope banner name this limit. It is not a defect — it is the default
 scope. The four sub-selector modifiers (cute-dbt#17) lift it when
-composed via `with_sub_selectors()`, each landing exactly as ADR-3's
+composed via `with_sub_selectors()` — or per run via the
+`--modified-selectors` CLI flag (cute-dbt#160) — each landing exactly as ADR-3's
 revisit condition predicted: a single additive `impl StateModifier` block
 plus registration in the constructor — the comparator, the domain model,
 and the scoping step did not change. The `.macros` selector compares the

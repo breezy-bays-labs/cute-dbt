@@ -11,10 +11,10 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::{ArgGroup, Parser};
+use clap::{ArgGroup, Parser, ValueEnum};
 
 use crate::adapters::config_reader::load_config;
-use crate::domain::{AnalysisConfig, PrDiff};
+use crate::domain::{AnalysisConfig, ModifierKind, PrDiff};
 
 /// cute-dbt — render a diff-scoped, self-contained HTML report of a dbt
 /// project's unit tests.
@@ -96,6 +96,77 @@ pub struct Cli {
     /// without the authoring-YAML drawer.
     #[arg(long, value_name = "PATH", value_parser = parse_project_root)]
     pub project_root: Option<PathBuf>,
+
+    /// Opt-in `state:modified` sub-selectors that widen baseline
+    /// diff-scoping beyond the body-only default (comma-separated).
+    ///
+    /// dbt's own bare `state:modified` ORs every sub-selector together;
+    /// cute-dbt's default is deliberately the narrower
+    /// `state:modified.body`. This flag composes the chosen
+    /// sub-selectors ALONGSIDE the always-on body checksum (the same OR
+    /// union dbt applies), so e.g. `--modified-selectors configs` also
+    /// scopes a config-only change (say, an incremental-strategy edit in
+    /// `dbt_project.yml`) that leaves the model body checksum identical.
+    /// The selector tokens match dbt's `state:modified.<sub>` vocabulary;
+    /// `body` is accepted but always active. dbt's
+    /// `persisted_descriptions` sub-selector is not implemented. Note
+    /// `configs` diffs the manifest's *resolved* config dict, which can
+    /// over-report relative to dbt's unrendered-config diff (it never
+    /// under-reports).
+    ///
+    /// Baseline arm only: the `--pr-diff` arm scopes by changed file
+    /// paths and never consults a `state:modified` comparator, so
+    /// combining this flag with `--pr-diff` is a clap usage error
+    /// (exit 2) rather than a silently ignored no-op.
+    #[arg(
+        long,
+        value_name = "SELECTORS",
+        value_delimiter = ',',
+        conflicts_with = "pr_diff"
+    )]
+    pub modified_selectors: Vec<ModifiedSelector>,
+}
+
+/// One `--modified-selectors` token — the CLI-layer twin of the domain
+/// [`ModifierKind`] (the domain stays clap-free; ADR-1).
+///
+/// The token set mirrors dbt's `state:modified.<sub>` sub-selector
+/// vocabulary (dbt-fusion `node_selector.rs`
+/// `StateModifiedSubType::from_str`, SHA `9977b6c`): `body`, `configs`,
+/// `relation`, `macros`, `contract`. fusion's sixth token,
+/// `persisted_descriptions`, has no cute-dbt modifier yet and is
+/// rejected by clap's possible-values validation like any other unknown
+/// token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ModifiedSelector {
+    /// `state:modified.body` — the model body checksum. Always active;
+    /// accepted here so the full dbt vocabulary parses.
+    Body,
+    /// `state:modified.configs` — the resolved config dict changed.
+    Configs,
+    /// `state:modified.relation` — the fully-qualified relation name
+    /// (database / schema / alias / identifier) changed.
+    Relation,
+    /// `state:modified.macros` — the set of upstream macros the node
+    /// depends on changed.
+    Macros,
+    /// `state:modified.contract` — `config.contract.enforced` flipped or
+    /// the declared column set changed.
+    Contract,
+}
+
+impl ModifiedSelector {
+    /// The domain [`ModifierKind`] this CLI token selects.
+    #[must_use]
+    pub fn kind(self) -> ModifierKind {
+        match self {
+            Self::Body => ModifierKind::Body,
+            Self::Configs => ModifierKind::Configs,
+            Self::Relation => ModifierKind::Relation,
+            Self::Macros => ModifierKind::Macros,
+            Self::Contract => ModifierKind::Contract,
+        }
+    }
 }
 
 /// clap value-parser: read + deserialize the TOML at `--config <PATH>`.
@@ -577,6 +648,175 @@ tilte = "typo'd"
             "error names the not-a-directory condition: {err}"
         );
         let _ = std::fs::remove_file(&file);
+    }
+
+    // ----- --modified-selectors (cute-dbt#160) -----
+
+    #[test]
+    fn modified_selectors_defaults_to_empty() {
+        let cli = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+        ])
+        .expect("no --modified-selectors parses");
+        assert!(
+            cli.modified_selectors.is_empty(),
+            "the default is the body-only scope — no opt-in selectors",
+        );
+    }
+
+    #[test]
+    fn modified_selectors_parses_comma_separated_tokens() {
+        let cli = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+            "--modified-selectors",
+            "configs,relation",
+        ])
+        .expect("comma-separated selectors parse");
+        assert_eq!(
+            cli.modified_selectors,
+            vec![ModifiedSelector::Configs, ModifiedSelector::Relation],
+        );
+    }
+
+    #[test]
+    fn modified_selectors_accepts_the_full_state_modified_vocabulary() {
+        // The token set mirrors dbt's state:modified.<sub> vocabulary
+        // (fusion `StateModifiedSubType::from_str` @ 9977b6c), `body`
+        // included — minus the unimplemented `persisted_descriptions`.
+        let cli = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+            "--modified-selectors",
+            "body,configs,relation,macros,contract",
+        ])
+        .expect("every implemented dbt sub-selector token parses");
+        assert_eq!(cli.modified_selectors.len(), 5);
+    }
+
+    #[test]
+    fn modified_selectors_maps_each_token_to_its_domain_kind() {
+        use crate::domain::ModifierKind;
+        let pairs = [
+            (ModifiedSelector::Body, ModifierKind::Body),
+            (ModifiedSelector::Configs, ModifierKind::Configs),
+            (ModifiedSelector::Relation, ModifierKind::Relation),
+            (ModifiedSelector::Macros, ModifierKind::Macros),
+            (ModifiedSelector::Contract, ModifierKind::Contract),
+        ];
+        for (selector, kind) in pairs {
+            assert_eq!(selector.kind(), kind);
+        }
+    }
+
+    #[test]
+    fn modified_selectors_repeated_flag_accumulates() {
+        let cli = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+            "--modified-selectors",
+            "configs",
+            "--modified-selectors",
+            "macros",
+        ])
+        .expect("a repeated flag accumulates values");
+        assert_eq!(
+            cli.modified_selectors,
+            vec![ModifiedSelector::Configs, ModifiedSelector::Macros],
+        );
+    }
+
+    #[test]
+    fn an_unknown_modified_selector_is_a_usage_error_naming_the_vocabulary() {
+        let err = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+            "--modified-selectors",
+            "frobnitz",
+        ])
+        .expect_err("an unknown selector token is a usage error");
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+        let msg = err.to_string();
+        for token in ["body", "configs", "relation", "macros", "contract"] {
+            assert!(
+                msg.contains(token),
+                "the remediation lists the valid token {token:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn persisted_descriptions_is_rejected_until_a_modifier_exists() {
+        // fusion's sixth sub-selector token; cute-dbt has no modifier
+        // for it, so it must fail with the same possible-values
+        // remediation — never silently parse as a no-op.
+        let err = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+            "--modified-selectors",
+            "persisted_descriptions",
+        ])
+        .expect_err("persisted_descriptions is not implemented");
+        assert_eq!(err.kind(), ErrorKind::InvalidValue);
+    }
+
+    #[test]
+    fn modified_selectors_with_pr_diff_is_an_argument_conflict() {
+        // The PrDiff arm scopes by file paths and never consults a
+        // StateComparator — the flag would be a silent no-op there, so
+        // it is rejected at parse time instead.
+        let diff = write_fixture("selectors-prdiff-conflict", VALID_DIFF);
+        let arg = format!("@{}", diff.display());
+        let err = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "m.json",
+            "--pr-diff",
+            &arg,
+            "--out",
+            "o.html",
+            "--modified-selectors",
+            "configs",
+        ])
+        .expect_err("--modified-selectors is baseline-arm only");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--modified-selectors") && msg.contains("--pr-diff"),
+            "the conflict names both flags: {msg}"
+        );
+        let _ = std::fs::remove_file(&diff);
     }
 
     #[test]

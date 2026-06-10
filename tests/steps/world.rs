@@ -105,6 +105,14 @@ pub struct World {
     /// a stale (drifted) edit, or a whitespace-only re-indent.
     pub model_sql_targets: Vec<ModelSqlTarget>,
 
+    /// cute-dbt#80: git-rename directives. The synthesizer emits the
+    /// `diff --git` + `similarity index` + `rename from`/`rename to`
+    /// extended-header block real `git diff` produces for a detected
+    /// rename — with NO `---`/`+++` headers and no hunks for a pure
+    /// rename (`edited: false`), or followed by the usual file headers
+    /// and a minimal hunk for a rename-with-edit (`edited: true`).
+    pub renames: Vec<RenameDirective>,
+
     // --- Cell-level data-table diff (cell_table_diff) -------------------
     /// cute-dbt#98: the scenario's fixture-cell-diff plan, set by a
     /// `Given a unit test … with a … given row …` step and consumed by the
@@ -205,6 +213,21 @@ pub struct CellDiffPlan {
     /// synthesized working-tree YAML renders them; the chosen edit rewrites
     /// the OLD side of one cell/row.
     pub new_rows: Vec<Vec<(String, String)>>,
+}
+
+/// A git-rename directive for the synthesized diff (cute-dbt#80). Paths
+/// are repo-relative, exactly as `git diff` names them in its
+/// `rename from`/`rename to` extended headers.
+#[derive(Debug, Clone)]
+pub struct RenameDirective {
+    /// The old (pre-rename) path.
+    pub from: String,
+    /// The new (post-rename) path.
+    pub to: String,
+    /// `false` ⇒ a pure rename (similarity 100%, no hunks); `true` ⇒ a
+    /// rename-with-edit (the new path also gets file headers + a minimal
+    /// hunk, the real `git diff` shape for similarity < 100%).
+    pub edited: bool,
 }
 
 /// A model-SQL-diff hunk directive for the synthesized diff (cute-dbt#111).
