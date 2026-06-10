@@ -194,6 +194,12 @@ fn render_pr_diff_to_file(
 // --- headless evaluation helpers ------------------------------------
 
 /// Evaluate `expr` in the page and return the (return-by-value) result.
+///
+/// FAILS LOUDLY on a thrown JS exception (cute-dbt#109): `silent: true`
+/// only suppresses the `Runtime.exceptionThrown` event/debugger pause —
+/// the `Runtime.evaluate` response still carries `exception_details`,
+/// which we surface as a panic. A missing DOM node must never coerce to
+/// a benign `Null` that lets a negative assertion pass vacuously.
 fn eval(tab: &Tab, expr: &str) -> serde_json::Value {
     let r = tab
         .call_method(Runtime::Evaluate {
@@ -215,18 +221,32 @@ fn eval(tab: &Tab, expr: &str) -> serde_json::Value {
             serialization_options: None,
         })
         .expect("evaluate expression");
+    if let Some(exc) = r.exception_details {
+        let detail = exc
+            .exception
+            .as_ref()
+            .and_then(|e| e.description.clone())
+            .unwrap_or(exc.text);
+        panic!("JS evaluation threw for `{expr}`: {detail}");
+    }
     r.result.value.unwrap_or(serde_json::Value::Null)
 }
 
 fn eval_string(tab: &Tab, expr: &str) -> String {
-    eval(tab, expr)
-        .as_str()
-        .map(str::to_owned)
-        .unwrap_or_default()
+    match eval(tab, expr) {
+        serde_json::Value::String(s) => s,
+        v => panic!("JS evaluation of `{expr}` returned non-string {v:?} (cute-dbt#109)"),
+    }
 }
 
 fn eval_bool(tab: &Tab, expr: &str) -> bool {
-    eval(tab, expr).as_bool().unwrap_or(false)
+    let v = eval(tab, expr);
+    v.as_bool().unwrap_or_else(|| {
+        panic!(
+            "JS evaluation of `{expr}` returned non-boolean {v:?} — a missing/renamed \
+             DOM hook must fail loudly, never read as a benign false (cute-dbt#109)"
+        )
+    })
 }
 
 /// `|`-joined option labels of a `<select>`, trimmed per option.
@@ -328,6 +348,42 @@ fn launch_browser_sized(window_size: Option<(u32, u32)>) -> Browser {
     }
     let opts = builder.build().expect("LaunchOptions must build");
     Browser::new(opts).expect("Chromium must launch")
+}
+
+// --- harness self-checks (cute-dbt#109) -------------------------------
+//
+// The eval helpers must FAIL LOUDLY on a thrown JS exception. Before
+// cute-dbt#109 the helper coerced a throw to `Null` → `false`/`""`/`-1`,
+// so a missing DOM node (`document.querySelector(...)` returning `null`
+// and the `.hidden`/`.classList` read then throwing) read as a benign
+// `false` — letting negative assertions like `assert!(!hint_hidden(..))`
+// pass even when the queried node was absent entirely (e.g. a renderer
+// regression dropping a `data-testid` hook). These self-checks pin the
+// fail-loud contract; they evaluate against the fresh tab's blank page
+// (no report needed — the contract under test is the harness itself).
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+#[should_panic(expected = "JS evaluation threw")]
+fn harness_eval_fails_loudly_when_js_throws() {
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    // A missing DOM node turns the property read into a TypeError — the
+    // exact masking class from cute-dbt#109. Must panic, never read Null.
+    eval(
+        &tab,
+        "document.querySelector('[data-testid=\"not-in-the-dom\"]').hidden",
+    );
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+#[should_panic(expected = "non-boolean")]
+fn harness_eval_bool_fails_loudly_on_non_boolean_result() {
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    // A non-boolean result must never coerce to a benign `false`.
+    eval_bool(&tab, "'truthy-but-not-a-bool'");
 }
 
 #[test]
@@ -910,7 +966,10 @@ fn render_yaml_diff_js_emits_classes_sigils_and_codepoint_emphasis() {
 
 /// Read a numeric expression from the page as i64 (DOM element counts).
 fn eval_i64(tab: &Tab, expr: &str) -> i64 {
-    eval(tab, expr).as_i64().unwrap_or(-1)
+    let v = eval(tab, expr);
+    v.as_i64().unwrap_or_else(|| {
+        panic!("JS evaluation of `{expr}` returned non-i64 {v:?} (cute-dbt#109)")
+    })
 }
 
 /// A JS array-literal of `n` context DiffLine objects (text `c0..c{n-1}`).
