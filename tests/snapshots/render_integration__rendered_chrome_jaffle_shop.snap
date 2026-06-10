@@ -1139,6 +1139,14 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
           <button type="button" data-difflayout="split">Split</button>
         </div>
       </div>
+      
+      <div class="settings-row settings-row-stack">
+        <label>DAG engine<span class="settings-hint">Mermaid (static) or Cytoscape (interactive)</span></label>
+        <div class="seg-radio engine-seg">
+          <button type="button" data-engine="mermaid">Mermaid</button>
+          <button type="button" data-engine="cytoscape">Cytoscape</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -1202,6 +1210,11 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
     Recursive CTE present; recursive arm omitted from DAG (v0.1 limit).
   </div>
   <div class="cte-dag-mermaid"></div>
+  
+  <div class="cte-dag-cyto is-hidden">
+    <div class="cyto-canvas" aria-label="Interactive CTE DAG (Cytoscape)"></div>
+    <div class="cyto-node-card" role="status" aria-live="polite"></div>
+  </div>
   <div class="dag-legend">
     <div class="dag-legend-group">
       <span class="dag-legend-title">node role</span>
@@ -1260,6 +1273,10 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
 <<inlined-asset>>
 </script>
 <script>
+<<inlined-asset>>
+</script>
+<script>
+
 <<inlined-asset>>
 </script>
 
@@ -1327,6 +1344,35 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
     final:     "Final select"
   };
 
+  // cute-dbt#180 — role fills/strokes/shapes for the Cytoscape engine,
+  // pinned 1:1 to the Mermaid classDef literals in buildMermaidSource
+  // (role_import / role_transform / role_final). Node fills stay LIGHT in
+  // every theme (light fill + dark label reads high-contrast on any bg) —
+  // only the edges/anchor carry the dark-bg variant, exactly like Mermaid.
+  var ROLE_FILLS = {
+    import:    { fill: "#e8f1f8", stroke: "#0072B2" },
+    transform: { fill: "#f4f4f5", stroke: "#8a8a90" },
+    final:     { fill: "#fdf2dc", stroke: "#E69F00" }
+  };
+
+  // cute-dbt#180 — the single palette source for BOTH DAG engines.
+  // cyto-dag.js reads colors exclusively through this hook so the
+  // edge-vocab-completeness CI gate (which greps the JOIN_COLORS_LIGHT/_DARK
+  // tables above) covers the Cytoscape engine too — no second palette table
+  // exists to drift. `edges` resolves the active light/dark variant, which
+  // is what fixes the handoff's documented dark-theme bug (the near-black
+  // `from` edges vanishing on dark backgrounds).
+  window.cuteDagPalette = function () {
+    return {
+      edges: dagEdges(),
+      roles: ROLE_FILLS,
+      roleLabels: ROLE_LABEL,
+      nodeText: "#1c1c1f",
+      selected: "#E91E63",
+      fallbackEdge: dagIsDark() ? "#5a606e" : "#9aa0ab"
+    };
+  };
+
   var DATA = (function () {
     var el = document.getElementById("cute-dbt-data");
     if (!el) return { baseline: "", models: [] };
@@ -1336,6 +1382,13 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
       return { baseline: "", models: [] };
     }
   })();
+
+  // cute-dbt#180 — the active DAG engine. "mermaid" is the static default;
+  // theme.js owns the persisted choice (cute-dbt.appearance.v1) and pushes
+  // it here through window.__cuteSetDagEngine before re-rendering. Kept
+  // OUTSIDE `state` deliberately: appearance state belongs to theme.js, this
+  // var is only the render dispatcher's current target.
+  var dagEngine = "mermaid";
 
   var state = {
     selectedModel:  null,
@@ -1436,9 +1489,30 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
     bindGlobalHandlers();
     bindSettingsMenu();
     // cute-dbt#178 — theme switches re-tint the DAG: re-render legend +
-    // Mermaid so edge/anchor colours pick up the light/dark variant.
-    // theme.js calls this hook after flipping [data-theme] / the .dark class.
+    // the ACTIVE engine so edge/anchor colours pick up the light/dark
+    // variant. theme.js calls this hook after flipping [data-theme] /
+    // the .dark class (and after an engine flip, cute-dbt#180).
     window.__cuteRerenderDag = function () { renderDagLegend(); renderDag(); };
+    // cute-dbt#180 — theme.js pushes the picker's engine here, then calls
+    // __cuteRerenderDag. A pure state setter: the render itself always goes
+    // through the renderDag() dispatcher (engine swap = destroy + rebuild,
+    // in place, no reload).
+    window.__cuteSetDagEngine = function (engine) {
+      dagEngine = engine === "cytoscape" ? "cytoscape" : "mermaid";
+    };
+    // cute-dbt#180 — the Cytoscape tap path's selection hook. Updates the
+    // Inspect panel ONLY — deliberately NO renderDag() call (the spike's
+    // no-renderDag-per-click rule: a rebuild would reset pan/zoom and wipe
+    // the in-place lineage highlight). Mermaid's own activate() keeps its
+    // full re-render — selection there is baked into the generated source.
+    window.__cuteSelectNode = function (id) {
+      state.selectedNodeId = id;
+      if (state.leftPanelMode !== "node") {
+        state.leftPanelMode = "node";
+        renderSegmentedToggle();
+      }
+      renderLeftPanel();
+    };
     // cute-dbt#178 — delegated hover/focus handlers for the column-header
     // tooltips (the th.has-col-meta triggers decorateColHeader marks).
     bindColTooltips();
@@ -1902,7 +1976,28 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
     return lines.join("\n");
   }
 
+  // cute-dbt#180 — the engine dispatcher. Mermaid is the static default;
+  // Cytoscape is the opt-in interactive engine (the settings-panel picker,
+  // persisted by theme.js). The flip happens IN PLACE: toggle the two host
+  // sections, tear down the inactive engine, build the chosen one. Full
+  // rebuilds run here only — model-switch, engine-switch, theme re-tint —
+  // never per node click (the spike's no-renderDag-per-click rule).
   function renderDag() {
+    var useCyto = dagEngine === "cytoscape"
+      && typeof window.cytoscape === "function"
+      && window.CuteCyto;
+    $(".cte-dag-mermaid").toggleClass("is-hidden", !!useCyto);
+    $(".cte-dag-cyto").toggleClass("is-hidden", !useCyto);
+    if (useCyto) {
+      $(".cte-dag-mermaid").empty();
+      window.CuteCyto.render(currentModel(), state.selectedNodeId);
+    } else {
+      if (window.CuteCyto) window.CuteCyto.destroy();
+      renderMermaidDag();
+    }
+  }
+
+  function renderMermaidDag() {
     var m = currentModel();
     var $host = $(".cte-dag-mermaid").empty();
     if (!m) return;
@@ -3595,6 +3690,331 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
 </script>
 <script>
 
+/* cute-dbt cytoscape DAG engine v1 (cute-dbt#180)
+   ----------------------------------------------------------------------------
+   The OPT-IN interactive CTE-DAG engine behind the settings-panel
+   Mermaid <-> Cytoscape picker (Mermaid stays the static default; theme.js
+   persists the choice under cute-dbt.appearance.v1). Visual parity with the
+   Mermaid DAG: same nodes, roles, edge-type colors, selected-pink — every
+   color arrives through the window.cuteDagPalette() hook interaction.js
+   exposes, so this file carries NO palette table of its own (the
+   edge-vocab-completeness CI gate greps interaction.js's
+   JOIN_COLORS_LIGHT/_DARK as the single source; a local copy would dodge it).
+   The hook returns the dark-bg lightness variant when html.dark is on — the
+   handoff's documented dark-theme bug (near-black `from` edges vanishing on
+   dark) cannot recur here because both engines read the same dark palette.
+
+   Init hygiene (the cute-dbt#180 / ADR-4 amendment contract):
+   - node labels are CANVAS TEXT (Cytoscape's default canvas renderer) —
+     XSS-safe by construction: hostile manifest-derived names are drawn as
+     glyphs, never parsed as HTML. No cytoscape-node-html-label, ever.
+   - explicit non-webfont system fontFamily (zero-egress: no font fetch).
+   - NO layout plugin (no cytoscape-dagre, never the EPL-licensed
+     cytoscape-elk) and NO workers: positions come from the first-party
+     longest-path column layout below, fed to the built-in `preset` layout.
+   - handlers are bound from THIS file to rendered elements — never click
+     directives executing payload data.
+   - per-click interaction mutates classes IN PLACE and must NOT re-call a
+     render entry point (the spike's no-renderDag-per-click rule): a rebuild
+     would reset pan/zoom and wipe the lineage highlight. Full rebuild is
+     reserved for model-switch, engine-switch and theme re-tint.
+   - the hover card + node-detail panel are DOM (canvas safety covers labels
+     only): every dynamic string lands via textContent, never innerHTML.
+
+   First-party, NOT vendored: lives at templates/cyto-dag.js, embedded at
+   compile time via asset_embed::CYTO_DAG_JS (include_str!) and interpolated
+   inline by the askama renderer. Banner-pin + end-of-file-sentinel tests in
+   src/adapters/asset_embed.rs guard the include. */
+(function () {
+  "use strict";
+
+  var cy = null;
+  var card = null;
+
+  // ---- longest-path column layout (parity with Mermaid `graph LR`) -------
+  // Kahn topological order relaxing longest path; each node's depth is its
+  // column. The CTE engine guarantees an acyclic graph, but any node a cycle
+  // would leave unseen simply keeps depth 0 (defensive, never throws).
+  function computeDepths(nodes, edges) {
+    var indeg = {}, adj = {};
+    nodes.forEach(function (n) { indeg[n.id] = 0; adj[n.id] = []; });
+    edges.forEach(function (e) {
+      if (adj[e.from] && Object.prototype.hasOwnProperty.call(indeg, e.to)) {
+        adj[e.from].push(e.to);
+        indeg[e.to] += 1;
+      }
+    });
+    var depth = {};
+    nodes.forEach(function (n) { depth[n.id] = 0; });
+    var queue = nodes.filter(function (n) { return indeg[n.id] === 0; })
+      .map(function (n) { return n.id; });
+    var deg = {};
+    nodes.forEach(function (n) { deg[n.id] = indeg[n.id]; });
+    while (queue.length) {
+      var u = queue.shift();
+      adj[u].forEach(function (v) {
+        if (depth[v] < depth[u] + 1) depth[v] = depth[u] + 1;
+        deg[v] -= 1;
+        if (deg[v] === 0) queue.push(v);
+      });
+    }
+    return depth;
+  }
+
+  function layoutPositions(nodes, edges) {
+    var depth = computeDepths(nodes, edges);
+    var cols = {};
+    nodes.forEach(function (n) {
+      var d = depth[n.id] || 0;
+      (cols[d] = cols[d] || []).push(n.id);
+    });
+    var colGap = 210, rowGap = 86, pos = {};
+    var maxRows = 1;
+    Object.keys(cols).forEach(function (k) {
+      if (cols[k].length > maxRows) maxRows = cols[k].length;
+    });
+    Object.keys(cols).forEach(function (d) {
+      var ids = cols[d];
+      var colH = (ids.length - 1) * rowGap;
+      var offset = ((maxRows - 1) * rowGap - colH) / 2;
+      ids.forEach(function (id, i) {
+        pos[id] = { x: (+d) * colGap, y: offset + i * rowGap };
+      });
+    });
+    return pos;
+  }
+
+  // ---- elements off the SAME DagPayload buildMermaidSource consumes ------
+  function buildElements(m) {
+    var dag = m && m.dag;
+    if (!dag || !dag.nodes || !dag.nodes.length) return null;
+    var pos = layoutPositions(dag.nodes, dag.edges || []);
+    var els = [];
+    dag.nodes.forEach(function (n) {
+      els.push({
+        group: "nodes",
+        // The element id is the stable node id (cute-dbt#155). It is only
+        // ever resolved via cy.getElementById(...) — never string-concatenated
+        // into a selector — so a selector-hostile id is inert by construction.
+        data: { id: n.id, label: String(n.label || n.id), role: n.role || "transform" },
+        position: pos[n.id] || { x: 0, y: 0 }
+      });
+    });
+    (dag.edges || []).forEach(function (e, i) {
+      els.push({
+        group: "edges",
+        data: { id: "e" + i, source: e.from, target: e.to, etype: e.edge_type || "from" }
+      });
+    });
+    return els;
+  }
+
+  function styleSheet() {
+    // The palette hook is REQUIRED (interaction.js defines it before this
+    // file parses). It returns the active light/dark edge palette + the
+    // role fills/strokes/shapes + nodeText + selected — keeping both DAG
+    // engines on the one gated color source.
+    var pal = window.cuteDagPalette();
+    var EDGES = pal.edges, ROLES = pal.roles;
+    var sheet = [
+      { selector: "node", style: {
+        "label": "data(label)",
+        "text-valign": "center",
+        "text-halign": "center",
+        // Explicit non-webfont system stack — zero-egress, ADR-4 contract.
+        "font-family": 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        "font-size": 13,
+        "color": pal.nodeText,
+        "text-wrap": "wrap",
+        "text-max-width": 150,
+        "width": "label",
+        "height": "label",
+        "padding": "10px",
+        "border-width": 1.6,
+        "background-color": ROLES.transform.fill,
+        "border-color": ROLES.transform.stroke,
+        "shape": "rectangle",
+        "transition-property": "opacity",
+        "transition-duration": 120
+      }},
+      { selector: 'node[role = "import"]', style: {
+        "background-color": ROLES.import.fill,
+        "border-color": ROLES.import.stroke,
+        "shape": "round-rectangle"
+      }},
+      { selector: 'node[role = "transform"]', style: {
+        "background-color": ROLES.transform.fill,
+        "border-color": ROLES.transform.stroke,
+        "shape": "rectangle"
+      }},
+      { selector: 'node[role = "final"]', style: {
+        "background-color": ROLES.final.fill,
+        "border-color": ROLES.final.stroke,
+        "shape": "hexagon",
+        "border-width": 2,
+        "padding": "14px"
+      }},
+      { selector: "edge", style: {
+        "curve-style": "bezier",
+        "width": 1.8,
+        "target-arrow-shape": "triangle",
+        "line-color": pal.fallbackEdge,
+        "target-arrow-color": pal.fallbackEdge,
+        "arrow-scale": 1.1,
+        "transition-property": "opacity",
+        "transition-duration": 120
+      }}
+    ];
+    Object.keys(EDGES).forEach(function (k) {
+      var dashed = (k === "union_all" || k === "union_distinct");
+      var style = { "line-color": EDGES[k], "target-arrow-color": EDGES[k] };
+      if (dashed) {
+        style["line-style"] = "dashed";
+        style["line-dash-pattern"] = [6, 3];
+      }
+      sheet.push({ selector: 'edge[etype = "' + k + '"]', style: style });
+    });
+    sheet.push({ selector: ".dim", style: { "opacity": 0.18 } });
+    sheet.push({ selector: "node.sel", style: {
+      "border-color": pal.selected, "border-width": 4, "opacity": 1
+    }});
+    sheet.push({ selector: "edge.trace", style: { "opacity": 1, "width": 2.6 } });
+    sheet.push({ selector: "node.trace", style: { "opacity": 1 } });
+    return sheet;
+  }
+
+  // ---- in-place interaction (never a re-render) ---------------------------
+  function clearHighlight() {
+    if (!cy) return;
+    cy.elements().removeClass("dim sel trace");
+  }
+
+  function traceLineage(node) {
+    clearHighlight();
+    var lineage = node.union(node.predecessors()).union(node.successors());
+    cy.elements().addClass("dim");
+    lineage.removeClass("dim").addClass("trace");
+    node.removeClass("dim").addClass("sel");
+  }
+
+  // Drive the report's shared node selection (the Inspect pane) through the
+  // hook interaction.js exposes. The hook updates the panel ONLY — it must
+  // never re-render the DAG (the no-renderDag-per-click rule).
+  function selectReportNode(id) {
+    if (typeof window.__cuteSelectNode === "function") window.__cuteSelectNode(id);
+  }
+
+  // One hover-card row: <div class="nc-row"><b>k</b> <span class="nc-v">v</span></div>.
+  // Built with createElement + textContent ONLY — no innerHTML anywhere on
+  // this DOM surface (the B-assertion: DOM stays escape-disciplined
+  // regardless of the canvas-label safety).
+  function cardRow(key, cls, value) {
+    var row = document.createElement("div");
+    row.className = "nc-row";
+    var b = document.createElement("b");
+    b.textContent = key;
+    var span = document.createElement("span");
+    span.className = cls;
+    span.textContent = value;
+    row.appendChild(b);
+    row.appendChild(document.createTextNode(" "));
+    row.appendChild(span);
+    return row;
+  }
+
+  function showCard(node) {
+    if (!card) return;
+    var d = node.data();
+    var pal = window.cuteDagPalette();
+    while (card.firstChild) card.removeChild(card.firstChild);
+    var id = document.createElement("span");
+    id.className = "nc-id";
+    id.textContent = d.id;
+    card.appendChild(id);
+    card.appendChild(cardRow("role", "nc-role", pal.roleLabels[d.role] || d.role));
+    card.appendChild(cardRow("name", "nc-name", d.label));
+    var rp = node.renderedPosition();
+    var host = cy.container();
+    var x = Math.min(rp.x + 14, host.clientWidth - card.offsetWidth - 8);
+    var y = Math.min(rp.y + 12, host.clientHeight - card.offsetHeight - 8);
+    card.style.left = Math.max(8, x) + "px";
+    card.style.top = Math.max(8, y) + "px";
+    card.classList.add("is-visible");
+  }
+  function hideCard() {
+    if (card) card.classList.remove("is-visible");
+  }
+
+  // ---- render / destroy (model-switch, engine-switch, theme re-tint) -----
+  function destroy() {
+    if (cy) { cy.destroy(); cy = null; }
+    hideCard();
+  }
+
+  function render(m, selectedNodeId) {
+    var container = document.querySelector(".cte-dag-cyto .cyto-canvas");
+    card = document.querySelector(".cte-dag-cyto .cyto-node-card");
+    if (!container) return;
+    destroy();
+    if (typeof window.cytoscape !== "function") {
+      container.textContent = "Cytoscape engine unavailable.";
+      return;
+    }
+    var els = buildElements(m);
+    if (!els) {
+      container.textContent = "(no DAG available)";
+      return;
+    }
+    container.textContent = "";
+
+    cy = window.cytoscape({
+      container: container,
+      elements: els,
+      style: styleSheet(),
+      layout: { name: "preset", fit: true, padding: 28 },
+      minZoom: 0.35,
+      maxZoom: 2.2,
+      boxSelectionEnabled: false,
+      autoungrabify: false
+    });
+
+    // Handlers bound ONCE per build, from our JS, to rendered elements.
+    // Tap = select + lineage highlight, all in-place class mutation.
+    cy.on("tap", "node", function (evt) {
+      traceLineage(evt.target);
+      selectReportNode(evt.target.id());
+    });
+    cy.on("tap", function (evt) { if (evt.target === cy) clearHighlight(); });
+    cy.on("mouseover", "node", function (evt) { showCard(evt.target); });
+    cy.on("mouseout", "node", hideCard);
+    cy.on("pan zoom drag", hideCard);
+
+    // Restore the report's current selection (parity with the Mermaid
+    // `selected` classDef) without waiting for a click.
+    if (selectedNodeId) {
+      var sel = cy.getElementById(String(selectedNodeId));
+      if (sel && sel.length) traceLineage(sel);
+    }
+
+    // Re-fit after first paint — the host may have been [hidden] (0-sized)
+    // when the engine flip unhid it this same frame.
+    window.requestAnimationFrame(function () { if (cy) cy.fit(undefined, 28); });
+  }
+
+  // Public seam: interaction.js's renderDag() dispatcher drives render/
+  // destroy; the cyInstance getter is the headless-test seam (mirrors the
+  // window.__cute* seam precedent).
+  window.CuteCyto = {
+    render: render,
+    destroy: destroy,
+    cyInstance: function () { return cy; }
+  };
+})();
+/* end of cute-dbt cytoscape DAG engine v1 (cute-dbt#180) */
+
+</script>
+<script>
+
 /* cute-dbt appearance engine v1 (cute-dbt#178)
    ----------------------------------------------------------------------------
    Wires the theme / style / accent / density / diff-style / diff-layout
@@ -3640,7 +4060,9 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
   // The public localStorage key for the appearance state — a stable consumer
   // contract (cute-dbt#178 AC3), not a credential.
   var KEY = "cute-dbt.appearance.v1"; // gitleaks:allow — a public storage key name, no secret
-  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", diffstyle: "color", difflayout: "auto" };
+  // `engine` (cute-dbt#180) is the DAG-engine picker: "mermaid" (the static
+  // default) or "cytoscape" (the opt-in interactive engine).
+  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", diffstyle: "color", difflayout: "auto", engine: "mermaid" };
 
   // Read the persisted appearance, string-typed keys only. Any storage error
   // (file:// SecurityError, disabled storage) leaves the defaults intact.
@@ -3651,11 +4073,14 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
     try {
       var p = JSON.parse(raw);
       if (p && typeof p === "object") {
-        ["theme", "style", "accent", "density", "diffstyle", "difflayout"].forEach(function (k) {
+        ["theme", "style", "accent", "density", "diffstyle", "difflayout", "engine"].forEach(function (k) {
           if (typeof p[k] === "string") pref[k] = p[k];
         });
       }
     } catch (e) { /* ignore — defaults hold */ }
+    // Coerce the engine into its closed vocabulary — an unknown persisted
+    // value must fall back to the static default, never reach the dispatcher.
+    if (pref.engine !== "cytoscape") pref.engine = "mermaid";
   }
   // Persist the current appearance. Swallows any storage error (zero-egress
   // in-memory fallback, mirrors interaction.js saveSettings).
@@ -3717,6 +4142,14 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
     root.setAttribute("data-style", s);
     pref.style = s;
   }
+  // cute-dbt#180 — push the picker's engine to the render dispatcher
+  // (interaction.js owns the DAG; this engine just persists the choice).
+  // The caller follows up with rerenderDag() so the flip happens in place.
+  function applyEngine(e) {
+    var engine = e === "cytoscape" ? "cytoscape" : "mermaid";
+    pref.engine = engine;
+    if (typeof window.__cuteSetDagEngine === "function") window.__cuteSetDagEngine(engine);
+  }
 
   // Re-tint the DAG after a theme flip (the light/dark edge + anchor
   // variants live in interaction.js, which owns the legend + Mermaid).
@@ -3744,6 +4177,9 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
     qsaForEach(".difflayout-seg button", function (b) {
       b.setAttribute("aria-pressed", b.getAttribute("data-difflayout") === pref.difflayout ? "true" : "false");
     });
+    qsaForEach(".engine-seg button", function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-engine") === pref.engine ? "true" : "false");
+    });
   }
 
   function wire() {
@@ -3764,6 +4200,12 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
     });
     qsaForEach(".difflayout-seg button", function (b) {
       b.addEventListener("click", function () { applyDiffLayout(b.getAttribute("data-difflayout")); save(); syncControls(); });
+    });
+    // cute-dbt#180 — the DAG-engine picker. The swap is IN PLACE: push the
+    // engine to the dispatcher, persist, then rerenderDag() tears down the
+    // old engine and builds the new one. No reload.
+    qsaForEach(".engine-seg button", function (b) {
+      b.addEventListener("click", function () { applyEngine(b.getAttribute("data-engine")); save(); syncControls(); rerenderDag(); });
     });
   }
 
@@ -3796,10 +4238,17 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
     applyDiffLayout(pref.difflayout);
     syncControls();
     wire();
-    // Re-tint the legend + Mermaid host once the theme's .dark class is on:
-    // interaction.js drew them on DOM-ready BEFORE this boot applied the
-    // theme, so the edge swatches would otherwise keep the light palette.
-    setTimeout(rerenderDag, 0);
+    // Re-tint the legend + the active DAG engine once the theme's .dark
+    // class is on: interaction.js drew them on DOM-ready BEFORE this boot
+    // applied the theme, so the edge swatches would otherwise keep the
+    // light palette. The engine apply rides the same deferred tick
+    // (cute-dbt#180): by then interaction.js's boot has installed
+    // __cuteSetDagEngine, so a persisted "cytoscape" choice flips the DAG
+    // in place right after the default Mermaid render.
+    setTimeout(function () {
+      applyEngine(pref.engine);
+      rerenderDag();
+    }, 0);
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);

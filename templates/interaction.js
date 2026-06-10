@@ -60,6 +60,35 @@
     final:     "Final select"
   };
 
+  // cute-dbt#180 — role fills/strokes/shapes for the Cytoscape engine,
+  // pinned 1:1 to the Mermaid classDef literals in buildMermaidSource
+  // (role_import / role_transform / role_final). Node fills stay LIGHT in
+  // every theme (light fill + dark label reads high-contrast on any bg) —
+  // only the edges/anchor carry the dark-bg variant, exactly like Mermaid.
+  var ROLE_FILLS = {
+    import:    { fill: "#e8f1f8", stroke: "#0072B2" },
+    transform: { fill: "#f4f4f5", stroke: "#8a8a90" },
+    final:     { fill: "#fdf2dc", stroke: "#E69F00" }
+  };
+
+  // cute-dbt#180 — the single palette source for BOTH DAG engines.
+  // cyto-dag.js reads colors exclusively through this hook so the
+  // edge-vocab-completeness CI gate (which greps the JOIN_COLORS_LIGHT/_DARK
+  // tables above) covers the Cytoscape engine too — no second palette table
+  // exists to drift. `edges` resolves the active light/dark variant, which
+  // is what fixes the handoff's documented dark-theme bug (the near-black
+  // `from` edges vanishing on dark backgrounds).
+  window.cuteDagPalette = function () {
+    return {
+      edges: dagEdges(),
+      roles: ROLE_FILLS,
+      roleLabels: ROLE_LABEL,
+      nodeText: "#1c1c1f",
+      selected: "#E91E63",
+      fallbackEdge: dagIsDark() ? "#5a606e" : "#9aa0ab"
+    };
+  };
+
   var DATA = (function () {
     var el = document.getElementById("cute-dbt-data");
     if (!el) return { baseline: "", models: [] };
@@ -69,6 +98,13 @@
       return { baseline: "", models: [] };
     }
   })();
+
+  // cute-dbt#180 — the active DAG engine. "mermaid" is the static default;
+  // theme.js owns the persisted choice (cute-dbt.appearance.v1) and pushes
+  // it here through window.__cuteSetDagEngine before re-rendering. Kept
+  // OUTSIDE `state` deliberately: appearance state belongs to theme.js, this
+  // var is only the render dispatcher's current target.
+  var dagEngine = "mermaid";
 
   var state = {
     selectedModel:  null,
@@ -169,9 +205,30 @@
     bindGlobalHandlers();
     bindSettingsMenu();
     // cute-dbt#178 — theme switches re-tint the DAG: re-render legend +
-    // Mermaid so edge/anchor colours pick up the light/dark variant.
-    // theme.js calls this hook after flipping [data-theme] / the .dark class.
+    // the ACTIVE engine so edge/anchor colours pick up the light/dark
+    // variant. theme.js calls this hook after flipping [data-theme] /
+    // the .dark class (and after an engine flip, cute-dbt#180).
     window.__cuteRerenderDag = function () { renderDagLegend(); renderDag(); };
+    // cute-dbt#180 — theme.js pushes the picker's engine here, then calls
+    // __cuteRerenderDag. A pure state setter: the render itself always goes
+    // through the renderDag() dispatcher (engine swap = destroy + rebuild,
+    // in place, no reload).
+    window.__cuteSetDagEngine = function (engine) {
+      dagEngine = engine === "cytoscape" ? "cytoscape" : "mermaid";
+    };
+    // cute-dbt#180 — the Cytoscape tap path's selection hook. Updates the
+    // Inspect panel ONLY — deliberately NO renderDag() call (the spike's
+    // no-renderDag-per-click rule: a rebuild would reset pan/zoom and wipe
+    // the in-place lineage highlight). Mermaid's own activate() keeps its
+    // full re-render — selection there is baked into the generated source.
+    window.__cuteSelectNode = function (id) {
+      state.selectedNodeId = id;
+      if (state.leftPanelMode !== "node") {
+        state.leftPanelMode = "node";
+        renderSegmentedToggle();
+      }
+      renderLeftPanel();
+    };
     // cute-dbt#178 — delegated hover/focus handlers for the column-header
     // tooltips (the th.has-col-meta triggers decorateColHeader marks).
     bindColTooltips();
@@ -635,7 +692,28 @@
     return lines.join("\n");
   }
 
+  // cute-dbt#180 — the engine dispatcher. Mermaid is the static default;
+  // Cytoscape is the opt-in interactive engine (the settings-panel picker,
+  // persisted by theme.js). The flip happens IN PLACE: toggle the two host
+  // sections, tear down the inactive engine, build the chosen one. Full
+  // rebuilds run here only — model-switch, engine-switch, theme re-tint —
+  // never per node click (the spike's no-renderDag-per-click rule).
   function renderDag() {
+    var useCyto = dagEngine === "cytoscape"
+      && typeof window.cytoscape === "function"
+      && window.CuteCyto;
+    $(".cte-dag-mermaid").toggleClass("is-hidden", !!useCyto);
+    $(".cte-dag-cyto").toggleClass("is-hidden", !useCyto);
+    if (useCyto) {
+      $(".cte-dag-mermaid").empty();
+      window.CuteCyto.render(currentModel(), state.selectedNodeId);
+    } else {
+      if (window.CuteCyto) window.CuteCyto.destroy();
+      renderMermaidDag();
+    }
+  }
+
+  function renderMermaidDag() {
     var m = currentModel();
     var $host = $(".cte-dag-mermaid").empty();
     if (!m) return;

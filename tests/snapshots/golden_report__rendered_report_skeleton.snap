@@ -89,6 +89,14 @@ expression: skeleton
           <button type="button" data-difflayout="split">Split</button>
         </div>
       </div>
+      
+      <div class="settings-row settings-row-stack">
+        <label>DAG engine<span class="settings-hint">Mermaid (static) or Cytoscape (interactive)</span></label>
+        <div class="seg-radio engine-seg">
+          <button type="button" data-engine="mermaid">Mermaid</button>
+          <button type="button" data-engine="cytoscape">Cytoscape</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -152,6 +160,11 @@ expression: skeleton
     Recursive CTE present; recursive arm omitted from DAG (v0.1 limit).
   </div>
   <div class="cte-dag-mermaid"></div>
+  
+  <div class="cte-dag-cyto is-hidden">
+    <div class="cyto-canvas" aria-label="Interactive CTE DAG (Cytoscape)"></div>
+    <div class="cyto-node-card" role="status" aria-live="polite"></div>
+  </div>
   <div class="dag-legend">
     <div class="dag-legend-group">
       <span class="dag-legend-title">node role</span>
@@ -206,7 +219,9 @@ expression: skeleton
 <script></script>
 <script></script>
 <script></script>
+<script></script>
 
+<script></script>
 <script></script>
 <script></script>
 </body>

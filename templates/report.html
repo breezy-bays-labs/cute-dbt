@@ -119,6 +119,17 @@
           <button type="button" data-difflayout="split">Split</button>
         </div>
       </div>
+      {# cute-dbt#180 — the DAG-engine picker. Mermaid is the static default;
+         Cytoscape is the opt-in interactive engine (pan/zoom, hover card,
+         click-to-highlight lineage). Wired + persisted by theme.js under
+         cute-dbt.appearance.v1; the swap happens in place (no reload). #}
+      <div class="settings-row settings-row-stack">
+        <label>DAG engine<span class="settings-hint">Mermaid (static) or Cytoscape (interactive)</span></label>
+        <div class="seg-radio engine-seg">
+          <button type="button" data-engine="mermaid">Mermaid</button>
+          <button type="button" data-engine="cytoscape">Cytoscape</button>
+        </div>
+      </div>
     </div>
     {%- if is_pr_diff %}
     <div class="settings-section">
@@ -206,6 +217,16 @@
     Recursive CTE present; recursive arm omitted from DAG (v0.1 limit).
   </div>
   <div class="cte-dag-mermaid"></div>
+  {# cute-dbt#180 — the Cytoscape engine's host, hidden while Mermaid (the
+     static default) is active. .cyto-canvas receives the cy instance;
+     .cyto-node-card is the hover context card (filled via textContent only,
+     positioned by cyto-dag.js). The picker's swap toggles the chassis
+     .is-hidden class on this and .cte-dag-mermaid in place (report.css
+     ships the rule). #}
+  <div class="cte-dag-cyto is-hidden">
+    <div class="cyto-canvas" aria-label="Interactive CTE DAG (Cytoscape)"></div>
+    <div class="cyto-node-card" role="status" aria-live="polite"></div>
+  </div>
   <div class="dag-legend">
     <div class="dag-legend-group">
       <span class="dag-legend-title">node role</span>
@@ -266,6 +287,14 @@
 <script>
 {{ mermaid_js|safe }}
 </script>
+<script>
+{# cute-dbt#180 — the vendored Cytoscape UMD bundle (the second graph
+   engine, behind the settings-panel picker; Mermaid stays the static
+   default). Core only — no layout plugin (the preset positions come from
+   cyto-dag.js). Same embedding contract as Mermaid: include_str! into
+   .rodata, inline interpolation, never ESM, never a runtime asset dir. #}
+{{ cytoscape_js|safe }}
+</script>
 
 <script>
 {# cute-dbt#178 — the first-party report interaction engine, embedded from
@@ -275,6 +304,15 @@
    (the old in-template copy needed a `raw` block). Banner-pin + end-of-file
    sentinel tests guard the include. #}
 {{ interaction_js|safe }}
+</script>
+<script>
+{# cute-dbt#180 — the first-party Cytoscape DAG engine (preset layout,
+   canvas-text labels, hover card, click-to-highlight lineage), embedded
+   from templates/cyto-dag.js via asset_embed::CYTO_DAG_JS. Parses after
+   interaction.js so the window.cuteDagPalette / __cuteSelectNode hooks it
+   consumes already exist; before theme.js so the persisted engine choice
+   can flip to it at boot. #}
+{{ cyto_dag_js|safe }}
 </script>
 <script>
 {# cute-dbt#178 — the appearance engine (theme / style / accent / density /
