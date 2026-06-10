@@ -506,7 +506,7 @@ pub struct CheckPragma {
 /// pragma  := "--" ws? "cute-dbt:" ws? "ignore" ws? "(" ws? id
 ///            ( ws? "," ws? '"' reason '"' )? ws? ")"
 /// id      := [^,)"]+ (trimmed; the dotted check id)
-/// reason  := [^"]*
+/// reason  := [^"]*  (may contain ')' — the quotes delimit it)
 /// ```
 ///
 /// The pragma is recognized after any `--` on a line — full-line or
@@ -525,25 +525,32 @@ pub fn scan_pragmas(sql: &str) -> Vec<CheckPragma> {
 }
 
 /// Parse the comment body after `--` as a pragma, or `None`.
+///
+/// Parsed structurally rather than by `find(')')` over the whole call:
+/// the quoted reason is consumed as a unit first, so a `)` *inside* the
+/// quotes is part of the reason, never the closing parenthesis.
 fn parse_pragma(comment: &str) -> Option<CheckPragma> {
     let rest = comment.trim_start().strip_prefix("cute-dbt:")?;
     let rest = rest.trim_start().strip_prefix("ignore")?;
     let rest = rest.trim_start().strip_prefix('(')?;
-    let body = &rest[..rest.find(')')?];
-    let (id_part, reason) = match body.find(',') {
-        Some(comma) => {
-            let raw_reason = body[comma + 1..].trim();
-            let reason = raw_reason
-                .strip_prefix('"')
-                .and_then(|r| r.strip_suffix('"'))?;
-            (&body[..comma], Some(reason.to_owned()))
-        }
-        None => (body, None),
-    };
-    let check = id_part.trim();
+    // The id runs to the first ',' (a reason follows) or ')' (no reason).
+    let id_end = rest.find([',', ')'])?;
+    let check = rest[..id_end].trim();
     if check.is_empty() || check.contains('"') {
         return None;
     }
+    let reason = if rest[id_end..].starts_with(',') {
+        let after_comma = rest[id_end + 1..].trim_start();
+        let inner = after_comma.strip_prefix('"')?;
+        let quote_end = inner.find('"')?;
+        // Only the closing ')' may follow the quoted reason.
+        if !inner[quote_end + 1..].trim_start().starts_with(')') {
+            return None;
+        }
+        Some(inner[..quote_end].to_owned())
+    } else {
+        None
+    };
     Some(CheckPragma {
         check: check.to_owned(),
         reason,
@@ -1025,7 +1032,28 @@ reason = "   "
 
     #[test]
     fn malformed_reason_quoting_is_not_a_pragma() {
-        assert!(scan_pragmas("-- cute-dbt: ignore(join.general, \"half)").is_empty());
+        for sql in [
+            "-- cute-dbt: ignore(join.general, \"half)",
+            // Junk between the quoted reason and the closing paren.
+            "-- cute-dbt: ignore(join.general, \"r\" x)",
+        ] {
+            assert!(scan_pragmas(sql).is_empty(), "{sql:?}");
+        }
+    }
+
+    #[test]
+    fn reason_containing_a_closing_paren_parses_whole() {
+        // The quotes delimit the reason — a ')' inside them is reason
+        // text, not the call's closing parenthesis (PR #193 review).
+        let pragmas =
+            scan_pragmas("-- cute-dbt: ignore(join.general, \"see RFC-12 (appendix B)\")");
+        assert_eq!(
+            pragmas,
+            vec![CheckPragma {
+                check: "join.general".to_owned(),
+                reason: Some("see RFC-12 (appendix B)".to_owned()),
+            }],
+        );
     }
 
     // ===== policy application =========================================
