@@ -172,6 +172,9 @@
     // Mermaid so edge/anchor colours pick up the light/dark variant.
     // theme.js calls this hook after flipping [data-theme] / the .dark class.
     window.__cuteRerenderDag = function () { renderDagLegend(); renderDag(); };
+    // cute-dbt#178 — delegated hover/focus handlers for the column-header
+    // tooltips (the th.has-col-meta triggers decorateColHeader marks).
+    bindColTooltips();
   });
 
   // cute-dbt#91 — scope-toggle helpers --------------------------------
@@ -1879,63 +1882,94 @@
   // from the canonical `key` (a `Number` key sorts numerically even when its
   // display is `1.00`). The JS no longer parses csv/dict — the domain's
   // `table_from_manifest_rows` owns that, and ships this POD on the wire.
-  // cute-dbt#165 — the column-header tooltip button for one column's
-  // Rust-computed metadata POD ({description, tests}). Mirrors the #146
-  // expect-tooltip contract: a focusable <button> with a CSS bubble shown on
-  // hover AND keyboard focus (a native `title` is hover-delayed, keyboard-
-  // unreachable, touch-invisible); `aria-label` carries the same text for
-  // assistive tech (the bubble is aria-hidden so it is not announced twice).
-  // DOM is built from text nodes only — payload strings never parse as HTML.
-  function buildColTooltip(colName, meta) {
+  // cute-dbt#165 / cute-dbt#178 — column-header tooltips, the handoff spec:
+  // the WHOLE header cell is the hover/focus trigger (no per-column icon).
+  // decorateColHeader marks a metadata-bearing th with `.has-col-meta` +
+  // data-attrs; showColTip fills + positions a single body-appended
+  // `#col-tooltip` bubble (position:fixed, so the .table-fit overflow
+  // scroller never clips it; horizontally clamped; flips above on bottom
+  // overflow). Data source: OUR shipped per-table `column_meta` payload
+  // ({description, tests:[{name, values, detail}]}) — Rust computes the
+  // README §2.2 display mapping, the JS only renders. Every interpolation
+  // below passes through escapeHtml, so payload strings never parse as HTML.
+  //
+  // A11y (the #146/#166 contract carried forward): a bare th is not
+  // focusable, so decorated headers gain tabindex="0" (keyboard users reach
+  // the tip via focusin); the th carries an aria-label summarizing the same
+  // content (the bubble is aria-hidden so it is never announced twice);
+  // hover AND focus both reveal. The native `title` is REMOVED from
+  // decorated headers — it would double-show over the bubble.
+  function colTestSummary(t) {
+    var extra = (t.values && t.values.length) ? " " + t.values.join(", ")
+              : t.detail ? " " + t.detail : "";
+    return t.name + extra;
+  }
+  function decorateColHeader($th, name, meta) {
+    if (!meta || (!meta.description && !(meta.tests && meta.tests.length))) return;
     var tests = meta.tests || [];
-    var parts = [];
+    var parts = ["Column " + name];
     if (meta.description) parts.push(meta.description);
-    if (tests.length) parts.push("column tests: " + tests.join("; "));
-    var $btn = $("<button>")
-      .attr("type", "button")
-      .addClass("col-tooltip")
-      .attr("aria-label", "Column " + colName + " — " + parts.join(" — "));
-    $btn.append(document.createTextNode("ⓘ"));
-    var $bubble = $("<span>").addClass("col-tooltip-bubble").attr("aria-hidden", "true");
-    if (meta.description) {
-      $bubble.append($("<span>").addClass("col-tooltip-desc").text(meta.description));
+    if (tests.length) parts.push("column tests: " + tests.map(colTestSummary).join("; "));
+    $th.removeAttr("title")
+      .addClass("has-col-meta")
+      .attr("tabindex", "0")
+      .attr("aria-label", parts.join(" — "))
+      .attr("data-col-name", name)
+      .attr("data-col-desc", meta.description || "")
+      .attr("data-col-tests", JSON.stringify(tests));
+  }
+  // The singleton bubble, lazily appended to <body> (one element serves
+  // every header). aria-hidden: the th aria-label is the AT surface.
+  function ensureColTooltip() {
+    var el = document.getElementById("col-tooltip");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "col-tooltip"; el.className = "col-tooltip"; el.hidden = true;
+      el.setAttribute("aria-hidden", "true");
+      document.body.appendChild(el);
     }
+    return el;
+  }
+  function showColTip(trigger) {
+    var el = ensureColTooltip();
+    var name = trigger.getAttribute("data-col-name");
+    var desc = trigger.getAttribute("data-col-desc");
+    var tests = [];
+    try { tests = JSON.parse(trigger.getAttribute("data-col-tests") || "[]"); } catch (e) { tests = []; }
+    var h = '<div class="ct-desc">' + escapeHtml(desc || name) + "</div>";
     if (tests.length) {
-      $bubble.append($("<span>").addClass("col-tooltip-tests-label").text("column tests"));
-      var $list = $("<ul>").addClass("col-tooltip-tests");
-      tests.forEach(function (t) { $list.append($("<li>").text(t)); });
-      $bubble.append($list);
+      h += '<div class="ct-tests-label">Data tests</div><div class="ct-tests">'
+         + tests.map(function (t) {
+             var inner = '<span class="ct-key">' + escapeHtml(t.name) + "</span>";
+             if (t.values && t.values.length) {
+               inner += '<span class="ct-vals">'
+                 + t.values.map(function (v) { return '<span class="ct-val">' + escapeHtml(String(v)) + "</span>"; }).join("")
+                 + "</span>";
+             } else if (t.detail) {
+               inner += '<span class="ct-detail">' + escapeHtml(t.detail) + "</span>";
+             }
+             return '<div class="ct-test">' + inner + "</div>";
+           }).join("")
+         + "</div>";
     }
-    $btn.append($bubble);
-    return $btn;
+    el.innerHTML = h;
+    el.hidden = false;
+    var r = trigger.getBoundingClientRect();
+    var tw = el.offsetWidth, th = el.offsetHeight;
+    var left = r.left;
+    if (left + tw > window.innerWidth - 8) left = window.innerWidth - 8 - tw;
+    if (left < 8) left = 8;
+    var top = r.bottom + 6;
+    if (top + th > window.innerHeight - 8) top = r.top - 6 - th; // flip above
+    el.style.left = Math.round(left) + "px";
+    el.style.top = Math.round(top) + "px";
   }
-
-  // cute-dbt#165 — the bubble is position:fixed so it escapes the .table-fit
-  // overflow scroller (which clips absolutely-positioned descendants); the
-  // coordinates are set here on hover/focus while VISIBILITY stays pure CSS
-  // (the #146 :hover/:focus contract). Horizontally clamped so a first/last-
-  // column bubble stays on-viewport. A hidden bubble still has layout
-  // geometry (visibility:hidden, not display:none), so offsetWidth is real.
-  function positionColTooltip(btn) {
-    var bubble = btn.querySelector(".col-tooltip-bubble");
-    if (!bubble) return;
-    var r = btn.getBoundingClientRect();
-    var half = bubble.offsetWidth / 2;
-    var margin = 8;
-    var cx = r.left + r.width / 2;
-    cx = Math.max(margin + half, Math.min(cx, window.innerWidth - margin - half));
-    bubble.style.left = cx + "px";
-    bubble.style.top = (r.bottom + 6) + "px";
+  function hideColTip() { var el = document.getElementById("col-tooltip"); if (el) el.hidden = true; }
+  function bindColTooltips() {
+    $(document)
+      .on("mouseenter focusin", ".has-col-meta", function () { showColTip(this); })
+      .on("mouseleave focusout", ".has-col-meta", function () { hideColTip(); });
   }
-  $(document).on("mouseenter focusin", ".col-tooltip", function () {
-    positionColTooltip(this);
-  });
-  // A th click sorts the DataTable; clicking/tapping the info button must
-  // only reveal the bubble (via focus), never also re-sort the column.
-  $(document).on("click", ".col-tooltip", function (e) {
-    e.preventDefault();
-    e.stopPropagation();
-  });
 
   // `colMeta` (cute-dbt#165) is the per-table column-metadata map keyed by
   // column name (absent key/entry => no affordance on that th).
@@ -1949,8 +1983,9 @@
     columns.forEach(function (c) {
       var html = escapeHtml(c).replace(/_/g, "_<wbr>");
       var $th = $("<th>").attr("title", c).html(html);
-      var meta = colMeta && colMeta[c];
-      if (meta) $th.append(buildColTooltip(c, meta));
+      // cute-dbt#178 — decorate (and de-title) the th when metadata exists;
+      // the header cell itself becomes the tooltip trigger.
+      decorateColHeader($th, c, colMeta && colMeta[c]);
       $hr.append($th);
     });
     var $tbody = $("<tbody>").appendTo($tbl);
@@ -2128,9 +2163,9 @@
       }
       // cute-dbt#165 — the Diff grid's unified column axis shares the same
       // metadata map (a removed column simply has no entry — the map is
-      // filtered to the CURRENT table's columns in Rust).
-      var meta = colMeta && colMeta[c.name];
-      if (meta) $th.append(buildColTooltip(c.name, meta));
+      // filtered to the CURRENT table's columns in Rust). cute-dbt#178: the
+      // th itself is the tooltip trigger.
+      decorateColHeader($th, c.name, colMeta && colMeta[c.name]);
       $hr.append($th);
     });
     var $tbody = $("<tbody>").appendTo($tbl);

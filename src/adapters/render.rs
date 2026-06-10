@@ -309,47 +309,144 @@ pub struct ColumnMetaPayload {
     /// description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Summarized column-level data tests, one display string per test
-    /// (built by [`summarize_column_test`]): the test name
-    /// (package-qualified when namespaced, e.g. `dbt_utils.*`), plus key
-    /// args for `accepted_values` / `relationships`. Deterministically
-    /// ordered (summary text, then test node id). Omitted from JSON when
-    /// the column is described but untested.
+    /// Structured column-level data tests (built by
+    /// [`column_test_payload`], the handoff README §2.2 display-string
+    /// mapping): each entry carries the display `name` plus — distinctly —
+    /// the `accepted_values` args (rendered as pills) or the
+    /// relationships/range `detail` (muted mono). Deterministically
+    /// ordered (name, values, detail, then test node id). Omitted from
+    /// JSON when the column is described but untested.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub tests: Vec<String>,
+    pub tests: Vec<ColumnTestPayload>,
 }
 
-/// One-line display summary of a column-scoped generic test
-/// (cute-dbt#165): the package-qualified test name, plus the key args
-/// dbt's two arg-carrying built-ins are read by (`accepted_values` →
-/// `values`; `relationships` → `to` / `field`). Other tests (incl.
-/// package tests like `dbt_expectations.*`) summarize as the bare
-/// qualified name — their arg vocabularies are open-ended and v1 does
-/// not interpret them.
+/// One column-scoped data test in display shape (cute-dbt#178, the
+/// handoff README §2.2 contract). The JS renders `name` in the accent
+/// color, each `values` entry as a chip, and `detail` as muted mono —
+/// so the three are carried distinctly, never pre-joined.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ColumnTestPayload {
+    /// Display name: `unique` / `not null` / `accepted values` /
+    /// `relationships` / `accepted range` for the known built-ins (the
+    /// §2.2 prose forms), else the package-qualified raw test name
+    /// (identifiers are never prose-mangled).
+    pub name: String,
+    /// `accepted_values` args, one chip per authored value. Empty (and
+    /// omitted from JSON) for every other test.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+    /// Muted mono detail: `relationships` → `"model.field"`;
+    /// `accepted_range` → `"0–100"` / `"≥ 0"` / `"≤ 1"`. `None` (and
+    /// omitted) when the test carries no interpretable detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// Structured display mapping of a column-scoped generic test
+/// (cute-dbt#165 → restructured for cute-dbt#178 per the handoff README
+/// §2.2 table):
+///
+/// | dbt test | `name` | `values` / `detail` |
+/// |---|---|---|
+/// | `unique` | `unique` | — |
+/// | `not_null` | `not null` | — |
+/// | `accepted_values` | `accepted values` | `values` = the list (pills) |
+/// | `relationships (to: ref('m'), field: f)` | `relationships` | `detail = "m.f"` |
+/// | `accepted_range (min/max)` | `accepted range` | `detail = "0–100"` / `"≥ 0"` / `"≤ 1"` |
+///
+/// Any other test (incl. package tests like `dbt_expectations.*`)
+/// carries its package-qualified raw name with no values/detail — their
+/// arg vocabularies are open-ended and v1 does not interpret them.
+/// `accepted_range` maps by bare name regardless of namespace (it
+/// usually ships as `dbt_utils.accepted_range`).
 #[must_use]
-pub fn summarize_column_test(tm: &TestMetadata) -> String {
+pub fn column_test_payload(tm: &TestMetadata) -> ColumnTestPayload {
     let qualified = match tm.namespace() {
         Some(ns) => format!("{ns}.{}", tm.name()),
         None => tm.name().to_owned(),
     };
     match tm.name() {
-        "accepted_values" => match tm.kwargs().get("values").and_then(Value::as_array) {
-            Some(values) if !values.is_empty() => {
-                let rendered: Vec<String> = values.iter().map(scalar_token).collect();
-                format!("{qualified} (values: {})", rendered.join(", "))
-            }
-            _ => qualified,
+        "unique" => ColumnTestPayload {
+            name: "unique".to_owned(),
+            ..ColumnTestPayload::default()
         },
-        "relationships" => {
-            let to = tm.kwargs().get("to").and_then(Value::as_str);
-            let field = tm.kwargs().get("field").and_then(Value::as_str);
-            match (to, field) {
-                (Some(to), Some(field)) => format!("{qualified} (to: {to}, field: {field})"),
-                (Some(to), None) => format!("{qualified} (to: {to})"),
-                _ => qualified,
+        "not_null" => ColumnTestPayload {
+            name: "not null".to_owned(),
+            ..ColumnTestPayload::default()
+        },
+        "accepted_values" => {
+            let values = tm
+                .kwargs()
+                .get("values")
+                .and_then(Value::as_array)
+                .map(|values| values.iter().map(scalar_token).collect())
+                .unwrap_or_default();
+            ColumnTestPayload {
+                name: "accepted values".to_owned(),
+                values,
+                detail: None,
             }
         }
-        _ => qualified,
+        "relationships" => ColumnTestPayload {
+            name: "relationships".to_owned(),
+            values: Vec::new(),
+            detail: relationships_detail(tm),
+        },
+        "accepted_range" => ColumnTestPayload {
+            name: "accepted range".to_owned(),
+            values: Vec::new(),
+            detail: accepted_range_detail(tm),
+        },
+        _ => ColumnTestPayload {
+            name: qualified,
+            ..ColumnTestPayload::default()
+        },
+    }
+}
+
+/// `relationships` detail per README §2.2: `to: ref('m'), field: f` →
+/// `"m.f"`. The `to` target unwraps a `ref('…')` / `source('…','…')`
+/// jinja call to its last quoted name; a non-call target renders
+/// verbatim. Field-less relationships show just the target.
+fn relationships_detail(tm: &TestMetadata) -> Option<String> {
+    let to = tm.kwargs().get("to").and_then(Value::as_str)?;
+    let target = unquote_last_jinja_arg(to);
+    match tm.kwargs().get("field").and_then(Value::as_str) {
+        Some(field) => Some(format!("{target}.{field}")),
+        None => Some(target),
+    }
+}
+
+/// The last single-quoted argument of a jinja-ish call (`ref('m')` →
+/// `m`; `source('raw', 'orders')` → `orders`), or the input verbatim
+/// when no quoted argument is present.
+fn unquote_last_jinja_arg(value: &str) -> String {
+    let mut last: Option<&str> = None;
+    let mut rest = value;
+    while let Some(open) = rest.find('\'') {
+        let tail = &rest[open + 1..];
+        let Some(close) = tail.find('\'') else { break };
+        last = Some(&tail[..close]);
+        rest = &tail[close + 1..];
+    }
+    last.unwrap_or(value).to_owned()
+}
+
+/// `accepted_range` detail per README §2.2: both bounds → `"min–max"`
+/// (en dash); min only → `"≥ min"`; max only → `"≤ max"`; neither →
+/// `None`. Bounds render via [`scalar_token`] (authored JSON scalars).
+fn accepted_range_detail(tm: &TestMetadata) -> Option<String> {
+    let min = tm.kwargs().get("min_value").filter(|v| !v.is_null());
+    let max = tm.kwargs().get("max_value").filter(|v| !v.is_null());
+    match (min, max) {
+        (Some(min), Some(max)) => Some(format!(
+            "{}\u{2013}{}",
+            scalar_token(min),
+            scalar_token(max)
+        )),
+        (Some(min), None) => Some(format!("\u{2265} {}", scalar_token(min))),
+        (None, Some(max)) => Some(format!("\u{2264} {}", scalar_token(max))),
+        (None, None) => None,
     }
 }
 
@@ -372,8 +469,8 @@ fn scalar_token(value: &Value) -> String {
 /// scope. Only columns with a description and/or ≥1 test appear.
 ///
 /// Deterministic: descriptions iterate a `BTreeMap`; tests are sorted by
-/// (column, summary, test node id) before insertion — `Manifest::nodes`
-/// is a `HashMap` with no inherent order.
+/// (column, name, values, detail, test node id) before insertion —
+/// `Manifest::nodes` is a `HashMap` with no inherent order.
 #[must_use]
 pub fn column_meta_for_model(
     current: &Manifest,
@@ -383,7 +480,7 @@ pub fn column_meta_for_model(
     for (column, description) in model.column_descriptions() {
         meta.entry(column.clone()).or_default().description = Some(description.clone());
     }
-    let mut tests: Vec<(&str, String, &str)> = current
+    let mut tests: Vec<(&str, ColumnTestPayload, &str)> = current
         .nodes()
         .iter()
         .filter_map(|(id, node)| {
@@ -392,15 +489,20 @@ pub fn column_meta_for_model(
             }
             let column = node.column_name()?;
             let tm = node.test_metadata()?;
-            Some((column, summarize_column_test(tm), id.as_str()))
+            Some((column, column_test_payload(tm), id.as_str()))
         })
         .collect();
-    tests.sort();
-    for (column, summary, _) in tests {
-        meta.entry(column.to_owned())
-            .or_default()
-            .tests
-            .push(summary);
+    tests.sort_by(|a, b| {
+        (a.0, &a.1.name, &a.1.values, &a.1.detail, a.2).cmp(&(
+            b.0,
+            &b.1.name,
+            &b.1.values,
+            &b.1.detail,
+            b.2,
+        ))
+    });
+    for (column, test, _) in tests {
+        meta.entry(column.to_owned()).or_default().tests.push(test);
     }
     meta
 }
@@ -3577,61 +3679,144 @@ mod tests {
         )
     }
 
+    /// Shorthand: a name-only `ColumnTestPayload`.
+    fn bare_test(name: &str) -> ColumnTestPayload {
+        ColumnTestPayload {
+            name: name.to_owned(),
+            ..ColumnTestPayload::default()
+        }
+    }
+
     #[test]
-    fn summarize_column_test_renders_names_and_key_args() {
-        // Built-in, bare name.
+    fn column_test_payload_maps_names_and_accepted_values() {
+        // cute-dbt#178 — the handoff README §2.2 display-string mapping.
+        // Built-ins, bare prose names.
         assert_eq!(
-            summarize_column_test(&TestMetadata::new("unique", None, Value::Null)),
-            "unique"
+            column_test_payload(&TestMetadata::new("unique", None, Value::Null)),
+            bare_test("unique")
         );
-        // Package-qualified.
         assert_eq!(
-            summarize_column_test(&TestMetadata::new(
+            column_test_payload(&TestMetadata::new("not_null", None, Value::Null)),
+            bare_test("not null")
+        );
+        // Unknown package test → package-qualified RAW identifier, no
+        // values/detail (open-ended arg vocabularies stay uninterpreted).
+        assert_eq!(
+            column_test_payload(&TestMetadata::new(
                 "expect_column_values_to_be_between",
                 Some("dbt_expectations".to_owned()),
                 json!({ "min_value": 0 }),
             )),
-            "dbt_expectations.expect_column_values_to_be_between"
+            bare_test("dbt_expectations.expect_column_values_to_be_between")
         );
-        // accepted_values → the authored values list.
+        // accepted_values → the authored values list as distinct chips.
         assert_eq!(
-            summarize_column_test(&TestMetadata::new(
+            column_test_payload(&TestMetadata::new(
                 "accepted_values",
                 None,
                 json!({ "values": ["placed", "shipped", 3] }),
             )),
-            "accepted_values (values: placed, shipped, 3)"
+            ColumnTestPayload {
+                name: "accepted values".to_owned(),
+                values: vec!["placed".to_owned(), "shipped".to_owned(), "3".to_owned()],
+                detail: None,
+            }
         );
         // accepted_values with no / empty values degrades to the bare name.
         assert_eq!(
-            summarize_column_test(&TestMetadata::new("accepted_values", None, Value::Null)),
-            "accepted_values"
+            column_test_payload(&TestMetadata::new("accepted_values", None, Value::Null)),
+            bare_test("accepted values")
         );
         assert_eq!(
-            summarize_column_test(&TestMetadata::new(
+            column_test_payload(&TestMetadata::new(
                 "accepted_values",
                 None,
                 json!({ "values": [] })
             )),
-            "accepted_values"
+            bare_test("accepted values")
         );
-        // relationships → to + field.
+    }
+
+    #[test]
+    fn column_test_payload_maps_relationships_and_accepted_range_details() {
+        // cute-dbt#178 — the README §2.2 detail mappings.
+        // relationships → "model.field" detail (ref('…') unwrapped).
         assert_eq!(
-            summarize_column_test(&TestMetadata::new(
+            column_test_payload(&TestMetadata::new(
                 "relationships",
                 None,
                 json!({ "to": "ref('customers')", "field": "customer_id" }),
             )),
-            "relationships (to: ref('customers'), field: customer_id)"
+            ColumnTestPayload {
+                name: "relationships".to_owned(),
+                values: Vec::new(),
+                detail: Some("customers.customer_id".to_owned()),
+            }
         );
-        // relationships with a missing field still names the target.
+        // relationships with a missing field still names the target; a
+        // source('…','…') unwraps to its LAST quoted argument.
         assert_eq!(
-            summarize_column_test(&TestMetadata::new(
+            column_test_payload(&TestMetadata::new(
                 "relationships",
                 None,
-                json!({ "to": "ref('customers')" }),
+                json!({ "to": "source('raw', 'customers')" }),
+            ))
+            .detail
+            .as_deref(),
+            Some("customers")
+        );
+        // a non-call `to` target renders verbatim.
+        assert_eq!(
+            column_test_payload(&TestMetadata::new(
+                "relationships",
+                None,
+                json!({ "to": "customers", "field": "id" }),
+            ))
+            .detail
+            .as_deref(),
+            Some("customers.id")
+        );
+        // accepted_range → range detail; maps by bare name regardless of
+        // namespace (it usually ships as dbt_utils.accepted_range).
+        assert_eq!(
+            column_test_payload(&TestMetadata::new(
+                "accepted_range",
+                Some("dbt_utils".to_owned()),
+                json!({ "min_value": 0, "max_value": 100 }),
             )),
-            "relationships (to: ref('customers'))"
+            ColumnTestPayload {
+                name: "accepted range".to_owned(),
+                values: Vec::new(),
+                detail: Some("0\u{2013}100".to_owned()),
+            }
+        );
+        assert_eq!(
+            column_test_payload(&TestMetadata::new(
+                "accepted_range",
+                Some("dbt_utils".to_owned()),
+                json!({ "min_value": 0 }),
+            ))
+            .detail
+            .as_deref(),
+            Some("\u{2265} 0")
+        );
+        assert_eq!(
+            column_test_payload(&TestMetadata::new(
+                "accepted_range",
+                Some("dbt_utils".to_owned()),
+                json!({ "max_value": 1 }),
+            ))
+            .detail
+            .as_deref(),
+            Some("\u{2264} 1")
+        );
+        assert_eq!(
+            column_test_payload(&TestMetadata::new(
+                "accepted_range",
+                Some("dbt_utils".to_owned()),
+                Value::Null,
+            )),
+            bare_test("accepted range")
         );
     }
 
@@ -3715,8 +3900,11 @@ mod tests {
 
         let id_meta = meta.get("id").expect("id has metadata");
         assert_eq!(id_meta.description.as_deref(), Some("Primary key"));
-        // Sorted by summary text → deterministic regardless of HashMap order.
-        assert_eq!(id_meta.tests, vec!["not_null", "unique"]);
+        // Sorted by display name → deterministic regardless of HashMap order.
+        assert_eq!(
+            id_meta.tests,
+            vec![bare_test("not null"), bare_test("unique")]
+        );
 
         let note_meta = meta.get("note").expect("described-only column present");
         assert_eq!(note_meta.description.as_deref(), Some("Free text"));
@@ -3724,7 +3912,7 @@ mod tests {
 
         let status_meta = meta.get("status").expect("tested-only column present");
         assert!(status_meta.description.is_none());
-        assert_eq!(status_meta.tests, vec!["not_null"]);
+        assert_eq!(status_meta.tests, vec![bare_test("not null")]);
 
         assert_eq!(meta.len(), 3, "no entries beyond id/note/status: {meta:?}");
     }
@@ -3800,7 +3988,7 @@ mod tests {
         );
         assert_eq!(
             expect_meta.get("id").map(|m| m.tests.as_slice()),
-            Some(&["unique".to_owned()][..])
+            Some(&[bare_test("unique")][..])
         );
         assert!(!expect_meta.contains_key("status"));
         assert!(!expect_meta.contains_key("not_in_fixture"));

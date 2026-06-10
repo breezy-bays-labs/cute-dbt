@@ -4111,8 +4111,9 @@ fn stacked_panel_does_not_blow_out_viewport_at_375px() {
 
 /// A column-scoped generic-test node attached to `model_id` — the
 /// manifest shape `column_meta_for_model` resolves (column_name +
-/// attached_node + test_metadata).
-fn column_test_node(id: &str, model_id: &str, column: &str, test_name: &str) -> Node {
+/// attached_node + test_metadata). Takes the full [`TestMetadata`] so
+/// arg-carrying tests (accepted_values / relationships) can be staged.
+fn column_test_node(id: &str, model_id: &str, column: &str, tm: TestMetadata) -> Node {
     Node::new(
         NodeId::new(id),
         "test",
@@ -4128,22 +4129,24 @@ fn column_test_node(id: &str, model_id: &str, column: &str, test_name: &str) -> 
     .with_test_attachment(
         Some(column.to_owned()),
         Some(NodeId::new(model_id)),
-        Some(TestMetadata::new(test_name, None, serde_json::Value::Null)),
+        Some(tm),
     )
 }
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
-fn column_header_tooltips_focus_reveal_and_skip_bare_columns() {
-    // cute-dbt#165 — dim_x's `id` column is described AND carries
-    // unique/not_null column tests; its `status` column has neither. The
-    // expect table renders both columns, so its thead must carry exactly
-    // ONE tooltip button (on `id`) — the negative path pins the
-    // "no empty bubbles" contract. The stg_src given verifies a given
-    // table resolves ITS OWN input model's metadata, not the target's.
-    // Mirrors the #146 expect-tooltip guards: focusable <button>, bubble
-    // hidden until hover/focus, FOCUS reveals it (keyboard path), aria
-    // parity.
+fn column_header_tooltips_th_trigger_hover_focus_and_skip_bare_columns() {
+    // cute-dbt#165 → cute-dbt#178 (the handoff spec): the WHOLE header cell
+    // is the tooltip trigger — NO per-column icon/button in the DOM. dim_x's
+    // `id` column is described AND carries unique / not_null /
+    // accepted_values / relationships column tests; its `status` column has
+    // neither (the no-empty-bubbles negative path). The stg_src given
+    // verifies a given table resolves ITS OWN input model's metadata.
+    //
+    // A11y (#166 carried onto the th): tabindex makes the th keyboard-
+    // focusable; aria-label is the AT surface; the singleton #col-tooltip
+    // bubble is aria-hidden; hover AND focus both reveal; decorated headers
+    // shed the native title (it would double-show over the bubble).
     let mut dim_desc = BTreeMap::new();
     dim_desc.insert("id".to_owned(), "Primary key for dim_x".to_owned());
     let dim = model_node("model.shop.dim_x").with_column_descriptions(dim_desc);
@@ -4181,13 +4184,33 @@ fn column_header_tooltips_focus_reveal_and_skip_bare_columns() {
                 "test.shop.unique_dim_x_id",
                 "model.shop.dim_x",
                 "id",
-                "unique",
+                TestMetadata::new("unique", None, serde_json::Value::Null),
             ),
             column_test_node(
                 "test.shop.not_null_dim_x_id",
                 "model.shop.dim_x",
                 "id",
-                "not_null",
+                TestMetadata::new("not_null", None, serde_json::Value::Null),
+            ),
+            column_test_node(
+                "test.shop.accepted_values_dim_x_id",
+                "model.shop.dim_x",
+                "id",
+                TestMetadata::new(
+                    "accepted_values",
+                    None,
+                    serde_json::json!({ "values": ["alpha", "beta"] }),
+                ),
+            ),
+            column_test_node(
+                "test.shop.relationships_dim_x_id",
+                "model.shop.dim_x",
+                "id",
+                TestMetadata::new(
+                    "relationships",
+                    None,
+                    serde_json::json!({ "to": "ref('stg_src')", "field": "src_id" }),
+                ),
             ),
         ],
         vec![("unit_test.shop.dim_x.cols", ut)],
@@ -4201,105 +4224,180 @@ fn column_header_tooltips_focus_reveal_and_skip_bare_columns() {
     tab.wait_until_navigated().expect("await navigation");
     select_model(&tab, "dim_x");
 
-    // ===== expected table: exactly one tooltip, on the `id` th =====
+    // ===== expected table: exactly one decorated th, on `id` =====
     assert_eq!(
         eval(
             &tab,
-            "document.querySelectorAll('.expected-panel th .col-tooltip').length"
+            "document.querySelectorAll('.expected-panel th.has-col-meta').length"
         )
         .as_u64(),
         Some(1),
-        "exactly one column-tooltip button in the expect thead (id yes, status no)",
+        "exactly one decorated header in the expect thead (id yes, status no)",
     );
-    const BTN: &str = "document.querySelector('.expected-panel th .col-tooltip')";
-    assert_eq!(
-        eval_string(&tab, &format!("{BTN}.tagName")),
-        "BUTTON",
-        "the column tooltip is a focusable <button>, not a hover-only span (#146 pattern)",
+    // The spec's no-icon contract: NO tooltip trigger element inside any th
+    // (the th itself is the trigger), and no legacy info button anywhere.
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('th .col-tooltip, th button, .col-info-btn') === null"
+        ),
+        "no per-column icon/button — the header cell itself is the trigger",
     );
+    const TH: &str = "document.querySelector('.expected-panel th.has-col-meta')";
     assert_eq!(
-        eval_string(&tab, &format!("{BTN}.closest('th').getAttribute('title')")),
+        eval_string(&tab, &format!("{TH}.getAttribute('data-col-name')")),
         "id",
-        "the tooltip rides the described+tested column's th",
+        "the decorated th is the described+tested column",
     );
-    // The negative path: the metadata-less column has NO affordance.
+    // Keyboard reachability: a bare th is not focusable — tabindex makes it.
+    assert_eq!(
+        eval_string(&tab, &format!("{TH}.getAttribute('tabindex')")),
+        "0",
+        "the decorated th carries tabindex=0 (keyboard users can reach the tip)",
+    );
+    // The native title is REMOVED from decorated headers (it would
+    // double-show over the bubble); undecorated headers keep theirs.
+    assert!(
+        eval_bool(&tab, &format!("{TH}.getAttribute('title') === null")),
+        "a decorated th sheds the native title attribute",
+    );
     assert!(
         eval_bool(
             &tab,
-            "document.querySelector('.expected-panel th[title=\"status\"] .col-tooltip') === null"
+            "document.querySelector('.expected-panel th[title=\"status\"]') !== null"
         ),
-        "a column with no description and no tests gets no tooltip button",
+        "the metadata-less column keeps its plain th (title intact, no decoration)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.expected-panel th[title=\"status\"].has-col-meta') === null"
+        ),
+        "a column with no description and no tests gets no tooltip affordance",
     );
 
-    // ===== bubble content: description + summarized column tests =====
-    let bubble_text = eval_string(
+    // ===== aria parity on the trigger =====
+    let aria = eval_string(&tab, &format!("{TH}.getAttribute('aria-label')"));
+    assert!(
+        aria.contains("Primary key for dim_x")
+            && aria.contains("unique")
+            && aria.contains("not null"),
+        "the th aria-label carries the description + display test names, got {aria:?}",
+    );
+
+    // ===== FOCUS reveals the singleton bubble (keyboard path) =====
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){var el=document.getElementById('col-tooltip');\
+             return el === null || el.hidden;})()"
+        ),
+        "the bubble is absent/hidden before any hover/focus",
+    );
+    let _ = eval(&tab, &format!("{TH}.focus()"));
+    const BUBBLE: &str = "document.getElementById('col-tooltip')";
+    assert!(
+        !eval_bool(&tab, &format!("{BUBBLE}.hidden")),
+        "focusing the th reveals the bubble (the keyboard path a native title never had)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{BUBBLE}.getAttribute('aria-hidden') === 'true'")
+        ),
+        "the bubble is aria-hidden — the th aria-label is the AT surface",
+    );
+    // Spec content: .ct-desc description, accent .ct-key test names,
+    // .ct-val chips for accepted_values args, .ct-detail for relationships.
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{BUBBLE}.querySelector('.ct-desc').textContent")
+        ),
+        "Primary key for dim_x",
+        "the bubble leads with the authored description",
+    );
+    let keys = eval_string(
         &tab,
-        &format!("{BTN}.querySelector('.col-tooltip-bubble').textContent"),
-    );
-    assert!(
-        bubble_text.contains("Primary key for dim_x"),
-        "the bubble carries the authored description, got {bubble_text:?}",
-    );
-    assert!(
-        bubble_text.contains("unique") && bubble_text.contains("not_null"),
-        "the bubble lists the column-level data tests, got {bubble_text:?}",
-    );
-    let aria = eval_string(&tab, &format!("{BTN}.getAttribute('aria-label')"));
-    assert!(
-        aria.contains("Primary key for dim_x") && aria.contains("unique"),
-        "the aria-label carries the same content for assistive tech, got {aria:?}",
-    );
-    assert!(
-        eval_bool(
-            &tab,
-            &format!(
-                "{BTN}.querySelector('.col-tooltip-bubble').getAttribute('aria-hidden') === 'true'"
-            )
+        &format!(
+            "Array.from({BUBBLE}.querySelectorAll('.ct-key'))\
+             .map(function(k){{return k.textContent;}}).join('|')"
         ),
-        "the bubble is aria-hidden so the content is not announced twice",
     );
-
-    // ===== visibility: hidden until focus; FOCUS reveals (keyboard path) =====
-    const BUBBLE_VIS: &str = "getComputedStyle(document.querySelector('.expected-panel th .col-tooltip .col-tooltip-bubble')).visibility";
     assert_eq!(
-        eval_string(&tab, BUBBLE_VIS),
-        "hidden",
-        "the bubble is hidden until hover/focus",
+        keys, "accepted values|not null|relationships|unique",
+        "every column test renders a .ct-key name (sorted by display name)",
     );
-    let _ = eval(&tab, &format!("{BTN}.focus()"));
-    assert_eq!(
-        eval_string(&tab, BUBBLE_VIS),
-        "visible",
-        "focusing the button reveals the bubble (the keyboard path a native title never had)",
+    let chips = eval_string(
+        &tab,
+        &format!(
+            "Array.from({BUBBLE}.querySelectorAll('.ct-vals .ct-val'))\
+             .map(function(v){{return v.textContent;}}).join('|')"
+        ),
     );
-
-    // ===== given table: the INPUT model's metadata, filtered the same =====
-    show_all_inputs(&tab);
-    const GIVEN_BTN: &str = "document.querySelector('.given-section th .col-tooltip')";
     assert_eq!(
-        eval(
-            &tab,
-            "document.querySelectorAll('.given-section th .col-tooltip').length"
-        )
-        .as_u64(),
-        Some(1),
-        "exactly one tooltip in the given thead (src_id yes, bare_col no)",
+        chips, "alpha|beta",
+        "accepted_values args render as distinct .ct-val chips",
     );
     assert_eq!(
         eval_string(
             &tab,
-            &format!("{GIVEN_BTN}.closest('th').getAttribute('title')")
+            &format!("{BUBBLE}.querySelector('.ct-detail').textContent")
         ),
-        "src_id",
-        "the given tooltip rides the input model's described column",
+        "stg_src.src_id",
+        "relationships renders its model.field detail in muted mono",
     );
-    let given_bubble = eval_string(
+
+    // Blur hides it again (focusout path).
+    let _ = eval(&tab, &format!("{TH}.blur()"));
+    assert!(
+        eval_bool(&tab, &format!("{BUBBLE}.hidden")),
+        "blurring the th hides the bubble",
+    );
+
+    // ===== HOVER reveals too (mouse path; delegated mouseenter) =====
+    let _ = eval(
         &tab,
-        &format!("{GIVEN_BTN}.querySelector('.col-tooltip-bubble').textContent"),
+        &format!("{TH}.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true}}))"),
     );
     assert!(
-        given_bubble.contains("Source key for stg_src"),
-        "the given bubble carries the INPUT model's description, got {given_bubble:?}",
+        !eval_bool(&tab, &format!("{BUBBLE}.hidden")),
+        "hovering the th reveals the bubble (mouse-only users reach it)",
+    );
+    let _ = eval(
+        &tab,
+        &format!("{TH}.dispatchEvent(new MouseEvent('mouseout', {{bubbles: true}}))"),
+    );
+    assert!(
+        eval_bool(&tab, &format!("{BUBBLE}.hidden")),
+        "leaving the th hides the bubble",
+    );
+
+    // ===== given table: the INPUT model's metadata, filtered the same =====
+    show_all_inputs(&tab);
+    const GIVEN_TH: &str = "document.querySelector('.given-section th.has-col-meta')";
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelectorAll('.given-section th.has-col-meta').length"
+        )
+        .as_u64(),
+        Some(1),
+        "exactly one decorated header in the given thead (src_id yes, bare_col no)",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{GIVEN_TH}.getAttribute('data-col-name')")),
+        "src_id",
+        "the given trigger rides the input model's described column",
+    );
+    let _ = eval(&tab, &format!("{GIVEN_TH}.focus()"));
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{BUBBLE}.querySelector('.ct-desc').textContent")
+        ),
+        "Source key for stg_src",
+        "the given bubble carries the INPUT model's description",
     );
 
     let _ = tab.close(true);

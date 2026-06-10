@@ -68,6 +68,14 @@
 
   var root = document.documentElement;
 
+  // ES5-safe NodeList iteration (gemini review, PR #188): older engines ship
+  // querySelectorAll results without NodeList.prototype.forEach; iterate via
+  // an index loop so this file keeps its deliberate ES5 posture throughout.
+  function qsaForEach(selector, fn) {
+    var list = document.querySelectorAll(selector);
+    for (var i = 0; i < list.length; i++) fn(list[i]);
+  }
+
   function themeById(id) {
     for (var i = 0; i < THEMES.length; i++) if (THEMES[i].id === id) return THEMES[i];
     return THEMES[0];
@@ -121,54 +129,57 @@
 
   /* ---- sync visual state of the (static) controls to prefs ------------- */
   function syncControls() {
-    document.querySelectorAll(".style-opt").forEach(function (b) {
+    qsaForEach(".style-opt", function (b) {
       b.setAttribute("aria-pressed", b.getAttribute("data-style-id") === pref.style ? "true" : "false");
     });
-    document.querySelectorAll(".theme-chip").forEach(function (b) {
+    qsaForEach(".theme-chip", function (b) {
       b.setAttribute("aria-pressed", b.getAttribute("data-theme-id") === pref.theme ? "true" : "false");
     });
-    document.querySelectorAll(".accent-swatch").forEach(function (b) {
+    qsaForEach(".accent-swatch", function (b) {
       b.setAttribute("aria-pressed", b.getAttribute("data-accent") === pref.accent ? "true" : "false");
     });
-    document.querySelectorAll(".density-seg button").forEach(function (b) {
+    qsaForEach(".density-seg button", function (b) {
       b.setAttribute("aria-pressed", b.getAttribute("data-density") === pref.density ? "true" : "false");
     });
-    document.querySelectorAll(".diff-seg button").forEach(function (b) {
+    qsaForEach(".diff-seg button", function (b) {
       b.setAttribute("aria-pressed", b.getAttribute("data-diffstyle") === pref.diffstyle ? "true" : "false");
     });
-    document.querySelectorAll(".difflayout-seg button").forEach(function (b) {
+    qsaForEach(".difflayout-seg button", function (b) {
       b.setAttribute("aria-pressed", b.getAttribute("data-difflayout") === pref.difflayout ? "true" : "false");
     });
   }
 
   function wire() {
-    document.querySelectorAll(".style-opt").forEach(function (b) {
+    qsaForEach(".style-opt", function (b) {
       b.addEventListener("click", function () { applyStyle(b.getAttribute("data-style-id")); save(); syncControls(); reflowTables(); rerenderDag(); });
     });
-    document.querySelectorAll(".theme-chip").forEach(function (b) {
+    qsaForEach(".theme-chip", function (b) {
       b.addEventListener("click", function () { applyTheme(b.getAttribute("data-theme-id")); save(); syncControls(); reflowTables(); rerenderDag(); });
     });
-    document.querySelectorAll(".accent-swatch").forEach(function (b) {
+    qsaForEach(".accent-swatch", function (b) {
       b.addEventListener("click", function () { applyAccent(b.getAttribute("data-accent")); save(); syncControls(); });
     });
-    document.querySelectorAll(".density-seg button").forEach(function (b) {
+    qsaForEach(".density-seg button", function (b) {
       b.addEventListener("click", function () { applyDensity(b.getAttribute("data-density")); save(); syncControls(); reflowTables(); });
     });
-    document.querySelectorAll(".diff-seg button").forEach(function (b) {
+    qsaForEach(".diff-seg button", function (b) {
       b.addEventListener("click", function () { applyDiffStyle(b.getAttribute("data-diffstyle")); save(); syncControls(); });
     });
-    document.querySelectorAll(".difflayout-seg button").forEach(function (b) {
+    qsaForEach(".difflayout-seg button", function (b) {
       b.addEventListener("click", function () { applyDiffLayout(b.getAttribute("data-difflayout")); save(); syncControls(); });
     });
   }
 
   // DataTables column widths shift when the font-size changes (density /
-  // style / theme flips); re-adjust the visible ones.
+  // style / theme flips); re-adjust the visible ones. jQuery is bound
+  // locally (gemini review, PR #188) so the lookup is explicit and a bare
+  // global `jQuery` reference can never throw mid-iteration.
   function reflowTables() {
-    if (window.jQuery && jQuery.fn && jQuery.fn.DataTable) {
-      jQuery("table.given-table, table.expected-table").each(function () {
-        if (jQuery.fn.DataTable.isDataTable(this) && this.offsetParent !== null) {
-          try { jQuery(this).DataTable().columns.adjust(); } catch (e) { /* hidden */ }
+    var $ = window.jQuery;
+    if ($ && $.fn && $.fn.DataTable) {
+      $("table.given-table, table.expected-table").each(function () {
+        if ($.fn.DataTable.isDataTable(this) && this.offsetParent !== null) {
+          try { $(this).DataTable().columns.adjust(); } catch (e) { /* hidden */ }
         }
       });
     }

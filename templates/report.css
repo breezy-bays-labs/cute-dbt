@@ -988,23 +988,33 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
    until their owning feature PR replaces them explicitly.
    ========================================================================== */
 
-/* cute-dbt#165 + cute-dbt#166 — column-header tooltip: the column's authored
-   description + its column-level data tests. Mirrors the #146 expect-tooltip
-   contract (focusable <button> + CSS bubble on :hover AND :focus; aria-label
-   for AT; never a native `title`). The ONE divergence: the bubble is
-   position:FIXED with JS-set coordinates — the th lives inside the .table-fit
-   overflow-x scroller, which would clip an absolutely-positioned bubble.
-   Visibility itself stays pure CSS. Tokenized onto the chassis (accent +
-   tooltip tokens); PR-2/PR-3 swap this for the redesign's body-appended
-   bubble when the engine DOM lands. */
-.col-tooltip { position: relative; display: inline-flex; align-items: center; border: none; background: transparent; padding: 0; margin-left: 0.3rem; font: inherit; font-size: 0.85em; font-weight: normal; color: var(--accent); cursor: help; }
-.col-tooltip-bubble { position: fixed; left: 0; top: 0; transform: translateX(-50%); z-index: 60; visibility: hidden; opacity: 0; transition: opacity 0.1s ease-in; width: 18rem; max-width: 70vw; padding: 0.5rem 0.65rem; background: var(--tooltip-bg); color: var(--tooltip-fg); border-radius: var(--radius-pan); box-shadow: 0 2px 10px rgba(0,0,0,0.35); font-size: 0.78rem; font-weight: normal; line-height: 1.45; text-align: left; text-transform: none; letter-spacing: normal; white-space: normal; pointer-events: none; }
-.col-tooltip:hover .col-tooltip-bubble, .col-tooltip:focus .col-tooltip-bubble, .col-tooltip:focus-visible .col-tooltip-bubble { visibility: visible; opacity: 1; }
-.col-tooltip-desc { display: block; }
-.col-tooltip-desc + .col-tooltip-tests-label { margin-top: 0.35rem; }
-.col-tooltip-tests-label { display: block; font-weight: 700; color: #b8e6c9; }
-.col-tooltip-tests { display: block; margin: 0; padding: 0; list-style: none; }
-.col-tooltip-tests li { margin: 0; padding-left: 0.85rem; text-indent: -0.85rem; }
+/* cute-dbt#165 + cute-dbt#166 + cute-dbt#178 — column-header tooltip, now
+   the handoff spec (rules ported from its base.css): the WHOLE header cell
+   is the hover/focus trigger — no per-column icon, no native title. The
+   bubble is the single body-appended #col-tooltip, position:fixed with
+   JS-set coordinates (the th lives inside the .table-fit overflow-x
+   scroller, which would clip an absolutely-positioned bubble; fixed +
+   horizontal clamp + the flip-above fallback never clips). The #166 a11y
+   contract carries forward on the th itself: tabindex makes it
+   keyboard-focusable, aria-label is the AT surface, the bubble stays
+   aria-hidden, hover AND focus both reveal. */
+th.has-col-meta { cursor: help; }
+th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.col-tooltip {
+  position: fixed; z-index: 90; max-width: 24rem; min-width: 12rem;
+  background: var(--tooltip-bg); color: var(--tooltip-fg);
+  border-radius: var(--radius-pan); box-shadow: 0 6px 22px rgba(0,0,0,0.32);
+  padding: 0.7rem 0.8rem; font-size: 12px; line-height: 1.45;
+  font-weight: normal; text-transform: none; letter-spacing: normal; pointer-events: none;
+}
+.col-tooltip .ct-desc { font-size: 1.12em; line-height: 1.5; opacity: 0.97; }
+.col-tooltip .ct-tests-label { margin-top: 0.6rem; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.07em; opacity: 0.6; }
+.col-tooltip .ct-tests { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.3rem; }
+.col-tooltip .ct-test { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.45rem; }
+.col-tooltip .ct-key { font-family: var(--font-mono); font-weight: 700; color: var(--accent); }
+.col-tooltip .ct-vals { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
+.col-tooltip .ct-val { background: rgba(255,255,255,0.14); border-radius: 4px; padding: 0.05rem 0.42rem; font-family: var(--font-mono); font-size: 0.9em; white-space: nowrap; }
+.col-tooltip .ct-detail { color: rgba(255,255,255,0.75); font-family: var(--font-mono); font-size: 0.95em; overflow-wrap: anywhere; }
 
 /* ============================================================================
    6. ENGINE-PR ADDITIONS (cute-dbt#178)
