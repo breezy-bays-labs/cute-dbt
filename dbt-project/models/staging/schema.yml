@@ -40,3 +40,17 @@ models:
           - accepted_values:
               arguments:
                 values: ['credit_card', 'coupon', 'bank_transfer', 'gift_card']
+
+  # cute-dbt#172 dogfood — the union.arm-coverage given-row sketch reads
+  # these declared columns for its recommendation payload.
+  - name: stg_refunds
+    columns:
+      - name: refund_id
+        description: Unique identifier for a refund event (staging grain)
+        tests:
+          - unique
+          - not_null
+      - name: order_id
+        description: Order the refund applies to
+      - name: amount
+        description: Refunded amount in dollars (negative)
