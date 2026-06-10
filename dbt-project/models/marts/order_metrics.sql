@@ -26,6 +26,12 @@ customers as (
     select * from {{ ref('stg_customers') }}
 ),
 
+-- cute-dbt#172 dogfood: this import feeds the deliberately-unexercised
+-- third UNION ALL arm in all_statuses below.
+refunds as (
+    select * from {{ ref('stg_refunds') }}
+),
+
 -- ---- INNER JOIN: orders (From) x payments (Inner) ----
 paid_orders as (
     select
@@ -132,10 +138,23 @@ other_rows as (
     where status <> 'completed'
 ),
 
+-- cute-dbt#172 dogfood (union.arm-coverage): the third arm reads
+-- `refunds`, which the unit test mocks EMPTY — the live PR-diff preview
+-- report carries the UNCOVERED finding + its given-row sketch (the
+-- catalog C3 charges/refunds worked example, self-dogfooded). With an
+-- empty given the arm contributes zero rows, so the existing expect is
+-- unchanged.
 all_statuses as (
     select order_id, status, amount, all_orders_amount from completed_rows
     union all
     select order_id, status, amount, all_orders_amount from other_rows
+    union all
+    select
+        order_id,
+        'refunded' as status,
+        amount,
+        cast(null as double) as all_orders_amount
+    from refunds
 ),
 
 -- ---- UNION (distinct): distinct status pairs from two arms ----
