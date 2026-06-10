@@ -310,6 +310,7 @@ jobs:
     permissions:
       actions: read       # `gh run download` reads this run's artifacts
       contents: write     # peaceiris pushes to the gh-pages branch
+      pages: read         # the privacy guard reads the Pages visibility
     # Shared with mdbook.yml (book deploy) + pr-preview-cleanup.yml: every
     # gh-pages push serializes through one group so peaceiris pushes don't
     # race + lose commits.
@@ -317,6 +318,52 @@ jobs:
       group: gh-pages
       cancel-in-progress: false
     steps:
+      # Privacy guard (cute-dbt#79): refuse to publish a PRIVATE repo's
+      # report to PUBLIC GitHub Pages — Pages sites are publicly
+      # URL-reachable even when the repo is private (private Pages
+      # visibility exists only on GitHub Enterprise Cloud). This repo is
+      # PUBLIC, so the guard passes trivially here — it stays present, and
+      # identical in shape to the consumer recipe's step, per the
+      # dogfood≡recipe sync invariant (consumer copy:
+      # `.github/workflows/examples/cute-dbt-pr-review.yml`; walkthrough:
+      # `book/src/recipes/github-actions-pr-review.md` § Privacy guard).
+      # Fail-closed: a private repo whose Pages visibility cannot be
+      # confirmed `private` fails here, BEFORE anything is published.
+      - name: Privacy guard — private repo vs public Pages
+        if: github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          # Repository variable opt-in: 'true' explicitly acknowledges that
+          # the published report becomes publicly reachable. Unset here.
+          ALLOW_PUBLIC_PAGES: ${{ vars.ALLOW_PUBLIC_PAGES }}
+        run: |
+          set -euo pipefail
+          repo_private=$(gh api "repos/${REPO}" --jq '.private')
+          if [ "$repo_private" != "true" ]; then
+            echo "Privacy guard: repository is public — publishing to Pages exposes nothing new."
+            exit 0
+          fi
+          # The repo is private (or internal). Publishing is safe only when
+          # the Pages site itself is private (Enterprise Cloud). A 404
+          # (Pages not enabled yet) or 403 (token lacks pages: read) lands
+          # in the fail-closed arm below.
+          pages_visibility=$(gh api "repos/${REPO}/pages" --jq '.visibility // "unknown"' 2>/dev/null || echo "unreadable")
+          if [ "$pages_visibility" = "private" ]; then
+            echo "Privacy guard: private repo with private (Enterprise) Pages — safe to publish."
+            exit 0
+          fi
+          if [ "${ALLOW_PUBLIC_PAGES:-}" = "true" ]; then
+            echo "::warning title=Privacy guard overridden::ALLOW_PUBLIC_PAGES=true — publishing a PRIVATE repo's report to a Pages site with visibility '${pages_visibility}'. Anyone with the URL can read it."
+            exit 0
+          fi
+          echo "::error title=Privacy guard::This repository is PRIVATE but its GitHub Pages site is not confirmed private (visibility: '${pages_visibility}'). Publishing would expose the report to anyone with the URL."
+          echo "Remediation:"
+          echo "  1. Use the artifact-link variant instead (downloads are auth-gated):"
+          echo "     https://breezy-bays-labs.github.io/cute-dbt/recipes/github-actions-pr-review.html"
+          echo "  2. On GitHub Enterprise Cloud, set the Pages site visibility to 'private'."
+          echo "  3. To knowingly publish anyway, set the repository variable ALLOW_PUBLIC_PAGES=true."
+          exit 1
       - name: Checkout (peaceiris needs a git workspace)
         # peaceiris/actions-gh-pages runs git against the repo; without a
         # checkout the workspace has no .git and the push fails.
