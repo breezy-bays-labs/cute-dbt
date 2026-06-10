@@ -1,0 +1,93 @@
+---
+source: tests/check_engine.rs
+expression: rendered
+---
+{
+  "model.healthcare_analytics.dim_payers": [
+    {
+      "check": "union.arm-coverage",
+      "construct": "union[final]",
+      "evidence": [
+        {
+          "label": "union",
+          "value": "final (2 arms: sequenced, unknown_member)"
+        },
+        {
+          "label": "unattributable arm",
+          "value": "unknown_member — no resolvable upstream relation"
+        }
+      ],
+      "instrument": "unit-test",
+      "model_id": "model.healthcare_analytics.dim_payers",
+      "tier": "high",
+      "verdict": {
+        "status": "unknown"
+      }
+    }
+  ],
+  "model.healthcare_analytics.fct_clinical_events": [
+    {
+      "check": "union.arm-coverage",
+      "construct": "union[all_events]",
+      "evidence": [
+        {
+          "label": "union",
+          "value": "all_events (3 arms: conditions, medications, procedures)"
+        },
+        {
+          "label": "unexercised arm",
+          "value": "conditions — no given row reaches ref('stg_synthea__conditions')"
+        },
+        {
+          "label": "suggested given",
+          "value": "- input: ref('stg_synthea__conditions')\n  rows:\n    - {_loaded_at: ..., condition_code: ..., condition_description: ..., condition_end_date: ..., condition_id: ..., condition_start_date: ..., encounter_id: ..., patient_id: ...}"
+        },
+        {
+          "label": "unexercised arm",
+          "value": "medications — no given row reaches ref('stg_synthea__medications')"
+        },
+        {
+          "label": "suggested given",
+          "value": "- input: ref('stg_synthea__medications')\n  rows:\n    - {_loaded_at: ..., base_cost: ..., dispenses: ..., encounter_id: ..., medication_code: ..., medication_description: ..., medication_end_at: ..., medication_id: ..., medication_start_at: ..., patient_id: ..., payer_coverage: ..., payer_id: ..., reason_code: ..., reason_description: ..., total_cost: ...}"
+        },
+        {
+          "label": "unexercised arm",
+          "value": "procedures — no given row reaches ref('stg_synthea__procedures')"
+        },
+        {
+          "label": "suggested given",
+          "value": "- input: ref('stg_synthea__procedures')\n  rows:\n    - {_loaded_at: ..., base_cost: ..., encounter_id: ..., patient_id: ..., procedure_at: ..., procedure_code: ..., procedure_description: ..., procedure_id: ..., reason_code: ..., reason_description: ...}"
+        }
+      ],
+      "instrument": "unit-test",
+      "model_id": "model.healthcare_analytics.fct_clinical_events",
+      "recommendation": "Add (or fill) a given row for each unexercised UNION arm's input so every arm contributes at least one row, then extend `expect` with the row(s) that arm should emit. This finding's evidence carries the per-arm input and a given-row sketch.",
+      "tier": "high",
+      "verdict": {
+        "status": "uncovered"
+      }
+    }
+  ],
+  "model.healthcare_analytics.mart_dq_summary": [
+    {
+      "check": "union.arm-coverage",
+      "construct": "union[combined_metrics]",
+      "evidence": [
+        {
+          "label": "union",
+          "value": "combined_metrics (2 arms: encounter_metrics, medication_metrics)"
+        }
+      ],
+      "instrument": "unit-test",
+      "model_id": "model.healthcare_analytics.mart_dq_summary",
+      "tier": "high",
+      "verdict": {
+        "by": [
+          "unit_test.healthcare_analytics.mart_dq_summary.test_mart_dq_summary_combines_encounter_and_medication_metrics",
+          "unit_test.healthcare_analytics.mart_dq_summary.test_mart_dq_summary_zero_quarantined_when_all_valid"
+        ],
+        "status": "covered"
+      }
+    }
+  ]
+}

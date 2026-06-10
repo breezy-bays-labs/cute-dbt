@@ -16,6 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
+use cute_dbt::adapters::cte_engine::parse_cte_graph;
 use cute_dbt::domain::{Finding, HeuristicId, Manifest, NodeId, Verdict, model_findings};
 use cute_dbt::ports::ManifestSource;
 
@@ -33,12 +34,16 @@ fn load(name: &str) -> Manifest {
         .expect("committed fixture passes Stage-1 preflight")
 }
 
-/// Run the engine pipeline on one model of `manifest`.
+/// Run the engine pipeline on one model of `manifest`, with the model's
+/// real CTE graph parsed from its fixture `compiled_code` — the same
+/// single-parse pass the renderer threads into the engine
+/// (cute-dbt#172).
 fn findings_for(manifest: &Manifest, model_id: &str) -> Vec<Finding<HeuristicId>> {
     let model = manifest
         .node(&NodeId::new(model_id))
         .expect("model exists in fixture");
-    model_findings(manifest, model)
+    let graph = parse_cte_graph(model.compiled_code().unwrap_or_default()).unwrap_or_default();
+    model_findings(manifest, model, Some(&graph))
 }
 
 #[test]
@@ -107,17 +112,96 @@ fn playground_combination_test_stays_composite_on_real_data() {
 #[test]
 fn jaffle_shop_models_without_unique_key_carry_no_findings() {
     // The jaffle-shop fixture declares no unique_key anywhere (its
-    // configs carry the explicit-null fusion arm) — zero findings on
-    // every model.
+    // configs carry the explicit-null fusion arm) AND no UNION-bearing
+    // model — zero findings on every model, even with the real graph
+    // threaded through.
     let manifest = load("jaffle-shop-current.json");
     for (id, node) in manifest.nodes() {
         if node.resource_type() == "model" {
             assert!(
-                model_findings(&manifest, node).is_empty(),
+                findings_for(&manifest, id.as_str()).is_empty(),
                 "unexpected finding on {id}"
             );
         }
     }
+}
+
+#[test]
+fn playground_union_with_both_arms_fed_is_covered_with_attribution() {
+    // mart_dq_summary: `combined_metrics` UNION ALLs the
+    // `encounter_metrics` and `medication_metrics` CTE arms; the
+    // "combines" unit test feeds BOTH arms non-empty csv givens
+    // (stg_synthea__encounters / stg_synthea__medications) — the
+    // real-data COVERED case for union.arm-coverage (cute-dbt#172).
+    let manifest = load("playground-current.json");
+    let findings = findings_for(&manifest, "model.healthcare_analytics.mart_dq_summary");
+    let union_finding = findings
+        .iter()
+        .find(|f| f.check == HeuristicId::UnionArmCoverage)
+        .expect("union finding fires on mart_dq_summary");
+    assert_eq!(union_finding.construct, "union[combined_metrics]");
+    let Verdict::Covered { by } = &union_finding.verdict else {
+        panic!("expected Covered, got {:?}", union_finding.verdict);
+    };
+    assert!(
+        by.contains(
+            &"unit_test.healthcare_analytics.mart_dq_summary.test_mart_dq_summary_combines_encounter_and_medication_metrics"
+                .to_owned()
+        ),
+        "attribution names the feeding test: {by:?}",
+    );
+    assert!(union_finding.recommendation.is_none());
+}
+
+#[test]
+fn playground_sentinel_union_arm_is_unknown_never_uncovered() {
+    // dim_payers: `final` UNION ALLs `unknown_member` (a constant
+    // SELECT with no upstream relation — the dimensional sentinel
+    // idiom) and `sequenced` (fed via stg_synthea__payers). The
+    // sentinel arm has no resolvable input, so the construct is honest
+    // UNKNOWN — never a nagged gap (the cute-dbt#172 exclusion).
+    let manifest = load("playground-current.json");
+    let findings = findings_for(&manifest, "model.healthcare_analytics.dim_payers");
+    let union_finding = findings
+        .iter()
+        .find(|f| f.check == HeuristicId::UnionArmCoverage)
+        .expect("union finding fires on dim_payers");
+    assert_eq!(union_finding.construct, "union[final]");
+    assert_eq!(union_finding.verdict, Verdict::Unknown);
+    assert!(union_finding.recommendation.is_none());
+    assert!(
+        union_finding
+            .evidence
+            .iter()
+            .any(|e| e.label == "unattributable arm" && e.value.contains("unknown_member")),
+        "evidence names the sentinel arm: {:?}",
+        union_finding.evidence,
+    );
+}
+
+#[test]
+fn playground_union_model_with_no_unit_tests_is_uncovered_with_a_sketch() {
+    // fct_clinical_events UNION ALLs five event-type arms and the
+    // fixture carries NO unit test targeting it — every arm is provably
+    // unexercised, and the recommendation payload carries a concrete
+    // given-row sketch per arm (the catalog C3 worked example, on real
+    // fusion-compiled data).
+    let manifest = load("playground-current.json");
+    let findings = findings_for(&manifest, "model.healthcare_analytics.fct_clinical_events");
+    let union_finding = findings
+        .iter()
+        .find(|f| f.check == HeuristicId::UnionArmCoverage)
+        .expect("union finding fires on fct_clinical_events");
+    assert_eq!(union_finding.verdict, Verdict::Uncovered);
+    assert!(union_finding.recommendation.is_some());
+    assert!(
+        union_finding
+            .evidence
+            .iter()
+            .any(|e| e.label == "suggested given" && e.value.starts_with("- input: ref('")),
+        "a copy-pasteable given sketch rides in the evidence: {:?}",
+        union_finding.evidence,
+    );
 }
 
 #[test]
@@ -141,4 +225,32 @@ fn playground_findings_payload_snapshot() {
     let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(snapshot))
         .expect("snapshot value serializes");
     insta::assert_snapshot!("playground_unique_key_findings", rendered);
+}
+
+#[test]
+fn playground_union_findings_payload_snapshot() {
+    // Pin the exact serialized union.arm-coverage findings for the
+    // three real-fixture verdict shapes — COVERED (mart_dq_summary),
+    // UNKNOWN (dim_payers' sentinel arm), UNCOVERED + given-row sketch
+    // (fct_clinical_events) — the payload contract cute-dbt#170's render
+    // surface will consume (cute-dbt#172).
+    let manifest = load("playground-current.json");
+    let mut snapshot = serde_json::Map::new();
+    for model_id in [
+        "model.healthcare_analytics.mart_dq_summary",
+        "model.healthcare_analytics.dim_payers",
+        "model.healthcare_analytics.fct_clinical_events",
+    ] {
+        let findings: Vec<Finding<HeuristicId>> = findings_for(&manifest, model_id)
+            .into_iter()
+            .filter(|f| f.check == HeuristicId::UnionArmCoverage)
+            .collect();
+        snapshot.insert(
+            model_id.to_owned(),
+            serde_json::to_value(findings).expect("findings serialize"),
+        );
+    }
+    let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(snapshot))
+        .expect("snapshot value serializes");
+    insta::assert_snapshot!("playground_union_arm_findings", rendered);
 }

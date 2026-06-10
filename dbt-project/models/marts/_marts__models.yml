@@ -66,6 +66,13 @@ unit_tests:
           - customer_id: 1
             first_name: 'Ada'
             last_name: 'Lovelace'
+      # cute-dbt#172 dogfood — DELIBERATELY EMPTY: the refunds UNION ALL
+      # arm in all_statuses gets zero given rows, so the live PR-diff
+      # preview surfaces the union.arm-coverage UNCOVERED finding with
+      # its given-row recommendation sketch (catalog C3 worked example).
+      - input: ref('stg_refunds')
+        format: dict
+        rows: []
     expect:
       format: dict
       rows:
