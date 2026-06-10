@@ -53,6 +53,37 @@ pub struct PrDiff {
     /// (`+++ b/<path>`). `/dev/null` (pure deletion of a whole file) is
     /// dropped by the parser.
     pub files: Vec<FileHunks>,
+    /// Git-detected renames — the `rename from <old>` / `rename to <new>`
+    /// extended-header pairs (cute-dbt#80). A **pure** rename (100%
+    /// similarity) carries no `---`/`+++` headers and no hunks, so it
+    /// appears here and NOT in [`files`](Self::files); a rename **with**
+    /// edits appears in both (the new path's [`FileHunks`] entry carries
+    /// the hunks). `#[serde(default)]` keeps pre-rename payloads
+    /// deserializable; `skip_serializing_if` keeps rename-free payloads
+    /// byte-identical to the pre-#80 shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub renames: Vec<RenamePair>,
+}
+
+/// One git-detected rename, as named by a `rename from`/`rename to`
+/// extended-header pair (cute-dbt#80).
+///
+/// Both paths are repo-relative and verbatim — git emits them with no
+/// `a/`/`b/` prefix (unlike the `---`/`+++` headers), unquoted even when
+/// they contain spaces. Paths with non-ASCII / control characters are
+/// C-quoted by git (`core.quotePath`) and are **not** dequoted here — the
+/// same fidelity level as the `+++ b/<path>` parser.
+///
+/// Additive POD (ADR-5). `Serialize`/`Deserialize` so the pairing survives
+/// the payload round-trip — the rename *lineage* (old name ↔ new name) is
+/// what a future report affordance would surface; the scope keyset alone
+/// flattens it away.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenamePair {
+    /// The old (pre-rename) repo-relative path.
+    pub from: String,
+    /// The new (post-rename) repo-relative path.
+    pub to: String,
 }
 
 /// One changed file and its hunks.
@@ -113,6 +144,16 @@ impl NormalizedDiffIndex {
     /// Build the index from a parsed diff, rebasing each diff-side path
     /// with `strip` (the dbt project root relative to the repo root, or
     /// `None` for an identity strip).
+    ///
+    /// Rename pairs (cute-dbt#80) put **both** sides into the changed-file
+    /// keyset: scope selection matches the **current** manifest's
+    /// `original_file_path`, so post-rename only the new path resolves to
+    /// a node — without this a *pure* rename (no `+++` header, no hunks)
+    /// would scope nothing. The old path is kept too, conservatively: it
+    /// matches no current node after a clean rename, so it is at worst
+    /// inert. Hunks are never attached via the rename (a rename-with-edit
+    /// already carries them on its new-path [`FileHunks`] entry, which
+    /// `or_default` merges with rather than clobbers).
     #[must_use]
     pub fn new(diff: &PrDiff, strip: Option<&Path>) -> Self {
         let mut by_path: HashMap<String, Vec<Hunk>> = HashMap::new();
@@ -122,6 +163,14 @@ impl NormalizedDiffIndex {
                 .entry(key)
                 .or_default()
                 .extend(file.hunks.iter().cloned());
+        }
+        for rename in &diff.renames {
+            by_path
+                .entry(normalize_path(&rename.from, strip))
+                .or_default();
+            by_path
+                .entry(normalize_path(&rename.to, strip))
+                .or_default();
         }
         Self { by_path }
     }
@@ -900,6 +949,7 @@ mod tests {
     #[test]
     fn pr_diff_round_trips_through_json() {
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![FileHunks {
                 path: "models/marts/core/_core__models.yml".to_owned(),
                 hunks: vec![Hunk {
@@ -924,11 +974,47 @@ mod tests {
         assert!(back.files.is_empty());
     }
 
+    // ----- rename serde compatibility (cute-dbt#80) -----
+
+    #[test]
+    fn rename_free_pr_diff_serializes_without_a_renames_field() {
+        // `skip_serializing_if` keeps the rename-free wire shape
+        // byte-identical to the pre-#80 POD — no `"renames":[]` noise.
+        let diff = PrDiff::default();
+        let json = serde_json::to_string(&diff).expect("serialize");
+        assert!(
+            !json.contains("renames"),
+            "an empty renames vec must not serialize: {json}",
+        );
+    }
+
+    #[test]
+    fn pre_rename_payload_without_a_renames_field_deserializes() {
+        // `#[serde(default)]` — a payload from before the field existed.
+        let back: PrDiff = serde_json::from_str(r#"{"files":[]}"#).expect("deserialize");
+        assert!(back.renames.is_empty());
+    }
+
+    #[test]
+    fn rename_carrying_pr_diff_round_trips_through_json() {
+        let diff = PrDiff {
+            renames: vec![RenamePair {
+                from: "models/dim_a.sql".to_owned(),
+                to: "models/dim_b.sql".to_owned(),
+            }],
+            files: Vec::new(),
+        };
+        let json = serde_json::to_string(&diff).expect("serialize");
+        let back: PrDiff = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(diff, back);
+    }
+
     // ----- NormalizedDiffIndex: keyset + lookup -----
 
     #[test]
     fn index_changed_paths_lists_normalized_file_set() {
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![
                 FileHunks {
                     path: "./models/a.sql".to_owned(),
@@ -949,6 +1035,7 @@ mod tests {
     #[test]
     fn index_contains_changed_matches_normalized_manifest_path() {
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![FileHunks {
                 path: "models/marts/dim_payers.sql".to_owned(),
                 hunks: vec![hunk(1, 1)],
@@ -962,6 +1049,7 @@ mod tests {
     #[test]
     fn index_hunks_for_returns_the_files_hunks() {
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![FileHunks {
                 path: "models/_ut.yml".to_owned(),
                 hunks: vec![hunk(5, 2), hunk(12, 1)],
@@ -984,6 +1072,7 @@ mod tests {
         // this is the "one normalization authority" claim cashed out
         // (BDD non-identity-strip scenario, at the unit level).
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![FileHunks {
                 path: "dbt_project/models/marts/core/_core__models.yml".to_owned(),
                 hunks: vec![hunk(7, 1)],
@@ -1007,6 +1096,7 @@ mod tests {
         // Defensive: a malformed diff naming the same file twice merges
         // its hunks rather than dropping one.
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![
                 FileHunks {
                     path: "models/_ut.yml".to_owned(),
@@ -1022,12 +1112,131 @@ mod tests {
         assert_eq!(index.hunks_for("models/_ut.yml").len(), 2);
     }
 
+    // ----- NormalizedDiffIndex: rename pairs (cute-dbt#80) -----
+
+    #[test]
+    fn index_includes_both_sides_of_a_pure_rename_in_the_changed_keyset() {
+        // A pure rename has NO file entry — only the pair. Both the old
+        // and the new path must land in the changed-file keyset, so the
+        // current manifest's node at the NEW path scopes (the old path
+        // maps to no current node and is inert).
+        let diff = PrDiff {
+            renames: vec![RenamePair {
+                from: "models/marts/dim_a.sql".to_owned(),
+                to: "models/marts/dim_b.sql".to_owned(),
+            }],
+            files: Vec::new(),
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        assert!(index.contains_changed("models/marts/dim_a.sql"));
+        assert!(index.contains_changed("models/marts/dim_b.sql"));
+        assert!(
+            index.hunks_for("models/marts/dim_b.sql").is_empty(),
+            "a pure rename carries no hunks",
+        );
+    }
+
+    #[test]
+    fn index_applies_the_project_root_strip_to_both_rename_sides() {
+        // Rename paths are repo-relative like every other diff-side path,
+        // so the strip applies to both sides — the same key the manifest's
+        // project-relative original_file_path resolves to.
+        let diff = PrDiff {
+            renames: vec![RenamePair {
+                from: "dbt_project/models/dim_a.sql".to_owned(),
+                to: "dbt_project/models/dim_b.sql".to_owned(),
+            }],
+            files: Vec::new(),
+        };
+        let index = NormalizedDiffIndex::new(&diff, Some(Path::new("dbt_project")));
+        assert!(index.contains_changed("models/dim_a.sql"));
+        assert!(index.contains_changed("models/dim_b.sql"));
+    }
+
+    #[test]
+    fn index_keeps_hunks_when_rename_to_coincides_with_a_file_entry() {
+        // Rename WITH edits: the new path has a real file entry (with
+        // hunks) AND appears as a rename `to`. The rename insertion must
+        // not clobber the hunks.
+        let diff = PrDiff {
+            renames: vec![RenamePair {
+                from: "models/dim_a.sql".to_owned(),
+                to: "models/dim_b.sql".to_owned(),
+            }],
+            files: vec![FileHunks {
+                path: "models/dim_b.sql".to_owned(),
+                hunks: vec![hunk(3, 1)],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        assert_eq!(
+            index.hunks_for("models/dim_b.sql").len(),
+            1,
+            "the new path's hunks survive the rename-side insertion",
+        );
+        assert!(index.contains_changed("models/dim_a.sql"));
+    }
+
+    /// The property under test (cute-dbt#80): the index keyset is
+    /// **exactly** the normalized union of the file paths and BOTH sides
+    /// of every rename pair — no supplied path can drop out, and nothing
+    /// extra can appear. Coverage is exhaustive over a structured input
+    /// space (every file-count × rename-count × strip combination from a
+    /// fixed stem pool) rather than randomized — the house property-test
+    /// style (no proptest dev-dependency; see
+    /// `adapters::manifest`'s tolerant-deserialization property).
+    #[test]
+    fn index_keyset_is_exactly_the_union_of_files_and_both_rename_sides() {
+        let file_pool = ["alpha", "bravo", "carol"];
+        let rename_pool = [("delta", "delta_v2"), ("echo", "foxtrot"), ("golf", "golf")];
+
+        for n_files in 0..=file_pool.len() {
+            for n_renames in 0..=rename_pool.len() {
+                for strip in [None, Some("dbt_project")] {
+                    let prefix = strip.map_or(String::new(), |s| format!("{s}/"));
+                    let files: Vec<FileHunks> = file_pool[..n_files]
+                        .iter()
+                        .map(|s| FileHunks {
+                            path: format!("{prefix}models/{s}.sql"),
+                            hunks: vec![hunk(1, 1)],
+                        })
+                        .collect();
+                    let renames: Vec<RenamePair> = rename_pool[..n_renames]
+                        .iter()
+                        .map(|(f, t)| RenamePair {
+                            from: format!("{prefix}models/{f}.sql"),
+                            to: format!("{prefix}models/{t}.sql"),
+                        })
+                        .collect();
+                    let diff = PrDiff { files, renames };
+                    let index = NormalizedDiffIndex::new(&diff, strip.map(Path::new));
+
+                    let expected: std::collections::HashSet<String> = file_pool[..n_files]
+                        .iter()
+                        .map(|s| format!("models/{s}.sql"))
+                        .chain(rename_pool[..n_renames].iter().flat_map(|(f, t)| {
+                            [format!("models/{f}.sql"), format!("models/{t}.sql")]
+                        }))
+                        .collect();
+                    let actual: std::collections::HashSet<String> =
+                        index.changed_paths().map(str::to_owned).collect();
+                    assert_eq!(
+                        actual, expected,
+                        "keyset must equal the union (files={n_files}, \
+                         renames={n_renames}, strip={strip:?})",
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn context_bearing_hunk_count_counts_only_non_unified_zero_hunks() {
         // A `--unified=0` diff: replacement (new_len == added.len()) and a
         // pure deletion (new_len == 0 == added.len()) both satisfy the
         // predicate → count 0.
         let unified_zero = PrDiff {
+            renames: Vec::new(),
             files: vec![
                 FileHunks {
                     path: "models/a.sql".to_owned(),
@@ -1055,6 +1264,7 @@ mod tests {
             added_lines: added.iter().map(|s| (*s).to_owned()).collect(),
         };
         let mixed = PrDiff {
+            renames: Vec::new(),
             files: vec![
                 FileHunks {
                     path: "models/a.sql".to_owned(),
@@ -1354,6 +1564,7 @@ mod tests {
         // _a.yml: one hunk replacing line 2 with test_in's body line. It
         // touches test_in's block [1,3] but not test_out's block [5,7].
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![
                 FileHunks {
                     path: "models/_a.yml".to_owned(),
@@ -1422,6 +1633,7 @@ mod tests {
         );
 
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![
                 FileHunks {
                     path: "models/_a.yml".to_owned(),
@@ -1902,6 +2114,7 @@ mod tests {
         );
 
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![
                 // _a.yml: hunk replaces line 2 with t_edit's working-tree
                 // body line → aligned + touches block [1,3].
@@ -2260,6 +2473,7 @@ mod tests {
         // The diff's `+` lines must match the (stripped) working tree at
         // their new-side positions for N7b to hold.
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![replace(2, &["from t"], &["from u"])],
@@ -2300,6 +2514,7 @@ mod tests {
         let current = manifest_with_models(vec![edit, untouched, stale, nodiff]);
 
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![
                 // edit.sql: line 2 replaced, `+` matches working tree → aligned + touched.
                 FileHunks {
@@ -2368,6 +2583,7 @@ mod tests {
         let current = manifest_with_models(vec![m]);
 
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![replace(2, &["from t"], &["    from t"])],
@@ -2401,6 +2617,7 @@ mod tests {
         );
         let current = manifest_with_models(vec![m]);
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![replace(1, &["old"], &["new"])],
@@ -2420,6 +2637,7 @@ mod tests {
         let m = model_with_raw("model.s.empty", "", ofp);
         let current = manifest_with_models(vec![m]);
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![replace(1, &["old"], &["new"])],
@@ -2481,6 +2699,7 @@ mod tests {
         // A default-context git diff: the `@@` claims 3 new-side lines but
         // only one `+` body is recorded (parser drops context lines).
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![context_bearing(1, 3, &["from was"], &["from t"])],

@@ -78,7 +78,7 @@ depend on `origin` remote semantics or branch-name resolution), with
 
 ```bash
 mkdir -p _site
-git diff --unified=0 \
+git diff --unified=0 --find-renames \
   "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
   > diff.patch
 
@@ -93,7 +93,14 @@ cute-dbt \
 "read from this file"). cute-dbt parses the diff's `+++ b/<path>` headers
 to pick the in-scope set and its `@@ … @@` hunks to flag which tests the
 PR actually edited (block-precise updated detection + the inline YAML diff
-drawer key off the hunk spans). When a hunk changes a model's `.sql`, the
+drawer key off the hunk spans). It also reads the `rename from`/`rename
+to` headers git emits for detected renames, so a renamed model — even a
+*pure* rename, which carries no hunks — scopes under its new name.
+`--find-renames` just makes git's default rename detection explicit
+(config-proof against a runner that sets `diff.renames = false`); a
+patch produced without it still works — a rename-detection-off diff
+shows the rename as a deleted + an added file, and the added path
+scopes the same node. When a hunk changes a model's `.sql`, the
 Model SQL section also shows an inline **SQL diff** of the model's raw
 Jinja with a Raw ↔ Diff toggle — same diff engine, keyed off the same
 hunks. Both inline diffs ignore whitespace-only edits as standard (a pure
@@ -190,7 +197,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p _site
-          git diff --unified=0 \
+          git diff --unified=0 --find-renames \
             "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
             > diff.patch
           cute-dbt \
@@ -456,8 +463,14 @@ scope by design (use `--baseline-manifest` if you need them):
 - A `packages.yml` / `dbt deps` change that alters compiled output without
   touching a `.sql`/`.yml` model file — the diff carries no path that maps
   to an affected node.
-- A **renamed** model (the diff shows a deleted path + an added path; the
-  deleted path maps to no current-manifest node).
+
+A **renamed** model is no longer on this list: cute-dbt reads the
+`rename from`/`rename to` headers `git diff` emits (rename detection is
+on by default since git 2.9) and maps both paths onto the scope match,
+so even a pure rename — which carries no hunks at all — scopes the
+model under its new name. The `--find-renames` flag in § 3 makes that
+detection explicit, so a runner whose git config sets
+`diff.renames = false` produces the same patch shape.
 
 A YAML **config-block** edit no longer mislabels a sibling test as
 updated: block precision flags only the tests whose block a diff hunk

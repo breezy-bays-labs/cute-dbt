@@ -7,7 +7,11 @@
 //! cute-dbt parses the diff itself: the changed-file set comes from each
 //! `+++ b/<path>` header, and the per-file hunks (with their `+`/`-`
 //! bodies) drive both block-precise `updated` detection and the inline
-//! YAML diff (cute-dbt#96).
+//! YAML diff (cute-dbt#96). Git-detected renames — the `rename from` /
+//! `rename to` extended-header pairs `git diff` emits by default since
+//! git 2.9 — are collected too (cute-dbt#80), so a **pure** rename
+//! (100% similarity, no `+++` header, no hunks) still names both of its
+//! paths to scope selection.
 //!
 //! Renamed from `--scope-from-pr-diff` at cute-dbt#96. The old flag took
 //! a *changed-file list*; the new one takes the *raw diff*, so cute-dbt
@@ -27,7 +31,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::domain::pr_diff::{FileHunks, Hunk, PrDiff};
+use crate::domain::pr_diff::{FileHunks, Hunk, PrDiff, RenamePair};
 
 /// clap value-parser for `--pr-diff`.
 ///
@@ -65,8 +69,20 @@ fn not_a_diff(detail: &str) -> String {
 /// **added body line** inside a hunk is never confused with a `+++ b/…`
 /// **file header** (headers only appear when `in_hunk` is false, after a
 /// `--- ` / `diff --git`).
+///
+/// Rename detection (cute-dbt#80): the `rename from <old>` /
+/// `rename to <new>` extended-header pair (emitted by `git diff`'s
+/// default rename detection, on since git 2.9) is collected into
+/// [`PrDiff::renames`]. A **pure** rename (100% similarity) emits *only*
+/// that header block — no `---`/`+++`, no hunks — so without this the
+/// renamed file would vanish from the diff entirely. The paths are taken
+/// verbatim (git emits them un-prefixed and unquoted-for-spaces;
+/// C-quoted non-ASCII paths are not dequoted — parity with the
+/// `+++ b/<path>` parser).
 fn parse_unified_diff(s: &str) -> Result<PrDiff, String> {
     let mut files: Vec<FileHunks> = Vec::new();
+    let mut renames: Vec<RenamePair> = Vec::new();
+    let mut pending_rename_from: Option<String> = None;
     let mut current: Option<FileHunks> = None;
     let mut in_hunk = false;
     let mut saw_structure = false;
@@ -76,6 +92,10 @@ fn parse_unified_diff(s: &str) -> Result<PrDiff, String> {
         if line.starts_with("diff --git") {
             saw_structure = true;
             in_hunk = false;
+            // A dangling `rename from` never happens in real git output
+            // (the pair is adjacent); dropping it here keeps a malformed
+            // header from leaking across files.
+            pending_rename_from = None;
             flush(&mut current, &mut files);
             continue;
         }
@@ -95,7 +115,9 @@ fn parse_unified_diff(s: &str) -> Result<PrDiff, String> {
             in_hunk = false;
         }
         // Header block (in_hunk == false). `--- ` (old-side path) is ignored;
-        // `+++ ` starts a new file. `index`, mode, `rename …`, blank → ignored.
+        // `+++ ` starts a new file; `rename from`/`rename to` pair into a
+        // RenamePair (cute-dbt#80). `index`, mode, `similarity …`, blank →
+        // ignored.
         if line.starts_with("--- ") {
             saw_structure = true;
             continue;
@@ -103,6 +125,24 @@ fn parse_unified_diff(s: &str) -> Result<PrDiff, String> {
         if let Some(rest) = line.strip_prefix("+++ ") {
             saw_structure = true;
             start_file(rest, &mut current, &mut files);
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("rename from ") {
+            saw_structure = true;
+            pending_rename_from = Some(rest.trim_end().to_owned());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("rename to ") {
+            saw_structure = true;
+            // A stray `rename to` with no pending `rename from` (never
+            // emitted by git) is ignored rather than erroring — the same
+            // lenience as other unrecognized header lines.
+            if let Some(from) = pending_rename_from.take() {
+                renames.push(RenamePair {
+                    from,
+                    to: rest.trim_end().to_owned(),
+                });
+            }
         }
     }
     flush(&mut current, &mut files);
@@ -110,7 +150,7 @@ fn parse_unified_diff(s: &str) -> Result<PrDiff, String> {
     if !s.trim().is_empty() && !saw_structure {
         return Err(not_a_diff("no diff headers or hunks found"));
     }
-    Ok(PrDiff { files })
+    Ok(PrDiff { files, renames })
 }
 
 /// Parse a `@@ … @@` header (everything after the `@@`) and open the hunk
@@ -335,9 +375,10 @@ index 3333333..4444444 100644\n\
     }
 
     // ----- A rename WITH content changes parses as the new path -----
+    // ----- AND carries the rename pair (cute-dbt#80) -----
 
     #[test]
-    fn rename_with_content_change_parses_as_new_path() {
+    fn rename_with_content_change_parses_as_new_path_and_pair() {
         let diff = parse_diff(
             "diff --git a/old_name.yml b/new_name.yml\nsimilarity index 80%\nrename from old_name.yml\nrename to new_name.yml\n--- a/old_name.yml\n+++ b/new_name.yml\n@@ -1 +1 @@\n-a\n+b\n",
         )
@@ -345,19 +386,132 @@ index 3333333..4444444 100644\n\
         assert_eq!(diff.files.len(), 1);
         assert_eq!(diff.files[0].path, "new_name.yml");
         assert_eq!(diff.files[0].hunks[0].added_lines, vec!["b"]);
+        assert_eq!(
+            diff.renames,
+            vec![RenamePair {
+                from: "old_name.yml".to_owned(),
+                to: "new_name.yml".to_owned(),
+            }],
+            "the rename pair is collected alongside the file entry",
+        );
     }
 
-    // ----- A pure rename (no hunks) names no changed-content file -----
+    // ----- A pure rename (no hunks) emits ONLY the rename pair -----
 
     #[test]
-    fn pure_rename_with_no_hunks_emits_no_file_entry() {
+    fn pure_rename_with_no_hunks_emits_a_rename_pair_and_no_file_entry() {
         let diff = parse_diff(
             "diff --git a/old.yml b/new.yml\nsimilarity index 100%\nrename from old.yml\nrename to new.yml\n",
         )
         .expect("a pure-rename diff parses");
-        // No `+++ b/` header (no content change) → no file entry. dbt
-        // rename handling is a documented fidelity limit (cute-dbt#80).
+        // No `+++ b/` header (no content change) → no file entry; the
+        // rename pair carries both paths instead (cute-dbt#80 — was a
+        // documented fidelity limit before rename detection landed).
         assert!(diff.files.is_empty());
+        assert_eq!(
+            diff.renames,
+            vec![RenamePair {
+                from: "old.yml".to_owned(),
+                to: "new.yml".to_owned(),
+            }],
+        );
+    }
+
+    // ----- Rename paths are verbatim (spaces stay; verified vs git) -----
+
+    #[test]
+    fn rename_paths_with_spaces_are_taken_verbatim() {
+        // Real `git diff` output (verified against git 2.51): `rename
+        // from`/`rename to` paths are NOT quoted for spaces and carry no
+        // `a/`/`b/` prefix.
+        let diff = parse_diff(
+            "diff --git a/models/dim c.sql b/models/dim d.sql\nsimilarity index 100%\nrename from models/dim c.sql\nrename to models/dim d.sql\n",
+        )
+        .expect("a spaced-path pure-rename diff parses");
+        assert_eq!(
+            diff.renames,
+            vec![RenamePair {
+                from: "models/dim c.sql".to_owned(),
+                to: "models/dim d.sql".to_owned(),
+            }],
+        );
+    }
+
+    // ----- CRLF rename headers carry no trailing \r -----
+
+    #[test]
+    fn crlf_rename_headers_are_trimmed() {
+        let diff = parse_diff(
+            "diff --git a/old.yml b/new.yml\r\nsimilarity index 100%\r\nrename from old.yml\r\nrename to new.yml\r\n",
+        )
+        .expect("a CRLF pure-rename diff parses");
+        assert_eq!(
+            diff.renames,
+            vec![RenamePair {
+                from: "old.yml".to_owned(),
+                to: "new.yml".to_owned(),
+            }],
+            "no trailing \\r in rename paths",
+        );
+    }
+
+    // ----- Multiple renames in one diff are all collected -----
+
+    #[test]
+    fn multiple_renames_are_all_collected() {
+        let diff = parse_diff(
+            "diff --git a/a.sql b/b.sql\nsimilarity index 100%\nrename from a.sql\nrename to b.sql\ndiff --git a/c.yml b/d.yml\nsimilarity index 90%\nrename from c.yml\nrename to d.yml\n--- a/c.yml\n+++ b/d.yml\n@@ -1 +1 @@\n-x\n+y\n",
+        )
+        .expect("a two-rename diff parses");
+        assert_eq!(diff.renames.len(), 2);
+        assert_eq!(diff.renames[0].from, "a.sql");
+        assert_eq!(diff.renames[0].to, "b.sql");
+        assert_eq!(diff.renames[1].from, "c.yml");
+        assert_eq!(diff.renames[1].to, "d.yml");
+        // The rename-with-edit also has its file entry; the pure one doesn't.
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].path, "d.yml");
+    }
+
+    // ----- An added body line that LOOKS like a rename header is body -----
+
+    #[test]
+    fn added_body_line_resembling_rename_header_is_not_a_rename() {
+        // Inside a hunk, `+rename from sneaky` is an added body line whose
+        // content is `rename from sneaky` — never a rename header (the
+        // in_hunk disambiguation, same as the `+++` body case).
+        let diff = parse_diff(
+            "--- a/x.md\n+++ b/x.md\n@@ -1 +1,2 @@\n-old\n+rename from sneaky\n+rename to sneakier\n",
+        )
+        .expect("parses");
+        assert!(diff.renames.is_empty(), "no spurious rename pair");
+        assert_eq!(
+            diff.files[0].hunks[0].added_lines,
+            vec!["rename from sneaky", "rename to sneakier"],
+        );
+    }
+
+    // ----- Defensive: unpaired rename header lines are ignored -----
+
+    #[test]
+    fn stray_rename_to_without_rename_from_is_ignored() {
+        let diff = parse_diff(
+            "diff --git a/x.yml b/x.yml\nrename to x.yml\n--- a/x.yml\n+++ b/x.yml\n@@ -1 +1 @@\n-a\n+b\n",
+        )
+        .expect("parses");
+        assert!(diff.renames.is_empty());
+    }
+
+    #[test]
+    fn dangling_rename_from_does_not_leak_across_files() {
+        // A `rename from` never followed by `rename to` (not real git
+        // output) is dropped at the next `diff --git`, so a later file's
+        // `rename to` cannot pair with it.
+        let diff = parse_diff(
+            "diff --git a/a.yml b/a.yml\nrename from a.yml\ndiff --git a/b.yml b/c.yml\nrename to c.yml\n--- a/b.yml\n+++ b/c.yml\n@@ -1 +1 @@\n-a\n+b\n",
+        )
+        .expect("parses");
+        assert!(diff.renames.is_empty(), "no cross-file rename pairing");
     }
 
     // ----- Multiple hunks in one file -----
