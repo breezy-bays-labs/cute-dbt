@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 
 use cute_dbt::adapters::manifest::FileManifestSource;
-use cute_dbt::domain::{Manifest, NodeId, StateComparator, resolve_target_model};
+use cute_dbt::domain::{Manifest, ModifierKind, NodeId, StateComparator, resolve_target_model};
 use cute_dbt::ports::ManifestSource;
 
 /// Absolute path to a committed fixture under `tests/fixtures/`.
@@ -121,4 +121,46 @@ fn with_sub_selectors_is_a_superset_of_body_only_on_the_real_diff() {
     }
     // The body-modified stg_customers stays in scope under the wider set.
     assert!(wide.contains(&NodeId::new("model.jaffle_shop.stg_customers")));
+}
+
+#[test]
+fn from_selectors_with_no_kinds_matches_body_only_on_the_real_diff() {
+    // cute-dbt#160 — the no-flag default through the CLI composition
+    // seam is byte-identical to the v0.1 body_only comparator on the
+    // real jaffle-shop diff pair: identical modified set, identical
+    // in-scope unit tests.
+    let baseline = load("jaffle-shop-baseline.json");
+    let current = load("jaffle-shop-current.json");
+
+    let body_only = StateComparator::body_only();
+    let no_kinds = StateComparator::from_selectors(&[]);
+    assert_eq!(
+        no_kinds.modified_set(&current, &baseline),
+        body_only.modified_set(&current, &baseline),
+    );
+    assert_eq!(
+        no_kinds.in_scope_unit_tests(&current, &baseline),
+        body_only.in_scope_unit_tests(&current, &baseline),
+    );
+}
+
+#[test]
+fn from_selectors_with_all_kinds_matches_with_sub_selectors_on_the_real_diff() {
+    // cute-dbt#160 — opting into every sub-selector via the CLI
+    // composition seam reproduces the canonical wide comparator on the
+    // real fixture pair (which carries real config / relation_name /
+    // depends_on.macros / columns blocks for the modifiers to parse).
+    let baseline = load("jaffle-shop-baseline.json");
+    let current = load("jaffle-shop-current.json");
+
+    let all = [
+        ModifierKind::Configs,
+        ModifierKind::Relation,
+        ModifierKind::Macros,
+        ModifierKind::Contract,
+    ];
+    assert_eq!(
+        StateComparator::from_selectors(&all).modified_set(&current, &baseline),
+        StateComparator::with_sub_selectors().modified_set(&current, &baseline),
+    );
 }

@@ -31,13 +31,35 @@ Feature: Diff-scope unit tests and models via dbt state:modified (body subset)
     When the in-scope set is computed
     Then "test_stg_customers_unique" is in scope
 
-  # v0.1 named fidelity limit (documented behavior, not a defect; tracking
-  # issue filed at the StateComparator site with PR 5).
-  Scenario: A config-only change is NOT detected in v0.1 (documented limit)
+  # Named fidelity limit of the DEFAULT scope (documented behavior, not a
+  # defect). Since cute-dbt#160 the limit is liftable per run via the
+  # opt-in --modified-selectors flag (next two scenarios); the default
+  # stays body-only by design (README / ADR-3).
+  Scenario: A config-only change is NOT detected by default (documented limit)
     Given the model "stg_orders" changed only in its config block
     And its body checksum is identical to the baseline
     When the in-scope set is computed
     Then "stg_orders" is not in scope
+
+  # cute-dbt#160 — the README-promised CLI selector. The selector tokens
+  # match dbt's own state:modified.<sub> vocabulary; the body checksum
+  # stays always-on (dbt's OR-union across sub-selectors). These two
+  # scenarios run the REAL cute-dbt subprocess over the same synthetic
+  # config-only divergence: opted in, the change is scoped; without the
+  # flag, the default behavior is unchanged.
+  Scenario: A config-only change is in scope with --modified-selectors configs
+    Given the model "stg_orders" changed only in its config block
+    And "stg_orders" has a unit test "test_stg_orders_dedup"
+    When I run cute-dbt on the synthetic pair with --modified-selectors "configs"
+    Then the exit code is 0
+    And the diff-scope banner states "Showing 1 unit test in scope"
+
+  Scenario: The same config-only change stays out of scope without the flag
+    Given the model "stg_orders" changed only in its config block
+    And "stg_orders" has a unit test "test_stg_orders_dedup"
+    When I run cute-dbt on the synthetic pair without --modified-selectors
+    Then the exit code is 0
+    And the diff-scope banner states "0 unit tests in scope"
 
   # Explorer mode (#30): modified models with zero unit tests appear in
   # models_in_scope so the render layer can show an "0 unit tests wired"
