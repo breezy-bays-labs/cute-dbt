@@ -18,7 +18,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::domain::AnalysisConfig;
+use crate::domain::{AnalysisConfig, CheckConfigError, HeuristicId, resolve_check_policy};
 
 /// Reasons a `--config <PATH>` file could not be loaded.
 ///
@@ -48,27 +48,56 @@ pub enum ConfigLoadError {
         #[source]
         source: toml::de::Error,
     },
+    /// The TOML parsed but the `[checks]` section failed the
+    /// fail-closed registry validation (cute-dbt#171): mode/field
+    /// legality, unknown check ids or group globs, glob/empty-reason
+    /// suppress entries. The underlying
+    /// [`CheckConfigError`] carries the remediation text (including the
+    /// registry's known checks and groups).
+    #[error("invalid [checks] in config file {path}: {source}")]
+    Checks {
+        /// The operator-supplied path, verbatim.
+        path: String,
+        /// Underlying validation failure, remediation-bearing.
+        #[source]
+        source: CheckConfigError,
+    },
 }
 
-/// Load + parse the operator-supplied TOML config.
+/// Load + parse + validate the operator-supplied TOML config.
 ///
-/// Reads `path` as UTF-8, then deserializes into [`AnalysisConfig`].
+/// Reads `path` as UTF-8, deserializes into [`AnalysisConfig`], then
+/// runs the `[checks]` fail-closed validation against the production
+/// [`HeuristicId`] registry ([`resolve_check_policy`], cute-dbt#171) so
+/// every config failure — syntax, schema, or check-registry — surfaces
+/// on the same clap usage-error path (exit 2). The resolved policy is
+/// discarded here; the run loop re-resolves it (infallibly, post
+/// validation) when building the render-time display policy.
 ///
 /// # Errors
 ///
 /// Returns [`ConfigLoadError::Io`] when the file cannot be read,
 /// [`ConfigLoadError::Toml`] when the content is not valid TOML or does
-/// not match the schema.
+/// not match the schema, [`ConfigLoadError::Checks`] when the
+/// `[checks]` section fails registry validation.
 pub fn load_config(path: &Path) -> Result<AnalysisConfig, ConfigLoadError> {
     let path_str = path.display().to_string();
     let bytes = fs::read_to_string(path).map_err(|source| ConfigLoadError::Io {
         path: path_str.clone(),
         source,
     })?;
-    toml::from_str(&bytes).map_err(|source| ConfigLoadError::Toml {
-        path: path_str,
-        source,
-    })
+    let config: AnalysisConfig =
+        toml::from_str(&bytes).map_err(|source| ConfigLoadError::Toml {
+            path: path_str.clone(),
+            source,
+        })?;
+    resolve_check_policy::<HeuristicId>(&config.checks).map_err(|source| {
+        ConfigLoadError::Checks {
+            path: path_str,
+            source,
+        }
+    })?;
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -135,7 +164,7 @@ subtitle = "PR 1234 / staging diff"
                     "Io error carries the operator path: {reported}"
                 );
             }
-            other @ ConfigLoadError::Toml { .. } => {
+            other => {
                 panic!("expected Io error, got {other:?}");
             }
         }
@@ -152,7 +181,7 @@ subtitle = "PR 1234 / staging diff"
                     "Toml error carries the operator path: {reported}"
                 );
             }
-            other @ ConfigLoadError::Io { .. } => {
+            other => {
                 panic!("expected Toml error, got {other:?}");
             }
         }
@@ -186,9 +215,81 @@ tilte = "typo'd"
                     "underlying TOML error names the typo'd field: {detail}"
                 );
             }
-            other @ ConfigLoadError::Io { .. } => {
+            other => {
                 panic!("expected Toml error, got {other:?}");
             }
+        }
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn valid_checks_section_loads() {
+        let path = write_fixture(
+            "checks-valid",
+            r#"
+[checks]
+mode = "opt-in"
+enable = ["grain.*"]
+
+[[checks.suppress]]
+check = "grain.unique-key-unbacked"
+model = "orders"
+reason = "duplicate grain accepted during backfill"
+"#,
+        );
+        let cfg = load_config(&path).expect("valid [checks] loads");
+        assert_eq!(cfg.checks.suppress.len(), 1);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unknown_check_id_is_a_checks_error_with_remediation() {
+        let path = write_fixture(
+            "checks-unknown-id",
+            "[checks]\ndisable = [\"grain.nonexistent\"]\n",
+        );
+        let err = load_config(&path).expect_err("unknown check id errors");
+        match err {
+            ConfigLoadError::Checks {
+                path: reported,
+                source,
+            } => {
+                assert!(reported.contains("checks-unknown-id"), "{reported}");
+                let detail = source.to_string();
+                assert!(detail.contains("grain.nonexistent"), "{detail}");
+                assert!(
+                    detail.contains("grain.unique-key-unbacked"),
+                    "remediation names known checks: {detail}"
+                );
+            }
+            other => panic!("expected Checks error, got {other:?}"),
+        }
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn enable_in_opt_out_mode_is_a_checks_error() {
+        let path = write_fixture("checks-enable-optout", "[checks]\nenable = [\"grain.*\"]\n");
+        let err = load_config(&path).expect_err("enable needs opt-in");
+        let msg = err.to_string();
+        assert!(msg.contains("invalid [checks]"), "{msg}");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn suppress_missing_reason_is_a_toml_error_naming_the_field() {
+        // `reason` is serde-required — a missing field is a Toml error,
+        // before the Checks validation even runs.
+        let path = write_fixture(
+            "checks-no-reason",
+            "[[checks.suppress]]\ncheck = \"grain.unique-key-unbacked\"\nmodel = \"orders\"\n",
+        );
+        let err = load_config(&path).expect_err("missing reason errors");
+        match err {
+            ConfigLoadError::Toml { source, .. } => {
+                assert!(source.to_string().contains("reason"), "{source}");
+            }
+            other => panic!("expected Toml error, got {other:?}"),
         }
         let _ = fs::remove_file(&path);
     }
