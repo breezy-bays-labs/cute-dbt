@@ -1,0 +1,231 @@
+version: 2
+
+# Demo dbt schema for the cute-dbt review canvas. Authored to match the
+# models in scope; the tool bakes columns[].description + data_tests into the
+# report payload as model.column_meta, which drives the column-header tooltips.
+
+models:
+  - name: dim_payers
+    description: "Payer dimension — one conformed row per insurance payer, built from Synthea payer records. Grain: payer."
+    columns:
+      - name: payer_id
+        description: "Natural key: the source payer identifier (Synthea payer UUID)."
+        data_tests:
+          - not_null
+      - name: payer_key
+        description: "Surrogate key for the payer dimension (hashed from payer_id)."
+        data_tests:
+          - unique
+          - not_null
+      - name: payer_name
+        description: "Display name of the insurance payer."
+        data_tests:
+          - not_null
+      - name: address
+        description: "Payer mailing street address."
+      - name: amount_covered
+        description: "Total dollars of claims covered by this payer."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: amount_uncovered
+        description: "Total patient out-of-pocket (uncovered) dollars."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: average_quality_of_life_score
+        description: "Mean quality-of-life score across the payer’s members (0–1)."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 1
+      - name: city
+        description: "Payer city."
+      - name: covered_encounters
+        description: "Count of encounters with cost covered by this payer."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: covered_immunizations
+        description: "Count of immunizations covered."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: covered_medications
+        description: "Count of medication fills covered."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: covered_procedures
+        description: "Count of procedures covered."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: member_months
+        description: "Sum of active membership-months across the payer’s members."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: phone
+        description: "Payer contact phone number."
+      - name: revenue
+        description: "Total premium revenue collected by the payer (USD)."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: state
+        description: "Payer state (2-letter US code)."
+        data_tests:
+          - not_null
+      - name: uncovered_encounters
+        description: "Count of encounters not covered by this payer."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: uncovered_immunizations
+        description: "Count of immunizations not covered."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: uncovered_medications
+        description: "Count of medications not covered."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: uncovered_procedures
+        description: "Count of procedures not covered."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: unique_customers
+        description: "Distinct members served by this payer."
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: zip_code
+        description: "Payer postal (ZIP) code."
+
+  - name: fct_encounters_incremental
+    description: "Encounter fact, built incrementally. Grain: one row per encounter; new encounters are merged on encounter_id."
+    columns:
+      - name: encounter_id
+        description: "Surrogate/natural key for the encounter."
+        data_tests:
+          - unique
+          - not_null
+      - name: encounter_type
+        description: "Class of encounter."
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['ambulatory', 'emergency', 'inpatient', 'outpatient', 'wellness', 'urgentcare']
+      - name: patient_id
+        description: "Foreign key to the patient."
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__patients')
+              field: patient_id
+      - name: start_time
+        description: "Timestamp the encounter began (UTC)."
+        data_tests:
+          - not_null
+      - name: total_cost
+        description: "Total billed cost of the encounter (USD)."
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+
+  - name: fct_provider_metrics
+    description: "Per-provider activity and cost metrics. Grain: provider."
+    columns:
+      - name: provider_id
+        description: "Foreign key to the provider."
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__providers')
+              field: provider_id
+      - name: encounter_count
+        description: "Number of encounters attributed to the provider."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: avg_encounter_cost
+        description: "Mean billed cost across the provider’s encounters (USD)."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+
+  - name: mart_dq_summary
+    description: "Data-quality roll-up: one row per modeled entity, summarizing validation pass/fail counts."
+    columns:
+      - name: entity_type
+        description: "The modeled entity these DQ checks apply to (e.g. encounters, medications)."
+        data_tests:
+          - not_null
+      - name: failed_timestamp_validations
+        description: "Count of rows failing timestamp-validity checks."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: quarantine_rate_pct
+        description: "Share of rows quarantined, as a percent (0–100)."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 100
+      - name: quarantined_count
+        description: "Count of rows quarantined for DQ failures."
+        data_tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: total_count
+        description: "Total rows evaluated for this entity."
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+      - name: end_after_1900
+        description: "Check flag: end timestamps fall after 1900-01-01."
+        data_tests:
+          - accepted_values:
+              values: [true, false]
+      - name: is_dq_valid
+        description: "Overall DQ pass flag for the entity."
+        data_tests:
+          - accepted_values:
+              values: [true, false]
+      - name: no_future_encounter_dates
+        description: "Check flag: no encounter dates in the future."
+        data_tests:
+          - accepted_values:
+              values: [true, false]
+      - name: start_after_1900
+        description: "Check flag: start timestamps fall after 1900-01-01."
+        data_tests:
+          - accepted_values:
+              values: [true, false]
+      - name: valid_encounter_timestamps
+        description: "Check flag: encounter start ≤ end."
+        data_tests:
+          - accepted_values:
+              values: [true, false]
+      - name: end_after_1900_if_present
+        description: "Check flag: end timestamp, when present, falls after 1900."
+        data_tests:
+          - accepted_values:
+              values: [true, false]
+      - name: no_future_medication_dates
+        description: "Check flag: no medication dates in the future."
+        data_tests:
+          - accepted_values:
+              values: [true, false]
+      - name: valid_medication_dates
+        description: "Check flag: medication start ≤ stop."
+        data_tests:
+          - accepted_values:
+              values: [true, false]
+

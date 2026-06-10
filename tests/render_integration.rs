@@ -15,8 +15,8 @@ use cute_dbt::adapters::asset_embed::{
     DATATABLES_CSS, DATATABLES_JS, JQUERY_JS, MERMAID_JS, SAKURA_CSS,
 };
 use cute_dbt::adapters::manifest::FileManifestSource;
-use cute_dbt::adapters::render::{ScopeSource, render_report};
-use cute_dbt::domain::{DEFAULT_REPORT_TITLE, Manifest, StateComparator};
+use cute_dbt::adapters::render::{ScopeSource, column_meta_for_model, render_report};
+use cute_dbt::domain::{DEFAULT_REPORT_TITLE, Manifest, NodeId, StateComparator};
 use cute_dbt::ports::ManifestSource;
 
 /// Absolute path to a committed fixture under `tests/fixtures/`.
@@ -249,4 +249,118 @@ fn the_real_renderer_emits_no_external_resource_constructs() {
         "exactly one href: {chrome}"
     );
     assert!(chrome.contains("href=\"data:,\""), "favicon is a data: URI");
+}
+
+#[test]
+fn column_meta_matches_the_handoff_mapping_against_the_real_fusion_fixture() {
+    // cute-dbt#179 AC2 — verify the handoff README §2.2 column-test
+    // display mapping against a REAL committed fixture (the
+    // fusion-compiled playground manifest), not just synthetic
+    // TestMetadata literals. Fusion's real generic-test kwargs carry
+    // EXTRA keys the synthetic tests omit (`column_name`, `model:
+    // "{{ get_where_subquery(ref('…')) }}"`); this pins that the mapping
+    // reads only the keys it summarizes and tolerates the rest.
+    let current = load("playground-current.json");
+    let patients = current
+        .nodes()
+        .get(&NodeId::new(
+            "model.healthcare_analytics.stg_synthea__patients",
+        ))
+        .expect("the playground fixture carries stg_synthea__patients");
+    let meta = column_meta_for_model(&current, patients);
+
+    // gender — described + three column tests, covering three §2.2 arms
+    // against real fusion payloads: bare built-in, accepted_values
+    // pills, and a package test left as its package-qualified raw
+    // identifier (dbt_expectations args stay uninterpreted).
+    let gender = meta.get("gender").expect("gender carries column meta");
+    assert_eq!(
+        gender.description.as_deref(),
+        Some("Patient gender (M or F)")
+    );
+    let gender_tests: Vec<(&str, &[String], Option<&str>)> = gender
+        .tests
+        .iter()
+        .map(|t| (t.name.as_str(), t.values.as_slice(), t.detail.as_deref()))
+        .collect();
+    assert!(
+        gender_tests.contains(&("not null", &[][..], None)),
+        "gender lists the bare not_null built-in; got {gender_tests:?}",
+    );
+    let m = "M".to_owned();
+    let f = "F".to_owned();
+    assert!(
+        gender_tests.contains(&("accepted values", &[m, f][..], None)),
+        "gender's real accepted_values kwargs render as the two pills; got {gender_tests:?}",
+    );
+    assert!(
+        gender_tests.contains(&(
+            "dbt_expectations.expect_column_values_to_match_regex",
+            &[][..],
+            None
+        )),
+        "a real package test keeps its package-qualified raw name, no detail; got {gender_tests:?}",
+    );
+
+    // patient_id — unique + not_null, prose display names.
+    let patient_id = meta
+        .get("patient_id")
+        .expect("patient_id carries column meta");
+    let patient_names: Vec<&str> = patient_id.tests.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(
+        patient_names,
+        vec!["not null", "unique"],
+        "patient_id lists its two built-ins under their §2.2 prose names",
+    );
+
+    // birth_date — the real project expresses range checks via
+    // dbt_expectations.expect_column_values_to_be_between, the §2.2
+    // near-miss of accepted_range: it must NOT be summarized into a
+    // range detail (open-ended arg vocabulary), only name-qualified.
+    let birth_date = meta
+        .get("birth_date")
+        .expect("birth_date carries column meta");
+    let between = birth_date
+        .tests
+        .iter()
+        .find(|t| t.name == "dbt_expectations.expect_column_values_to_be_between")
+        .expect("birth_date carries the real package range test");
+    assert!(
+        between.values.is_empty() && between.detail.is_none(),
+        "expect_column_values_to_be_between stays uninterpreted (no pills, no detail)",
+    );
+
+    // The model-level row-count test (column_name: null) appears in NO
+    // column entry — column-scoped tests only (the v1 scope line).
+    assert!(
+        meta.values()
+            .flat_map(|m| &m.tests)
+            .all(|t| { t.name != "dbt_expectations.expect_table_row_count_to_be_between" }),
+        "a model-level test (column_name null) never lands in column meta",
+    );
+
+    // relationships — real fusion `to: "ref('stg_synthea__organizations')"`
+    // unwraps to the bare model name and joins the field (§2.2:
+    // `"model.field"`).
+    let providers = current
+        .nodes()
+        .get(&NodeId::new(
+            "model.healthcare_analytics.stg_synthea__providers",
+        ))
+        .expect("the playground fixture carries stg_synthea__providers");
+    let providers_meta = column_meta_for_model(&current, providers);
+    let org = providers_meta
+        .get("organization_id")
+        .expect("organization_id carries column meta");
+    let rel = org
+        .tests
+        .iter()
+        .find(|t| t.name == "relationships")
+        .expect("organization_id carries the relationships test");
+    assert_eq!(
+        rel.detail.as_deref(),
+        Some("stg_synthea__organizations.organization_id"),
+        "relationships detail is \"model.field\" with the real ref('…') unwrapped",
+    );
+    assert!(rel.values.is_empty(), "relationships carries no pills");
 }

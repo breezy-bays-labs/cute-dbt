@@ -451,6 +451,29 @@ tests/fixtures/source-yaml/project` so the relative path resolves. \
 Pure synthetic.\
 """
 
+[[fixture]]
+path = "healthcare-analytics-schema.yml"
+origin = "claude-design-handoff"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/179"
+sha256 = "1ecd5dfd2db0662f36bbc6f51f9365f44600accbcdced4b0d414c5511bf55c98"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Demo dbt schema YAML from the report-redesign design handoff \
+(`claude-code-handoff/demo/healthcare_analytics.yml`, the worked \
+fixture behind the handoff README's section 2.2 column-tooltip display \
+mapping) — adopted verbatim for cute-dbt#179. Healthcare-SHAPED pure \
+synthetic data (Synthea-derived demo naming; no real data anywhere in \
+the pipeline). Adds the section-2.2 coverage the fusion-compiled \
+playground manifest lacks: `dbt_utils.accepted_range` bounds in both \
+the min-only (">= 0") and both-bounds ("0-1" / "0-100") forms, plus \
+boolean `accepted_values` pills ([true, false]). Consumed by \
+`tests/column_meta_handoff_schema.rs`, which extracts every authored \
+`data_tests` entry and asserts the `column_test_payload` display \
+mapping over them.\
+"""
+
 # ---------------------------------------------------------------------------
 # dbt-project/ data carriers (cute-dbt#114 / #115)
 #
