@@ -297,6 +297,7 @@ jobs:
     #   - 10 after pr_diff_scoping (cute-dbt#84)
     #   - 11 after cell_table_diff (cute-dbt#98)
     #   - 12 after incremental_models (cute-dbt#145)
+    #   - 13 after coverage_checks (cute-dbt#169)
     # The README is not a feature. The job name deliberately carries no
     # number (cute-dbt#68 — the old `==6` display label went stale across
     # several bumps): the enforced count lives ONLY in the `expected=`
@@ -314,7 +315,7 @@ jobs:
       - name: features/*.feature count matches expected
         run: |
           set -euo pipefail
-          expected=12
+          expected=13
           count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
           echo "feature-count: expected ${expected}, found ${count}"
           if [ "$count" != "$expected" ]; then
@@ -663,6 +664,39 @@ jobs:
             exit 1
           fi
           echo "All example reports are byte-identical to renderer output."
+
+  heuristics-ledger:
+    # Byte-gate for the GENERATED heuristics ledger (cute-dbt#169 — the
+    # example-report-check pattern). The single source of truth for every
+    # check is the `heuristics!` block in src/domain/checks.rs;
+    # heuristics/registry.toml + book/src/checks/*.md are generated from
+    # SPECS. This job regenerates them in place and fails on any diff, so
+    # the committed ledger cannot drift from the code. The cargo test
+    # itself also compares byte-identity in default mode (fast local
+    # signal via `cargo nextest run` / `cargo test`); `lefthook.yml`
+    # mirrors this job pre-push. No untrusted GitHub event interpolation
+    # in any `run:` block.
+    name: Heuristics ledger is generated from SPECS
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: cute-dbt
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Regenerate ledger and diff
+        run: |
+          set -euo pipefail
+          GEN_HEURISTICS_LEDGER=1 cargo test --test heuristics_ledger --locked
+          if ! git diff --exit-code -- heuristics book/src/checks; then
+            echo "::error::heuristics-ledger: heuristics/registry.toml or book/src/checks/*.md drifted from the heuristics! block in src/domain/checks.rs. Regenerate with:"
+            echo "  GEN_HEURISTICS_LEDGER=1 cargo test --test heuristics_ledger"
+            exit 1
+          fi
 
   resource-ref-lint:
     # Secondary zero-egress gate: structured HTML parse over the committed

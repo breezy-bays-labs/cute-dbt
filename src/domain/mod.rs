@@ -36,6 +36,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod cell_diff;
+pub mod checks;
 pub mod config;
 pub mod cte;
 pub mod manifest;
@@ -53,10 +54,16 @@ pub use cell_diff::{
     RowChangeKind, UnitTestDataDiff, diff_fixture_tables, reconstruct_external_fixture_diff,
     reconstruct_table_diffs,
 };
+pub use checks::{
+    CheckContext, CheckId, Evidence, Finding, HeuristicId, HeuristicSpec, Instrument, Tier,
+    Verdict, check_page_markdown, checks_index_markdown, evaluate_all, filter_for_display,
+    model_findings, registry_toml, resolve_supersedes, supersedes_is_acyclic,
+};
 pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};
 pub use manifest::{
     Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, TestMetadata,
+    UniqueKey,
 };
 pub use path::{match_changed_path, normalize_path};
 pub use pr_diff::{

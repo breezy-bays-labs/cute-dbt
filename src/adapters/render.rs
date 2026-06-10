@@ -66,9 +66,10 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, BlockDiff, CteGraph, EdgeType, FixtureTable, InScopeSet, Manifest,
-    ModelInScopeSet, Node, NodeId, TestMetadata, UnitTest, UnitTestDataDiff, UnitTestGiven,
-    UnitTestYamlBlock, resolve_target_model, table_from_manifest_rows,
+    BANNER_EMPTY_SCOPE, BlockDiff, CteGraph, EdgeType, Finding, FixtureTable, HeuristicId,
+    InScopeSet, Manifest, ModelInScopeSet, Node, NodeId, TestMetadata, UnitTest, UnitTestDataDiff,
+    UnitTestGiven, UnitTestYamlBlock, model_findings, resolve_target_model,
+    table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -231,6 +232,16 @@ pub struct ModelPayload {
     /// `!(m && m.is_incremental)` read is undefined-safe when omitted.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub is_incremental: bool,
+    /// Coverage-intelligence findings for this model (cute-dbt#169) —
+    /// the per-(construct, check) verdicts the check engine computed
+    /// during payload assembly ([`model_findings`]: evaluate ALL
+    /// registered checks → resolve supersedes; display filtering is a
+    /// separate downstream concern). Payload-level only in this slice —
+    /// the report findings surface renders these in cute-dbt#170.
+    /// Omitted from JSON when empty so every pre-#169 payload (and the
+    /// committed goldens whose models trip no check) stays byte-stable.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<Finding<HeuristicId>>,
 }
 
 /// One DAG node — stable id, display label, and role.
@@ -990,6 +1001,10 @@ fn build_model_payload(
         tests: test_payloads,
         is_recursive,
         is_incremental: model.config().materialized() == Some("incremental"),
+        // cute-dbt#169 — the check engine runs here, during payload
+        // assembly over models_in_scope (the parse_ctes precedent: the
+        // run loop's per-model work happens one stage downstream).
+        findings: model_findings(current, model),
     }
 }
 
@@ -1742,6 +1757,69 @@ mod tests {
         assert!(
             model.tests[0].changed,
             "test_one is in the changed set → tagged updated",
+        );
+    }
+
+    #[test]
+    fn build_payload_carries_findings_for_an_unbacked_unique_key() {
+        // cute-dbt#169 — the check engine runs during payload assembly:
+        // an in-scope model declaring config.unique_key with no backing
+        // uniqueness test surfaces an UNCOVERED grain finding on its
+        // ModelPayload, serialized with the dotted check id.
+        let mut config = BTreeMap::new();
+        config.insert("materialized".to_owned(), json!("incremental"));
+        config.insert("unique_key".to_owned(), json!("order_id"));
+        let node = Node::new(
+            NodeId::new("model.shop.orders_rollup"),
+            "model",
+            checksum("body"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(config, false),
+            None,
+            BTreeMap::new(),
+        );
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.orders_rollup")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        let json = serde_json::to_value(&payload.models[0]).expect("serialize");
+        assert_eq!(json["findings"][0]["check"], "grain.unique-key-unbacked");
+        assert_eq!(json["findings"][0]["verdict"]["status"], "uncovered");
+        assert_eq!(json["findings"][0]["model_id"], "model.shop.orders_rollup");
+    }
+
+    #[test]
+    fn build_payload_omits_the_findings_key_when_no_check_fires() {
+        // The serde skip keeps every pre-#169 payload byte-stable: a
+        // model tripping no check carries NO `findings` key at all.
+        let node = model_node("model.shop.plain", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.plain")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        let json = serde_json::to_value(&payload.models[0]).expect("serialize");
+        assert!(
+            json.get("findings").is_none(),
+            "empty findings must be serde-skipped; got {json}"
         );
     }
 

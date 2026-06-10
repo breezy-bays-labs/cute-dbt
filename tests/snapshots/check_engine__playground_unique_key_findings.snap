@@ -1,0 +1,67 @@
+---
+source: tests/check_engine.rs
+expression: rendered
+---
+{
+  "model.healthcare_analytics.fct_encounters_incremental": [
+    {
+      "check": "grain.unique-key-unbacked",
+      "construct": "config.unique_key",
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "encounter_id"
+        }
+      ],
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_encounters_incremental",
+      "tier": "total",
+      "verdict": {
+        "by": [
+          "test.healthcare_analytics.unique_fct_encounters_incremental_encounter_id.a165c01d01"
+        ],
+        "status": "covered"
+      }
+    }
+  ],
+  "model.healthcare_analytics.fct_encounters_monthly": [
+    {
+      "check": "grain.unique-key-unbacked",
+      "construct": "config.unique_key",
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "year_month, encounter_class"
+        }
+      ],
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_encounters_monthly",
+      "recommendation": "Add a uniqueness data test at the declared grain: `unique` on a single-column key, or `dbt_utils.unique_combination_of_columns` over the composite key columns.",
+      "tier": "total",
+      "verdict": {
+        "status": "uncovered"
+      }
+    }
+  ],
+  "model.healthcare_analytics.fct_patient_summary": [
+    {
+      "check": "grain.unique-key-unbacked",
+      "construct": "config.unique_key",
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "patient_summary_key"
+        }
+      ],
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_patient_summary",
+      "tier": "total",
+      "verdict": {
+        "by": [
+          "test.healthcare_analytics.unique_fct_patient_summary_patient_summary_key.e532e1ff45"
+        ],
+        "status": "covered"
+      }
+    }
+  ]
+}
