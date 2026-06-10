@@ -584,7 +584,9 @@ fn load_current(cli: &Cli) -> Result<Manifest, RunError> {
 ///
 /// - `--baseline-manifest` → load the baseline (Stage-1 pre-flight; a
 ///   failure is remapped to `BaselineUnusable` by [`load_baseline`]) and
-///   wrap it in [`ScopeInput::Baseline`].
+///   wrap it in [`ScopeInput::Baseline`] together with any opt-in
+///   `--modified-selectors` sub-selector kinds (cute-dbt#160; clap
+///   rejects the flag on the `--pr-diff` arm at parse time).
 /// - `--pr-diff` → build the single [`NormalizedDiffIndex`] from the
 ///   parsed diff and the `--project-root` strip, and wrap it in
 ///   [`ScopeInput::PrDiff`]. The index rebases the diff's repo-relative
@@ -597,7 +599,15 @@ fn resolve_scope_input(cli: &Cli) -> Result<ScopeInput, RunError> {
     if let Some(baseline_path) = cli.baseline_manifest.as_deref() {
         let source = FileManifestSource;
         let baseline = load_baseline(&source, baseline_path)?;
-        Ok(ScopeInput::Baseline { manifest: baseline })
+        let sub_selectors = cli
+            .modified_selectors
+            .iter()
+            .map(|selector| selector.kind())
+            .collect();
+        Ok(ScopeInput::Baseline {
+            manifest: baseline,
+            sub_selectors,
+        })
     } else if let Some(diff) = cli.pr_diff.as_ref() {
         // Build the single NormalizedDiffIndex ONCE here and thread the
         // one instance through scope selection (and cute-dbt#96's
@@ -720,6 +730,7 @@ mod tests {
             config: None,
             project_root: None,
             pr_diff: None,
+            modified_selectors: Vec::new(),
         }
     }
 
@@ -1257,6 +1268,7 @@ mod tests {
     fn index_for(path: &str, removed: &str, added: &str, line: usize) -> NormalizedDiffIndex {
         use crate::domain::{FileHunks, Hunk, PrDiff};
         let diff = PrDiff {
+            renames: Vec::new(),
             files: vec![FileHunks {
                 path: path.to_owned(),
                 hunks: vec![Hunk {

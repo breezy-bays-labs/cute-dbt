@@ -52,11 +52,22 @@ count.
 detects model **body** changes (a model's `checksum` differs between the
 current and baseline manifests). Pure `.configs`-only / `.contract`-only
 / `.relation`-only / `.macros`-only changes leave the body checksum
-identical, so they are **not** detected by the default scope. The four
-sub-selector modifiers (`.configs` / `.relation` / `.macros` /
-`.contract`) now exist as additive `impl StateModifier` blocks
-(cute-dbt#17), composable via `StateComparator::with_sub_selectors()`;
-wiring a CLI selector flag to opt into the wider fidelity is a follow-up.
+identical, so they are **not** detected by the default scope. Opt into
+the wider fidelity per run with `--modified-selectors` (cute-dbt#160) —
+the tokens match dbt's own `state:modified.<sub>` sub-selector
+vocabulary, and the chosen selectors compose **alongside** the always-on
+body checksum (dbt's OR union across sub-selectors):
+
+```bash
+cute-dbt --manifest target/current/manifest.json \
+         --baseline-manifest target/baseline/manifest.json \
+         --modified-selectors configs,relation,macros,contract \
+         --out report.html
+```
+
+Baseline mode only — `--pr-diff` scopes by changed file paths, never a
+`state:modified` comparator, so combining it with `--modified-selectors`
+is a usage error rather than a silent no-op.
 
 ## Why your data stays on your machine
 
@@ -101,14 +112,20 @@ narrow.
 - **Default state-modified scoping is body-only.** The default
   comparator detects model body changes only; a pure `.configs` /
   `.contract` / `.relation` / `.macros` change leaves the model body
-  checksum identical and is not flagged by default. The four
-  sub-selector modifiers now exist as additive `impl StateModifier`
-  blocks and compose via `StateComparator::with_sub_selectors()`
+  checksum identical and is not flagged by default — note dbt's own bare
+  `state:modified` is wider (it ORs every sub-selector together). The
+  `--modified-selectors` flag
+  ([`cute-dbt#160`](https://github.com/breezy-bays-labs/cute-dbt/issues/160))
+  opts a run into the wider fidelity, wiring the four sub-selector
+  modifiers
   ([`cute-dbt#17`](https://github.com/breezy-bays-labs/cute-dbt/issues/17),
   fulfilling the originally-tracked
-  [`cute-dbt#14`](https://github.com/breezy-bays-labs/cute-dbt/issues/14)).
-  A CLI flag to select the wider fidelity is a follow-up; until then the
-  default path stays body-only.
+  [`cute-dbt#14`](https://github.com/breezy-bays-labs/cute-dbt/issues/14));
+  the default path stays body-only by design. Two residual caveats:
+  `.configs` diffs the manifest's *resolved* config dict, which can
+  over-report relative to dbt's unrendered-config diff (it never
+  under-reports), and dbt's `persisted_descriptions` sub-selector has no
+  cute-dbt modifier yet.
 - **`source()` references are not bound to fixtures.** dbt resolves
   `source('package', 'name')` to a relation name at `dbt compile`
   time, so the compiled SQL the renderer sees no longer carries the

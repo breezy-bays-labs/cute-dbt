@@ -360,15 +360,45 @@ impl StateComparator {
     /// explicitly; the default run-loop scoping is unchanged.
     #[must_use]
     pub fn with_sub_selectors() -> Self {
-        Self {
-            modifiers: vec![
-                Box::new(BodyChecksumModifier),
-                Box::new(ConfigsModifier),
-                Box::new(RelationModifier),
-                Box::new(MacrosModifier),
-                Box::new(ContractModifier),
-            ],
+        Self::from_selectors(&[
+            ModifierKind::Configs,
+            ModifierKind::Relation,
+            ModifierKind::Macros,
+            ModifierKind::Contract,
+        ])
+    }
+
+    /// Compose a comparator from [`BodyChecksumModifier`] plus the given
+    /// opt-in sub-selector `kinds` — the `--modified-selectors` CLI
+    /// wiring (cute-dbt#160).
+    ///
+    /// - The body modifier is **always** registered: the opt-in kinds
+    ///   *widen* the default scope, never replace it.
+    ///   `from_selectors(&[])` is behaviorally identical to
+    ///   [`Self::body_only`] — the byte-identical no-flag default.
+    /// - [`ModifierKind::Body`] in `kinds` is accepted and ignored
+    ///   (already registered): the CLI exposes dbt's full
+    ///   `state:modified` sub-selector vocabulary, `body` included.
+    /// - Duplicate kinds register once, and registration follows the
+    ///   fixed canonical order (configs, relation, macros, contract)
+    ///   regardless of `kinds` order. Union semantics make duplicates
+    ///   and order immaterial to behavior; the dedupe + canonical order
+    ///   keep the composition reproducible.
+    #[must_use]
+    pub fn from_selectors(kinds: &[ModifierKind]) -> Self {
+        const CANONICAL_ORDER: [ModifierKind; 4] = [
+            ModifierKind::Configs,
+            ModifierKind::Relation,
+            ModifierKind::Macros,
+            ModifierKind::Contract,
+        ];
+        let mut modifiers: Vec<Box<dyn StateModifier>> = vec![Box::new(BodyChecksumModifier)];
+        for kind in CANONICAL_ORDER {
+            if kinds.contains(&kind) {
+                modifiers.push(sub_selector_modifier(kind));
+            }
         }
+        Self { modifiers }
     }
 
     /// Node ids reported `state:modified` — every node in `current` that
@@ -511,6 +541,21 @@ impl StateComparator {
             }
         }
         ids.into_iter().collect()
+    }
+}
+
+/// The `impl StateModifier` for one [`ModifierKind`].
+///
+/// `Body` maps to [`BodyChecksumModifier`] — callers composing opt-in
+/// kinds ([`StateComparator::from_selectors`]) skip it because the body
+/// modifier is always pre-registered.
+fn sub_selector_modifier(kind: ModifierKind) -> Box<dyn StateModifier> {
+    match kind {
+        ModifierKind::Body => Box::new(BodyChecksumModifier),
+        ModifierKind::Configs => Box::new(ConfigsModifier),
+        ModifierKind::Relation => Box::new(RelationModifier),
+        ModifierKind::Macros => Box::new(MacrosModifier),
+        ModifierKind::Contract => Box::new(ContractModifier),
     }
 }
 
@@ -1459,6 +1504,318 @@ mod tests {
                 .modified_set(&current, &baseline)
                 .contains(&id("model.shop.x")),
         );
+    }
+
+    // ----- StateComparator::from_selectors (cute-dbt#160) -----
+    //
+    // The CLI `--modified-selectors` composition seam: body is always
+    // registered; the chosen sub-selector kinds widen the scope under
+    // the same OR-union semantics; an empty kind list is the byte-
+    // identical body-only default.
+
+    /// A `model` node carrying every sub-selector facet, so one helper
+    /// can flip each facet independently (the exhaustive union cube).
+    fn faceted_model(
+        checksum: &str,
+        materialized: &str,
+        relation: &str,
+        macros: &[&str],
+        id_type: &str,
+    ) -> Node {
+        Node::new(
+            NodeId::new("model.shop.faceted"),
+            "model",
+            Checksum::new("sha256", checksum),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::new(macros.iter().map(|m| (*m).to_owned()).collect(), Vec::new()),
+            None,
+            config_of(&[("materialized", Value::from(materialized))]),
+            Some(relation.to_owned()),
+            columns_of(&[("id", Some(id_type))]),
+        )
+    }
+
+    #[test]
+    fn from_selectors_with_no_kinds_matches_body_only() {
+        // The no-flag default: a config-only change stays invisible
+        // (exactly like body_only) and a body change is still caught.
+        let config_only_current = manifest(
+            vec![rich_model(
+                "model.shop.x",
+                "same",
+                config_of(&[("materialized", Value::from("table"))]),
+                None,
+                BTreeMap::new(),
+            )],
+            vec![],
+        );
+        let config_only_baseline = manifest(
+            vec![rich_model(
+                "model.shop.x",
+                "same",
+                config_of(&[("materialized", Value::from("view"))]),
+                None,
+                BTreeMap::new(),
+            )],
+            vec![],
+        );
+        let cmp = StateComparator::from_selectors(&[]);
+        assert!(
+            cmp.modified_set(&config_only_current, &config_only_baseline)
+                .is_empty(),
+            "from_selectors(&[]) must not see a config-only change",
+        );
+
+        let body_current = manifest(vec![model("model.shop.x", "new")], vec![]);
+        let body_baseline = manifest(vec![model("model.shop.x", "old")], vec![]);
+        assert!(
+            cmp.modified_set(&body_current, &body_baseline)
+                .contains(&id("model.shop.x")),
+            "from_selectors(&[]) still detects a body change",
+        );
+    }
+
+    #[test]
+    fn from_selectors_configs_detects_a_config_only_change() {
+        let current = manifest(
+            vec![rich_model(
+                "model.shop.x",
+                "same",
+                config_of(&[("materialized", Value::from("table"))]),
+                None,
+                BTreeMap::new(),
+            )],
+            vec![],
+        );
+        let baseline = manifest(
+            vec![rich_model(
+                "model.shop.x",
+                "same",
+                config_of(&[("materialized", Value::from("view"))]),
+                None,
+                BTreeMap::new(),
+            )],
+            vec![],
+        );
+        assert!(
+            StateComparator::from_selectors(&[ModifierKind::Configs])
+                .modified_set(&current, &baseline)
+                .contains(&id("model.shop.x")),
+        );
+    }
+
+    #[test]
+    fn from_selectors_configs_alone_does_not_detect_a_relation_only_change() {
+        // Selectivity: only the REQUESTED sub-selectors register — a
+        // relation-only change is invisible to a configs-only opt-in.
+        let current = manifest(
+            vec![rich_model(
+                "model.shop.x",
+                "same",
+                NodeConfig::default(),
+                Some("\"db\".\"prod\".\"x\""),
+                BTreeMap::new(),
+            )],
+            vec![],
+        );
+        let baseline = manifest(
+            vec![rich_model(
+                "model.shop.x",
+                "same",
+                NodeConfig::default(),
+                Some("\"db\".\"dev\".\"x\""),
+                BTreeMap::new(),
+            )],
+            vec![],
+        );
+        assert!(
+            StateComparator::from_selectors(&[ModifierKind::Configs])
+                .modified_set(&current, &baseline)
+                .is_empty(),
+        );
+    }
+
+    #[test]
+    fn from_selectors_always_registers_the_body_modifier() {
+        // The flag widens scope, never replaces it: a body change is
+        // caught even when only `.configs` was requested.
+        let current = manifest(vec![model("model.shop.x", "new")], vec![]);
+        let baseline = manifest(vec![model("model.shop.x", "old")], vec![]);
+        assert!(
+            StateComparator::from_selectors(&[ModifierKind::Configs])
+                .modified_set(&current, &baseline)
+                .contains(&id("model.shop.x")),
+        );
+    }
+
+    #[test]
+    fn from_selectors_with_all_four_matches_with_sub_selectors() {
+        // Registering every opt-in kind is the same comparator
+        // `with_sub_selectors()` builds — same kinds, same order.
+        let all = [
+            ModifierKind::Configs,
+            ModifierKind::Relation,
+            ModifierKind::Macros,
+            ModifierKind::Contract,
+        ];
+        let from_kinds: Vec<ModifierKind> = StateComparator::from_selectors(&all)
+            .modifiers
+            .iter()
+            .map(|m| m.kind())
+            .collect();
+        let canonical: Vec<ModifierKind> = StateComparator::with_sub_selectors()
+            .modifiers
+            .iter()
+            .map(|m| m.kind())
+            .collect();
+        assert_eq!(from_kinds, canonical);
+    }
+
+    #[test]
+    fn from_selectors_dedupes_and_ignores_an_explicit_body_kind() {
+        // `body` is accepted (full dbt state:modified vocabulary) but
+        // never double-registers; duplicate kinds register once.
+        assert_eq!(
+            StateComparator::from_selectors(&[ModifierKind::Body])
+                .modifiers
+                .len(),
+            1,
+            "an explicit Body kind is the always-on default — one modifier",
+        );
+        assert_eq!(
+            StateComparator::from_selectors(&[ModifierKind::Configs, ModifierKind::Configs])
+                .modifiers
+                .len(),
+            2,
+            "a duplicated kind registers once (body + configs)",
+        );
+    }
+
+    #[test]
+    fn from_selectors_registration_is_order_independent() {
+        // CLI argument order is immaterial: registration follows the
+        // fixed canonical order, so the composition is reproducible.
+        let cmp = StateComparator::from_selectors(&[ModifierKind::Contract, ModifierKind::Configs]);
+        let kinds: Vec<ModifierKind> = cmp.modifiers.iter().map(|m| m.kind()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ModifierKind::Body,
+                ModifierKind::Configs,
+                ModifierKind::Contract
+            ],
+        );
+    }
+
+    // The union-cube helpers below decompose the exhaustive
+    // union-semantics test so each function stays simple (crap4rs
+    // complexity gate): one builds the selector subset for a mask, one
+    // builds the divergent current node for a change vector, one is the
+    // union-semantics oracle, and one asserts a single cube case. The
+    // test itself is two plain loops.
+
+    /// The opt-in kinds selected by `mask`'s low four bits — the 2^4
+    /// selector subsets of the union cube.
+    fn cube_kinds(mask: u8) -> Vec<ModifierKind> {
+        let mut kinds = Vec::new();
+        if mask & 1 != 0 {
+            kinds.push(ModifierKind::Configs);
+        }
+        if mask & 2 != 0 {
+            kinds.push(ModifierKind::Relation);
+        }
+        if mask & 4 != 0 {
+            kinds.push(ModifierKind::Macros);
+        }
+        if mask & 8 != 0 {
+            kinds.push(ModifierKind::Contract);
+        }
+        kinds
+    }
+
+    /// The cube's baseline node — every facet at its rest value.
+    fn cube_baseline_node() -> Node {
+        faceted_model(
+            "ck",
+            "view",
+            "\"db\".\"dev\".\"x\"",
+            &["macro.shop.a"],
+            "int",
+        )
+    }
+
+    /// The cube's current node for one change vector: each set bit of
+    /// `change_mask` flips one facet away from [`cube_baseline_node`]'s
+    /// rest value (bit 0 = body, 1 = configs, 2 = relation, 3 = macros,
+    /// 4 = contract columns).
+    fn cube_current_node(change_mask: u8) -> Node {
+        faceted_model(
+            if change_mask & 1 != 0 { "ck2" } else { "ck" },
+            if change_mask & 2 != 0 {
+                "table"
+            } else {
+                "view"
+            },
+            if change_mask & 4 != 0 {
+                "\"db\".\"prod\".\"x\""
+            } else {
+                "\"db\".\"dev\".\"x\""
+            },
+            if change_mask & 8 != 0 {
+                &["macro.shop.a", "macro.shop.b"]
+            } else {
+                &["macro.shop.a"]
+            },
+            if change_mask & 16 != 0 {
+                "bigint"
+            } else {
+                "int"
+            },
+        )
+    }
+
+    /// The union-semantics oracle: modified ⟺ the body changed OR any
+    /// SELECTED kind's facet changed.
+    fn cube_expected(kinds: &[ModifierKind], change_mask: u8) -> bool {
+        change_mask & 1 != 0
+            || (kinds.contains(&ModifierKind::Configs) && change_mask & 2 != 0)
+            || (kinds.contains(&ModifierKind::Relation) && change_mask & 4 != 0)
+            || (kinds.contains(&ModifierKind::Macros) && change_mask & 8 != 0)
+            || (kinds.contains(&ModifierKind::Contract) && change_mask & 16 != 0)
+    }
+
+    /// Assert one cube case: the comparator built from `kinds` agrees
+    /// with [`cube_expected`] on the `change_mask` node divergence.
+    fn assert_union_semantics_case(cmp: &StateComparator, kinds: &[ModifierKind], change_mask: u8) {
+        let current = manifest(vec![cube_current_node(change_mask)], vec![]);
+        let baseline = manifest(vec![cube_baseline_node()], vec![]);
+        let actual = cmp
+            .modified_set(&current, &baseline)
+            .contains(&id("model.shop.faceted"));
+        assert_eq!(
+            actual,
+            cube_expected(kinds, change_mask),
+            "union semantics violated: kinds={kinds:?} change_mask={change_mask:#07b}",
+        );
+    }
+
+    #[test]
+    fn from_selectors_union_semantics_hold_exhaustively() {
+        // The union-semantics property, exhaustively (repo convention:
+        // exhaustive coverage over sampling — no proptest dep): for EVERY
+        // subset of the four opt-in kinds (2^4) and EVERY change vector
+        // over the five facets (2^5), a node is in the modified set iff
+        // the body changed OR any SELECTED kind's facet changed. Same
+        // 2^4 x 2^5 cube as before the crap4rs restructure — zero case
+        // loss; the per-case work lives in the helpers above.
+        for kind_mask in 0u8..16 {
+            let kinds = cube_kinds(kind_mask);
+            let cmp = StateComparator::from_selectors(&kinds);
+            for change_mask in 0u8..32 {
+                assert_union_semantics_case(&cmp, &kinds, change_mask);
+            }
+        }
     }
 
     // ===== StateComparator::modified_set =====
