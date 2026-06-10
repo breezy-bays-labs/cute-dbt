@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cute_dbt::adapters::asset_embed::{
-    DATATABLES_CSS, DATATABLES_JS, JQUERY_JS, MERMAID_JS, SAKURA_CSS,
+    CYTOSCAPE_JS, DATATABLES_CSS, DATATABLES_JS, JQUERY_JS, MERMAID_JS, SAKURA_CSS,
 };
 use cute_dbt::adapters::manifest::FileManifestSource;
 use cute_dbt::adapters::render::{ScopeSource, column_meta_for_model, render_report};
@@ -63,8 +63,10 @@ fn render_jaffle_shop(out: &Path) {
     .expect("render writes the report");
 }
 
-/// The HTML cute-dbt itself emits, with the five inlined asset bodies
-/// stripped out. Scanning *this* for egress constructs avoids the false
+/// The HTML cute-dbt itself emits, with the six inlined VENDORED asset
+/// bodies stripped out (the first-party report.css / interaction.js /
+/// theme.js / cyto-dag.js stay — they are ours and belong in the
+/// snapshot). Scanning *this* for egress constructs avoids the false
 /// positives the minified bundles' inert URL literals would otherwise
 /// produce (`ARCHITECTURE.md` §5).
 fn chrome_only(html: &str) -> String {
@@ -75,6 +77,7 @@ fn chrome_only(html: &str) -> String {
         JQUERY_JS,
         DATATABLES_JS,
         MERMAID_JS,
+        CYTOSCAPE_JS,
     ] {
         chrome = chrome.replace(asset, "<<inlined-asset>>");
     }
@@ -93,6 +96,7 @@ fn the_real_renderer_bundles_every_asset_for_a_real_fixture() {
         ("jquery", JQUERY_JS),
         ("datatables-js", DATATABLES_JS),
         ("mermaid", MERMAID_JS),
+        ("cytoscape", CYTOSCAPE_JS),
     ] {
         assert!(html.contains(asset), "{label} is inlined into the report");
     }

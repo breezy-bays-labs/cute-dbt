@@ -17,8 +17,8 @@ artifact on the sticky PR comment, not committed here.)
 
 Open any file directly (`open examples/jaffle-shop-report.html` on macOS,
 `xdg-open` on Linux, or drag into a browser). Every page makes **zero**
-outbound requests; every asset (Sakura CSS, jQuery, DataTables, Mermaid)
-is inlined.
+outbound requests; every asset (Sakura CSS, jQuery, DataTables, Mermaid,
+Cytoscape) is inlined.
 
 ## How to regenerate
 

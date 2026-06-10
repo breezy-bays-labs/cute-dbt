@@ -62,8 +62,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::adapters::asset_embed::{
-    DATATABLES_CSS, DATATABLES_JS, FAVICON_DATA_URI, INTERACTION_JS, JQUERY_JS, MERMAID_JS,
-    REPORT_CSS, SAKURA_CSS, THEME_JS,
+    CYTO_DAG_JS, CYTOSCAPE_JS, DATATABLES_CSS, DATATABLES_JS, FAVICON_DATA_URI, INTERACTION_JS,
+    JQUERY_JS, MERMAID_JS, REPORT_CSS, SAKURA_CSS, THEME_JS,
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
@@ -762,6 +762,10 @@ struct ReportTemplate<'a> {
     jquery_js: &'a str,
     datatables_js: &'a str,
     mermaid_js: &'a str,
+    /// Vendored Cytoscape UMD bundle (cute-dbt#180) — the second graph
+    /// engine behind the settings-panel Mermaid ⇄ Cytoscape picker
+    /// (Mermaid stays the static default). [`CYTOSCAPE_JS`].
+    cytoscape_js: &'a str,
     /// First-party report interaction engine (cute-dbt#178) — the
     /// model/test selectors, DAG, unified + split diff renderers, fixture
     /// grids and settings wiring that fill the template's engine
@@ -772,6 +776,10 @@ struct ReportTemplate<'a> {
     /// persistence + the `DataTables` dark sync. [`THEME_JS`], not a
     /// vendored asset.
     theme_js: &'a str,
+    /// First-party Cytoscape DAG engine (cute-dbt#180) — preset layout,
+    /// canvas-text labels, hover card, click-to-highlight lineage.
+    /// [`CYTO_DAG_JS`], not a vendored asset.
+    cyto_dag_js: &'a str,
     favicon_data_uri: &'a str,
     /// Report title — substituted into both `<title>` (head) and
     /// `<h1>` (header). Resolved by the cli layer from
@@ -1051,8 +1059,10 @@ pub fn render_report_with_externals(
         jquery_js: JQUERY_JS,
         datatables_js: DATATABLES_JS,
         mermaid_js: MERMAID_JS,
+        cytoscape_js: CYTOSCAPE_JS,
         interaction_js: INTERACTION_JS,
         theme_js: THEME_JS,
+        cyto_dag_js: CYTO_DAG_JS,
         favicon_data_uri: FAVICON_DATA_URI,
         report_title,
         report_subtitle,
@@ -3448,7 +3458,7 @@ mod tests {
         // will reject: `<script src>`, `<link href>`, `<img src>`,
         // CSS `@import`, CSS `url(`, protocol-relative `//`, and bare
         // `http://` / `https://`. The chrome is measured AFTER
-        // stripping the five inlined asset bodies so we don't
+        // stripping the six inlined vendored asset bodies so we don't
         // false-positive on the bundles' inert URL literals.
         let node = model_node("model.shop.x", "body", Some("select 1"));
         let manifest = manifest_for(vec![node], vec![]);
@@ -3478,6 +3488,7 @@ mod tests {
             JQUERY_JS,
             DATATABLES_JS,
             MERMAID_JS,
+            CYTOSCAPE_JS,
         ] {
             chrome = chrome.replace(asset, "<<inlined-asset>>");
         }

@@ -4469,3 +4469,279 @@ fn column_header_tooltips_th_trigger_hover_focus_and_skip_bare_columns() {
 
     let _ = tab.close(true);
 }
+
+// ===== cute-dbt#180 — Mermaid <-> Cytoscape engine picker ============
+//
+// These fixtures reuse `model_node_with_compiled` (the #155 helper above):
+// the compiled body below carries two parallel branches, so tapping one
+// branch's import must dim the OTHER branch (the lineage-complement
+// assertion needs nodes outside the tapped lineage).
+
+/// Two independent branches joining into `final_join`: tapping `src_a`
+/// leaves `src_b` + `branch_b` outside the lineage.
+const TWO_BRANCH_SQL: &str = "with src_a as (select 1 as id), \
+     src_b as (select 1 as id), \
+     branch_a as (select id from src_a), \
+     branch_b as (select id from src_b), \
+     final_join as (select branch_a.id from branch_a inner join branch_b on branch_a.id = branch_b.id) \
+     select id from final_join";
+
+/// Render a baseline report whose single model carries the two-branch DAG
+/// and navigate a fresh tab to it.
+fn dag_engine_fixture_tab(browser: &Browser, filename: &str) -> std::sync::Arc<Tab> {
+    let id = "unit_test.shop.dim_a.t";
+    let url = render_to_file(
+        filename,
+        vec![model_node_with_compiled("model.shop.dim_a", TWO_BRANCH_SQL)],
+        vec![(id, unit_test("t", "dim_a"))],
+        &["model.shop.dim_a"],
+        &[id],
+    );
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    tab
+}
+
+/// Open the settings cog and click the engine-picker segment button for
+/// `engine` ("mermaid" | "cytoscape").
+fn click_engine(tab: &Tab, engine: &str) {
+    let _ = eval(tab, "document.querySelector('.settings-cog').click()");
+    let _ = eval(
+        tab,
+        &format!("document.querySelector('.engine-seg button[data-engine=\"{engine}\"]').click()"),
+    );
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn dag_engine_picker_switches_engines_in_place_and_persists() {
+    // The cute-dbt#180 picker contract: Mermaid renders by default (the
+    // static default engine), the Cytoscape segment flips the DAG to a live
+    // cy canvas IN PLACE (no page reload — a window sentinel survives), the
+    // choice persists with the appearance state under
+    // cute-dbt.appearance.v1, and flipping back restores the Mermaid SVG
+    // and destroys the cy instance.
+    let browser = launch_browser();
+    let tab = dag_engine_fixture_tab(&browser, "headless_engine_picker.html");
+
+    // Boot: Mermaid is the default-rendered engine; the Cytoscape host is
+    // hidden and empty.
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-mermaid svg",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("Mermaid renders the DAG by default");
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.cte-dag-cyto').classList.contains('is-hidden')"
+        ),
+        "the Cytoscape host starts hidden (Mermaid is the static default)",
+    );
+    assert!(
+        eval_bool(&tab, "window.CuteCyto.cyInstance() === null"),
+        "no cy instance exists while Mermaid is active",
+    );
+
+    // The in-place proof: a sentinel set before the flip must survive it
+    // (a reload would wipe window state).
+    let _ = eval(&tab, "window.__cuteEngineFlipSentinel = 42");
+    click_engine(&tab, "cytoscape");
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-cyto canvas",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("the Cytoscape engine renders a live canvas after the flip");
+    assert_eq!(
+        eval(&tab, "window.__cuteEngineFlipSentinel"),
+        serde_json::json!(42),
+        "the engine swap happens in place — no page reload",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.cte-dag-mermaid').classList.contains('is-hidden') \
+             && document.querySelector('.cte-dag-mermaid').childElementCount === 0"
+        ),
+        "the Mermaid host is hidden and emptied while Cytoscape is active",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('.cte-dag-cyto').classList.contains('is-hidden')"
+        ),
+        "the Cytoscape host is revealed",
+    );
+    assert_eq!(
+        eval_i64(&tab, "window.CuteCyto.cyInstance().nodes().length"),
+        6,
+        "the cy graph carries the five CTE nodes + the terminal",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.engine-seg button[data-engine=\"cytoscape\"]').getAttribute('aria-pressed')"
+        ),
+        "true",
+        "the active engine segment reports aria-pressed=true",
+    );
+
+    // Persistence rides the appearance blob (where storage is usable).
+    let storage_ok = eval_bool(
+        &tab,
+        "(function(){try{if(!window.localStorage)return false;\
+           window.localStorage.setItem('__probe','1');\
+           window.localStorage.removeItem('__probe');return true;}\
+           catch(e){return false;}})()",
+    );
+    if storage_ok {
+        let raw = eval_string(
+            &tab,
+            "window.localStorage.getItem('cute-dbt.appearance.v1') || ''",
+        );
+        assert!(
+            raw.contains("\"engine\":\"cytoscape\""),
+            "the engine choice persisted under cute-dbt.appearance.v1: {raw}",
+        );
+    }
+
+    // Flip back: Mermaid SVG returns, the cy instance is destroyed.
+    click_engine(&tab, "mermaid");
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-mermaid svg",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("flipping back re-renders the Mermaid SVG");
+    assert!(
+        eval_bool(&tab, "window.CuteCyto.cyInstance() === null"),
+        "flipping back destroys the cy instance",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.cte-dag-cyto').classList.contains('is-hidden')"
+        ),
+        "the Cytoscape host hides again",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn cytoscape_hover_card_appears_and_tap_highlights_lineage_in_place() {
+    // The cute-dbt#180 interaction set, exercised through the handlers
+    // cyto-dag.js binds (emit() fires the real bound listeners):
+    //  - hover a node -> the .cyto-node-card context card appears, filled
+    //    via textContent;
+    //  - tap a node -> its full lineage highlights and the complement dims
+    //    IN PLACE (the same cy instance survives — the spike's
+    //    no-renderDag-per-click rule), and the Inspect panel selects the
+    //    node through __cuteSelectNode;
+    //  - background tap clears the highlight.
+    let browser = launch_browser();
+    let tab = dag_engine_fixture_tab(&browser, "headless_cyto_interactions.html");
+    click_engine(&tab, "cytoscape");
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-cyto canvas",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("the Cytoscape engine renders");
+
+    // ===== hover -> context card =====
+    let _ = eval(
+        &tab,
+        "void window.CuteCyto.cyInstance().getElementById('src_a').emit('mouseover')",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.cyto-node-card').classList.contains('is-visible')"
+        ),
+        "hovering a node reveals the context card",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.cyto-node-card .nc-name').textContent"
+        ),
+        "src_a",
+        "the card names the hovered node (textContent-filled)",
+    );
+    let _ = eval(
+        &tab,
+        "void window.CuteCyto.cyInstance().getElementById('src_a').emit('mouseout')",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('.cyto-node-card').classList.contains('is-visible')"
+        ),
+        "leaving the node hides the context card",
+    );
+
+    // ===== tap -> lineage highlight + dim-complement, in place =====
+    let _ = eval(
+        &tab,
+        "void (window.__cuteCyRef = window.CuteCyto.cyInstance())",
+    );
+    let _ = eval(
+        &tab,
+        "void window.CuteCyto.cyInstance().getElementById('src_a').emit('tap')",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "window.CuteCyto.cyInstance().getElementById('src_a').hasClass('sel')"
+        ),
+        "the tapped node carries the selected ring",
+    );
+    assert_eq!(
+        eval_i64(&tab, "window.CuteCyto.cyInstance().nodes('.dim').length"),
+        2,
+        "exactly the other branch (src_b + branch_b) dims — the lineage \
+         (src_a -> branch_a -> final_join -> terminal) stays lit",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "window.CuteCyto.cyInstance().getElementById('branch_b').hasClass('dim') \
+             && window.CuteCyto.cyInstance().getElementById('src_b').hasClass('dim')"
+        ),
+        "both non-lineage nodes are the dimmed ones",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "window.CuteCyto.cyInstance().getElementById('branch_a').hasClass('dim')"
+        ),
+        "downstream lineage stays undimmed",
+    );
+    assert!(
+        eval_bool(&tab, "window.CuteCyto.cyInstance() === window.__cuteCyRef"),
+        "the tap mutates classes on the SAME cy instance — no rebuild, \
+         pan/zoom state survives (the no-renderDag-per-click rule)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.left-panel-body .node-detail').getAttribute('data-node-id')"
+        ),
+        "src_a",
+        "the tap drives the Inspect panel through __cuteSelectNode",
+    );
+
+    // ===== background tap clears =====
+    let _ = eval(&tab, "void window.CuteCyto.cyInstance().emit('tap')");
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "window.CuteCyto.cyInstance().elements('.dim, .sel, .trace').length"
+        ),
+        0,
+        "a background tap clears the highlight classes",
+    );
+
+    let _ = tab.close(true);
+}

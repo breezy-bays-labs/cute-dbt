@@ -171,13 +171,24 @@ In-scope unit-test selection: unit tests whose target model is in
 
 ## Asset embedding contract
 
-All vendored frontend assets (Sakura CSS, jQuery, DataTables, Mermaid)
+All vendored frontend assets (Sakura CSS, jQuery, DataTables, Mermaid,
+Cytoscape)
 are embedded at compile time via `include_str!`/`include_bytes!` into the
 binary's `.rodata` and emitted through askama with the `|safe` filter.
 **Never** a runtime asset directory. **Never** ESM Mermaid (`type=module`).
 Mermaid initializes with `securityLevel: 'strict'` and an explicit
 non-webfont `fontFamily` (system stack). The favicon is a `data:` URI.
 Pin + SHA-256 + SPDX license per asset in `assets/MANIFEST.toml`.
+Cytoscape (cute-dbt#180) is the opt-in second DAG engine behind the
+settings-panel picker — Mermaid stays the static default. Its init
+contract: UMD core only, canvas-text labels (no HTML-label extension),
+non-webfont system `fontFamily`, no layout plugins (no `cytoscape-dagre`,
+never EPL `cytoscape-elk`; the preset layout is first-party in
+`templates/cyto-dag.js`), no workers, handlers bound from our JS, and
+per-click interaction mutates classes in place (never re-calls a render
+entry point). Carrying both engines in `report.html` is a conscious
+reversal of the one-engine-per-page posture — see the 2026-06-10 ADR-4
+amendment in the ops repo.
 
 ## Zero-egress gate (the core privacy property)
 

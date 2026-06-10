@@ -282,3 +282,146 @@ fn every_committed_example_makes_zero_external_requests_when_opened_via_file_url
         failures.join("\n"),
     );
 }
+
+/// Evaluate `expr` in the page; panic on a thrown JS exception so a
+/// missing selector can never silently pass the gate.
+fn eval(tab: &headless_chrome::Tab, expr: &str) -> serde_json::Value {
+    let r = tab
+        .call_method(Runtime::Evaluate {
+            expression: expr.to_string(),
+            object_group: None,
+            include_command_line_api: None,
+            silent: Some(true),
+            context_id: None,
+            return_by_value: Some(true),
+            generate_preview: None,
+            user_gesture: Some(true),
+            await_promise: Some(false),
+            throw_on_side_effect: None,
+            timeout: None,
+            disable_breaks: None,
+            repl_mode: None,
+            allow_unsafe_eval_blocked_by_csp: None,
+            unique_context_id: None,
+            serialization_options: None,
+        })
+        .expect("evaluate expression");
+    if let Some(exc) = r.exception_details {
+        let detail = exc
+            .exception
+            .as_ref()
+            .and_then(|e| e.description.clone())
+            .unwrap_or(exc.text);
+        panic!("JS evaluation threw for `{expr}`: {detail}");
+    }
+    r.result.value.unwrap_or(serde_json::Value::Null)
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn every_committed_example_stays_zero_egress_with_the_cytoscape_engine_selected() {
+    // cute-dbt#180 — the per-engine arm of the primary gate. The default
+    // test above proves the Mermaid-rendered page; this one flips the
+    // settings-panel DAG-engine picker to Cytoscape (the opt-in interactive
+    // engine), waits for the live cy canvas, and asserts the SAME property:
+    // zero external requests over a real file:// origin with DNS denied.
+    // The picker path matters because the Cytoscape bundle + the cyto-dag
+    // engine only EXECUTE after the flip — a static golden can never
+    // exercise them (the dogfood guard from the Bucket-2 plan).
+    let chrome_path = std::env::var_os("CHROME").map(PathBuf::from);
+    let host_resolver = OsStr::new("--host-resolver-rules=MAP * ~NOTFOUND");
+    let no_first_run = OsStr::new("--no-first-run");
+    let no_default_check = OsStr::new("--no-default-browser-check");
+    let disable_breakpad = OsStr::new("--disable-breakpad");
+
+    let mut builder = LaunchOptionsBuilder::default();
+    builder.headless(true).sandbox(false).args(vec![
+        host_resolver,
+        no_first_run,
+        no_default_check,
+        disable_breakpad,
+    ]);
+    if let Some(p) = chrome_path.as_ref() {
+        builder.path(Some(p.clone()));
+    }
+    let opts = builder.build().expect("LaunchOptions must build");
+    let browser = Browser::new(opts).expect("Chromium must launch");
+
+    let mut failures: Vec<String> = Vec::new();
+    for filename in common::COMMITTED_EXAMPLES {
+        let url = report_file_url(filename);
+        assert!(
+            url.starts_with("file://"),
+            "zero-egress proof MUST run against a real file:// origin; got {url}",
+        );
+        let tab = browser.new_tab().expect("new tab");
+        tab.call_method(Network::Enable {
+            max_total_buffer_size: None,
+            max_resource_buffer_size: None,
+            max_post_data_size: None,
+            report_direct_socket_traffic: None,
+            enable_durable_messages: None,
+        })
+        .expect("enable Network domain");
+
+        let external = Arc::new(Mutex::new(Vec::<ExternalRequest>::new()));
+        let external_recorder = external.clone();
+        tab.add_event_listener(Arc::new(move |event: &Event| {
+            if let Event::NetworkRequestWillBeSent(e) = event {
+                let req_url = e.params.request.url.clone();
+                if scheme_is_external(&req_url) {
+                    external_recorder.lock().unwrap().push(ExternalRequest {
+                        url: req_url,
+                        initiator_type: format!("{:?}", e.params.initiator.Type),
+                        initiator_url: e.params.initiator.url.clone(),
+                        initiator_line: e.params.initiator.line_number,
+                    });
+                }
+            }
+        }))
+        .expect("subscribe Network.requestWillBeSent");
+
+        tab.navigate_to(&url).expect("navigate to file:// URL");
+        tab.wait_until_navigated().expect("await navigation");
+
+        // Let the default Mermaid render settle first (the boot path),
+        // then flip the picker to Cytoscape.
+        let _ = tab
+            .wait_for_element_with_custom_timeout(".cte-dag-mermaid svg", Duration::from_secs(15));
+        let _ = eval(&tab, "document.querySelector('.settings-cog').click()");
+        let _ = eval(
+            &tab,
+            "document.querySelector('.engine-seg button[data-engine=\"cytoscape\"]').click()",
+        );
+        let cyto_ok = tab
+            .wait_for_element_with_custom_timeout(".cte-dag-cyto canvas", Duration::from_secs(15))
+            .is_ok();
+
+        let captured = external.lock().unwrap().clone();
+        if !captured.is_empty() {
+            let listing = captured
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            failures.push(format!(
+                "examples/{filename} (cytoscape selected): {n} external request(s):\n{listing}",
+                n = captured.len(),
+            ));
+        }
+        if !cyto_ok {
+            failures.push(format!(
+                "examples/{filename}: the Cytoscape canvas never appeared inside \
+                 .cte-dag-cyto after selecting the engine — either the inlined \
+                 Cytoscape UMD bundle is broken offline or the picker wiring failed.",
+            ));
+        }
+        let _ = tab.close(true);
+    }
+
+    assert!(
+        failures.is_empty(),
+        "zero-egress proof FAILED with the Cytoscape engine selected:\n{}",
+        failures.join("\n"),
+    );
+}
