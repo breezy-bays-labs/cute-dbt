@@ -398,9 +398,11 @@ document and the spec files from drifting.
 Three CI invariants pin the feature-spec contract — see
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
 
-- `feature-count` asserts exactly **6** `.feature` files exist (bumped
-  from 5 to 6 in PR 14 when `config.feature` joined the contract;
-  adding a seventh requires a deliberate update).
+- `feature-count` asserts the exact number of `.feature` files. The
+  enforced count lives only in the `expected=` line of the CI job and
+  its `lefthook.yml` mirror (no number here on purpose — hardcoded
+  counts in prose went stale repeatedly, cute-dbt#68); adding a feature
+  file requires a deliberate bump of both.
 - `baseline-required-grep` asserts every scenario invoking the CLI passes
   `--baseline-manifest`, except scenarios tagged
   `@no-baseline-usage-error` (the one intentional exception that
