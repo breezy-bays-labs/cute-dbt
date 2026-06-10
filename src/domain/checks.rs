@@ -827,11 +827,8 @@ fn given_rows_presence(given: &UnitTestGiven) -> RowsPresence {
 /// state feeds the model itself, never an arm) and for any other shape.
 fn given_input_leaf(input: &str) -> Option<String> {
     let trimmed = input.trim();
-    let is_call = ["ref", "source"].iter().any(|kw| {
-        trimmed.get(..kw.len()).is_some_and(|prefix| {
-            prefix.eq_ignore_ascii_case(kw) && trimmed[kw.len()..].trim_start().starts_with('(')
-        })
-    });
+    let keyword = trimmed[..trimmed.find('(')?].trim_end();
+    let is_call = keyword.eq_ignore_ascii_case("ref") || keyword.eq_ignore_ascii_case("source");
     if !is_call || !trimmed.ends_with(')') {
         return None;
     }
