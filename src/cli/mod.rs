@@ -921,6 +921,9 @@ mod tests {
 
     #[test]
     fn build_check_policy_resolves_the_config_selection() {
+        // Registry-shape-robust: `grain.*` removes exactly the grain
+        // group; every other registered check (e.g. union.arm-coverage,
+        // cute-dbt#172) stays displayed.
         let manifest = manifest_of_models(vec![model_with_raw("model.shop.orders", None)]);
         let policy = build_check_policy(
             &cli_with_checks(crate::domain::ChecksConfig {
@@ -930,7 +933,19 @@ mod tests {
             &manifest,
             &scope_of(&["model.shop.orders"]),
         );
-        assert!(policy.displayed.is_empty(), "grain.* disables every check");
+        let expected: Vec<HeuristicId> = CheckPolicy::default()
+            .displayed
+            .into_iter()
+            .filter(|id: &HeuristicId| {
+                use crate::domain::CheckId as _;
+                id.spec().group != "grain"
+            })
+            .collect();
+        assert_eq!(policy.displayed, expected, "grain.* removes only grain");
+        assert!(
+            !expected.is_empty(),
+            "the registry carries non-grain checks (union.arm-coverage)"
+        );
     }
 
     #[test]

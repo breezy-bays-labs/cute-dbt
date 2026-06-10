@@ -861,15 +861,39 @@ model = "orders"
     }
 
     #[test]
-    fn production_registry_resolves_its_own_id_and_group() {
-        // Sanity over the REAL registry: the walking-skeleton id and its
-        // group glob both resolve.
-        let cfg = config("disable = [\"grain.unique-key-unbacked\"]");
-        let policy = resolve_check_policy::<HeuristicId>(&cfg).expect("exact id resolves");
-        assert!(policy.displayed.is_empty());
-        let cfg = config("disable = [\"grain.*\"]");
-        let policy = resolve_check_policy::<HeuristicId>(&cfg).expect("group glob resolves");
-        assert!(policy.displayed.is_empty());
+    fn production_registry_resolves_every_id_and_group() {
+        // Sanity over the REAL registry, shape-robust: EVERY registered
+        // check's exact id and group glob resolve, and disabling one
+        // removes exactly that id / that group — nothing else. Extends
+        // automatically as checks join the registry (union.arm-coverage
+        // arrived with cute-dbt#172/#191).
+        for spec in HeuristicId::SPECS {
+            let cfg = config(&format!("disable = [\"{}\"]", spec.id_str));
+            let policy = resolve_check_policy::<HeuristicId>(&cfg).expect("exact id resolves");
+            let expected: Vec<HeuristicId> = HeuristicId::ALL
+                .iter()
+                .copied()
+                .filter(|id| *id != spec.id)
+                .collect();
+            assert_eq!(
+                policy.displayed, expected,
+                "{} removes itself only",
+                spec.id_str
+            );
+
+            let cfg = config(&format!("disable = [\"{}.*\"]", spec.group));
+            let policy = resolve_check_policy::<HeuristicId>(&cfg).expect("group glob resolves");
+            let expected: Vec<HeuristicId> = HeuristicId::ALL
+                .iter()
+                .copied()
+                .filter(|id| id.spec().group != spec.group)
+                .collect();
+            assert_eq!(
+                policy.displayed, expected,
+                "{}.* removes exactly its group",
+                spec.group
+            );
+        }
     }
 
     // ===== suppress entry validation ==================================
