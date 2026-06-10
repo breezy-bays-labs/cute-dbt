@@ -1708,72 +1708,112 @@ mod tests {
         );
     }
 
+    // The union-cube helpers below decompose the exhaustive
+    // union-semantics test so each function stays simple (crap4rs
+    // complexity gate): one builds the selector subset for a mask, one
+    // builds the divergent current node for a change vector, one is the
+    // union-semantics oracle, and one asserts a single cube case. The
+    // test itself is two plain loops.
+
+    /// The opt-in kinds selected by `mask`'s low four bits — the 2^4
+    /// selector subsets of the union cube.
+    fn cube_kinds(mask: u8) -> Vec<ModifierKind> {
+        let mut kinds = Vec::new();
+        if mask & 1 != 0 {
+            kinds.push(ModifierKind::Configs);
+        }
+        if mask & 2 != 0 {
+            kinds.push(ModifierKind::Relation);
+        }
+        if mask & 4 != 0 {
+            kinds.push(ModifierKind::Macros);
+        }
+        if mask & 8 != 0 {
+            kinds.push(ModifierKind::Contract);
+        }
+        kinds
+    }
+
+    /// The cube's baseline node — every facet at its rest value.
+    fn cube_baseline_node() -> Node {
+        faceted_model(
+            "ck",
+            "view",
+            "\"db\".\"dev\".\"x\"",
+            &["macro.shop.a"],
+            "int",
+        )
+    }
+
+    /// The cube's current node for one change vector: each set bit of
+    /// `change_mask` flips one facet away from [`cube_baseline_node`]'s
+    /// rest value (bit 0 = body, 1 = configs, 2 = relation, 3 = macros,
+    /// 4 = contract columns).
+    fn cube_current_node(change_mask: u8) -> Node {
+        faceted_model(
+            if change_mask & 1 != 0 { "ck2" } else { "ck" },
+            if change_mask & 2 != 0 {
+                "table"
+            } else {
+                "view"
+            },
+            if change_mask & 4 != 0 {
+                "\"db\".\"prod\".\"x\""
+            } else {
+                "\"db\".\"dev\".\"x\""
+            },
+            if change_mask & 8 != 0 {
+                &["macro.shop.a", "macro.shop.b"]
+            } else {
+                &["macro.shop.a"]
+            },
+            if change_mask & 16 != 0 {
+                "bigint"
+            } else {
+                "int"
+            },
+        )
+    }
+
+    /// The union-semantics oracle: modified ⟺ the body changed OR any
+    /// SELECTED kind's facet changed.
+    fn cube_expected(kinds: &[ModifierKind], change_mask: u8) -> bool {
+        change_mask & 1 != 0
+            || (kinds.contains(&ModifierKind::Configs) && change_mask & 2 != 0)
+            || (kinds.contains(&ModifierKind::Relation) && change_mask & 4 != 0)
+            || (kinds.contains(&ModifierKind::Macros) && change_mask & 8 != 0)
+            || (kinds.contains(&ModifierKind::Contract) && change_mask & 16 != 0)
+    }
+
+    /// Assert one cube case: the comparator built from `kinds` agrees
+    /// with [`cube_expected`] on the `change_mask` node divergence.
+    fn assert_union_semantics_case(cmp: &StateComparator, kinds: &[ModifierKind], change_mask: u8) {
+        let current = manifest(vec![cube_current_node(change_mask)], vec![]);
+        let baseline = manifest(vec![cube_baseline_node()], vec![]);
+        let actual = cmp
+            .modified_set(&current, &baseline)
+            .contains(&id("model.shop.faceted"));
+        assert_eq!(
+            actual,
+            cube_expected(kinds, change_mask),
+            "union semantics violated: kinds={kinds:?} change_mask={change_mask:#07b}",
+        );
+    }
+
     #[test]
     fn from_selectors_union_semantics_hold_exhaustively() {
         // The union-semantics property, exhaustively (repo convention:
         // exhaustive coverage over sampling — no proptest dep): for EVERY
         // subset of the four opt-in kinds (2^4) and EVERY change vector
         // over the five facets (2^5), a node is in the modified set iff
-        // the body changed OR any SELECTED kind's facet changed.
+        // the body changed OR any SELECTED kind's facet changed. Same
+        // 2^4 x 2^5 cube as before the crap4rs restructure — zero case
+        // loss; the per-case work lives in the helpers above.
         for kind_mask in 0u8..16 {
-            let mut kinds = Vec::new();
-            if kind_mask & 1 != 0 {
-                kinds.push(ModifierKind::Configs);
-            }
-            if kind_mask & 2 != 0 {
-                kinds.push(ModifierKind::Relation);
-            }
-            if kind_mask & 4 != 0 {
-                kinds.push(ModifierKind::Macros);
-            }
-            if kind_mask & 8 != 0 {
-                kinds.push(ModifierKind::Contract);
-            }
+            let kinds = cube_kinds(kind_mask);
             let cmp = StateComparator::from_selectors(&kinds);
             for change_mask in 0u8..32 {
-                let body_changed = change_mask & 1 != 0;
-                let config_changed = change_mask & 2 != 0;
-                let relation_changed = change_mask & 4 != 0;
-                let macros_changed = change_mask & 8 != 0;
-                let columns_changed = change_mask & 16 != 0;
-
-                let baseline_node = faceted_model(
-                    "ck",
-                    "view",
-                    "\"db\".\"dev\".\"x\"",
-                    &["macro.shop.a"],
-                    "int",
-                );
-                let current_node = faceted_model(
-                    if body_changed { "ck2" } else { "ck" },
-                    if config_changed { "table" } else { "view" },
-                    if relation_changed {
-                        "\"db\".\"prod\".\"x\""
-                    } else {
-                        "\"db\".\"dev\".\"x\""
-                    },
-                    if macros_changed {
-                        &["macro.shop.a", "macro.shop.b"]
-                    } else {
-                        &["macro.shop.a"]
-                    },
-                    if columns_changed { "bigint" } else { "int" },
-                );
-                let current = manifest(vec![current_node], vec![]);
-                let baseline = manifest(vec![baseline_node], vec![]);
-
-                let expected = body_changed
-                    || (kinds.contains(&ModifierKind::Configs) && config_changed)
-                    || (kinds.contains(&ModifierKind::Relation) && relation_changed)
-                    || (kinds.contains(&ModifierKind::Macros) && macros_changed)
-                    || (kinds.contains(&ModifierKind::Contract) && columns_changed);
-                let actual = cmp
-                    .modified_set(&current, &baseline)
-                    .contains(&id("model.shop.faceted"));
-                assert_eq!(
-                    actual, expected,
-                    "union semantics violated: kinds={kinds:?} change_mask={change_mask:#07b}",
-                );
+                assert_union_semantics_case(&cmp, &kinds, change_mask);
             }
         }
     }
