@@ -38,23 +38,40 @@
 //! (downstream) — so disabling a superseding check can never resurrect
 //! the superseded finding on the very construct it misreads.
 //!
-//! ## v0.1 walking-skeleton registry
+//! ## v0.1 registry
 //!
-//! Exactly one TOTAL-tier check: `grain.unique-key-unbacked` — a model
-//! declares `config.unique_key` (merge/delete+insert semantics depend on
-//! it) but no enabled uniqueness data test covers a column set ⊆ the key.
-//! Wire shapes verified against dbt-fusion
-//! `9977b6cbb1b761065536300037560d8e3c037011` (`DbtUniqueKey` in
-//! `dbt-schemas/src/schemas/common.rs`; test-kwargs extraction in
-//! `dbt-parser/src/resolve/primary_key_inference.rs`) and against the
-//! committed `playground-current.json` fixture (`tests/check_engine.rs`).
+//! Two checks ship today:
+//!
+//! - `grain.unique-key-unbacked` (TOTAL, the cute-dbt#169 walking
+//!   skeleton) — a model declares `config.unique_key` (merge/
+//!   delete+insert semantics depend on it) but no enabled uniqueness
+//!   data test covers a column set ⊆ the key. Wire shapes verified
+//!   against dbt-fusion `9977b6cbb1b761065536300037560d8e3c037011`
+//!   (`DbtUniqueKey` in `dbt-schemas/src/schemas/common.rs`;
+//!   test-kwargs extraction in
+//!   `dbt-parser/src/resolve/primary_key_inference.rs`) and against the
+//!   committed `playground-current.json` fixture
+//!   (`tests/check_engine.rs`).
+//! - `union.arm-coverage` (HIGH, cute-dbt#172 — catalog class C3) — a
+//!   model UNIONs N arms and the unit-test givens leave one or more
+//!   arms provably unexercised at the fixture-input level. Consumes the
+//!   EXISTING [`CteGraph`] union facts (union-typed edges +
+//!   `body_leaf_table_refs`, cute-dbt#40) and the cute-dbt#131
+//!   given↔leaf-ref binding — no new AST pass. Per-given runtime
+//!   semantics verified against dbt-fusion
+//!   `9977b6cbb1b761065536300037560d8e3c037011`
+//!   (`render_unit_test` in
+//!   `dbt-tasks-sa/src/renderable/renderable/unit_test.rs` builds one
+//!   mock CTE per `given` entry — a relation with no given keeps
+//!   reading its real table, which is why an unmocked *seed* input is
+//!   honest UNKNOWN, never UNCOVERED).
 //!
 //! Domain purity: `std` + `serde` (+ `serde_json::Value` passthrough)
 //! only — no I/O, no parser deps. Checks stay thin pattern-matchers over
-//! already-parsed manifest facts (the `StateModifier` precedent: plain
-//! functions until ≥2 rules force a seam).
+//! already-parsed manifest + CteGraph facts (the `StateModifier`
+//! precedent: plain functions until ≥2 rules force a seam).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 // Infallible when writing into a String — the ledger generators use
 // `let _ = write!(...)` per clippy::format_push_string.
 use std::fmt::Write as _;
@@ -62,7 +79,11 @@ use std::fmt::Write as _;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
+use crate::domain::cte::{CteGraph, EdgeType};
 use crate::domain::manifest::{Manifest, Node, NodeId};
+use crate::domain::state::resolve_target_model;
+use crate::domain::unit_test::{UnitTest, UnitTestGiven};
+use crate::domain::unit_test_table::table_from_manifest_rows;
 
 // ---------------------------------------------------------------------
 // Spec vocabulary.
@@ -190,14 +211,21 @@ pub trait CheckId: Copy + Eq + Ord + std::fmt::Debug + Sized + 'static {
 }
 
 /// The evidence a detector pattern-matches over: the whole parsed
-/// [`Manifest`] plus the one model node under evaluation. Borrowed POD
-/// facts only — detectors never do I/O.
+/// [`Manifest`] plus the one model node under evaluation, plus the
+/// model's already-parsed [`CteGraph`] (the cute-dbt#40 single-parse
+/// pass — the second evidence family on the extraction ladder). Borrowed
+/// POD facts only — detectors never do I/O and never re-parse SQL.
 #[derive(Debug, Clone, Copy)]
 pub struct CheckContext<'a> {
     /// The full current manifest (test-node resolution, sibling lookups).
     pub manifest: &'a Manifest,
     /// The model node the engine is evaluating.
     pub model: &'a Node,
+    /// The model's CTE graph, parsed once by the adapter from
+    /// `compiled_code` (cute-dbt#172). `None` when the caller computed
+    /// no graph — graph-fact checks then stay silent (no graph evidence
+    /// is not evidence of absence; manifest-fact checks are unaffected).
+    pub cte_graph: Option<&'a CteGraph>,
 }
 
 // ---------------------------------------------------------------------
@@ -426,9 +454,21 @@ pub fn supersedes_is_acyclic<Id: CheckId>() -> bool {
 /// model, over the production [`HeuristicId`] registry. Display
 /// filtering ([`filter_for_display`]) is deliberately NOT applied here —
 /// it is a downstream presentation step (and has no config surface yet).
+///
+/// `cte_graph` is the model's already-parsed CTE graph (the renderer's
+/// single `parse_cte_graph` pass) — `None` when no graph was computed;
+/// graph-fact checks (cute-dbt#172) then stay silent.
 #[must_use]
-pub fn model_findings(manifest: &Manifest, model: &Node) -> Vec<Finding<HeuristicId>> {
-    let ctx = CheckContext { manifest, model };
+pub fn model_findings(
+    manifest: &Manifest,
+    model: &Node,
+    cte_graph: Option<&CteGraph>,
+) -> Vec<Finding<HeuristicId>> {
+    let ctx = CheckContext {
+        manifest,
+        model,
+        cte_graph,
+    };
     resolve_supersedes(evaluate_all::<HeuristicId>(&ctx))
 }
 
@@ -549,6 +589,37 @@ heuristics! {
             recommendation: "Add a uniqueness data test at the declared grain: `unique` on a single-column key, or `dbt_utils.unique_combination_of_columns` over the composite key columns.",
             rationale: "Incremental merge / delete+insert semantics silently depend on the declared unique_key actually being unique — a duplicate key corrupts the merge with no test to catch it. Declaring a grain without a test at that grain is an unverified load-bearing assumption.",
             detector: detect_grain_unique_key_unbacked,
+        },
+        /// `union.arm-coverage` — UNION arms left unexercised by the
+        /// unit-test givens (cute-dbt#172, catalog class C3).
+        UnionArmCoverage {
+            id: "union.arm-coverage",
+            name: "Unexercised UNION arm",
+            group: "union",
+            tier: High,
+            instrument: UnitTest,
+            supersedes: [],
+            evidence: [
+                "cte-graph.union-edges",
+                "cte-graph.body-leaf-table-refs",
+                "manifest.unit-test-givens",
+            ],
+            conditions: [
+                "the model's body (or a CTE within it) UNIONs arms the CTE engine resolved to union-typed edges — each checked arm is a join-free reference to an earlier CTE (`UnionAll` / `UnionDistinct`)",
+                "an arm counts as exercised when at least one unit-test given with one or more in-manifest rows binds — by `ref(...)` / `source(...)` leaf name, case-insensitive — to any external relation in the arm's upstream CTE closure",
+                "a given bound to a relation shared by several arms exercises every arm whose closure reads it: its rows provably enter each arm's scan, while per-arm filter survival is deliberately out of scope (no predicate evaluation) — the HIGH-tier cue boundary, never an assertion of output-level coverage",
+                "verdict order: any provably-unfed arm makes the construct UNCOVERED; otherwise any statically-unattributable arm makes it UNKNOWN; otherwise COVERED, attributing every test that feeds an arm",
+            ],
+            exclusions: [
+                "arms that are not a join-free reference to an earlier CTE (join chains, derived tables, arms reading external tables directly, EXCEPT/INTERSECT arms) emit no union edge and are invisible to this check — never counted, never reported",
+                "an arm whose upstream closure reads no resolvable external relation (constant SELECT, table functions) makes the construct UNKNOWN, never UNCOVERED",
+                "an arm fed only by external-fixture or non-literal-sql givens (row counts not statically recoverable) makes the construct UNKNOWN, never UNCOVERED",
+                "an arm whose only unbound feeding relation resolves to a seed is UNKNOWN, never UNCOVERED, when the model has unit tests (dbt lets seed inputs go ungiven and reads the real seed file)",
+                "`this` givens (incremental prior state) never feed a union arm",
+            ],
+            recommendation: "Add (or fill) a given row for each unexercised UNION arm's input so every arm contributes at least one row, then extend `expect` with the row(s) that arm should emit. This finding's evidence carries the per-arm input and a given-row sketch.",
+            rationale: "A UNION arm with no fixture rows contributes nothing to any unit test: its projection, casts, and filters run on zero rows, so a column mix-up or a dropped row in that arm ships silently. One given row per arm makes every branch's contribution visible in the expected output.",
+            detector: detect_union_arm_coverage,
         },
     }
 }
@@ -695,6 +766,341 @@ fn uniqueness_test_columns(node: &Node) -> Option<Vec<String>> {
         }
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------
+// union.arm-coverage — UNION arms unexercised by unit-test givens
+// (cute-dbt#172, catalog class C3).
+// ---------------------------------------------------------------------
+
+/// Whether a given's in-manifest rows are statically countable, and if
+/// so whether any exist. Three-valued on purpose: the honest-tier
+/// contract forbids guessing (`Unknown` never becomes a nagged gap).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowsPresence {
+    /// ≥1 row recovered from the manifest payload.
+    NonEmpty,
+    /// The payload provably carries zero rows (`rows: []`, header-only
+    /// csv, …).
+    Empty,
+    /// Not statically countable: an external `fixture:` file (rows live
+    /// on disk, not in the manifest — cute-dbt#126) or a non-literal
+    /// `format: sql` SELECT.
+    Unknown,
+}
+
+/// How one union arm relates to the unit-test fixtures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArmCoverage {
+    /// ≥1 non-empty given (in ≥1 test) feeds the arm's closure.
+    Fed,
+    /// Every test provably feeds the arm zero rows.
+    Unfed,
+    /// Not statically decidable (unbindable closure, unknown-count
+    /// givens, or an ungiven seed input).
+    Unknown,
+}
+
+/// Classify a given's `rows` payload via the shared fixture normalizer
+/// ([`table_from_manifest_rows`] — the cute-dbt#66/#127/#137 single
+/// source of truth for dict / csv-string / literal-sql row recovery).
+fn given_rows_presence(given: &UnitTestGiven) -> RowsPresence {
+    if given.fixture().is_some() {
+        // External fixture file: the rows are NOT in the manifest and
+        // the domain does no I/O — statically unknowable (cute-dbt#126).
+        return RowsPresence::Unknown;
+    }
+    match table_from_manifest_rows(given.rows(), given.format()) {
+        None => RowsPresence::Unknown,
+        Some(table) if table.rows.is_empty() => RowsPresence::Empty,
+        Some(_) => RowsPresence::NonEmpty,
+    }
+}
+
+/// The lowercased leaf relation a given's `input` mocks: the **last
+/// single-quoted argument** of a `ref(...)` / `source(...)` call —
+/// `ref('stg_orders')` → `stg_orders`, `ref('pkg', 'stg_orders')` →
+/// `stg_orders`, `source('raw', 'orders')` → `orders`. Mirrors the
+/// renderer's given↔leaf-ref binding (cute-dbt#34/#131:
+/// `render::parse_ref_name` + the source unwrap; duplicated here because
+/// domain never imports adapters). `None` for `this` (incremental prior
+/// state feeds the model itself, never an arm) and for any other shape.
+fn given_input_leaf(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    let is_call = ["ref", "source"].iter().any(|kw| {
+        trimmed.get(..kw.len()).is_some_and(|prefix| {
+            prefix.eq_ignore_ascii_case(kw) && trimmed[kw.len()..].trim_start().starts_with('(')
+        })
+    });
+    if !is_call || !trimmed.ends_with(')') {
+        return None;
+    }
+    let close = trimmed.rfind('\'')?;
+    let open = trimmed[..close].rfind('\'')?;
+    let name = trimmed[open + 1..close].trim();
+    (!name.is_empty()).then(|| name.to_ascii_lowercase())
+}
+
+/// `true` when `leaf` (lowercased) is the leaf segment of a seed node's
+/// id. dbt lets a seed input go ungiven (the test reads the real seed
+/// file — verified against fusion `render_unit_test`, see module docs),
+/// so an unbound seed relation never proves an arm unfed.
+fn leaf_resolves_to_seed(manifest: &Manifest, leaf: &str) -> bool {
+    manifest.nodes().values().any(|node| {
+        node.resource_type() == "seed"
+            && node
+                .id()
+                .as_str()
+                .rsplit('.')
+                .next()
+                .is_some_and(|segment| segment.eq_ignore_ascii_case(leaf))
+    })
+}
+
+/// The external relations feeding one union arm: walk the arm source's
+/// upstream CTE closure over the graph's edges, union every node's
+/// `body_leaf_table_refs`, and drop refs that are themselves CTE names
+/// (internal plumbing, not model inputs). Pure reuse of the cute-dbt#40
+/// single-parse facts — no SQL is re-parsed. Engine refs are already
+/// lowercased.
+fn arm_external_refs(graph: &CteGraph, arm: usize) -> BTreeSet<String> {
+    let cte_names: BTreeSet<String> = graph
+        .nodes()
+        .iter()
+        .map(|node| node.name().to_ascii_lowercase())
+        .collect();
+    let mut closure = BTreeSet::from([arm]);
+    let mut frontier = vec![arm];
+    while let Some(node) = frontier.pop() {
+        for edge in graph.edges() {
+            if edge.to() == node && closure.insert(edge.from()) {
+                frontier.push(edge.from());
+            }
+        }
+    }
+    closure
+        .into_iter()
+        .filter_map(|index| graph.nodes().get(index))
+        .flat_map(|node| node.body_leaf_table_refs().iter())
+        .filter(|leaf| !cte_names.contains(*leaf))
+        .cloned()
+        .collect()
+}
+
+/// One unit test's contribution to one arm (refs = the arm's external
+/// closure): `Fed` when a bound given provably carries rows; `Unknown`
+/// when a bound given's count is unrecoverable OR an unbound ref is a
+/// seed (real seed data flows); `Unfed` when every path provably
+/// delivers zero rows.
+fn arm_coverage_for_test(
+    manifest: &Manifest,
+    unit_test: &UnitTest,
+    refs: &BTreeSet<String>,
+) -> ArmCoverage {
+    let mut unknown = false;
+    let mut any_bound = BTreeSet::new();
+    for given in unit_test.given() {
+        let Some(leaf) = given_input_leaf(given.input()) else {
+            continue;
+        };
+        if !refs.contains(&leaf) {
+            continue;
+        }
+        any_bound.insert(leaf);
+        match given_rows_presence(given) {
+            RowsPresence::NonEmpty => return ArmCoverage::Fed,
+            RowsPresence::Unknown => unknown = true,
+            RowsPresence::Empty => {}
+        }
+    }
+    let unbound_seed = refs
+        .iter()
+        .filter(|leaf| !any_bound.contains(*leaf))
+        .any(|leaf| leaf_resolves_to_seed(manifest, leaf));
+    if unknown || unbound_seed {
+        ArmCoverage::Unknown
+    } else {
+        ArmCoverage::Unfed
+    }
+}
+
+/// Render the `ref-list` half of an arm's evidence value.
+fn refs_display(refs: &BTreeSet<String>) -> String {
+    refs.iter()
+        .map(|leaf| format!("ref('{leaf}')"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A copy-pasteable given-row YAML sketch for an unfed arm (the catalog
+/// C3 recommendation payload): one `- input:` block per feeding
+/// relation, with a column sketch from the input model's declared
+/// `columns` when the manifest carries one.
+fn suggested_given_sketch(manifest: &Manifest, refs: &BTreeSet<String>) -> String {
+    let mut out = String::new();
+    for leaf in refs {
+        let columns = resolve_target_model(manifest, &NodeId::new(leaf))
+            .map(|node| node.columns().keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let row = if columns.is_empty() {
+            "{...}".to_owned()
+        } else {
+            let cells: Vec<String> = columns.iter().map(|c| format!("{c}: ...")).collect();
+            format!("{{{}}}", cells.join(", "))
+        };
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        let _ = write!(out, "- input: ref('{leaf}')\n  rows:\n    - {row}");
+    }
+    out
+}
+
+/// Detector for `union.arm-coverage` (cute-dbt#172, catalog class C3).
+///
+/// Trigger: a consumer node in the model's [`CteGraph`] with incoming
+/// union-typed edges (`UnionAll` / `UnionDistinct`) — one finding per
+/// consumer, discriminated as `union[<consumer>]`. The checked arms are
+/// exactly the union-edge sources (join-free references to earlier CTEs
+/// — the only arm shape the engine marks; everything else is the
+/// declared visibility exclusion).
+///
+/// Satisfaction (the cute-dbt#172 Discovery settlement): an arm is
+/// **exercised** when ≥1 given with ≥1 in-manifest row binds to any
+/// external relation in the arm's upstream closure. A given whose
+/// relation is shared by several arms exercises **all** of them — rows
+/// provably reach each arm's scan; per-arm filter survival is
+/// statically undecidable and deliberately out of scope (tier HIGH: a
+/// cue, never an assertion). UNCOVERED therefore requires a **provably
+/// unfed** arm; anything not statically attributable (unbindable
+/// closure, external-fixture / non-literal-sql givens, ungiven seed
+/// inputs) degrades to honest UNKNOWN.
+fn detect_union_arm_coverage(ctx: &CheckContext<'_>) -> Vec<Finding<HeuristicId>> {
+    if ctx.model.resource_type() != "model" {
+        return Vec::new();
+    }
+    let Some(graph) = ctx.cte_graph else {
+        return Vec::new();
+    };
+    let mut arms_by_consumer: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    for edge in graph.edges() {
+        if matches!(
+            edge.edge_type(),
+            EdgeType::UnionAll | EdgeType::UnionDistinct
+        ) {
+            arms_by_consumer
+                .entry(edge.to())
+                .or_default()
+                .insert(edge.from());
+        }
+    }
+    if arms_by_consumer.is_empty() {
+        return Vec::new();
+    }
+    let mut tests: Vec<(&String, &UnitTest)> = ctx
+        .manifest
+        .unit_tests()
+        .iter()
+        .filter(|(_, ut)| {
+            resolve_target_model(ctx.manifest, ut.model())
+                .is_some_and(|model| model.id() == ctx.model.id())
+        })
+        .collect();
+    tests.sort_by(|a, b| a.0.cmp(b.0));
+    arms_by_consumer
+        .into_iter()
+        .map(|(consumer, arms)| union_finding(ctx, graph, &tests, consumer, &arms))
+        .collect()
+}
+
+/// Build the per-consumer finding for [`detect_union_arm_coverage`].
+fn union_finding(
+    ctx: &CheckContext<'_>,
+    graph: &CteGraph,
+    tests: &[(&String, &UnitTest)],
+    consumer: usize,
+    arms: &BTreeSet<usize>,
+) -> Finding<HeuristicId> {
+    let node_name = |index: usize| {
+        graph
+            .nodes()
+            .get(index)
+            .map_or_else(String::new, |node| node.name().to_owned())
+    };
+    let consumer_name = node_name(consumer);
+    let arm_names: Vec<String> = arms.iter().map(|&arm| node_name(arm)).collect();
+    let mut evidence = vec![Evidence::new(
+        "union",
+        format!(
+            "{consumer_name} ({} arm{}: {})",
+            arms.len(),
+            if arms.len() == 1 { "" } else { "s" },
+            arm_names.join(", "),
+        ),
+    )];
+    let mut unfed: Vec<(String, BTreeSet<String>)> = Vec::new();
+    let mut unknown_evidence: Vec<Evidence> = Vec::new();
+    let mut covered_by: BTreeSet<String> = BTreeSet::new();
+    for &arm in arms {
+        let arm_name = node_name(arm);
+        let refs = arm_external_refs(graph, arm);
+        if refs.is_empty() {
+            unknown_evidence.push(Evidence::new(
+                "unattributable arm",
+                format!("{arm_name} — no resolvable upstream relation"),
+            ));
+            continue;
+        }
+        let mut fed_by: Vec<&str> = Vec::new();
+        let mut unknown_in_a_test = false;
+        for (id, unit_test) in tests {
+            match arm_coverage_for_test(ctx.manifest, unit_test, &refs) {
+                ArmCoverage::Fed => fed_by.push(id.as_str()),
+                ArmCoverage::Unknown => unknown_in_a_test = true,
+                ArmCoverage::Unfed => {}
+            }
+        }
+        if !fed_by.is_empty() {
+            covered_by.extend(fed_by.iter().map(|id| (*id).to_owned()));
+        } else if unknown_in_a_test {
+            unknown_evidence.push(Evidence::new(
+                "unattributable arm",
+                format!(
+                    "{arm_name} — fed only by givens whose rows are not statically countable (reads {})",
+                    refs_display(&refs),
+                ),
+            ));
+        } else {
+            unfed.push((arm_name, refs));
+        }
+    }
+    for (arm_name, refs) in &unfed {
+        evidence.push(Evidence::new(
+            "unexercised arm",
+            format!("{arm_name} — no given row reaches {}", refs_display(refs)),
+        ));
+        evidence.push(Evidence::new(
+            "suggested given",
+            suggested_given_sketch(ctx.manifest, refs),
+        ));
+    }
+    evidence.extend(unknown_evidence.iter().cloned());
+    let verdict = if !unfed.is_empty() {
+        Verdict::Uncovered
+    } else if !unknown_evidence.is_empty() {
+        Verdict::Unknown
+    } else {
+        Verdict::Covered {
+            by: covered_by.into_iter().collect(),
+        }
+    };
+    Finding::new(
+        HeuristicId::UnionArmCoverage,
+        ctx.model.id().clone(),
+        format!("union[{consumer_name}]"),
+        verdict,
+        evidence,
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -926,12 +1332,22 @@ mod tests {
         )
     }
 
-    /// Run the production pipeline on `model` within `manifest`.
+    /// Run the production pipeline on `model` within `manifest`
+    /// (no CTE graph — the manifest-fact checks' path).
     fn run(manifest: &Manifest, model_id: &str) -> Vec<Finding<HeuristicId>> {
+        run_with_graph(manifest, model_id, None)
+    }
+
+    /// Run the production pipeline on `model` with an optional graph.
+    fn run_with_graph(
+        manifest: &Manifest,
+        model_id: &str,
+        graph: Option<&CteGraph>,
+    ) -> Vec<Finding<HeuristicId>> {
         let model = manifest
             .node(&NodeId::new(model_id))
             .expect("model node exists");
-        model_findings(manifest, model)
+        model_findings(manifest, model, graph)
     }
 
     // ===== registry generation invariants ============================
@@ -1075,6 +1491,7 @@ mod tests {
         let ctx = CheckContext {
             manifest: &manifest,
             model,
+            cte_graph: None,
         };
         resolve_supersedes(evaluate_all::<PipelineTestId>(&ctx))
     }
@@ -1093,6 +1510,7 @@ mod tests {
         let ctx = CheckContext {
             manifest: &manifest,
             model,
+            cte_graph: None,
         };
         let findings = evaluate_all::<PipelineTestId>(&ctx);
         assert_eq!(
@@ -1193,6 +1611,7 @@ mod tests {
             let ctx = CheckContext {
                 manifest: &manifest,
                 model,
+                cte_graph: None,
             };
             let evaluated = evaluate_all::<PipelineTestId>(&ctx);
             let resolved = resolve_supersedes(evaluated.clone());
@@ -1649,7 +2068,7 @@ mod tests {
         let node = manifest
             .node(&node_id("snapshot.shop.snp_patients"))
             .expect("node exists");
-        assert!(model_findings(&manifest, node).is_empty());
+        assert!(model_findings(&manifest, node, None).is_empty());
     }
 
     #[test]
@@ -1670,6 +2089,607 @@ mod tests {
         ]);
         let finding = single_finding(run(&manifest, ORDERS));
         assert_eq!(finding.verdict, Verdict::Uncovered);
+    }
+
+    // ===== union.arm-coverage detector ===============================
+
+    use crate::domain::cte::{CteEdge, CteNode};
+    use crate::domain::unit_test::{UnitTest, UnitTestExpect, UnitTestGiven};
+
+    const PAYMENTS: &str = "model.shop.fct_payments";
+
+    /// A CTE node carrying engine-computed leaf refs (already lowercase,
+    /// the engine contract).
+    fn cte(name: &str, refs: &[&str]) -> CteNode {
+        CteNode::new(name, None, None, None)
+            .with_shape_facts(false, refs.iter().map(|r| (*r).to_owned()).collect())
+    }
+
+    /// The catalog C3 worked-example graph: `charges` + `refunds` import
+    /// CTEs union-ALLed by the terminal select.
+    fn charges_refunds_graph() -> CteGraph {
+        CteGraph::new(
+            vec![
+                cte("charges", &["stg_charges"]),
+                cte("refunds", &["stg_refunds"]),
+                cte("(final select)", &["charges", "refunds"]),
+            ],
+            vec![
+                CteEdge::new(0, 2, EdgeType::UnionAll),
+                CteEdge::new(1, 2, EdgeType::UnionAll),
+            ],
+        )
+    }
+
+    fn payments_model() -> Node {
+        // No unique_key — the grain check stays silent, so every
+        // finding asserted below is the union check's.
+        model_with_config(PAYMENTS, &[("materialized", Value::from("table"))])
+    }
+
+    fn given(input: &str, rows: Value) -> UnitTestGiven {
+        UnitTestGiven::new(input, rows, Some("dict".to_owned()), None)
+    }
+
+    fn unit_test_on_payments(givens: Vec<UnitTestGiven>) -> UnitTest {
+        UnitTest::new(
+            "test_fct_payments",
+            NodeId::new("fct_payments"),
+            givens,
+            UnitTestExpect::new(serde_json::json!([{ "payment_id": 1 }]), None, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn manifest_with_unit_tests(nodes: Vec<Node>, tests: Vec<(&str, UnitTest)>) -> Manifest {
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+            tests
+                .into_iter()
+                .map(|(id, t)| (id.to_owned(), t))
+                .collect(),
+            HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn union_without_a_graph_emits_no_finding() {
+        // No graph evidence is not evidence of absence — silent.
+        let manifest = manifest_of(vec![payments_model()]);
+        assert!(run_with_graph(&manifest, PAYMENTS, None).is_empty());
+    }
+
+    #[test]
+    fn union_graph_without_union_edges_is_silent() {
+        let graph = CteGraph::new(
+            vec![cte("a", &["stg_charges"]), cte("(final select)", &["a"])],
+            vec![CteEdge::new(0, 1, EdgeType::From)],
+        );
+        let manifest = manifest_of(vec![payments_model()]);
+        assert!(run_with_graph(&manifest, PAYMENTS, Some(&graph)).is_empty());
+    }
+
+    #[test]
+    fn union_with_zero_unit_tests_is_uncovered_listing_every_arm() {
+        let graph = charges_refunds_graph();
+        let manifest = manifest_of(vec![payments_model()]);
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert_eq!(finding.check, HeuristicId::UnionArmCoverage);
+        assert_eq!(finding.tier, Tier::High);
+        assert_eq!(finding.instrument, Instrument::UnitTest);
+        assert_eq!(finding.construct, "union[(final select)]");
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+        assert!(finding.recommendation.is_some());
+        let unexercised: Vec<&str> = finding
+            .evidence
+            .iter()
+            .filter(|e| e.label == "unexercised arm")
+            .map(|e| e.value.as_str())
+            .collect();
+        assert_eq!(unexercised.len(), 2, "both arms listed: {unexercised:?}");
+        assert!(unexercised[0].contains("charges"));
+        assert!(unexercised[1].contains("refunds"));
+    }
+
+    #[test]
+    fn union_with_every_arm_fed_is_covered_with_attribution() {
+        let graph = charges_refunds_graph();
+        let manifest = manifest_with_unit_tests(
+            vec![payments_model()],
+            vec![(
+                "unit_test.shop.fct_payments.test_fct_payments",
+                unit_test_on_payments(vec![
+                    given("ref('stg_charges')", serde_json::json!([{ "amount": 100 }])),
+                    given("ref('stg_refunds')", serde_json::json!([{ "amount": 40 }])),
+                ]),
+            )],
+        );
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert_eq!(
+            finding.verdict,
+            Verdict::Covered {
+                by: vec!["unit_test.shop.fct_payments.test_fct_payments".to_owned()],
+            },
+        );
+        assert!(finding.recommendation.is_none());
+    }
+
+    #[test]
+    fn union_with_an_empty_given_arm_is_uncovered_with_a_concrete_sketch() {
+        // The catalog C3 worked example: the refunds given is mocked
+        // EMPTY — the arm provably contributes zero rows to every test.
+        // The recommendation evidence carries a copy-pasteable given-row
+        // sketch with the input model's declared columns.
+        let graph = charges_refunds_graph();
+        let mut columns = BTreeMap::new();
+        columns.insert("payment_id".to_owned(), None);
+        columns.insert("amount".to_owned(), None);
+        let stg_refunds = Node::new(
+            NodeId::new("model.shop.stg_refunds"),
+            "model",
+            Checksum::new("sha256", "y"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(BTreeMap::new(), false),
+            None,
+            columns,
+        );
+        let manifest = manifest_with_unit_tests(
+            vec![payments_model(), stg_refunds],
+            vec![(
+                "unit_test.shop.fct_payments.test_fct_payments",
+                unit_test_on_payments(vec![
+                    given("ref('stg_charges')", serde_json::json!([{ "amount": 100 }])),
+                    given("ref('stg_refunds')", serde_json::json!([])),
+                ]),
+            )],
+        );
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+        let unexercised: Vec<&str> = finding
+            .evidence
+            .iter()
+            .filter(|e| e.label == "unexercised arm")
+            .map(|e| e.value.as_str())
+            .collect();
+        assert_eq!(
+            unexercised,
+            vec!["refunds — no given row reaches ref('stg_refunds')"]
+        );
+        let sketch = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "suggested given")
+            .expect("sketch evidence present");
+        assert_eq!(
+            sketch.value,
+            "- input: ref('stg_refunds')\n  rows:\n    - {amount: ..., payment_id: ...}",
+        );
+    }
+
+    #[test]
+    fn union_arm_fed_transitively_through_the_cte_chain_is_covered() {
+        // The arm CTE reads an intermediate CTE; the given binds to the
+        // EXTERNAL relation at the bottom of the closure.
+        let graph = CteGraph::new(
+            vec![
+                cte("base", &["stg_charges"]),
+                cte("charges", &["base"]),
+                cte("refunds", &["stg_refunds"]),
+                cte("(final select)", &["charges", "refunds"]),
+            ],
+            vec![
+                CteEdge::new(0, 1, EdgeType::From),
+                CteEdge::new(1, 3, EdgeType::UnionAll),
+                CteEdge::new(2, 3, EdgeType::UnionAll),
+            ],
+        );
+        let manifest = manifest_with_unit_tests(
+            vec![payments_model()],
+            vec![(
+                "unit_test.shop.fct_payments.test_fct_payments",
+                unit_test_on_payments(vec![
+                    given("ref('stg_charges')", serde_json::json!([{ "amount": 100 }])),
+                    given("ref('stg_refunds')", serde_json::json!([{ "amount": 40 }])),
+                ]),
+            )],
+        );
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert!(matches!(finding.verdict, Verdict::Covered { .. }));
+    }
+
+    #[test]
+    fn union_shared_ref_given_exercises_every_arm_it_reaches() {
+        // THE cute-dbt#172 Discovery settlement, encoded: two arms read
+        // the SAME external relation (filter-split arms). A non-empty
+        // given for it provably reaches BOTH arms' scans, so both count
+        // as exercised at the input level — per-arm filter survival is
+        // out of scope (no predicate evaluation; tier HIGH, cue not
+        // assertion). Conservative direction: never a false UNCOVERED.
+        let graph = CteGraph::new(
+            vec![
+                cte("completed", &["stg_payments"]),
+                cte("other", &["stg_payments"]),
+                cte("(final select)", &["completed", "other"]),
+            ],
+            vec![
+                CteEdge::new(0, 2, EdgeType::UnionAll),
+                CteEdge::new(1, 2, EdgeType::UnionAll),
+            ],
+        );
+        let manifest = manifest_with_unit_tests(
+            vec![payments_model()],
+            vec![(
+                "unit_test.shop.fct_payments.test_fct_payments",
+                unit_test_on_payments(vec![given(
+                    "ref('stg_payments')",
+                    serde_json::json!([{ "status": "completed" }]),
+                )]),
+            )],
+        );
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert!(
+            matches!(finding.verdict, Verdict::Covered { .. }),
+            "shared-ref arms are both input-fed, never flagged: {:?}",
+            finding.verdict,
+        );
+    }
+
+    #[test]
+    fn union_constant_arm_is_unknown_never_uncovered() {
+        // Paired negative test for the declared exclusion: an arm with
+        // no resolvable upstream relation (sentinel/constant SELECT)
+        // cannot be bound to any given — honest UNKNOWN, with no
+        // recommendation, never a nagged gap.
+        let graph = CteGraph::new(
+            vec![
+                cte("unknown_member", &[]),
+                cte("sequenced", &["stg_payers"]),
+                cte("(final select)", &["unknown_member", "sequenced"]),
+            ],
+            vec![
+                CteEdge::new(0, 2, EdgeType::UnionAll),
+                CteEdge::new(1, 2, EdgeType::UnionAll),
+            ],
+        );
+        let manifest = manifest_with_unit_tests(
+            vec![payments_model()],
+            vec![(
+                "unit_test.shop.fct_payments.test_fct_payments",
+                unit_test_on_payments(vec![given(
+                    "ref('stg_payers')",
+                    serde_json::json!([{ "payer_id": 1 }]),
+                )]),
+            )],
+        );
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Unknown);
+        assert!(finding.recommendation.is_none());
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .any(|e| e.label == "unattributable arm" && e.value.contains("unknown_member")),
+        );
+    }
+
+    #[test]
+    fn union_external_fixture_given_is_unknown_never_uncovered() {
+        // Paired negative test for the declared exclusion: an external
+        // `fixture:` given's rows live on disk (cute-dbt#126), so its
+        // row count is statically unknowable — the arm degrades to
+        // UNKNOWN, never UNCOVERED.
+        let graph = charges_refunds_graph();
+        let manifest = manifest_with_unit_tests(
+            vec![payments_model()],
+            vec![(
+                "unit_test.shop.fct_payments.test_fct_payments",
+                unit_test_on_payments(vec![
+                    given("ref('stg_charges')", serde_json::json!([{ "amount": 100 }])),
+                    UnitTestGiven::new(
+                        "ref('stg_refunds')",
+                        Value::Null,
+                        Some("csv".to_owned()),
+                        Some("refunds_fixture".to_owned()),
+                    ),
+                ]),
+            )],
+        );
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Unknown);
+        assert!(finding.recommendation.is_none());
+    }
+
+    #[test]
+    fn union_unbound_seed_input_is_unknown_when_tests_exist() {
+        // Paired negative test for the declared exclusion: dbt lets a
+        // seed input go ungiven (the test reads the real seed file —
+        // fusion `render_unit_test` mocks only `given` entries), so an
+        // unbound seed relation never proves the arm unfed.
+        let graph = CteGraph::new(
+            vec![
+                cte("charges", &["stg_charges"]),
+                cte("manual_adjustments", &["raw_adjustments"]),
+                cte("(final select)", &["charges", "manual_adjustments"]),
+            ],
+            vec![
+                CteEdge::new(0, 2, EdgeType::UnionAll),
+                CteEdge::new(1, 2, EdgeType::UnionAll),
+            ],
+        );
+        let seed = Node::new(
+            NodeId::new("seed.shop.raw_adjustments"),
+            "seed",
+            Checksum::new("sha256", "z"),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(BTreeMap::new(), false),
+            None,
+            BTreeMap::new(),
+        );
+        let manifest = manifest_with_unit_tests(
+            vec![payments_model(), seed],
+            vec![(
+                "unit_test.shop.fct_payments.test_fct_payments",
+                unit_test_on_payments(vec![given(
+                    "ref('stg_charges')",
+                    serde_json::json!([{ "amount": 100 }]),
+                )]),
+            )],
+        );
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert_eq!(
+            finding.verdict,
+            Verdict::Unknown,
+            "ungiven seed input must not nag a gap",
+        );
+    }
+
+    #[test]
+    fn union_this_given_never_feeds_an_arm() {
+        // Paired negative test for the declared exclusion: a non-empty
+        // `this` given (incremental prior state) feeds the model itself,
+        // never a union arm — the unbound arm stays provably unfed.
+        let graph = charges_refunds_graph();
+        let manifest = manifest_with_unit_tests(
+            vec![payments_model()],
+            vec![(
+                "unit_test.shop.fct_payments.test_fct_payments",
+                unit_test_on_payments(vec![
+                    given("ref('stg_charges')", serde_json::json!([{ "amount": 100 }])),
+                    given("this", serde_json::json!([{ "payment_id": 1 }])),
+                ]),
+            )],
+        );
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .any(|e| e.label == "unexercised arm" && e.value.contains("refunds")),
+        );
+    }
+
+    #[test]
+    fn union_distinct_arms_are_checked_too() {
+        let graph = CteGraph::new(
+            vec![
+                cte("charges", &["stg_charges"]),
+                cte("refunds", &["stg_refunds"]),
+                cte("(final select)", &["charges", "refunds"]),
+            ],
+            vec![
+                CteEdge::new(0, 2, EdgeType::UnionDistinct),
+                CteEdge::new(1, 2, EdgeType::UnionDistinct),
+            ],
+        );
+        let manifest = manifest_of(vec![payments_model()]);
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+    }
+
+    #[test]
+    fn union_sql_format_given_counts_when_literal_only() {
+        // A literal-row `format: sql` given produces a statically known
+        // row count (cute-dbt#137 parse) — it feeds the arm. A
+        // non-literal SELECT does not parse to rows — honest UNKNOWN.
+        let graph = charges_refunds_graph();
+        let literal = UnitTestGiven::new(
+            "ref('stg_refunds')",
+            Value::from("select 1 as refund_id"),
+            Some("sql".to_owned()),
+            None,
+        );
+        let opaque = UnitTestGiven::new(
+            "ref('stg_refunds')",
+            Value::from("select * from somewhere"),
+            Some("sql".to_owned()),
+            None,
+        );
+        for (g, expected) in [
+            (literal, None::<Verdict>), // Covered — asserted via matches! below
+            (opaque, Some(Verdict::Unknown)),
+        ] {
+            let manifest = manifest_with_unit_tests(
+                vec![payments_model()],
+                vec![(
+                    "unit_test.shop.fct_payments.test_fct_payments",
+                    unit_test_on_payments(vec![
+                        given("ref('stg_charges')", serde_json::json!([{ "amount": 100 }])),
+                        g,
+                    ]),
+                )],
+            );
+            let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+            match expected {
+                Some(v) => assert_eq!(finding.verdict, v),
+                None => assert!(matches!(finding.verdict, Verdict::Covered { .. })),
+            }
+        }
+    }
+
+    #[test]
+    fn union_header_only_csv_given_is_provably_empty() {
+        // A fusion csv-string given with a header and no data rows
+        // carries zero rows — the arm is provably unfed.
+        let graph = charges_refunds_graph();
+        let manifest = manifest_with_unit_tests(
+            vec![payments_model()],
+            vec![(
+                "unit_test.shop.fct_payments.test_fct_payments",
+                unit_test_on_payments(vec![
+                    given("ref('stg_charges')", serde_json::json!([{ "amount": 100 }])),
+                    UnitTestGiven::new(
+                        "ref('stg_refunds')",
+                        Value::from("refund_id,amount\n"),
+                        Some("csv".to_owned()),
+                        None,
+                    ),
+                ]),
+            )],
+        );
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+    }
+
+    #[test]
+    fn union_given_binding_is_ascii_case_insensitive() {
+        let graph = charges_refunds_graph();
+        let manifest = manifest_with_unit_tests(
+            vec![payments_model()],
+            vec![(
+                "unit_test.shop.fct_payments.test_fct_payments",
+                unit_test_on_payments(vec![
+                    given("REF('STG_CHARGES')", serde_json::json!([{ "amount": 100 }])),
+                    given("Ref('Stg_Refunds')", serde_json::json!([{ "amount": 40 }])),
+                ]),
+            )],
+        );
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert!(matches!(finding.verdict, Verdict::Covered { .. }));
+    }
+
+    #[test]
+    fn union_source_given_binds_by_last_quoted_argument() {
+        let graph = CteGraph::new(
+            vec![
+                cte("charges", &["stg_charges"]),
+                cte("raw_refunds", &["refunds"]),
+                cte("(final select)", &["charges", "raw_refunds"]),
+            ],
+            vec![
+                CteEdge::new(0, 2, EdgeType::UnionAll),
+                CteEdge::new(1, 2, EdgeType::UnionAll),
+            ],
+        );
+        let manifest = manifest_with_unit_tests(
+            vec![payments_model()],
+            vec![(
+                "unit_test.shop.fct_payments.test_fct_payments",
+                unit_test_on_payments(vec![
+                    given("ref('stg_charges')", serde_json::json!([{ "amount": 100 }])),
+                    given(
+                        "source('billing', 'refunds')",
+                        serde_json::json!([{ "amount": 40 }]),
+                    ),
+                ]),
+            )],
+        );
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert!(matches!(finding.verdict, Verdict::Covered { .. }));
+    }
+
+    #[test]
+    fn union_multiple_consumers_emit_one_finding_each() {
+        // Two distinct union sites in one model (the dogfood
+        // order_metrics shape: a UNION ALL consumer and a UNION
+        // DISTINCT consumer) — one finding per consumer, discriminated
+        // by construct, in declaration order.
+        let graph = CteGraph::new(
+            vec![
+                cte("charges", &["stg_charges"]),
+                cte("refunds", &["stg_refunds"]),
+                cte("all_rows", &["charges", "refunds"]),
+                cte("status_dim", &["charges", "refunds"]),
+                cte("(final select)", &["all_rows", "status_dim"]),
+            ],
+            vec![
+                CteEdge::new(0, 2, EdgeType::UnionAll),
+                CteEdge::new(1, 2, EdgeType::UnionAll),
+                CteEdge::new(0, 3, EdgeType::UnionDistinct),
+                CteEdge::new(1, 3, EdgeType::UnionDistinct),
+                CteEdge::new(2, 4, EdgeType::From),
+            ],
+        );
+        let manifest = manifest_of(vec![payments_model()]);
+        let findings = run_with_graph(&manifest, PAYMENTS, Some(&graph));
+        assert_eq!(findings.len(), 2, "one finding per union consumer");
+        assert_eq!(findings[0].construct, "union[all_rows]");
+        assert_eq!(findings[1].construct, "union[status_dim]");
+    }
+
+    #[test]
+    fn union_check_skips_non_model_nodes() {
+        let graph = charges_refunds_graph();
+        let snapshot = Node::new(
+            NodeId::new("snapshot.shop.snp_payments"),
+            "snapshot",
+            Checksum::new("sha256", "x"),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(BTreeMap::new(), false),
+            None,
+            BTreeMap::new(),
+        );
+        let manifest = manifest_of(vec![snapshot]);
+        let node = manifest
+            .node(&node_id("snapshot.shop.snp_payments"))
+            .expect("node exists");
+        assert!(model_findings(&manifest, node, Some(&graph)).is_empty());
+    }
+
+    #[test]
+    fn union_attribution_lists_every_feeding_test_sorted() {
+        // Two tests each feed one arm — coverage is per-arm any-test,
+        // and BOTH tests are attributed, sorted by id.
+        let graph = charges_refunds_graph();
+        let charges_only = unit_test_on_payments(vec![given(
+            "ref('stg_charges')",
+            serde_json::json!([{ "amount": 100 }]),
+        )]);
+        let refunds_only = unit_test_on_payments(vec![given(
+            "ref('stg_refunds')",
+            serde_json::json!([{ "amount": 40 }]),
+        )]);
+        let manifest = manifest_with_unit_tests(
+            vec![payments_model()],
+            vec![
+                ("unit_test.shop.fct_payments.b_refunds", refunds_only),
+                ("unit_test.shop.fct_payments.a_charges", charges_only),
+            ],
+        );
+        let finding = single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph)));
+        assert_eq!(
+            finding.verdict,
+            Verdict::Covered {
+                by: vec![
+                    "unit_test.shop.fct_payments.a_charges".to_owned(),
+                    "unit_test.shop.fct_payments.b_refunds".to_owned(),
+                ],
+            },
+        );
     }
 
     // ===== ledger generation =========================================

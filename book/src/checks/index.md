@@ -7,3 +7,4 @@ The coverage-intelligence check registry. Each check pairs a construct trigger w
 | Check | Name | Tier | Instrument |
 |---|---|---|---|
 | [`grain.unique-key-unbacked`](./grain.unique-key-unbacked.md) | Unique key without a uniqueness test | `total` | `data-test` |
+| [`union.arm-coverage`](./union.arm-coverage.md) | Unexercised UNION arm | `high` | `unit-test` |

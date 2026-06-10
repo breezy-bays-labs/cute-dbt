@@ -1131,8 +1131,10 @@ fn build_model_payload(
         is_incremental: model.config().materialized() == Some("incremental"),
         // cute-dbt#169 — the check engine runs here, during payload
         // assembly over models_in_scope (the parse_ctes precedent: the
-        // run loop's per-model work happens one stage downstream).
-        findings: model_findings(current, model),
+        // run loop's per-model work happens one stage downstream). The
+        // already-parsed graph rides along so graph-fact checks
+        // (cute-dbt#172) reuse the single parse pass.
+        findings: model_findings(current, model, Some(&graph)),
     }
 }
 

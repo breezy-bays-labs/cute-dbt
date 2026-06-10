@@ -13,6 +13,7 @@
 - [Features](./features/index.md)
 - [Checks](./checks/index.md)
   - [grain.unique-key-unbacked](./checks/grain.unique-key-unbacked.md)
+  - [union.arm-coverage](./checks/union.arm-coverage.md)
 - [Examples](./examples.md)
 - [Release discipline](./release-discipline.md)
 
