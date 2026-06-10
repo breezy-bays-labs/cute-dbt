@@ -67,8 +67,8 @@ use crate::adapters::asset_embed::{
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
     BANNER_EMPTY_SCOPE, BlockDiff, CteGraph, EdgeType, FixtureTable, InScopeSet, Manifest,
-    ModelInScopeSet, Node, NodeId, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestYamlBlock,
-    resolve_target_model, table_from_manifest_rows,
+    ModelInScopeSet, Node, NodeId, TestMetadata, UnitTest, UnitTestDataDiff, UnitTestGiven,
+    UnitTestYamlBlock, resolve_target_model, table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -280,6 +280,137 @@ pub struct DagPayload {
     pub edges: Vec<EdgePayload>,
 }
 
+/// Column-header metadata for one fixture-table column (cute-dbt#165):
+/// the model's authored column description plus the summarized
+/// column-level data tests. Rendered by the template as the th tooltip
+/// bubble — the payload is the complete renderable POD (Rust computes,
+/// JS only renders).
+///
+/// Emitted only for columns that actually appear in the carrying
+/// given/expect [`FixtureTable`] AND have at least a description or one
+/// test (no empty bubbles); a column with neither simply has no map
+/// entry, which the template reads as "no affordance".
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ColumnMetaPayload {
+    /// Authored column description from the owning model node's
+    /// `columns` map. Omitted from JSON when the column has tests but no
+    /// description.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Summarized column-level data tests, one display string per test
+    /// (built by [`summarize_column_test`]): the test name
+    /// (package-qualified when namespaced, e.g. `dbt_utils.*`), plus key
+    /// args for `accepted_values` / `relationships`. Deterministically
+    /// ordered (summary text, then test node id). Omitted from JSON when
+    /// the column is described but untested.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tests: Vec<String>,
+}
+
+/// One-line display summary of a column-scoped generic test
+/// (cute-dbt#165): the package-qualified test name, plus the key args
+/// dbt's two arg-carrying built-ins are read by (`accepted_values` →
+/// `values`; `relationships` → `to` / `field`). Other tests (incl.
+/// package tests like `dbt_expectations.*`) summarize as the bare
+/// qualified name — their arg vocabularies are open-ended and v1 does
+/// not interpret them.
+#[must_use]
+pub fn summarize_column_test(tm: &TestMetadata) -> String {
+    let qualified = match tm.namespace() {
+        Some(ns) => format!("{ns}.{}", tm.name()),
+        None => tm.name().to_owned(),
+    };
+    match tm.name() {
+        "accepted_values" => match tm.kwargs().get("values").and_then(Value::as_array) {
+            Some(values) if !values.is_empty() => {
+                let rendered: Vec<String> = values.iter().map(scalar_token).collect();
+                format!("{qualified} (values: {})", rendered.join(", "))
+            }
+            _ => qualified,
+        },
+        "relationships" => {
+            let to = tm.kwargs().get("to").and_then(Value::as_str);
+            let field = tm.kwargs().get("field").and_then(Value::as_str);
+            match (to, field) {
+                (Some(to), Some(field)) => format!("{qualified} (to: {to}, field: {field})"),
+                (Some(to), None) => format!("{qualified} (to: {to})"),
+                _ => qualified,
+            }
+        }
+        _ => qualified,
+    }
+}
+
+/// Display token for one `accepted_values` entry: a JSON string renders
+/// bare (no quotes — the authored value, matching how dbt docs show the
+/// list), any other scalar via its JSON rendering.
+fn scalar_token(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Build the full column-metadata map for `model` (cute-dbt#165):
+/// authored descriptions from the model node's `columns` map, plus the
+/// **column-scoped** generic tests attached to it (manifest `test` nodes
+/// with `attached_node == model` AND `column_name` set — dbt's
+/// column-`tests:` shape). Model-level tests that merely take a column
+/// argument carry `column_name: null` and are deliberately out of v1
+/// scope. Only columns with a description and/or ≥1 test appear.
+///
+/// Deterministic: descriptions iterate a `BTreeMap`; tests are sorted by
+/// (column, summary, test node id) before insertion — `Manifest::nodes`
+/// is a `HashMap` with no inherent order.
+#[must_use]
+pub fn column_meta_for_model(
+    current: &Manifest,
+    model: &Node,
+) -> BTreeMap<String, ColumnMetaPayload> {
+    let mut meta: BTreeMap<String, ColumnMetaPayload> = BTreeMap::new();
+    for (column, description) in model.column_descriptions() {
+        meta.entry(column.clone()).or_default().description = Some(description.clone());
+    }
+    let mut tests: Vec<(&str, String, &str)> = current
+        .nodes()
+        .iter()
+        .filter_map(|(id, node)| {
+            if node.resource_type() != "test" || node.attached_node() != Some(model.id()) {
+                return None;
+            }
+            let column = node.column_name()?;
+            let tm = node.test_metadata()?;
+            Some((column, summarize_column_test(tm), id.as_str()))
+        })
+        .collect();
+    tests.sort();
+    for (column, summary, _) in tests {
+        meta.entry(column.to_owned())
+            .or_default()
+            .tests
+            .push(summary);
+    }
+    meta
+}
+
+/// Filter a model's full column-metadata map down to the columns that
+/// actually appear in one rendered fixture table. `None` table (sql /
+/// opaque / unloaded-external fixture — no grid, no headers) ⇒ empty map
+/// (the `skip_serializing_if` then omits the key entirely).
+fn column_meta_for_table(
+    meta: &BTreeMap<String, ColumnMetaPayload>,
+    table: Option<&FixtureTable>,
+) -> BTreeMap<String, ColumnMetaPayload> {
+    let Some(table) = table else {
+        return BTreeMap::new();
+    };
+    table
+        .columns
+        .iter()
+        .filter_map(|column| meta.get(column).map(|m| (column.clone(), m.clone())))
+        .collect()
+}
+
 /// One `given[i]` entry from a unit test, lifted into payload shape.
 ///
 /// `bound_to_node` ties the given to an import-CTE node id when a match
@@ -336,6 +467,16 @@ pub struct GivenPayload {
     /// the key.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub is_this: bool,
+    /// Column-header metadata for this given's table (cute-dbt#165),
+    /// keyed by column name — resolved against the model that OWNS the
+    /// given's columns: the `ref(...)` input model (`this` resolves to
+    /// the target model itself; `source(...)` inputs resolve to nothing —
+    /// manifest `sources` are not ingested in v0.x). Only columns present
+    /// in [`table`](Self::table) with a description and/or ≥1 column test
+    /// appear; empty ⇒ the key is omitted and the template renders no
+    /// affordance.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub column_meta: BTreeMap<String, ColumnMetaPayload>,
 }
 
 /// One unit test in the per-model payload.
@@ -445,6 +586,12 @@ pub struct ExpectedPayload {
     /// [`GivenPayload::fixture`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fixture: Option<String>,
+    /// Column-header metadata for the expect table (cute-dbt#165), keyed
+    /// by column name — resolved against the TARGET model (the expect
+    /// table's columns are the model's output columns). Same emission
+    /// contract as [`GivenPayload::column_meta`].
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub column_meta: BTreeMap<String, ColumnMetaPayload>,
 }
 
 /// The full JSON blob the askama template emits into the
@@ -647,6 +794,7 @@ pub fn build_payload_with_externals(
         };
         let tests = model_tests.get(model_id).unwrap_or(&empty).as_slice();
         models.push(build_model_payload(
+            current,
             model,
             tests,
             changed,
@@ -779,8 +927,12 @@ pub fn render_report_with_externals(
     fs::write(out, html)
 }
 
-/// Build a [`ModelPayload`] for one in-scope model.
+/// Build a [`ModelPayload`] for one in-scope model. `current` is the
+/// whole manifest — needed to resolve each given's input model and the
+/// column-scoped tests for the cute-dbt#165 column-header metadata.
+#[allow(clippy::too_many_arguments)] // mirrors render_report's rationale
 fn build_model_payload(
+    current: &Manifest,
     model: &Node,
     tests: &[(&str, &UnitTest)],
     changed: &InScopeSet,
@@ -804,6 +956,9 @@ fn build_model_payload(
     // SQL diff is keyed by the model's FULL node id (the
     // `reconstruct_model_sql_diffs` key), not the bare name.
     let sql_diff = sql_diffs.get(model.id().as_str()).cloned();
+    // cute-dbt#165 — the target model's full column-metadata map, built
+    // once and shared by every test's expect table (and `this` givens).
+    let target_column_meta = column_meta_for_model(current, model);
     let test_payloads = tests
         .iter()
         .map(|(id, ut)| {
@@ -816,6 +971,8 @@ fn build_model_payload(
                 yaml_diffs.get(*id),
                 data_diffs.get(*id),
                 external_fixtures.get(*id),
+                current,
+                &target_column_meta,
             )
         })
         .collect();
@@ -972,7 +1129,11 @@ fn resolve_fixture_payload(
 /// given. `changed` is the set of updated test ids — `id`'s membership
 /// sets [`TestPayload::changed`] (cute-dbt#91). `external` carries any
 /// external fixture files read for this test (cute-dbt#126), inlined into
-/// the given/expect payloads.
+/// the given/expect payloads. `current` + `target_column_meta` feed the
+/// cute-dbt#165 column-header metadata: the expect table (and a `this`
+/// given) read the target model's map; a `ref(...)` given resolves its
+/// own input model's map.
+#[allow(clippy::too_many_arguments)] // mirrors render_report's rationale
 fn build_test_payload(
     id: &str,
     unit_test: &UnitTest,
@@ -982,6 +1143,8 @@ fn build_test_payload(
     yaml_diff: Option<&BlockDiff>,
     data_diff: Option<&UnitTestDataDiff>,
     external: Option<&ExternalFixtures>,
+    current: &Manifest,
+    target_column_meta: &BTreeMap<String, ColumnMetaPayload>,
 ) -> TestPayload {
     let given = unit_test
         .given()
@@ -993,6 +1156,23 @@ fn build_test_payload(
             let loaded = external.and_then(|e| e.given.get(&ordinal));
             let (rows, table, format) =
                 resolve_fixture_payload(g.rows(), g.format(), g.fixture(), loaded);
+            let is_this = g.input() == "this";
+            // cute-dbt#165 — the model that OWNS this given's columns: the
+            // target model for `this` (prior model state), else the
+            // resolved `ref(...)` input model. `source(...)` inputs and
+            // unresolvable refs contribute nothing (empty map → key
+            // omitted).
+            let column_meta = if is_this {
+                column_meta_for_table(target_column_meta, table.as_ref())
+            } else {
+                parse_ref_name(g.input())
+                    .and_then(|ref_name| resolve_target_model(current, &NodeId::new(ref_name)))
+                    .map(|input_model| {
+                        let meta = column_meta_for_model(current, input_model);
+                        column_meta_for_table(&meta, table.as_ref())
+                    })
+                    .unwrap_or_default()
+            };
             GivenPayload {
                 input: g.input().to_owned(),
                 bound_to_node,
@@ -1000,7 +1180,8 @@ fn build_test_payload(
                 rows,
                 format,
                 fixture: g.fixture().map(str::to_owned),
-                is_this: g.input() == "this",
+                is_this,
+                column_meta,
             }
         })
         .collect();
@@ -1010,6 +1191,7 @@ fn build_test_payload(
         unit_test.expect().fixture(),
         external.and_then(|e| e.expect.as_ref()),
     );
+    let expect_column_meta = column_meta_for_table(target_column_meta, expect_table.as_ref());
     TestPayload {
         id: id.to_owned(),
         name: unit_test.name().to_owned(),
@@ -1029,6 +1211,7 @@ fn build_test_payload(
             rows: expect_rows,
             format: expect_format,
             fixture: unit_test.expect().fixture().map(str::to_owned),
+            column_meta: expect_column_meta,
         },
     }
 }
@@ -3220,6 +3403,8 @@ mod tests {
             None,
             None,
             None,
+            &manifest_for(vec![], vec![]),
+            &BTreeMap::new(),
         );
         assert!(payload.data_diff.is_none());
         let json = serde_json::to_string(&payload).expect("payload serializes");
@@ -3262,12 +3447,348 @@ mod tests {
             None,
             Some(&data_diff),
             None,
+            &manifest_for(vec![], vec![]),
+            &BTreeMap::new(),
         );
         assert_eq!(payload.data_diff.as_ref(), Some(&data_diff));
         let json = serde_json::to_string(&payload).expect("payload serializes");
         assert!(
             json.contains("data_diff"),
             "present data_diff is on the wire"
+        );
+    }
+
+    // ===== cute-dbt#165 — column-header metadata =====
+
+    /// A column-scoped generic-test node attached to `model_id`.
+    fn column_test_node(id: &str, model_id: &str, column: &str, tm: TestMetadata) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "test",
+            checksum("t"),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_test_attachment(
+            Some(column.to_owned()),
+            Some(NodeId::new(model_id)),
+            Some(tm),
+        )
+    }
+
+    #[test]
+    fn summarize_column_test_renders_names_and_key_args() {
+        // Built-in, bare name.
+        assert_eq!(
+            summarize_column_test(&TestMetadata::new("unique", None, Value::Null)),
+            "unique"
+        );
+        // Package-qualified.
+        assert_eq!(
+            summarize_column_test(&TestMetadata::new(
+                "expect_column_values_to_be_between",
+                Some("dbt_expectations".to_owned()),
+                json!({ "min_value": 0 }),
+            )),
+            "dbt_expectations.expect_column_values_to_be_between"
+        );
+        // accepted_values → the authored values list.
+        assert_eq!(
+            summarize_column_test(&TestMetadata::new(
+                "accepted_values",
+                None,
+                json!({ "values": ["placed", "shipped", 3] }),
+            )),
+            "accepted_values (values: placed, shipped, 3)"
+        );
+        // accepted_values with no / empty values degrades to the bare name.
+        assert_eq!(
+            summarize_column_test(&TestMetadata::new("accepted_values", None, Value::Null)),
+            "accepted_values"
+        );
+        assert_eq!(
+            summarize_column_test(&TestMetadata::new(
+                "accepted_values",
+                None,
+                json!({ "values": [] })
+            )),
+            "accepted_values"
+        );
+        // relationships → to + field.
+        assert_eq!(
+            summarize_column_test(&TestMetadata::new(
+                "relationships",
+                None,
+                json!({ "to": "ref('customers')", "field": "customer_id" }),
+            )),
+            "relationships (to: ref('customers'), field: customer_id)"
+        );
+        // relationships with a missing field still names the target.
+        assert_eq!(
+            summarize_column_test(&TestMetadata::new(
+                "relationships",
+                None,
+                json!({ "to": "ref('customers')" }),
+            )),
+            "relationships (to: ref('customers'))"
+        );
+    }
+
+    #[test]
+    fn column_meta_for_model_merges_descriptions_and_column_scoped_tests() {
+        let mut descriptions = BTreeMap::new();
+        descriptions.insert("id".to_owned(), "Primary key".to_owned());
+        descriptions.insert("note".to_owned(), "Free text".to_owned());
+        let model = model_node("model.shop.dim_x", "x", Some("select 1"))
+            .with_column_descriptions(descriptions);
+        let manifest = manifest_for(
+            vec![
+                model.clone(),
+                column_test_node(
+                    "test.shop.unique_dim_x_id",
+                    "model.shop.dim_x",
+                    "id",
+                    TestMetadata::new("unique", None, Value::Null),
+                ),
+                column_test_node(
+                    "test.shop.not_null_dim_x_id",
+                    "model.shop.dim_x",
+                    "id",
+                    TestMetadata::new("not_null", None, Value::Null),
+                ),
+                // tested-but-undescribed column → tests-only entry
+                column_test_node(
+                    "test.shop.not_null_dim_x_status",
+                    "model.shop.dim_x",
+                    "status",
+                    TestMetadata::new("not_null", None, Value::Null),
+                ),
+                // attached to ANOTHER model → excluded
+                column_test_node(
+                    "test.shop.unique_other_id",
+                    "model.shop.other",
+                    "id",
+                    TestMetadata::new("unique", None, Value::Null),
+                ),
+                // model-level test (no column_name) → excluded (v1 scope)
+                Node::new(
+                    NodeId::new("test.shop.model_level"),
+                    "test",
+                    checksum("t"),
+                    None,
+                    None,
+                    DependsOn::default(),
+                    None,
+                    NodeConfig::default(),
+                    None,
+                    BTreeMap::new(),
+                )
+                .with_test_attachment(
+                    None,
+                    Some(NodeId::new("model.shop.dim_x")),
+                    Some(TestMetadata::new("custom_model_check", None, Value::Null)),
+                ),
+                // singular test (no test_metadata) → excluded
+                Node::new(
+                    NodeId::new("test.shop.singular"),
+                    "test",
+                    checksum("t"),
+                    None,
+                    None,
+                    DependsOn::default(),
+                    None,
+                    NodeConfig::default(),
+                    None,
+                    BTreeMap::new(),
+                )
+                .with_test_attachment(
+                    Some("id".to_owned()),
+                    Some(NodeId::new("model.shop.dim_x")),
+                    None,
+                ),
+            ],
+            vec![],
+        );
+        let model_ref = manifest.node(&NodeId::new("model.shop.dim_x")).unwrap();
+        let meta = column_meta_for_model(&manifest, model_ref);
+
+        let id_meta = meta.get("id").expect("id has metadata");
+        assert_eq!(id_meta.description.as_deref(), Some("Primary key"));
+        // Sorted by summary text → deterministic regardless of HashMap order.
+        assert_eq!(id_meta.tests, vec!["not_null", "unique"]);
+
+        let note_meta = meta.get("note").expect("described-only column present");
+        assert_eq!(note_meta.description.as_deref(), Some("Free text"));
+        assert!(note_meta.tests.is_empty());
+
+        let status_meta = meta.get("status").expect("tested-only column present");
+        assert!(status_meta.description.is_none());
+        assert_eq!(status_meta.tests, vec!["not_null"]);
+
+        assert_eq!(meta.len(), 3, "no entries beyond id/note/status: {meta:?}");
+    }
+
+    #[test]
+    fn build_test_payload_attaches_column_meta_per_table_owner() {
+        // Target model dim_x (expect cols id/status) + input model stg_src
+        // (given col src_id). The expect map must come from dim_x, the
+        // given map from stg_src, each filtered to its own table's columns.
+        let mut target_desc = BTreeMap::new();
+        target_desc.insert("id".to_owned(), "Primary key".to_owned());
+        target_desc.insert("not_in_fixture".to_owned(), "never rendered".to_owned());
+        let target = model_node("model.shop.dim_x", "x", Some("select 1"))
+            .with_column_descriptions(target_desc);
+        let mut src_desc = BTreeMap::new();
+        src_desc.insert("src_id".to_owned(), "Source key".to_owned());
+        let src = model_node("model.shop.stg_src", "s", Some("select 1"))
+            .with_column_descriptions(src_desc);
+        let manifest = manifest_for(
+            vec![
+                target.clone(),
+                src,
+                column_test_node(
+                    "test.shop.unique_dim_x_id",
+                    "model.shop.dim_x",
+                    "id",
+                    TestMetadata::new("unique", None, Value::Null),
+                ),
+            ],
+            vec![],
+        );
+        let ut = UnitTest::new(
+            "t",
+            NodeId::new("dim_x"),
+            vec![UnitTestGiven::new(
+                "ref('stg_src')",
+                json!([{ "src_id": 1, "unknown_col": 2 }]),
+                Some("dict".to_owned()),
+                None,
+            )],
+            UnitTestExpect::new(
+                json!([{ "id": 1, "status": "ok" }]),
+                Some("dict".to_owned()),
+                None,
+            ),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let target_meta = column_meta_for_model(&manifest, &target);
+        let payload = build_test_payload(
+            "unit_test.shop.t",
+            &ut,
+            &CteGraph::default(),
+            &InScopeSet::new(),
+            None,
+            None,
+            None,
+            None,
+            &manifest,
+            &target_meta,
+        );
+
+        // Expect side: dim_x meta filtered to the expect table's columns —
+        // `id` (described + tested) is present; `status` (no meta) and
+        // `not_in_fixture` (not a table column) are absent.
+        let expect_meta = &payload.expected.column_meta;
+        assert_eq!(
+            expect_meta.get("id").and_then(|m| m.description.as_deref()),
+            Some("Primary key")
+        );
+        assert_eq!(
+            expect_meta.get("id").map(|m| m.tests.as_slice()),
+            Some(&["unique".to_owned()][..])
+        );
+        assert!(!expect_meta.contains_key("status"));
+        assert!(!expect_meta.contains_key("not_in_fixture"));
+
+        // Given side: stg_src meta — its own description, never dim_x's.
+        let given_meta = &payload.given[0].column_meta;
+        assert_eq!(
+            given_meta
+                .get("src_id")
+                .and_then(|m| m.description.as_deref()),
+            Some("Source key")
+        );
+        assert!(!given_meta.contains_key("unknown_col"));
+        assert!(!given_meta.contains_key("id"));
+    }
+
+    #[test]
+    fn build_test_payload_this_given_uses_target_model_meta() {
+        let mut target_desc = BTreeMap::new();
+        target_desc.insert("id".to_owned(), "Primary key".to_owned());
+        let target = model_node("model.shop.dim_x", "x", Some("select 1"))
+            .with_column_descriptions(target_desc);
+        let manifest = manifest_for(vec![target.clone()], vec![]);
+        let ut = UnitTest::new(
+            "t",
+            NodeId::new("dim_x"),
+            vec![UnitTestGiven::new(
+                "this",
+                json!([{ "id": 1 }]),
+                Some("dict".to_owned()),
+                None,
+            )],
+            UnitTestExpect::new(json!([{ "id": 2 }]), Some("dict".to_owned()), None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let target_meta = column_meta_for_model(&manifest, &target);
+        let payload = build_test_payload(
+            "unit_test.shop.t",
+            &ut,
+            &CteGraph::default(),
+            &InScopeSet::new(),
+            None,
+            None,
+            None,
+            None,
+            &manifest,
+            &target_meta,
+        );
+        assert_eq!(
+            payload.given[0]
+                .column_meta
+                .get("id")
+                .and_then(|m| m.description.as_deref()),
+            Some("Primary key"),
+            "a `this` given is the model's own prior state — target meta applies",
+        );
+    }
+
+    #[test]
+    fn column_meta_is_omitted_from_the_wire_when_empty() {
+        // A model with NO column metadata: the payload key must be absent
+        // (skip_serializing_if) so pre-#165 reports stay byte-stable in
+        // shape and the template's `colMeta || {}` read stays minimal.
+        let ut = simple_unit_test("m", "t");
+        let payload = build_test_payload(
+            "unit_test.shop.t",
+            &ut,
+            &CteGraph::default(),
+            &InScopeSet::new(),
+            None,
+            None,
+            None,
+            None,
+            &manifest_for(vec![], vec![]),
+            &BTreeMap::new(),
+        );
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert!(
+            !json.contains("column_meta"),
+            "empty column_meta must be omitted from the wire; got {json}",
         );
     }
 
@@ -3304,6 +3825,8 @@ mod tests {
             None,
             None,
             None,
+            &manifest_for(vec![], vec![]),
+            &BTreeMap::new(),
         );
         // The external given: fixture name present, rows null.
         assert_eq!(payload.given[0].fixture.as_deref(), Some("stg_a_fixture"));

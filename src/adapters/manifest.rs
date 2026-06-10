@@ -44,7 +44,7 @@ use serde::Deserialize;
 
 use crate::domain::{
     Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, PreflightError,
-    UnitTest, UnitTestExpect, UnitTestGiven,
+    TestMetadata, UnitTest, UnitTestExpect, UnitTestGiven,
 };
 use crate::ports::ManifestSource;
 use serde_json::Value;
@@ -116,6 +116,19 @@ struct WireNode {
     relation_name: Option<String>,
     #[serde(default)]
     columns: BTreeMap<String, WireColumn>,
+    /// Test-node attribution (cute-dbt#165): `column_name` is set iff the
+    /// test is column-scoped; `attached_node` is the declaring model;
+    /// `test_metadata` is the generic-test descriptor (absent on singular
+    /// SQL-file tests — fusion `#[skip_serializing_none]`s the key away).
+    /// The domain [`TestMetadata`] already deserializes the wire shape
+    /// verbatim (`name` + defaulted `namespace`/`kwargs`), so no `Wire*`
+    /// twin is needed — the [`Checksum`]/[`DependsOn`] reuse precedent.
+    #[serde(default)]
+    column_name: Option<String>,
+    #[serde(default)]
+    attached_node: Option<NodeId>,
+    #[serde(default)]
+    test_metadata: Option<TestMetadata>,
 }
 
 /// Tolerant wire projection of a node's `config` sub-object.
@@ -132,12 +145,18 @@ struct WireNodeConfig {
     config: BTreeMap<String, Value>,
 }
 
-/// Tolerant wire projection of one `columns` map entry — only the
-/// declared `data_type` is consumed for the `.contract` column-set diff.
+/// Tolerant wire projection of one `columns` map entry — the declared
+/// `data_type` feeds the `.contract` column-set diff, and the authored
+/// `description` feeds the column-header tooltips (cute-dbt#165). fusion
+/// always serializes `description` (an unset one as `""` — `dbt-schemas`
+/// `dbt_column.rs` `serialize_dbt_column_desc`); the translation drops
+/// empty descriptions so the domain map carries only real prose.
 #[derive(Debug, Default, Deserialize)]
 struct WireColumn {
     #[serde(default)]
     data_type: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 impl WireNodeConfig {
@@ -296,11 +315,19 @@ impl WireManifest {
             .into_iter()
             .map(|(key, wire)| {
                 let id = NodeId::new(key);
-                let columns = wire
-                    .columns
-                    .into_iter()
-                    .map(|(name, col)| (name, col.data_type))
-                    .collect();
+                // One pass over the wire columns feeds both domain maps:
+                // name → data_type (the `.contract` column-set diff) and
+                // name → non-empty description (the cute-dbt#165
+                // column-header tooltips; fusion serializes an unset
+                // description as `""`, which is dropped here).
+                let mut columns = BTreeMap::new();
+                let mut column_descriptions = BTreeMap::new();
+                for (name, col) in wire.columns {
+                    if let Some(desc) = col.description.filter(|d| !d.is_empty()) {
+                        column_descriptions.insert(name.clone(), desc);
+                    }
+                    columns.insert(name, col.data_type);
+                }
                 let config = wire.config.into_domain();
                 let node = Node::new(
                     id.clone(),
@@ -313,6 +340,12 @@ impl WireManifest {
                     config,
                     wire.relation_name,
                     columns,
+                )
+                .with_column_descriptions(column_descriptions)
+                .with_test_attachment(
+                    wire.column_name,
+                    wire.attached_node,
+                    wire.test_metadata,
                 );
                 (id, node)
             })
@@ -750,6 +783,144 @@ mod tests {
         assert!(manifest.nodes().is_empty());
         assert!(manifest.unit_tests().is_empty());
         assert!(manifest.macros().is_empty());
+    }
+
+    // ----- cute-dbt#165: column descriptions + test attribution ------
+
+    #[test]
+    fn parse_manifest_extracts_column_descriptions_and_drops_empty_ones() {
+        // fusion ALWAYS serializes `description` — an unset one as `""`
+        // (`serialize_dbt_column_desc`, dbt-schemas dbt_column.rs). The
+        // adapter keeps only non-empty prose; `columns` (name → data_type)
+        // is unchanged so `.contract` semantics cannot drift.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.dim_x": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "abc" }},
+                  "columns": {{
+                    "id": {{ "name": "id", "description": "Primary key", "data_type": "integer" }},
+                    "label": {{ "name": "label", "description": "" }},
+                    "untyped": {{ "name": "untyped" }}
+                  }}
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid v12 manifest");
+        let node = manifest
+            .node(&NodeId::new("model.shop.dim_x"))
+            .expect("dim_x present");
+        assert_eq!(
+            node.column_descriptions().get("id").map(String::as_str),
+            Some("Primary key")
+        );
+        assert!(
+            !node.column_descriptions().contains_key("label"),
+            "an empty description (fusion's unset shape) is dropped"
+        );
+        assert!(!node.column_descriptions().contains_key("untyped"));
+        // The .contract input is untouched by the description ingest.
+        assert_eq!(node.columns().get("id"), Some(&Some("integer".to_owned())));
+        assert_eq!(node.columns().get("label"), Some(&None));
+    }
+
+    #[test]
+    fn parse_manifest_extracts_test_attribution_fields() {
+        // A column-scoped generic test (the jaffle-shop wire shape):
+        // column_name + attached_node + test_metadata incl. a
+        // package-qualified namespace and kwargs passthrough.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "test.shop.accepted_values_orders_status.abc123": {{
+                  "resource_type": "test",
+                  "checksum": {{ "name": "none", "checksum": "" }},
+                  "column_name": "status",
+                  "attached_node": "model.shop.orders",
+                  "test_metadata": {{
+                    "name": "accepted_values",
+                    "kwargs": {{
+                      "column_name": "status",
+                      "values": ["placed", "shipped"],
+                      "model": "{{{{ get_where_subquery(ref('orders')) }}}}"
+                    }},
+                    "namespace": null
+                  }}
+                }},
+                "test.shop.expect_between_orders_amount.def456": {{
+                  "resource_type": "test",
+                  "checksum": {{ "name": "none", "checksum": "" }},
+                  "column_name": "amount",
+                  "attached_node": "model.shop.orders",
+                  "test_metadata": {{
+                    "name": "expect_column_values_to_be_between",
+                    "kwargs": {{ "min_value": 0 }},
+                    "namespace": "dbt_expectations"
+                  }}
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid v12 manifest");
+        let t1 = manifest
+            .node(&NodeId::new(
+                "test.shop.accepted_values_orders_status.abc123",
+            ))
+            .expect("test node present");
+        assert_eq!(t1.column_name(), Some("status"));
+        assert_eq!(t1.attached_node(), Some(&NodeId::new("model.shop.orders")));
+        let tm1 = t1.test_metadata().expect("test_metadata present");
+        assert_eq!(tm1.name(), "accepted_values");
+        assert_eq!(tm1.namespace(), None, "explicit-null namespace → None");
+        assert_eq!(
+            tm1.kwargs()["values"],
+            serde_json::json!(["placed", "shipped"])
+        );
+        let t2 = manifest
+            .node(&NodeId::new(
+                "test.shop.expect_between_orders_amount.def456",
+            ))
+            .expect("test node present");
+        let tm2 = t2.test_metadata().expect("test_metadata present");
+        assert_eq!(tm2.namespace(), Some("dbt_expectations"));
+    }
+
+    #[test]
+    fn parse_manifest_tolerates_singular_and_model_level_tests() {
+        // The real playground fixture carries both shapes: singular
+        // (SQL-file) tests OMIT test_metadata entirely (fusion
+        // `#[skip_serializing_none]`), and model-level tests carry
+        // `column_name: null`. Explicit nulls must also parse (ADR-5 —
+        // fusion null-fills unset Options on other structs).
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "test.shop.singular_check": {{
+                  "resource_type": "test",
+                  "checksum": {{ "name": "sha256", "checksum": "aa" }}
+                }},
+                "test.shop.model_level_check": {{
+                  "resource_type": "test",
+                  "checksum": {{ "name": "sha256", "checksum": "bb" }},
+                  "column_name": null,
+                  "attached_node": null,
+                  "test_metadata": null
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("tolerant parse");
+        for id in ["test.shop.singular_check", "test.shop.model_level_check"] {
+            let node = manifest.node(&NodeId::new(id)).expect("node present");
+            assert!(node.column_name().is_none(), "{id}");
+            assert!(node.attached_node().is_none(), "{id}");
+            assert!(node.test_metadata().is_none(), "{id}");
+        }
     }
 
     // ----- parse_manifest: Stage-1 failure arms ---------------------
