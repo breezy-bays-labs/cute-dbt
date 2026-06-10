@@ -2914,4 +2914,662 @@ mod tests {
         );
         assert_eq!(effective_fixture_format(None, "weird.txt"), None);
     }
+
+    // -----------------------------------------------------------------
+    // K11. Internal scan/branch arithmetic — mutation pins (cute-dbt#143).
+    //
+    //   The K1–K10 accept/reject tests above drive the PUBLIC
+    //   `parse_sql_literal_rows`, which type-erases WHY a string was
+    //   rejected (every reject path returns the same `None`). That hides
+    //   the conservative-reject parser's internal scan branches from
+    //   mutation: a mutant that flips a comment-boundary or quote-split
+    //   branch can still funnel to the same `None` and survive. These
+    //   tests pin the scan helpers DIRECTLY (they are reachable from this
+    //   child module) so each branch's exact output is asserted, killing
+    //   the surviving boolean/arithmetic mutants the public-fn tests miss.
+    // -----------------------------------------------------------------
+
+    // ----- K11a. `strip_sql_comments` — the quote-aware comment scan -----
+
+    #[test]
+    fn k11a_lone_slash_is_not_a_block_comment_start() {
+        // Pins SqlCommentStripper::step's block-comment branch
+        // `c == '/' && next == Some('*')`: only a `/` IMMEDIATELY followed
+        // by `*` opens a block comment. A lone `/` (or a `/` followed by
+        // anything else) is an ordinary char, copied verbatim. The
+        // `&& → ||` mutant treats a bare `/` (or any char whose successor
+        // is `*`) as a comment opener, swallowing to the next `*/`/EOF.
+        assert_eq!(strip_sql_comments("a/b"), "a/b");
+        assert_eq!(strip_sql_comments("1 / 2"), "1 / 2");
+        // A real `/*` STILL opens a comment (the branch is not disabled).
+        assert_eq!(strip_sql_comments("a/*c*/b"), "a b");
+    }
+
+    #[test]
+    fn k11b_lone_dash_is_not_a_line_comment_start() {
+        // Pins step's line-comment branch `c == '-' && next == Some('-')`:
+        // a single `-` (e.g. a negative-number sign) is an ordinary char,
+        // never a comment. The `&& → ||` mutant would treat a lone `-` as
+        // a `--` comment and swallow to EOL.
+        assert_eq!(strip_sql_comments("a-b"), "a-b");
+        assert_eq!(strip_sql_comments("-1"), "-1");
+        // A real `--` STILL opens a line comment (replaced by one space).
+        assert_eq!(strip_sql_comments("a-- c"), "a ");
+    }
+
+    #[test]
+    fn k11c_line_comment_runs_to_eof_without_trailing_newline() {
+        // Pins skip_line_comment's `self.i < chars.len()` bound: a `--`
+        // comment with NO trailing `\n` must scan to EOF and stop. The
+        // `< → <=` mutant indexes `chars[len]` → panic (a kill via panic);
+        // the original returns the comment replaced by a single space.
+        assert_eq!(strip_sql_comments("x--eof"), "x ");
+        assert_eq!(strip_sql_comments("--whole-line"), " ");
+    }
+
+    #[test]
+    fn k11d_block_comment_inner_star_does_not_terminate_early() {
+        // Pins skip_block_comment's terminator
+        // `!(chars[i] == '*' && next == Some('/'))`: only the PAIR `*/`
+        // closes the comment. The `&& → ||` mutant closes on a lone `*`
+        // (or a lone `/`), so an inner `*` (as in `a*b`) would terminate
+        // the scan early and leak `*/…` into the output.
+        assert_eq!(strip_sql_comments("/*a*b*/x"), " x");
+        assert_eq!(strip_sql_comments("/* 2*3 */y"), " y");
+    }
+
+    #[test]
+    fn k11e_unterminated_block_comment_scans_to_eof() {
+        // Pins skip_block_comment's `self.i < chars.len()` bound: an
+        // unterminated `/*` runs to EOF and stops (saturating `i += 2`
+        // past EOF is harmless). The `< → <=` mutant indexes `chars[len]`
+        // → panic. The original yields the kept prefix plus one space.
+        assert_eq!(strip_sql_comments("a/*unterminated"), "a ");
+    }
+
+    #[test]
+    fn k11f_block_comment_open_advances_by_two() {
+        // Pins skip_block_comment's `self.i += 2` (skip the `/*`): the
+        // `+= → -=` mutant underflows (`i` is small) → panic; `+= → *=`
+        // mis-positions the scan. The original strips the whole comment.
+        assert_eq!(strip_sql_comments("a/*cc*/b"), "a b");
+    }
+
+    #[test]
+    fn k11g_doubled_quote_inside_string_is_escaped_not_a_close() {
+        // Pins in_string's `''`-escape lookahead
+        // (`c == '\'' && next == Some('\'')`, and the `self.i + 1` index):
+        // a `''` inside a single-quoted run is a literal quote and stays
+        // in-string, so a `--`/`/*` AFTER it is still protected. The
+        // `== → !=` / `+ → -` mutants mis-handle the escape and let the
+        // string close early.
+        assert_eq!(strip_sql_comments("'a''b'"), "'a''b'");
+        // A `--` that follows a `''` escape, still inside the string, is
+        // preserved (not treated as a comment).
+        assert_eq!(strip_sql_comments("'a''-- b'"), "'a''-- b'");
+    }
+
+    #[test]
+    fn k11h_comment_marker_inside_string_is_preserved() {
+        // Pins in_string's `c == '\''` close test: while in a string, a
+        // `--` or `/*` is copied verbatim, never a comment. The `== → !=`
+        // mutant closes the string on a non-quote char, exposing the
+        // marker as a comment.
+        assert_eq!(
+            strip_sql_comments("'-- not a comment'"),
+            "'-- not a comment'"
+        );
+        assert_eq!(strip_sql_comments("'/* literal */'"), "'/* literal */'");
+    }
+
+    // ----- K11i. `split_quote_aware` — the projection-/value-split scan -----
+
+    #[test]
+    fn k11i_double_quoted_run_protects_separator_and_closes() {
+        // Pins split_quote_aware's double-quoted backslash-escape arm
+        // (`Some('"') if c == '\\'`). The escape arm must fire ONLY on a
+        // backslash; the `c == '\\' → true` and `== → !=` mutants make it
+        // fire on other chars, which eats the CLOSING `"` as an escaped
+        // char so the run never closes and a following separator stays
+        // (wrongly) protected → ONE part instead of two.
+        assert_eq!(
+            split_quote_aware("\"ab\",x", ','),
+            vec!["\"ab\"".to_string(), "x".to_string()],
+        );
+        // The minimal exhaustive-search distinguisher: an empty
+        // double-quoted value then a separator → two parts.
+        assert_eq!(
+            split_quote_aware("\"\",", ','),
+            vec!["\"\"".to_string(), String::new()],
+        );
+    }
+
+    #[test]
+    fn k11j_double_quote_backslash_escape_keeps_run_open() {
+        // The positive side of the same arm: a backslash escapes the next
+        // char (kept verbatim), so a `\"` does NOT close the run and an
+        // embedded separator stays protected. Pins that the escape arm is
+        // REACHED for a real backslash (guards against the arm being made
+        // dead by a guard mutation).
+        assert_eq!(
+            split_quote_aware("\"a\\\",b\",c", ','),
+            vec!["\"a\\\",b\"".to_string(), "c".to_string()],
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // K12. cute-dbt#143 — mutation-pin the #137 literal-row SQL parser.
+    //   Distinguishing kill-tests for the MISSED-survivor set: each feeds
+    //   an input where the original returns X and a specific mutant
+    //   returns Y != X (or panics). Tests call the parser helpers
+    //   directly (reachable from this child module, like k11a-k11j).
+    // -----------------------------------------------------------------
+
+    // ----- K12a. `split_quote_aware` — single-quote doubled-escape arm -----
+    //
+    // CLASSIFIED-EQUIVALENT: the 847 guard `→ false` mutant (disable the
+    // doubled-single-quote arm) is provably equivalent and is classified in
+    // `.cargo/mutants.toml` (exclude_re), not killed here.
+    // Reason: the escape arm pushes BOTH quotes of a `''` and stays quoted.
+    // Disabling it routes the first `'` through `Some(q)` (push `'`, set
+    // quote=None) and the second `'` through `None` (push `'`, set
+    // quote=Some) on the very next iteration — no character lies between the
+    // two adjacent quotes, so the cur content AND the final quote state are
+    // byte-identical. An exhaustive brute force over all 21 845 strings of
+    // length ≤7 over {`'`, `,`, `a`, `b`} found ZERO distinguishing inputs.
+    // tracked: cute-dbt#129 — the open equivalent-mutant exclusion tracker
+    // (full rationale block in `.cargo/mutants.toml`).
+    //
+    // This test is kept as a behavioral-regression pin for the `''`-escape
+    // semantics themselves (NOT as the 847 kill — there is no such kill).
+
+    #[test]
+    fn k12a_split_quote_aware_doubled_single_quote_stays_quoted() {
+        // A `''` inside a single-quoted run is a literal quote; the run stays
+        // quoted, so an embedded `,` is protected → ONE part.
+        assert_eq!(
+            split_quote_aware("'a'',b'", ','),
+            vec!["'a'',b'".to_string()],
+            "doubled single-quote keeps the run quoted; the inner comma is protected",
+        );
+        // Two genuine values still split: `'x',y` → two parts (proves the
+        // quote does close on a LONE quote, i.e. the arm isn't over-greedy).
+        assert_eq!(
+            split_quote_aware("'x',y", ','),
+            vec!["'x'".to_string(), "y".to_string()],
+        );
+    }
+
+    // ----- K12b. `SqlCommentStripper::in_string` — close-test + lookahead -----
+
+    #[test]
+    fn k12b_in_string_closes_only_on_a_lone_quote() {
+        // Pins in_string's close test `c == '\''` (1004). The `== → !=`
+        // mutant treats any NON-quote char as the closing quote: it would
+        // close the string on the first inner char and then re-interpret
+        // the rest of the literal as bare SQL, so a `--` inside the string
+        // would be stripped as a comment. Original keeps the whole literal
+        // verbatim. A `--` mid-string is the discriminator.
+        assert_eq!(strip_sql_comments("'x-- y'z"), "'x-- y'z");
+        // And a `/*` mid-string is likewise preserved (the close test must
+        // not fire on `*` or `/`).
+        assert_eq!(strip_sql_comments("'a/*b*/c'd"), "'a/*b*/c'd");
+    }
+
+    #[test]
+    fn k12c_in_string_escape_lookahead_is_i_plus_one() {
+        // Pins in_string's `''`-escape lookahead index `self.i + 1` (1005).
+        // The `+ → -` mutant looks BEHIND (`self.i - 1`). For the second
+        // quote of a CLOSING `''` (`i == 1` in `''`), the original looks
+        // ahead at `chars[2]` (None → not an escape → CLOSE the string)
+        // while the mutant looks back at `chars[0]` (the opening `'` → a
+        // false-positive escape → push an extra `'` and over-advance). So
+        // `''` (an empty single-quoted string) strips to `''` originally but
+        // to `'''` under the mutant — a sharp, minimal distinguisher.
+        assert_eq!(strip_sql_comments("''"), "''");
+        // A leading `''` followed by `--`: original sees the empty string
+        // CLOSE then the `--` as a real comment → `'' `; the mutant keeps
+        // mis-escaping and never closes, so the `--` stays in-string.
+        assert_eq!(strip_sql_comments("''--"), "'' ");
+        // The escape body is still kept where it is genuinely an escape.
+        assert_eq!(strip_sql_comments("'a''b'"), "'a''b'");
+    }
+
+    // ----- K12d. `SqlCommentStripper::skip_block_comment` — `*=` index -----
+
+    #[test]
+    fn k12d_skip_block_comment_advance_is_addition_not_mult() {
+        // Pins skip_block_comment's opening `self.i += 2` (1025). The
+        // `+= → *=` mutant multiplies the cursor instead of advancing it by
+        // two. When the `/*` does NOT start at index 0 the two operations
+        // diverge: e.g. `ab/* c */d` opens at i=2 → original i=4 (`*=` gives
+        // i*... = 2*2 = 4, coincides), so anchor the comment where i!=2.
+        // With `xyz/*p*/q` the `/*` opens at i=3 → original 3+2=5, mutant
+        // 3*2=6 → the scan mis-positions and the output diverges from the
+        // clean `xyz q`.
+        assert_eq!(strip_sql_comments("xyz/*p*/q"), "xyz q");
+        // A longer prefix widens the +=/*= gap further (5+2=7 vs 5*2=10).
+        assert_eq!(strip_sql_comments("abcde/*pp*/f"), "abcde f");
+    }
+
+    // ----- K12e. `is_union_all_at` — the `&&` conjunction -----
+
+    #[test]
+    fn k12e_union_requires_both_union_and_all() {
+        // Pins is_union_all_at's `&&` (1068): a `UNION ALL` boundary needs
+        // BOTH `union` at idx AND `all` at idx+1. The `&& → ||` mutant
+        // splits an arm on a bare `union` (or a bare `all`) alone. A bare
+        // `UNION` (no ALL) is a disallowed set op → the whole query rejects
+        // → None; the `||` mutant instead splits it as if it were UNION ALL.
+        // Use a bare `union` reached only AFTER has_disallowed_set_op is
+        // satisfied... has_disallowed_set_op already rejects a bare union,
+        // so route through a non-rejected shape: `all` appearing as an
+        // alias word. `select 1 as all` — here `all` is a bare-alias; with
+        // `||` the token `all` at some idx makes is_union_all_at(idx-?) ...
+        // Simplest robust distinguisher: a query whose only set-op-looking
+        // token is a bare `union` is rejected by has_disallowed_set_op
+        // first, so instead assert the POSITIVE contract a `||` breaks:
+        // `select 1 as a union all select 2 as a` splits into exactly two
+        // arms (one row each); a `||` mutant would ALSO split on the bare
+        // `all`/`union` token boundaries, producing empty/garbage arms that
+        // fail to parse → None.
+        let t = parse_sql_literal_rows("select 1 as a union all select 2 as a")
+            .expect("UNION ALL of two literal arms accepts");
+        assert_eq!(
+            t.rows.len(),
+            2,
+            "exactly two arms, not split on a lone token"
+        );
+        assert_eq!(t.columns, vec!["a".to_string()]);
+        // Direct helper assertion: only the (union, all) PAIR is a boundary.
+        let words = tokenize_sql_words("union all union");
+        assert!(is_union_all_at(&words, 0), "union all at 0 is a boundary");
+        assert!(
+            !is_union_all_at(&words, 2),
+            "a trailing bare `union` (no following `all`) is NOT a boundary",
+        );
+        assert!(
+            !is_union_all_at(&words, 1),
+            "`all union` is NOT a boundary (needs union THEN all)",
+        );
+    }
+
+    // ----- K12f. `has_disallowed_set_op` — body + the two `||` -----
+
+    #[test]
+    fn k12f_disallowed_set_op_detects_each_operator() {
+        // Pins has_disallowed_set_op (1075 `→ false`, 1076 both `||→&&`).
+        // The function returns true iff the stream carries INTERSECT, EXCEPT,
+        // MINUS, or a bare UNION (not followed by ALL). The `→ false` mutant
+        // makes every set op slip through; the `|| → &&` mutants require
+        // MULTIPLE operators simultaneously, so a lone one slips through.
+        // Each single-operator stream is a distinguisher.
+        assert!(has_disallowed_set_op(&tokenize_sql_words("a intersect b")));
+        assert!(has_disallowed_set_op(&tokenize_sql_words("a except b")));
+        assert!(has_disallowed_set_op(&tokenize_sql_words("a minus b")));
+        assert!(
+            has_disallowed_set_op(&tokenize_sql_words("a union b")),
+            "a bare UNION (no ALL) is disallowed",
+        );
+        // The negative side: a clean UNION ALL stream carries NO disallowed
+        // op (guards the `→ true`-style over-trigger and proves the bare-
+        // union clause needs the `&& !all` half).
+        assert!(!has_disallowed_set_op(&tokenize_sql_words(
+            "select 1 union all select 2"
+        )));
+        // End-to-end: each disallowed op rejects the whole table.
+        assert_eq!(
+            parse_sql_literal_rows("select 1 as a intersect select 2 as a"),
+            None
+        );
+        assert_eq!(
+            parse_sql_literal_rows("select 1 as a except select 2 as a"),
+            None
+        );
+        assert_eq!(
+            parse_sql_literal_rows("select 1 as a union select 2 as a"),
+            None
+        );
+    }
+
+    // ----- K12g. `single_quote_end` — bound + the `2 * len` byte step -----
+
+    #[test]
+    fn k12g_single_quote_end_unterminated_returns_none() {
+        // Pins single_quote_end's `i < chars.len()` bound (1169). The
+        // `< → <=` mutant indexes `chars[len]` on an unterminated string →
+        // panic; the original walks to EOF and returns None.
+        assert_eq!(single_quote_end("'abc"), None);
+        assert_eq!(single_quote_end("'"), None);
+    }
+
+    #[test]
+    fn k12h_single_quote_end_escape_byte_step_is_two_times_len() {
+        // Pins single_quote_end's escape byte step `byte += 2 * '\''.len_utf8()`
+        // (1173). The opening `'` plus a non-trivial prefix makes the running
+        // `byte` != 2 at the escape point, so:
+        //   - `+= → *=` (1173:22): `byte *= 2` instead of `byte += 2` → a
+        //     larger end index;
+        //   - `* → +` (1173:27): `2 + 1 = 3` added instead of `2 * 1 = 2` →
+        //     end index off by one.
+        // NOTE: the sibling `* → /` mutant at 1173:27 is CLASSIFIED-EQUIVALENT
+        // (classified in `.cargo/mutants.toml`, not killed here): the
+        // multiplicand `'\''.len_utf8()` is the compile-time constant 1, so
+        // `2 * 1 == 2 / 1 == 2` for every input — no distinguishing case
+        // exists. tracked: cute-dbt#129 — the open equivalent-mutant
+        // exclusion tracker.
+        // `'abcd''x'` is 9 bytes; the closing quote is the 9th, so the byte
+        // index just past it is exactly 9. Each killable arithmetic mutant
+        // shifts it.
+        assert_eq!(single_quote_end("'abcd''x'"), Some(9));
+        // Sanity: a no-escape string's end is its byte length.
+        assert_eq!(single_quote_end("'abc'"), Some(5));
+        // A leading-escape string also pins the step (`''` right after open).
+        assert_eq!(single_quote_end("'''x'"), Some(5));
+    }
+
+    // ----- K12i. `parse_bare_alias` — the first-char class test -----
+
+    #[test]
+    fn k12i_bare_alias_rejects_digit_or_symbol_first_char() {
+        // Pins parse_bare_alias's first-char test `first == '_'` (1241).
+        // The `== → !=` mutant inverts the underscore allowance: it would
+        // ACCEPT a first char that is not `_` (already covered by the
+        // alphabetic arm) but REJECT a leading underscore. `_id` is a valid
+        // bare alias; the mutant rejects it. A leading digit `1x` is invalid
+        // either way, so the discriminator is the leading underscore.
+        assert_eq!(parse_bare_alias("_id"), Some("_id".to_string()));
+        assert_eq!(parse_bare_alias("_"), Some("_".to_string()));
+        // A normal alphabetic alias still accepts (arm unaffected).
+        assert_eq!(parse_bare_alias("name"), Some("name".to_string()));
+        // A leading digit is rejected (not a bare identifier).
+        assert_eq!(parse_bare_alias("1x"), None);
+    }
+
+    // ----- K12j. `consume_quoted_run` — bound, close-test, escape lookahead -----
+
+    #[test]
+    fn k12j_consume_quoted_run_bound_and_close() {
+        // Pins consume_quoted_run's `i < chars.len()` bound (1302). The
+        // `< → >` mutant never enters the loop, returning `start + 1` (the
+        // run is dropped after the opening quote); the `< → <=` mutant
+        // indexes `chars[len]` on an unterminated run → panic. The original
+        // returns the index just past the CLOSING quote.
+        let chars: Vec<char> = "'ab'c".chars().collect();
+        let mut cur = String::new();
+        let end = consume_quoted_run(&chars, 0, &mut cur);
+        assert_eq!(end, 4, "index just past the closing quote at char 3");
+        assert_eq!(cur, "'ab'", "the full quoted run is appended verbatim");
+
+        // Unterminated run → walk to EOF, return len (the `< → >`/`<=` and
+        // close-test mutants diverge here).
+        let chars2: Vec<char> = "'ab".chars().collect();
+        let mut cur2 = String::new();
+        let end2 = consume_quoted_run(&chars2, 0, &mut cur2);
+        assert_eq!(end2, 3, "unterminated run scans to EOF (len 3)");
+        assert_eq!(cur2, "'ab");
+    }
+
+    #[test]
+    fn k12k_consume_quoted_run_close_test_and_escape_lookahead() {
+        // Pins consume_quoted_run's close test `d == '\''` (1305) and the
+        // `''`-escape lookahead `chars.get(i + 1)` (1306).
+        //  - `== → !=` (1305): the run would "close" on a non-quote char,
+        //    truncating the run after the first inner char.
+        //  - `+ → -` (1306): the escape lookahead reads BEHIND, so a real
+        //    `''` is mis-handled — the run closes early on the first `'`.
+        // `'a''b'` carries a `''` escape; the original appends the full run
+        // (both quotes of the escape kept) and returns the index past the
+        // FINAL closing quote.
+        let chars: Vec<char> = "'a''b'X".chars().collect();
+        let mut cur = String::new();
+        let end = consume_quoted_run(&chars, 0, &mut cur);
+        assert_eq!(cur, "'a''b'", "the `''` escape stays inside the run");
+        assert_eq!(end, 6, "index just past the final closing quote (char 5)");
+        // A lone closing quote really does close (so the run is not greedy):
+        // `'a'` then `b` — the run ends at index 3.
+        let chars2: Vec<char> = "'a'b".chars().collect();
+        let mut cur2 = String::new();
+        let end2 = consume_quoted_run(&chars2, 0, &mut cur2);
+        assert_eq!(cur2, "'a'");
+        assert_eq!(end2, 3);
+    }
+
+    // -----------------------------------------------------------------
+    // K13. cute-dbt#143 — bounded kills for the TIMEOUT-survivor set.
+    //   A TIMEOUT only means the SUITE's path to the mutant spins in an
+    //   outer driving loop. Two bounded-kill shapes recover almost all:
+    //   - `+= → -=` index mutants: a tiny input drives the mutated
+    //     subtraction to a `usize` underflow → panic → CAUGHT.
+    //   - body-replacement mutants (`→ 0` / `→ 1` / `→ ()`) in helpers
+    //     WITHOUT internal loops: a DIRECT unit call terminates
+    //     instantly and the wrong return/state fails an assertion.
+    //   `+= → *=` mutants INSIDE a helper's own loop hang the test
+    //   process itself; those are caught by the nextest mutation
+    //   profile, not by a bounded input (see the K13 note at the end
+    //   of this module).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn k13a_comment_stripper_step_advances_on_ordinary_char() {
+        // Pins step's ordinary-char `self.i += 1` (995). The `+= → -=`
+        // mutant does `0usize -= 1` on the first plain char → underflow
+        // panic. Original copies the char and advances.
+        assert_eq!(strip_sql_comments("a"), "a");
+        assert_eq!(strip_sql_comments("ab"), "ab");
+    }
+
+    #[test]
+    fn k13b_in_string_escape_advance_is_plus_two() {
+        // Pins in_string's `''`-escape `self.i += 2` (1007). The `+= → -=`
+        // mutant does `1usize -= 2` at the first escape (i == 1) → underflow
+        // panic. Original keeps the escaped body.
+        assert_eq!(strip_sql_comments("''x"), "''x");
+        assert_eq!(strip_sql_comments("'a''b'"), "'a''b'");
+    }
+
+    #[test]
+    fn k13c_in_string_ordinary_advance_is_plus_one() {
+        // Pins in_string's per-char `self.i += 1` (1012). The `+= → -=`
+        // mutant rewinds inside the string; on `'ab'` the cursor walks back
+        // into already-emitted territory and underflows → panic. Original
+        // copies the string verbatim.
+        assert_eq!(strip_sql_comments("'ab'"), "'ab'");
+    }
+
+    #[test]
+    fn k13d_split_union_all_arms_consumes_two_words() {
+        // Pins split_union_all_arms's `idx += 2` (1052). The `+= → -=`
+        // mutant rewinds the word cursor at a `UNION ALL` boundary; with
+        // the boundary at the very START (idx == 0) the mutant computes
+        // `0usize - 2` → underflow panic. The original consumes the pair,
+        // finds the leading arm empty, and conservatively rejects → None.
+        // (A mid-query boundary would NOT kill this mutant — `4 - 2 = 2`
+        // merely oscillates — so the LEADING boundary is load-bearing.)
+        assert_eq!(
+            parse_sql_literal_rows("union all select 1 as a"),
+            None,
+            "a dangling leading UNION ALL (empty first arm) rejects",
+        );
+    }
+
+    #[test]
+    fn k13e_single_quote_end_escape_index_advance_is_plus_two() {
+        // Pins single_quote_end's `i += 2` (1174). The `+= → -=` mutant does
+        // `1usize -= 2` at the first `''` escape (i == 1) → underflow panic.
+        // Original returns the byte index past the closing quote.
+        assert_eq!(single_quote_end("'''x'"), Some(5));
+    }
+
+    #[test]
+    fn k13f_tokenize_sql_words_whitespace_advance_is_plus_one() {
+        // Pins tokenize_sql_words's whitespace branch `i += 1` (1284). The
+        // `+= → -=` mutant does `0usize -= 1` on a leading space → underflow
+        // panic. Original tokenizes around the space.
+        let w = tokenize_sql_words(" a");
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].text, "a");
+    }
+
+    #[test]
+    fn k13g_consume_quoted_run_escape_index_advance_is_plus_two() {
+        // Pins consume_quoted_run's `i += 2` (1308). The `+= → -=` mutant
+        // does `1usize -= 2` at the first `''` escape (start == 0, i == 1) →
+        // underflow panic. Original consumes the whole escaped run.
+        let chars: Vec<char> = "'a''b'".chars().collect();
+        let mut cur = String::new();
+        let end = consume_quoted_run(&chars, 0, &mut cur);
+        assert_eq!(end, 6);
+        assert_eq!(cur, "'a''b'");
+    }
+
+    // ----- K13h–K13l. direct-call kills for body-replacement timeouts -----
+    // These helpers have NO internal loop — the suite's hang lived in the
+    // OUTER driving loop (`while i < len { i += feed(..) }`). Calling the
+    // helper once, directly, terminates instantly under the mutant and the
+    // wrong return value / un-mutated state fails the assertion.
+
+    #[test]
+    fn k13h_csv_scanner_feed_family_reports_consumed_count() {
+        // Pins `CsvScanner::feed -> 0` (584), `feed_in_quotes -> 0` (593),
+        // `feed_unquoted -> 0` (608). Each body-replacement mutant returns 0
+        // and skips the state mutation; a direct single call asserts both
+        // the consumed count and the state effect.
+        let mut s = CsvScanner::default();
+        // feed (dispatch) + feed_unquoted: an ordinary char consumes 1 and
+        // lands in the current field.
+        assert_eq!(s.feed('a', None), 1);
+        assert_eq!(s.field, "a");
+        // feed_unquoted: a CRLF pair consumes 2 and closes the row.
+        assert_eq!(s.feed('\r', Some('\n')), 2);
+        assert_eq!(s.matrix.len(), 1);
+        // feed_in_quotes: inside quotes, a `""` escape consumes 2 and emits
+        // one literal quote; a closing `"` consumes 1.
+        let mut q = CsvScanner {
+            in_quotes: true,
+            ..CsvScanner::default()
+        };
+        assert_eq!(q.feed_in_quotes('"', Some('"')), 2);
+        assert_eq!(q.field, "\"");
+        assert_eq!(q.feed_in_quotes('"', None), 1);
+        assert!(!q.in_quotes, "a lone quote closes the quoted field");
+    }
+
+    #[test]
+    fn k13i_comment_stripper_step_advances_cursor_and_emits() {
+        // Pins `SqlCommentStripper::step -> ()` (980) and the ordinary-char
+        // `+= → *=` (995: `0 *= 1` stays 0). One direct step over `a` must
+        // advance the cursor to 1 and emit the char — the `()` body does
+        // neither; the `*=` mutant emits but leaves `i == 0`.
+        let chars: Vec<char> = "ab".chars().collect();
+        let mut s = SqlCommentStripper {
+            out: String::new(),
+            i: 0,
+            in_string: false,
+        };
+        s.step(&chars);
+        assert_eq!(s.i, 1, "one ordinary char consumed");
+        assert_eq!(s.out, "a");
+    }
+
+    #[test]
+    fn k13j_in_string_advances_cursor_and_copies() {
+        // Pins `in_string -> ()` (1002) and its ordinary-char `+= → *=`
+        // (1012: `1 *= 1` stays 1). A direct in-string step over the `b`
+        // of `'b` must copy the char and advance — the `()` body does
+        // neither; the `*=` mutant copies but never advances.
+        let chars: Vec<char> = "'b".chars().collect();
+        let mut s = SqlCommentStripper {
+            out: String::new(),
+            i: 1, // inside the string, at `b`
+            in_string: true,
+        };
+        s.in_string(&chars);
+        assert_eq!(s.i, 2, "one in-string char consumed");
+        assert_eq!(s.out, "b");
+        // End-to-end seal for the 1012 `*=` mutant: an empty `''` string —
+        // the mutant re-reads the closing quote as a fresh string OPENER and
+        // emits a third `'` (`''` → `'''`); the original emits exactly `''`.
+        assert_eq!(strip_sql_comments("''"), "''");
+    }
+
+    #[test]
+    fn k13k_skip_line_comment_scans_to_terminator() {
+        // Pins `skip_line_comment -> ()` (1017 body) and its loop-condition
+        // mutants `< → ==`, `< → >`, `!= → ==` (1017). Each makes the scan
+        // loop exit immediately, leaving the cursor ON the `--` instead of
+        // past the comment. A direct call asserts the cursor lands at the
+        // newline (or EOF) and a single space is emitted.
+        let chars: Vec<char> = "--x\ny".chars().collect();
+        let mut s = SqlCommentStripper {
+            out: String::new(),
+            i: 0,
+            in_string: false,
+        };
+        s.skip_line_comment(&chars);
+        assert_eq!(s.i, 3, "cursor stops AT the newline");
+        assert_eq!(s.out, " ");
+        // EOF variant (no trailing newline): scan to len.
+        let chars2: Vec<char> = "--x".chars().collect();
+        let mut s2 = SqlCommentStripper {
+            out: String::new(),
+            i: 0,
+            in_string: false,
+        };
+        s2.skip_line_comment(&chars2);
+        assert_eq!(s2.i, 3, "cursor stops at EOF");
+    }
+
+    #[test]
+    fn k13l_skip_block_comment_scans_past_terminator() {
+        // Pins `skip_block_comment -> ()` (1025 body). The `()` body leaves
+        // the cursor ON the `/*` (and emits nothing), so the outer dispatch
+        // would re-enter forever; a direct call asserts the cursor lands
+        // just past the `*/` and one space is emitted.
+        let chars: Vec<char> = "/*x*/y".chars().collect();
+        let mut s = SqlCommentStripper {
+            out: String::new(),
+            i: 0,
+            in_string: false,
+        };
+        s.skip_block_comment(&chars);
+        assert_eq!(s.i, 5, "cursor lands just past the `*/`");
+        assert_eq!(s.out, " ");
+    }
+
+    #[test]
+    fn k13m_consume_quoted_run_returns_real_end_index() {
+        // Pins `consume_quoted_run -> 0` and `-> 1` (1300 body). The body-
+        // replacement mutants return a fixed index and never append the run.
+        // (Through tokenize_sql_words this spins; called DIRECTLY it
+        // terminates and fails both assertions.) `'x'` ends at index 3 —
+        // neither 0 nor 1 — and the run text must be appended.
+        let chars: Vec<char> = "'x'".chars().collect();
+        let mut cur = String::new();
+        let end = consume_quoted_run(&chars, 0, &mut cur);
+        assert_eq!(end, 3);
+        assert_eq!(cur, "'x'");
+    }
+
+    // K13 — the in-loop `+= → *=` hang class (caught via nextest, not via
+    // a bounded input).
+    //
+    // Eight timeout survivors were `+= → *=` cursor mutations INSIDE a
+    // helper's own scan loop (scan_csv_matrix 658, skip_line_comment 1018,
+    // skip_block_comment 1028, split_union_all_arms 1056, single_quote_end
+    // 1180, tokenize_sql_words 1284/1287, consume_quoted_run 1313). The
+    // stuck index spins in-function (`x *= 1 == x`; `0 *= k == 0`), so the
+    // test exercising the loop HANGS rather than fails — no bounded input
+    // distinguishes them.
+    //
+    // Under plain `cargo test` (one process for the whole suite) the hung
+    // sibling prevented the binary from exiting to report THIS module's
+    // kill-test failures, degrading the verdict to an inconclusive TIMEOUT.
+    // The fix is harness-level, not test-level: `test_tool = "nextest"` in
+    // `.cargo/mutants.toml` plus the `[profile.mutants]` slow-timeout
+    // (terminate-after) in `.config/nextest.toml` — nextest runs each test
+    // in its own process and TERMINATES a hung test as a FAILURE, so the
+    // hang itself becomes the kill. Verified (#143): 141 mutants over this
+    // file → 140 caught, 1 unviable, 0 timeouts, 0 missed — no
+    // non-terminating exclusions needed.
 }

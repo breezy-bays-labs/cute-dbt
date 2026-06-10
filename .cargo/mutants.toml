@@ -5,31 +5,34 @@
 # render-template glue is reported, not gated. Strict modules mirror the
 # crap4rs strict-keyed paths.
 
-# cucumber-rs `harness = false` means `cargo nextest` is incompatible
-# with the bdd test target; cargo-mutants must invoke `cargo test`. We
-# explicitly enumerate the kill-detection test targets so the slow
-# Gherkin outer-loop binary (`tests/bdd.rs`, every scenario spawning a
-# subprocess) does NOT run on every candidate mutant. The
-# mutation-kill signal lives in the unit tests + the fast integration
-# tests below; the BDD target is the contract gate, not the
-# kill-detection gate.
-test_tool = "cargo"
-additional_cargo_test_args = [
-  "--lib",
-  "--bins",
-  "--test", "diff_scoping",
-  "--test", "run_loop",
-  "--test", "manifest_ingestion",
-  "--test", "cte_engine",
-  "--test", "render_integration",
-  "--test", "fixture_parse",
-  "--test", "fixture_manifest_listed",
-  "--test", "assets_manifest",
-  "--test", "domain_clean_arch",
-  "--test", "resource_ref_lint",
-  "--test", "golden_report",
-  "--test", "cell_table_diff",
-]
+# The kill-detection harness is nextest (cute-dbt#143). Under plain
+# `cargo test` (one process per test BINARY), a mutant that breaks cursor
+# advancement in a scan-loop helper hangs a sibling test, so the binary
+# can never exit to report the kill-tests' failures — the suite verdict
+# degrades to an inconclusive TIMEOUT. nextest runs process-per-TEST and,
+# under the `mutants` nextest profile (`.config/nextest.toml`,
+# slow-timeout terminate-after), TERMINATES a hung test and marks it
+# FAILED — converting those hangs into genuine CAUGHT verdicts (#143
+# verification over unit_test_table.rs: 141 mutants → 140 caught,
+# 1 unviable, 0 timeouts, 0 missed).
+#
+# `--profile mutants` selects that nextest profile EXPLICITLY — nothing
+# selects it implicitly (no NEXTEST_PROFILE env contract). The profile's
+# default-filter also excludes the two binaries that cannot run under
+# cargo-mutants:
+# - bdd: cucumber-rs `harness = false`; nextest cannot enumerate it.
+#   It is the contract gate, not the kill-detection gate (every nextest
+#   profile excludes it).
+# - fixture_manifest_listed: enumerates committed files via
+#   `git ls-files`, and cargo-mutants scratch copies carry no `.git`
+#   dir, so the gate fails there spuriously. Profile-scoped filter,
+#   NOT a coverage exclusion — the gate still runs in the default
+#   profile, lefthook, and CI.
+# All other test binaries (lib, bins, the integration suites) run on
+# every candidate mutant — new test binaries join kill-detection
+# automatically.
+test_tool = "nextest"
+additional_cargo_test_args = ["--profile", "mutants"]
 
 # Focused scope. Render-glue and POD domain types are NOT in this list —
 # they are measured but not gated (per ADR-4 / quality-loop playbook).
@@ -63,26 +66,28 @@ exclude_globs = []
 # cute-dbt#30 — filed with PR C.
 #
 # Classified-equivalent mutation: `replace - with + in dedent` at
-# unit_test_table.rs:1532 (the per-line slice-start clamp
+# unit_test_table.rs:1616 (the per-line slice-start clamp
 # `min_indent.min(l.len() - l.trim_start().len())`). `min_indent` is the
 # MINIMUM leading-whitespace width over all non-blank lines, so every
 # non-blank line's own indent is >= min_indent → the `.min()` always returns
 # min_indent; the `+` mutation makes the clamped term strictly larger still,
 # so `.min()` still returns min_indent → byte-identical output for every
 # input. The clamp only guards a slice-overflow panic that min_indent's
-# definition already precludes. The sibling 1523 mutant (the min_indent
+# definition already precludes. The sibling 1607 mutant (the min_indent
 # computation) IS discriminating and is killed by
 # `dedent_strips_only_the_common_prefix_and_preserves_deeper_indent`.
-# The exclude_re below pins the line (`:1532:`) so it excludes ONLY the
-# equivalent clamp mutant — the sibling `1523:26` `- with +` in the
+# The exclude_re below pins the line (`:1616:`) so it excludes ONLY the
+# equivalent clamp mutant — the sibling `1607:26` `- with +` in the
 # min_indent computation shares the same mutant *name* but is discriminating
 # and stays gated (and killed).
 #
-# The line pin (`:1532:`) is intrinsically fragile: the discriminating sibling
+# The line pin (`:1616:`) is intrinsically fragile: the discriminating sibling
 # shares the identical mutant name (`replace - with + in dedent`), so the line
 # number — not the name — is the only discriminator, and it drifts whenever
 # unit_test_table.rs grows above the `dedent` fn. Re-pin via `cargo mutants
-# --list | rg dedent` whenever it moves (last re-pin: cute-dbt#131, 839→1532).
+# --list | rg dedent` whenever it moves (last re-pin: cute-dbt#143,
+# 1532→1616 — the stale `:1532:` pin surfaced exactly as designed, as a
+# false MISSED survivor in the #143 mutation run).
 # The mutation gate self-detects a stale pin: a drifted line stops excluding
 # the equivalent clamp, which then surfaces as a false survivor (a red gate) —
 # which is how the original `:839:` staleness was caught.
@@ -90,7 +95,44 @@ exclude_globs = []
 # stays OPEN as the exclusion tracker (restoration: lift if `dedent` is ever
 # refactored so the per-line slice start can legitimately differ from
 # min_indent). cute-dbt#128 is a literal duplicate of #129 (closed as dup).
+#
+# Classified-equivalent mutation (cute-dbt#143): `replace match guard
+# c == '\'' && chars.peek() == Some(&'\'') with false in split_quote_aware`
+# at unit_test_table.rs:847 (the doubled-single-quote escape arm). The arm
+# pushes BOTH quotes of a `''` and stays quoted; disabling it routes the
+# first `'` through the `Some(q)` close arm (push, quote=None) and the
+# second `'` through the `None` open arm (push, quote=Some) on the very next
+# iteration — no character lies between the two adjacent quotes, so the
+# accumulated text AND the final quote state are byte-identical on every
+# input. Verified by exhaustive brute force: all 21,845 strings of length
+# <= 7 over {', ',', 'a', 'b'} produce identical output (see the K12a note
+# in unit_test_table.rs tests). Line-pinned for the same self-detecting
+# staleness behavior as the dedent pin.
+# tracked: cute-dbt#129 — the open equivalent-mutant exclusion tracker
+# (scope widened from the dedent clamp to all three unit_test_table.rs
+# equivalents in #143).
+#
+# Classified-equivalent mutation (cute-dbt#143): `replace * with / in
+# single_quote_end` at unit_test_table.rs:1173 (`byte += 2 * '\''.len_utf8()`).
+# The multiplicand `'\''.len_utf8()` is the compile-time constant 1, so
+# `2 * 1 == 2 / 1 == 2` on every input — no distinguishing case exists. The
+# same-line sibling `* with +` IS discriminating (2 + 1 == 3) and is killed
+# by `k12h_single_quote_end_escape_byte_step_is_two_times_len`. The `/` in
+# the replacement text disambiguates within the line pin.
+# tracked: cute-dbt#129 — the open equivalent-mutant exclusion tracker.
+#
+# NOTE (cute-dbt#143): eight `+= -> *=` cursor mutations inside the
+# scan-loop helpers of unit_test_table.rs (scan_csv_matrix,
+# skip_line_comment, skip_block_comment, split_union_all_arms,
+# single_quote_end, tokenize_sql_words, consume_quoted_run) hang the test
+# that exercises the loop and previously degraded to inconclusive
+# TIMEOUTs under `cargo test`. Under the nextest harness above they are
+# genuinely CAUGHT (the hung test is terminated and marked failed), so
+# they are deliberately NOT excluded. See the K13 note at the end of
+# src/domain/unit_test_table.rs.
 exclude_re = [
   "delete ! in StateComparator::models_in_scope",
-  "unit_test_table\\.rs:1532:.*replace - with \\+ in dedent",
+  "unit_test_table\\.rs:1616:.*replace - with \\+ in dedent",
+  "unit_test_table\\.rs:847:.*replace match guard .* with false in split_quote_aware",
+  "unit_test_table\\.rs:1173:.*replace \\* with / in single_quote_end",
 ]

@@ -11,3 +11,19 @@
 
 [profile.default]
 default-filter = "all() - binary(bdd)"
+
+# Mutation-testing profile (cute-dbt#143): a mutant that breaks cursor
+# advancement in a scan-loop helper hangs some lib test forever; plain
+# `cargo test` then cannot exit to report the kill-test's failure, so the
+# suite verdict degrades to an inconclusive TIMEOUT. nextest runs
+# process-per-test and TERMINATES hung tests as failures, converting
+# those hangs into genuine CAUGHT verdicts.
+#
+# fixture_manifest_listed is additionally filtered here: it enumerates
+# committed files via `git ls-files`, and cargo-mutants scratch copies
+# carry no `.git` dir, so the gate fails there spuriously. This is a
+# profile-scoped filter, NOT a coverage exclusion — the gate still runs
+# in the default profile, lefthook, and CI.
+[profile.mutants]
+default-filter = "all() - binary(bdd) - binary(fixture_manifest_listed)"
+slow-timeout = { period = "5s", terminate-after = 1 }
