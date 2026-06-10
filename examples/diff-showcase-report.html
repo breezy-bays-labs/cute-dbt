@@ -7425,20 +7425,23 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
   // Kahn topological order relaxing longest path; each node's depth is its
   // column. The CTE engine guarantees an acyclic graph, but any node a cycle
   // would leave unseen simply keeps depth 0 (defensive, never throws).
+  // Every id-keyed map is prototype-less (Object.create(null)) so a CTE
+  // legitimately named `toString`/`constructor` can never collide with a
+  // built-in prototype property (gemini review, PR #192).
   function computeDepths(nodes, edges) {
-    var indeg = {}, adj = {};
+    var indeg = Object.create(null), adj = Object.create(null);
     nodes.forEach(function (n) { indeg[n.id] = 0; adj[n.id] = []; });
     edges.forEach(function (e) {
-      if (adj[e.from] && Object.prototype.hasOwnProperty.call(indeg, e.to)) {
+      if (adj[e.from] !== undefined && indeg[e.to] !== undefined) {
         adj[e.from].push(e.to);
         indeg[e.to] += 1;
       }
     });
-    var depth = {};
+    var depth = Object.create(null);
     nodes.forEach(function (n) { depth[n.id] = 0; });
     var queue = nodes.filter(function (n) { return indeg[n.id] === 0; })
       .map(function (n) { return n.id; });
-    var deg = {};
+    var deg = Object.create(null);
     nodes.forEach(function (n) { deg[n.id] = indeg[n.id]; });
     while (queue.length) {
       var u = queue.shift();
@@ -7453,12 +7456,12 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
 
   function layoutPositions(nodes, edges) {
     var depth = computeDepths(nodes, edges);
-    var cols = {};
+    var cols = Object.create(null);
     nodes.forEach(function (n) {
       var d = depth[n.id] || 0;
       (cols[d] = cols[d] || []).push(n.id);
     });
-    var colGap = 210, rowGap = 86, pos = {};
+    var colGap = 210, rowGap = 86, pos = Object.create(null);
     var maxRows = 1;
     Object.keys(cols).forEach(function (k) {
       if (cols[k].length > maxRows) maxRows = cols[k].length;
@@ -7623,13 +7626,17 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
     card.appendChild(id);
     card.appendChild(cardRow("role", "nc-role", pal.roleLabels[d.role] || d.role));
     card.appendChild(cardRow("name", "nc-name", d.label));
+    // Reveal BEFORE measuring (gemini review, PR #192): the chassis hides
+    // the card via opacity (so offsetWidth stays real today), but ordering
+    // the class first keeps the clamp correct even if the hide ever
+    // becomes display-based.
+    card.classList.add("is-visible");
     var rp = node.renderedPosition();
     var host = cy.container();
     var x = Math.min(rp.x + 14, host.clientWidth - card.offsetWidth - 8);
     var y = Math.min(rp.y + 12, host.clientHeight - card.offsetHeight - 8);
     card.style.left = Math.max(8, x) + "px";
     card.style.top = Math.max(8, y) + "px";
-    card.classList.add("is-visible");
   }
   function hideCard() {
     if (card) card.classList.remove("is-visible");
@@ -7686,9 +7693,10 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
       if (sel && sel.length) traceLineage(sel);
     }
 
-    // Re-fit after first paint — the host may have been [hidden] (0-sized)
-    // when the engine flip unhid it this same frame.
-    window.requestAnimationFrame(function () { if (cy) cy.fit(undefined, 28); });
+    // Re-fit after first paint — the host may have been hidden (0-sized)
+    // when the engine flip revealed it this same frame. `fit(28)` is the
+    // documented number-as-padding form (gemini review, PR #192).
+    window.requestAnimationFrame(function () { if (cy) cy.fit(28); });
   }
 
   // Public seam: interaction.js's renderDag() dispatcher drives render/
