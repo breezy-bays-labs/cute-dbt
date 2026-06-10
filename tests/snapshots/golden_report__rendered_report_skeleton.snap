@@ -3,7 +3,7 @@ source: tests/golden_report.rs
 expression: skeleton
 ---
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-style="soft" data-difflayout="auto">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">

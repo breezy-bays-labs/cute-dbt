@@ -49,6 +49,24 @@ pub const DATATABLES_CSS: &str = include_str!("../../assets/datatables-2.1.8.min
 /// `assets/mermaid-11.15.0.umd.min.js`.
 pub const MERMAID_JS: &str = include_str!("../../assets/mermaid-11.15.0.umd.min.js");
 
+/// The report's first-party chassis CSS (cute-dbt#177) — semantic token
+/// layer, the five `[data-theme]` blocks, the four `html[data-style]`
+/// direction packs, the density layer and the tokenized component rules,
+/// merged from the Claude Design Phase-1 handoff in its prescribed
+/// cascade order (tokens → styles → chrome → base) plus the cute-dbt
+/// reconciliation + PR-1 bridge layers.
+///
+/// First-party, NOT vendored: it lives at `templates/report.css` (beside
+/// the template it styles), deliberately outside `assets/` so the
+/// third-party provenance gate (`assets/MANIFEST.toml` +
+/// `tests/assets_manifest.rs`, which walk every file under `assets/`)
+/// never demands an upstream pin for code this repo authors. Its
+/// integrity gates are the banner-pin test (head banner + end-of-file
+/// sentinel, so a truncated copy fails) and the comment-balance test
+/// (the handoff's documented `*` + `/` porting bug cannot silently eat
+/// a rule) in this module's test block.
+pub const REPORT_CSS: &str = include_str!("../../templates/report.css");
+
 /// An empty `data:` URI favicon.
 ///
 /// Emitted as `<link rel="icon" href="data:,">`, this resolves the
@@ -85,5 +103,64 @@ mod tests {
     #[test]
     fn the_favicon_is_an_empty_data_uri() {
         assert_eq!(FAVICON_DATA_URI, "data:,");
+    }
+
+    #[test]
+    fn the_report_css_carries_its_banner_and_is_not_truncated() {
+        // First-party sibling of the vendored banner-pin test above:
+        // proves `include_str!` grabbed the chassis CSS at its declared
+        // version. The HEAD banner catches a renamed/replaced file; the
+        // END-OF-FILE sentinel catches a truncated copy (a head-only
+        // check would pass on a file cut off mid-rule).
+        assert!(
+            REPORT_CSS.contains("cute-dbt report chassis CSS v1"),
+            "report.css head banner",
+        );
+        assert!(
+            REPORT_CSS
+                .trim_end()
+                .ends_with("/* end of cute-dbt report chassis v1 (cute-dbt#177) */"),
+            "report.css end-of-file sentinel (truncation guard)",
+        );
+    }
+
+    #[test]
+    fn the_report_css_comments_are_balanced_and_keep_the_hidden_rule() {
+        // The handoff's documented porting bug (its §2.1): a `*`
+        // immediately followed by `/` INSIDE a CSS comment body closes
+        // the comment early and silently eats the next rule — it once
+        // ate `[hidden]{display:none!important}` and broke every
+        // Diff/File toggle and diff fold. Two structural guards:
+        //
+        // 1. Comment delimiters balance. The bug's signature is an
+        //    orphaned closer (`/* --fs-* / --pad-* /` written without
+        //    the inner spaces yields one opener, two closers).
+        let openers = REPORT_CSS.matches("/*").count();
+        let closers = REPORT_CSS.matches("*/").count();
+        assert_eq!(
+            openers, closers,
+            "CSS comment delimiters must balance — an excess `*/` means \
+             a comment body contains the closer sequence and has eaten \
+             the rules between (handoff §2.1 porting bug)",
+        );
+        // 2. The load-bearing rule the original bug ate survives
+        //    comment-stripping — i.e. it is live CSS, not swallowed
+        //    comment text.
+        let mut stripped = String::with_capacity(REPORT_CSS.len());
+        let mut rest = REPORT_CSS;
+        while let Some(open) = rest.find("/*") {
+            stripped.push_str(&rest[..open]);
+            let Some(close) = rest[open + 2..].find("*/") else {
+                rest = "";
+                break;
+            };
+            rest = &rest[open + 2 + close + 2..];
+        }
+        stripped.push_str(rest);
+        let normalized: String = stripped.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            normalized.contains("[hidden]{display:none!important;}"),
+            "the [hidden] override (cute-dbt#121) must survive comment-stripping",
+        );
     }
 }
