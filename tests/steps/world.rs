@@ -123,6 +123,15 @@ pub struct World {
     /// synthetic current/baseline pair (with the wire-shape injection the
     /// flat-domain serialization can't express) and run the subprocess.
     pub incremental_plan: IncrementalPlan,
+
+    /// cute-dbt#169: the coverage-check scenario accumulator. Filled by
+    /// the `coverage_checks.feature` Givens (which models declare a
+    /// `config.unique_key` and which uniqueness data tests exist), then
+    /// consumed by the self-contained `When I render the coverage report`
+    /// step to build + serialize a synthetic current/baseline pair (with
+    /// the flat-config + test-node wire-shape injection) and run the
+    /// subprocess. The Thens assert the embedded payload's `findings`.
+    pub coverage_plan: CoveragePlan,
 }
 
 /// A cute-dbt#145 incremental scenario plan — the models (each with its
@@ -153,6 +162,33 @@ pub struct IncrementalTest {
     pub mode: Option<bool>,
     /// Ordered `given` input strings (`this`, `ref('stg_orders')`, …).
     pub givens: Vec<String>,
+}
+
+/// A cute-dbt#169 coverage-check scenario plan — the models (each with
+/// an optional `config.unique_key` wire value) and the uniqueness data
+/// tests the scenario declares. Every declared model is modified vs the
+/// baseline (coverage scenarios always want the model in scope).
+#[derive(Debug, Default, Clone)]
+pub struct CoveragePlan {
+    /// `(bare model name, config.unique_key wire value)` per model —
+    /// `serde_json::Value::Null` when the scenario declares no key.
+    pub models: Vec<(String, serde_json::Value)>,
+    /// Uniqueness data tests the scenario declares.
+    pub tests: Vec<CoverageDataTest>,
+}
+
+/// One uniqueness data test in a [`CoveragePlan`].
+#[derive(Debug, Clone)]
+pub struct CoverageDataTest {
+    /// Bare target model name the test is attached to.
+    pub target: String,
+    /// `true` for `dbt_utils.unique_combination_of_columns`; `false`
+    /// for the dbt-core `unique` generic test.
+    pub combo: bool,
+    /// The asserted column set (one column for `unique`).
+    pub columns: Vec<String>,
+    /// `config.enabled` on the test node.
+    pub enabled: bool,
 }
 
 /// A cute-dbt#98 cell-diff scenario plan — the test name, fixture format,

@@ -230,6 +230,47 @@ pub fn serialize_to_tmp(manifest: &Manifest, name: &str) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------
+// Coverage-check builders (coverage_checks.feature — cute-dbt#169).
+// ---------------------------------------------------------------------
+
+/// Serialize a synthetic CURRENT manifest for the coverage-check
+/// scenarios, injecting the wire shapes the flat-domain serialization
+/// cannot express (the [`serialize_incremental_to_tmp`] precedent):
+///
+/// 1. **flat model `config`** — each `(bare, config)` entry rewrites the
+///    node's `config` to dbt's flat dict (carrying `materialized` and
+///    `unique_key` exactly as fusion serializes them: a string OR an
+///    array of strings — `DbtUniqueKey`, dbt-fusion `9977b6cb…`);
+/// 2. **generic-test nodes** — each `(node id, node json)` entry is
+///    spliced into `nodes` verbatim, in the real wire shape
+///    (`resource_type: "test"`, `attached_node`, `column_name`,
+///    `test_metadata`, flat `config.enabled`) that the domain types do
+///    not round-trip (domain `NodeConfig` serializes nested).
+#[must_use]
+pub fn serialize_coverage_to_tmp(
+    manifest: &Manifest,
+    name: &str,
+    model_configs: &[(&str, Value)],
+    test_nodes: &[(String, Value)],
+) -> PathBuf {
+    let mut value: Value = serde_json::to_value(manifest).expect("manifest serializes to Value");
+    for (bare, config) in model_configs {
+        let id = model_id(bare);
+        value["nodes"][id.as_str()]["config"] = config.clone();
+    }
+    for (id, node) in test_nodes {
+        value["nodes"][id.as_str()] = node.clone();
+    }
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.json"));
+    std::fs::write(
+        &path,
+        serde_json::to_string(&value).expect("injected manifest serializes"),
+    )
+    .expect("write coverage manifest to temp file");
+    path
+}
+
+// ---------------------------------------------------------------------
 // Incremental-model builders (incremental_models.feature — cute-dbt#145).
 // ---------------------------------------------------------------------
 
