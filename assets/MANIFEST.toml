@@ -65,3 +65,19 @@ path = "mermaid-11.15.0.umd.min.js"
 source = "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.min.js"
 sha256 = "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de"
 license = "MIT"
+
+# Cytoscape.js core ONLY (cute-dbt#180): the second graph engine behind the
+# report's Mermaid <-> Cytoscape picker. The minified UMD build, extracted
+# from `package/dist/cytoscape.min.js` inside the npm registry tarball below
+# (no CDN involved). The bundle ships with NO `sourceMappingURL` trailer
+# (verified at vendoring — nothing to strip). Deliberately NO layout
+# extension is vendored (no cytoscape-dagre, never the EPL-licensed
+# cytoscape-elk): the report's CTE DAG is laid out by the first-party
+# longest-path preset positions in templates/cyto-dag.js.
+[[asset]]
+name = "cytoscape"
+version = "3.30.2"
+path = "cytoscape-3.30.2.min.js"
+source = "https://registry.npmjs.org/cytoscape/-/cytoscape-3.30.2.tgz"
+sha256 = "83e8c54a6bec655bfd81df07df605649c268af69aeca67a5ea2da54ea42dac81"
+license = "MIT"

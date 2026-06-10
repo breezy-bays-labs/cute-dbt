@@ -43,7 +43,9 @@
   // The public localStorage key for the appearance state — a stable consumer
   // contract (cute-dbt#178 AC3), not a credential.
   var KEY = "cute-dbt.appearance.v1"; // gitleaks:allow — a public storage key name, no secret
-  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", diffstyle: "color", difflayout: "auto" };
+  // `engine` (cute-dbt#180) is the DAG-engine picker: "mermaid" (the static
+  // default) or "cytoscape" (the opt-in interactive engine).
+  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", diffstyle: "color", difflayout: "auto", engine: "mermaid" };
 
   // Read the persisted appearance, string-typed keys only. Any storage error
   // (file:// SecurityError, disabled storage) leaves the defaults intact.
@@ -54,11 +56,14 @@
     try {
       var p = JSON.parse(raw);
       if (p && typeof p === "object") {
-        ["theme", "style", "accent", "density", "diffstyle", "difflayout"].forEach(function (k) {
+        ["theme", "style", "accent", "density", "diffstyle", "difflayout", "engine"].forEach(function (k) {
           if (typeof p[k] === "string") pref[k] = p[k];
         });
       }
     } catch (e) { /* ignore — defaults hold */ }
+    // Coerce the engine into its closed vocabulary — an unknown persisted
+    // value must fall back to the static default, never reach the dispatcher.
+    if (pref.engine !== "cytoscape") pref.engine = "mermaid";
   }
   // Persist the current appearance. Swallows any storage error (zero-egress
   // in-memory fallback, mirrors interaction.js saveSettings).
@@ -120,6 +125,14 @@
     root.setAttribute("data-style", s);
     pref.style = s;
   }
+  // cute-dbt#180 — push the picker's engine to the render dispatcher
+  // (interaction.js owns the DAG; this engine just persists the choice).
+  // The caller follows up with rerenderDag() so the flip happens in place.
+  function applyEngine(e) {
+    var engine = e === "cytoscape" ? "cytoscape" : "mermaid";
+    pref.engine = engine;
+    if (typeof window.__cuteSetDagEngine === "function") window.__cuteSetDagEngine(engine);
+  }
 
   // Re-tint the DAG after a theme flip (the light/dark edge + anchor
   // variants live in interaction.js, which owns the legend + Mermaid).
@@ -147,6 +160,9 @@
     qsaForEach(".difflayout-seg button", function (b) {
       b.setAttribute("aria-pressed", b.getAttribute("data-difflayout") === pref.difflayout ? "true" : "false");
     });
+    qsaForEach(".engine-seg button", function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-engine") === pref.engine ? "true" : "false");
+    });
   }
 
   function wire() {
@@ -167,6 +183,12 @@
     });
     qsaForEach(".difflayout-seg button", function (b) {
       b.addEventListener("click", function () { applyDiffLayout(b.getAttribute("data-difflayout")); save(); syncControls(); });
+    });
+    // cute-dbt#180 — the DAG-engine picker. The swap is IN PLACE: push the
+    // engine to the dispatcher, persist, then rerenderDag() tears down the
+    // old engine and builds the new one. No reload.
+    qsaForEach(".engine-seg button", function (b) {
+      b.addEventListener("click", function () { applyEngine(b.getAttribute("data-engine")); save(); syncControls(); rerenderDag(); });
     });
   }
 
@@ -199,10 +221,17 @@
     applyDiffLayout(pref.difflayout);
     syncControls();
     wire();
-    // Re-tint the legend + Mermaid host once the theme's .dark class is on:
-    // interaction.js drew them on DOM-ready BEFORE this boot applied the
-    // theme, so the edge swatches would otherwise keep the light palette.
-    setTimeout(rerenderDag, 0);
+    // Re-tint the legend + the active DAG engine once the theme's .dark
+    // class is on: interaction.js drew them on DOM-ready BEFORE this boot
+    // applied the theme, so the edge swatches would otherwise keep the
+    // light palette. The engine apply rides the same deferred tick
+    // (cute-dbt#180): by then interaction.js's boot has installed
+    // __cuteSetDagEngine, so a persisted "cytoscape" choice flips the DAG
+    // in place right after the default Mermaid render.
+    setTimeout(function () {
+      applyEngine(pref.engine);
+      rerenderDag();
+    }, 0);
   }
 
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);

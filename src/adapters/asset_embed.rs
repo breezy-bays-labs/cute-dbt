@@ -3,8 +3,9 @@
 //!
 //! ## What this module embeds
 //!
-//! Five vendored assets — Sakura CSS, jQuery, `DataTables` (JS + CSS)
-//! and the Mermaid UMD bundle — are pulled in with [`include_str!`] so their
+//! Six vendored assets — Sakura CSS, jQuery, `DataTables` (JS + CSS),
+//! the Mermaid UMD bundle and the Cytoscape UMD bundle (cute-dbt#180) —
+//! are pulled in with [`include_str!`] so their
 //! bytes land in the binary's read-only data section. There is **no
 //! runtime asset directory and no `--assets-dir` flag**: the only way the
 //! bytes reach the report is inline interpolation by the askama renderer
@@ -49,6 +50,15 @@ pub const DATATABLES_CSS: &str = include_str!("../../assets/datatables-2.1.8.min
 /// `assets/mermaid-11.15.0.umd.min.js`.
 pub const MERMAID_JS: &str = include_str!("../../assets/mermaid-11.15.0.umd.min.js");
 
+/// Cytoscape 3.30.2 — the second graph engine (cute-dbt#180), behind the
+/// report's Mermaid ⇄ Cytoscape DAG-engine picker (Mermaid stays the
+/// static default). The minified **UMD** bundle (never ESM), core only:
+/// no layout extension is vendored (no `cytoscape-dagre`, never the
+/// EPL-licensed `cytoscape-elk`) — node positions come from the
+/// first-party preset layout in [`CYTO_DAG_JS`]. Vendored at
+/// `assets/cytoscape-3.30.2.min.js`; provenance in `assets/MANIFEST.toml`.
+pub const CYTOSCAPE_JS: &str = include_str!("../../assets/cytoscape-3.30.2.min.js");
+
 /// The report's first-party chassis CSS (cute-dbt#177) — semantic token
 /// layer, the five `[data-theme]` blocks, the four `html[data-style]`
 /// direction packs, the density layer and the tokenized component rules,
@@ -87,6 +97,21 @@ pub const INTERACTION_JS: &str = include_str!("../../templates/interaction.js");
 /// gates: the banner-pin + end-of-file sentinel test in this module.
 pub const THEME_JS: &str = include_str!("../../templates/theme.js");
 
+/// The report's first-party Cytoscape DAG engine (cute-dbt#180) — the
+/// opt-in interactive alternative behind the settings-panel engine
+/// picker: longest-path preset layout (no layout plugin), canvas-text
+/// labels (XSS-safe by construction), hover context card, and
+/// click-to-highlight lineage with dim-complement. Reads its palette
+/// through the `window.cuteDagPalette()` hook `interaction.js` exposes
+/// (the single `JOIN_COLORS_LIGHT`/`_DARK` source the
+/// edge-vocab-completeness CI gate greps), so the two engines can never
+/// drift apart on edge colors.
+///
+/// First-party, NOT vendored: lives at `templates/cyto-dag.js`.
+/// Integrity gates: the banner-pin + end-of-file sentinel test in this
+/// module.
+pub const CYTO_DAG_JS: &str = include_str!("../../templates/cyto-dag.js");
+
 /// An empty `data:` URI favicon.
 ///
 /// Emitted as `<link rel="icon" href="data:,">`, this resolves the
@@ -112,6 +137,16 @@ mod tests {
             "datatables js banner",
         );
         assert!(MERMAID_JS.contains("11.15.0"), "mermaid version string");
+        // Cytoscape: the head license banner + the embedded version string
+        // (`version:"3.30.2"` survives minification as a string literal).
+        assert!(
+            CYTOSCAPE_JS.contains("The Cytoscape Consortium"),
+            "cytoscape license banner",
+        );
+        assert!(
+            CYTOSCAPE_JS.contains("\"3.30.2\""),
+            "cytoscape version string",
+        );
         // DataTables CSS ships no banner comment; assert a DataTables-only
         // custom property is present.
         assert!(
@@ -179,6 +214,33 @@ mod tests {
         assert!(
             THEME_JS.contains("\"cute-dbt.appearance.v1\""),
             "theme.js persists under the cute-dbt.appearance.v1 key",
+        );
+    }
+
+    #[test]
+    fn the_cyto_dag_js_carries_its_banner_and_is_not_truncated() {
+        assert!(
+            CYTO_DAG_JS.contains("cute-dbt cytoscape DAG engine v1"),
+            "cyto-dag.js head banner",
+        );
+        assert!(
+            CYTO_DAG_JS
+                .trim_end()
+                .ends_with("/* end of cute-dbt cytoscape DAG engine v1 (cute-dbt#180) */"),
+            "cyto-dag.js end-of-file sentinel (truncation guard)",
+        );
+        // The engine reads its palette EXCLUSIVELY through the
+        // interaction.js hook — a local palette table would dodge the
+        // edge-vocab-completeness CI gate (which greps
+        // JOIN_COLORS_LIGHT/_DARK in templates/interaction.js only).
+        assert!(
+            CYTO_DAG_JS.contains("window.cuteDagPalette"),
+            "cyto-dag.js sources colors through the cuteDagPalette hook",
+        );
+        assert!(
+            !CYTO_DAG_JS.contains("var JOIN_COLORS"),
+            "cyto-dag.js must not declare its own edge palette table \
+             (it would dodge the edge-vocab-completeness gate)",
         );
     }
 
