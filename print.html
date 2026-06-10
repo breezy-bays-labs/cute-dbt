@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-d38760c2.js";
+            window.path_to_searchindex_js = "searchindex-a883dd5c.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-584848ec.js"></script>
+        <script src="toc-4c4e6604.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -816,6 +816,117 @@ TOML file.</p>
 <p>Add (or fill) a given row for each unexercised UNION arm’s input so every arm contributes at least one row, then extend <code>expect</code> with the row(s) that arm should emit. This finding’s evidence carries the per-arm input and a given-row sketch.</p>
 <h2 id="rationale-1"><a class="header" href="#rationale-1">Rationale</a></h2>
 <p>A UNION arm with no fixture rows contributes nothing to any unit test: its projection, casts, and filters run on zero rows, so a column mix-up or a dropped row in that arm ships silently. One given row per arm makes every branch’s contribution visible in the expected output.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="selecting--suppressing-checks"><a class="header" href="#selecting--suppressing-checks">Selecting &amp; suppressing checks</a></h1>
+<p>cute-dbt’s coverage checks (see <a href="#checks">Checks</a>) are tuned
+through the <code>[checks]</code> section of the optional <code>--config &lt;PATH&gt;</code> TOML
+file, plus an inline SQL pragma for model-adjacent acknowledgements.</p>
+<p>Everything on this page is <strong>display-layer only</strong>. Disabled and
+suppressed checks still evaluate and still participate in supersedes
+resolution — disabling or suppressing a more-specific check can never
+resurrect the finding it superseded. Selection <em>removes</em> findings from
+the report; suppression <em>keeps them and marks them</em>, carrying your
+reason into the report payload. The report itself stays stateless: no
+browser-local state, ever — what the team accepted (and why) lives in
+the repo, code-reviewed by construction.</p>
+<h2 id="selection-opt-out-and-opt-in-modes"><a class="header" href="#selection-opt-out-and-opt-in-modes">Selection: opt-out and opt-in modes</a></h2>
+<p>Two modes, sqlfluff-style. The default is <code>opt-out</code>: every registered
+check is displayed unless you disable it.</p>
+<pre><code class="language-toml">[checks]
+# mode = "opt-out" is the default
+disable = ["grain.unique-key-unbacked"]
+</code></pre>
+<p>If you would rather start from nothing and pick the checks you want —
+without authoring a huge opt-out list — use <code>opt-in</code>:</p>
+<pre><code class="language-toml">[checks]
+mode = "opt-in"
+enable = ["grain.*"]
+</code></pre>
+<p>Rules:</p>
+<ul>
+<li><code>disable</code> is only legal in <code>opt-out</code> mode; <code>enable</code> is only legal —
+and is required — in <code>opt-in</code> mode (<code>enable = []</code> is a valid,
+explicit “display no checks”).</li>
+<li>Entries are <strong>exact check ids</strong> (<code>grain.unique-key-unbacked</code>) or
+<strong>group globs</strong> of the form <code>&lt;group&gt;.*</code> (<code>grain.*</code>). No other
+pattern shapes are supported.</li>
+<li>Resolution is <strong>fail-closed</strong>: an unknown check id, an unknown group,
+or an unsupported pattern is a usage error (exit 2) before any report
+is written, with remediation text naming the registry’s known checks
+and groups. The registry ledger is
+<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/heuristics/registry.toml"><code>heuristics/registry.toml</code></a>.</li>
+</ul>
+<p>Disabling a check that supersedes another does <strong>not</strong> re-enable the
+superseded one on constructs the disabled check fired on — resolution
+already happened. That is deliberate: the superseding check exists
+because it reads those constructs better.</p>
+<h2 id="targeted-suppression-checkssuppress"><a class="header" href="#targeted-suppression-checkssuppress">Targeted suppression: <code>[[checks.suppress]]</code></a></h2>
+<p>Suppression is for <em>“we know and we don’t care”</em> — a real finding the
+team has consciously accepted. It is <strong>never</strong> for tool misreads: if a
+check is wrong about a construct, that is a detector bug or a missing
+supersedes edge — <a href="https://github.com/breezy-bays-labs/cute-dbt/issues">file an issue</a>
+instead of suppressing.</p>
+<pre><code class="language-toml">[[checks.suppress]]
+check = "grain.unique-key-unbacked"
+model = "fct_encounters_monthly"
+reason = "monthly grain duplicates accepted during the 2026 backfill"
+</code></pre>
+<ul>
+<li><code>check</code> takes an <strong>exact</strong> check id — no globs. Suppression is a
+precise statement; to hide a whole group, use <code>disable</code>.</li>
+<li><code>model</code> is the bare model name (<code>fct_encounters_monthly</code>) or the full
+node id (<code>model.healthcare_analytics.fct_encounters_monthly</code>).</li>
+<li><code>reason</code> is <strong>required</strong> and must be non-empty. A config entry lives
+far from the code it silences, so it must carry its own
+justification. The reason rides into the report payload with the
+finding, marked <code>suppressed</code> with <code>source = "config"</code>.</li>
+</ul>
+<p>A suppress entry whose <code>model</code> matches nothing in the current scope is
+inert (the model may simply not be in this report’s scope); an unknown
+<code>check</code> id is a fail-closed usage error like any other <code>[checks]</code>
+entry.</p>
+<h2 id="the-inline-pragma"><a class="header" href="#the-inline-pragma">The inline pragma</a></h2>
+<p>For an acknowledgement that should live next to the code it concerns,
+put a pragma comment in the model’s SQL file:</p>
+<pre><code class="language-sql">-- cute-dbt: ignore(grain.unique-key-unbacked, "known dupes during backfill")
+select ...
+</code></pre>
+<p>Grammar:</p>
+<pre><code class="language-text">-- cute-dbt: ignore(&lt;check-id&gt;)
+-- cute-dbt: ignore(&lt;check-id&gt;, "&lt;reason&gt;")
+</code></pre>
+<ul>
+<li>The pragma may appear on <strong>any line</strong> of the model file — a full-line
+comment or trailing after code (the sqlfluff <code>-- noqa</code> placement) —
+and applies <strong>model-wide</strong> (file-level granularity). Construct-level
+placement is not supported.</li>
+<li><code>&lt;check-id&gt;</code> is an exact check id; whitespace inside the parentheses
+is tolerated.</li>
+<li>The <code>reason</code> is <strong>optional</strong> here (unlike <code>[[checks.suppress]]</code>): the
+pragma sits beside the code it silences, so the surrounding source
+and its review history are the justification surface. When present it
+must be double-quoted, and it rides into the payload exactly like a
+config reason (<code>source = "pragma"</code>).</li>
+<li>cute-dbt reads the pragma from the manifest’s <code>raw_code</code> (the
+verbatim authored model file), so it works in both scope modes with
+no <code>--project-root</code> required.</li>
+<li>A pragma naming an <strong>unknown check id is not an error</strong> — it warns on
+stderr and has no effect. Source text warns; config fails closed.</li>
+</ul>
+<h2 id="what-suppressed-findings-look-like"><a class="header" href="#what-suppressed-findings-look-like">What suppressed findings look like</a></h2>
+<p>A suppressed finding keeps its verdict (<code>covered</code> / <code>uncovered</code> /
+<code>unknown</code>), its evidence, and its recommendation — it is simply marked:</p>
+<pre><code class="language-json">{
+  "check": "grain.unique-key-unbacked",
+  "verdict": { "status": "uncovered" },
+  "suppressed": {
+    "source": "config",
+    "reason": "monthly grain duplicates accepted during the 2026 backfill"
+  }
+}
+</code></pre>
+<p>The report’s findings surface renders suppressed findings as a
+collapsed, acknowledged set rather than active recommendations.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="examples"><a class="header" href="#examples">Examples</a></h1>
 <p>cute-dbt commits rendered example reports under
