@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-11b6e832.js";
+            window.path_to_searchindex_js = "searchindex-2ba07985.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-d338c274.js"></script>
+        <script src="toc-7388fac0.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -739,6 +739,48 @@ property; see <a href="#zero-egress--the-privacy-property">zero egress</a>.</p>
 <h2 id="configurable-report"><a class="header" href="#configurable-report">Configurable report</a></h2>
 <p><code>--config &lt;PATH&gt;</code> supplies a custom report title + subtitle via a small
 TOML file.</p>
+<div style="break-before: page; page-break-before: always;"></div><!-- GENERATED — do not edit. Source of truth: the `heuristics!` block in src/domain/checks.rs. Regenerate: GEN_HEURISTICS_LEDGER=1 cargo test --test heuristics_ledger -->
+<h1 id="checks"><a class="header" href="#checks">Checks</a></h1>
+<p>The coverage-intelligence check registry. Each check pairs a construct trigger with a satisfaction predicate and reports a per-construct verdict: covered, uncovered, or unknown.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Check</th><th>Name</th><th>Tier</th><th>Instrument</th></tr>
+</thead>
+<tbody>
+<tr><td><a href="#grainunique-key-unbacked"><code>grain.unique-key-unbacked</code></a></td><td>Unique key without a uniqueness test</td><td><code>total</code></td><td><code>data-test</code></td></tr>
+</tbody>
+</table>
+</div>
+<div style="break-before: page; page-break-before: always;"></div><!-- GENERATED — do not edit. Source of truth: the `heuristics!` block in src/domain/checks.rs. Regenerate: GEN_HEURISTICS_LEDGER=1 cargo test --test heuristics_ledger -->
+<h1 id="grainunique-key-unbacked"><a class="header" href="#grainunique-key-unbacked">grain.unique-key-unbacked</a></h1>
+<p><strong>Unique key without a uniqueness test</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th></th></tr>
+</thead>
+<tbody>
+<tr><td>Group</td><td><code>grain</code></td></tr>
+<tr><td>Tier</td><td><code>total</code></td></tr>
+<tr><td>Instrument</td><td><code>data-test</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="conditions"><a class="header" href="#conditions">Conditions</a></h2>
+<ul>
+<li>the model declares config.unique_key (a column name or a list of columns)</li>
+<li>no enabled uniqueness data test (unique, or a composite unique_combination_of_columns) attached to the model has a column set that is a subset of the declared key</li>
+</ul>
+<h2 id="exclusions"><a class="header" href="#exclusions">Exclusions</a></h2>
+<ul>
+<li>a unique_key value that is not a literal column name / list of column names is reported UNKNOWN, never UNCOVERED (the declared grain is not statically recoverable)</li>
+<li>a uniqueness test whose column set is WIDER than the key does not satisfy the check (uniqueness of a superset does not imply uniqueness at the declared grain)</li>
+</ul>
+<h2 id="recommendation"><a class="header" href="#recommendation">Recommendation</a></h2>
+<p>Add a uniqueness data test at the declared grain: <code>unique</code> on a single-column key, or <code>dbt_utils.unique_combination_of_columns</code> over the composite key columns.</p>
+<h2 id="rationale"><a class="header" href="#rationale">Rationale</a></h2>
+<p>Incremental merge / delete+insert semantics silently depend on the declared unique_key actually being unique — a duplicate key corrupts the merge with no test to catch it. Declaring a grain without a test at that grain is an unverified load-bearing assumption.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="examples"><a class="header" href="#examples">Examples</a></h1>
 <p>cute-dbt commits rendered example reports under
