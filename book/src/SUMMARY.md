@@ -14,6 +14,7 @@
 - [Checks](./checks/index.md)
   - [grain.unique-key-unbacked](./checks/grain.unique-key-unbacked.md)
   - [union.arm-coverage](./checks/union.arm-coverage.md)
+- [Selecting & suppressing checks](./check-selection.md)
 - [Examples](./examples.md)
 - [Release discipline](./release-discipline.md)
 

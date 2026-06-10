@@ -169,12 +169,15 @@ remediation path, conflate operator-misuse with input-data failures, and
 break the symmetry the two-stage fail-closed contract is built on.
 
 The config loader lives in `src/adapters/config_reader.rs` and returns a
-typed `ConfigLoadError { Io | Toml }` that the cli value-parser fn
-stringifies for clap. The domain (`src/domain/config.rs`) holds only the
-POD `AnalysisConfig` struct — no I/O, no parser dependency. The v0.1
-surface is two optional keys under `[report]` (`title`, `subtitle`);
-additional sections are additive POD additions with `#[serde(default)]`
-in v0.2+.
+typed `ConfigLoadError { Io | Toml | Checks }` that the cli value-parser
+fn stringifies for clap. The domain (`src/domain/config.rs` +
+`src/domain/check_config.rs`) holds only POD structs — no I/O, no parser
+dependency. The surface grows by additive `#[serde(default)]` POD
+sections: `[report]` (`title`, `subtitle`; PR 14) and `[checks]`
+(selection modes + `[[checks.suppress]]`, cute-dbt#171 — the section is
+additionally validated fail-closed against the check registry at load
+time, so an unknown check id/group glob or an illegal mode/field
+combination is the same exit-2 usage error as a TOML syntax error).
 
 Locked policy consequences:
 
