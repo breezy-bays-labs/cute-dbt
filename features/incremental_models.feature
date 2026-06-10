@@ -49,7 +49,7 @@ Feature: cute-dbt surfaces incremental-model unit-test semantics
     And the unit test "test_order_events_incremental" overrides is_incremental to true
     When I render the incremental report
     Then the section for "test_order_events_incremental" marks the test as exercising the incremental branch
-    And the section for "test_order_events_incremental" explains that Expected is the rows merged or inserted, not the final table
+    And the section for "test_order_events_incremental" explains the incremental expect semantics
 
   Scenario: A full-refresh-mode unit test shows a full-refresh badge and no expect-semantics tooltip
     Given the model "order_events" is materialized "incremental"
@@ -58,7 +58,7 @@ Feature: cute-dbt surfaces incremental-model unit-test semantics
     And the unit test "test_order_events_full_refresh" overrides is_incremental to false
     When I render the incremental report
     Then the section for "test_order_events_full_refresh" marks the test as exercising the full-refresh branch
-    And the section for "test_order_events_full_refresh" does not explain the merged-rows expect semantics
+    And the section for "test_order_events_full_refresh" does not explain the incremental expect semantics
 
   Scenario: A given input of `this` is marked as the prior model state
     Given the model "order_events" is materialized "incremental"
@@ -76,4 +76,4 @@ Feature: cute-dbt surfaces incremental-model unit-test semantics
     And "orders" declares unit test "test_orders"
     When I render the incremental report
     Then the section for "test_orders" does not mark the test with an incremental or full-refresh branch
-    And the section for "test_orders" does not explain the merged-rows expect semantics
+    And the section for "test_orders" does not explain the incremental expect semantics

@@ -1454,9 +1454,9 @@ th.col-removed { text-decoration: line-through; text-decoration-color: rgba(190,
         .addClass("mode-badge " + (incrementalMode ? "mode-incremental" : "mode-full-refresh"))
         .text(incrementalMode ? "incremental branch" : "full-refresh branch"));
       if (incrementalMode) {
-        var tip = "For an incremental-mode unit test, Expected is the result of the "
-          + "materialization — the rows that will be merged or inserted — "
-          + "not the resulting model itself (the final table after the merge).";
+        var tip = "Expected is the output of the model's compiled SELECT on the "
+          + "incremental branch — the rows the configured incremental strategy "
+          + "will apply to the table — not the table's final state after the run.";
         // A focusable <button> carrying a CSS-rendered bubble shown on hover
         // AND keyboard focus — a native `title` is hover-delayed, keyboard-
         // unreachable, and frequently never paints (cute-dbt#146 review). The
