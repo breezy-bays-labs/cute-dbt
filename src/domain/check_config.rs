@@ -29,8 +29,9 @@
 //! ## The display-layer invariant (cute-dbt#186, extended here)
 //!
 //! Selection and suppression run strictly **after**
-//! [`resolve_supersedes`] — [`apply_check_policy`] is the
-//! `filter_for_display` stage grown a config surface. Disabled checks
+//! [`resolve_supersedes`](crate::domain::checks::resolve_supersedes) —
+//! [`apply_check_policy`] is the `filter_for_display` stage grown a
+//! config surface. Disabled checks
 //! still evaluate and still supersede; suppressing or disabling a
 //! superseding check can never resurrect the finding it superseded.
 //! Disabled checks' findings are *removed* from the payload; suppressed
