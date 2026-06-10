@@ -313,6 +313,42 @@ pub struct Finding<Id: CheckId> {
     /// nothing to recommend). Omitted from JSON when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recommendation: Option<String>,
+    /// An operator acknowledgement (cute-dbt#171), set by the
+    /// display-layer policy stage (`apply_check_policy`) — never by a
+    /// detector or by supersedes resolution. Omitted from JSON when
+    /// `None` so pre-#171 payloads (and the committed goldens) stay
+    /// byte-stable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppressed: Option<Suppression>,
+}
+
+/// Where a suppression came from (cute-dbt#171) — a `[[checks.suppress]]`
+/// config entry or an inline `-- cute-dbt: ignore(...)` SQL pragma.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuppressionSource {
+    /// A `[[checks.suppress]]` entry in the `--config` TOML.
+    Config,
+    /// An inline `-- cute-dbt: ignore(check-id, "reason")` pragma in the
+    /// model's raw SQL.
+    Pragma,
+}
+
+/// An operator acknowledgement attached to a finding (cute-dbt#171).
+///
+/// Display-layer ONLY: a suppressed finding was still evaluated and
+/// still participated in supersedes resolution — the mark is applied by
+/// `apply_check_policy` (the grown [`filter_for_display`] stage) strictly
+/// after [`resolve_supersedes`]. The reason rides into the payload so the
+/// report can render the acknowledgement without browser-local state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Suppression {
+    /// Config entry vs inline pragma.
+    pub source: SuppressionSource,
+    /// The acknowledgement reason — required (`Some`) for config
+    /// entries, optional for pragmas. Omitted from JSON when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Serialize a [`CheckId`] as its canonical dotted id string.
@@ -346,6 +382,7 @@ impl<Id: CheckId> Finding<Id> {
             verdict,
             evidence,
             recommendation,
+            suppressed: None,
         }
     }
 }
