@@ -114,35 +114,15 @@ fn parse_unified_diff(s: &str) -> Result<PrDiff, String> {
             }
             in_hunk = false;
         }
-        // Header block (in_hunk == false). `--- ` (old-side path) is ignored;
-        // `+++ ` starts a new file; `rename from`/`rename to` pair into a
-        // RenamePair (cute-dbt#80). `index`, mode, `similarity …`, blank →
-        // ignored.
-        if line.starts_with("--- ") {
+        // Header block (in_hunk == false). `--- `/`+++ ` are the path
+        // headers; `rename from`/`rename to` pair into a RenamePair
+        // (cute-dbt#80). `index`, mode, `similarity …`, blank → ignored.
+        if consume_path_header(line, &mut current, &mut files) {
             saw_structure = true;
             continue;
         }
-        if let Some(rest) = line.strip_prefix("+++ ") {
+        if consume_rename_header(line, &mut pending_rename_from, &mut renames) {
             saw_structure = true;
-            start_file(rest, &mut current, &mut files);
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("rename from ") {
-            saw_structure = true;
-            pending_rename_from = Some(rest.trim_end().to_owned());
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("rename to ") {
-            saw_structure = true;
-            // A stray `rename to` with no pending `rename from` (never
-            // emitted by git) is ignored rather than erroring — the same
-            // lenience as other unrecognized header lines.
-            if let Some(from) = pending_rename_from.take() {
-                renames.push(RenamePair {
-                    from,
-                    to: rest.trim_end().to_owned(),
-                });
-            }
         }
     }
     flush(&mut current, &mut files);
@@ -167,6 +147,54 @@ fn open_hunk(
         f.hunks.push(hunk);
     }
     Ok(())
+}
+
+/// Classify one header-territory path-header line (`in_hunk == false`).
+/// A `--- ` (old-side path) is consumed as a no-op; a `+++ ` starts a new
+/// file via [`start_file`]. Returns `true` when the line was one of the
+/// two (the caller marks `saw_structure` and moves on); `false` for any
+/// other header line.
+fn consume_path_header(
+    line: &str,
+    current: &mut Option<FileHunks>,
+    files: &mut Vec<FileHunks>,
+) -> bool {
+    if line.starts_with("--- ") {
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix("+++ ") {
+        start_file(rest, current, files);
+        return true;
+    }
+    false
+}
+
+/// Classify one header-territory rename-header line (cute-dbt#80,
+/// `in_hunk == false`). `rename from <old>` stages the old path;
+/// `rename to <new>` pairs it into a [`RenamePair`]. A stray `rename to`
+/// with no pending `rename from` (never emitted by git) is consumed but
+/// ignored — the same lenience as other unrecognized header lines.
+/// Returns `true` when the line was one of the two (the caller marks
+/// `saw_structure`); `false` otherwise.
+fn consume_rename_header(
+    line: &str,
+    pending_from: &mut Option<String>,
+    renames: &mut Vec<RenamePair>,
+) -> bool {
+    if let Some(rest) = line.strip_prefix("rename from ") {
+        *pending_from = Some(rest.trim_end().to_owned());
+        return true;
+    }
+    if let Some(rest) = line.strip_prefix("rename to ") {
+        if let Some(from) = pending_from.take() {
+            renames.push(RenamePair {
+                from,
+                to: rest.trim_end().to_owned(),
+            });
+        }
+        return true;
+    }
+    false
 }
 
 /// Flush the in-progress file and begin a new one from a `+++ ` header
