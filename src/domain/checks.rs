@@ -68,7 +68,7 @@
 //!
 //! Domain purity: `std` + `serde` (+ `serde_json::Value` passthrough)
 //! only — no I/O, no parser deps. Checks stay thin pattern-matchers over
-//! already-parsed manifest + CteGraph facts (the `StateModifier`
+//! already-parsed manifest + [`CteGraph`] facts (the `StateModifier`
 //! precedent: plain functions until ≥2 rules force a seam).
 
 use std::collections::{BTreeMap, BTreeSet};
