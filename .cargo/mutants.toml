@@ -40,6 +40,10 @@ examine_globs = [
   "src/domain/state.rs",
   "src/domain/preflight.rs",
   "src/domain/pr_diff.rs",
+  # path.rs joined at cute-dbt#183 — it was extracted from scope.rs at
+  # cute-dbt#96 with its dedicated kill suite (tests/path_matching.rs)
+  # but never re-added to the focused scope after the split.
+  "src/domain/path.rs",
   "src/domain/scope.rs",
   "src/domain/cell_diff.rs",
   "src/domain/unit_test_table.rs",
