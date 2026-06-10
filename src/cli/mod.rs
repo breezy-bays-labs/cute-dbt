@@ -829,7 +829,7 @@ mod tests {
                 title: None,
                 subtitle: Some("PR 1234".to_owned()),
             },
-            checks: Default::default(),
+            checks: crate::domain::ChecksConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, DEFAULT_REPORT_TITLE);
@@ -844,7 +844,7 @@ mod tests {
                 title: Some("Q3 review".to_owned()),
                 subtitle: Some("PR 1234 / staging diff".to_owned()),
             },
-            checks: Default::default(),
+            checks: crate::domain::ChecksConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, "Q3 review");
@@ -859,7 +859,7 @@ mod tests {
                 title: Some("title-only".to_owned()),
                 subtitle: None,
             },
-            checks: Default::default(),
+            checks: crate::domain::ChecksConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, "title-only");

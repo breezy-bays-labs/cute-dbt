@@ -599,8 +599,7 @@ pub fn apply_check_policy<Id: CheckId>(
 mod tests {
     use super::*;
     use crate::domain::checks::{
-        CheckContext, HeuristicId, HeuristicSpec, Instrument, Tier, Verdict, evaluate_all,
-        resolve_supersedes,
+        CheckContext, HeuristicId, HeuristicSpec, Instrument, Tier, Verdict, resolve_supersedes,
     };
     use crate::domain::manifest::NodeId;
 
