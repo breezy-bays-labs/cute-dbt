@@ -133,6 +133,45 @@ impl DependsOn {
     }
 }
 
+/// A model's typed `config.unique_key` (cute-dbt#169).
+///
+/// Mirrors dbt-fusion's `DbtUniqueKey` — an untagged
+/// `Single(String) | Multiple(Vec<String>)` enum, so the wire value is a
+/// JSON string **or** an array of strings
+/// (`dbt-schemas/src/schemas/common.rs`, dbt-fusion
+/// `9977b6cbb1b761065536300037560d8e3c037011`; the manifest node config
+/// carries it as `Option<DbtUniqueKey>` in
+/// `project/configs/model_config.rs`). cute-dbt adds the tolerant
+/// [`UniqueKey::Unrecognized`] arm for a present-but-unparseable value
+/// (ADR-5: one odd config value must never fail anything; the check
+/// engine maps it to an honest `UNKNOWN` verdict instead).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UniqueKey {
+    /// `unique_key: "order_id"` — a single column.
+    Single(String),
+    /// `unique_key: ["customer_id", "order_date"]` — a composite key.
+    Multiple(Vec<String>),
+    /// Present but not a non-empty string / array-of-strings (e.g. a
+    /// number, an object, or a mixed-type array). The declared grain is
+    /// not statically recoverable.
+    Unrecognized,
+}
+
+impl UniqueKey {
+    /// The declared key columns, or `None` when the value shape is
+    /// [`UniqueKey::Unrecognized`]. A composite key returns every column
+    /// (the set is the grain — callers must never flatten it into
+    /// per-column claims).
+    #[must_use]
+    pub fn columns(&self) -> Option<Vec<&str>> {
+        match self {
+            Self::Single(column) => Some(vec![column.as_str()]),
+            Self::Multiple(columns) => Some(columns.iter().map(String::as_str).collect()),
+            Self::Unrecognized => None,
+        }
+    }
+}
+
 /// dbt's per-node `config` sub-object — the v0.2 `state:modified`
 /// sub-selector inputs (cute-dbt#17).
 ///
@@ -194,6 +233,43 @@ impl NodeConfig {
     #[must_use]
     pub fn materialized(&self) -> Option<&str> {
         self.config.get("materialized").and_then(Value::as_str)
+    }
+
+    /// `config.unique_key` — the model's declared grain, typed
+    /// (cute-dbt#169). A pure POD read over the config dict, mirroring
+    /// the [`Self::materialized`] accessor.
+    ///
+    /// Wire shapes (verified against dbt-fusion `DbtUniqueKey`,
+    /// `9977b6cbb1b761065536300037560d8e3c037011`, and the committed
+    /// `playground-current.json` fixture which carries both):
+    ///
+    /// - absent key or explicit JSON `null` (fusion null-fills unset
+    ///   `Option` fields) ⇒ `None` — no grain declared;
+    /// - a non-empty string ⇒ [`UniqueKey::Single`];
+    /// - an array of strings ⇒ [`UniqueKey::Multiple`] (kept composite —
+    ///   the set is the grain);
+    /// - anything else (empty string, mixed-type array, number, object)
+    ///   ⇒ [`UniqueKey::Unrecognized`] — present but not statically
+    ///   recoverable, never an error (ADR-5).
+    #[must_use]
+    pub fn unique_key(&self) -> Option<UniqueKey> {
+        match self.config.get("unique_key") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if !s.trim().is_empty() => Some(UniqueKey::Single(s.clone())),
+            Some(Value::Array(items)) => {
+                let columns: Vec<String> = items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+                if columns.len() == items.len() {
+                    Some(UniqueKey::Multiple(columns))
+                } else {
+                    Some(UniqueKey::Unrecognized)
+                }
+            }
+            Some(_) => Some(UniqueKey::Unrecognized),
+        }
     }
 }
 
@@ -794,6 +870,86 @@ mod tests {
         let mut bad = BTreeMap::new();
         bad.insert("materialized".to_owned(), Value::from(42));
         assert_eq!(NodeConfig::new(bad, false).materialized(), None);
+    }
+
+    // ----- cute-dbt#169 — NodeConfig::unique_key typed accessor -----
+
+    fn config_with_unique_key(value: Value) -> NodeConfig {
+        let mut map = BTreeMap::new();
+        map.insert("unique_key".to_owned(), value);
+        NodeConfig::new(map, false)
+    }
+
+    #[test]
+    fn unique_key_absent_is_none() {
+        assert_eq!(NodeConfig::default().unique_key(), None);
+    }
+
+    #[test]
+    fn unique_key_explicit_null_is_none() {
+        // fusion null-fills unset Option fields — an explicit JSON null is
+        // the ABSENT shape, not an unrecognized one (cute-dbt#145 lesson).
+        assert_eq!(config_with_unique_key(Value::Null).unique_key(), None);
+    }
+
+    #[test]
+    fn unique_key_string_is_single() {
+        assert_eq!(
+            config_with_unique_key(Value::from("order_id")).unique_key(),
+            Some(UniqueKey::Single("order_id".to_owned()))
+        );
+    }
+
+    #[test]
+    fn unique_key_string_array_is_multiple_kept_composite() {
+        let key = config_with_unique_key(serde_json::json!(["customer_id", "order_date"]))
+            .unique_key()
+            .expect("array of strings parses");
+        assert_eq!(
+            key,
+            UniqueKey::Multiple(vec!["customer_id".to_owned(), "order_date".to_owned()])
+        );
+        // columns() exposes the WHOLE composite set, in declared order.
+        assert_eq!(key.columns(), Some(vec!["customer_id", "order_date"]));
+    }
+
+    #[test]
+    fn unique_key_unrecognized_shapes() {
+        // Number, object, mixed-type array, empty string — present but
+        // not a statically recoverable grain (never an error, ADR-5).
+        for value in [
+            Value::from(42),
+            serde_json::json!({ "column": "id" }),
+            serde_json::json!(["order_id", 7]),
+            Value::from(""),
+            Value::from("   "),
+        ] {
+            assert_eq!(
+                config_with_unique_key(value.clone()).unique_key(),
+                Some(UniqueKey::Unrecognized),
+                "value {value} should be Unrecognized"
+            );
+        }
+        assert_eq!(UniqueKey::Unrecognized.columns(), None);
+    }
+
+    #[test]
+    fn unique_key_empty_array_is_multiple_with_no_columns() {
+        // Faithful to the wire: [] parses as Multiple([]); the check
+        // engine treats an empty column list as not statically decidable.
+        let key = config_with_unique_key(serde_json::json!([]))
+            .unique_key()
+            .expect("empty array still parses");
+        assert_eq!(key, UniqueKey::Multiple(Vec::new()));
+        assert_eq!(key.columns(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn unique_key_single_columns_is_one_element() {
+        assert_eq!(
+            UniqueKey::Single("encounter_id".to_owned()).columns(),
+            Some(vec!["encounter_id"])
+        );
     }
 
     #[test]
