@@ -62,7 +62,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::adapters::asset_embed::{
-    DATATABLES_CSS, DATATABLES_JS, FAVICON_DATA_URI, JQUERY_JS, MERMAID_JS, REPORT_CSS, SAKURA_CSS,
+    DATATABLES_CSS, DATATABLES_JS, FAVICON_DATA_URI, INTERACTION_JS, JQUERY_JS, MERMAID_JS,
+    REPORT_CSS, SAKURA_CSS, THEME_JS,
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
@@ -650,6 +651,16 @@ struct ReportTemplate<'a> {
     jquery_js: &'a str,
     datatables_js: &'a str,
     mermaid_js: &'a str,
+    /// First-party report interaction engine (cute-dbt#178) — the
+    /// model/test selectors, DAG, unified + split diff renderers, fixture
+    /// grids and settings wiring that fill the template's engine
+    /// `<script>` block. [`INTERACTION_JS`], not a vendored asset.
+    interaction_js: &'a str,
+    /// First-party appearance engine (cute-dbt#178) — theme / style /
+    /// accent / density / diff-style / diff-layout + `localStorage`
+    /// persistence + the `DataTables` dark sync. [`THEME_JS`], not a
+    /// vendored asset.
+    theme_js: &'a str,
     favicon_data_uri: &'a str,
     /// Report title — substituted into both `<title>` (head) and
     /// `<h1>` (header). Resolved by the cli layer from
@@ -929,6 +940,8 @@ pub fn render_report_with_externals(
         jquery_js: JQUERY_JS,
         datatables_js: DATATABLES_JS,
         mermaid_js: MERMAID_JS,
+        interaction_js: INTERACTION_JS,
+        theme_js: THEME_JS,
         favicon_data_uri: FAVICON_DATA_URI,
         report_title,
         report_subtitle,

@@ -1288,6 +1288,16 @@ fn model_sql_section_defaults_to_diff_and_toggles_to_raw() {
         ),
         "the Raw↔Diff toggle is present in the Model SQL section",
     );
+    // cute-dbt#178 — the code-card header names the model file (the DAG
+    // terminal label, `<name>.sql`) and hosts the toggle.
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .code-filename').textContent.trim()"
+        ),
+        "dim_a.sql",
+        "the Model-SQL code-card header shows the model's file name",
+    );
     assert!(
         !eval_bool(
             &tab,
@@ -3067,6 +3077,238 @@ fn settings_persist_across_reload_where_supported() {
     let _ = tab.close(true);
 }
 
+// --- cute-dbt#178: appearance settings + unified/split diff layouts ---
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn appearance_settings_flip_theme_density_diff_layout_and_persist() {
+    // The cute-dbt#178 appearance engine (theme.js): the settings panel's
+    // static controls flip the html-level appearance attributes the chassis
+    // CSS keys on, DataTables dark mode syncs via html.dark, the diff-layout
+    // seg-radio switches the rendered unified <-> split views, and the whole
+    // appearance state persists under cute-dbt.appearance.v1.
+    let diff = BlockDiff {
+        lines: vec![
+            dl(DiffLineKind::Context, "select id", None),
+            dl(DiffLineKind::Removed, "from t", Some((5, 6))),
+            dl(DiffLineKind::Added, "from u", Some((5, 6))),
+        ],
+    };
+    let url = render_pr_diff_with_sql_diffs(
+        "headless_appearance.html",
+        vec![model_node_with_raw("model.shop.dim_a", "select id\nfrom u")],
+        vec![("unit_test.shop.dim_a.t", unit_test("t", "dim_a"))],
+        &["model.shop.dim_a"],
+        vec![("model.shop.dim_a", diff)],
+    );
+    // Wide launch window: the explicit-Split media floor is 760px, so the
+    // layout flip below must not be at the responsive fallback's mercy.
+    let browser = launch_browser_sized(Some((1280, 900)));
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    const ROOT: &str = "document.documentElement";
+
+    // ===== boot defaults: the template attrs + theme.js boot =====
+    assert_eq!(
+        eval_string(&tab, &format!("{ROOT}.getAttribute('data-style')")),
+        "soft",
+        "the default style pack is soft (template attr, re-applied at boot)",
+    );
+    // Boot follows the HOST's prefers-color-scheme (headless Chrome inherits
+    // the OS preference, so the exact theme is platform-dependent — the #158
+    // lesson: never pin a platform value). Assert the scheme-FOLLOWING
+    // contract instead, then pin a known state via the Light chip.
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "{ROOT}.getAttribute('data-theme') === \
+                 ((window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light')"
+            )
+        ),
+        "boot applies the prefers-color-scheme default (saved -> scheme -> light)",
+    );
+
+    // ===== theme chip: [data-theme] flips + DataTables dark sync =====
+    let _ = eval(&tab, "document.querySelector('.settings-cog').click()");
+    let _ = eval(
+        &tab,
+        "document.querySelector('.theme-chip[data-theme-id=\"light\"]').click()",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{ROOT}.getAttribute('data-theme')")),
+        "light",
+        "clicking the Light chip sets html[data-theme=light]",
+    );
+    assert!(
+        !eval_bool(&tab, &format!("{ROOT}.classList.contains('dark')")),
+        "no html.dark class on the light theme",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.theme-chip[data-theme-id=\"dark\"]').click()",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{ROOT}.getAttribute('data-theme')")),
+        "dark",
+        "clicking the Dark chip sets html[data-theme=dark]",
+    );
+    assert!(
+        eval_bool(&tab, &format!("{ROOT}.classList.contains('dark')")),
+        "the dark theme toggles html.dark — the DataTables dark-mode sync lever",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.theme-chip[data-theme-id=\"dark\"]').getAttribute('aria-pressed')"
+        ),
+        "true",
+        "the active theme chip reports aria-pressed=true",
+    );
+
+    // ===== density seg-radio: [data-density] =====
+    let _ = eval(
+        &tab,
+        "document.querySelector('.density-seg button[data-density=\"compact\"]').click()",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{ROOT}.getAttribute('data-density')")),
+        "compact",
+        "clicking Compact sets html[data-density=compact]",
+    );
+
+    // ===== diff layout: unified <-> split over the SAME rendered diff =====
+    // Both views are emitted into the Model-SQL diff <pre>; CSS shows one.
+    const UNIFIED_DISPLAY: &str = "getComputedStyle(document.querySelector('.model-sql .sql-diff-view .diff-unified')).display";
+    const SPLIT_DISPLAY: &str =
+        "getComputedStyle(document.querySelector('.model-sql .sql-diff-view .diff-split')).display";
+    let _ = eval(
+        &tab,
+        "document.querySelector('.difflayout-seg button[data-difflayout=\"unified\"]').click()",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{ROOT}.getAttribute('data-difflayout')")),
+        "unified",
+        "clicking Unified sets html[data-difflayout=unified]",
+    );
+    assert_ne!(
+        eval_string(&tab, UNIFIED_DISPLAY),
+        "none",
+        "Unified layout shows the unified view",
+    );
+    assert_eq!(
+        eval_string(&tab, SPLIT_DISPLAY),
+        "none",
+        "Unified layout hides the split table",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.difflayout-seg button[data-difflayout=\"split\"]').click()",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{ROOT}.getAttribute('data-difflayout')")),
+        "split",
+        "clicking Split sets html[data-difflayout=split]",
+    );
+    assert_eq!(
+        eval_string(&tab, UNIFIED_DISPLAY),
+        "none",
+        "Split layout (wide viewport) hides the unified view",
+    );
+    assert_eq!(
+        eval_string(&tab, SPLIT_DISPLAY),
+        "table",
+        "Split layout (wide viewport) shows the split table",
+    );
+
+    // ===== persistence: the appearance blob (where storage is usable) =====
+    let storage_ok = eval_bool(
+        &tab,
+        "(function(){try{if(!window.localStorage)return false;\
+           window.localStorage.setItem('__probe','1');\
+           window.localStorage.removeItem('__probe');return true;}\
+           catch(e){return false;}})()",
+    );
+    if storage_ok {
+        let raw = eval_string(
+            &tab,
+            "window.localStorage.getItem('cute-dbt.appearance.v1') || ''",
+        );
+        assert!(
+            raw.contains("\"theme\":\"dark\"")
+                && raw.contains("\"density\":\"compact\"")
+                && raw.contains("\"difflayout\":\"split\""),
+            "the appearance state persisted under cute-dbt.appearance.v1: {raw}",
+        );
+    }
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn split_diff_renders_the_same_block_diff_as_unified() {
+    // cute-dbt#178 — the split renderer consumes the SAME BlockDiff lines
+    // (kind/text/emphasis) verbatim: removed pairs left, added right,
+    // context on both sides, word-level <strong> emphasis preserved, and the
+    // unified renderer's two-column gutter numbers the same way.
+    let url = render_pr_diff_to_file(
+        "headless_split_diff_js.html",
+        vec![model_node("model.shop.dim_a")],
+        vec![("unit_test.shop.dim_a.t", unit_test("t", "dim_a"))],
+        &["model.shop.dim_a"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    const DIFF_JS: &str = "{lines:[\
+        {kind:'context',text:'select id',emphasis:null},\
+        {kind:'removed',text:'from t',emphasis:[5,6]},\
+        {kind:'added',text:'from u',emphasis:[5,6]}\
+        ]}";
+
+    // Unified: the gutter carries old|new pairs — the removed line has no
+    // new number, the added line no old number.
+    let unified = eval_string(
+        &tab,
+        &format!("window.__cuteRenderBlockDiff({DIFF_JS}, window.__cuteTokenizeSql)"),
+    );
+    assert!(
+        unified.contains("dln dln-o") && unified.contains("dln dln-n"),
+        "the unified renderer emits the two-column line-number gutter: {unified}",
+    );
+    assert!(
+        unified.contains("<strong>u</strong>"),
+        "the unified renderer keeps word-level emphasis on the added line: {unified}",
+    );
+
+    // Split: one row pairs the removed (left) and added (right) sides;
+    // context appears on both sides; emphasis is preserved on both sides.
+    let split = eval_string(
+        &tab,
+        &format!("window.__cuteRenderSplitDiff({DIFF_JS}, window.__cuteTokenizeSql)"),
+    );
+    assert!(
+        split.contains("ds-removed") && split.contains("ds-added"),
+        "the split renderer tints the removed/added sides: {split}",
+    );
+    assert!(
+        split.contains("<strong>t</strong>") && split.contains("<strong>u</strong>"),
+        "the split renderer keeps word-level emphasis on BOTH sides: {split}",
+    );
+    assert!(
+        split.matches("ds-context").count() >= 4,
+        "the context line renders on both sides (2 num + 2 code cells): {split}",
+    );
+
+    let _ = tab.close(true);
+}
+
 // --- cute-dbt#145: incremental-model unit-test semantics ------------
 //
 // The rendered-DOM proof of the incremental affordances. The payload facts
@@ -3087,7 +3329,9 @@ fn model_node_materialized(full_id: &str, materialized: &str) -> Node {
         "model",
         Checksum::new("sha256", "ck"),
         Some("select 1".to_owned()),
-        None,
+        // raw_code so the Model-SQL section renders — since cute-dbt#178 the
+        // incremental badge lives in its code-card header (no static span).
+        Some("select 1".to_owned()),
         DependsOn::default(),
         None,
         NodeConfig::new(
@@ -3231,10 +3475,23 @@ fn incremental_badges_modes_tooltip_and_this_given() {
     tab.wait_until_navigated().expect("await navigation");
 
     // ===== incremental model → the U1 model badge is visible =====
+    // cute-dbt#178 — the badge is JS-created inside the Model-SQL code-card
+    // header (the static template span is gone), so presence === visible.
     select_model(&tab, "dim_inc");
     assert!(
-        !eval_bool(&tab, "document.querySelector('.incremental-badge').hidden"),
-        "the incremental-badge is visible for an incremental model",
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-sql .code-header .incremental-badge') !== null"
+        ),
+        "the incremental-badge renders in the Model-SQL code-card header for an incremental model",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .incremental-badge').textContent.trim()"
+        ),
+        "incremental",
+        "the relocated badge keeps its label",
     );
 
     // ===== incremental-mode test (mode_on): badge + tooltip =====
@@ -3351,10 +3608,15 @@ fn incremental_badges_modes_tooltip_and_this_given() {
     );
 
     // ===== table model → no incremental affordances (cross-model clear) =====
+    // cute-dbt#178 — for a non-incremental model the badge is simply never
+    // created (renderModelSql rebuilds the code-card header per model).
     select_model(&tab, "dim_tbl");
     assert!(
-        eval_bool(&tab, "document.querySelector('.incremental-badge').hidden"),
-        "the incremental-badge is hidden for a table model",
+        eval_bool(
+            &tab,
+            "document.querySelector('.incremental-badge') === null"
+        ),
+        "no incremental-badge exists anywhere for a table model",
     );
     select_test(&tab, "unit_test.shop.dim_tbl.plain");
     assert!(

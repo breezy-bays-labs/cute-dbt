@@ -1112,10 +1112,7 @@ th.col-removed { text-decoration: line-through; text-decoration-color: var(--dif
    (flex:1; min-width:0) so long lines never produce a horizontal scrollbar;
    wrapped continuation lines hang-indent under the code start, not the gutter.
    The gutter stays sticky-left and stretches to the (possibly multi-line) row
-   height.
-   NOTE (PR-1): the pre-engine DOM has no gutter or .diff-code wrapper; the
-   PR-1 bridge layer at the bottom restores block layout for `.diff-line`
-   until the engine PR lands the new line DOM. */
+   height. (The engine emits this line DOM since cute-dbt#178.) */
 .diff-line, .code-line { display: flex; align-items: stretch; white-space: normal; }
 .code-line:hover { background: var(--code-line-hover); }
 
@@ -1157,8 +1154,8 @@ th.col-removed { text-decoration: line-through; text-decoration-color: var(--dif
 
 /* ---- split (side-by-side) diff --------------------------------------- */
 /* both layouts are emitted; show exactly one per html[data-difflayout].
-   (PR-1: the pre-engine DOM emits neither wrapper class — every rule in
-   this section is inert until the engine PR lands.) */
+   (Live since cute-dbt#178: diffViewsHtml emits the unified <code> AND the
+   split <table> side by side.) */
 .diff-unified { display: block; }
 .diff-split { display: none; width: 100%; border-collapse: collapse; table-layout: fixed; font-variant-numeric: tabular-nums; }
 .diff-split td { vertical-align: top; padding: 0; border: 0; }
@@ -1199,15 +1196,15 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
 .model-sql-block { height: 24rem; min-height: 8rem; overflow: auto; resize: vertical; }
 
 /* ---- column-header info tooltip --------------------------------------- */
-/* OMITTED from PR-1 (deliberate divergence from the handoff's base.css):
-   the redesign's `.col-tooltip` is a body-appended position:fixed bubble
-   keyed off `th.has-col-meta` — DOM that arrives with the engine + the
-   column_meta payload reconciliation (PR-2/PR-3). The shipped cute-dbt#165
-   and cute-dbt#166 contract reuses the `.col-tooltip` class name for a focusable
-   <button> trigger INSIDE the th, so carrying the handoff block verbatim
-   would restyle the live trigger into a broken fixed-position bubble. The
-   shipped contract's tokenized rules live in the reconciliation layer below;
-   the engine PR swaps them for the handoff block when the DOM changes. */
+/* DELIBERATE divergence from the handoff's base.css (decided at PR-1, kept
+   at the engine PR cute-dbt#178): the redesign's `.col-tooltip` was a
+   body-appended position:fixed bubble keyed off `th.has-col-meta` and fed by
+   a ModelPayload.column_meta contract that does not exist yet. The SHIPPED
+   cute-dbt#165 / cute-dbt#166 contract — a focusable <button> trigger inside
+   the th with a CSS bubble on :hover AND :focus, headless-guarded — wins;
+   its tokenized rules live in the reconciliation layer below. Any swap to
+   the handoff's renderer belongs to the column_meta PR (handoff PR-3), with
+   the headless guards carried forward. */
 
 /* ---- density override (Tweak; wins over the direction's :root values) - */
 :root[data-density="compact"] {
@@ -1250,40 +1247,29 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
 .col-tooltip-tests li { margin: 0; padding-left: 0.85rem; text-indent: -0.85rem; }
 
 /* ============================================================================
-   6. PR-1 BRIDGE LAYER (remove with the engine PR, cute-dbt#178)
+   6. ENGINE-PR ADDITIONS (cute-dbt#178)
    ----------------------------------------------------------------------------
-   The chassis CSS above styles the redesign's line DOM ([gutter][sigil][code]
-   flex rows, code-card headers). That DOM arrives with the engine PR. Until
-   then the report's inline JS emits the pre-redesign DOM; this layer restores
-   its layout on top of the chassis tokens so the intermediate state stays
-   coherent. Every rule here is expected to be DELETED by cute-dbt#178.
+   The PR-1 bridge layer that lived here (block-layout .diff-line shims, the
+   legacy .sql-block copy-button clearance, the text-glyph cog sizing) is
+   DELETED per its own contract: the engine now emits the redesign's line DOM
+   ([gutter][sigil][code] flex rows, code-card headers, the SVG cog), so the
+   chassis rules above apply directly. What remains below is the small chrome
+   the static settings-panel markup needs.
    ========================================================================== */
 
-/* Pre-engine diff lines are flat spans inside a <pre> — no gutter, no
-   .diff-code wrapper. Block layout gives the full-width row tint; the
-   inherited pre whitespace keeps SQL/YAML indentation (the chassis flex +
-   white-space:normal pair would collapse it). */
-.diff-line { display: block; width: fit-content; min-width: 100%; white-space: pre; }
-.diff-line .diff-sigil { display: inline-block; width: 1ch; padding-left: 0; margin-right: 0.5ch; }
 /* cute-dbt#136 — an expanded fold stays visible as a "Hide N" collapse
-   affordance; mark it among many hunks (the engine restyles folds wholesale). */
+   affordance; mark it among many hunks. */
 .diff-fold[aria-expanded="true"] { filter: brightness(0.96); }
 
-/* Pre-engine code blocks have no .code-header strip: keep the legacy
-   clearance for the absolute-positioned copy button and a side inset (the
-   chassis 0.4rem/0 padding assumes the gutter rail provides the inset). */
-.sql-block { padding: 2.5rem 0.75rem 0.6rem; }
-/* Sit further from the right edge so the button doesn't overlap the vertical
-   scrollbar that appears when the SQL is long. */
-.model-sql-wrap .sql-copy { right: 22px; }
-
-/* The Model SQL section keeps its rhythm (the chassis spaces sections via
-   .panel and friends; .model-sql is not in that list pre-engine). */
+/* The Model SQL section keeps its vertical rhythm (it sits outside the
+   .panel spacing list). */
 .model-sql { margin-bottom: var(--gap-section); }
 
-/* The settings cog is still the ⚙ text glyph pre-engine (the SVG icon set
-   arrives with the engine); keep it legible at the cog's button size. */
-.settings-cog { font-size: 1.2em; }
+/* Stacked settings rows (the appearance section): the control grid sits
+   UNDER its label, full-width — the prototype expressed this with inline
+   styles; the static template markup uses this class instead. */
+.settings-row.settings-row-stack { display: block; }
+.settings-row.settings-row-stack > label { display: block; margin-bottom: 0.35rem; }
 
 /* end of cute-dbt report chassis v1 (cute-dbt#177) */
 
@@ -1301,6 +1287,74 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
     vs baseline manifest <code class="diff-scope-baseline">tests/fixtures/jaffle-shop-baseline.json</code>.
   </p>
 </section>
+
+
+<div class="settings-cog-wrap">
+  <button type="button" class="settings-cog" aria-label="Report settings"
+          aria-haspopup="true" aria-expanded="false" aria-controls="settings-panel">
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.09A1.65 1.65 0 0 0 9 4.6V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.09a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+  </button>
+  <div class="settings-panel" id="settings-panel" role="dialog"
+       aria-label="Report settings" hidden>
+    <h2>Settings</h2>
+    <div class="settings-section appearance-section">
+      <h2>Appearance</h2>
+      <div class="settings-row settings-row-stack">
+        <label>Style</label>
+        <div class="style-grid">
+          <button type="button" class="style-opt" data-style-id="soft">Soft</button>
+          <button type="button" class="style-opt" data-style-id="paper">Paper</button>
+          <button type="button" class="style-opt" data-style-id="swiss">Swiss</button>
+          <button type="button" class="style-opt" data-style-id="terminal">Terminal</button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Theme</label>
+        <div class="theme-grid">
+          <button type="button" class="theme-chip" data-theme-id="light"><span class="swatch-dots"><i style="background:#ffffff"></i><i style="background:#1d7484"></i><i style="background:#33363d"></i></span><span class="theme-name">Light</span></button>
+          <button type="button" class="theme-chip" data-theme-id="dark"><span class="swatch-dots"><i style="background:#15171c"></i><i style="background:#5fb3c4"></i><i style="background:#d7dae1"></i></span><span class="theme-name">Dark</span></button>
+          <button type="button" class="theme-chip" data-theme-id="tokyo"><span class="swatch-dots"><i style="background:#1a1b26"></i><i style="background:#7aa2f7"></i><i style="background:#bb9af7"></i></span><span class="theme-name">Tokyo Night</span></button>
+          <button type="button" class="theme-chip" data-theme-id="solarized"><span class="swatch-dots"><i style="background:#fdf6e3"></i><i style="background:#268bd2"></i><i style="background:#b58900"></i></span><span class="theme-name">Solarized</span></button>
+          <button type="button" class="theme-chip" data-theme-id="gruvbox"><span class="swatch-dots"><i style="background:#282828"></i><i style="background:#83a598"></i><i style="background:#fabd2f"></i></span><span class="theme-name">Gruvbox</span></button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Accent</label>
+        <div class="accent-row">
+          <button type="button" class="accent-swatch" data-accent="theme" aria-label="Theme default accent" title="Theme default accent"></button>
+          <button type="button" class="accent-swatch" data-accent="teal" style="background:#1d7484" aria-label="teal accent" title="teal accent"></button>
+          <button type="button" class="accent-swatch" data-accent="blue" style="background:#2a6fdb" aria-label="blue accent" title="blue accent"></button>
+          <button type="button" class="accent-swatch" data-accent="violet" style="background:#7c3aed" aria-label="violet accent" title="violet accent"></button>
+          <button type="button" class="accent-swatch" data-accent="green" style="background:#1f8a5b" aria-label="green accent" title="green accent"></button>
+          <button type="button" class="accent-swatch" data-accent="amber" style="background:#b45c0c" aria-label="amber accent" title="amber accent"></button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Density</label>
+        <div class="seg-radio density-seg">
+          <button type="button" data-density="compact">Compact</button>
+          <button type="button" data-density="cozy">Cozy</button>
+          <button type="button" data-density="comfortable">Roomy</button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Diff cells<span class="settings-hint">colour, or +/&minus; marks</span></label>
+        <div class="seg-radio diff-seg">
+          <button type="button" data-diffstyle="color">Colour</button>
+          <button type="button" data-diffstyle="marks">Marks</button>
+        </div>
+      </div>
+      <div class="settings-row settings-row-stack">
+        <label>Diff layout<span class="settings-hint">side-by-side when there&rsquo;s room</span></label>
+        <div class="seg-radio difflayout-seg">
+          <button type="button" data-difflayout="auto">Auto</button>
+          <button type="button" data-difflayout="unified">Unified</button>
+          <button type="button" data-difflayout="split">Split</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <section class="error-card" role="alert" aria-label="Manifest error">
   <h2>This manifest can't be visualized</h2>
@@ -1326,7 +1380,7 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
     <div class="selector-field">
       <label for="model-select">Model</label>
       <select id="model-select"></select>
-      <span class="incremental-badge" hidden>incremental</span>
+      
     </div>
     <span class="selector-arrow" aria-hidden="true">→</span>
     <div class="selector-field">
@@ -4834,7 +4888,15 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
 
 <script>
 
-
+/* cute-dbt report interaction engine v1 (cute-dbt#178)
+   ----------------------------------------------------------------------------
+   First-party, NOT vendored: this file lives at templates/interaction.js
+   (beside the template it drives), embedded at compile time via
+   asset_embed::INTERACTION_JS (include_str!) and interpolated inline by the
+   askama renderer — never a runtime asset, never an external script tag
+   (the zero-egress contract). Its integrity gates are the banner-pin +
+   end-of-file-sentinel tests in src/adapters/asset_embed.rs (a truncated
+   copy fails CI). */
 // cute-dbt report.html — interactive layer.
 //
 // DOM + class + data-* attributes are the askama template contract.
@@ -4852,7 +4914,14 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   // (duplicates preserved) and blue for `union_distinct` (deduplicated).
   // `right` reuses the same blue family — fine because joins render
   // solid, UNION renders dashed; the dash pattern is the visual cue.
-  var JOIN_COLORS = {
+  // cute-dbt#178 — FIXED categorical hue mapping (Okabe-Ito). The dark-bg
+  // variant preserves hue IDENTITY (blue stays blue) but lifts lightness so
+  // the page-drawn edges + the near-black `from` anchor stay legible on dark
+  // themes. Node FILLS stay light in every theme (light fill + dark label
+  // reads high-contrast on any bg), so only the edges/anchor flip.
+  // One key per line — the edge-vocab-completeness CI gate and the BDD
+  // legend steps line-anchor their greps on `<wire_key>:`.
+  var JOIN_COLORS_LIGHT = {
     from:           "#1c1c1f",
     inner:          "#009E73",
     left:           "#0072B2",
@@ -4862,6 +4931,18 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     union_all:      "#E69F00",
     union_distinct: "#0072B2"
   };
+  var JOIN_COLORS_DARK = {
+    from:           "#cbd0da",
+    inner:          "#34d399",
+    left:           "#5aa6f0",
+    right:          "#7cc4f2",
+    cross:          "#e08fc0",
+    full:           "#e472a3",
+    union_all:      "#f0b020",
+    union_distinct: "#5aa6f0"
+  };
+  function dagIsDark() { return document.documentElement.classList.contains("dark"); }
+  function dagEdges() { return dagIsDark() ? JOIN_COLORS_DARK : JOIN_COLORS_LIGHT; }
 
   var ROLE_LABEL = {
     import:    "Import CTE",
@@ -4977,6 +5058,10 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     renderForSelectedModel();
     bindGlobalHandlers();
     bindSettingsMenu();
+    // cute-dbt#178 — theme switches re-tint the DAG: re-render legend +
+    // Mermaid so edge/anchor colours pick up the light/dark variant.
+    // theme.js calls this hook after flipping [data-theme] / the .dark class.
+    window.__cuteRerenderDag = function () { renderDagLegend(); renderDag(); };
   });
 
   // cute-dbt#91 — scope-toggle helpers --------------------------------
@@ -5121,9 +5206,10 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     var m = currentModel();
     var t = currentTest();
     $(".recursive-banner").prop("hidden", !(m && m.is_recursive));
-    // cute-dbt#145 — model-level incremental badge; reads the enclosing
-    // model (the is_recursive precedent), undefined-safe when omitted.
-    $(".incremental-badge").prop("hidden", !(m && m.is_incremental));
+    // cute-dbt#145 / cute-dbt#178 — the model-level incremental badge now
+    // lives in the Model-SQL code-card header, created per-render by
+    // renderModelSql (the static template span is gone), so no hidden-toggle
+    // is needed here.
     // cute-dbt#145 — the .expected-panel .panel-header is a PERSISTENT static
     // element. renderExpectedPanel (which clears + re-appends the mode badge /
     // expect-tooltip) runs ONLY in the `if (t)` arm below, so a switch to a
@@ -5161,7 +5247,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       $(".left-panel-body").empty().append(
         $("<div>").addClass("no-tests-empty").text(leftMsg)
       );
-      $(".expected-panel .expected-rowcount").text("0 rows");
+      // cute-dbt#178 — the row-count badge is a PERSISTENT static element a
+      // prior render may have relocated into the fixture-view bar (inside
+      // .expected-body); return it to the header BEFORE the wipe so the
+      // .empty() below can never destroy it.
+      var $erc0 = $(".expected-panel .expected-rowcount");
+      $(".expected-panel .panel-header").append($erc0);
+      $erc0.text("0 rows");
       $(".expected-body").empty().append(
         $("<div>").addClass("no-tests-empty")
           .text("No unit test selected.")
@@ -5201,7 +5293,11 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     }
     $body.append($metaLine);
 
-    if (t.defined_in) {
+    // cute-dbt#178 — the authoring-YAML drawer's code-card header now shows
+    // this path (GitHub-style). Keep this row ONLY as a fallback for tests
+    // with no authoring YAML (no drawer, no header), so the path is never
+    // lost.
+    if (t.defined_in && !t.authoring_yaml) {
       $body.append(
         $("<div>").addClass("td-line td-defined-in-line")
           .append($("<span>").addClass("td-label").text("Defined in "))
@@ -5224,12 +5320,21 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       var $yamlDet = $("<details>").addClass("authoring-yaml").attr("open", "open");
       $yamlDet.append($("<summary>").text(hasDiff ? "Authoring YAML — diff" : "Authoring YAML"));
       var $yamlWrap = $("<div>").addClass("sql-block-wrap fixture-sql-block-wrap");
+      // cute-dbt#178 — GitHub-style code-card header: the file path sits left
+      // of the Diff/File toggle. `defined_in` is the test's authoring-YAML
+      // path (the manifest original_file_path).
+      var $yamlHeader = $("<div>").addClass("code-header");
+      if (t.defined_in) {
+        $yamlHeader.append($("<span>").addClass("code-filename")
+          .attr("title", t.defined_in).text(t.defined_in));
+      }
+      $yamlHeader.append($("<span>").addClass("code-header-spacer"));
       if (hasDiff) {
         var $authPre = $("<pre>").addClass("sql-block yaml-authored-view").prop("hidden", true).append(
-          $("<code>").html(highlightYaml(t.authoring_yaml))
+          $("<code>").html(highlightLinesYaml(t.authoring_yaml))
         );
-        var $diffPre = $("<pre>").addClass("sql-block yaml-diff-view").append(
-          $("<code>").html(renderYamlDiff(t.yaml_diff))
+        var $diffPre = $("<pre>").addClass("sql-block yaml-diff-view").html(
+          diffViewsHtml(t.yaml_diff, tokenizeYaml)
         );
         var $toggle = $("<div>").addClass("yaml-diff-toggle");
         var $diffBtn = $("<button>").attr("type", "button")
@@ -5244,11 +5349,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
           $diffPre.prop("hidden", view !== "diff");
           $authPre.prop("hidden", view !== "authored");
         });
-        $yamlWrap.append($toggle).append($diffPre).append($authPre);
+        $yamlHeader.append($toggle);
+        $yamlWrap.append($yamlHeader).append($diffPre).append($authPre);
       } else {
         var $yamlPre = $("<pre>").addClass("sql-block").append(
-          $("<code>").html(highlightYaml(t.authoring_yaml))
+          $("<code>").html(highlightLinesYaml(t.authoring_yaml))
         );
+        if (t.defined_in) $yamlWrap.append($yamlHeader);
         $yamlWrap.append($yamlPre);
       }
       $yamlDet.append($yamlWrap);
@@ -5289,12 +5396,25 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       copySql(raw, $(this));
     });
     $wrap.append($copy);
+    // cute-dbt#178 — GitHub-style code-card header with the model's file
+    // name. The payload carries no path, so synthesize `<name>.sql` (matches
+    // the DAG terminal-node label, cute-dbt#155).
+    var modelFile = (m && m.name ? m.name : "model") + ".sql";
+    var $mHeader = $("<div>").addClass("code-header");
+    $mHeader.append($("<span>").addClass("code-filename").attr("title", modelFile).text(modelFile));
+    // cute-dbt#145 incremental badge — relocated here (cute-dbt#178), right
+    // of the file name. Created only when the model is incremental (the
+    // static template span is gone).
+    if (m && m.is_incremental) {
+      $mHeader.append($("<span>").addClass("incremental-badge").text("incremental"));
+    }
+    $mHeader.append($("<span>").addClass("code-header-spacer"));
     if (hasDiff) {
-      var $diffPre = $("<pre>").addClass("sql-block model-sql-block sql-diff-view").append(
-        $("<code>").addClass("model-sql-code").html(renderBlockDiff(m.sql_diff, tokenizeSql))
+      var $diffPre = $("<pre>").addClass("sql-block model-sql-block sql-diff-view").html(
+        diffViewsHtml(m.sql_diff, tokenizeSql, "model-sql-code")
       );
       var $rawPre = $("<pre>").addClass("sql-block model-sql-block sql-raw-view").prop("hidden", true).append(
-        $("<code>").addClass("model-sql-code").html(highlightSql(raw))
+        $("<code>").addClass("model-sql-code").html(highlightLinesSql(raw))
       );
       var $toggle = $("<div>").addClass("yaml-diff-toggle model-sql-toggle");
       var $diffBtn = $("<button>").attr("type", "button")
@@ -5309,12 +5429,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
         $diffPre.prop("hidden", view !== "diff");
         $rawPre.prop("hidden", view !== "raw");
       });
-      $wrap.append($toggle).append($diffPre).append($rawPre);
+      $mHeader.append($toggle);
+      $wrap.append($mHeader).append($diffPre).append($rawPre);
     } else {
       var $pre = $("<pre>").addClass("sql-block model-sql-block").append(
-        $("<code>").addClass("model-sql-code").html(highlightSql(raw))
+        $("<code>").addClass("model-sql-code").html(highlightLinesSql(raw))
       );
-      $wrap.append($pre);
+      $wrap.append($mHeader).append($pre);
     }
   }
 
@@ -5338,11 +5459,11 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       if (j === "union_all" || j === "union_distinct") {
         $edge.addClass("is-dashed").css({
           background: "transparent",
-          "border-top": "3px dashed " + JOIN_COLORS[j],
+          "border-top": "3px dashed " + dagEdges()[j],
           height: "0"
         });
       } else {
-        $edge.css("background", JOIN_COLORS[j]);
+        $edge.css("background", dagEdges()[j]);
       }
       $joins.append(
         $("<span>").addClass("legend-item join-" + j)
@@ -5387,7 +5508,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     lines.push("    classDef selected stroke:#E91E63,stroke-width:4px;");
 
     dag.edges.forEach(function (e, i) {
-      var color = JOIN_COLORS[e.edge_type] || "#8a8a90";
+      var color = dagEdges()[e.edge_type] || "#8a8a90";
       var dash = (e.edge_type === "union_all" || e.edge_type === "union_distinct") ? ",stroke-dasharray:5 3" : "";
       lines.push("    linkStyle " + i + " stroke:" + color + ",stroke-width:1.8px,fill:none" + dash + ";");
     });
@@ -5597,7 +5718,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     var $sqlWrap = $("<div>").addClass("sql-block-wrap");
     var $copy = $("<button>").attr("type", "button").addClass("sql-copy").text("Copy")
       .on("click", function (e) { e.preventDefault(); e.stopPropagation(); copySql(sql, $(this)); });
-    var $pre = $("<pre>").addClass("sql-block").append($("<code>").html(highlightSql(sql)));
+    var $pre = $("<pre>").addClass("sql-block").append($("<code>").html(highlightLinesSql(sql)));
     $sqlWrap.append($copy).append($pre);
     $det.append($sqlWrap);
     $detail.append($det);
@@ -5708,7 +5829,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
 
   function renderExpectedPanel(t) {
     var $panel = $(".expected-panel");
-    var $body = $panel.find(".expected-body").empty();
+    var $exHdr = $panel.find(".panel-header");
+    // cute-dbt#178 — the row-count badge is a PERSISTENT static element. A
+    // prior render may have relocated it into the fixture-view bar (below);
+    // return it to the header BEFORE the body wipe so $body.empty() can
+    // never destroy it.
+    var $rowcount = $panel.find(".expected-rowcount");
+    $exHdr.append($rowcount);
     // cute-dbt#145 — per-test mode badge + expect-semantics tooltip.
     // The .panel-header is a PERSISTENT static element reused across
     // renders, so first clear any prior mode badge / tooltip (targeted —
@@ -5718,8 +5845,8 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     // `this`-given proxy, and NEVER on the full-refresh branch (there
     // `expect` IS the final table). Emitted BEFORE the sql / external
     // early-returns: the mode is about the test, not the fixture format.
-    var $exHdr = $panel.find(".panel-header");
     $exHdr.find(".mode-badge, .expect-tooltip").remove();
+    var $body = $panel.find(".expected-body").empty();
     var em = currentModel();
     if (em && em.is_incremental) {
       var incrementalMode = t.is_incremental_mode === true;
@@ -5767,12 +5894,23 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     // cute-dbt#138 — the Current view renders the Rust-computed POD directly.
     var table = t.expected.table || { columns: [], rows: [] };
     var rowCount = table.rows.length;
-    $panel.find(".expected-rowcount").text(rowCount + " row" + (rowCount === 1 ? "" : "s"));
+    $rowcount.text(rowCount + " row" + (rowCount === 1 ? "" : "s"));
     // The expect side's cell diff, when the test's expect fixture carried a
     // real change (cute-dbt#98). `data_diff.expect` already passed
     // `has_real_change()`, so its presence === "default this table to Diff".
     var diff = (t.data_diff && t.data_diff.expect) || undefined;
     $body.append(buildFixtureView(table, "expected-table", diff, t.expected.column_meta));
+    // cute-dbt#178 — when a Diff/File toggle bar exists, relocate the header
+    // meta onto that bar, to its right, in reading order: [mode badge]
+    // [N rows] [expect-tooltip]. .append() MOVES the nodes (no copy), so
+    // nothing is duplicated. No bar (sql/external/no-diff) => the meta stays
+    // in the header as the fallback (the pre-#178 layout).
+    var $bar = $body.find(".fixture-view-bar").first();
+    if ($bar.length) {
+      $bar.append($exHdr.find(".mode-badge")); // empty set when not incremental
+      $bar.append($rowcount);
+      $bar.append($exHdr.find(".expect-tooltip"));
+    }
     initDataTablesIn($body);
   }
 
@@ -5818,7 +5956,7 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   function buildSqlCodeBlock(sql) {
     var $wrap = $("<div>").addClass("sql-block-wrap fixture-sql-block-wrap");
     var $pre = $("<pre>").addClass("sql-block").append(
-      $("<code>").html(highlightSql(String(sql)))
+      $("<code>").html(highlightLinesSql(String(sql)))
     );
     $wrap.append($pre);
     return $wrap;
@@ -6187,6 +6325,27 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   function highlightSql(sql) { return emitTokens(tokenizeSql(sql)); }
   function highlightYaml(yaml) { return emitTokens(tokenizeYaml(yaml)); }
 
+  // cute-dbt#178 — plain (non-diff) code block with a GitHub-style single
+  // line-number gutter. Splits on newlines and tokenizes each line
+  // independently (same per-line contract the diff path already relies on),
+  // wrapping each in a .code-line so a robust numbered gutter renders without
+  // depending on <pre> newline counting. The trailing blank line is trimmed
+  // so we don't show a stray empty numbered row.
+  function highlightLines(text, tokenizeFn) {
+    var src = String(text == null ? "" : text).replace(/\n+$/, "");
+    var rows = src.split("\n");
+    var out = "";
+    for (var i = 0; i < rows.length; i++) {
+      out += '<span class="code-line">'
+           + '<span class="code-gutter" aria-hidden="true">' + (i + 1) + '</span>'
+           + '<span class="diff-code">' + emitTokens(tokenizeFn(rows[i])) + '</span>'
+           + '</span>';
+    }
+    return out;
+  }
+  function highlightLinesSql(sql) { return highlightLines(sql, tokenizeSql); }
+  function highlightLinesYaml(yaml) { return highlightLines(yaml, tokenizeYaml); }
+
   // Expose for headless JS unit tests (cute-dbt#69 / cute-dbt#132 — parallels
   // the `__cuteRenderYamlDiff` headless seam).
   window.__cuteHighlightYaml = highlightYaml;
@@ -6282,21 +6441,49 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   // (the folded middle passes `diff-folded fold-<id>`); `hidden` toggles the
   // `hidden` attribute (relies on the #122 `[hidden]{display:none!important}`
   // rule, since Sakura's `.diff-line{display:block}` defeats a bare [hidden]).
-  function renderOneDiffLine(ln, tokenizeFn, extraClass, hidden) {
+  // cute-dbt#178 — GitHub-style two-column gutter (old line no | new line
+  // no). `null` => blank cell (added lines have no old number; removed have
+  // no new). aria-hidden so screen readers read the code, not the numbering
+  // scaffold.
+  function diffGutter(o, n) {
+    return '<span class="diff-gutter" aria-hidden="true">'
+         + '<span class="dln dln-o">' + (o == null ? "" : o) + '</span>'
+         + '<span class="dln dln-n">' + (n == null ? "" : n) + '</span></span>';
+  }
+
+  // Shared: the inner code HTML for a diff line (syntax + optional word-level
+  // emphasis overlay). Used by both the unified and split renderers.
+  function diffBody(ln, tokenizeFn) {
+    var tokens = tokenizeFn(ln.text);
+    if (ln.kind !== "context" && ln.emphasis) {
+      return emitTokensWithEmphasis(tokens, ln.emphasis[0], ln.emphasis[1]);
+    }
+    return emitTokens(tokens);
+  }
+
+  // Old/new line-number pair for every line, in document order (unified-diff
+  // numbering): added has no old number, removed has no new number.
+  function diffNumbers(lines) {
+    var nums = new Array(lines.length), o = 1, nw = 1;
+    for (var p = 0; p < lines.length; p++) {
+      var kk = lines[p].kind;
+      if (kk === "added")        { nums[p] = { o: null, n: nw++ }; }
+      else if (kk === "removed") { nums[p] = { o: o++,  n: null }; }
+      else                       { nums[p] = { o: o++,  n: nw++ }; }
+    }
+    return nums;
+  }
+
+  function renderOneDiffLine(ln, tokenizeFn, extraClass, hidden, num) {
     var cls = ln.kind === "added" ? "diff-added"
             : ln.kind === "removed" ? "diff-removed"
             : "diff-context";
     var sigil = ln.kind === "added" ? "+" : ln.kind === "removed" ? "-" : " ";
-    var tokens = tokenizeFn(ln.text);
-    var body;
-    if (ln.kind !== "context" && ln.emphasis) {
-      body = emitTokensWithEmphasis(tokens, ln.emphasis[0], ln.emphasis[1]);
-    } else {
-      body = emitTokens(tokens);
-    }
     return '<span class="diff-line ' + cls + (extraClass ? " " + extraClass : "") + '"'
          + (hidden ? " hidden" : "") + '>'
-         + '<span class="diff-sigil">' + sigil + '</span>' + body
+         + diffGutter(num ? num.o : null, num ? num.n : null)
+         + '<span class="diff-sigil">' + sigil + '</span>'
+         + '<span class="diff-code">' + diffBody(ln, tokenizeFn) + '</span>'
          + '</span>';
   }
 
@@ -6308,12 +6495,15 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       ? padOverride : diffFoldPad;
     var lines = diff.lines;
     var n = lines.length;
+    // Precompute the old/new line-number pair for every line, in document
+    // order, so the gutters read like a unified diff regardless of folding.
+    var nums = diffNumbers(lines);
     var html = "";
     var foldId = 0; // counter LOCAL to this call — parent-scoping makes it safe.
     var i = 0;
     while (i < n) {
       if (lines[i].kind !== "context") {
-        html += renderOneDiffLine(lines[i], tokenizeFn, "", false);
+        html += renderOneDiffLine(lines[i], tokenizeFn, "", false, nums[i]);
         i += 1;
         continue;
       }
@@ -6328,13 +6518,13 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       if (hidden < FOLD_MIN_HIDDEN) {
         // Short run (or short hidden middle): render the whole run normally.
         for (var k = runStart; k < j; k++) {
-          html += renderOneDiffLine(lines[k], tokenizeFn, "", false);
+          html += renderOneDiffLine(lines[k], tokenizeFn, "", false, nums[k]);
         }
       } else {
         var id = foldId++;
         // head context lines (adjacent to the preceding change).
         for (var h = runStart; h < runStart + head; h++) {
-          html += renderOneDiffLine(lines[h], tokenizeFn, "", false);
+          html += renderOneDiffLine(lines[h], tokenizeFn, "", false, nums[h]);
         }
         // The fold control. Bidirectional (#136): it stays in the DOM and
         // relabels Show<->Hide on toggle, so `data-fold-count` + a dedicated
@@ -6343,18 +6533,19 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
         html += '<span class="diff-line diff-fold" data-fold="' + id + '"'
               + ' data-fold-count="' + hidden + '"'
               + ' role="button" tabindex="0" aria-expanded="false">'
-              + '<span class="diff-sigil">···</span>'
+              + '<span class="diff-gutter diff-gutter-hunk" aria-hidden="true"></span>'
+              + '<span class="diff-sigil">⋯</span>'
               + '<span class="diff-fold-label">'
               + 'Show ' + hidden + ' unchanged line' + (hidden === 1 ? "" : "s")
               + '</span>'
               + '</span>';
         // The folded (hidden) middle lines.
         for (var m2 = runStart + head; m2 < j - tail; m2++) {
-          html += renderOneDiffLine(lines[m2], tokenizeFn, "diff-folded fold-" + id, true);
+          html += renderOneDiffLine(lines[m2], tokenizeFn, "diff-folded fold-" + id, true, nums[m2]);
         }
         // tail context lines (adjacent to the following change).
         for (var tIdx = j - tail; tIdx < j; tIdx++) {
-          html += renderOneDiffLine(lines[tIdx], tokenizeFn, "", false);
+          html += renderOneDiffLine(lines[tIdx], tokenizeFn, "", false, nums[tIdx]);
         }
       }
       i = j;
@@ -6367,6 +6558,65 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   function renderYamlDiff(diff) { return renderBlockDiff(diff, tokenizeYaml); }
   window.__cuteRenderBlockDiff = renderBlockDiff;
   window.__cuteRenderYamlDiff = renderYamlDiff;
+
+  // cute-dbt#178 — SPLIT (side-by-side) diff. Old lines on the left, new on
+  // the right, paired index-wise within each change block; context appears on
+  // both sides. No folding in split mode (these blocks are short — showing
+  // every context line reads cleaner than wiring a second fold mechanism).
+  // Rendered as a fixed-layout table so the two halves stay aligned; each
+  // code cell soft-wraps. The CSS picks unified vs split per
+  // html[data-difflayout] (+ a responsive fallback), so BOTH are emitted and
+  // exactly one is shown. Consumes the same BlockDiff lines verbatim — the
+  // Rust diff engine is unchanged.
+  function splitCell(side) {
+    if (!side) {
+      return '<td class="ds-num ds-empty"></td><td class="ds-code ds-empty"></td>';
+    }
+    return '<td class="ds-num ds-' + side.cls + '">' + (side.num == null ? "" : side.num) + '</td>'
+         + '<td class="ds-code ds-' + side.cls + '"><div class="ds-codewrap">'
+         + '<span class="diff-sigil">' + side.sigil + '</span>'
+         + '<span class="diff-code">' + side.body + '</span></div></td>';
+  }
+  function renderSplitDiff(diff, tokenizeFn) {
+    var lines = diff.lines, n = lines.length, nums = diffNumbers(lines);
+    var rows = "", i = 0;
+    while (i < n) {
+      if (lines[i].kind === "context") {
+        var body = diffBody(lines[i], tokenizeFn);
+        rows += '<tr class="ds-row">'
+              + splitCell({ cls: "context", num: nums[i].o, sigil: " ", body: body })
+              + splitCell({ cls: "context", num: nums[i].n, sigil: " ", body: body })
+              + '</tr>';
+        i += 1;
+        continue;
+      }
+      // Maximal change block; pair removed (left) with added (right).
+      var rem = [], add = [];
+      while (i < n && lines[i].kind !== "context") {
+        if (lines[i].kind === "removed") rem.push(i); else add.push(i);
+        i += 1;
+      }
+      var maxL = Math.max(rem.length, add.length);
+      for (var x = 0; x < maxL; x++) {
+        var L = x < rem.length
+          ? { cls: "removed", num: nums[rem[x]].o, sigil: "-", body: diffBody(lines[rem[x]], tokenizeFn) } : null;
+        var R = x < add.length
+          ? { cls: "added", num: nums[add[x]].n, sigil: "+", body: diffBody(lines[add[x]], tokenizeFn) } : null;
+        rows += '<tr class="ds-row">' + splitCell(L) + splitCell(R) + '</tr>';
+      }
+    }
+    return '<table class="diff-split"><tbody>' + rows + '</tbody></table>';
+  }
+
+  // Emit BOTH layouts into a diff <pre>: the unified <code> + the split
+  // table. CSS shows exactly one (html[data-difflayout] + the responsive
+  // fallback). `codeClass` lets the Model-SQL caller keep its hook class.
+  function diffViewsHtml(diff, tokenizeFn, codeClass) {
+    return '<code class="diff-unified' + (codeClass ? " " + codeClass : "") + '">'
+         + renderBlockDiff(diff, tokenizeFn) + '</code>'
+         + renderSplitDiff(diff, tokenizeFn);
+  }
+  window.__cuteRenderSplitDiff = renderSplitDiff;
 
   // cute-dbt#132 — global fold controls (configurable context lines +
   // expand-all/collapse-all). setAllFolds is a SYMMETRIC DOM MIRROR over the
@@ -6684,8 +6934,11 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
     var $toggle = $("<div>").addClass("cell-diff-toggle");
     var $diffBtn = $("<button>").attr("type", "button")
       .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
+    // cute-dbt#178 — labelled "File" for consistency with the other
+    // Diff/File toggles (the data-view stays "current": it is the test's
+    // current fixture data as authored in the file).
     var $curBtn = $("<button>").attr("type", "button")
-      .addClass("yaml-view-btn").attr("data-view", "current").text("Current");
+      .addClass("yaml-view-btn").attr("data-view", "current").text("File");
     $toggle.append($diffBtn).append($curBtn);
     // Bind to the LOCAL $toggle (not a global `.yaml-view-btn` delegate) so it
     // can never catch the #96/#111 drawer toggles elsewhere in the document.
@@ -6704,7 +6957,11 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
       adjustDataTablesIn($shown);
     });
 
-    $wrap.append($toggle).append($diffView).append($currentView);
+    // cute-dbt#178 — the toggle rides a .fixture-view-bar strip so
+    // renderExpectedPanel can relocate the header meta (mode badge, row
+    // count, expect-tooltip) onto the same row, GitHub-toolbar style.
+    $wrap.append($("<div>").addClass("fixture-view-bar").append($toggle))
+         .append($diffView).append($currentView);
     return $wrap;
   }
 
@@ -6919,6 +7176,211 @@ globalThis["mermaid"] = globalThis.__esbuild_esm_mermaid_nm["mermaid"].default;
   $(window).on("resize", reflowPanelsForOverflow);
 
 })();
+/* end of cute-dbt report interaction engine v1 (cute-dbt#178) */
+
+</script>
+<script>
+
+/* cute-dbt appearance engine v1 (cute-dbt#178)
+   ----------------------------------------------------------------------------
+   Wires the theme / style / accent / density / diff-style / diff-layout
+   controls in the report's settings panel (the markup is static in
+   templates/report.html — the askama DOM contract), persists the choices in
+   localStorage (key cute-dbt.appearance.v1) with a graceful in-memory
+   fallback, and syncs DataTables dark mode by toggling html.dark. Plain
+   vanilla JS, no framework, zero egress.
+
+   First-party, NOT vendored: this file lives at templates/theme.js, embedded
+   at compile time via asset_embed::THEME_JS (include_str!) and interpolated
+   inline by the askama renderer. Banner-pin + end-of-file-sentinel tests in
+   src/adapters/asset_embed.rs guard the include.
+
+   The handoff prototype also carried a Cytoscape DAG-engine picker here; that
+   is Bucket 2 (cute-dbt#101 territory) and is deliberately ABSENT from this
+   file — adding it back rides the vendored-Cytoscape PR, never this one. */
+(function () {
+  "use strict";
+
+  // The five [data-theme] packs the chassis CSS ships (templates/report.css).
+  // `dark` drives the html.dark class DataTables' vendored dark rules key on.
+  var THEMES = [
+    { id: "light",     dark: false },
+    { id: "dark",      dark: true  },
+    { id: "tokyo",     dark: true  },
+    { id: "solarized", dark: false },
+    { id: "gruvbox",   dark: true  }
+  ];
+
+  // Accent palettes: value / hover / tint triples applied as inline custom
+  // properties on <html>. "theme" = remove the override (the active theme's
+  // own accent shows through).
+  var ACCENTS = [
+    { id: "theme" },
+    { id: "teal",   v: "#1d7484", h: "#155c69", t: "#e3f0f2" },
+    { id: "blue",   v: "#2a6fdb", h: "#1f57b0", t: "#e6eefb" },
+    { id: "violet", v: "#7c3aed", h: "#6027c4", t: "#efe8fd" },
+    { id: "green",  v: "#1f8a5b", h: "#176d47", t: "#e2f3ec" },
+    { id: "amber",  v: "#b45c0c", h: "#8f4708", t: "#fbeede" }
+  ];
+
+  // The public localStorage key for the appearance state — a stable consumer
+  // contract (cute-dbt#178 AC3), not a credential.
+  var KEY = "cute-dbt.appearance.v1"; // gitleaks:allow — a public storage key name, no secret
+  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", diffstyle: "color", difflayout: "auto" };
+
+  // Read the persisted appearance, string-typed keys only. Any storage error
+  // (file:// SecurityError, disabled storage) leaves the defaults intact.
+  function load() {
+    var raw;
+    try { raw = window.localStorage && window.localStorage.getItem(KEY); } catch (e) { raw = null; }
+    if (!raw) return;
+    try {
+      var p = JSON.parse(raw);
+      if (p && typeof p === "object") {
+        ["theme", "style", "accent", "density", "diffstyle", "difflayout"].forEach(function (k) {
+          if (typeof p[k] === "string") pref[k] = p[k];
+        });
+      }
+    } catch (e) { /* ignore — defaults hold */ }
+  }
+  // Persist the current appearance. Swallows any storage error (zero-egress
+  // in-memory fallback, mirrors interaction.js saveSettings).
+  function save() {
+    try { if (window.localStorage) window.localStorage.setItem(KEY, JSON.stringify(pref)); } catch (e) { /* in-memory only */ }
+  }
+
+  var root = document.documentElement;
+
+  function themeById(id) {
+    for (var i = 0; i < THEMES.length; i++) if (THEMES[i].id === id) return THEMES[i];
+    return THEMES[0];
+  }
+
+  function applyTheme(id) {
+    var t = themeById(id);
+    root.setAttribute("data-theme", t.id);
+    root.classList.toggle("dark", t.dark); // DataTables dark rules follow html.dark
+    pref.theme = t.id;
+  }
+  function applyAccent(id) {
+    var a = null;
+    for (var i = 0; i < ACCENTS.length; i++) if (ACCENTS[i].id === id) a = ACCENTS[i];
+    if (!a || a.id === "theme") {
+      root.style.removeProperty("--accent");
+      root.style.removeProperty("--accent-hover");
+      root.style.removeProperty("--accent-tint");
+      pref.accent = "theme";
+    } else {
+      root.style.setProperty("--accent", a.v);
+      root.style.setProperty("--accent-hover", a.h);
+      root.style.setProperty("--accent-tint", a.t);
+      pref.accent = a.id;
+    }
+  }
+  function applyDensity(d) {
+    if (d === "auto") root.removeAttribute("data-density");
+    else root.setAttribute("data-density", d);
+    pref.density = d;
+  }
+  function applyDiffStyle(s) {
+    if (s === "color") root.removeAttribute("data-diffstyle");
+    else root.setAttribute("data-diffstyle", s);
+    pref.diffstyle = s;
+  }
+  function applyDiffLayout(v) {
+    root.setAttribute("data-difflayout", v);
+    pref.difflayout = v;
+  }
+  function applyStyle(s) {
+    root.setAttribute("data-style", s);
+    pref.style = s;
+  }
+
+  // Re-tint the DAG after a theme flip (the light/dark edge + anchor
+  // variants live in interaction.js, which owns the legend + Mermaid).
+  function rerenderDag() {
+    if (typeof window.__cuteRerenderDag === "function") window.__cuteRerenderDag();
+  }
+
+  /* ---- sync visual state of the (static) controls to prefs ------------- */
+  function syncControls() {
+    document.querySelectorAll(".style-opt").forEach(function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-style-id") === pref.style ? "true" : "false");
+    });
+    document.querySelectorAll(".theme-chip").forEach(function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-theme-id") === pref.theme ? "true" : "false");
+    });
+    document.querySelectorAll(".accent-swatch").forEach(function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-accent") === pref.accent ? "true" : "false");
+    });
+    document.querySelectorAll(".density-seg button").forEach(function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-density") === pref.density ? "true" : "false");
+    });
+    document.querySelectorAll(".diff-seg button").forEach(function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-diffstyle") === pref.diffstyle ? "true" : "false");
+    });
+    document.querySelectorAll(".difflayout-seg button").forEach(function (b) {
+      b.setAttribute("aria-pressed", b.getAttribute("data-difflayout") === pref.difflayout ? "true" : "false");
+    });
+  }
+
+  function wire() {
+    document.querySelectorAll(".style-opt").forEach(function (b) {
+      b.addEventListener("click", function () { applyStyle(b.getAttribute("data-style-id")); save(); syncControls(); reflowTables(); rerenderDag(); });
+    });
+    document.querySelectorAll(".theme-chip").forEach(function (b) {
+      b.addEventListener("click", function () { applyTheme(b.getAttribute("data-theme-id")); save(); syncControls(); reflowTables(); rerenderDag(); });
+    });
+    document.querySelectorAll(".accent-swatch").forEach(function (b) {
+      b.addEventListener("click", function () { applyAccent(b.getAttribute("data-accent")); save(); syncControls(); });
+    });
+    document.querySelectorAll(".density-seg button").forEach(function (b) {
+      b.addEventListener("click", function () { applyDensity(b.getAttribute("data-density")); save(); syncControls(); reflowTables(); });
+    });
+    document.querySelectorAll(".diff-seg button").forEach(function (b) {
+      b.addEventListener("click", function () { applyDiffStyle(b.getAttribute("data-diffstyle")); save(); syncControls(); });
+    });
+    document.querySelectorAll(".difflayout-seg button").forEach(function (b) {
+      b.addEventListener("click", function () { applyDiffLayout(b.getAttribute("data-difflayout")); save(); syncControls(); });
+    });
+  }
+
+  // DataTables column widths shift when the font-size changes (density /
+  // style / theme flips); re-adjust the visible ones.
+  function reflowTables() {
+    if (window.jQuery && jQuery.fn && jQuery.fn.DataTable) {
+      jQuery("table.given-table, table.expected-table").each(function () {
+        if (jQuery.fn.DataTable.isDataTable(this) && this.offsetParent !== null) {
+          try { jQuery(this).DataTable().columns.adjust(); } catch (e) { /* hidden */ }
+        }
+      });
+    }
+  }
+
+  function boot() {
+    load();
+    // Default theme: saved -> prefers-color-scheme -> light.
+    if (!pref.theme) {
+      pref.theme = (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
+    }
+    applyStyle(pref.style);
+    applyTheme(pref.theme);
+    applyAccent(pref.accent);
+    applyDensity(pref.density);
+    applyDiffStyle(pref.diffstyle);
+    applyDiffLayout(pref.difflayout);
+    syncControls();
+    wire();
+    // Re-tint the legend + Mermaid host once the theme's .dark class is on:
+    // interaction.js drew them on DOM-ready BEFORE this boot applied the
+    // theme, so the edge swatches would otherwise keep the light palette.
+    setTimeout(rerenderDag, 0);
+  }
+
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+  else boot();
+})();
+/* end of cute-dbt appearance engine v1 (cute-dbt#178) */
 
 </script>
 </body>

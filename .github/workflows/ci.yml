@@ -208,11 +208,13 @@ jobs:
     #      compile-time exhaustiveness is the primary mechanism (a new
     #      variant fails to compile); this CI grep is belt-and-braces
     #      against the function being renamed or moved.
-    #   2. `JOIN_COLORS` map in templates/report.html — the JS palette
-    #      keyed by snake_case wire key. The renderer's edge_type field
-    #      serializes via serde rename_all="snake_case", so the JS map
-    #      must contain each snake_case wire key as a property; a missing
-    #      key surfaces as a gray fallback color and no legend entry.
+    #   2. the `JOIN_COLORS_LIGHT`/`JOIN_COLORS_DARK` maps in
+    #      templates/interaction.js (the first-party engine the template
+    #      inlines, cute-dbt#178) — the JS palettes keyed by snake_case
+    #      wire key. The renderer's edge_type field serializes via serde
+    #      rename_all="snake_case", so the JS maps must contain each
+    #      snake_case wire key as a property; a missing key surfaces as a
+    #      gray fallback color and no legend entry.
     name: EdgeType enum/label completeness guard
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -236,19 +238,23 @@ jobs:
             exit 1
           fi
           # 2. Every variant's snake_case wire key must appear in
-          #    `templates/report.html`'s JOIN_COLORS map. Derive the
-          #    snake_case form (CamelCase -> snake_case) via awk so the
-          #    gate does not need a Rust pass.
+          #    `templates/interaction.js`'s JOIN_COLORS_LIGHT/_DARK maps
+          #    (one key per line, the format this grep line-anchors on).
+          #    Derive the snake_case form (CamelCase -> snake_case) via awk
+          #    so the gate does not need a Rust pass. Checked per-palette so
+          #    a key missing from only the dark variant still fails.
           snake_keys=$(printf '%s\n' "$variants" \
             | awk '{ s=""; for(i=1;i<=length($0);i++){c=substr($0,i,1); if(c~/[A-Z]/ && i>1){s=s"_"} s=s tolower(c)} print s }' \
             | sort -u)
-          covered_js=$(grep -oE '^[[:space:]]*[a-z_]+:' templates/report.html \
-            | tr -d ' :' | sort -u)
-          missing_js=$(comm -23 <(printf '%s\n' "$snake_keys") <(printf '%s\n' "$covered_js"))
-          if [ -n "$missing_js" ]; then
-            echo "::error::edge-vocab-completeness: snake_case EdgeType wire keys missing from templates/report.html JOIN_COLORS: $missing_js"
-            exit 1
-          fi
+          for palette in JOIN_COLORS_LIGHT JOIN_COLORS_DARK; do
+            covered_js=$(awk "/var ${palette} = \\{/,/\\};/" templates/interaction.js \
+              | grep -oE '^[[:space:]]*[a-z_]+:' | tr -d ' :' | sort -u)
+            missing_js=$(comm -23 <(printf '%s\n' "$snake_keys") <(printf '%s\n' "$covered_js"))
+            if [ -n "$missing_js" ]; then
+              echo "::error::edge-vocab-completeness: snake_case EdgeType wire keys missing from templates/interaction.js ${palette}: $missing_js"
+              exit 1
+            fi
+          done
 
   baseline-required-grep:
     # The locked policy decision: --baseline-manifest is a required CLI

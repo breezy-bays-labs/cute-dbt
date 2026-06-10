@@ -145,24 +145,25 @@ fn model_with_any_cte_dependency(world: &mut World) {
     world.last_cte_graph = Some(graph);
 }
 
-/// The committed report template — the source of truth for the legend
-/// palette. Read at test time so the legend assertions go through the
-/// actual rendered chrome's color table, not just the producer-side
-/// wire-key projection.
+/// The committed report engine (templates/interaction.js, inlined into
+/// every rendered report since cute-dbt#178) — the source of truth for
+/// the legend palette. Read at test time so the legend assertions go
+/// through the actual rendered chrome's color table, not just the
+/// producer-side wire-key projection.
 fn template_html() -> String {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("templates")
-        .join("report.html");
+        .join("interaction.js");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
-/// Extract a `JOIN_COLORS` palette entry from the template
-/// (e.g. `inner: "#009E73"` → `"#009E73"`). Scoped to the
-/// `var JOIN_COLORS = { … };` block so other `<wire_key>:` matches
-/// (e.g. `"Segoe UI"` inside a CSS font-family declaration) cannot
-/// pollute the lookup.
-fn legend_color(template: &str, wire_key: &str) -> Option<String> {
-    let block_start = template.find("var JOIN_COLORS")?;
+/// Extract a palette entry from the named `var <palette> = { … };` block
+/// (e.g. `inner: "#009E73"` → `"#009E73"`). Scoped to the block so other
+/// `<wire_key>:` matches elsewhere in the engine cannot pollute the
+/// lookup. Since cute-dbt#178 the engine carries TWO palettes —
+/// `JOIN_COLORS_LIGHT` and `JOIN_COLORS_DARK` (theme-aware edges).
+fn palette_color(template: &str, palette: &str, wire_key: &str) -> Option<String> {
+    let block_start = template.find(&format!("var {palette}"))?;
     let open_brace = template[block_start..].find('{')?;
     let close_brace = template[block_start + open_brace..].find('}')?;
     let block_end = block_start + open_brace + close_brace;
@@ -174,6 +175,13 @@ fn legend_color(template: &str, wire_key: &str) -> Option<String> {
     let rest = &tail[open + 1..];
     let close = rest.find('"')?;
     Some(rest[..close].to_owned())
+}
+
+/// The light palette's entry — the canonical legend palette (the dark
+/// variant is its lightness-lifted twin, checked for completeness in
+/// `edge_legend_visible`).
+fn legend_color(template: &str, wire_key: &str) -> Option<String> {
+    palette_color(template, "JOIN_COLORS_LIGHT", wire_key)
 }
 
 #[then("an edge-type color legend is visible")]
@@ -197,12 +205,16 @@ fn edge_legend_visible(_world: &mut World) {
     ];
     for edge in known {
         let key = edge_type_wire_key(*edge);
-        let color = legend_color(&template, key)
-            .unwrap_or_else(|| panic!("legend entry for {key} missing from template"));
-        assert!(
-            color.starts_with('#') && color.len() >= 4,
-            "legend color for {key} ({color}) must be a `#…` value",
-        );
+        // cute-dbt#178 — the engine carries a light AND a dark palette
+        // (theme-aware edges); every wire key must be present in BOTH.
+        for palette in ["JOIN_COLORS_LIGHT", "JOIN_COLORS_DARK"] {
+            let color = palette_color(&template, palette, key)
+                .unwrap_or_else(|| panic!("legend entry for {key} missing from {palette}"));
+            assert!(
+                color.starts_with('#') && color.len() >= 4,
+                "legend color for {key} in {palette} ({color}) must be a `#…` value",
+            );
+        }
     }
 }
 
