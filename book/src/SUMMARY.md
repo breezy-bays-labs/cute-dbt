@@ -11,6 +11,8 @@
 # Reference
 
 - [Features](./features/index.md)
+- [Checks](./checks/index.md)
+  - [grain.unique-key-unbacked](./checks/grain.unique-key-unbacked.md)
 - [Examples](./examples.md)
 - [Release discipline](./release-discipline.md)
 
