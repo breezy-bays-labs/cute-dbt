@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-2ba07985.js";
+            window.path_to_searchindex_js = "searchindex-d38760c2.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-7388fac0.js"></script>
+        <script src="toc-584848ec.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -749,6 +749,7 @@ TOML file.</p>
 </thead>
 <tbody>
 <tr><td><a href="#grainunique-key-unbacked"><code>grain.unique-key-unbacked</code></a></td><td>Unique key without a uniqueness test</td><td><code>total</code></td><td><code>data-test</code></td></tr>
+<tr><td><a href="#unionarm-coverage"><code>union.arm-coverage</code></a></td><td>Unexercised UNION arm</td><td><code>high</code></td><td><code>unit-test</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -781,6 +782,40 @@ TOML file.</p>
 <p>Add a uniqueness data test at the declared grain: <code>unique</code> on a single-column key, or <code>dbt_utils.unique_combination_of_columns</code> over the composite key columns.</p>
 <h2 id="rationale"><a class="header" href="#rationale">Rationale</a></h2>
 <p>Incremental merge / delete+insert semantics silently depend on the declared unique_key actually being unique — a duplicate key corrupts the merge with no test to catch it. Declaring a grain without a test at that grain is an unverified load-bearing assumption.</p>
+<div style="break-before: page; page-break-before: always;"></div><!-- GENERATED — do not edit. Source of truth: the `heuristics!` block in src/domain/checks.rs. Regenerate: GEN_HEURISTICS_LEDGER=1 cargo test --test heuristics_ledger -->
+<h1 id="unionarm-coverage"><a class="header" href="#unionarm-coverage">union.arm-coverage</a></h1>
+<p><strong>Unexercised UNION arm</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th></th></tr>
+</thead>
+<tbody>
+<tr><td>Group</td><td><code>union</code></td></tr>
+<tr><td>Tier</td><td><code>high</code></td></tr>
+<tr><td>Instrument</td><td><code>unit-test</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="conditions-1"><a class="header" href="#conditions-1">Conditions</a></h2>
+<ul>
+<li>the model’s body (or a CTE within it) UNIONs arms the CTE engine resolved to union-typed edges — each checked arm is a join-free reference to an earlier CTE (<code>UnionAll</code> / <code>UnionDistinct</code>)</li>
+<li>an arm counts as exercised when at least one unit-test given with one or more in-manifest rows binds — by <code>ref(...)</code> / <code>source(...)</code> leaf name, case-insensitive — to any external relation in the arm’s upstream CTE closure</li>
+<li>a given bound to a relation shared by several arms exercises every arm whose closure reads it: its rows provably enter each arm’s scan, while per-arm filter survival is deliberately out of scope (no predicate evaluation) — the HIGH-tier cue boundary, never an assertion of output-level coverage</li>
+<li>verdict order: any provably-unfed arm makes the construct UNCOVERED; otherwise any statically-unattributable arm makes it UNKNOWN; otherwise COVERED, attributing every test that feeds an arm</li>
+</ul>
+<h2 id="exclusions-1"><a class="header" href="#exclusions-1">Exclusions</a></h2>
+<ul>
+<li>arms that are not a join-free reference to an earlier CTE (join chains, derived tables, arms reading external tables directly, EXCEPT/INTERSECT arms) emit no union edge and are invisible to this check — never counted, never reported</li>
+<li>an arm whose upstream closure reads no resolvable external relation (constant SELECT, table functions) makes the construct UNKNOWN, never UNCOVERED</li>
+<li>an arm fed only by external-fixture or non-literal-sql givens (row counts not statically recoverable) makes the construct UNKNOWN, never UNCOVERED</li>
+<li>an arm whose only unbound feeding relation resolves to a seed is UNKNOWN, never UNCOVERED, when the model has unit tests (dbt lets seed inputs go ungiven and reads the real seed file)</li>
+<li><code>this</code> givens (incremental prior state) never feed a union arm</li>
+</ul>
+<h2 id="recommendation-1"><a class="header" href="#recommendation-1">Recommendation</a></h2>
+<p>Add (or fill) a given row for each unexercised UNION arm’s input so every arm contributes at least one row, then extend <code>expect</code> with the row(s) that arm should emit. This finding’s evidence carries the per-arm input and a given-row sketch.</p>
+<h2 id="rationale-1"><a class="header" href="#rationale-1">Rationale</a></h2>
+<p>A UNION arm with no fixture rows contributes nothing to any unit test: its projection, casts, and filters run on zero rows, so a column mix-up or a dropped row in that arm ships silently. One given row per arm makes every branch’s contribution visible in the expected output.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="examples"><a class="header" href="#examples">Examples</a></h1>
 <p>cute-dbt commits rendered example reports under
