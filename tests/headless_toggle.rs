@@ -226,17 +226,17 @@ fn eval(tab: &Tab, expr: &str) -> serde_json::Value {
             .exception
             .as_ref()
             .and_then(|e| e.description.clone())
-            .unwrap_or_else(|| exc.text.clone());
+            .unwrap_or(exc.text);
         panic!("JS evaluation threw for `{expr}`: {detail}");
     }
     r.result.value.unwrap_or(serde_json::Value::Null)
 }
 
 fn eval_string(tab: &Tab, expr: &str) -> String {
-    let v = eval(tab, expr);
-    v.as_str().map(str::to_owned).unwrap_or_else(|| {
-        panic!("JS evaluation of `{expr}` returned non-string {v:?} (cute-dbt#109)")
-    })
+    match eval(tab, expr) {
+        serde_json::Value::String(s) => s,
+        v => panic!("JS evaluation of `{expr}` returned non-string {v:?} (cute-dbt#109)"),
+    }
 }
 
 fn eval_bool(tab: &Tab, expr: &str) -> bool {
