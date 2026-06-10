@@ -91,10 +91,11 @@ exclude_globs = []
 # The mutation gate self-detects a stale pin: a drifted line stops excluding
 # the equivalent clamp, which then surfaces as a false survivor (a red gate) —
 # which is how the original `:839:` staleness was caught.
-# tracked: cute-dbt#129 — equivalent dedent clamp mutant (#98 mutation gate);
-# stays OPEN as the exclusion tracker (restoration: lift if `dedent` is ever
-# refactored so the per-line slice start can legitimately differ from
-# min_indent). cute-dbt#128 is a literal duplicate of #129 (closed as dup).
+# adr: ops/decisions/cute-dbt/adr-equivalent-mutant-classifications.md —
+# equivalent dedent clamp mutant (#98 mutation gate); permanent
+# classification (re-audit if `dedent` is ever refactored so the per-line
+# slice start can legitimately differ from min_indent). Formerly tracked
+# via cute-dbt#129 (and its literal duplicate cute-dbt#128, closed as dup).
 #
 # Classified-equivalent mutation (cute-dbt#143): `replace match guard
 # c == '\'' && chars.peek() == Some(&'\'') with false in split_quote_aware`
@@ -108,9 +109,10 @@ exclude_globs = []
 # <= 7 over {', ',', 'a', 'b'} produce identical output (see the K12a note
 # in unit_test_table.rs tests). Line-pinned for the same self-detecting
 # staleness behavior as the dedent pin.
-# tracked: cute-dbt#129 — the open equivalent-mutant exclusion tracker
-# (scope widened from the dedent clamp to all three unit_test_table.rs
-# equivalents in #143).
+# adr: ops/decisions/cute-dbt/adr-equivalent-mutant-classifications.md —
+# equivalent doubled-quote escape-arm guard mutant; permanent classification
+# (brute-forced over all 21,845 inputs of length <= 7, zero distinguishing
+# cases; classified in #143).
 #
 # Classified-equivalent mutation (cute-dbt#143): `replace * with / in
 # single_quote_end` at unit_test_table.rs:1173 (`byte += 2 * '\''.len_utf8()`).
@@ -119,7 +121,9 @@ exclude_globs = []
 # same-line sibling `* with +` IS discriminating (2 + 1 == 3) and is killed
 # by `k12h_single_quote_end_escape_byte_step_is_two_times_len`. The `/` in
 # the replacement text disambiguates within the line pin.
-# tracked: cute-dbt#129 — the open equivalent-mutant exclusion tracker.
+# adr: ops/decisions/cute-dbt/adr-equivalent-mutant-classifications.md —
+# equivalent escape byte-step mutant; permanent classification
+# (`'\''.len_utf8()` is the compile-time constant 1, so `2 * 1 == 2 / 1`).
 #
 # NOTE (cute-dbt#143): eight `+= -> *=` cursor mutations inside the
 # scan-loop helpers of unit_test_table.rs (scan_csv_matrix,
