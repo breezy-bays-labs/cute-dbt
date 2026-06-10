@@ -12,29 +12,64 @@
 //! cycle, so the leaf direction is a structural decision recorded here
 //! and in the closeout decision record.
 //!
-//! Path normalization: leading `./` is stripped; an optional
-//! `project_root` prefix is stripped from changed paths (a dbt sub-tree
-//! workflow lives under `<repo-root>/dbt_project/`, the manifest records
-//! `models/...` relative to `dbt_project/`); double slashes collapse.
-//! Windows-style `\` separators are explicitly **not** supported in v0.1
-//! — dbt manifests on macOS/Linux emit forward slashes. Promoting to
-//! cross-platform path-set semantics is a v0.2+ follow-up
-//! (tracked: cute-dbt#183).
+//! Path normalization: Windows-style `\` separators canonicalize to `/`
+//! (cute-dbt#183); leading `./` is stripped; an optional `project_root`
+//! prefix is stripped from changed paths (a dbt sub-tree workflow lives
+//! under `<repo-root>/dbt_project/`, the manifest records `models/...`
+//! relative to `dbt_project/`); separator runs collapse.
+//!
+//! The `\` canonicalization closes a one-sided gap (cute-dbt#183,
+//! verified against source 2026-06-10): a dbt manifest compiled **on
+//! Windows** serializes `original_file_path` from a native `PathBuf`
+//! verbatim — `\`-separated — with no slash normalization (dbt-fusion
+//! `crates/dbt-schemas/src/schemas/manifest/manifest_nodes.rs` +
+//! `crates/dbt-schemas/src/schemas/nodes.rs` `CommonAttributes`, both at
+//! commit `9977b6cbb1b761065536300037560d8e3c037011`; fusion's own
+//! `dbt_common::path::path_separator_eq` treats `/` and `\` as
+//! equivalent for exactly this reason). `git diff`, by contrast, emits
+//! `/`-separated repo paths on **every** platform (index/tree entry path
+//! names are stored with `/` — `git/git`
+//! `Documentation/gitformat-index.adoc` at `1ff279f34`). Without
+//! canonicalization a Windows-compiled manifest never matched the diff
+//! keyset and scoping silently missed. Treating `\` as a separator
+//! mirrors fusion's equivalence semantics; a Unix filename containing a
+//! *literal* `\` is therefore misread, accepted deliberately — fusion's
+//! own path equality already conflates the two.
 
+use std::borrow::Cow;
 use std::path::Path;
 
+/// Canonicalize Windows-style `\` separators to `/` (cute-dbt#183),
+/// borrowing when the input carries none.
+fn canonicalize_separators(s: &str) -> Cow<'_, str> {
+    if s.contains('\\') {
+        Cow::Owned(s.replace('\\', "/"))
+    } else {
+        Cow::Borrowed(s)
+    }
+}
+
 /// Normalize a file path for matching:
+/// - Canonicalize Windows-style `\` separators to `/` (cute-dbt#183 —
+///   a Windows-compiled manifest emits `\`-separated
+///   `original_file_path`; see the module docs for the source-pinned
+///   evidence). Applied to the path **and** to `strip_prefix`, before
+///   every other step, so a fully Windows-shaped input still strips and
+///   matches.
 /// - Strip leading `./`.
 /// - Strip `strip_prefix` (with optional trailing slash) if the path
 ///   starts with it.
 /// - Collapse runs of `/` into a single `/`.
 ///
 /// Returns the normalized path as a `String` (cheap — most fixtures are
-/// short). Windows-style `\` separators are passed through unchanged
-/// (v0.1 limitation; tracked: cute-dbt#183).
+/// short).
 #[must_use]
 pub fn normalize_path(p: &str, strip_prefix: Option<&Path>) -> String {
-    let mut remaining = p;
+    // Step 0: canonicalize `\` → `/` so every later step sees one
+    // separator vocabulary (`.\x` strips, `dbt_project\x` matches the
+    // prefix, `\\` runs collapse).
+    let canonical = canonicalize_separators(p);
+    let mut remaining: &str = &canonical;
 
     // Step 1: strip leading "./".
     while let Some(rest) = remaining.strip_prefix("./") {
@@ -46,8 +81,9 @@ pub fn normalize_path(p: &str, strip_prefix: Option<&Path>) -> String {
     // mid-segment) so `dbt_project_notes/x.sql` is NOT stripped when the
     // prefix is `dbt_project` — bot-review finding on cute-dbt#86.
     if let Some(prefix) = strip_prefix {
-        let prefix_str = prefix.to_string_lossy();
-        let prefix_str = prefix_str.trim_end_matches('/');
+        let prefix_lossy = prefix.to_string_lossy();
+        let prefix_canonical = canonicalize_separators(&prefix_lossy);
+        let prefix_str = prefix_canonical.trim_end_matches('/');
         if !prefix_str.is_empty() {
             if remaining == prefix_str {
                 remaining = "";
@@ -165,6 +201,32 @@ mod tests {
         );
     }
 
+    // ----- Windows-style `\` separators (cute-dbt#183) -----
+    // Representative unit cases; the exhaustive mutation-kill parity
+    // suite lives in `tests/path_matching.rs`.
+
+    #[test]
+    fn normalize_path_canonicalizes_backslash_separators() {
+        assert_eq!(normalize_path("models\\x.sql", None), "models/x.sql");
+    }
+
+    #[test]
+    fn normalize_path_strips_project_root_prefix_from_backslash_path() {
+        assert_eq!(
+            normalize_path("dbt_project\\models\\x.sql", Some(Path::new("dbt_project"))),
+            "models/x.sql"
+        );
+    }
+
+    #[test]
+    fn normalize_path_backslash_segment_guard_still_holds() {
+        // The segment-aware prefix guard survives canonicalization.
+        assert_eq!(
+            normalize_path("dbt_project_notes\\x.sql", Some(Path::new("dbt_project"))),
+            "dbt_project_notes/x.sql"
+        );
+    }
+
     // ----- match_changed_path -----
 
     #[test]
@@ -193,5 +255,13 @@ mod tests {
     fn match_changed_path_no_match_for_unrelated_path() {
         let changed = vec!["README.md".to_owned()];
         assert!(!match_changed_path("models/x.sql", &changed, None));
+    }
+
+    #[test]
+    fn match_changed_path_bridges_backslash_manifest_to_slash_diff() {
+        // The cute-dbt#183 gap: a Windows-compiled manifest's
+        // original_file_path is `\`-separated; the git diff is `/`.
+        let changed = vec!["models/x.sql".to_owned()];
+        assert!(match_changed_path("models\\x.sql", &changed, None));
     }
 }
