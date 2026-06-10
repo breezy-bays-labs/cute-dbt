@@ -3077,8 +3077,9 @@ mod tests {
     // two adjacent quotes, so the cur content AND the final quote state are
     // byte-identical. An exhaustive brute force over all 21 845 strings of
     // length ≤7 over {`'`, `,`, `a`, `b`} found ZERO distinguishing inputs.
-    // tracked: cute-dbt#129 — the open equivalent-mutant exclusion tracker
-    // (full rationale block in `.cargo/mutants.toml`).
+    // adr: ops/decisions/cute-dbt/adr-equivalent-mutant-classifications.md
+    // — permanent equivalent-mutant classification (full rationale block in
+    // `.cargo/mutants.toml`).
     //
     // This test is kept as a behavioral-regression pin for the `''`-escape
     // semantics themselves (NOT as the 847 kill — there is no such kill).
@@ -3256,8 +3257,9 @@ mod tests {
         // (classified in `.cargo/mutants.toml`, not killed here): the
         // multiplicand `'\''.len_utf8()` is the compile-time constant 1, so
         // `2 * 1 == 2 / 1 == 2` for every input — no distinguishing case
-        // exists. tracked: cute-dbt#129 — the open equivalent-mutant
-        // exclusion tracker.
+        // exists.
+        // adr: ops/decisions/cute-dbt/adr-equivalent-mutant-classifications.md
+        // — permanent equivalent-mutant classification.
         // `'abcd''x'` is 9 bytes; the closing quote is the 9th, so the byte
         // index just past it is exactly 9. Each killable arithmetic mutant
         // shifts it.
