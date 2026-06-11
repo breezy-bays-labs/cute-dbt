@@ -185,6 +185,90 @@ fn real_fixture_carries_column_descriptions_and_column_test_attribution() {
 }
 
 #[test]
+fn real_fixture_carries_model_description_tags_and_full_overrides() {
+    // cute-dbt#200 verified against the REAL committed fixtures (the
+    // fusion-first rule's second leg — synthetic JSON misses the engines'
+    // unset shapes). The wire types are pinned to dbt-fusion
+    // `dbt-schemas` @ 9977b6cbb1b761065536300037560d8e3c037011
+    // (`ManifestMaterializableCommonAttributes.{description,tags}`,
+    // `UnitTestOverrides.{env_vars,macros,vars}`).
+
+    // --- jaffle-shop (dbt 1.11 wire): "" description + null overrides ---
+    let jaffle = FileManifestSource
+        .load(&fixture("jaffle-shop-current.json"))
+        .expect("the current fixture is a valid compiled v12 manifest");
+    let customers = jaffle
+        .node(&NodeId::new("model.jaffle_shop.customers"))
+        .expect("customers model present");
+    assert_eq!(
+        customers.description(),
+        Some(
+            "This table has basic information about a customer, as well as \
+             some derived facts based on a customer's orders"
+        ),
+        "authored top-level model description ingests verbatim",
+    );
+    let stg_customers = jaffle
+        .node(&NodeId::new("model.jaffle_shop.stg_customers"))
+        .expect("stg_customers model present");
+    assert!(
+        stg_customers.description().is_none(),
+        "the wire's empty-string unset description must be dropped",
+    );
+    assert!(stg_customers.tags().is_empty(), "untagged model: []");
+    let jaffle_ut = jaffle
+        .unit_test("unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns")
+        .expect("unit test present");
+    assert!(
+        jaffle_ut.overrides().is_none(),
+        "the wire's explicit `\"overrides\": null` collapses to None",
+    );
+
+    // --- playground: real tags (top-level, deduplicated) + the #125
+    //     overrides splice with empty sibling channels ---
+    let playground = FileManifestSource
+        .load(&fixture("playground-current.json"))
+        .expect("the playground fixture is a valid compiled v12 manifest");
+    let mart = playground
+        .node(&NodeId::new("model.healthcare_analytics.mart_dq_summary"))
+        .expect("mart_dq_summary present");
+    assert_eq!(
+        mart.tags(),
+        [
+            "analytics".to_owned(),
+            "data_quality".to_owned(),
+            "marts".to_owned()
+        ],
+        "the TOP-LEVEL deduplicated tags — this fixture's config.tags \
+         carries the project+model merge duplicates and must not be read",
+    );
+    assert!(
+        mart.description()
+            .is_some_and(|d| d.starts_with("Data quality summary metrics")),
+        "authored model description ingests",
+    );
+    let incremental_ut = playground
+        .unit_test(
+            "unit_test.healthcare_analytics.fct_encounters_incremental.\
+             test_fct_encounters_incremental_appends_new_encounters",
+        )
+        .expect("the #125 overrides splice is present");
+    let overrides = incremental_ut
+        .overrides()
+        .expect("populated macros group retained");
+    assert_eq!(
+        overrides.keys().collect::<Vec<_>>(),
+        ["macros"],
+        "the wire's empty `\"vars\": {{}}` / `\"env_vars\": {{}}` channels are dropped",
+    );
+    assert_eq!(
+        overrides["macros"]["is_incremental"],
+        serde_json::json!(true),
+        "a native JSON bool survives ingestion untouched (never stringified)",
+    );
+}
+
+#[test]
 fn baseline_and_current_form_the_modified_stg_customers_diff_pair() {
     // PR 5's StateComparator diffs node body checksums; PR 4b must carry
     // that signal through translation intact. The fixtures are a pair:
