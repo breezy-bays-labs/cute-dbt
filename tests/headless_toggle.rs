@@ -4390,14 +4390,19 @@ fn non_this_givens_unbadged(tab: &Tab) -> bool {
     )
 }
 
-const MODE_BADGE: &str = "document.querySelector('.expected-panel .panel-header .mode-badge')";
+// cute-dbt#232 (audit D2) — table renders ALWAYS relocate the mode badge
+// onto the .fixture-view-bar meta row below the title (mirroring Given);
+// only the sql-format / external-fixture paths keep the header placement.
+// These tests' expect fixtures render the table path, so the bar is the
+// spec-true location.
+const MODE_BADGE: &str = "document.querySelector('.expected-panel .fixture-view-bar .mode-badge')";
 // cute-dbt#202 (founder decision, epic #197) — the expect-semantics tooltip
 // is BADGE-BORNE: the mode badge itself is the focusable trigger and the
 // bubble nests inside it (the #146 CSS-bubble mechanism, pass-2 styling).
 // The separate ⓘ `.expect-tooltip` button is retired from the expected
 // panel (the static DAG hint keeps the class elsewhere).
 const MODE_TIP_TRIGGER: &str =
-    "document.querySelector('.expected-panel .panel-header .mode-badge.has-mode-tip')";
+    "document.querySelector('.expected-panel .fixture-view-bar .mode-badge.has-mode-tip')";
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
@@ -4695,11 +4700,13 @@ fn incremental_badges_modes_tooltip_and_this_given() {
          nested bubble goes with it)",
     );
     // cute-dbt#202 — the #161 clear-list extends to .expected-model-badge:
-    // the model pill from the prior test must not leak either.
+    // the model pill from the prior test must not leak either (location-
+    // agnostic since cute-dbt#232: the pill rides the meta bar, which the
+    // no-test body wipe destroys; the header must stay clear too).
     assert!(
         eval_bool(
             &tab,
-            "document.querySelector('.expected-panel .panel-header .expected-model-badge') === null"
+            "document.querySelector('.expected-panel .expected-model-badge') === null"
         ),
         "selecting a modified-but-untested model clears the leaked expected model pill",
     );
@@ -6182,9 +6189,11 @@ fn rich_hover_cards_model_pill_format_badge_and_overrides() {
         "blurring the overrides badge hides the tip",
     );
 
-    // ===== Expected: the model pill rides the header (no diff → no bar) =====
+    // ===== Expected: the model pill rides the meta bar (cute-dbt#232 —
+    // the bar exists for EVERY table render now, diff or not; the old
+    // right-aligned header fallback is retired) =====
     const EX_PILL: &str =
-        "document.querySelector('.expected-panel .panel-header .expected-model-badge')";
+        "document.querySelector('.expected-panel .fixture-view-bar .expected-model-badge')";
     assert_eq!(
         eval_string(&tab, &format!("{EX_PILL}.textContent")),
         "dim_x",
@@ -7405,6 +7414,313 @@ fn tier_chips_meet_aa_contrast_on_every_theme() {
     assert!(
         failures.is_empty(),
         "tier chips below the WCAG AA 4.5:1 floor (cute-dbt#206): {failures:#?}",
+    );
+
+    let _ = tab.close(true);
+}
+
+// ===== cute-dbt#232 — pass-2 conformance: edge-aware tooltip bubbles ·
+// expected meta row left · 13.44px tip text ================================
+//
+// Fixes the three confirmed deviations from the 2026-06-11 design-
+// conformance audit (D1 edge clipping, D2 expected badges right+reversed,
+// D3 7.8px bubble text). NOTE (merge contention): sibling PR cute-dbt#230
+// also appends tests to this file — the #232 block sits at the end so a
+// textual conflict resolves by keeping both blocks.
+
+/// An incremental-mode unit test whose expect is a real dict table with NO
+/// expect-side cell diff — the COMMON Expected-panel presentation (every
+/// baseline-mode render + every pr-diff test without an expect change),
+/// where `buildFixtureView` returns a bare grid with no Diff/File toggle.
+/// The #232 assertions exercise exactly this path, not the diff-bar
+/// special case the existing `expected_bar_orders_…` test covers.
+fn incremental_dict_expect_test(name: &str, model_bare: &str) -> UnitTest {
+    UnitTest::new(
+        name.to_owned(),
+        NodeId::new(model_bare),
+        vec![UnitTestGiven::new(
+            "ref('stg_src')".to_owned(),
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+    .with_incremental_mode(Some(true))
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn badge_tip_bubble_stays_inside_a_narrow_viewport() {
+    // cute-dbt#232 (audit D1) — the CSS-bubble tip family had zero edge
+    // awareness: on a phone-class viewport the incremental badge's bubble
+    // painted past the right viewport edge (audit measurement on the
+    // playground report: bubble right edge 422.7px vs a 375px viewport =
+    // 47.7px of text clipped mid-word). Two fixes cooperate here: the meta
+    // row moves LEFT under the Expected title mirroring Given (R2), and the
+    // geometry-only edge tagger + CSS anchor rules keep the bubble inside
+    // the viewport wherever the trigger sits (R1). Visibility stays pure
+    // CSS — the #146 contract — so `focus()` below both reveals the bubble
+    // (the CSS :focus rule) and lets the focusin tagger annotate geometry.
+    // The fixture stages the audit's phone-viewport worst case: a WIDE
+    // given table (the #157 helper) trips the content-overflow stack
+    // toggle, so the Expected panel spans the full narrow viewport and the
+    // unfixed right-aligned header pushes the badge cluster against the
+    // right edge — exactly where its left-anchored bubble clips. The
+    // 1-char model name keeps the pill (the badge's right neighbour in the
+    // unfixed header) from pulling the badge back from the edge.
+    let ut = UnitTest::new(
+        "t".to_owned(),
+        NodeId::new("m"),
+        vec![UnitTestGiven::new(
+            "ref('stg_src')".to_owned(),
+            wide_cols_rows(12, 3),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+    .with_incremental_mode(Some(true));
+    let url = render_to_file(
+        "headless_232_bubble_edge.html",
+        vec![model_node_materialized("model.shop.m", "incremental")],
+        vec![("unit_test.shop.m.t", ut)],
+        &["model.shop.m"],
+        &[], // 0 changed → auto-All mode → the test is selectable
+    );
+    // Dedicated narrow (iPhone-class) launch window — the same lever the
+    // cute-dbt#157 viewport regression uses (CDP device-metrics overrides
+    // silently no-op on `window.innerWidth` in headless_chrome 1.0.21).
+    let browser = launch_browser_sized(Some((375, 812)));
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    select_model(&tab, "m");
+    select_test(&tab, "unit_test.shop.m.t");
+
+    // Nudge the closure-scoped responsive helper and wait for the stacked
+    // (single-column) phone layout — the #157 pattern.
+    let _ = eval(&tab, "window.dispatchEvent(new Event('resize'))");
+    let mut stacked = false;
+    for _ in 0..40 {
+        if eval_bool(
+            &tab,
+            "document.querySelector('.panel-row.is-stacked') !== null",
+        ) {
+            stacked = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        stacked,
+        "precondition: the phone-class viewport stacks the panel row \
+         (the badge-at-the-edge geometry under test needs the stacked layout)",
+    );
+
+    // Location-agnostic trigger selector: header on the pre-#232 layout,
+    // the always-present fixture-view bar after — the assertion is about
+    // viewport containment, not placement.
+    const TRIGGER: &str = "document.querySelector('.expected-panel .mode-badge.has-mode-tip')";
+    assert!(
+        eval_bool(&tab, &format!("{TRIGGER} !== null")),
+        "precondition: the incremental-mode badge tip trigger renders",
+    );
+    let _ = eval(&tab, &format!("{TRIGGER}.focus()"));
+    let m = eval(
+        &tab,
+        &format!(
+            "(function(){{var b={TRIGGER}.querySelector('.expect-tooltip-bubble');\
+             var r=b.getBoundingClientRect();\
+             return {{left:r.left,right:r.right,vw:window.innerWidth}};}})()"
+        ),
+    );
+    let left = m["left"].as_f64().expect("bubble left is a number");
+    let right = m["right"].as_f64().expect("bubble right is a number");
+    let vw = m["vw"].as_f64().expect("innerWidth is a number");
+    eprintln!("badge tip bubble geometry: left={left:.1} right={right:.1} innerWidth={vw:.1}");
+    assert!(
+        right <= vw,
+        "the badge bubble must not paint past the right viewport edge \
+         (cute-dbt#232 audit D1 — 47.7px clipped at 375px on the unfixed CSS): \
+         bubble.right={right} > innerWidth={vw}",
+    );
+    assert!(
+        left >= 0.0,
+        "the badge bubble must not paint past the LEFT viewport edge either: bubble.left={left}",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn badge_tip_text_matches_column_tooltip_description_size() {
+    // cute-dbt#232 (audit D3) — the shared `.expect-tooltip-bubble` rule
+    // sized its text `0.78rem` = 7.8px at Sakura's 62.5% root
+    // (html{font-size:62.5%} → 1rem = 10px) — 58% of spec. Pass-2 sizes
+    // badge-tip text exactly like the column-tooltip description: the
+    // 12px `.col-tooltip` shell base × 1.12em `.ct-desc` = 13.44px, in
+    // ABSOLUTE px precisely because of the Sakura root. The equality is
+    // asserted against the real computed `.ct-desc`, plus the absolute
+    // value, so the two surfaces can never drift to a shared wrong size.
+    let mut col_desc = BTreeMap::new();
+    col_desc.insert("id".to_owned(), "Primary key for dim_inc".to_owned());
+    let url = render_to_file(
+        "headless_232_tip_size.html",
+        vec![
+            model_node_materialized("model.shop.dim_inc", "incremental")
+                .with_column_descriptions(col_desc),
+        ],
+        vec![(
+            "unit_test.shop.dim_inc.t",
+            incremental_dict_expect_test("t", "dim_inc"),
+        )],
+        &["model.shop.dim_inc"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    select_model(&tab, "dim_inc");
+    select_test(&tab, "unit_test.shop.dim_inc.t");
+
+    // Materialize the singleton #col-tooltip (and its .ct-desc) through the
+    // real path: focusing the described expected-table header cell.
+    let _ = eval(
+        &tab,
+        "document.querySelector('.expected-panel th.has-col-meta').focus()",
+    );
+    let ct_desc_px = eval_string(
+        &tab,
+        "getComputedStyle(document.querySelector('#col-tooltip .ct-desc')).fontSize",
+    );
+    assert_eq!(
+        ct_desc_px, "13.44px",
+        "sanity: the column-tooltip description is the spec's 12px x 1.12em = 13.44px",
+    );
+    let bubble_px = eval_string(
+        &tab,
+        "getComputedStyle(document.querySelector(\
+         '.expected-panel .mode-badge.has-mode-tip .expect-tooltip-bubble')).fontSize",
+    );
+    assert_eq!(
+        bubble_px, ct_desc_px,
+        "the badge-tip bubble text matches the column-tooltip description size \
+         (cute-dbt#232 audit D3: 7.8px vs 13.44px on the unfixed CSS)",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn expected_meta_row_reads_left_without_an_expect_diff() {
+    // cute-dbt#232 (audit D2) — spec: the Expected meta reads LEFT under
+    // the panel title in [model pill][mode badge][N rows] order, mirroring
+    // Given, in EVERY table render. On the unfixed JS the meta bar only
+    // existed when an expect-side cell diff built the Diff/File toggle; in
+    // every other render (the COMMON presentation) the badges fell back
+    // into the .panel-header pushed RIGHT in REVERSED order
+    // [rows][branch][model].
+    let url = render_to_file(
+        "headless_232_meta_row.html",
+        vec![model_node_materialized("model.shop.dim_inc", "incremental")],
+        vec![(
+            "unit_test.shop.dim_inc.t",
+            incremental_dict_expect_test("t", "dim_inc"),
+        )],
+        &["model.shop.dim_inc"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    select_model(&tab, "dim_inc");
+    select_test(&tab, "unit_test.shop.dim_inc.t");
+
+    const BAR: &str = "document.querySelector('.expected-panel .fixture-view-bar')";
+    assert!(
+        eval_bool(&tab, &format!("{BAR} !== null")),
+        "the Expected meta row exists even with NO expect diff \
+         (cute-dbt#232 audit D2 — the bar was diff-only on the unfixed JS)",
+    );
+    // Reading order inside the bar: [model pill][mode badge][row count] —
+    // no Diff/File toggle on this path (no expect diff to toggle to).
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!(
+                "Array.from({BAR}.children).map(function(c){{\
+                 return c.classList.contains('expected-model-badge') ? 'model'\
+                 : c.classList.contains('mode-badge') ? 'mode'\
+                 : c.classList.contains('expected-rowcount') ? 'rows'\
+                 : c.classList.contains('cell-diff-toggle') ? 'toggle' : '?';}}).join('|')"
+            ),
+        ),
+        "model|mode|rows",
+        "the no-diff meta row reads [model pill][mode badge][row count], no toggle",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{BAR}.querySelector('.expected-rowcount').textContent")
+        ),
+        "1 row",
+        "the relocated row count rides the bar",
+    );
+    // Visual reading order matches DOM order: the pill paints LEFT of the
+    // row count (left-aligned cluster — no margin-left:auto push here).
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "{BAR}.querySelector('.expected-model-badge').getBoundingClientRect().left \
+                 < {BAR}.querySelector('.expected-rowcount').getBoundingClientRect().left"
+            ),
+        ),
+        "the model pill paints left of the row count (left-aligned meta)",
+    );
+    // The header carries only the <h2> — the badges/rowcount all moved to
+    // the meta row (the header fallback is retired for table renders).
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelector('.expected-panel .panel-header').children.length"
+        ),
+        1,
+        "the Expected header carries only the title once the meta row owns the badges",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.expected-panel .panel-header').children[0].tagName"
+        ),
+        "H2",
+        "the header's only child is the panel title",
     );
 
     let _ = tab.close(true);

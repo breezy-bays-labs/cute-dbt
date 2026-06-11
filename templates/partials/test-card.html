@@ -29,6 +29,12 @@
   </section>
 
   <section class="panel expected-panel" aria-label="Expected output">
+    {#- cute-dbt#178 / cute-dbt#232 — the rowcount span below is a PERSISTENT
+       static element: table renders relocate it (with the model pill + mode
+       badge) onto the .fixture-view-bar meta row inside .expected-body, and
+       every render rescues it back to this header BEFORE wiping the body so
+       .empty() can never destroy it. Only the sql-format / external-fixture
+       paths leave it in the header. #}
     <div class="panel-header">
       <h2>Expected</h2>
       <span class="row-count-badge expected-rowcount">0 rows</span>

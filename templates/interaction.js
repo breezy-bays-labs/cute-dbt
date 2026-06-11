@@ -249,6 +249,9 @@
     // cute-dbt#202 — delegated hover/focus handlers for the rich hover
     // cards (model pills, format badges, the overrides badge).
     bindModelTips();
+    // cute-dbt#232 — viewport-edge tagging for the pure-CSS bubble family
+    // (geometry annotation only; visibility stays CSS :hover/:focus).
+    bindTipEdgeTagger();
   });
 
   // cute-dbt#91 — scope-toggle helpers --------------------------------
@@ -1642,6 +1645,44 @@
       .on("mouseleave focusout", ".has-ov-tip", function () { hideTip("ov-tooltip"); });
   }
 
+  // cute-dbt#232 (audit D1) — geometry-only edge tagger for the CSS-bubble
+  // tip family: the .has-mode-tip badges (incremental branch · prior model
+  // state) and the static .expect-tooltip DAG hint. These bubbles are pure
+  // CSS (the #146 contract: focusable trigger, reveal on :hover AND
+  // :focus/:focus-visible — never JS-controlled visibility), so a trigger
+  // near a viewport edge clipped its fixed-direction bubble. This tagger
+  // never touches visibility: it measures the trigger against the viewport
+  // on the same delegated mouseenter/focusin moment that precedes the CSS
+  // reveal and annotates `data-tip-edge="right"|"left"` (or removes it) so
+  // the stylesheet can anchor the bubble away from the hugged edge.
+  function tagTipEdge(trigger) {
+    var bubble = trigger.querySelector(".expect-tooltip-bubble");
+    if (!bubble) return;
+    var vw = document.documentElement.clientWidth;
+    var r = trigger.getBoundingClientRect();
+    // The bubble is laid out even while visibility:hidden, so its real
+    // box (20rem capped at min(70vw, 100vw - 16px), plus padding) is
+    // measurable without revealing it.
+    var w = bubble.offsetWidth;
+    // Default anchors: badge-borne bubbles open rightward from the
+    // trigger's left edge; the .expect-tooltip hint centers on it.
+    var defLeft = trigger.classList.contains("has-mode-tip")
+      ? r.left
+      : (r.left + r.right) / 2 - w / 2;
+    if (defLeft + w > vw - 8 && r.right - w >= 8) {
+      trigger.setAttribute("data-tip-edge", "right");
+    } else if (defLeft < 8) {
+      trigger.setAttribute("data-tip-edge", "left");
+    } else {
+      trigger.removeAttribute("data-tip-edge");
+    }
+  }
+  function bindTipEdgeTagger() {
+    $(document).on("mouseenter focusin", ".has-mode-tip, .expect-tooltip", function () {
+      tagTipEdge(this);
+    });
+  }
+
   function renderGivenSection(given, dataDiff, ordinal) {
     // The section keeps `data-input-name` (the test seam) even though the
     // visible title is now the #202 ref() pill rendering.
@@ -1813,21 +1854,24 @@
     // `has_real_change()`, so its presence === "default this table to Diff".
     var diff = (t.data_diff && t.data_diff.expect) || undefined;
     $body.append(buildFixtureView(table, "expected-table", diff, t.expected.column_meta));
-    // cute-dbt#178 / cute-dbt#202 — when a Diff/File toggle bar exists,
-    // relocate the header meta onto that bar in reading order:
-    // [model pill] [mode badge] [N rows], with the Diff/File toggle pushed
-    // to the far right (CSS margin-left:auto — matches the Given bars).
-    // .prepend()/.append() MOVE the nodes (no copy), so nothing is
-    // duplicated. No bar (sql/external/no-diff) => the meta stays in the
-    // header and the model pill rides there as the fallback.
+    // cute-dbt#178 / cute-dbt#202 / cute-dbt#232 — the meta row ALWAYS
+    // rides a .fixture-view-bar below the "Expected" title, mirroring the
+    // Given headers (the pass-2 spec; audit D2): reading order
+    // [model pill] [mode badge] [N rows], with the Diff/File toggle — when
+    // an expect cell diff built one — pushed to the far right (CSS
+    // margin-left:auto). buildFixtureView returns a bare grid when there
+    // is no expect diff, so create the bar then (the right-aligned,
+    // order-reversed header fallback is retired). .prepend() MOVES the
+    // nodes (no copy), so nothing is duplicated. The sql / external
+    // early-returns above keep the header placement (spec-consistent).
     var $bar = $body.find(".fixture-view-bar").first();
-    if ($bar.length) {
-      $bar.prepend($rowcount);
-      $bar.prepend($exHdr.find(".mode-badge")); // empty set when not incremental
-      $bar.prepend(buildExpectedModelBadge(em));
-    } else {
-      $exHdr.append(buildExpectedModelBadge(em)); // empty set when no model
+    if (!$bar.length) {
+      $bar = $("<div>").addClass("fixture-view-bar");
+      $body.prepend($bar);
     }
+    $bar.prepend($rowcount);
+    $bar.prepend($exHdr.find(".mode-badge")); // empty set when not incremental
+    $bar.prepend(buildExpectedModelBadge(em)); // empty set when no model
     initDataTablesIn($body);
   }
 
@@ -2882,6 +2926,10 @@
   // Shared fixed-position clamp for the singleton bubble: below the
   // trigger, horizontally clamped, flipping above on bottom overflow.
   function positionTipNear(el, trigger) {
+    // cute-dbt#232 (audit D18) — reset the previous show's left BEFORE
+    // measuring: a stale left near the viewport edge squeezes the layout,
+    // so offsetWidth under-reports and the clamp below overshoots.
+    el.style.left = "0px";
     var r = trigger.getBoundingClientRect();
     var tw = el.offsetWidth, th = el.offsetHeight;
     var left = r.left;
