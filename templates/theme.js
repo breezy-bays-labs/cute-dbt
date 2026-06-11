@@ -53,7 +53,12 @@
   var KEY = "cute-dbt.appearance.v1"; // gitleaks:allow — a public storage key name, no secret
   // `engine` (cute-dbt#180) is the DAG-engine picker: "mermaid" (the static
   // default) or "cytoscape" (the opt-in interactive engine).
-  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", difflayout: "auto", engine: "mermaid" };
+  // `coverage` (cute-dbt#219) is the viewer-side coverage-intelligence
+  // display toggle: "on" (default; the field may be absent) or "off". The
+  // CROSS-PAGE contract: any cute-dbt page that renders check-engine-derived
+  // content reads this same field — the report keys one CSS rule on
+  // html[data-coverage=off]; the explorer pages adopt it as #103/#104 land.
+  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", difflayout: "auto", engine: "mermaid", coverage: "on" };
 
   // Read the persisted appearance, string-typed keys only. Any storage error
   // (file:// SecurityError, disabled storage) leaves the defaults intact.
@@ -64,7 +69,7 @@
     try {
       var p = JSON.parse(raw);
       if (p && typeof p === "object") {
-        ["theme", "style", "accent", "density", "difflayout", "engine"].forEach(function (k) {
+        ["theme", "style", "accent", "density", "difflayout", "engine", "coverage"].forEach(function (k) {
           if (typeof p[k] === "string") pref[k] = p[k];
         });
       }
@@ -72,6 +77,9 @@
     // Coerce the engine into its closed vocabulary — an unknown persisted
     // value must fall back to the static default, never reach the dispatcher.
     if (pref.engine !== "cytoscape") pref.engine = "mermaid";
+    // Same closed-vocabulary coercion for the coverage toggle (cute-dbt#219):
+    // anything but the explicit "off" reads as the default ON.
+    if (pref.coverage !== "off") pref.coverage = "on";
   }
   // Persist the current appearance. Swallows any storage error (zero-egress
   // in-memory fallback, mirrors interaction.js saveSettings).
@@ -136,6 +144,16 @@
     pref.engine = engine;
     if (typeof window.__cuteSetDagEngine === "function") window.__cuteSetDagEngine(engine);
   }
+  // cute-dbt#219 — the coverage-intelligence display toggle. PURE display:
+  // OFF sets html[data-coverage=off] (one CSS rule hides every
+  // check-engine-derived surface); ON removes the attribute and the
+  // already-rendered content shows again — no re-render, payload untouched.
+  function applyCoverage(v) {
+    var coverage = v === "off" ? "off" : "on";
+    if (coverage === "off") root.setAttribute("data-coverage", "off");
+    else root.removeAttribute("data-coverage");
+    pref.coverage = coverage;
+  }
 
   // Re-tint the DAG after a theme flip (the light/dark edge + anchor
   // variants live in interaction.js, which owns the legend + Mermaid).
@@ -163,6 +181,10 @@
     qsaForEach(".engine-seg button", function (b) {
       b.setAttribute("aria-pressed", b.getAttribute("data-engine") === pref.engine ? "true" : "false");
     });
+    // cute-dbt#219 — the coverage switch mirrors the pref (a checkbox owns
+    // its checked state natively; no aria-pressed on an <input>).
+    var cov = document.getElementById("settings-coverage-input");
+    if (cov) cov.checked = pref.coverage !== "off";
   }
 
   function wire() {
@@ -187,6 +209,12 @@
     qsaForEach(".engine-seg button", function (b) {
       b.addEventListener("click", function () { applyEngine(b.getAttribute("data-engine")); save(); syncControls(); rerenderDag(); });
     });
+    // cute-dbt#219 — the coverage-intelligence switch: flip the attribute,
+    // persist. Display-only — no re-render, no DAG/table reflow needed.
+    var cov = document.getElementById("settings-coverage-input");
+    if (cov) {
+      cov.addEventListener("change", function () { applyCoverage(cov.checked ? "on" : "off"); save(); });
+    }
   }
 
   // DataTables column widths shift when the font-size changes (density /
@@ -215,6 +243,7 @@
     applyAccent(pref.accent);
     applyDensity(pref.density);
     applyDiffLayout(pref.difflayout);
+    applyCoverage(pref.coverage);
     syncControls();
     wire();
     // Re-tint the legend + the active DAG engine once the theme's .dark
