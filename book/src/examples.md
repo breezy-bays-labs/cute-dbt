@@ -34,10 +34,16 @@ See [the zero-egress page](./zero-egress.md) for how it works.
 The richer example — cute-dbt run against a real dbt project
 ([`cmbays/dbt-playground`](https://github.com/cmbays/dbt-playground), built
 on synthetic [Synthea](https://synthetichealth.github.io/synthea/) patient
-data). One diff touches three models, so the report shows off:
+data). One diff puts seven models in scope, so the report shows off:
 
 - **multiple model cards** side by side,
 - **UNION arm rendering** in the CTE DAG (the dashed-orange edge + legend),
+- **cross-join rendering** in the CTE DAG (`mart_date_state_grid` builds a
+  dense months × states grid with an explicit `CROSS JOIN` CTE — the pink
+  `cross` edge + its legend entry), exercised by a unit test that **mixes
+  dict and csv givens** in a single test,
+- a **`source()`-given unit test** (`stg_synthea__patients` mocks
+  `source('synthea_raw', 'patients')` instead of a `ref()`),
 - an **empty-state card** (a model in scope with no unit tests wired).
 
 Open it and click around — the fastest way to get a feel for a real-world
@@ -45,8 +51,8 @@ report.
 
 ## diff-view showcase (PR-diff mode)
 
-👉 **[Open the rendered diff-view showcase](./examples/playground-pr-diff-report.html)**
-([source](https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/playground-pr-diff-report.html))
+👉 **[Open the rendered diff-view showcase](./examples/diff-showcase-report.html)**
+([source](https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/diff-showcase-report.html))
 
 The two reports above run in **baseline** mode. This one runs in **`--pr-diff`
 mode** — the way cute-dbt runs inside a CI PR review — so it shows the diff-view
