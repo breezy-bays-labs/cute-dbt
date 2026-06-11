@@ -225,3 +225,92 @@ fn unit_test_authoring_yaml_absent(world: &mut World, test_name: String) {
         test.get("authoring_yaml"),
     );
 }
+
+// ----- cute-dbt#247: the Model-YAML drawer pipeline -----
+
+/// The payload entry for the named model, with the run's exit/stderr
+/// asserted first (the report must have rendered).
+fn find_named_model<'p>(world: &World, payload: &'p Value, model_name: &str) -> &'p Value {
+    assert_eq!(
+        world.last_exit_code,
+        Some(0),
+        "cute-dbt failed; stderr={}",
+        world.last_stderr,
+    );
+    payload["models"]
+        .as_array()
+        .expect("payload.models is an array")
+        .iter()
+        .find(|m| m.get("name").and_then(Value::as_str) == Some(model_name))
+        .unwrap_or_else(|| panic!("payload carries no model named {model_name}"))
+}
+
+#[then(regex = r#"^the model "([^"]+)" carries model YAML containing "([^"]+)"$"#)]
+fn model_yaml_contains(world: &mut World, model_name: String, expected_substring: String) {
+    let html = world
+        .report_html
+        .as_ref()
+        .expect("report.html was written by the subprocess");
+    let payload = extract_payload(html);
+    let model = find_named_model(world, &payload, &model_name);
+    let raw = model
+        .pointer("/model_yaml/raw")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected model {model_name} to carry `model_yaml.raw`; \
+                 model_yaml = {:?}",
+                model.get("model_yaml"),
+            )
+        });
+    assert!(
+        raw.contains(&expected_substring),
+        "expected model_yaml.raw for {model_name} to contain {expected_substring:?}; \
+         got: {raw:?}",
+    );
+}
+
+#[then(regex = r#"^the model "([^"]+)" names "([^"]+)" as its schema file$"#)]
+fn model_yaml_names_schema_file(world: &mut World, model_name: String, expected_path: String) {
+    let html = world
+        .report_html
+        .as_ref()
+        .expect("report.html was written by the subprocess");
+    let payload = extract_payload(html);
+    let model = find_named_model(world, &payload, &model_name);
+    assert_eq!(
+        model.pointer("/model_yaml/path").and_then(Value::as_str),
+        Some(expected_path.as_str()),
+        "the scheme-stripped patch_path is the section's schema-file label",
+    );
+}
+
+#[then(regex = r#"^the model "([^"]+)" carries a Model YAML placeholder naming "([^"]+)"$"#)]
+fn model_yaml_placeholder_names(world: &mut World, model_name: String, expected_substring: String) {
+    let html = world
+        .report_html
+        .as_ref()
+        .expect("report.html was written by the subprocess");
+    let payload = extract_payload(html);
+    let model = find_named_model(world, &payload, &model_name);
+    assert!(
+        model.pointer("/model_yaml/raw").is_none(),
+        "a degraded section must carry NO raw block; model_yaml = {:?}",
+        model.get("model_yaml"),
+    );
+    let missing = model
+        .pointer("/model_yaml/missing")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected model {model_name} to carry the truthful `model_yaml.missing` \
+                 placeholder; model_yaml = {:?}",
+                model.get("model_yaml"),
+            )
+        });
+    assert!(
+        missing.contains(&expected_substring),
+        "expected the placeholder for {model_name} to name {expected_substring:?}; \
+         got: {missing:?}",
+    );
+}

@@ -294,6 +294,7 @@ fn payload_json_for(model_id: &str, policy: &CheckPolicy<HeuristicId>) -> serde_
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        &HashMap::new(),
         "baseline.json",
         policy,
     );

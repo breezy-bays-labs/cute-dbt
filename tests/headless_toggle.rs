@@ -160,6 +160,7 @@ fn render_with_scope(
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        &HashMap::new(),
         baseline_label,
         scope,
         DEFAULT_REPORT_TITLE,
@@ -724,6 +725,7 @@ fn render_pr_diff_with_diffs(
         &yaml_diffs,
         &HashMap::new(),
         &HashMap::new(),
+        &HashMap::new(),
         "",
         ScopeSource::PrDiff,
         DEFAULT_REPORT_TITLE,
@@ -774,17 +776,20 @@ fn yaml_diff_drawer_defaults_to_diff_and_toggles_to_authored() {
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
 
-    // cute-dbt#233 (audit D7) — pass-2 labels the drawer "Model YAML" with
-    // NO diff-variant suffix (spec interaction.js:468): the Diff/File
-    // toggle in the code header carries the diff affordance. The Diff view
-    // stays the default (Authored hidden).
+    // cute-dbt#247 — the drawer shows the SELECTED UNIT TEST's authored
+    // YAML, so it is labeled "Unit test YAML" (supersedes the #233 D7
+    // "Model YAML" label, which was a spec naming error — that name now
+    // belongs to the model-level schema-entry section). Still no
+    // diff-variant suffix: the Diff/File toggle in the code header
+    // carries the diff affordance. The Diff view stays the default
+    // (Authored hidden).
     assert_eq!(
         eval_string(
             &tab,
             "document.querySelector('.authoring-yaml > summary').textContent.trim()"
         ),
-        "Model YAML",
-        "the drawer summary is the pass-2 'Model YAML' label (cute-dbt#233 audit D7)",
+        "Unit test YAML",
+        "the drawer summary is the truthful 'Unit test YAML' label (cute-dbt#247)",
     );
     assert!(
         eval_bool(&tab, "document.querySelector('.yaml-diff-toggle') !== null"),
@@ -1372,6 +1377,7 @@ fn render_pr_diff_with_sql_diffs(
         &HashMap::new(),
         &sql_diff_map,
         &HashMap::new(),
+        &HashMap::new(),
         "",
         ScopeSource::PrDiff,
         DEFAULT_REPORT_TITLE,
@@ -1934,6 +1940,7 @@ fn render_pr_diff_with_both_diffs(
         &yaml_diff_map,
         &sql_diff_map,
         &HashMap::new(),
+        &HashMap::new(),
         "",
         ScopeSource::PrDiff,
         DEFAULT_REPORT_TITLE,
@@ -2162,6 +2169,7 @@ fn render_pr_diff_with_data_diffs(
         &in_scope,
         &models,
         &changed,
+        &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
@@ -2667,6 +2675,7 @@ fn render_fusion_report(filename: &str, data_diffs: HashMap<String, UnitTestData
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        &HashMap::new(),
         &data_diffs,
         "",
         ScopeSource::PrDiff,
@@ -2837,6 +2846,7 @@ fn literal_sql_given_renders_as_table_non_literal_falls_back_to_code_block() {
         &in_scope,
         &models,
         &in_scope,
+        &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
@@ -4745,6 +4755,7 @@ fn render_with_external_fixtures(
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        &HashMap::new(),
         &externals,
         "",
         ScopeSource::PrDiff,
@@ -5068,6 +5079,7 @@ fn source_given_fixture_card_renders_in_the_given_panel_not_the_shelf() {
         &in_scope,
         &models,
         &InScopeSet::new(),
+        &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
@@ -7106,6 +7118,7 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        &HashMap::new(),
         "baseline.json",
         ScopeSource::Baseline,
         DEFAULT_REPORT_TITLE,
@@ -7632,6 +7645,7 @@ fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
         &in_scope,
         &models,
         &changed,
+        &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
@@ -8315,6 +8329,7 @@ fn render_with_sources_to_file(
         &in_scope,
         &models,
         &changed,
+        &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
@@ -9889,6 +9904,385 @@ fn whitespace_only_description_degrades_to_truthful_fallback() {
         fallback.contains("No description or data tests declared on dim_ws"),
         "the truthful fallback renders for the whitespace-described column, \
          got {fallback:?}",
+    );
+
+    let _ = tab.close(true);
+}
+
+// ---------------------------------------------------------------------
+// cute-dbt#247 — the Model YAML section (peer of Model SQL): the model's
+// authored schema-file `models:` entry with File/Diff views, and the
+// truthful degrade placeholder when the block could not be surfaced.
+// ---------------------------------------------------------------------
+
+use cute_dbt::domain::ModelYamlOutcome;
+
+/// Render with a `model_yaml` gather map (cute-dbt#247) under `scope`.
+fn render_with_model_yaml(
+    filename: &str,
+    nodes: Vec<Node>,
+    tests: Vec<(&str, UnitTest)>,
+    model_ids: &[&str],
+    changed_ids: &[&str],
+    model_yaml: Vec<(&str, ModelYamlOutcome)>,
+    scope: ScopeSource,
+) -> String {
+    let all_ids: Vec<String> = tests.iter().map(|(id, _)| (*id).to_owned()).collect();
+    let m = manifest(nodes, tests);
+    let in_scope: InScopeSet = all_ids.into_iter().collect();
+    let models: ModelInScopeSet = model_ids.iter().map(|id| NodeId::new(*id)).collect();
+    let changed: InScopeSet = changed_ids.iter().map(|s| (*s).to_owned()).collect();
+    let model_yaml: HashMap<String, ModelYamlOutcome> = model_yaml
+        .into_iter()
+        .map(|(id, o)| (id.to_owned(), o))
+        .collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &changed,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &model_yaml,
+        &HashMap::new(),
+        "baseline.json",
+        scope,
+        DEFAULT_REPORT_TITLE,
+        None,
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    format!("file://{p}")
+}
+
+/// A Found outcome over a one-entry schema block for `name`.
+fn found_model_yaml(name: &str, path: &str) -> ModelYamlOutcome {
+    let raw = format!("  - name: {name}\n    description: demo model {name}");
+    ModelYamlOutcome::Found {
+        path: path.to_owned(),
+        block: UnitTestYamlBlock::new(raw, 2, 2, 3),
+        diff: None,
+    }
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn model_yaml_section_shows_block_or_truthful_placeholder_for_every_model() {
+    // Three models spanning the outcome arms: a sliced block, a missing
+    // schema file, and a model with no schema entry at all. The #240
+    // lesson — assert over EVERY model in the picker (universal, not the
+    // one known-good case): for each selection the section must show
+    // either real code or a non-empty truthful placeholder, never an
+    // empty or hidden card.
+    let url = render_with_model_yaml(
+        "headless_model_yaml_universal.html",
+        vec![
+            model_node("model.shop.dim_a"),
+            model_node("model.shop.dim_b"),
+            model_node("model.shop.dim_c"),
+        ],
+        vec![
+            ("unit_test.shop.dim_a.t1", unit_test("t1", "dim_a")),
+            ("unit_test.shop.dim_b.t2", unit_test("t2", "dim_b")),
+            ("unit_test.shop.dim_c.t3", unit_test("t3", "dim_c")),
+        ],
+        &["model.shop.dim_a", "model.shop.dim_b", "model.shop.dim_c"],
+        &[],
+        vec![
+            (
+                "model.shop.dim_a",
+                found_model_yaml("dim_a", "models/schema.yml"),
+            ),
+            (
+                "model.shop.dim_b",
+                ModelYamlOutcome::FileMissing {
+                    path: "models/missing.yml".to_owned(),
+                },
+            ),
+            ("model.shop.dim_c", ModelYamlOutcome::NoPatchPath),
+        ],
+        ScopeSource::Baseline,
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // Universal sweep: every model in the picker renders a visible
+    // section carrying either code or a non-empty placeholder.
+    for model in ["dim_a", "dim_b", "dim_c"] {
+        select_model(&tab, model);
+        assert!(
+            !eval_bool(
+                &tab,
+                "getComputedStyle(document.querySelector('.model-yaml')).display === 'none'"
+            ),
+            "the Model YAML section is visible for {model}",
+        );
+        assert!(
+            eval_bool(
+                &tab,
+                "(function(){var c=document.querySelector('.model-yaml .model-yaml-code');\
+                   var p=document.querySelector('.model-yaml .model-yaml-missing');\
+                   return !!(c && c.textContent.trim()) || !!(p && p.textContent.trim());})()"
+            ),
+            "the section carries code or a truthful placeholder for {model} — never empty",
+        );
+        assert!(
+            eval_string(
+                &tab,
+                "document.querySelector('.model-yaml > details > summary').textContent"
+            )
+            .contains("Model YAML"),
+            "the section summary is labeled 'Model YAML' for {model}",
+        );
+    }
+
+    // dim_a: the sliced block renders in the File view with the schema
+    // file path in the code-card header.
+    select_model(&tab, "dim_a");
+    let code = eval_string(
+        &tab,
+        "document.querySelector('.model-yaml .model-yaml-code').textContent",
+    );
+    assert!(
+        code.contains("- name: dim_a") && code.contains("description: demo model dim_a"),
+        "the authored block renders verbatim; got {code:?}",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-yaml .code-header .code-filename').textContent"
+        ),
+        "models/schema.yml",
+        "the code-card header names the schema file",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-yaml-summary-hint').textContent"
+        ),
+        "authored schema entry",
+        "the summary hint reads 'authored schema entry' on the plain File view",
+    );
+
+    // dim_b: missing schema file → the placeholder names the file and the
+    // failure, and no code block renders.
+    select_model(&tab, "dim_b");
+    let placeholder = eval_string(
+        &tab,
+        "document.querySelector('.model-yaml .model-yaml-missing').textContent",
+    );
+    assert!(
+        placeholder.contains("models/missing.yml") && placeholder.contains("not found"),
+        "the placeholder names the missing file; got {placeholder:?}",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-yaml .model-yaml-code') === null"
+        ),
+        "no code block renders for a missing schema file",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-yaml-summary-hint').textContent"
+        ),
+        "unavailable",
+        "the summary hint reads 'unavailable' on the degrade view",
+    );
+
+    // dim_c: no schema entry in the manifest → the placeholder says so.
+    select_model(&tab, "dim_c");
+    let placeholder = eval_string(
+        &tab,
+        "document.querySelector('.model-yaml .model-yaml-missing').textContent",
+    );
+    assert!(
+        placeholder.contains("No schema file declares this model"),
+        "the placeholder names the absent schema entry; got {placeholder:?}",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn model_yaml_diff_defaults_to_diff_and_file_toggle_switches_views() {
+    // PR-diff mode with an attached Model-YAML block diff: the section
+    // defaults to the Diff view (hint "diff"), the header carries the
+    // Diff/File toggle + fold toggle + copy button (the Model SQL
+    // idiom), and REAL clicks switch the views both ways.
+    let diff = BlockDiff {
+        lines: vec![
+            dl(DiffLineKind::Context, "  - name: dim_a", None),
+            dl(
+                DiffLineKind::Removed,
+                "    description: old words",
+                Some((17, 26)),
+            ),
+            dl(
+                DiffLineKind::Added,
+                "    description: demo model dim_a",
+                Some((17, 33)),
+            ),
+        ],
+    };
+    let model_yaml = ModelYamlOutcome::Found {
+        path: "models/schema.yml".to_owned(),
+        block: UnitTestYamlBlock::new(
+            "  - name: dim_a\n    description: demo model dim_a".to_owned(),
+            2,
+            2,
+            3,
+        ),
+        diff: Some(diff),
+    };
+    let url = render_with_model_yaml(
+        "headless_model_yaml_diff_toggle.html",
+        vec![model_node("model.shop.dim_a")],
+        vec![("unit_test.shop.dim_a.t1", unit_test("t1", "dim_a"))],
+        &["model.shop.dim_a"],
+        &[],
+        vec![("model.shop.dim_a", model_yaml)],
+        ScopeSource::PrDiff,
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // Open the collapsed drawer with a REAL click on its summary.
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-yaml > details > summary').click()",
+    );
+    assert!(
+        eval_bool(&tab, "document.querySelector('.model-yaml > details').open"),
+        "clicking the summary opens the Model YAML drawer",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-yaml-summary-hint').textContent"
+        ),
+        "diff",
+        "the summary hint reads 'diff' when an inline diff is attached",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('.model-yaml .yaml-diff-view').hidden"
+        ),
+        "the Diff view is the default (visible)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-yaml .yaml-authored-view').hidden"
+        ),
+        "the File view starts hidden",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-yaml .yaml-diff-view .diff-removed strong') !== null"
+        ),
+        "the removed line carries an intra-line emphasis <strong>",
+    );
+    // The code-card header carries the #199 affordances.
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-yaml .code-header .diff-fold-toggle') !== null"
+        ),
+        "the header carries the per-diff fold toggle",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-yaml .code-header .code-copy-btn') !== null"
+        ),
+        "the header carries the copy-icon button",
+    );
+
+    // REAL click: File → the views flip.
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-yaml .yaml-view-btn[data-view=\"file\"]').click()",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-yaml .yaml-diff-view').hidden"
+        ),
+        "the Diff view hides after switching to File",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('.model-yaml .yaml-authored-view').hidden"
+        ),
+        "the File view shows after the toggle",
+    );
+    let file_text = eval_string(
+        &tab,
+        "document.querySelector('.model-yaml .yaml-authored-view').textContent",
+    );
+    assert!(
+        file_text.contains("description: demo model dim_a"),
+        "the File view renders the working-tree block; got {file_text:?}",
+    );
+
+    // REAL click back: Diff.
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-yaml .yaml-view-btn[data-view=\"diff\"]').click()",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('.model-yaml .yaml-diff-view').hidden"
+        ),
+        "the Diff view returns after toggling back",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn model_yaml_section_hides_when_the_payload_has_no_gather_outcome() {
+    // A render path that never ran the gather (every existing helper in
+    // this file passes an empty map) must HIDE the section — hiding is
+    // honest there because the payload carries no outcome to degrade
+    // from; the placeholder arms cover every gather-ran case.
+    let url = render_to_file(
+        "headless_model_yaml_hidden.html",
+        vec![model_node("model.shop.dim_a")],
+        vec![("unit_test.shop.dim_a.t1", unit_test("t1", "dim_a"))],
+        &["model.shop.dim_a"],
+        &[],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    assert!(
+        eval_bool(
+            &tab,
+            "getComputedStyle(document.querySelector('.model-yaml')).display === 'none'"
+        ),
+        "the Model YAML section hides when the payload carries no model_yaml",
     );
 
     let _ = tab.close(true);

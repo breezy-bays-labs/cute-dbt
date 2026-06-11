@@ -1070,9 +1070,9 @@ th.col-removed { text-decoration: line-through; text-decoration-color: var(--dif
    pass-2 (cute-dbt#198): diff cells always render in colour. */
 
 /* ---- SQL / YAML drawers + syntax ------------------------------------- */
-.compiled-sql > summary, .authoring-yaml > summary, .model-sql > details > summary { cursor: pointer; }
-.authoring-yaml > summary, .model-sql > details > summary { font-weight: 600; color: var(--text); }
-.model-sql-summary-hint, .yaml-diff-summary-hint { font-weight: 400; color: var(--text-muted); margin-left: 0.4rem; font-size: 0.9em; }
+.compiled-sql > summary, .authoring-yaml > summary, .model-sql > details > summary, .model-yaml > details > summary { cursor: pointer; }
+.authoring-yaml > summary, .model-sql > details > summary, .model-yaml > details > summary { font-weight: 600; color: var(--text); }
+.model-sql-summary-hint, .model-yaml-summary-hint, .yaml-diff-summary-hint { font-weight: 400; color: var(--text-muted); margin-left: 0.4rem; font-size: 0.9em; }
 .sql-block { margin: 0; padding: 0.4rem 0; background: var(--code-bg); border-radius: 0; color: var(--text); font-size: 12px; line-height: 1.6; font-variant-numeric: tabular-nums; overflow-x: auto; }
 .sql-block code { display: block; }
 .sql-block-wrap, .model-sql-wrap {
@@ -1259,6 +1259,16 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
 /* ---- Model SQL ------------------------------------------------------- */
 .model-sql-block { height: 24rem; min-height: 8rem; overflow: auto; resize: vertical; }
 
+/* ---- Model YAML (cute-dbt#247) ---------------------------------------- */
+/* The authored schema-entry block: capped like the Model SQL card but
+   shorter by default (schema entries are usually narrower than model SQL),
+   same resize affordance. max-height (not height) so a short entry does
+   not float in empty chrome. */
+.model-yaml-block { max-height: 24rem; min-height: 4rem; overflow: auto; resize: vertical; }
+/* The truthful degrade placeholder — muted prose inside the code chrome,
+   never an empty card. */
+.model-yaml-missing { margin: 0; padding: 0.6rem 0.75rem; color: var(--text-muted); font-size: 0.85em; }
+
 /* ---- column-header info tooltip --------------------------------------- */
 /* DELIBERATE divergence from the handoff's base.css (decided at PR-1, kept
    at the engine PR cute-dbt#178): the redesign's `.col-tooltip` was a
@@ -1409,8 +1419,9 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
 .diff-fold[aria-expanded="true"] { filter: brightness(0.96); }
 
 /* The Model SQL section keeps its vertical rhythm (it sits outside the
-   .panel spacing list). */
-.model-sql { margin-bottom: var(--gap-section); }
+   .panel spacing list). The Model YAML section (cute-dbt#247) is its
+   peer and keeps the same rhythm. */
+.model-sql, .model-yaml { margin-bottom: var(--gap-section); }
 
 /* Stacked settings rows (the appearance section): the control grid sits
    UNDER its label, full-width — the prototype expressed this with inline
@@ -1762,6 +1773,16 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   </details>
 </section>
 
+
+<section class="model-yaml" aria-label="Model YAML">
+  <details class="model-yaml-details">
+    <summary>Model YAML<span class="model-yaml-summary-hint">authored schema entry</span></summary>
+    <div class="sql-block-wrap model-yaml-wrap">
+      <pre class="sql-block model-yaml-block"><code class="model-yaml-code"></code></pre>
+    </div>
+  </details>
+</section>
+
 <section class="cte-dag" aria-label="CTE dependency DAG">
   <div class="cte-dag-header">
     <h2>CTE dependency DAG</h2>
@@ -2047,6 +2068,7 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     if (!DATA.models.length) {
       $(".test-selection").hide();
       $(".model-sql").hide();
+      $(".model-yaml").hide();
       $(".cte-dag").hide();
       $(".model-findings").hide();
       $(".test-section").hide();
@@ -2298,6 +2320,10 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     closeNodeShelf();
     renderTestDetails(t);
     renderModelSql(m);
+    // cute-dbt#247 — the Model YAML section (peer of Model SQL): the
+    // model's authored schema-file `models:` entry, or its truthful
+    // degrade placeholder.
+    renderModelYaml(m);
     // cute-dbt#170 — the coverage-checks panel is MODEL-scoped: it renders
     // for the selected model in both scope-toggle views and regardless of
     // whether a test is selected (findings are current-state facts).
@@ -2439,10 +2465,13 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       // authored YAML exactly as cute-dbt#69 did.
       var hasDiff = t.yaml_diff && t.yaml_diff.lines && t.yaml_diff.lines.length;
       var $yamlDet = $("<details>").addClass("authoring-yaml").attr("open", "open");
-      // cute-dbt#233 (audit D7) — pass-2 labels the drawer "Model YAML"
-      // with no diff-variant suffix; the Diff/File toggle in the code
-      // header carries the diff affordance.
-      $yamlDet.append($("<summary>").text("Model YAML"));
+      // cute-dbt#247 — the drawer shows the SELECTED UNIT TEST's authored
+      // YAML block, so it is labeled "Unit test YAML" (the #233 D7
+      // "Model YAML" label was a spec naming error — that name now
+      // belongs to the model-level schema-entry section). No diff-variant
+      // suffix; the Diff/File toggle in the code header carries the diff
+      // affordance.
+      $yamlDet.append($("<summary>").text("Unit test YAML"));
       var $yamlWrap = $("<div>").addClass("sql-block-wrap fixture-sql-block-wrap");
       // cute-dbt#178 — GitHub-style code-card header: the file path sits left
       // of the Diff/File toggle. `defined_in` is the test's authoring-YAML
@@ -2566,6 +2595,83 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
         $("<code>").addClass("model-sql-code").html(highlightLinesSql(raw))
       );
       $wrap.append($mHeader).append($pre);
+    }
+  }
+
+  // cute-dbt#247 — populate the per-model Model YAML section: the model's
+  // FULL authored schema-file `models:` entry (description, tags,
+  // model-level data tests, columns + column tests, meta), sliced by Rust
+  // from the file the manifest's patch_path names. Peer of Model SQL —
+  // same code-card idiom, same Diff/File toggle in --pr-diff mode
+  // (my.diff present), YAML highlighter on the File view.
+  //
+  // Honest degrade: when the block could not be surfaced, the payload
+  // carries my.missing (truthful copy naming exactly what is absent —
+  // composed in Rust, rendered verbatim here) and the section shows that
+  // placeholder instead of vanishing. Only a payload with NO model_yaml
+  // key at all (a render path that skipped the gather entirely) hides
+  // the section.
+  function renderModelYaml(m) {
+    var $section = $(".model-yaml");
+    var my = m && m.model_yaml;
+    if (!my) {
+      $section.hide();
+      return;
+    }
+    $section.show();
+    var $wrap = $section.find(".model-yaml-wrap");
+    // Rebuild the wrap body each model switch so a prior model's
+    // toggle/diff/placeholder never leaks (the renderModelSql contract).
+    $wrap.empty();
+    if (!my.raw) {
+      $section.find(".model-yaml-summary-hint").text("unavailable");
+      $wrap.append(
+        $("<p>").addClass("model-yaml-missing")
+          .text(my.missing || "The authored model YAML could not be surfaced.")
+      );
+      return;
+    }
+    var hasDiff = my.diff && my.diff.lines && my.diff.lines.length;
+    $section.find(".model-yaml-summary-hint").text(hasDiff ? "diff" : "authored schema entry");
+    // GitHub-style code-card header with the schema file path (the
+    // manifest patch_path, project-relative).
+    var $header = $("<div>").addClass("code-header");
+    if (my.path) {
+      $header.append($("<span>").addClass("code-filename").attr("title", my.path).text(my.path));
+    }
+    $header.append($("<span>").addClass("code-header-spacer"));
+    if (hasDiff) {
+      var $diffPre = $("<pre>").addClass("sql-block model-yaml-block yaml-diff-view").html(
+        diffViewsHtml(my.diff, tokenizeYaml, "model-yaml-code")
+      );
+      var $filePre = $("<pre>").addClass("sql-block model-yaml-block yaml-authored-view").prop("hidden", true).append(
+        $("<code>").addClass("model-yaml-code").html(highlightLinesYaml(my.raw))
+      );
+      var $toggle = $("<div>").addClass("yaml-diff-toggle model-yaml-toggle");
+      var $diffBtn = $("<button>").attr("type", "button")
+        .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
+      var $fileBtn = $("<button>").attr("type", "button")
+        .addClass("yaml-view-btn").attr("data-view", "file").text("File");
+      $toggle.append($diffBtn).append($fileBtn);
+      $toggle.on("click", ".yaml-view-btn", function () {
+        var view = $(this).attr("data-view");
+        $toggle.find(".yaml-view-btn").removeClass("active");
+        $(this).addClass("active");
+        $diffPre.prop("hidden", view !== "diff");
+        $filePre.prop("hidden", view !== "file");
+      });
+      // cute-dbt#199 — per-diff fold toggle + copy-icon button in the
+      // header. Copy always copies the raw block regardless of view.
+      $header.append(buildFoldToggleBtn(function () { return $diffPre[0]; }));
+      $header.append($toggle);
+      $header.append(copyIconBtn(function () { return my.raw; }));
+      $wrap.append($header).append($diffPre).append($filePre);
+    } else {
+      $header.append(copyIconBtn(function () { return my.raw; }));
+      var $pre = $("<pre>").addClass("sql-block model-yaml-block").append(
+        $("<code>").addClass("model-yaml-code").html(highlightLinesYaml(my.raw))
+      );
+      $wrap.append($header).append($pre);
     }
   }
 
@@ -4983,14 +5089,14 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   }
 
   // The external-fixture affordance: never a silently-empty grid. Names the
-  // file and points the reader at the Model YAML drawer (the #96 view),
+  // file and points the reader at the Unit test YAML drawer (the #96 view),
   // which surfaces the authored block including the `fixture:` line.
-  // (Pointer copy follows the cute-dbt#233 D7 drawer rename.)
+  // (Pointer copy follows the cute-dbt#247 truthful drawer rename.)
   function buildExternalFixtureAffordance(name) {
     var $box = $("<div>").addClass("given-empty external-fixture-note");
     $box.append(document.createTextNode("data in external fixture file: "));
     $box.append($("<code>").addClass("td-defined-in").text(String(name)));
-    $box.append(document.createTextNode(" — see the Model YAML drawer above for this test's block."));
+    $box.append(document.createTextNode(" — see the Unit test YAML drawer above for this test's block."));
     return $box;
   }
 
