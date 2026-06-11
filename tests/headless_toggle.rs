@@ -3213,6 +3213,44 @@ fn appearance_settings_flip_theme_density_diff_layout_and_persist() {
         !eval_bool(&tab, &format!("{ROOT}.classList.contains('dark')")),
         "no html.dark class on the light theme",
     );
+    // ===== cute-dbt#198 — the pass-2 themes ride the same contract =====
+    // One NEW light-family id (latte) and one NEW dark-family id (dracula):
+    // the chip flips [data-theme] and the html.dark DataTables sync follows
+    // the theme's family.
+    let _ = eval(
+        &tab,
+        "document.querySelector('.theme-chip[data-theme-id=\"latte\"]').click()",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{ROOT}.getAttribute('data-theme')")),
+        "latte",
+        "clicking the Catppuccin Latte chip sets html[data-theme=latte]",
+    );
+    assert!(
+        !eval_bool(&tab, &format!("{ROOT}.classList.contains('dark')")),
+        "latte is light-family — no html.dark class",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.theme-chip[data-theme-id=\"dracula\"]').click()",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{ROOT}.getAttribute('data-theme')")),
+        "dracula",
+        "clicking the Dracula chip sets html[data-theme=dracula]",
+    );
+    assert!(
+        eval_bool(&tab, &format!("{ROOT}.classList.contains('dark')")),
+        "dracula is dark-family — html.dark toggles on (DataTables sync)",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.theme-grid .theme-chip').length"
+        ),
+        8,
+        "the settings theme grid lists all 8 themes",
+    );
     let _ = eval(
         &tab,
         "document.querySelector('.theme-chip[data-theme-id=\"dark\"]').click()",

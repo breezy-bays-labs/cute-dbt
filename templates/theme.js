@@ -18,14 +18,19 @@
 (function () {
   "use strict";
 
-  // The five [data-theme] packs the chassis CSS ships (templates/report.css).
+  // The eight [data-theme] packs the chassis CSS ships (templates/report.css),
+  // light family first (design pass-2, cute-dbt#198) — kept in lockstep with
+  // the static theme grid in templates/report.html.
   // `dark` drives the html.dark class DataTables' vendored dark rules key on.
   var THEMES = [
     { id: "light",     dark: false },
+    { id: "solarized", dark: false },
+    { id: "latte",     dark: false },
+    { id: "rosepine",  dark: false },
     { id: "dark",      dark: true  },
     { id: "tokyo",     dark: true  },
-    { id: "solarized", dark: false },
-    { id: "gruvbox",   dark: true  }
+    { id: "gruvbox",   dark: true  },
+    { id: "dracula",   dark: true  }
   ];
 
   // Accent palettes: value / hover / tint triples applied as inline custom
