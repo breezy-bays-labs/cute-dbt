@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-be99764a.js";
+            window.path_to_searchindex_js = "searchindex-87624546.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-f6d2c74b.js"></script>
@@ -247,6 +247,32 @@ Explore is <strong>fail-open</strong> on uncompiled models — a <code>dbt parse
 model renders as a “not compiled” node instead of aborting the run
 (the manifest itself must still be readable and schema v12+). Bare
 <code>cute-dbt</code> without a verb is a usage error listing both.</p>
+<h3 id="change-context-explore---pr-diff"><a class="header" href="#change-context-explore---pr-diff">Change context: <code>explore --pr-diff</code></a></h3>
+<p>To see <em>your branch’s footprint</em> on the graph, pass the optional
+<code>--pr-diff</code> — the same input shape as <code>report --pr-diff</code> (a raw
+<code>git diff --unified=0</code> patch via <code>@file</code>):</p>
+<pre><code class="language-sh">git diff --unified=0 origin/main...HEAD &gt; /tmp/branch.diff
+
+cute-dbt explore \
+    --manifest target/manifest.json \
+    --out-dir  explore/ \
+    --pr-diff  @/tmp/branch.diff
+</code></pre>
+<p>The models whose files changed in the diff get an <strong>amber “changed”
+glow</strong> on <code>dag.html</code>, the header counts them (“N changed in this
+diff”), and the legend gains a <code>changed</code> chip. Change context <strong>never
+narrows scope</strong> — the full graph still renders every model; the diff
+only highlights what you touched. The treatment composes with the
+highlight/dim interaction: a changed node you highlight shows both,
+and the detail card + hover tooltip note “changed in this diff”.</p>
+<p>Git renames are understood (a purely renamed model still marks as
+changed at its new path), and if your dbt project lives in a repo
+subdirectory, pass <code>--project-root &lt;dir&gt;</code> so the diff’s repo-relative
+paths match the manifest’s project-relative ones (the flag requires
+<code>--pr-diff</code> on this verb).</p>
+<p>The explorer takes <strong>no baseline manifest, ever</strong> — the
+developer-native diff signal is git, not environment manifests;
+baseline comparison stays a <code>report</code>-only concern.</p>
 <h2 id="producing-the-manifests"><a class="header" href="#producing-the-manifests">Producing the manifests</a></h2>
 <p>cute-dbt expects compiled dbt manifests (i.e. produced by <code>dbt compile</code> or any command that compiles, like <code>dbt run</code>/<code>dbt build</code>).
 A <code>dbt parse</code>-only manifest will fail the second-stage compiled-SQL

@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-be99764a.js";
+            window.path_to_searchindex_js = "searchindex-87624546.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-f6d2c74b.js"></script>
@@ -305,13 +305,30 @@ convention cute-dbt’s own renderer applies.</li>
 — keys are never omitted. The same paths render read-only in the
 model-detail card’s <strong>files</strong> section, so the contract surface is
 human-visible too.</p>
+<h2 id="change-context---pr-diff-the-changed-node-key"><a class="header" href="#change-context---pr-diff-the-changed-node-key">Change context (<code>--pr-diff</code>): the <code>changed</code> node key</a></h2>
+<p>When the page was rendered with <code>explore --pr-diff</code> (PR-diff change
+context), each lineage-payload node whose source file the diff touched
+carries an additional key:</p>
+<pre><code class="language-json">{ "id": "model.jaffle_shop.customers", "changed": true, "...": "..." }
+</code></pre>
+<p>This key is the <strong>one deliberate exception</strong> to the explicit-absence
+posture: it is serialized <strong>only when <code>true</code></strong>. An unchanged node — and
+<em>every</em> node on a page rendered without <code>--pr-diff</code> — carries no
+<code>changed</code> key at all, so a no-context payload is byte-identical to the
+pre-context shape. Hosts should treat a missing key as “not changed /
+no context”. The key is additive and informational; it is not one of
+the four versioned contract surfaces, and shipping it did not bump the
+contract version.</p>
+<p>Change context never narrows scope: the payload’s <code>nodes</code> array spans
+the full manifest with or without a diff.</p>
 <h2 id="what-is-deliberately-not-in-the-contract"><a class="header" href="#what-is-deliberately-not-in-the-contract">What is deliberately <em>not</em> in the contract</a></h2>
 <ul>
 <li>Hover, click, and search are in-page exploration; they never fire
 the external signal in either binding.</li>
 <li><code>tests.html</code> is not a drivable surface (no hooks, no attribute).</li>
-<li>The explorer takes no baseline manifest; change context arrives via
-<code>--pr-diff</code> and is orthogonal to this contract.</li>
+<li>The explorer takes no baseline manifest, ever — change context
+arrives via <code>--pr-diff</code> (the git diff signal) and only decorates;
+the commit event schema is unchanged by it.</li>
 </ul>
 
                     </main>
