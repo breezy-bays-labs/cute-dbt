@@ -65,10 +65,14 @@
   // (role_import / role_transform / role_final). Node fills stay LIGHT in
   // every theme (light fill + dark label reads high-contrast on any bg) —
   // only the edges/anchor carry the dark-bg variant, exactly like Mermaid.
+  // The final stroke is #b07400 (design pass-2, cute-dbt#198): the pass-1
+  // #E69F00 failed AA against the light #fdf2dc fill; #b07400 is the same
+  // amber family at AA depth. The legend's two-layer swatch (report.css)
+  // mirrors it via color-mix on --dag-final-stroke.
   var ROLE_FILLS = {
     import:    { fill: "#e8f1f8", stroke: "#0072B2" },
     transform: { fill: "#f4f4f5", stroke: "#8a8a90" },
-    final:     { fill: "#fdf2dc", stroke: "#E69F00" }
+    final:     { fill: "#fdf2dc", stroke: "#b07400" }
   };
 
   // cute-dbt#180 — the single palette source for BOTH DAG engines.
@@ -875,7 +879,7 @@
 
     lines.push("    classDef role_import fill:#e8f1f8,stroke:#0072B2,stroke-width:1.5px,color:#1c1c1f;");
     lines.push("    classDef role_transform fill:#f4f4f5,stroke:#8a8a90,stroke-width:1.5px,color:#1c1c1f;");
-    lines.push("    classDef role_final fill:#fdf2dc,stroke:#E69F00,stroke-width:2px,color:#1c1c1f;");
+    lines.push("    classDef role_final fill:#fdf2dc,stroke:#b07400,stroke-width:2px,color:#1c1c1f;");
     lines.push("    classDef selected stroke:#E91E63,stroke-width:4px;");
 
     dag.edges.forEach(function (e, i) {
