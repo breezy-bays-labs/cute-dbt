@@ -1686,7 +1686,28 @@
     });
   }
 
-  function renderGivenSection(given, dataDiff, ordinal) {
+  // cute-dbt#240 (defect B) — the human name of the node that OWNS a
+  // given's columns, for the metadata-less fallback bubble: the bare model
+  // name for ref('x'), `source.table` for source('source','table'), the
+  // target model for `this`. Unparseable inputs fall back to the raw input
+  // string (still truthful, never empty). Both quote styles match (PR #244
+  // review): dbt-fusion ships the AUTHORED input string verbatim — a
+  // `ref("stg_payments")` given compiles onto the manifest wire
+  // double-quoted, unnormalized (verified against a real fusion
+  // 2.0-preview.177 compile) — so ref("x") / source("a", "b") reach this
+  // parser exactly as written. The backreference pins matching open/close
+  // quotes (a mixed-quote token stays unparsed → raw-input fallback).
+  function givenOwnerLabel(given, targetModel) {
+    if (given.is_this) return targetModel || "this";
+    var input = given.input || "";
+    var ref = /^ref\(\s*(['"])([^'"]+)\1\s*\)$/.exec(input);
+    if (ref) return ref[2];
+    var src = /^source\(\s*(['"])([^'"]+)\1\s*,\s*(['"])([^'"]+)\3\s*\)$/.exec(input);
+    if (src) return src[2] + "." + src[4];
+    return input;
+  }
+
+  function renderGivenSection(given, dataDiff, ordinal, targetModel) {
     // The section keeps `data-input-name` (the test seam) even though the
     // visible title is now the #202 ref() pill rendering.
     var $sec = $("<section>").addClass("given-section").attr("data-input-name", given.input);
@@ -1751,7 +1772,8 @@
       .text(rowCount + " row" + (rowCount === 1 ? "" : "s")));
     $sec.append($hdr);
     var diff = givenDataDiff(dataDiff, ordinal);
-    $sec.append(buildFixtureView(table, "given-table", diff, given.column_meta));
+    $sec.append(buildFixtureView(table, "given-table", diff, given.column_meta,
+      givenOwnerLabel(given, targetModel)));
     return $sec;
   }
 
@@ -1761,7 +1783,9 @@
       $wrap.append($("<div>").addClass("empty-hint").text("No fixtures defined for this test."));
       return;
     }
-    t.given.forEach(function (given, idx) { $wrap.append(renderGivenSection(given, t.data_diff, idx)); });
+    t.given.forEach(function (given, idx) {
+      $wrap.append(renderGivenSection(given, t.data_diff, idx, t.target_model));
+    });
     initDataTablesIn($wrap);
   }
 
@@ -1856,7 +1880,8 @@
     // real change (cute-dbt#98). `data_diff.expect` already passed
     // `has_real_change()`, so its presence === "default this table to Diff".
     var diff = (t.data_diff && t.data_diff.expect) || undefined;
-    $body.append(buildFixtureView(table, "expected-table", diff, t.expected.column_meta));
+    $body.append(buildFixtureView(table, "expected-table", diff, t.expected.column_meta,
+      t.target_model));
     // cute-dbt#178 / cute-dbt#202 / cute-dbt#232 — the meta row ALWAYS
     // rides a .fixture-view-bar below the "Expected" title, mirroring the
     // Given headers (the pass-2 spec; audit D2): reading order
@@ -2890,18 +2915,43 @@
     }
     return '<div class="ct-test">' + inner + "</div>";
   }
-  function decorateColHeader($th, name, meta) {
-    if (!meta || (!meta.description && !(meta.tests && meta.tests.length))) return;
-    var tests = meta.tests || [];
+  // cute-dbt#240 (defect B, third report) — EVERY fixture column header is
+  // a tooltip trigger now. The #165/#178 "no metadata ⇒ no affordance"
+  // posture made undeclared columns silently hover-dead; on real projects
+  // (staging models declare a couple of columns, target models declare
+  // all) that meant MOST given headers showed nothing while every expected
+  // header answered — read three times by the founder as "given tooltips
+  // are broken". A metadata-less header now reveals a truthful fallback
+  // ("no description or data tests declared …") naming the owning node, so
+  // hover always answers and the honesty invariant strengthens: never an
+  // empty bubble, and no dead headers either. `owner` is the human name of
+  // the node that owns the columns (input model / seed / source for a
+  // given, the target model for `this` and the expected table).
+  function decorateColHeader($th, name, meta, owner) {
+    var m = meta || {};
+    var tests = m.tests || [];
+    // PR #244 review — trim ONCE here (the single writer of
+    // data-col-desc): a whitespace-only authored description must not
+    // count as metadata, or it would suppress the truthful fallback and
+    // open an effectively-empty bubble on a description-only column —
+    // exactly the never-empty-bubble contract this fix exists to keep.
+    var desc = (m.description || "").trim();
+    var hasMeta = Boolean(desc || tests.length);
     var parts = ["Column " + name];
-    if (meta.description) parts.push(meta.description);
+    if (desc) parts.push(desc);
     if (tests.length) parts.push("column tests: " + tests.map(colTestSummary).join("; "));
+    if (!hasMeta) {
+      parts.push("no description or data tests declared"
+        + (owner ? " on " + owner : "") + " in the project YAML");
+    }
     $th.removeAttr("title")
       .addClass("has-col-meta")
+      .toggleClass("col-meta-empty", !hasMeta)
       .attr("tabindex", "0")
       .attr("aria-label", parts.join(" — "))
       .attr("data-col-name", name)
-      .attr("data-col-desc", meta.description || "")
+      .attr("data-col-desc", desc)
+      .attr("data-col-owner", owner || "")
       .attr("data-col-tests", JSON.stringify(tests));
   }
   // The singleton bubble, lazily appended to <body> (one element serves
@@ -2920,6 +2970,7 @@
     var el = ensureColTooltip();
     var name = trigger.getAttribute("data-col-name");
     var desc = trigger.getAttribute("data-col-desc");
+    var owner = trigger.getAttribute("data-col-owner");
     var tests = [];
     try { tests = JSON.parse(trigger.getAttribute("data-col-tests") || "[]"); } catch (e) { tests = []; }
     var h = '<div class="ct-desc">' + escapeHtml(desc || name) + "</div>";
@@ -2927,6 +2978,13 @@
       h += '<div class="ct-tests-label">Data tests</div><div class="ct-tests">'
          + tests.map(ctTestHtml).join("")
          + "</div>";
+    }
+    // cute-dbt#240 (defect B) — the truthful no-metadata fallback: name the
+    // column and say plainly that the project YAML declares nothing for it
+    // on the owning node. Never an empty bubble; never a dead header.
+    if (!desc && !tests.length) {
+      h += '<div class="ct-empty">No description or data tests declared'
+         + (owner ? " on " + escapeHtml(owner) : "") + " in the project YAML.</div>";
     }
     el.innerHTML = h;
     el.hidden = false;
@@ -2939,13 +2997,27 @@
     // measuring: a stale left near the viewport edge squeezes the layout,
     // so offsetWidth under-reports and the clamp below overshoots.
     el.style.left = "0px";
+    // cute-dbt#240 (defect D) — clamp against documentElement.clientWidth,
+    // not window.innerWidth: innerWidth includes a classic scrollbar's
+    // gutter, so an innerWidth-based clamp can park the bubble's right edge
+    // under the scrollbar — visually clipped at the screen edge. The CSS
+    // side caps every singleton's max-width at calc(100vw - 16px) so the
+    // measured box below can never exceed the clamping range.
+    var vw = document.documentElement.clientWidth || window.innerWidth;
+    var vh = document.documentElement.clientHeight || window.innerHeight;
     var r = trigger.getBoundingClientRect();
     var tw = el.offsetWidth, th = el.offsetHeight;
     var left = r.left;
-    if (left + tw > window.innerWidth - 8) left = window.innerWidth - 8 - tw;
+    if (left + tw > vw - 8) left = vw - 8 - tw;
     if (left < 8) left = 8;
     var top = r.bottom + 6;
-    if (top + th > window.innerHeight - 8) top = r.top - 6 - th; // flip above
+    if (top + th > vh - 8) top = r.top - 6 - th; // flip above
+    // PR #244 review / cute-dbt#246 — post-flip top clamp: at pathological
+    // viewport heights the flipped position (trigger top − bubble height)
+    // goes negative, pushing the bubble above the screen. Clamp to the
+    // 8px gutter (mirrors the horizontal clamp; the bubble may then
+    // overlap the trigger — contained beats clipped).
+    if (top < 8) top = 8;
     el.style.left = Math.round(left) + "px";
     el.style.top = Math.round(top) + "px";
   }
@@ -2968,8 +3040,9 @@
   }
 
   // `colMeta` (cute-dbt#165) is the per-table column-metadata map keyed by
-  // column name (absent key/entry => no affordance on that th).
-  function buildTable(table, cls, colMeta) {
+  // column name (absent key/entry ⇒ the cute-dbt#240 truthful fallback
+  // bubble naming `owner`, never a dead header).
+  function buildTable(table, cls, colMeta, owner) {
     var columns = (table && table.columns) || [];
     var rows = (table && table.rows) || [];
     var $wrap = $("<div>").addClass("table-fit");
@@ -2979,9 +3052,10 @@
     columns.forEach(function (c) {
       var html = escapeHtml(c).replace(/_/g, "_<wbr>");
       var $th = $("<th>").attr("title", c).html(html);
-      // cute-dbt#178 — decorate (and de-title) the th when metadata exists;
-      // the header cell itself becomes the tooltip trigger.
-      decorateColHeader($th, c, colMeta && colMeta[c]);
+      // cute-dbt#178 — decorate (and de-title) the th; the header cell
+      // itself is the tooltip trigger (cute-dbt#240: every th, fallback
+      // content when the manifest carries no metadata for the column).
+      decorateColHeader($th, c, colMeta && colMeta[c], owner);
       $hr.append($th);
     });
     var $tbody = $("<tbody>").appendTo($tbl);
@@ -3064,14 +3138,14 @@
   // is present — also build the Diff grid and a Current↔Diff toggle that flips
   // exactly one view visible at a time (the inactive view carries `hidden`).
   // Default-Diff when a diff exists, else Current with no toggle.
-  function buildFixtureView(table, cls, diff, colMeta) {
+  function buildFixtureView(table, cls, diff, colMeta, owner) {
     if (!diff) {
       // No cell diff for this table → the plain Current grid from the POD.
-      return buildTable(table, cls, colMeta);
+      return buildTable(table, cls, colMeta, owner);
     }
     var $wrap = $("<div>").addClass("fixture-view");
-    var $diffView = buildDiffTable(diff, cls, colMeta);
-    var $currentView = buildTable(table, cls, colMeta).prop("hidden", true);
+    var $diffView = buildDiffTable(diff, cls, colMeta, owner);
+    var $currentView = buildTable(table, cls, colMeta, owner).prop("hidden", true);
 
     var $toggle = $("<div>").addClass("cell-diff-toggle");
     var $diffBtn = $("<button>").attr("type", "button")
@@ -3146,7 +3220,7 @@
   // added/removed column badges from DiffColumn.status) and rows tinted by
   // RowChangeKind. A `Modified` cell flagged by the active lens (cellChanged)
   // renders inline `old → new`; otherwise the cell shows its current value.
-  function buildDiffTable(diff, cls, colMeta) {
+  function buildDiffTable(diff, cls, colMeta, owner) {
     var $wrap = $("<div>").addClass("table-fit");
     var $tbl = $("<table>").addClass(cls).addClass("cell-diff-table");
     var $thead = $("<thead>").appendTo($tbl);
@@ -3162,8 +3236,9 @@
       // cute-dbt#165 — the Diff grid's unified column axis shares the same
       // metadata map (a removed column simply has no entry — the map is
       // filtered to the CURRENT table's columns in Rust). cute-dbt#178: the
-      // th itself is the tooltip trigger.
-      decorateColHeader($th, c.name, colMeta && colMeta[c.name]);
+      // th itself is the tooltip trigger (cute-dbt#240: every th, with the
+      // truthful fallback when the manifest carries no column metadata).
+      decorateColHeader($th, c.name, colMeta && colMeta[c.name], owner);
       $hr.append($th);
     });
     var $tbody = $("<tbody>").appendTo($tbl);
@@ -3265,8 +3340,8 @@
   // element so a test can assert the authored-display rendering, the toggle,
   // and the tinted markup.
   if (typeof window !== "undefined") {
-    window.__cuteBuildFixtureView = function (table, cls, diff, colMeta) {
-      return buildFixtureView(table, cls, diff, colMeta)[0];
+    window.__cuteBuildFixtureView = function (table, cls, diff, colMeta, owner) {
+      return buildFixtureView(table, cls, diff, colMeta, owner)[0];
     };
     window.__cuteCellText = cellText;
     // cute-dbt#139 — the cell-change lens + the settings object, exposed so the

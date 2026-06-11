@@ -722,6 +722,17 @@ table.given-table th, table.expected-table th {
 
 .diff-scope-banner { padding: 0; margin: 0 0 var(--gap-section); color: var(--text); }
 .diff-scope-line code, .diff-scope-text + * code { font-family: var(--font-mono); }
+/* cute-dbt#240 (defects C+E) — Sakura's base `code { background:#f1f1f1 }`
+   is a light-theme constant: on the dark themes it pairs with the
+   near-white --text at ≈1.2:1 (illegible "near-white pills"). The two
+   founder-reported surfaces — the baseline-manifest path in the scope
+   banner (E) and the COVERED finding row's "Covered by" test ids (C) —
+   re-skin with theme tokens (the .td-defined-in idiom; --bg-alt is each
+   theme's sunken code-well pair for --text). AA-pinned on all 8 themes by
+   the headless guard family. */
+.diff-scope-line code, .finding-covered-by code {
+  background: var(--bg-alt); color: var(--text);
+}
 
 /* cute-dbt#201 — the left-border description BANNER (and its
    test-description-section landmark) is retired: the description renders
@@ -1277,13 +1288,23 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
 th.has-col-meta { cursor: help; }
 th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .col-tooltip {
-  position: fixed; z-index: 90; max-width: 24rem; min-width: 12rem;
+  position: fixed; z-index: 90; min-width: 12rem;
+  /* cute-dbt#240 (defects A+D) — the bubble must CONTAIN its content:
+     (1) the width cap can never exceed the viewport (the calc term mirrors
+     the #232/#234 CSS-bubble cap, so positionTipNear's clamp always has a
+     box that fits), and (2) long unbreakable mono tokens (test names,
+     override values) wrap inside the painted background instead of
+     painting past its right edge. */
+  max-width: min(24rem, calc(100vw - 16px));
+  overflow-wrap: anywhere;
   background: var(--tooltip-bg); color: var(--tooltip-fg);
   border-radius: var(--radius-pan); box-shadow: 0 6px 22px rgba(0,0,0,0.32);
   padding: 0.7rem 0.8rem; font-size: 12px; line-height: 1.45;
   font-weight: normal; text-transform: none; letter-spacing: normal; pointer-events: none;
 }
 .col-tooltip .ct-desc { font-size: 1.12em; line-height: 1.5; opacity: 0.97; }
+/* cute-dbt#240 (defect B) — the truthful no-metadata fallback line. */
+.col-tooltip .ct-empty { margin-top: 0.2rem; font-size: 0.95em; opacity: 0.75; }
 .col-tooltip .ct-tests-label { margin-top: 0.6rem; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.07em; opacity: 0.6; }
 .col-tooltip .ct-tests { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.3rem; }
 .col-tooltip .ct-test { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.7rem; }
@@ -1301,7 +1322,10 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
    model tip too (it rides the .col-tooltip shell). */
 :root[data-theme="latte"] .col-tooltip .ct-key { color: color-mix(in oklab, var(--accent) 35%, white); }
 .col-tooltip .ct-vals { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
-.col-tooltip .ct-val { background: rgba(255,255,255,0.14); border-radius: 4px; padding: 0.05rem 0.42rem; font-family: var(--font-mono); font-size: 0.9em; white-space: nowrap; }
+/* cute-dbt#240 (defect A) — chips wrap mid-token when (and only when) a
+   single value exceeds the bubble width: `anywhere` breaks ONLY on
+   overflow, so the short shipped args stay one-line chips. */
+.col-tooltip .ct-val { background: rgba(255,255,255,0.14); border-radius: 4px; padding: 0.05rem 0.42rem; font-family: var(--font-mono); font-size: 0.9em; overflow-wrap: anywhere; }
 /* (cute-dbt#202 — the .ct-detail run is retired: detail strings now split
    into the same ct-vals/ct-val chips the values branch uses.) */
 
@@ -1309,7 +1333,9 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
    (body-appended #model-tooltip / #ov-tooltip singletons, position:fixed
    via the shared class above; hardcoded whites follow the ct-val
    precedent — the tooltip interior is dark in every theme). */
-.col-tooltip.ov-tooltip, .col-tooltip.model-tooltip { max-width: 32rem; }
+/* cute-dbt#240 (defect D) — the wider tips keep the same can-never-exceed-
+   the-viewport cap so the positionTipNear clamp always fully contains them. */
+.col-tooltip.ov-tooltip, .col-tooltip.model-tooltip { max-width: min(32rem, calc(100vw - 16px)); }
 .model-tooltip .mt-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.45rem; }
 .model-tooltip .ct-desc { font-size: 1.3em; line-height: 1.5; }
 .model-tooltip .mt-mat { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: #f0c674; border: 1px solid currentColor; border-radius: 999px; padding: 0.02rem 0.5rem; }
@@ -1326,10 +1352,15 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
 .model-tooltip .ct-key { color: color-mix(in oklab, var(--accent) 60%, white); }
 .ov-tooltip .ov-grp + .ov-grp { margin-top: 0.55rem; }
 .ov-tooltip .ov-grp-name { font-family: var(--font-mono); font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; margin-bottom: 0.25rem; }
-.ov-tooltip .ov-row { display: flex; gap: 0.5rem; align-items: baseline; padding-left: 0.45rem; white-space: nowrap; }
-.ov-tooltip .ov-key, .ov-tooltip .ov-row code { background: none; padding: 0; font-family: var(--font-mono); font-weight: 700; color: color-mix(in oklab, var(--accent) 50%, white); white-space: nowrap; }
+/* cute-dbt#240 (defect D) — the nowrap run made any key/value longer than
+   the bubble's cap paint past the painted background and clip at the
+   viewport's right edge near right-edge triggers. Rows now flex-wrap and
+   long tokens break inside the bubble; colors stay verbatim (cute-dbt#238
+   owns the ov-tooltip palette). */
+.ov-tooltip .ov-row { display: flex; flex-wrap: wrap; gap: 0.15rem 0.5rem; align-items: baseline; padding-left: 0.45rem; }
+.ov-tooltip .ov-key, .ov-tooltip .ov-row code { background: none; padding: 0; font-family: var(--font-mono); font-weight: 700; color: color-mix(in oklab, var(--accent) 50%, white); overflow-wrap: anywhere; }
 .ov-tooltip .ov-eq { opacity: 0.45; }
-.ov-tooltip .ov-val { font-family: var(--font-mono); color: rgba(255,255,255,0.9); white-space: nowrap; }
+.ov-tooltip .ov-val { font-family: var(--font-mono); color: rgba(255,255,255,0.9); overflow-wrap: anywhere; min-width: 0; }
 
 /* cute-dbt#202 — the format-block tip (#fmt-tooltip): a mini framed code
    surface (NOT the dark .col-tooltip shell — it reuses the code-card
@@ -1500,6 +1531,15 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
 .finding-body { padding: 0.45rem 0.7rem 0.6rem; border-top: var(--rule-w) solid var(--border); font-size: 0.88em; }
 .finding-body p { margin: 0.3rem 0; }
 .f-label { color: var(--text-muted); }
+/* cute-dbt#240 (defect C residual, PR #244 verification) — the
+   "Covered by " prefix label rides the verbatim muted on the finding
+   row's --surface fill and sits sub-AA on latte alone: #6c6f85 on
+   #eff1f5 = 4.37:1 (11.88px weight-400, so the 4.5 floor applies;
+   rosepine measures 4.56 and stays verbatim). The established #227/#231
+   deepened stand-in extends to this label (latte Catppuccin subtext1
+   #5c5f77 ≈ 5.5:1 on the row fill, re-measured empirically) — token
+   override only; the verbatim latte theme block stays pinned. */
+:root[data-theme="latte"] .finding-covered-by .f-label { --text-muted: #5c5f77; }
 .finding-covered-by code, .finding-suppress-reason code { font-size: 0.92em; }
 .finding-evidence { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.15rem; }
 .finding-evidence li { line-height: 1.45; }
