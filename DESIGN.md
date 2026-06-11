@@ -25,7 +25,7 @@ handoff zips as historical input, not as the current contract.
 | Report interactivity (selectors, DAG views, diff renderers, fixture grids, settings panel) | `templates/interaction.js` | report page |
 | Theme engine: applies/persists appearance via localStorage key `cute-dbt.appearance.v1` | `templates/theme.js` | report page only (today) |
 | Report-page Cytoscape preset layout (first-party, no layout plugin) | `templates/cyto-dag.js` | report page |
-| Explore pages | `templates/explore-dag.html`, `templates/explore-tests.html` + `explore-lineage.js`, `explore-cte.js`, `explore-tests.js` | `cute-dbt explore` two-page output |
+| Explore pages | `templates/explore-dag.html`, `templates/explore-tests.html` + `templates/explore-lineage.js`, `templates/explore-cte.js`, `templates/explore-tests.js` | `cute-dbt explore` two-page output |
 | Shared markup partial (test card: given/expected fixture grids) | `templates/partials/test-card.html` (askama `{% include %}`) | **both** report and explore-tests |
 | Vendored frontend bundles + provenance (pin, SHA-256, SPDX) | `assets/` + `assets/MANIFEST.toml` | both page families |
 | Rendered, committed reference artifacts | `examples/*.html` (report: jaffle-shop, playground, diff-showcase) and `examples/explore/{dag,tests}.html` | what you should open and look at — these are byte-identity-gated in CI and regenerate on every change |
