@@ -1203,6 +1203,13 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
 .tier-chip.tier-high     { background: transparent; color: var(--accent); border-color: var(--accent); }
 .tier-chip.tier-advisory { background: transparent; color: var(--text-muted); border-color: var(--border-strong); text-transform: none; }
 .tier-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* cute-dbt#198 discovery — Latte chip AA: the verbatim latte accent
+   (#1e66f5, 4.34:1) and text-muted (#6c6f85, 4.37:1) sit a hair under AA
+   on the latte surface at the chips' 0.68em size. Deepened stand-ins are
+   scoped to the chips per theme (accent -> one-step-darker latte blue,
+   5.13:1; muted -> Catppuccin subtext1, 5.53:1) — a token override only;
+   the chip rules/markup and the verbatim latte theme block stay pinned. */
+:root[data-theme="latte"] .tier-chip { --accent: #1a5cdd; --text-muted: #5c5f77; }
 html[data-style="terminal"] .tier-chip,
 html[data-style="terminal"] .suppress-chip,
 html[data-style="swiss"] .tier-chip,
