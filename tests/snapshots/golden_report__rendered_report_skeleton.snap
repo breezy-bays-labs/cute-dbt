@@ -94,6 +94,19 @@ expression: skeleton
         </div>
       </div>
     </div>
+    
+    <div class="settings-section coverage-section">
+      <div class="settings-row">
+        <label for="settings-coverage-input">Coverage intelligence
+          <span class="settings-hint">show or hide the coverage-checks surface</span>
+        </label>
+        <span class="settings-switch">
+          <input type="checkbox" id="settings-coverage-input"
+                 aria-label="Show coverage-intelligence checks" checked>
+          <span class="switch-track" aria-hidden="true"></span>
+        </span>
+      </div>
+    </div>
   </div>
 </div>
 

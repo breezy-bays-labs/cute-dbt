@@ -1343,6 +1343,12 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
    suppressed findings are visible-but-quiet behind a collapsed count.
    ========================================================================== */
 .model-findings { margin-bottom: var(--gap-section); }
+/* cute-dbt#219 — the viewer-side coverage-intelligence display toggle: the
+   settings switch sets html[data-coverage=off] (theme.js, persisted as the
+   `coverage` field of cute-dbt.appearance.v1) and this ONE rule hides every
+   check-engine-derived surface. The panel's rendered content stays in the
+   DOM (display-only — payload untouched), so ON restores without re-render. */
+html[data-coverage="off"] .model-findings { display: none; }
 .findings-header { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.45rem; flex-wrap: wrap; }
 .findings-header h2 {
   font-size: var(--fs-label); text-transform: uppercase;
