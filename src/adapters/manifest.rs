@@ -260,12 +260,31 @@ struct WireSource {
     database: Option<String>,
     #[serde(default)]
     relation_name: Option<String>,
+    /// Source `columns` map (cute-dbt#235) — the same wire shape as a
+    /// node's (fusion `ManifestSource.columns` serializes through the
+    /// shared `serialize_dbt_columns`, `dbt-schemas`
+    /// `manifest/manifest_nodes.rs` @ `9977b6cb…`), so [`WireColumn`] is
+    /// reused verbatim. Feeds the `source(...)`-given column-header
+    /// tooltips; only `description` is consumed.
+    #[serde(default)]
+    columns: BTreeMap<String, WireColumn>,
 }
 
 impl WireSource {
     /// Translate into the domain [`SourceNode`], folding the
-    /// authoritative map `key` into the id (the [`WireNode`] precedent).
+    /// authoritative map `key` into the id (the [`WireNode`] precedent)
+    /// and keeping only non-empty column descriptions (the cute-dbt#165
+    /// empty-string-unset drop, applied to sources for cute-dbt#235).
     fn into_domain(self, key: String) -> SourceNode {
+        let column_descriptions = self
+            .columns
+            .into_iter()
+            .filter_map(|(name, col)| {
+                col.description
+                    .filter(|d| !d.is_empty())
+                    .map(|desc| (name, desc))
+            })
+            .collect();
         SourceNode::new(
             NodeId::new(key),
             self.source_name.unwrap_or_default(),
@@ -275,6 +294,7 @@ impl WireSource {
             self.database,
             self.relation_name,
         )
+        .with_column_descriptions(column_descriptions)
     }
 }
 
@@ -994,6 +1014,47 @@ mod tests {
         assert_eq!(source.identifier(), None);
         assert_eq!(source.database(), None);
         assert_eq!(source.relation_name(), None);
+    }
+
+    #[test]
+    fn parse_manifest_extracts_source_column_descriptions_and_drops_empty_ones() {
+        // cute-dbt#235 — source `columns` ride the same wire shape as
+        // node columns (fusion serializes both through
+        // `serialize_dbt_columns`; an unset description is `""`). Only
+        // non-empty prose reaches the domain map — the #165 drop rule.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "sources": {{
+                "source.shop.synthea_raw.patients": {{
+                  "schema": "main",
+                  "name": "patients",
+                  "source_name": "synthea_raw",
+                  "columns": {{
+                    "Id": {{ "name": "Id", "description": "Unique patient identifier (UUID)" }},
+                    "FIRST": {{ "name": "FIRST", "description": "" }},
+                    "LAST": {{ "name": "LAST" }}
+                  }}
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("source entry with columns parses");
+        let source = manifest
+            .source_by_name("synthea_raw", "patients")
+            .expect("the (source_name, name) pair resolves");
+        assert_eq!(
+            source.column_descriptions().get("Id"),
+            Some(&"Unique patient identifier (UUID)".to_owned()),
+        );
+        assert!(
+            !source.column_descriptions().contains_key("FIRST"),
+            "fusion's empty-string unset description is dropped",
+        );
+        assert!(
+            !source.column_descriptions().contains_key("LAST"),
+            "a column with no description key contributes nothing",
+        );
     }
 
     #[test]
