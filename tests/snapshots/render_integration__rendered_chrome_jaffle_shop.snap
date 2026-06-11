@@ -1425,6 +1425,14 @@ html[data-coverage="off"] .model-findings { display: none; }
    5.13:1; muted -> Catppuccin subtext1, 5.53:1) — a token override only;
    the chip rules/markup and the verbatim latte theme block stay pinned. */
 :root[data-theme="latte"] .tier-chip { --accent: #1a5cdd; --text-muted: #5c5f77; }
+/* cute-dbt#206 — Solarized chip AA: the verbatim solarized accent
+   (#268bd2) sits at 3.41:1 on the chip surface (#fdf6e3) — under AA at
+   the chips' 0.68em size. The deepened stand-in is the theme's OWN
+   accent-hover (#1d6fa8, one-step-darker solarized blue, 5.00:1) —
+   a token override only, scoped to the chips; tier-total (4.99:1) and
+   tier-advisory (4.92:1) already pass, so accent is the only token
+   overridden and the verbatim solarized theme block stays pinned. */
+:root[data-theme="solarized"] .tier-chip { --accent: #1d6fa8; }
 html[data-style="terminal"] .tier-chip,
 html[data-style="terminal"] .suppress-chip,
 html[data-style="swiss"] .tier-chip,

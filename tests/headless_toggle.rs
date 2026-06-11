@@ -7268,3 +7268,144 @@ fn coverage_intelligence_toggle_hides_check_surfaces_and_persists() {
 
     let _ = tab.close(true);
 }
+
+// ===== cute-dbt#206 — tier-chip WCAG AA contrast across every theme ====
+//
+// The Solarized tier-high chip shipped at 3.41:1 — under the 4.5:1 AA
+// floor — because the chip's outlined-accent text renders the theme's
+// verbatim accent on the finding row's `--surface`, and nothing gated
+// that pairing per theme. This guard is the mechanical encoding of the
+// sweep: for EVERY [data-theme] pack the chassis ships, every tier chip
+// must reach AA on its true backdrop (a 9th theme cannot silently
+// regress). The contrast math runs in evaluated JS over RESOLVED
+// computed styles, so token overrides (the #198 latte / #206 solarized
+// chip-scoped overrides) are measured exactly as the browser paints
+// them.
+//
+// Backdrop resolution mirrors how the chips actually composite: chips
+// append into `.finding-summary` inside `.finding-row { background:
+// var(--surface) }`, so the effective text backdrop is the nearest
+// opaque ancestor background (NOT `--bg`; body bg only shows through
+// the gaps between rows). The self-backed TOTAL chip is judged on its
+// own `--control-active-bg` fill instead.
+
+/// The full WCAG sweep, evaluated in-page. Returns a JSON array of
+/// `{theme, tier, ratio, fg, bg}` — one entry per (theme, tier chip).
+/// No live check carries the Advisory tier yet (test registries only),
+/// so the sweep injects one advisory chip into a real
+/// `.finding-summary` — a pure class-based DOM addition that exercises
+/// the exact shipped `.tier-chip.tier-advisory` rules.
+const TIER_CHIP_CONTRAST_SWEEP_JS: &str = r#"(function () {
+  var THEMES = ["light", "solarized", "latte", "rosepine",
+                "dark", "tokyo", "gruvbox", "dracula"];
+  var DARK = { dark: true, tokyo: true, gruvbox: true, dracula: true };
+  function parseRgb(s) {
+    var m = /rgba?\(([^)]+)\)/.exec(s || "");
+    if (!m) return null;
+    var p = m[1].split(",");
+    return { r: parseFloat(p[0]), g: parseFloat(p[1]), b: parseFloat(p[2]),
+             a: p.length > 3 ? parseFloat(p[3]) : 1 };
+  }
+  function chan(v) {
+    v = v / 255;
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  function lum(c) {
+    return 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
+  }
+  function ratio(f, b) {
+    var lf = lum(f), lb = lum(b);
+    var hi = Math.max(lf, lb), lo = Math.min(lf, lb);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+  function backdropOf(el) {
+    for (var n = el; n; n = n.parentElement) {
+      var c = parseRgb(getComputedStyle(n).backgroundColor);
+      if (c && c.a === 1) return c;
+    }
+    return null; /* no opaque ancestor — surfaced as ratio -1 */
+  }
+  if (!document.querySelector(".tier-chip.tier-advisory")) {
+    var sp = document.createElement("span");
+    sp.className = "tier-chip tier-advisory";
+    sp.textContent = "advisory";
+    document.querySelector(".finding-summary").appendChild(sp);
+  }
+  var root = document.documentElement;
+  var out = [];
+  for (var i = 0; i < THEMES.length; i++) {
+    /* exactly theme.js applyTheme: set data-theme + sync html.dark */
+    root.setAttribute("data-theme", THEMES[i]);
+    root.classList.toggle("dark", !!DARK[THEMES[i]]);
+    var chips = document.querySelectorAll(".tier-chip");
+    for (var j = 0; j < chips.length; j++) {
+      var cs = getComputedStyle(chips[j]);
+      var fg = parseRgb(cs.color);
+      var own = parseRgb(cs.backgroundColor);
+      var bg = own && own.a === 1 ? own : backdropOf(chips[j].parentElement);
+      var tier =
+        (/tier-(total|high|advisory)/.exec(chips[j].className) || [])[1]
+        || "unknown";
+      out.push({
+        theme: THEMES[i], tier: tier,
+        ratio: fg && bg ? ratio(fg, bg) : -1,
+        fg: cs.color,
+        bg: bg ? "rgb(" + bg.r + ", " + bg.g + ", " + bg.b + ")" : "none"
+      });
+    }
+  }
+  return JSON.stringify(out);
+})()"#;
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn tier_chips_meet_aa_contrast_on_every_theme() {
+    // dim_both trips grain (TOTAL chip) + union (HIGH chip); the sweep
+    // JS injects the advisory chip — full tier vocabulary, all 8 themes.
+    let url = render_to_file(
+        "headless_tier_chip_contrast.html",
+        vec![findings_model("model.shop.dim_both")],
+        vec![("unit_test.shop.dim_both.t1", unit_test("t1", "dim_both"))],
+        &["model.shop.dim_both"],
+        &["unit_test.shop.dim_both.t1"],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    let raw = eval_string(&tab, TIER_CHIP_CONTRAST_SWEEP_JS);
+    let measured: Vec<serde_json::Value> =
+        serde_json::from_str(&raw).expect("the contrast sweep returns valid JSON");
+    assert_eq!(
+        measured.len(),
+        24,
+        "8 themes x 3 tier chips (total/high/advisory) measured, got: {raw}",
+    );
+
+    let mut failures = Vec::new();
+    for m in &measured {
+        let theme = m["theme"].as_str().expect("theme is a string");
+        let tier = m["tier"].as_str().expect("tier is a string");
+        let ratio = m["ratio"].as_f64().expect("ratio is a number");
+        let fg = m["fg"].as_str().unwrap_or("?");
+        let bg = m["bg"].as_str().unwrap_or("?");
+        assert_ne!(tier, "unknown", "every chip carries a known tier class");
+        assert!(
+            ratio > 0.0,
+            "the {theme}/{tier} chip resolved no opaque backdrop — the \
+             backdrop walk must end on a painted surface",
+        );
+        eprintln!("tier-chip contrast {theme:>9} / {tier:<8} = {ratio:.2}  ({fg} on {bg})");
+        if ratio < 4.5 {
+            failures.push(format!("{theme}/{tier} = {ratio:.2} ({fg} on {bg})"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "tier chips below the WCAG AA 4.5:1 floor (cute-dbt#206): {failures:#?}",
+    );
+
+    let _ = tab.close(true);
+}
