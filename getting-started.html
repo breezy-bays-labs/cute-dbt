@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-0577d594.js";
+            window.path_to_searchindex_js = "searchindex-e6dce51a.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-db4d1b28.js"></script>
@@ -238,7 +238,10 @@ data does not leave your machine.</p>
     --out-dir  explore/
 </code></pre>
 <p>It writes two self-contained pages under <code>explore/</code>: <code>dag.html</code> (the
-model-lineage DAG) and <code>tests.html</code> (the per-model unit-test index).
+<strong>interactive</strong> model-lineage DAG — pan/zoom/drag, fuzzy search, click
+or search-select to highlight a model’s full lineage, <kbd>Space</kbd>
+to commit focus on the highlighted model) and <code>tests.html</code> (the
+per-model unit-test index).
 Explore is <strong>fail-open</strong> on uncompiled models — a <code>dbt parse</code>-only
 model renders as a “not compiled” node instead of aborting the run
 (the manifest itself must still be readable and schema v12+). Bare
