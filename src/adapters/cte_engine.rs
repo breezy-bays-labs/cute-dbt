@@ -498,7 +498,7 @@ fn conforming_inner(subquery: &Query) -> Option<(&Select, String)> {
     if subquery.with.is_some() {
         return None;
     }
-    let SetExpr::Select(inner) = &*subquery.body else {
+    let SetExpr::Select(inner) = subquery.body.as_ref() else {
         return None;
     };
     if inner.from.len() != 1 || !inner.from[0].joins.is_empty() {
