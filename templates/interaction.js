@@ -246,6 +246,9 @@
     // column test-count expanders (delegated; shelf content is rebuilt per
     // node selection).
     bindShelf();
+    // cute-dbt#202 — delegated hover/focus handlers for the rich hover
+    // cards (model pills, format badges, the overrides badge).
+    bindModelTips();
   });
 
   // cute-dbt#91 — scope-toggle helpers --------------------------------
@@ -417,12 +420,14 @@
     // is needed here.
     // cute-dbt#145 — the .expected-panel .panel-header is a PERSISTENT static
     // element. renderExpectedPanel (which clears + re-appends the mode badge /
-    // expect-tooltip) runs ONLY in the `if (t)` arm below, so a switch to a
+    // model pill) runs ONLY in the `if (t)` arm below, so a switch to a
     // modified-but-untested model (currentTest() === null) would otherwise
     // leak a prior incremental-mode test's badge + tooltip. Clear them here
     // unconditionally too (targeted — never touches .expected-rowcount).
-    // (gemini review, PR #146.)
-    $(".expected-panel .panel-header .mode-badge, .expected-panel .panel-header .expect-tooltip").remove();
+    // (gemini review, PR #146.) cute-dbt#202 extends the #161 clear-list to
+    // .expected-model-badge; the expect-semantics bubble now rides INSIDE
+    // the mode badge (the retired ⓘ button needs no selector).
+    $(".expected-panel .panel-header .mode-badge, .expected-panel .panel-header .expected-model-badge").remove();
     // cute-dbt#201 — a fresh model/test selection closes any open
     // node-detail shelf BEFORE the DAG re-renders below, so the rebuilt
     // DAG re-centers with no baked selection (the shelf's ✕ handler does
@@ -502,8 +507,8 @@
   // cute-dbt#201 — the always-open test card (founder decision on epic
   // cute-dbt#197, 2026-06-10: NOT a drawer). The selector is the card's
   // title; this populates the badge row (tag chips, the muted `untagged`
-  // fallback, meta chips — the overrides badge arrives with cute-dbt#202),
-  // the larger-font description (hidden when empty: the #74
+  // fallback, the cute-dbt#202 overrides badge, meta chips), the
+  // larger-font description (hidden when empty: the #74
   // no-empty-landmark intent carries over from the retired
   // test-description-section), and the details body (defined-in fallback +
   // the authoring-YAML drawer — the one piece that stays collapsible).
@@ -521,6 +526,22 @@
       });
     } else {
       $badges.append($("<span>").addClass("tb-badge tb-muted").text("untagged"));
+    }
+    // cute-dbt#202 — `overrides · N` badge (N = total keys across the
+    // macros/vars/env_vars groups). Hover/focus shows the grouped
+    // key = value rows via the #ov-tooltip singleton (showOvTip); the
+    // badge's visible text is the AT surface. The payload field is the
+    // #200 TestPayload.overrides blob (native scalars, never on the wire
+    // when the test declares no override).
+    if (t.overrides && Object.keys(t.overrides).length) {
+      var ovCount = 0, ovJson = t.overrides;
+      Object.keys(ovJson).forEach(function (k) {
+        ovCount += ovJson[k] && typeof ovJson[k] === "object" ? Object.keys(ovJson[k]).length : 1;
+      });
+      $badges.append($("<span>").addClass("tb-badge tb-overrides has-ov-tip")
+        .attr("data-overrides", JSON.stringify(ovJson))
+        .attr("tabindex", "0").attr("role", "button")
+        .text("overrides · " + ovCount));
     }
     // meta chips — one chip per key (replaces the "No metadata" line; zero
     // meta keys simply render zero chips).
@@ -1426,15 +1447,226 @@
     return hit ? hit.diff : undefined;
   }
 
+  // ---- rich hover cards: model-ref, format-block, overrides (#202) -------
+  //
+  // Three body-appended singleton tips (#model-tooltip / #fmt-tooltip /
+  // #ov-tooltip) behind delegated trigger classes, shown on mouseenter AND
+  // focusin (every trigger is focusable — the #146 rule: no native title as
+  // a primary affordance). The prior-model-state this-badge and the
+  // incremental-branch mode badge deliberately do NOT ride this mechanism:
+  // per the founder decision on epic cute-dbt#197 they keep the #146
+  // focusable-trigger CSS bubble (badge-borne, the pass-2 visual styling) —
+  // exactly one tooltip mechanism per affordance, so the pass-2's JS
+  // info-tip twin for those badges is not ported.
+
+  // The raw token of a Current-view cell: the canonical key value when the
+  // wire carries one, else the authored display ("" for null/absent — the
+  // dbt empty-equals-null convention round-trips as the empty token).
+  function cellRaw(cell) {
+    if (!cell) return "";
+    var k = cell.key || {};
+    return k.v != null ? String(k.v) : (cell.display != null ? String(cell.display) : "");
+  }
+  // The token as a YAML scalar: numbers/bools verbatim, strings quoted only
+  // when YAML would re-parse them (colon/space/quote/comment characters).
+  function cellYaml(cell) {
+    var k = (cell && cell.key) || {};
+    if (k.t === "number" || k.t === "bool" || k.t === "boolean") return cellRaw(cell);
+    var s = cellRaw(cell);
+    return /[:\s'"#]/.test(s) ? JSON.stringify(s) : s;
+  }
+  // Reconstruct the fixture as authored, purely client-side from the
+  // existing payload (no new data): sql => the raw SELECT; csv => header +
+  // comma rows; dict/other => a YAML list of row dicts.
+  function reconstructFormatBlock(given) {
+    if (isSqlCodeBlockFixture(given)) return { text: String(given.rows || ""), lang: "sql" };
+    var table = given.table || { columns: [], rows: [] };
+    var cols = table.columns || [], rows = table.rows || [];
+    if ((given.format || "") === "csv") {
+      var lines = [cols.join(",")];
+      rows.forEach(function (r) {
+        var c = r.cells || [];
+        lines.push(cols.map(function (_, i) { return cellRaw(c[i]); }).join(","));
+      });
+      return { text: lines.join("\n"), lang: "csv" };
+    }
+    var out = [];
+    rows.forEach(function (r) {
+      var c = r.cells || [];
+      var parts = cols.map(function (col, i) { return col + ": " + cellYaml(c[i]); });
+      out.push("- " + parts.join("\n  "));
+    });
+    return { text: out.join("\n"), lang: "yaml" };
+  }
+  // Plaintext gutter-numbered lines for the fmt tip's csv branch — the same
+  // [gutter][code] line DOM the SQL/YAML highlighters emit, no tokenizing.
+  function highlightLinesPlain(text) {
+    var rows = String(text || "").replace(/\n+$/, "").split("\n");
+    return rows.map(function (r, i) {
+      return '<span class="code-line"><span class="code-gutter" aria-hidden="true">' + (i + 1)
+           + '</span><span class="diff-code">' + escapeHtml(r) + "</span></span>";
+    }).join("");
+  }
+  // The `format: <fmt>` badge — shown for ALL formats (the pre-#202 dict
+  // suppression is retired). It becomes a #fmt-tooltip trigger only when
+  // there is data to reconstruct (an UNLOADED external fixture has no rows
+  // in the payload — its badge stays plain, the same graceful-absence
+  // posture as a model pill without a manifest_nodes entry).
+  function formatBadge(given) {
+    var fmt = isSqlCodeBlockFixture(given) ? "sql" : (given.format || "");
+    var block = reconstructFormatBlock(given);
+    var $b = $("<span>").addClass("format-badge")
+      .attr("data-fmt", fmt)
+      .text("format: " + fmt);
+    if (block.text) {
+      $b.addClass("has-fmt-tip")
+        .attr("tabindex", "0").attr("role", "button")
+        .attr("data-fmt-lang", block.lang)
+        .attr("data-fmt-block", block.text);
+    }
+    return $b;
+  }
+  // Given header title: `ref(` + highlighted model pill + `)` — the
+  // `given ·` prefix is dropped (the whole panel is already the Given
+  // block). The pill is a #model-tooltip trigger only when manifest_nodes
+  // knows that upstream model (graceful absence); non-ref inputs (`this`,
+  // `source(...)`) render verbatim.
+  function buildGivenTitle(given) {
+    var $h = $("<h4>").addClass("table-title");
+    var ref = refTargetName(given.input);
+    if (ref) {
+      $h.append($("<span>").addClass("gt-prefix").text("ref("));
+      var $mid = $("<span>").addClass("gt-model").text(ref);
+      if (manifestNode(ref)) {
+        $mid.addClass("has-model-tip").attr("data-model", ref)
+          .attr("tabindex", "0").attr("role", "button");
+      }
+      $h.append($mid).append($("<span>").addClass("gt-prefix").text(")"));
+    } else {
+      $h.append($("<span>").addClass("gt-model").text(given.input));
+    }
+    return $h;
+  }
+  // Lazily create (or re-class) the body-appended singleton tip `id`. Same
+  // posture as ensureColTooltip: aria-hidden (the trigger's visible text /
+  // aria-label is the AT surface), hidden until shown.
+  function ensureTip(id, cls) {
+    var el = document.getElementById(id);
+    if (!el) {
+      el = document.createElement("div");
+      el.id = id;
+      el.hidden = true;
+      el.setAttribute("aria-hidden", "true");
+      document.body.appendChild(el);
+    }
+    el.className = cls;
+    return el;
+  }
+  function hideTip(id) { var el = document.getElementById(id); if (el) el.hidden = true; }
+  // Model-ref tip (given pill + expected badge): materialized + tags +
+  // description + model-level tests. No name (you're hovering it) and no
+  // columns (the table below shows them) — keeps the bubble small.
+  function showModelTip(trigger) {
+    var name = trigger.getAttribute("data-model"), info = manifestNode(name);
+    if (!info) return;
+    var el = ensureTip("model-tooltip", "col-tooltip model-tooltip");
+    var h = "";
+    var hasChips = info.materialized || (info.tags && info.tags.length);
+    if (hasChips) {
+      h += '<div class="mt-chips">';
+      if (info.materialized) h += '<span class="mt-mat">' + escapeHtml(info.materialized) + "</span>";
+      (info.tags || []).forEach(function (tg) { h += '<span class="mt-tag">' + escapeHtml(tg) + "</span>"; });
+      h += "</div>";
+    }
+    if (info.description) h += '<div class="ct-desc">' + escapeHtml(info.description) + "</div>";
+    if (info.model_tests && info.model_tests.length) {
+      h += '<div class="ct-tests-label">Model tests</div>';
+      h += '<div class="mt-mtests">';
+      info.model_tests.forEach(function (tt) {
+        h += '<div class="dt-row">' + testChipsHtml(tt) + "</div>";
+      });
+      h += "</div>";
+    }
+    el.innerHTML = h;
+    el.hidden = false;
+    positionTipNear(el, trigger);
+  }
+  // Format tip: the fixture reconstructed in its authored format, in a
+  // framed mini code-surface (sql/yaml ride the #132 highlighters).
+  function showFmtTip(trigger) {
+    var fmt = trigger.getAttribute("data-fmt"), lang = trigger.getAttribute("data-fmt-lang");
+    var block = trigger.getAttribute("data-fmt-block") || "";
+    var code = lang === "sql" ? highlightLinesSql(block)
+             : lang === "yaml" ? highlightLinesYaml(block)
+             : highlightLinesPlain(block);
+    var el = ensureTip("fmt-tooltip", "fmt-tooltip");
+    el.innerHTML = '<div class="code-header"><span class="code-filename">format: ' + escapeHtml(fmt)
+      + '</span></div><pre class="sql-block"><code>' + code + "</code></pre>";
+    el.hidden = false;
+    positionTipNear(el, trigger);
+  }
+  // Overrides tip: key = value rows grouped by macros / vars / env_vars.
+  // Values arrive as NATIVE scalars (#200) and are stringified here.
+  function showOvTip(trigger) {
+    var ov = {};
+    try { ov = JSON.parse(trigger.getAttribute("data-overrides") || "{}"); } catch (e) { ov = {}; }
+    var el = ensureTip("ov-tooltip", "col-tooltip ov-tooltip");
+    var h = '<div class="ct-tests-label">Overrides</div>';
+    Object.keys(ov).forEach(function (grp) {
+      h += '<div class="ov-grp"><div class="ov-grp-name">' + escapeHtml(grp) + "</div>";
+      var v = ov[grp];
+      if (v && typeof v === "object") {
+        Object.keys(v).forEach(function (k) {
+          h += '<div class="ov-row"><code class="ov-key">' + escapeHtml(k)
+            + '</code><span class="ov-eq">=</span><span class="ov-val">'
+            + escapeHtml(String(v[k])) + "</span></div>";
+        });
+      } else {
+        h += '<div class="ov-row"><span class="ov-val">' + escapeHtml(String(v)) + "</span></div>";
+      }
+      h += "</div>";
+    });
+    el.innerHTML = h;
+    el.hidden = false;
+    positionTipNear(el, trigger);
+  }
+  // Delegated hover/focus handlers for the three singleton tips — the same
+  // mouseenter+focusin / mouseleave+focusout pairing bindColTooltips uses.
+  function bindModelTips() {
+    $(document)
+      .on("mouseenter focusin", ".has-model-tip", function () { showModelTip(this); })
+      .on("mouseleave focusout", ".has-model-tip", function () { hideTip("model-tooltip"); })
+      .on("mouseenter focusin", ".has-fmt-tip", function () { showFmtTip(this); })
+      .on("mouseleave focusout", ".has-fmt-tip", function () { hideTip("fmt-tooltip"); })
+      .on("mouseenter focusin", ".has-ov-tip", function () { showOvTip(this); })
+      .on("mouseleave focusout", ".has-ov-tip", function () { hideTip("ov-tooltip"); });
+  }
+
   function renderGivenSection(given, dataDiff, ordinal) {
+    // The section keeps `data-input-name` (the test seam) even though the
+    // visible title is now the #202 ref() pill rendering.
     var $sec = $("<section>").addClass("given-section").attr("data-input-name", given.input);
     var $hdr = $("<div>").addClass("table-header");
-    $hdr.append($("<h4>").addClass("table-title").text("given · " + given.input));
+    $hdr.append(buildGivenTitle(given));
     // cute-dbt#145 — mark a `given: - input: this` as the model's prior
     // state. $hdr is freshly built per call (renderAllInputs .empty()s the
-    // wrap), so no idempotent clear is needed here.
+    // wrap), so no idempotent clear is needed here. cute-dbt#202 — the
+    // badge carries an explanatory tip via the #146 focusable-trigger CSS
+    // bubble (badge-borne, the founder-decided mechanism — see the #202
+    // section header above). Copy stays strategy-invariant (the #159/#161
+    // lesson): "incremental branch", never a merge/insert-specific verb.
     if (given.is_this) {
-      $hdr.append($("<span>").addClass("this-badge").text("prior model state"));
+      var thisTip = "The model's rows BEFORE this run — dbt feeds these to an "
+        + "incremental model as its existing table (the `this` relation), so "
+        + "the test can exercise the incremental branch.";
+      $hdr.append(
+        $("<span>").addClass("this-badge has-mode-tip")
+          .attr("tabindex", "0")
+          .attr("aria-label", thisTip)
+          .text("prior model state")
+          .append($("<span>").addClass("expect-tooltip-bubble")
+            .attr("aria-hidden", "true").text(thisTip))
+      );
     }
     // cute-dbt#126 — provenance chip when the data was LOADED from an external
     // fixture file (`fixture:` set AND rows present, i.e. the reader inlined
@@ -1446,7 +1678,7 @@
       $hdr.append(buildFixtureProvenanceChip(given.fixture));
     }
     if (isSqlCodeBlockFixture(given)) {
-      $hdr.append($("<span>").addClass("format-badge").text("format: sql"));
+      $hdr.append(formatBadge(given));
       $sec.append($hdr);
       $sec.append(buildSqlCodeBlock(given.rows));
       return $sec;
@@ -1457,17 +1689,19 @@
     // pointer to the Authoring YAML drawer rather than a silently-empty grid.
     if (isExternalFixture(given)) {
       if (given.format) {
-        $hdr.append($("<span>").addClass("format-badge").text("format: " + given.format));
+        $hdr.append(formatBadge(given));
       }
       $sec.append($hdr);
       $sec.append(buildExternalFixtureAffordance(given.fixture));
       return $sec;
     }
     // cute-dbt#138 — the Current view renders the Rust-computed POD directly.
+    // cute-dbt#202 — the badge shows for ALL formats now, dict included (its
+    // hover reconstructs the fixture in its authored format).
     var table = given.table || { columns: [], rows: [] };
     var rowCount = table.rows.length;
-    if (given.format && given.format !== "dict") {
-      $hdr.append($("<span>").addClass("format-badge").text("format: " + given.format));
+    if (given.format) {
+      $hdr.append(formatBadge(given));
     }
     $hdr.append($("<span>").addClass("row-count-badge")
       .text(rowCount + " row" + (rowCount === 1 ? "" : "s")));
@@ -1487,6 +1721,21 @@
     initDataTablesIn($wrap);
   }
 
+  // cute-dbt#202 — the Expected panel's model pill: the target model's
+  // name in the same .gt-model dress as the given ref() pills, a
+  // #model-tooltip trigger when manifest_nodes knows the model (graceful
+  // absence otherwise). Returns an empty set for a missing model so
+  // callers can append unconditionally.
+  function buildExpectedModelBadge(m) {
+    if (!m) return $();
+    var $b = $("<span>").addClass("gt-model expected-model-badge").text(m.name);
+    if (manifestNode(m.name)) {
+      $b.addClass("has-model-tip").attr("data-model", m.name)
+        .attr("tabindex", "0").attr("role", "button");
+    }
+    return $b;
+  }
+
   function renderExpectedPanel(t) {
     var $panel = $(".expected-panel");
     var $exHdr = $panel.find(".panel-header");
@@ -1498,42 +1747,46 @@
     $exHdr.append($rowcount);
     // cute-dbt#145 — per-test mode badge + expect-semantics tooltip.
     // The .panel-header is a PERSISTENT static element reused across
-    // renders, so first clear any prior mode badge / tooltip (targeted —
-    // must NOT touch the static .expected-rowcount). The mode badge shows
-    // only when the enclosing model is incremental; the tooltip rides the
+    // renders, so first clear any prior mode badge / model pill (targeted —
+    // must NOT touch the static .expected-rowcount; the #161 idempotent
+    // clear-list extends to .expected-model-badge with cute-dbt#202, and
+    // the expect-semantics bubble now rides INSIDE the mode badge so the
+    // retired ⓘ button needs no selector). The mode badge shows only when
+    // the enclosing model is incremental; the tooltip rides the
     // AUTHORITATIVE bool (is_incremental_mode === true), NEVER the
     // `this`-given proxy, and NEVER on the full-refresh branch (there
     // `expect` IS the final table). Emitted BEFORE the sql / external
     // early-returns: the mode is about the test, not the fixture format.
-    $exHdr.find(".mode-badge, .expect-tooltip").remove();
+    $exHdr.find(".mode-badge, .expected-model-badge").remove();
     var $body = $panel.find(".expected-body").empty();
     var em = currentModel();
     if (em && em.is_incremental) {
       var incrementalMode = t.is_incremental_mode === true;
-      $exHdr.append($("<span>")
+      var $modeBadge = $("<span>")
         .addClass("mode-badge " + (incrementalMode ? "mode-incremental" : "mode-full-refresh"))
-        .text(incrementalMode ? "incremental branch" : "full-refresh branch"));
+        .text(incrementalMode ? "incremental branch" : "full-refresh branch");
       if (incrementalMode) {
         var tip = "Expected is the output of the model's compiled SELECT on the "
           + "incremental branch — the rows the configured incremental strategy "
           + "will apply to the table — not the table's final state after the run.";
-        // A focusable <button> carrying a CSS-rendered bubble shown on hover
-        // AND keyboard focus — a native `title` is hover-delayed, keyboard-
-        // unreachable, and frequently never paints (cute-dbt#146 review). The
-        // bubble is the visual surface; `aria-label` carries the same text for
-        // assistive tech (bubble is aria-hidden so it is not announced twice).
-        // Pure CSS — no asset, no JS tooltip lib — so the zero-egress gate holds.
-        var $tip = $("<button>")
-          .attr("type", "button")
-          .addClass("expect-tooltip")
-          .attr("aria-label", tip);
-        $tip.append(document.createTextNode("ⓘ"));
-        $tip.append($("<span>")
-          .addClass("expect-tooltip-bubble")
-          .attr("aria-hidden", "true")
-          .text(tip));
-        $exHdr.append($tip);
+        // cute-dbt#202 (founder decision, epic #197) — the badge ITSELF is
+        // the focusable trigger carrying a CSS-rendered bubble shown on
+        // hover AND keyboard focus (the #146 mechanism, pass-2 badge-borne
+        // styling; the separate ⓘ button is retired). A native `title` is
+        // hover-delayed, keyboard-unreachable, and frequently never paints
+        // (cute-dbt#146 review). The bubble is the visual surface;
+        // `aria-label` carries the same text for assistive tech (bubble is
+        // aria-hidden so it is not announced twice). Pure CSS — no asset,
+        // no JS tooltip lib — so the zero-egress gate holds.
+        $modeBadge.addClass("has-mode-tip")
+          .attr("tabindex", "0")
+          .attr("aria-label", tip)
+          .append($("<span>")
+            .addClass("expect-tooltip-bubble")
+            .attr("aria-hidden", "true")
+            .text(tip));
       }
+      $exHdr.append($modeBadge);
     }
     // cute-dbt#126 — external-fixture provenance for the expect side (loaded
     // from a file). `$body` is emptied each render, so no cleanup is needed.
@@ -1560,16 +1813,20 @@
     // `has_real_change()`, so its presence === "default this table to Diff".
     var diff = (t.data_diff && t.data_diff.expect) || undefined;
     $body.append(buildFixtureView(table, "expected-table", diff, t.expected.column_meta));
-    // cute-dbt#178 — when a Diff/File toggle bar exists, relocate the header
-    // meta onto that bar, to its right, in reading order: [mode badge]
-    // [N rows] [expect-tooltip]. .append() MOVES the nodes (no copy), so
-    // nothing is duplicated. No bar (sql/external/no-diff) => the meta stays
-    // in the header as the fallback (the pre-#178 layout).
+    // cute-dbt#178 / cute-dbt#202 — when a Diff/File toggle bar exists,
+    // relocate the header meta onto that bar in reading order:
+    // [model pill] [mode badge] [N rows], with the Diff/File toggle pushed
+    // to the far right (CSS margin-left:auto — matches the Given bars).
+    // .prepend()/.append() MOVE the nodes (no copy), so nothing is
+    // duplicated. No bar (sql/external/no-diff) => the meta stays in the
+    // header and the model pill rides there as the fallback.
     var $bar = $body.find(".fixture-view-bar").first();
     if ($bar.length) {
-      $bar.append($exHdr.find(".mode-badge")); // empty set when not incremental
-      $bar.append($rowcount);
-      $bar.append($exHdr.find(".expect-tooltip"));
+      $bar.prepend($rowcount);
+      $bar.prepend($exHdr.find(".mode-badge")); // empty set when not incremental
+      $bar.prepend(buildExpectedModelBadge(em));
+    } else {
+      $exHdr.append(buildExpectedModelBadge(em)); // empty set when no model
     }
     initDataTablesIn($body);
   }
@@ -2603,7 +2860,16 @@
                  + t.values.map(function (v) { return '<span class="ct-val">' + escapeHtml(String(v)) + "</span>"; }).join("")
                  + "</span>";
              } else if (t.detail) {
-               inner += '<span class="ct-detail">' + escapeHtml(t.detail) + "</span>";
+               // cute-dbt#202 — a multi-arg detail splits into one chip per
+               // argument (the ct-vals/ct-val dress the values branch uses;
+               // the ct-detail run is retired). The shipped detail forms —
+               // relationships `m.f`, accepted_range `0–100` — carry no
+               // comma, so a single-value detail stays one chip.
+               inner += '<span class="ct-vals">'
+                 + String(t.detail).split(/,\s*/).map(function (a) {
+                     return '<span class="ct-val">' + escapeHtml(a) + "</span>";
+                   }).join("")
+                 + "</span>";
              }
              return '<div class="ct-test">' + inner + "</div>";
            }).join("")
@@ -2776,8 +3042,9 @@
     });
 
     // cute-dbt#178 — the toggle rides a .fixture-view-bar strip so
-    // renderExpectedPanel can relocate the header meta (mode badge, row
-    // count, expect-tooltip) onto the same row, GitHub-toolbar style.
+    // renderExpectedPanel can relocate the header meta (model pill, mode
+    // badge, row count — cute-dbt#202 order) onto the same row,
+    // GitHub-toolbar style.
     $wrap.append($("<div>").addClass("fixture-view-bar").append($toggle))
          .append($diffView).append($currentView);
     return $wrap;
