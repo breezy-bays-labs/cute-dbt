@@ -117,8 +117,10 @@ pub enum NodeRole {
 }
 
 /// Parse the bare name out of a unit-test `given[].input` string of the
-/// form `ref('NAME')` (case-insensitive `ref`, single quotes only —
-/// matches dbt's serialized form in the manifest).
+/// form `ref('NAME')` / `ref("NAME")` (case-insensitive `ref`; either
+/// quote style — dbt accepts both in authored YAML and both engines
+/// ship the authored string **verbatim** on the manifest wire,
+/// cute-dbt#245).
 ///
 /// The keyword check is case-insensitive across any byte casing
 /// (`ref` / `REF` / `Ref` / `rEf` / …) and tolerates whitespace between
@@ -127,8 +129,10 @@ pub enum NodeRole {
 ///
 /// Returns `None` when the input does not match the `ref('…')` shape,
 /// when the inner name is empty, or when the parentheses / quotes are
-/// unbalanced. The caller (`bind_import_to_given`) treats `None` as "no
-/// import-CTE match" and surfaces the design's empty-state copy.
+/// unbalanced or mismatched (open/close must be the same character —
+/// see `strip_matching_quotes`). The caller (`bind_import_to_given`)
+/// treats `None` as "no import-CTE match" and surfaces the design's
+/// empty-state copy.
 #[must_use]
 pub fn parse_ref_name(input: &str) -> Option<&str> {
     let trimmed = input.trim();
@@ -138,9 +142,22 @@ pub fn parse_ref_name(input: &str) -> Option<&str> {
     }
     let after_ref = trimmed[3..].trim_start();
     let inside = after_ref.strip_prefix('(')?.strip_suffix(')')?;
-    let inner = inside.trim();
-    let name = inner.strip_prefix('\'')?.strip_suffix('\'')?;
+    let name = strip_matching_quotes(inside.trim())?;
     if name.is_empty() { None } else { Some(name) }
+}
+
+/// Strip one pair of **matching** string-literal quotes (`'…'` or
+/// `"…"`) from the ends of `s`.
+///
+/// dbt given inputs are authored as Python/Jinja string literals, which
+/// accept either quote character but require the open and close to be
+/// the same one. A mixed pair (`"x'`), an unbalanced quote (`'x`), or a
+/// bare token returns `None` — the fail-open posture both callers
+/// ([`parse_ref_name`] / [`parse_source_ref`]) rely on (cute-dbt#245).
+fn strip_matching_quotes(s: &str) -> Option<&str> {
+    s.strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+        .or_else(|| s.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')))
 }
 
 /// Parse the `(source_name, table_name)` pair out of a unit-test
@@ -154,10 +171,11 @@ pub fn parse_ref_name(input: &str) -> Option<&str> {
 /// authored call. The same tolerances as [`parse_ref_name`] apply:
 /// case-insensitive keyword (`source` / `SOURCE` / …), whitespace
 /// between the keyword and the parenthesis and around the arguments,
-/// single quotes only (dbt's documented/dominant serialized form —
-/// double-quoted and `name=`/`table_name=` kwargs variants are
-/// engine-valid but rare and deliberately deferred, exactly as the ref
-/// parser defers them).
+/// and either quote style with the matching-quote rule applied **per
+/// argument** (each arg is its own string literal, so
+/// `source("a", 'b')` is engine-valid; cute-dbt#245 — the
+/// `name=`/`table_name=` kwargs variants stay engine-valid-but-rare and
+/// deliberately deferred).
 ///
 /// Returns `None` when the input does not match the `source('…','…')`
 /// shape or when either name is empty. The caller treats `None` as "no
@@ -172,12 +190,13 @@ pub fn parse_source_ref(input: &str) -> Option<(&str, &str)> {
     }
     let after_keyword = trimmed[6..].trim_start();
     let inside = after_keyword.strip_prefix('(')?.strip_suffix(')')?;
-    // Top-level comma split: a comma inside a quoted name would leave
-    // the first fragment with unbalanced quotes, fail the quote strip
-    // below, and fall through to `None` — fail-open by construction.
+    // Top-level comma split: a comma inside a quoted name (either
+    // style) would leave the first fragment with an unbalanced or
+    // mismatched quote pair, fail the matching-quote strip below, and
+    // fall through to `None` — fail-open by construction.
     let (first, second) = inside.split_once(',')?;
-    let source_name = first.trim().strip_prefix('\'')?.strip_suffix('\'')?;
-    let table_name = second.trim().strip_prefix('\'')?.strip_suffix('\'')?;
+    let source_name = strip_matching_quotes(first.trim())?;
+    let table_name = strip_matching_quotes(second.trim())?;
     if source_name.is_empty() || table_name.is_empty() {
         None
     } else {
@@ -2328,20 +2347,39 @@ mod tests {
     #[test]
     fn parse_ref_name_returns_none_on_empty_inner() {
         assert_eq!(parse_ref_name("ref('')"), None);
+        assert_eq!(parse_ref_name("ref(\"\")"), None);
     }
 
     #[test]
-    fn parse_ref_name_returns_none_on_double_quoted_name() {
-        // dbt manifests serialize ref(...) with single quotes; the renderer
-        // is deliberately strict here so a stray "ref" mention in user text
-        // does not silently produce a binding.
-        assert_eq!(parse_ref_name("ref(\"x\")"), None);
+    fn parse_ref_name_accepts_double_quoted_name() {
+        // dbt accepts both quote styles in an authored given `input:`
+        // and fusion ships the authored string VERBATIM on the manifest
+        // wire (cute-dbt#245 — verified against a real fusion
+        // 2.0.0-preview.177 compile of the dogfood project).
+        assert_eq!(parse_ref_name("ref(\"x\")"), Some("x"));
+        assert_eq!(
+            parse_ref_name("ref(\"stg_payments\")"),
+            Some("stg_payments")
+        );
+        // Same keyword/whitespace tolerances as the single-quoted form.
+        assert_eq!(parse_ref_name("REF (\"Y\")"), Some("Y"));
+        assert_eq!(parse_ref_name("  ref(\"a\")  "), Some("a"));
+    }
+
+    #[test]
+    fn parse_ref_name_returns_none_on_mixed_quotes() {
+        // Open/close must be the SAME character — a mixed pair is not a
+        // valid Python/Jinja string literal. Fail-open (cute-dbt#245).
+        assert_eq!(parse_ref_name("ref(\"x')"), None);
+        assert_eq!(parse_ref_name("ref('x\")"), None);
     }
 
     #[test]
     fn parse_ref_name_returns_none_on_unmatched_quotes() {
         assert_eq!(parse_ref_name("ref('x"), None);
         assert_eq!(parse_ref_name("ref(x')"), None);
+        assert_eq!(parse_ref_name("ref(\"x"), None);
+        assert_eq!(parse_ref_name("ref(x\")"), None);
     }
 
     #[test]
@@ -2394,19 +2432,50 @@ mod tests {
         assert_eq!(parse_source_ref("source('', 'b')"), None);
         assert_eq!(parse_source_ref("source('a', '')"), None);
         assert_eq!(parse_source_ref("source('', '')"), None);
+        assert_eq!(parse_source_ref("source(\"\", \"b\")"), None);
+        assert_eq!(parse_source_ref("source(\"a\", \"\")"), None);
     }
 
     #[test]
-    fn parse_source_ref_returns_none_on_double_quoted_names() {
-        // Same deliberate strictness as parse_ref_name: dbt manifests
-        // serialize the dominant single-quoted authored form.
-        assert_eq!(parse_source_ref("source(\"a\", \"b\")"), None);
+    fn parse_source_ref_accepts_double_quoted_names() {
+        // Same cute-dbt#245 evidence as parse_ref_name: both quote
+        // styles are engine-valid authored forms and ship verbatim on
+        // the manifest wire.
+        assert_eq!(
+            parse_source_ref("source(\"synthea_raw\", \"patients\")"),
+            Some(("synthea_raw", "patients")),
+        );
+        assert_eq!(parse_source_ref("SOURCE (\"a\", \"b\")"), Some(("a", "b")));
+    }
+
+    #[test]
+    fn parse_source_ref_accepts_mixed_style_args() {
+        // The matching-quote rule is PER ARGUMENT — each arg is its own
+        // string literal, so the two args may use different styles.
+        assert_eq!(parse_source_ref("source(\"a\", 'b')"), Some(("a", "b")));
+        assert_eq!(parse_source_ref("source('a', \"b\")"), Some(("a", "b")));
+    }
+
+    #[test]
+    fn parse_source_ref_returns_none_on_mixed_quotes_within_an_arg() {
+        // A mixed open/close pair inside EITHER argument fails that
+        // arg's matching-quote strip — fail-open (cute-dbt#245).
+        assert_eq!(parse_source_ref("source(\"a', 'b')"), None);
+        assert_eq!(parse_source_ref("source('a\", 'b')"), None);
+        assert_eq!(parse_source_ref("source('a', \"b')"), None);
+        assert_eq!(parse_source_ref("source('a', 'b\")"), None);
     }
 
     #[test]
     fn parse_source_ref_returns_none_on_unmatched_quotes() {
+        // A comma inside a quoted name leaves the first split fragment
+        // with an unbalanced quote — both quote styles fail the strip
+        // (the fail-open-by-construction property, cute-dbt#245).
         assert_eq!(parse_source_ref("source('a, 'b')"), None);
         assert_eq!(parse_source_ref("source('a', b')"), None);
+        assert_eq!(parse_source_ref("source(\"a, \"b\")"), None);
+        assert_eq!(parse_source_ref("source(\"a\", b\")"), None);
+        assert_eq!(parse_source_ref("source(\"a,b\", \"c\")"), None);
     }
 
     #[test]
@@ -2415,6 +2484,75 @@ mod tests {
         assert_eq!(parse_source_ref("this"), None);
         assert_eq!(parse_source_ref(""), None);
         assert_eq!(parse_source_ref("plain_table"), None);
+    }
+
+    // ===== double-quoted given rendering (cute-dbt#245) =====
+
+    #[test]
+    fn render_report_binds_double_quoted_given_and_populates_column_meta() {
+        // cute-dbt#245 AC4: fusion ships an authored `ref("…")` given
+        // input VERBATIM on the manifest wire; the rendered report must
+        // bind it to its import CTE (`bound_to_node`) and resolve the
+        // input model's column metadata exactly like the single-quoted
+        // form. Asserted end-to-end through render_report so the proof
+        // covers the full payload-into-HTML path, not just the parser.
+        let compiled = "with stg_payments_src as (select * from raw_payments) \
+                        select * from stg_payments_src";
+        let target = model_node("model.shop.orders", "body", Some(compiled));
+        let mut src_desc = BTreeMap::new();
+        src_desc.insert(
+            "payment_id".to_owned(),
+            "Double-quoted given column marker".to_owned(),
+        );
+        let src = model_node("model.shop.stg_payments_src", "s", Some("select 1"))
+            .with_column_descriptions(src_desc);
+        let ut = UnitTest::new(
+            "test_dq",
+            NodeId::new("orders"),
+            vec![UnitTestGiven::new(
+                "ref(\"stg_payments_src\")",
+                json!([{ "payment_id": 1 }]),
+                Some("dict".to_owned()),
+                None,
+            )],
+            UnitTestExpect::new(json!([]), None, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let manifest = manifest_for(vec![target, src], vec![("unit_test.shop.test_dq", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_dq".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.orders")]);
+        let tmp = std::env::temp_dir().join("cute_dbt_render_double_quoted_given_test.html");
+        let _ = std::fs::remove_file(&tmp);
+        render_report(
+            &tmp,
+            &manifest,
+            &in_scope,
+            &models,
+            &InScopeSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+            ScopeSource::Baseline,
+            DEFAULT_REPORT_TITLE,
+            None,
+        )
+        .expect("render writes the report");
+        let html = std::fs::read_to_string(&tmp).expect("report exists");
+        assert!(
+            html.contains("\"bound_to_node\":\"stg_payments_src\""),
+            "a double-quoted given binds to its import CTE in the rendered payload",
+        );
+        assert!(
+            html.contains("Double-quoted given column marker"),
+            "a double-quoted given resolves its input model's column_meta",
+        );
+        let _ = std::fs::remove_file(&tmp);
     }
 
     // ===== source_relation_token / strip_ident_quotes (cute-dbt#57) =====

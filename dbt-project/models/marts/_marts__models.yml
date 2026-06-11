@@ -98,7 +98,11 @@ unit_tests:
             customer_id: 1
             order_date: '2024-01-01'
             status: 'completed'
-      - input: ref('stg_payments')
+      # cute-dbt#245 dogfood — DELIBERATELY double-quoted: dbt accepts
+      # both quote styles and fusion ships the authored string verbatim
+      # on the manifest wire; the live PR-diff preview proves the Rust
+      # parsers bind this given (bound_to_node + column_meta).
+      - input: ref("stg_payments")
         format: dict
         rows:
           - payment_id: 1
