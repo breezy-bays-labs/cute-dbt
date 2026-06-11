@@ -125,6 +125,30 @@
         </div>
       </div>
     </div>
+    {# cute-dbt#219 — the viewer-side coverage-intelligence display toggle.
+       Default ON; OFF hides every check-engine-derived surface (the #170
+       findings panel: checklist, tier chips, suppressed count) via
+       html[data-coverage=off] + one CSS rule (report.css §7) — purely a
+       DISPLAY toggle: the payload and the rendered DOM stay untouched, so ON
+       restores in place with no re-render. Wired + persisted by theme.js as
+       the `coverage` field of cute-dbt.appearance.v1 ("on"/"off", absent =
+       "on") — the cross-page contract the explorer arm (#103/#104) reads
+       when check-derived content lands there. Distinct from the
+       producer-side [checks] selection/suppression (#171): checks stay
+       computed; an individual viewer hides the surface. Rendered in BOTH
+       modes (findings are current-state facts, not diff artifacts). #}
+    <div class="settings-section coverage-section">
+      <div class="settings-row">
+        <label for="settings-coverage-input">Coverage intelligence
+          <span class="settings-hint">show or hide the coverage-checks surface</span>
+        </label>
+        <span class="settings-switch">
+          <input type="checkbox" id="settings-coverage-input"
+                 aria-label="Show coverage-intelligence checks" checked>
+          <span class="switch-track" aria-hidden="true"></span>
+        </span>
+      </div>
+    </div>
     {%- if is_pr_diff %}
     <div class="settings-section">
       <div class="settings-row">
