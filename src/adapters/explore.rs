@@ -72,7 +72,7 @@ use crate::domain::{
 /// global, which reads the attribute back — the attribute is the single
 /// source, so the two surfaces cannot drift. Bumps ONLY on a breaking
 /// change to the named surface, governed by the release-discipline
-/// CLI-surface SemVer policy (a bump is a v0.x minor / v1.0+ major
+/// CLI-surface `SemVer` policy (a bump is a v0.x minor / v1.0+ major
 /// event) — no separate versioning system.
 pub const EXPLORE_CONTRACT_VERSION: &str = "1";
 
@@ -242,7 +242,7 @@ pub struct LineageNodePayload {
 /// this model's files, straight off the manifest. All paths are
 /// **project-relative** as dbt emits them (`original_file_path` /
 /// `patch_path` are relative by design — never an absolute path, the
-/// root_path leak class).
+/// `root_path` leak class).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct NodePathsPayload {
     /// The model's SQL source (`nodes.<id>.original_file_path`, e.g.
