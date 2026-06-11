@@ -579,7 +579,10 @@
       // authored YAML exactly as cute-dbt#69 did.
       var hasDiff = t.yaml_diff && t.yaml_diff.lines && t.yaml_diff.lines.length;
       var $yamlDet = $("<details>").addClass("authoring-yaml").attr("open", "open");
-      $yamlDet.append($("<summary>").text(hasDiff ? "Authoring YAML — diff" : "Authoring YAML"));
+      // cute-dbt#233 (audit D7) — pass-2 labels the drawer "Model YAML"
+      // with no diff-variant suffix; the Diff/File toggle in the code
+      // header carries the diff affordance.
+      $yamlDet.append($("<summary>").text("Model YAML"));
       var $yamlWrap = $("<div>").addClass("sql-block-wrap fixture-sql-block-wrap");
       // cute-dbt#178 — GitHub-style code-card header: the file path sits left
       // of the Diff/File toggle. `defined_in` is the test's authoring-YAML
@@ -3046,13 +3049,14 @@
   }
 
   // The external-fixture affordance: never a silently-empty grid. Names the
-  // file and points the reader at the Authoring YAML drawer (the #96 view),
+  // file and points the reader at the Model YAML drawer (the #96 view),
   // which surfaces the authored block including the `fixture:` line.
+  // (Pointer copy follows the cute-dbt#233 D7 drawer rename.)
   function buildExternalFixtureAffordance(name) {
     var $box = $("<div>").addClass("given-empty external-fixture-note");
     $box.append(document.createTextNode("data in external fixture file: "));
     $box.append($("<code>").addClass("td-defined-in").text(String(name)));
-    $box.append(document.createTextNode(" — see the Authoring YAML drawer above for this test's block."));
+    $box.append(document.createTextNode(" — see the Model YAML drawer above for this test's block."));
     return $box;
   }
 

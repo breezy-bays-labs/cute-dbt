@@ -131,8 +131,9 @@ pub struct ReportArgs {
     /// `original_file_path` entries.
     ///
     /// When supplied, cute-dbt reads each in-scope `unit_test`'s source
-    /// YAML and surfaces an "Authoring YAML" drawer in the report
-    /// (cute-dbt#69). When absent, cute-dbt attempts to derive the
+    /// YAML and surfaces a "Model YAML" drawer in the report
+    /// (cute-dbt#69; label per the pass-2 spec, cute-dbt#233). When
+    /// absent, cute-dbt attempts to derive the
     /// project root from `--manifest` (by stripping a trailing
     /// `target/manifest.json`) before silently skipping the YAML
     /// extraction.

@@ -774,15 +774,17 @@ fn yaml_diff_drawer_defaults_to_diff_and_toggles_to_authored() {
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
 
-    // The edited test's drawer summary names the diff, and the Diff view is
-    // the default (Authored hidden).
+    // cute-dbt#233 (audit D7) — pass-2 labels the drawer "Model YAML" with
+    // NO diff-variant suffix (spec interaction.js:468): the Diff/File
+    // toggle in the code header carries the diff affordance. The Diff view
+    // stays the default (Authored hidden).
     assert_eq!(
         eval_string(
             &tab,
             "document.querySelector('.authoring-yaml > summary').textContent.trim()"
         ),
-        "Authoring YAML — diff",
-        "an edited test's drawer summary is 'Authoring YAML — diff'",
+        "Model YAML",
+        "the drawer summary is the pass-2 'Model YAML' label (cute-dbt#233 audit D7)",
     );
     assert!(
         eval_bool(&tab, "document.querySelector('.yaml-diff-toggle') !== null"),
@@ -7857,6 +7859,278 @@ fn badge_tip_text_matches_column_tooltip_description_size() {
         bubble_px, ct_desc_px,
         "the badge-tip bubble text matches the column-tooltip description size \
          (cute-dbt#232 audit D3: 7.8px vs 13.44px on the unfixed CSS)",
+    );
+
+    let _ = tab.close(true);
+}
+
+// ===== cute-dbt#233 — pass-2 residual deltas (audit D4/D5/D6) ===============
+//
+// The 2026-06-11 design-conformance audit found the implementation kept
+// stale pass-1 values that pass-2 revised. D4 is the load-bearing one:
+// `.col-tooltip .ct-key` shipped raw `var(--accent)`, which resolves to
+// ≈3:1 against the always-dark tooltip fill on the 4 light themes — an
+// AA failure for the 12px bold mono test names. Pass-2 (engine/base.css,
+// the `.ct-key` rule) brightens it to
+// `color-mix(in oklab, var(--accent) 60%, white)`.
+//
+// The guard extends the #206/#227 AA family with the same methodology:
+// contrast is computed from RESOLVED computed styles against the
+// element's EFFECTIVE backdrop — for tooltip text that is the tooltip
+// bubble's own opaque `--tooltip-bg` fill (every theme paints the tip
+// dark), NEVER `--bg` and NEVER `--surface`. The sweep records the
+// bubble's own resolved fill alongside the backdrop the ancestor walk
+// found, so the methodology itself is pinned: if the walk ever escapes
+// the bubble to a page surface, the test fails loudly.
+
+/// The `.col-tooltip .ct-key` WCAG sweep, evaluated in-page. Returns a
+/// JSON array of `{theme, ratio, fg, bg, tipbg}` — one entry per theme;
+/// `tipbg` is the bubble's own resolved background (the methodology pin).
+const COL_TOOLTIP_CT_KEY_CONTRAST_SWEEP_JS: &str = r#"(function () {
+  var THEMES = ["light", "solarized", "latte", "rosepine",
+                "dark", "tokyo", "gruvbox", "dracula"];
+  var DARK = { dark: true, tokyo: true, gruvbox: true, dracula: true };
+  function parseRgb(s) {
+    var m = /rgba?\(([^)]+)\)/.exec(s || "");
+    if (!m) return null;
+    var p = m[1].split(",");
+    return { r: parseFloat(p[0]), g: parseFloat(p[1]), b: parseFloat(p[2]),
+             a: p.length > 3 ? parseFloat(p[3]) : 1 };
+  }
+  function chan(v) {
+    v = v / 255;
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  function lum(c) {
+    return 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
+  }
+  function ratio(f, b) {
+    var lf = lum(f), lb = lum(b);
+    var hi = Math.max(lf, lb), lo = Math.min(lf, lb);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+  function backdropOf(el) {
+    for (var n = el; n; n = n.parentElement) {
+      var c = parseRgb(getComputedStyle(n).backgroundColor);
+      if (c && c.a === 1) return c;
+    }
+    return null; /* no opaque ancestor — surfaced as ratio -1 */
+  }
+  /* normalize ANY css color serialization through a 1x1 canvas: the
+     color-mix(in oklab, ...) fg computes to a non-rgb() string in
+     Chrome (oklab()/color()), which the #206 regex parse can't read.
+     An unparseable string falls back to canvas-black, which lands a
+     ~1:1 ratio on the dark tooltip fill — a loud failure, never a
+     silent pass. */
+  function cssToRgb(s) {
+    var cv = document.createElement("canvas");
+    cv.width = cv.height = 1;
+    var cx = cv.getContext("2d");
+    cx.fillStyle = s;
+    cx.fillRect(0, 0, 1, 1);
+    var d = cx.getImageData(0, 0, 1, 1).data;
+    return { r: d[0], g: d[1], b: d[2], a: d[3] / 255 };
+  }
+  var tip = document.getElementById("col-tooltip");
+  var key = tip.querySelector(".ct-key");
+  var root = document.documentElement;
+  var out = [];
+  for (var i = 0; i < THEMES.length; i++) {
+    /* exactly theme.js applyTheme: set data-theme + sync html.dark */
+    root.setAttribute("data-theme", THEMES[i]);
+    root.classList.toggle("dark", !!DARK[THEMES[i]]);
+    var cs = getComputedStyle(key);
+    var fg = cssToRgb(cs.color);
+    var own = parseRgb(cs.backgroundColor);
+    var bg = own && own.a === 1 ? own : backdropOf(key.parentElement);
+    out.push({
+      theme: THEMES[i],
+      ratio: fg && bg ? ratio(fg, bg) : -1,
+      fg: cs.color,
+      bg: bg ? "rgb(" + bg.r + ", " + bg.g + ", " + bg.b + ")" : "none",
+      tipbg: getComputedStyle(tip).backgroundColor
+    });
+  }
+  return JSON.stringify(out);
+})()"#;
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn col_tooltip_ct_key_meets_aa_contrast_on_every_theme() {
+    // A described + column-tested `id` column materializes the singleton
+    // #col-tooltip with a real `.ct-key` row through the shipped path
+    // (focusing the decorated expected-table header).
+    let mut col_desc = BTreeMap::new();
+    col_desc.insert("id".to_owned(), "Primary key for dim_aa".to_owned());
+    let ut = UnitTest::new(
+        "aa".to_owned(),
+        NodeId::new("dim_aa"),
+        Vec::new(),
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+    let url = render_to_file(
+        "headless_233_ct_key_contrast.html",
+        vec![
+            model_node("model.shop.dim_aa").with_column_descriptions(col_desc),
+            column_test_node(
+                "test.shop.unique_dim_aa_id",
+                "model.shop.dim_aa",
+                "id",
+                TestMetadata::new("unique", None, serde_json::Value::Null),
+            ),
+        ],
+        vec![("unit_test.shop.dim_aa.aa", ut)],
+        &["model.shop.dim_aa"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    select_model(&tab, "dim_aa");
+    select_test(&tab, "unit_test.shop.dim_aa.aa");
+
+    let _ = eval(
+        &tab,
+        "document.querySelector('.expected-panel th.has-col-meta').focus()",
+    );
+    assert!(
+        !eval_bool(&tab, "document.getElementById('col-tooltip').hidden"),
+        "precondition: focusing the decorated th reveals the column tooltip",
+    );
+
+    // cute-dbt#233 (audit D4) — the full 8-theme AA sweep.
+    let raw = eval_string(&tab, COL_TOOLTIP_CT_KEY_CONTRAST_SWEEP_JS);
+    let measured: Vec<serde_json::Value> =
+        serde_json::from_str(&raw).expect("the contrast sweep returns valid JSON");
+    assert_eq!(measured.len(), 8, "all 8 themes measured, got: {raw}",);
+
+    let mut failures = Vec::new();
+    for m in &measured {
+        let theme = m["theme"].as_str().expect("theme is a string");
+        let ratio = m["ratio"].as_f64().expect("ratio is a number");
+        let fg = m["fg"].as_str().unwrap_or("?");
+        let bg = m["bg"].as_str().unwrap_or("?");
+        let tipbg = m["tipbg"].as_str().unwrap_or("?");
+        assert!(
+            ratio > 0.0,
+            "the {theme} .ct-key resolved no opaque backdrop — the backdrop \
+             walk must end on a painted surface",
+        );
+        // The methodology pin: the effective backdrop IS the tooltip
+        // bubble's own fill — never a page surface shining through.
+        assert_eq!(
+            bg, tipbg,
+            "the {theme} backdrop walk must land on the tooltip's own \
+             --tooltip-bg fill (got {bg}, the bubble paints {tipbg})",
+        );
+        eprintln!("col-tooltip .ct-key contrast {theme:>9} = {ratio:.2}  ({fg} on {bg})");
+        if ratio < 4.5 {
+            failures.push(format!("{theme} = {ratio:.2} ({fg} on {bg})"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        ".col-tooltip .ct-key below the WCAG AA 4.5:1 floor (cute-dbt#233 \
+         audit D4 — raw var(--accent) lands ≈3:1 on the 4 light themes): \
+         {failures:#?}",
+    );
+
+    // cute-dbt#233 (audit D5) — the pass-2 chip-row gap is
+    // `0.25rem 0.7rem`: rowGap 2.5px / columnGap 7px at Sakura's 10px
+    // root (html{font-size:62.5%}); pass-1 shipped 0.45rem = 4.5px.
+    assert_eq!(
+        eval_string(
+            &tab,
+            "getComputedStyle(document.querySelector('#col-tooltip .ct-test')).rowGap"
+        ),
+        "2.5px",
+        "the .ct-test row gap stays the shared 0.25rem = 2.5px",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "getComputedStyle(document.querySelector('#col-tooltip .ct-test')).columnGap"
+        ),
+        "7px",
+        "the .ct-test column gap is the pass-2 0.7rem = 7px at the 10px \
+         Sakura root (cute-dbt#233 audit D5 — pass-1 shipped 0.45rem = 4.5px)",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn badge_tip_bubble_rounds_at_small_radius() {
+    // cute-dbt#233 (audit D6) — pass-2 (engine/base.css:548-556) rounds
+    // the badge-borne bubble at `--radius-sm`; pass-1 let it inherit the
+    // shared `.expect-tooltip-bubble` `--radius-pan`. Asserted against
+    // in-page reference elements so no px values are hardcoded (the
+    // tokens vary per style pack); the sm≠pan precondition keeps the
+    // equality's teeth honest.
+    let url = render_to_file(
+        "headless_233_badge_radius.html",
+        vec![model_node_materialized("model.shop.dim_inc", "incremental")],
+        vec![(
+            "unit_test.shop.dim_inc.t",
+            incremental_dict_expect_test("t", "dim_inc"),
+        )],
+        &["model.shop.dim_inc"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    select_model(&tab, "dim_inc");
+    select_test(&tab, "unit_test.shop.dim_inc.t");
+
+    let m = eval(
+        &tab,
+        "(function(){\
+         var ref = document.createElement('div');\
+         document.body.appendChild(ref);\
+         ref.style.borderRadius = 'var(--radius-sm)';\
+         var sm = getComputedStyle(ref).borderRadius;\
+         ref.style.borderRadius = 'var(--radius-pan)';\
+         var pan = getComputedStyle(ref).borderRadius;\
+         ref.remove();\
+         var bubble = document.querySelector(\
+           '.expected-panel .mode-badge.has-mode-tip .expect-tooltip-bubble');\
+         var got = bubble ? getComputedStyle(bubble).borderRadius : '';\
+         return {got: got, sm: sm, pan: pan};})()",
+    );
+    // A missing bubble surfaces as got == "" so the assert below names the
+    // mismatch cleanly instead of a cryptic in-page TypeError.
+    let got = m["got"].as_str().expect("bubble radius resolves");
+    assert!(
+        !got.is_empty(),
+        "precondition: the badge-borne bubble renders \
+         ('.expected-panel .mode-badge.has-mode-tip .expect-tooltip-bubble' not found)",
+    );
+    let sm = m["sm"].as_str().expect("--radius-sm resolves");
+    let pan = m["pan"].as_str().expect("--radius-pan resolves");
+    assert_ne!(
+        sm, pan,
+        "precondition: the default pack's --radius-sm and --radius-pan \
+         differ, so the equality below has teeth",
+    );
+    assert_eq!(
+        got, sm,
+        "the badge-borne bubble rounds at --radius-sm (cute-dbt#233 audit \
+         D6 — the unfixed CSS inherited --radius-pan = {pan})",
     );
 
     let _ = tab.close(true);
