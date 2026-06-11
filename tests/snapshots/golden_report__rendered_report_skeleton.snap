@@ -78,13 +78,6 @@ expression: skeleton
         </div>
       </div>
       <div class="settings-row settings-row-stack">
-        <label>Diff cells<span class="settings-hint">colour, or +/&minus; marks</span></label>
-        <div class="seg-radio diff-seg">
-          <button type="button" data-diffstyle="color">Colour</button>
-          <button type="button" data-diffstyle="marks">Marks</button>
-        </div>
-      </div>
-      <div class="settings-row settings-row-stack">
         <label>Diff layout<span class="settings-hint">side-by-side when there&rsquo;s room</span></label>
         <div class="seg-radio difflayout-seg">
           <button type="button" data-difflayout="auto">Auto</button>

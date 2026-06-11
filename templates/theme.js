@@ -1,11 +1,14 @@
 /* cute-dbt appearance engine v1 (cute-dbt#178)
    ----------------------------------------------------------------------------
-   Wires the theme / style / accent / density / diff-style / diff-layout
-   controls in the report's settings panel (the markup is static in
-   templates/report.html — the askama DOM contract), persists the choices in
-   localStorage (key cute-dbt.appearance.v1) with a graceful in-memory
-   fallback, and syncs DataTables dark mode by toggling html.dark. Plain
-   vanilla JS, no framework, zero egress.
+   Wires the theme / style / accent / density / diff-layout controls in the
+   report's settings panel (the markup is static in templates/report.html —
+   the askama DOM contract), persists the choices in localStorage (key
+   cute-dbt.appearance.v1) with a graceful in-memory fallback, and syncs
+   DataTables dark mode by toggling html.dark. Plain vanilla JS, no
+   framework, zero egress. The #188 diff-cells colour/marks control was
+   retired by design pass-2 (cute-dbt#198): cells always render in colour;
+   a legacy persisted `diffstyle` key is ignored gracefully (load() copies
+   only the live keys, and nothing sets data-diffstyle any more).
 
    First-party, NOT vendored: this file lives at templates/theme.js, embedded
    at compile time via asset_embed::THEME_JS (include_str!) and interpolated
@@ -50,7 +53,7 @@
   var KEY = "cute-dbt.appearance.v1"; // gitleaks:allow — a public storage key name, no secret
   // `engine` (cute-dbt#180) is the DAG-engine picker: "mermaid" (the static
   // default) or "cytoscape" (the opt-in interactive engine).
-  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", diffstyle: "color", difflayout: "auto", engine: "mermaid" };
+  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", difflayout: "auto", engine: "mermaid" };
 
   // Read the persisted appearance, string-typed keys only. Any storage error
   // (file:// SecurityError, disabled storage) leaves the defaults intact.
@@ -61,7 +64,7 @@
     try {
       var p = JSON.parse(raw);
       if (p && typeof p === "object") {
-        ["theme", "style", "accent", "density", "diffstyle", "difflayout", "engine"].forEach(function (k) {
+        ["theme", "style", "accent", "density", "difflayout", "engine"].forEach(function (k) {
           if (typeof p[k] === "string") pref[k] = p[k];
         });
       }
@@ -117,11 +120,6 @@
     else root.setAttribute("data-density", d);
     pref.density = d;
   }
-  function applyDiffStyle(s) {
-    if (s === "color") root.removeAttribute("data-diffstyle");
-    else root.setAttribute("data-diffstyle", s);
-    pref.diffstyle = s;
-  }
   function applyDiffLayout(v) {
     root.setAttribute("data-difflayout", v);
     pref.difflayout = v;
@@ -159,9 +157,6 @@
     qsaForEach(".density-seg button", function (b) {
       b.setAttribute("aria-pressed", b.getAttribute("data-density") === pref.density ? "true" : "false");
     });
-    qsaForEach(".diff-seg button", function (b) {
-      b.setAttribute("aria-pressed", b.getAttribute("data-diffstyle") === pref.diffstyle ? "true" : "false");
-    });
     qsaForEach(".difflayout-seg button", function (b) {
       b.setAttribute("aria-pressed", b.getAttribute("data-difflayout") === pref.difflayout ? "true" : "false");
     });
@@ -182,9 +177,6 @@
     });
     qsaForEach(".density-seg button", function (b) {
       b.addEventListener("click", function () { applyDensity(b.getAttribute("data-density")); save(); syncControls(); reflowTables(); });
-    });
-    qsaForEach(".diff-seg button", function (b) {
-      b.addEventListener("click", function () { applyDiffStyle(b.getAttribute("data-diffstyle")); save(); syncControls(); });
     });
     qsaForEach(".difflayout-seg button", function (b) {
       b.addEventListener("click", function () { applyDiffLayout(b.getAttribute("data-difflayout")); save(); syncControls(); });
@@ -222,7 +214,6 @@
     applyTheme(pref.theme);
     applyAccent(pref.accent);
     applyDensity(pref.density);
-    applyDiffStyle(pref.diffstyle);
     applyDiffLayout(pref.difflayout);
     syncControls();
     wire();

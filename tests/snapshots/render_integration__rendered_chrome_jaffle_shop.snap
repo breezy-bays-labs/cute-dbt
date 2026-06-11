@@ -599,7 +599,7 @@ html[data-style="soft"] .report-header h1 { letter-spacing: -0.01em; }
 .accent-swatch[aria-pressed="true"] { border-color: var(--text); box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--text); }
 .accent-swatch[data-accent="theme"] { background: linear-gradient(135deg, var(--accent) 50%, var(--text-muted) 50%); }
 
-/* segmented radio (density, diff-style) */
+/* segmented radio (density, diff-layout, DAG engine) */
 .seg-radio { display: inline-flex; border: var(--rule-w) solid var(--control-border); border-radius: var(--radius-sm); overflow: hidden; }
 .seg-radio button { font: inherit; font-size: 0.9em; padding: 0.25rem 0.6rem; border: none; background: var(--control-bg); color: var(--text-muted); cursor: pointer; }
 .seg-radio button + button { border-left: var(--rule-w) solid var(--control-border); }
@@ -907,12 +907,8 @@ th.col-removed { text-decoration: line-through; text-decoration-color: var(--dif
 .cell-new { color: var(--diff-add-fg); font-weight: 700; }
 .cell-arrow { color: var(--diff-arrow); margin: 0 0.3ch; }
 
-/* alt diff encoding (Tweak): symbol prefix + underline instead of pure colour */
-:root[data-diffstyle="marks"] .cell-old { text-decoration: line-through; text-decoration-thickness: 1px; }
-:root[data-diffstyle="marks"] .cell-old::before { content: "− "; font-weight: 700; }
-:root[data-diffstyle="marks"] .cell-new::before { content: "+ "; font-weight: 700; }
-:root[data-diffstyle="marks"] tr.row-added   td:first-child::after { content: " +"; color: var(--diff-add-fg); font-weight: 700; }
-:root[data-diffstyle="marks"] tr.row-removed td:first-child::after { content: " −"; color: var(--diff-remove-fg); font-weight: 700; }
+/* The #188 [data-diffstyle] "marks" alt encoding was retired by design
+   pass-2 (cute-dbt#198): diff cells always render in colour. */
 
 /* ---- SQL / YAML drawers + syntax ------------------------------------- */
 .compiled-sql > summary, .authoring-yaml > summary, .model-sql > details > summary { cursor: pointer; }
@@ -1339,13 +1335,6 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
           <button type="button" data-density="compact">Compact</button>
           <button type="button" data-density="cozy">Cozy</button>
           <button type="button" data-density="comfortable">Roomy</button>
-        </div>
-      </div>
-      <div class="settings-row settings-row-stack">
-        <label>Diff cells<span class="settings-hint">colour, or +/&minus; marks</span></label>
-        <div class="seg-radio diff-seg">
-          <button type="button" data-diffstyle="color">Colour</button>
-          <button type="button" data-diffstyle="marks">Marks</button>
         </div>
       </div>
       <div class="settings-row settings-row-stack">
@@ -4508,12 +4497,15 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
 
 /* cute-dbt appearance engine v1 (cute-dbt#178)
    ----------------------------------------------------------------------------
-   Wires the theme / style / accent / density / diff-style / diff-layout
-   controls in the report's settings panel (the markup is static in
-   templates/report.html — the askama DOM contract), persists the choices in
-   localStorage (key cute-dbt.appearance.v1) with a graceful in-memory
-   fallback, and syncs DataTables dark mode by toggling html.dark. Plain
-   vanilla JS, no framework, zero egress.
+   Wires the theme / style / accent / density / diff-layout controls in the
+   report's settings panel (the markup is static in templates/report.html —
+   the askama DOM contract), persists the choices in localStorage (key
+   cute-dbt.appearance.v1) with a graceful in-memory fallback, and syncs
+   DataTables dark mode by toggling html.dark. Plain vanilla JS, no
+   framework, zero egress. The #188 diff-cells colour/marks control was
+   retired by design pass-2 (cute-dbt#198): cells always render in colour;
+   a legacy persisted `diffstyle` key is ignored gracefully (load() copies
+   only the live keys, and nothing sets data-diffstyle any more).
 
    First-party, NOT vendored: this file lives at templates/theme.js, embedded
    at compile time via asset_embed::THEME_JS (include_str!) and interpolated
@@ -4558,7 +4550,7 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   var KEY = "cute-dbt.appearance.v1"; // gitleaks:allow — a public storage key name, no secret
   // `engine` (cute-dbt#180) is the DAG-engine picker: "mermaid" (the static
   // default) or "cytoscape" (the opt-in interactive engine).
-  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", diffstyle: "color", difflayout: "auto", engine: "mermaid" };
+  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", difflayout: "auto", engine: "mermaid" };
 
   // Read the persisted appearance, string-typed keys only. Any storage error
   // (file:// SecurityError, disabled storage) leaves the defaults intact.
@@ -4569,7 +4561,7 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     try {
       var p = JSON.parse(raw);
       if (p && typeof p === "object") {
-        ["theme", "style", "accent", "density", "diffstyle", "difflayout", "engine"].forEach(function (k) {
+        ["theme", "style", "accent", "density", "difflayout", "engine"].forEach(function (k) {
           if (typeof p[k] === "string") pref[k] = p[k];
         });
       }
@@ -4625,11 +4617,6 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     else root.setAttribute("data-density", d);
     pref.density = d;
   }
-  function applyDiffStyle(s) {
-    if (s === "color") root.removeAttribute("data-diffstyle");
-    else root.setAttribute("data-diffstyle", s);
-    pref.diffstyle = s;
-  }
   function applyDiffLayout(v) {
     root.setAttribute("data-difflayout", v);
     pref.difflayout = v;
@@ -4667,9 +4654,6 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     qsaForEach(".density-seg button", function (b) {
       b.setAttribute("aria-pressed", b.getAttribute("data-density") === pref.density ? "true" : "false");
     });
-    qsaForEach(".diff-seg button", function (b) {
-      b.setAttribute("aria-pressed", b.getAttribute("data-diffstyle") === pref.diffstyle ? "true" : "false");
-    });
     qsaForEach(".difflayout-seg button", function (b) {
       b.setAttribute("aria-pressed", b.getAttribute("data-difflayout") === pref.difflayout ? "true" : "false");
     });
@@ -4690,9 +4674,6 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     });
     qsaForEach(".density-seg button", function (b) {
       b.addEventListener("click", function () { applyDensity(b.getAttribute("data-density")); save(); syncControls(); reflowTables(); });
-    });
-    qsaForEach(".diff-seg button", function (b) {
-      b.addEventListener("click", function () { applyDiffStyle(b.getAttribute("data-diffstyle")); save(); syncControls(); });
     });
     qsaForEach(".difflayout-seg button", function (b) {
       b.addEventListener("click", function () { applyDiffLayout(b.getAttribute("data-difflayout")); save(); syncControls(); });
@@ -4730,7 +4711,6 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     applyTheme(pref.theme);
     applyAccent(pref.accent);
     applyDensity(pref.density);
-    applyDiffStyle(pref.diffstyle);
     applyDiffLayout(pref.difflayout);
     syncControls();
     wire();

@@ -3328,6 +3328,18 @@ fn appearance_settings_flip_theme_density_diff_layout_and_persist() {
         "Split layout (wide viewport) shows the split table",
     );
 
+    // ===== cute-dbt#198 — the #188 diff-cells colour/marks control is =====
+    // retired (design pass-2): no control markup, no [data-diffstyle] hook.
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.diff-seg, [data-diffstyle]').length"
+        ),
+        0,
+        "the diff-cells colour/marks control is retired — no .diff-seg \
+         markup and no data-diffstyle attribute anywhere",
+    );
+
     // ===== persistence: the appearance blob (where storage is usable) =====
     let storage_ok = eval_bool(
         &tab,
@@ -3346,6 +3358,36 @@ fn appearance_settings_flip_theme_density_diff_layout_and_persist() {
                 && raw.contains("\"density\":\"compact\"")
                 && raw.contains("\"difflayout\":\"split\""),
             "the appearance state persisted under cute-dbt.appearance.v1: {raw}",
+        );
+
+        // cute-dbt#198 — a LEGACY persisted `diffstyle` key (written by the
+        // retired #188 control) is ignored gracefully: boot copies only the
+        // live keys, sets no data-diffstyle attribute, and the surviving
+        // appearance keys still hydrate. Poll the hydrated theme — boot runs
+        // after DOMContentLoaded, which wait_until_navigated alone races.
+        let _ = eval(
+            &tab,
+            "window.localStorage.setItem('cute-dbt.appearance.v1', \
+             JSON.stringify({theme:'dark',density:'compact',\
+             difflayout:'split',diffstyle:'marks'}))",
+        );
+        tab.reload(false, None).expect("reload");
+        tab.wait_until_navigated().expect("await reload");
+        let mut theme = String::new();
+        for _ in 0..50 {
+            theme = eval_string(&tab, &format!("{ROOT}.getAttribute('data-theme') || ''"));
+            if theme == "dark" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(
+            theme, "dark",
+            "the live appearance keys still hydrate alongside a legacy diffstyle key",
+        );
+        assert!(
+            !eval_bool(&tab, &format!("{ROOT}.hasAttribute('data-diffstyle')")),
+            "a legacy persisted diffstyle key leaves no data-diffstyle attribute",
         );
     }
 

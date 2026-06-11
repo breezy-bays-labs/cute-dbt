@@ -582,7 +582,7 @@ html[data-style="soft"] .report-header h1 { letter-spacing: -0.01em; }
 .accent-swatch[aria-pressed="true"] { border-color: var(--text); box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--text); }
 .accent-swatch[data-accent="theme"] { background: linear-gradient(135deg, var(--accent) 50%, var(--text-muted) 50%); }
 
-/* segmented radio (density, diff-style) */
+/* segmented radio (density, diff-layout, DAG engine) */
 .seg-radio { display: inline-flex; border: var(--rule-w) solid var(--control-border); border-radius: var(--radius-sm); overflow: hidden; }
 .seg-radio button { font: inherit; font-size: 0.9em; padding: 0.25rem 0.6rem; border: none; background: var(--control-bg); color: var(--text-muted); cursor: pointer; }
 .seg-radio button + button { border-left: var(--rule-w) solid var(--control-border); }
@@ -890,12 +890,8 @@ th.col-removed { text-decoration: line-through; text-decoration-color: var(--dif
 .cell-new { color: var(--diff-add-fg); font-weight: 700; }
 .cell-arrow { color: var(--diff-arrow); margin: 0 0.3ch; }
 
-/* alt diff encoding (Tweak): symbol prefix + underline instead of pure colour */
-:root[data-diffstyle="marks"] .cell-old { text-decoration: line-through; text-decoration-thickness: 1px; }
-:root[data-diffstyle="marks"] .cell-old::before { content: "− "; font-weight: 700; }
-:root[data-diffstyle="marks"] .cell-new::before { content: "+ "; font-weight: 700; }
-:root[data-diffstyle="marks"] tr.row-added   td:first-child::after { content: " +"; color: var(--diff-add-fg); font-weight: 700; }
-:root[data-diffstyle="marks"] tr.row-removed td:first-child::after { content: " −"; color: var(--diff-remove-fg); font-weight: 700; }
+/* The #188 [data-diffstyle] "marks" alt encoding was retired by design
+   pass-2 (cute-dbt#198): diff cells always render in colour. */
 
 /* ---- SQL / YAML drawers + syntax ------------------------------------- */
 .compiled-sql > summary, .authoring-yaml > summary, .model-sql > details > summary { cursor: pointer; }
