@@ -291,26 +291,30 @@ const SUGGESTED_GIVEN_LABEL: &str = "suggested given";
 
 /// Resolve the DAG node a finding pins to (see
 /// [`FindingPayload::pin_node`]). Bracketed constructs name an engine
-/// node verbatim today; the match is case-insensitive anyway because
-/// SQL identifiers fold.
+/// node verbatim (`union[<consumer>]`) or qualify it with a sub-construct
+/// segment (`left_join[<consumer>:<right>]`, cute-dbt#173) — the consumer
+/// node is the pin either way; the match is case-insensitive because SQL
+/// identifiers fold.
 fn resolve_pin_node(graph: &CteGraph, construct: &str) -> Option<String> {
+    let node_named = |name: &str| {
+        graph
+            .nodes()
+            .iter()
+            .find(|node| node.name().eq_ignore_ascii_case(name))
+            .map(|node| node.name().to_owned())
+    };
     let named = construct
         .find('[')
         .and_then(|open| construct[open + 1..].strip_suffix(']'))
         .and_then(|name| {
-            graph
-                .nodes()
-                .iter()
-                .find(|node| node.name().eq_ignore_ascii_case(name))
-                .map(|node| node.name().to_owned())
+            node_named(name).or_else(|| {
+                name.split(':')
+                    .next()
+                    .filter(|c| !c.is_empty())
+                    .and_then(node_named)
+            })
         });
-    named.or_else(|| {
-        graph
-            .nodes()
-            .iter()
-            .find(|node| node.name() == TERMINAL_NODE_NAME)
-            .map(|node| node.name().to_owned())
-    })
+    named.or_else(|| node_named(TERMINAL_NODE_NAME))
 }
 
 /// Wrap one policy-applied domain [`Finding`] into its render shape:
@@ -955,10 +959,17 @@ struct ReportTemplate<'a> {
 /// break out of the JSON carrier.
 ///
 /// Escape `<` to its `<` Unicode form whenever it is followed by
-/// `/` or `!` — the only sequences that matter under HTML5's
-/// script-data state machine. The `\uXXXX` form is a documented JSON
-/// escape (RFC 8259 §7) so the output remains a valid JSON document
-/// that `JSON.parse(...)` decodes back to the original characters.
+/// `/`, `!`, `?`, or an ASCII letter — every tag-opening shape. `</`
+/// and `<!--` are the sequences that matter under HTML5's script-data
+/// state machine; the `<letter` / `<?` forms are inert in a real
+/// browser but read as markup to non-HTML5 tag scanners (cute-dbt#170:
+/// the check-spec catalog put prose like `WHERE <right>.<key> IS NULL`
+/// on the wire, which the `tl`-based test extractors parsed as a tag,
+/// corrupting payload extraction). A bare `<` followed by a space or
+/// digit (compiled-SQL comparisons) stays raw. The `\uXXXX` form is a
+/// documented JSON escape (RFC 8259 §7) so the output remains a valid
+/// JSON document that `JSON.parse(...)` decodes back to the original
+/// characters.
 ///
 /// # Errors
 ///
@@ -971,7 +982,8 @@ fn payload_json_for_html_script(payload: &ReportPayload) -> Result<String, serde
     let mut out = String::with_capacity(json.len() + 16);
     let mut chars = json.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '<' && matches!(chars.peek(), Some('/' | '!')) {
+        let tag_opener = matches!(chars.peek(), Some('/' | '!' | '?' | 'a'..='z' | 'A'..='Z'));
+        if c == '<' && tag_opener {
             out.push_str("\\u003c");
         } else {
             out.push(c);
@@ -2261,6 +2273,46 @@ mod tests {
     }
 
     #[test]
+    fn finding_payload_pins_qualified_join_constructs_to_the_consumer_node() {
+        // cute-dbt#173 constructs are `left_join[<consumer>:<right>]` —
+        // the consumer CTE is the pin target.
+        let compiled = "with customers as (select * from src_customers), \
+                        orders as (select * from src_orders), \
+                        joined as (select orders.id, customers.email from orders \
+                        left join customers on orders.customer_id = customers.id) \
+                        select * from joined";
+        let node = model_node("model.shop.order_emails", "body", Some(compiled));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.order_emails")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        let json = serde_json::to_value(&payload.models[0]).expect("serialize");
+        let join = json["findings"]
+            .as_array()
+            .expect("findings present")
+            .iter()
+            .find(|f| {
+                f["construct"]
+                    .as_str()
+                    .is_some_and(|c| c.starts_with("left_join["))
+            })
+            .cloned()
+            .expect("a join finding fires on the LEFT JOIN model");
+        assert_eq!(
+            join["pin_node"], "joined",
+            "the qualified construct pins the consumer CTE: {join}"
+        );
+    }
+
+    #[test]
     fn finding_payload_omits_pin_node_when_the_graph_is_empty() {
         // A `select 1` model has no CTE graph — no pin affordance.
         let mut config = BTreeMap::new();
@@ -3422,6 +3474,34 @@ mod tests {
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(serialized.contains("a < b"), "bare `<` is preserved");
+    }
+
+    #[test]
+    fn payload_json_escapes_tag_like_angle_brackets() {
+        // cute-dbt#170 — check-spec prose like `WHERE <right>.<key> IS
+        // NULL` rides the payload now; `<letter` shapes must not read as
+        // markup to tag scanners (the tl-based test extractors choked on
+        // them), while staying JSON-decodable to the original text.
+        let payload = ReportPayload {
+            baseline: "filters WHERE <right>.<key> IS NULL <?".to_owned(),
+            models: vec![],
+            check_specs: BTreeMap::new(),
+        };
+        let serialized = payload_json_for_html_script(&payload).unwrap();
+        assert!(
+            !serialized.contains("<right>") && !serialized.contains("<key>"),
+            "no raw tag-like sequence survives: {serialized}"
+        );
+        assert!(
+            serialized.contains("\\u003cright>") && serialized.contains("\\u003c?"),
+            "tag openers escape to \\u003c: {serialized}"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serialized).expect("escaped output is valid JSON");
+        assert_eq!(
+            parsed["baseline"],
+            serde_json::Value::String("filters WHERE <right>.<key> IS NULL <?".to_owned()),
+        );
     }
 
     #[test]

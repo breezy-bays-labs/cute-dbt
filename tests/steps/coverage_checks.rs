@@ -331,15 +331,25 @@ fn finding_suggests_no_match_given(world: &mut World, check: String, model: Stri
     );
 }
 
-/// The `suggested given` evidence value on a finding.
+/// The copy-pasteable given sketch on a finding. Since cute-dbt#170 the
+/// renderer LIFTS the detector's `suggested given` evidence entries into
+/// the finding's `sketches` array (the copy-button code blocks), so the
+/// payload fact lives there — never duplicated back into `evidence`.
 fn suggested_given(world: &World, check: &str, model: &str) -> String {
     let finding = find_finding(world, check, model);
-    finding["evidence"]
+    assert!(
+        !finding["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|e| e["label"].as_str() == Some("suggested given")),
+        "sketch entries are lifted into `sketches`, never left in evidence: {finding}"
+    );
+    finding["sketches"]
         .as_array()
         .into_iter()
         .flatten()
-        .find(|e| e["label"].as_str() == Some("suggested given"))
-        .and_then(|e| e["value"].as_str())
+        .find_map(Value::as_str)
         .unwrap_or_else(|| panic!("finding carries a suggested-given sketch: {finding}"))
         .to_owned()
 }
