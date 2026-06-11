@@ -18,6 +18,7 @@ pub mod cte_rendering;
 pub mod diff_scoping;
 pub mod explore_cli;
 pub mod explore_full_manifest;
+pub mod explore_js_contract;
 pub mod explore_lineage_dag;
 pub mod explore_model_detail;
 pub mod explore_test_badges;

@@ -217,6 +217,29 @@ pub struct ExplorePlan {
     /// wire-splice path for the signatures absent from the committed
     /// playground fixture (`dbt_constraints.*`, `dbt_expectations.*`).
     pub uniqueness_tests: Vec<ExploreUniquenessTestDecl>,
+    /// Declared path-bearing unit tests (cute-dbt#105 — the
+    /// external-drive payload-paths scenarios): each carries its
+    /// declaring YAML path and external `fixture:` refs. Built as
+    /// domain unit tests by the explore `When` (the domain serializes
+    /// `original_file_path`, `given[].fixture` and `expect.fixture` in
+    /// the wire shape — `rows: null` + `fixture`, the confirmed fusion
+    /// external-fixture shape).
+    pub path_tests: Vec<ExplorePathTestDecl>,
+}
+
+/// One path-bearing unit test in an [`ExplorePlan`] (cute-dbt#105).
+#[derive(Debug, Clone)]
+pub struct ExplorePathTestDecl {
+    /// User-facing unit-test name.
+    pub name: String,
+    /// Bare name of the target model (the manifest's `model:` field).
+    pub target: String,
+    /// The declaring `.yml`'s `original_file_path`.
+    pub yaml: Option<String>,
+    /// External fixture refs for the `given` blocks, in given order.
+    pub given_fixtures: Vec<String>,
+    /// External fixture ref for the `expect` block.
+    pub expect_fixture: Option<String>,
 }
 
 /// One uniqueness-test node in an [`ExplorePlan`] (cute-dbt#104).
@@ -284,6 +307,14 @@ pub struct ExploreModelDecl {
     /// serializes `columns` as a name→type map the wire reader cannot
     /// ingest.
     pub columns: Vec<(String, Option<String>, Option<String>)>,
+    /// The model's SQL source path (cute-dbt#105) — spliced as the
+    /// top-level wire `original_file_path`.
+    pub original_file_path: Option<String>,
+    /// The model's schema-YAML patch path (cute-dbt#105) — spliced
+    /// VERBATIM as the top-level wire `patch_path`, scheme included
+    /// (`<package>://models/schema.yml`), so the subprocess exercises
+    /// the adapter's package-URI strip for real.
+    pub wire_patch_path: Option<String>,
 }
 
 /// A cute-dbt#145 incremental scenario plan — the models (each with its

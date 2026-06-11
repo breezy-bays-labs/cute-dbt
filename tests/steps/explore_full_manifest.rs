@@ -45,6 +45,8 @@ fn declares_model(world: &mut World, bare: String) {
         tags: Vec::new(),
         flat_config: None,
         columns: Vec::new(),
+        original_file_path: None,
+        wire_patch_path: None,
     });
 }
 
@@ -102,6 +104,24 @@ fn run_explore_on_synthetic(world: &mut World) {
         if let Some(config) = &m.flat_config {
             node_patches.push((m.bare.clone(), "config".to_owned(), config.clone()));
         }
+        // cute-dbt#105 — per-node file paths: the SQL source path and
+        // the schema-YAML patch path. `patch_path` splices VERBATIM
+        // (scheme included) so the subprocess exercises the adapter's
+        // package-URI strip for real.
+        if let Some(path) = &m.original_file_path {
+            node_patches.push((
+                m.bare.clone(),
+                "original_file_path".to_owned(),
+                serde_json::json!(path),
+            ));
+        }
+        if let Some(patch) = &m.wire_patch_path {
+            node_patches.push((
+                m.bare.clone(),
+                "patch_path".to_owned(),
+                serde_json::json!(patch),
+            ));
+        }
         if !m.columns.is_empty() {
             let columns: serde_json::Map<String, serde_json::Value> = m
                 .columns
@@ -123,6 +143,13 @@ fn run_explore_on_synthetic(world: &mut World) {
                 serde_json::Value::Object(columns),
             ));
         }
+    }
+    // cute-dbt#105 — path-bearing unit tests (declaring YAML + external
+    // fixture refs), built as DOMAIN unit tests: the domain serializes
+    // the confirmed fusion wire shape directly (`original_file_path`
+    // top-level; `rows: null` + `fixture` on external given/expect).
+    for t in &plan.path_tests {
+        manifest = with_unit_test(manifest, super::explore_js_contract::path_unit_test(t));
     }
     // cute-dbt#103 — splice the declared data-test nodes in the REAL
     // fusion wire shape (the coverage_checks.rs precedent: the domain
