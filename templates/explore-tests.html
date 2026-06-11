@@ -9,10 +9,11 @@
 {{ sakura_css|safe }}
 </style>
 <style>
-{# cute-dbt#100 — first-party explore-page chrome. This page is a
-   server-rendered static index (no Mermaid, no DataTables, no JS): the
-   page-aware liveness oracle for it is plain DOM facts. The full
-   interactive unit-test viewer is the epic #99 V3 slice. #}
+{# cute-dbt#100 — first-party explore-page chrome. Since cute-dbt#102
+   the page carries the unit-test VIEWER (the shared test-card partial +
+   the explore-tests.js engine) above the server-rendered per-model
+   index; it still embeds no Mermaid, no DataTables, no jQuery and no
+   graph engine. #}
 body { max-width: 72rem; }
 .explore-header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
 .explore-header h1 { margin-bottom: 0.25rem; }
@@ -23,11 +24,39 @@ body { max-width: 72rem; }
 .model-path { color: #555; font-size: 0.85rem; margin: 0 0 0.4rem; }
 .not-compiled-badge { font-size: 0.7em; vertical-align: middle; padding: 0.1rem 0.45rem; border: 1.5px dashed #b07400; border-radius: 4px; background: #f4f4f5; color: #1c1c1f; }
 .explore-tests { margin-bottom: 0.5rem; }
-.explore-test .test-name { font-weight: 600; }
 .explore-test .test-shape { color: #555; font-size: 0.85rem; }
 .explore-test .test-description { color: #555; font-size: 0.9rem; margin: 0.1rem 0 0; }
 .no-tests { color: #555; font-style: italic; }
 .explore-empty { color: #555; font-style: italic; }
+/* cute-dbt#102 — explore-local styling for the SHARED test-card partial
+   (report.html styles the same markup through its chassis CSS, which
+   this light page deliberately does not embed). */
+.explore-viewer { border-top: 1px solid #ddd; padding-top: 0.75rem; margin-top: 0.75rem; }
+.explore-viewer > h2 { margin-bottom: 0.4rem; }
+.test-card { border: 1px solid #c5c5cc; border-radius: 6px; padding: 0.75rem 1rem; background: #fcfcfd; }
+.test-card-head { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.test-select-field label { font-weight: 600; margin-right: 0.4rem; }
+/* Explore is full-manifest by design: there is no updated/context split,
+   so the partial's scope toggle is inert chrome here — hidden, not
+   forked out of the shared markup. */
+.test-mode-toggle { display: none; }
+.test-badges .tag-badge { display: inline-block; font-size: 0.75rem; color: #1c1c1f; border: 1px solid #c5c5cc; border-radius: 4px; padding: 0 0.35rem; background: #f4f4f5; margin-right: 0.25rem; }
+.test-description { color: #333; margin: 0.5rem 0 0; }
+.test-defined-in { color: #555; font-size: 0.85rem; margin: 0.3rem 0 0; }
+.panel-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.75rem; }
+.panel { flex: 1 1 22rem; min-width: 0; border: 1px solid #c5c5cc; border-radius: 6px; padding: 0.6rem 0.8rem; background: #fcfcfd; }
+.panel-header { display: flex; align-items: baseline; gap: 0.6rem; }
+.panel-header h2 { font-size: 1.1rem; margin: 0 0 0.4rem; }
+.table-header { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+.table-title { margin: 0.4rem 0 0.2rem; font-size: 0.95rem; }
+.row-count-badge, .format-badge, .this-badge { font-size: 0.75rem; color: #555; border: 1px solid #c5c5cc; border-radius: 4px; padding: 0 0.35rem; background: #f4f4f5; }
+.fixture-provenance { font-size: 0.8rem; color: #555; }
+table.given-table, table.expected-table { font-size: 0.85rem; margin: 0.3rem 0 0.6rem; }
+.cell-null { color: #888; font-style: italic; }
+.empty-hint, .given-empty { color: #555; font-style: italic; }
+.sql-block { font-size: 0.85rem; }
+.test-jump { background: none; border: none; padding: 0; color: #1d7484; font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
+.test-jump:hover, .test-jump:focus { color: #144f5a; }
 </style>
 </head>
 <body>
@@ -45,14 +74,25 @@ body { max-width: 72rem; }
 {% if models.is_empty() %}
 <p class="explore-empty">No models in this manifest.</p>
 {% endif %}
+{# cute-dbt#102 — the unit-test viewer: the SHARED test-card partial
+   (templates/partials/test-card.html — the exact markup report.html
+   renders) plus the explore-tests.js engine below, which fills it from
+   the embedded cute-dbt-data payload. Hidden when the manifest carries
+   no unit tests (the index's empty states still tell the story). #}
+<section class="explore-viewer" aria-label="Unit-test viewer"{% if test_count == 0 %} hidden{% endif %}>
+<h2>Unit-test viewer</h2>
+{% include "partials/test-card.html" %}
+</section>
 {% for m in models %}
 <section class="explore-model" data-model-id="{{ m.id }}" aria-label="Model {{ m.name }}">
   <h2>{{ m.name }}{% if m.not_compiled %} <span class="not-compiled-badge">not compiled</span>{% endif %}</h2>
   {% match m.path %}{% when Some with (p) %}<p class="model-path"><code>{{ p }}</code></p>
   {% when None %}{% endmatch %}{% if m.tests.is_empty() %}<p class="no-tests">0 unit tests wired</p>
   {% else %}<ul class="explore-tests">
-    {% for t in m.tests %}<li class="explore-test">
-      <span class="test-name">{{ t.name }}</span>
+    {% for t in m.tests %}<li class="explore-test" data-test-id="{{ t.id }}">
+      {# cute-dbt#102 — the test name is a jump button: explore-tests.js
+         selects this test in the viewer above. #}
+      <button type="button" class="test-jump" data-test-id="{{ t.id }}">{{ t.name }}</button>
       <span class="test-shape">&mdash; {{ t.shape }}</span>
       {% match t.description %}{% when Some with (d) %}<p class="test-description">{{ d }}</p>
       {% when None %}{% endmatch %}
@@ -69,5 +109,13 @@ body { max-width: 72rem; }
    carrier id so payload-consuming tooling reads both surfaces the same
    way; the V3 unit-test viewer renders from it. #}
 <script type="application/json" id="cute-dbt-data">{{ payload_json|safe }}</script>
+<script>
+{# cute-dbt#102 — the first-party explore tests viewer (selector
+   population, given/expected fixture grids off the Rust FixtureTable
+   POD, index-row jump wiring), embedded from templates/explore-tests.js
+   via asset_embed::EXPLORE_TESTS_JS. Banner-pin + end-of-file sentinel
+   tests guard the include. #}
+{{ explore_tests_js|safe }}
+</script>
 </body>
 </html>

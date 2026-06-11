@@ -1,0 +1,39 @@
+<section class="test-section" aria-label="Unit test">
+  <div class="test-card">
+    <div class="test-card-head">
+      <div class="selector-field test-select-field">
+        <label for="test-select">Unit test</label>
+        <select id="test-select"></select>
+      </div>
+      <div class="test-mode-toggle" role="group" aria-label="Test scope" data-testid="updated-toggle">
+        <button type="button" data-test-mode="updated" class="is-active" aria-pressed="true">Updated only</button>
+        <button type="button" data-test-mode="all" aria-pressed="false">All tests</button>
+      </div>
+      <div class="test-badges"></div>
+    </div>
+    <p class="test-description" hidden></p>
+    <div class="test-details-body"></div>
+  </div>
+</section>
+
+<div class="panel-row">
+
+  <section class="panel left-panel" aria-label="Given inputs">
+    {# cute-dbt#201 — the Inspect/All-inputs segmented toggle is retired:
+       the left panel is the Given panel, always rendering every given
+       input (node detail moved to the DAG shelf above). #}
+    <div class="panel-header">
+      <h2>Given</h2>
+    </div>
+    <div class="left-panel-body" data-mode="inputs"></div>
+  </section>
+
+  <section class="panel expected-panel" aria-label="Expected output">
+    <div class="panel-header">
+      <h2>Expected</h2>
+      <span class="row-count-badge expected-rowcount">0 rows</span>
+    </div>
+    <div class="expected-body"></div>
+  </section>
+
+</div>

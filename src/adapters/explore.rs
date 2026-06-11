@@ -37,7 +37,7 @@
 //! are same-directory navigation anchors (`dag.html` ⇄ `tests.html`),
 //! which load nothing until clicked and resolve over `file://`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -46,9 +46,10 @@ use askama::Template;
 use serde::Serialize;
 
 use crate::adapters::asset_embed::{
-    CYTOSCAPE_DAGRE_JS, CYTOSCAPE_JS, EXPLORE_LINEAGE_JS, FAVICON_DATA_URI, SAKURA_CSS,
+    CYTOSCAPE_DAGRE_JS, CYTOSCAPE_JS, EXPLORE_CTE_JS, EXPLORE_LINEAGE_JS, EXPLORE_TESTS_JS,
+    FAVICON_DATA_URI, SAKURA_CSS,
 };
-use crate::adapters::render::ReportPayload;
+use crate::adapters::render::{DagPayload, ReportPayload};
 use crate::domain::{Manifest, ModelInScopeSet, NodeId};
 
 /// One model node in the lineage graph.
@@ -157,6 +158,15 @@ pub struct LineagePayload {
     pub nodes: Vec<LineageNodePayload>,
     /// Forward dependency edges between models in `nodes`, ordered.
     pub edges: Vec<LineageEdgePayload>,
+    /// Per-model CTE DAGs (cute-dbt#102) — the CTE ⇄ model view
+    /// toggle's data, keyed by full model node id. Each entry is the
+    /// SAME [`DagPayload`] the report renders for that model (the
+    /// `build_payload` reuse seam): engine-extracted CTE nodes with
+    /// render-classified roles plus join-typed edges. Models with an
+    /// empty graph carry **no** entry — the client renders the
+    /// "no CTE DAG" sparse state for a compiled CTE-less model and the
+    /// labeled fail-open degraded view for a `not_compiled` one.
+    pub cte_dags: BTreeMap<String, DagPayload>,
 }
 
 /// Build the serializable lineage payload for `dag.html` (cute-dbt#101).
@@ -185,7 +195,37 @@ pub fn build_lineage_payload(current: &Manifest, models: &ModelInScopeSet) -> Li
             not_compiled: n.not_compiled,
         })
         .collect();
-    LineagePayload { nodes, edges }
+    LineagePayload {
+        nodes,
+        edges,
+        cte_dags: BTreeMap::new(),
+    }
+}
+
+/// Build the per-model CTE-DAG map for the dag.html carrier
+/// (cute-dbt#102) — the CTE ⇄ model view toggle's data.
+///
+/// Pure zip over the documented one-to-one contract between `models`
+/// and `payload.models` (see the private `explore_models` assembler
+/// below, which documents the zip's soundness): each model id keys
+/// its payload entry's [`DagPayload`] — the same engine-extracted,
+/// role-classified graph the report renders, parsed exactly once during
+/// `build_payload`. Models whose graph is empty (an uncompiled
+/// `dbt parse` node, or compiled SQL with no `WITH` clause) contribute
+/// **no** entry, keeping the carrier lean; the client distinguishes the
+/// two off the lineage node's `not_compiled` flag (fail-open: the
+/// degraded view is labeled, never an error).
+#[must_use]
+pub fn cte_dags_by_model(
+    models: &ModelInScopeSet,
+    payload: &ReportPayload,
+) -> BTreeMap<String, DagPayload> {
+    models
+        .iter()
+        .zip(payload.models.iter())
+        .filter(|(_, model_payload)| !model_payload.dag.nodes.is_empty())
+        .map(|(id, model_payload)| (id.as_str().to_owned(), model_payload.dag.clone()))
+        .collect()
 }
 
 /// One model section on `tests.html` (server-rendered).
@@ -205,6 +245,9 @@ struct ExploreModel {
 
 /// One unit-test row on `tests.html`.
 struct ExploreTest {
+    /// Manifest unit-test id — the `data-test-id` handle the index row
+    /// carries so the viewer (cute-dbt#102) can select it in place.
+    id: String,
     /// User-facing test name.
     name: String,
     /// Optional `description:` from the manifest.
@@ -241,6 +284,9 @@ struct ExploreDagTemplate<'a> {
     cytoscape_js: &'a str,
     cytoscape_dagre_js: &'a str,
     explore_lineage_js: &'a str,
+    /// First-party CTE-view engine (cute-dbt#102) — the CTE ⇄ model
+    /// view toggle and the per-model Cytoscape CTE DAG.
+    explore_cte_js: &'a str,
     favicon_data_uri: &'a str,
     /// Pre-escaped JSON for the `explore-dag-data` carrier (the
     /// [`LineagePayload`]).
@@ -259,6 +305,10 @@ struct ExploreTestsTemplate<'a> {
     models: &'a [ExploreModel],
     model_count: usize,
     test_count: usize,
+    /// First-party unit-test viewer engine (cute-dbt#102) — renders the
+    /// selected test's fixtures into the shared test-card partial from
+    /// the embedded payload.
+    explore_tests_js: &'a str,
     /// Pre-escaped JSON for the `cute-dbt-data` carrier (the full
     /// [`ReportPayload`] — the `build_payload` reuse seam).
     payload_json: &'a str,
@@ -322,6 +372,7 @@ fn explore_models(
                     .tests
                     .iter()
                     .map(|t| ExploreTest {
+                        id: t.id.clone(),
                         name: t.name.clone(),
                         description: t.description.clone(),
                         shape: test_shape(
@@ -355,7 +406,10 @@ pub fn render_explore(
 ) -> io::Result<()> {
     fs::create_dir_all(out_dir)?;
 
-    let lineage = build_lineage_payload(current, models);
+    let mut lineage = build_lineage_payload(current, models);
+    // cute-dbt#102 — the CTE ⇄ model toggle's per-model CTE DAGs ride
+    // the same carrier (the payload's graphs, parsed once upstream).
+    lineage.cte_dags = cte_dags_by_model(models, payload);
     let not_compiled_count = lineage.nodes.iter().filter(|n| n.not_compiled).count();
     let dag_json = json_for_html_script(&lineage)
         .map_err(|err| io::Error::other(format!("dag payload serialization: {err}")))?;
@@ -364,6 +418,7 @@ pub fn render_explore(
         cytoscape_js: CYTOSCAPE_JS,
         cytoscape_dagre_js: CYTOSCAPE_DAGRE_JS,
         explore_lineage_js: EXPLORE_LINEAGE_JS,
+        explore_cte_js: EXPLORE_CTE_JS,
         favicon_data_uri: FAVICON_DATA_URI,
         dag_json: &dag_json,
         model_count: lineage.nodes.len(),
@@ -384,6 +439,7 @@ pub fn render_explore(
         models: &models_pod,
         model_count: models_pod.len(),
         test_count,
+        explore_tests_js: EXPLORE_TESTS_JS,
         payload_json: &payload_json,
     }
     .render()
@@ -707,6 +763,152 @@ mod tests {
         assert!(
             tests.contains("No models in this manifest"),
             "the empty state is explicit, not a blank page: {tests}",
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ----- cte_dags_by_model (cute-dbt#102) ---------------------------
+
+    /// A compiled model whose SQL carries one CTE — the smallest shape
+    /// that yields a non-empty [`DagPayload`].
+    fn cte_model(id: &str) -> Node {
+        model(
+            id,
+            Some("with src_orders as (select * from db.sch.orders) select * from src_orders"),
+            &[],
+        )
+    }
+
+    #[test]
+    fn cte_dags_map_carries_one_entry_per_cte_bearing_model() {
+        let current = manifest_of(vec![
+            cte_model("model.shop.dim_orders"),
+            cte_model("model.shop.stg_orders"),
+        ]);
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let dags = cte_dags_by_model(&models, &payload);
+        assert_eq!(dags.len(), 2, "one CTE DAG per CTE-bearing model");
+        let dag = dags
+            .get("model.shop.dim_orders")
+            .expect("keyed by full model node id");
+        let names: Vec<&str> = dag.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(
+            names.contains(&"src_orders"),
+            "the CTE node rides the map entry: {names:?}",
+        );
+        assert!(
+            dag.nodes.len() >= 2,
+            "the terminal node rides alongside the CTE: {names:?}",
+        );
+    }
+
+    #[test]
+    fn cte_dags_map_skips_uncompiled_and_cteless_models() {
+        let current = manifest_of(vec![
+            // No WITH clause -> empty graph -> no entry.
+            model("model.shop.flat", Some("select 1"), &[]),
+            // Uncompiled (dbt parse) -> fail-open, no entry (the JS
+            // renders the labeled degraded view off `not_compiled`).
+            model("model.shop.parsed_only", None, &[]),
+            cte_model("model.shop.dim_orders"),
+        ]);
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let dags = cte_dags_by_model(&models, &payload);
+        assert_eq!(
+            dags.keys().collect::<Vec<_>>(),
+            vec!["model.shop.dim_orders"],
+            "only the CTE-bearing compiled model gets a map entry",
+        );
+    }
+
+    #[test]
+    fn render_explore_dag_embeds_the_cte_carrier_and_view_toggle() {
+        let current = manifest_of(vec![cte_model("model.shop.dim_orders")]);
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let dir = tmp_dir("cte-toggle");
+        render_explore(&dir, &current, &models, &payload).expect("explore renders");
+        let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
+        // The carrier embeds the per-model CTE DAG map.
+        assert!(dag.contains("\"cte_dags\":{"), "cte_dags carrier present");
+        assert!(
+            dag.contains("src_orders"),
+            "the CTE node id rides the dag.html carrier",
+        );
+        // The view toggle: lineage arm active, CTE arm gated on a
+        // highlight at render time (selection is a runtime act).
+        assert!(
+            dag.contains("data-view=\"lineage\""),
+            "lineage toggle arm present",
+        );
+        assert!(dag.contains("data-view=\"cte\""), "CTE toggle arm present");
+        // The CTE view host renders hidden — lineage is the boot view.
+        assert!(
+            dag.contains("class=\"cte-view\" hidden"),
+            "the CTE view host starts hidden: {dag}",
+        );
+        // The first-party CTE engine ships on the page.
+        assert!(
+            dag.contains("cute-dbt explore CTE engine v1"),
+            "dag.html embeds the explore CTE engine",
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ----- tests.html shared unit-test card (cute-dbt#102) ------------
+
+    #[test]
+    fn render_explore_tests_embeds_the_shared_test_card_and_viewer() {
+        let mut current = three_model_manifest();
+        let ut = crate::domain::UnitTest::new(
+            "test_dim_orders",
+            NodeId::new("dim_orders"),
+            Vec::new(),
+            crate::domain::UnitTestExpect::new(serde_json::Value::Null, None, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let mut unit_tests = StdHashMap::new();
+        unit_tests.insert("unit_test.shop.dim_orders.test_dim_orders".to_owned(), ut);
+        current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            current.nodes().clone(),
+            unit_tests,
+            StdHashMap::new(),
+        );
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let dir = tmp_dir("tests-viewer");
+        render_explore(&dir, &current, &models, &payload).expect("explore renders");
+        let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html");
+        // The shared askama partial (report.html's test card) renders.
+        assert!(
+            tests.contains("class=\"test-section\""),
+            "the shared test-card partial renders on tests.html",
+        );
+        assert!(tests.contains("id=\"test-select\""), "test selector");
+        assert!(
+            tests.contains("class=\"panel-row\""),
+            "the Given/Expected panel pair renders",
+        );
+        // Each listed test wires its id for the viewer.
+        assert!(
+            tests.contains("data-test-id=\"unit_test.shop.dim_orders.test_dim_orders\""),
+            "the index rows carry data-test-id handles",
+        );
+        // The first-party viewer engine ships; no graph engine does.
+        assert!(
+            tests.contains("cute-dbt explore tests viewer v1"),
+            "tests.html embeds the explore tests viewer",
+        );
+        assert!(
+            !tests.contains("The Cytoscape Consortium") && !tests.contains("cytoscapeDagre"),
+            "tests.html embeds NO Cytoscape assets",
         );
         let _ = fs::remove_dir_all(&dir);
     }

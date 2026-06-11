@@ -36,6 +36,7 @@ fn declares_model(world: &mut World, bare: String) {
     world.explore_plan.models.push(ExploreModelDecl {
         bare,
         compiled: true,
+        compiled_sql: None,
         deps: Vec::new(),
         tests: Vec::new(),
     });
@@ -75,7 +76,11 @@ fn run_explore_on_synthetic(world: &mut World) {
     let mut manifest = empty_manifest();
     for m in &plan.models {
         let deps: Vec<&str> = m.deps.iter().map(String::as_str).collect();
-        let compiled = m.compiled.then_some("select 1");
+        // cute-dbt#102 — an explicit compiled body (the CTE-view
+        // scenarios author a WITH clause) over the `select 1` default.
+        let compiled = m
+            .compiled
+            .then(|| m.compiled_sql.as_deref().unwrap_or("select 1"));
         manifest = with_node(
             manifest,
             model_node_with_deps(&m.bare, "ck", compiled, &deps),
