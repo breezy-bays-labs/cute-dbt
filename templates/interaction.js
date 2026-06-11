@@ -113,8 +113,11 @@
   var state = {
     selectedModel:  null,
     selectedTestId: null,
+    // cute-dbt#201 — the DAG node-detail shelf's selection. Non-null while
+    // the shelf is open; openNodeShelf/closeNodeShelf own it. (The old
+    // leftPanelMode is retired with the Inspect/All-inputs toggle: the
+    // left panel is always the Given panel now.)
     selectedNodeId: null,
-    leftPanelMode:  "node",
     // cute-dbt#91 — false: show only updated tests (default); true: show
     // all tests on the in-scope models. Global + persistent across model
     // switches. Auto-set to true at boot when the diff updated 0 tests.
@@ -186,6 +189,7 @@
       $(".model-sql").hide();
       $(".cte-dag").hide();
       $(".model-findings").hide();
+      $(".test-section").hide();
       $(".panel-row").hide();
       return;
     }
@@ -225,22 +229,23 @@
     window.__cuteSetDagEngine = function (engine) {
       dagEngine = engine === "cytoscape" ? "cytoscape" : "mermaid";
     };
-    // cute-dbt#180 — the Cytoscape tap path's selection hook. Updates the
-    // Inspect panel ONLY — deliberately NO renderDag() call (the spike's
+    // cute-dbt#180 / cute-dbt#201 — the shared node-selection seam. The
+    // Cytoscape tap (cyto-dag.js) and the #194 findings pin both route
+    // through this one global; since the #201 restructure it opens the DAG
+    // node-detail shelf. Deliberately NO renderDag() call (the spike's
     // no-renderDag-per-click rule: a rebuild would reset pan/zoom and wipe
     // the in-place lineage highlight). Mermaid's own activate() keeps its
     // full re-render — selection there is baked into the generated source.
     window.__cuteSelectNode = function (id) {
-      state.selectedNodeId = id;
-      if (state.leftPanelMode !== "node") {
-        state.leftPanelMode = "node";
-        renderSegmentedToggle();
-      }
-      renderLeftPanel();
+      openNodeShelf(id);
     };
     // cute-dbt#178 — delegated hover/focus handlers for the column-header
     // tooltips (the th.has-col-meta triggers decorateColHeader marks).
     bindColTooltips();
+    // cute-dbt#201 — the DAG node-detail shelf's ✕ close + the model-card
+    // column test-count expanders (delegated; shelf content is rebuilt per
+    // node selection).
+    bindShelf();
   });
 
   // cute-dbt#91 — scope-toggle helpers --------------------------------
@@ -339,12 +344,33 @@
     $sel.off("change.cuteDbt").on("change.cuteDbt", function () {
       state.selectedModel = $(this).val();
       // Land on the first VISIBLE test under the (persistent) toggle mode.
+      // (renderForSelectedModel closes any open node shelf — cute-dbt#201.)
       state.selectedTestId = firstVisibleTestId(currentModel());
-      state.selectedNodeId = null;
-      state.leftPanelMode = "node";
       renderTestSelector();
       renderForSelectedModel();
     });
+  }
+
+  // cute-dbt#201 — size a <select> to its WIDEST option (+ arrow/padding)
+  // so its width is static across selections instead of stretching to fill
+  // the row. Canvas-measured with the select's own computed font; the
+  // cached canvas is a measurement scratchpad only (never attached to the
+  // DOM, nothing rendered — zero-egress untouched). The CSS clamps the
+  // resulting width with `max-width: 100%` so a long test name can never
+  // push a narrow viewport (the #157 lesson).
+  function sizeSelectToWidest($sel) {
+    var el = $sel[0];
+    if (!el || !el.options.length) return;
+    var cs = window.getComputedStyle(el);
+    var c = sizeSelectToWidest._c || (sizeSelectToWidest._c = document.createElement("canvas"));
+    var ctx = c.getContext("2d");
+    ctx.font = cs.fontWeight + " " + cs.fontSize + " " + cs.fontFamily;
+    var max = 0;
+    for (var i = 0; i < el.options.length; i++) {
+      var w = ctx.measureText(el.options[i].text).width;
+      if (w > max) max = w;
+    }
+    el.style.width = Math.ceil(max + 46) + "px"; // text + arrow + L/R padding
   }
 
   function renderTestSelector() {
@@ -355,10 +381,10 @@
       $sel.append($("<option>").val(t.id).text(t.name));
     });
     $sel.val(state.selectedTestId);
+    sizeSelectToWidest($sel);
     $sel.off("change.cuteDbt").on("change.cuteDbt", function () {
+      // (renderForSelectedModel closes any open node shelf — cute-dbt#201.)
       state.selectedTestId = $(this).val();
-      state.selectedNodeId = null;
-      state.leftPanelMode = "node";
       renderForSelectedModel();
     });
     renderZeroUpdatedHint(m, tests);
@@ -397,6 +423,11 @@
     // unconditionally too (targeted — never touches .expected-rowcount).
     // (gemini review, PR #146.)
     $(".expected-panel .panel-header .mode-badge, .expected-panel .panel-header .expect-tooltip").remove();
+    // cute-dbt#201 — a fresh model/test selection closes any open
+    // node-detail shelf BEFORE the DAG re-renders below, so the rebuilt
+    // DAG re-centers with no baked selection (the shelf's ✕ handler does
+    // its own renderDag; this path lets the one below suffice).
+    closeNodeShelf();
     renderTestDetails(t);
     renderModelSql(m);
     // cute-dbt#170 — the coverage-checks panel is MODEL-scoped: it renders
@@ -405,21 +436,12 @@
     renderFindingsPanel(m);
     renderDagLegend();
     renderDag();
-    renderSegmentedToggle();
     if (t) {
-      var desc = t.description || "";
-      $(".test-description").text(desc);
-      // cute-dbt#74 — toggle the section's `.is-hidden` class so the
-      // aria-labeled landmark drops from the accessibility tree when
-      // the test carries no description (Gemini-disposition on PR#77:
-      // class-based toggle is whitespace-robust where `:empty` /
-      // `:has(:empty)` selectors are not).
-      $(".test-description-section").toggleClass("is-hidden", !desc);
       renderLeftPanel();
       renderExpectedPanel(t);
     } else {
-      $(".test-description").text("");
-      $(".test-description-section").addClass("is-hidden");
+      // (renderTestDetails(null) above already cleared the badge row, the
+      // description, and the details body — cute-dbt#201.)
       // cute-dbt#91 — distinguish "model has tests but none are updated
       // (Updated-only mode hides them)" from the genuine explorer-mode
       // "model is modified but has zero unit tests" case.
@@ -477,34 +499,36 @@
     return $b;
   }
 
+  // cute-dbt#201 — the always-open test card (founder decision on epic
+  // cute-dbt#197, 2026-06-10: NOT a drawer). The selector is the card's
+  // title; this populates the badge row (tag chips, the muted `untagged`
+  // fallback, meta chips — the overrides badge arrives with cute-dbt#202),
+  // the larger-font description (hidden when empty: the #74
+  // no-empty-landmark intent carries over from the retired
+  // test-description-section), and the details body (defined-in fallback +
+  // the authoring-YAML drawer — the one piece that stays collapsible).
   function renderTestDetails(t) {
+    var $badges = $(".test-badges").empty();
+    var desc = t && t.description ? t.description : "";
+    $(".test-description").text(desc).prop("hidden", !desc);
     var $body = $(".test-details-body").empty();
     if (!t) return;
-    var $tagsLine = $("<div>").addClass("td-line td-tags-line");
-    if (t.tags && t.tags.length) {
-      $tagsLine.append($("<span>").addClass("td-label").text("Tagged "));
-      t.tags.forEach(function (tag, i) {
-        if (i > 0) $tagsLine.append(document.createTextNode(", "));
-        $tagsLine.append($("<span>").addClass("td-tag").text(tag));
-      });
-    } else {
-      $tagsLine.addClass("muted").text("Untagged");
-    }
-    $body.append($tagsLine);
 
-    var $metaLine = $("<div>").addClass("td-line td-meta-line");
-    var metaKeys = t.meta ? Object.keys(t.meta) : [];
-    if (metaKeys.length === 0) {
-      $metaLine.addClass("muted").text("No metadata");
-    } else {
-      metaKeys.forEach(function (k, i) {
-        if (i > 0) $metaLine.append(document.createTextNode(" · "));
-        $metaLine.append($("<span>").addClass("td-meta-key").text(k));
-        $metaLine.append(document.createTextNode(": "));
-        $metaLine.append($("<span>").addClass("td-meta-val").text(String(t.meta[k])));
+    // tag badges — chips replace the #178 "Tagged …"/"Untagged" text lines.
+    if (t.tags && t.tags.length) {
+      t.tags.forEach(function (tag) {
+        $badges.append($("<span>").addClass("tb-badge tb-tag").text(tag));
       });
+    } else {
+      $badges.append($("<span>").addClass("tb-badge tb-muted").text("untagged"));
     }
-    $body.append($metaLine);
+    // meta chips — one chip per key (replaces the "No metadata" line; zero
+    // meta keys simply render zero chips).
+    var metaKeys = t.meta ? Object.keys(t.meta) : [];
+    metaKeys.forEach(function (k) {
+      $badges.append($("<span>").addClass("tb-badge tb-meta")
+        .text(k + ": " + String(t.meta[k])));
+    });
 
     // cute-dbt#178 — the authoring-YAML drawer's code-card header now shows
     // this path (GitHub-style). Keep this row ONLY as a fallback for tests
@@ -1056,12 +1080,11 @@
       g.setAttribute("aria-label", "Inspect DAG node: " + (safeToLabel[safeId] || originalId));
       g.style.cursor = "pointer";
       function activate() {
-        state.selectedNodeId = originalId;
-        if (state.leftPanelMode !== "node") {
-          state.leftPanelMode = "node";
-          renderSegmentedToggle();
-        }
-        renderLeftPanel();
+        // cute-dbt#201 — open the node-detail shelf, then re-render: the
+        // Mermaid selection ring is baked into the generated source, so
+        // the Mermaid path keeps its full re-render (Cytoscape's tap goes
+        // through __cuteSelectNode and never re-renders — the #180 rule).
+        openNodeShelf(originalId);
         renderDag();
       }
       g.addEventListener("click", activate);
@@ -1084,16 +1107,9 @@
     }
   }
 
-  function renderSegmentedToggle() {
-    $(".panel-toggle [data-mode]").each(function () {
-      var mode = $(this).attr("data-mode");
-      $(this).attr("aria-pressed", mode === state.leftPanelMode ? "true" : "false");
-      $(this).toggleClass("is-active", mode === state.leftPanelMode);
-    });
-  }
-
   // cute-dbt#91 — sync the Updated-only ↔ All-tests toggle's active state
-  // to state.showAll (mirrors renderSegmentedToggle's idiom).
+  // to state.showAll. (renderSegmentedToggle is retired with the
+  // Inspect/All-inputs panel toggle — cute-dbt#201.)
   function renderTestModeToggle() {
     var active = state.showAll ? "all" : "updated";
     $(".test-mode-toggle [data-test-mode]").each(function () {
@@ -1104,16 +1120,12 @@
   }
 
   function bindGlobalHandlers() {
-    $(".panel-toggle").on("click", "[data-mode]", function () {
-      state.leftPanelMode = $(this).attr("data-mode");
-      renderSegmentedToggle();
-      renderLeftPanel();
-    });
     // cute-dbt#91 — global Updated-only ↔ All-tests toggle. state.showAll
     // is global and persists across model switches (the model-change
     // handler never resets it). On flip, keep the selection valid: if the
     // currently selected test is no longer visible, fall back to the first
-    // visible test (or null).
+    // visible test (or null). (renderForSelectedModel closes any open node
+    // shelf — cute-dbt#201.)
     $(".test-mode-toggle").on("click", "[data-test-mode]", function () {
       var nextShowAll = $(this).attr("data-test-mode") === "all";
       if (nextShowAll === state.showAll) return;
@@ -1121,8 +1133,6 @@
       var vis = visibleTests(currentModel());
       var stillVisible = vis.some(function (t) { return t.id === state.selectedTestId; });
       if (!stillVisible) state.selectedTestId = vis.length ? vis[0].id : null;
-      state.selectedNodeId = null;
-      state.leftPanelMode = "node";
       renderTestModeToggle();
       renderModelSelector();
       renderTestSelector();
@@ -1166,8 +1176,9 @@
       // cute-dbt#180 contract: per-click Cytoscape interaction mutates
       // classes IN PLACE — never a renderDag() rebuild (which would
       // reset pan/zoom). Emitting a tap on the node runs the exact
-      // bound click path (lineage highlight + __cuteSelectNode →
-      // Inspect). Mermaid keeps its render-driven selection.
+      // bound click path (lineage highlight + __cuteSelectNode → the
+      // node-detail shelf, cute-dbt#201). Mermaid keeps its
+      // render-driven selection.
       var cyto = dagEngine === "cytoscape" && window.CuteCyto
         ? window.CuteCyto.cyInstance()
         : null;
@@ -1175,12 +1186,7 @@
       if (cyEle && cyEle.length) {
         cyEle.emit("tap");
       } else {
-        state.selectedNodeId = id;
-        if (state.leftPanelMode !== "node") {
-          state.leftPanelMode = "node";
-          renderSegmentedToggle();
-        }
-        renderLeftPanel();
+        openNodeShelf(id);
         renderDag();
       }
       var dag = document.querySelector(".cte-dag");
@@ -1208,21 +1214,167 @@
     });
   }
 
+  // ---- manifest helpers (model details from DATA.manifest_nodes) ---------
+  // cute-dbt#201 — the node-detail shelf's model card reads the #200
+  // manifest_nodes lookup. All graceful: a model absent from the lookup
+  // simply renders no card (compiled SQL still shows).
+  function refTargetName(input) {
+    var mm = /^ref\(['"](.+)['"]\)$/.exec(input || "");
+    return mm ? mm[1] : null;
+  }
+  function manifestNode(name) {
+    return (DATA.manifest_nodes && DATA.manifest_nodes[name]) || null;
+  }
+  // The manifest model a DAG node maps to: the final-select node => this
+  // model; an import node => the ref() target of its bound given (the #131
+  // bound_to_node seam); anything else only when the node id itself names a
+  // known model. Null => no card.
+  function nodeManifestName(node, t, m) {
+    if (!node) return null;
+    if (node.role === "final") return m ? m.name : null;
+    if (node.role === "import") {
+      var g = ((t && t.given) || []).filter(function (x) { return x.bound_to_node === node.id; })[0];
+      if (g) {
+        var r = refTargetName(g.input);
+        if (r && manifestNode(r)) return r;
+      }
+    }
+    return manifestNode(node.id) ? node.id : null;
+  }
+  // Structured-test chips: accent keyword + one value chip per argument —
+  // the #166/#189 ColumnTestPayload display shape ({name, values?,
+  // detail?}), reused for the shelf card's model-level + column tests.
+  function testChipsHtml(tt) {
+    var h = '<span class="dt-key">' + escapeHtml(tt.name) + "</span>";
+    if (tt.values && tt.values.length) {
+      h += '<span class="dt-vals">'
+        + tt.values.map(function (v) { return '<span class="dt-val">' + escapeHtml(String(v)) + "</span>"; }).join("")
+        + "</span>";
+    } else if (tt.detail) {
+      // split a multi-arg detail ("field: x, datepart: day, interval: 2")
+      // into one chip per argument.
+      h += '<span class="dt-vals">'
+        + String(tt.detail).split(/,\s*/).map(function (a) {
+            return '<span class="dt-val">' + escapeHtml(a) + "</span>";
+          }).join("")
+        + "</span>";
+    }
+    return h;
+  }
+  // The shelf's model-detail card: tags → name + materialized →
+  // description → model-level tests → columns (each with a
+  // click-to-expand test-count chip). Built from manifest_nodes[name].
+  function buildModelDetailCard(name) {
+    var info = manifestNode(name);
+    var $c = $("<div>").addClass("model-detail-card");
+    // tags first (above the name), then the name + materialized, then desc.
+    if (info && info.tags && info.tags.length) {
+      var $tg = $("<div>").addClass("mdc-tags");
+      info.tags.forEach(function (tag) { $tg.append($("<span>").addClass("mdc-tag").text(tag)); });
+      $c.append($tg);
+    }
+    var $h = $("<div>").addClass("mdc-head");
+    $h.append($("<code>").addClass("mdc-name").text(name));
+    if (info && info.materialized) $h.append($("<span>").addClass("mdc-mat").text(info.materialized));
+    $c.append($h);
+    if (info && info.description) $c.append($("<p>").addClass("mdc-desc").text(info.description));
+    // model-level data tests (below the description, above the columns).
+    if (info && info.model_tests && info.model_tests.length) {
+      var $mt = $("<div>").addClass("mdc-mtests");
+      $mt.append($("<div>").addClass("mdc-section-label")
+        .text("Model tests · " + info.model_tests.length));
+      var $mul = $("<ul>").addClass("mdc-mtest-list");
+      info.model_tests.forEach(function (tt) {
+        $mul.append($("<li>").addClass("dt-row").html(testChipsHtml(tt)));
+      });
+      $mt.append($mul);
+      $c.append($mt);
+    }
+    if (info && info.columns && info.columns.length) {
+      $c.append($("<div>").addClass("mdc-section-label").text("Columns · " + info.columns.length));
+      var $cols = $("<ul>").addClass("mdc-cols");
+      info.columns.forEach(function (col) {
+        var $li = $("<li>");
+        var $nrow = $("<div>").addClass("mdc-col-nrow");
+        $nrow.append($("<code>").addClass("mdc-col-name").text(col.name));
+        if (col.type) $nrow.append($("<span>").addClass("mdc-col-type").text(col.type));
+        // test-count chip — click to expand this column's tests.
+        var hasTests = col.tests && col.tests.length;
+        if (hasTests) {
+          $nrow.append($("<button>").attr("type", "button")
+            .addClass("mdc-col-testcount").attr("aria-expanded", "false")
+            .attr("aria-label", col.tests.length + " data test" + (col.tests.length === 1 ? "" : "s"))
+            .text(col.tests.length));
+        }
+        $li.append($nrow);
+        if (col.description) $li.append($("<div>").addClass("mdc-col-desc").text(col.description));
+        if (hasTests) {
+          var $tl = $("<ul>").addClass("mdc-col-tests").prop("hidden", true);
+          col.tests.forEach(function (tt) {
+            $tl.append($("<li>").addClass("dt-row").html(testChipsHtml(tt)));
+          });
+          $li.append($tl);
+        }
+        $cols.append($li);
+      });
+      $c.append($cols);
+    }
+    return $c;
+  }
+
+  // ---- node-detail shelf (slides out beside the DAG; cute-dbt#201) -------
+  function openNodeShelf(nodeId) {
+    state.selectedNodeId = nodeId;
+    $(".dag-shelf").prop("hidden", false);
+    $(".dag-stage").addClass("shelf-open");
+    renderNodeDetail(currentTest());
+  }
+  // Hide + clear the shelf. Pure state/DOM reset — the DAG re-render is
+  // the CALLER's choice: the ✕ handler re-renders (re-centers, clears the
+  // baked Mermaid selection) while renderForSelectedModel calls this just
+  // before its own renderDag() so a fresh selection never double-renders.
+  function closeNodeShelf() {
+    state.selectedNodeId = null;
+    $(".dag-shelf").prop("hidden", true);
+    $(".dag-stage").removeClass("shelf-open");
+    $(".dag-shelf-body").empty();
+  }
+  function bindShelf() {
+    $(document).on("click", ".dag-shelf-close", function () {
+      closeNodeShelf();
+      renderDag(); // ✕ re-centers the DAG (the cute-dbt#201 close contract)
+    });
+    // expand/collapse a column's tests in the shelf model-detail card.
+    $(document).on("click", ".mdc-col-testcount", function () {
+      var $btn = $(this);
+      var open = $btn.attr("aria-expanded") === "true";
+      $btn.attr("aria-expanded", open ? "false" : "true");
+      $btn.closest("li").find(".mdc-col-tests").prop("hidden", open);
+    });
+  }
+
+  // cute-dbt#201 — the left panel is the Given panel: always every given
+  // input (the Inspect/All-inputs segmented toggle is retired; node detail
+  // lives in the DAG shelf). The #131 ordinal binding rides the render
+  // loop index in renderAllInputs — t.given is the full in-order list.
   function renderLeftPanel() {
     var t = currentTest();
     if (!t) return;
-    if (state.leftPanelMode === "inputs") {
-      renderAllInputs(t);
-    } else {
-      renderNodeDetail(t);
-    }
+    renderAllInputs(t);
   }
 
+  // cute-dbt#201 — render the selected DAG node into the shelf: the
+  // model-detail card (when manifest_nodes knows the node's model) + the
+  // node's compiled SQL with the role badge riding the summary row. The
+  // unit-test given fixtures are deliberately NOT shown here — they live
+  // in the Given panel below (the pre-#201 duplicate ordinal-bound
+  // cell-diff rendering disappears with this rule), so the shelf stays
+  // focused on the node: model details + compiled SQL.
   function renderNodeDetail(t) {
-    var $wrap = $(".left-panel-body").empty().attr("data-mode", "node");
+    var $wrap = $(".dag-shelf-body").empty();
     var m = currentModel();
     if (!state.selectedNodeId) {
-      $wrap.append($("<div>").addClass("empty-hint").text("Click a node above to inspect."));
+      $wrap.append($("<div>").addClass("empty-hint").text("Click a node to inspect."));
       return;
     }
     var node = m && m.dag.nodes.filter(function (n) { return n.id === state.selectedNodeId; })[0];
@@ -1230,18 +1382,21 @@
       $wrap.append($("<div>").addClass("empty-hint").text("Node not found."));
       return;
     }
+    $(".dag-shelf-title").text(node.label || node.id);
     var $detail = $("<div>").addClass("node-detail")
       .attr("data-node-id", node.id)
       .attr("data-node-role", node.role);
 
-    var $hdr = $("<div>").addClass("node-detail-header");
-    $hdr.append($("<h3>").addClass("node-detail-title").text(node.label || node.id));
-    $hdr.append($("<span>").addClass("node-role-badge role-" + node.role).text(node.role));
-    $detail.append($hdr);
+    var mfName = nodeManifestName(node, t, m);
+    if (mfName) $detail.append(buildModelDetailCard(mfName));
 
+    // role badge rides the Compiled SQL summary row (saves vertical space).
     var sql = (m.compiled_sql && m.compiled_sql[node.id]) || "-- compiled SQL not available";
     var $det = $("<details>").addClass("compiled-sql").attr("open", "open");
-    $det.append($("<summary>").text("Compiled SQL"));
+    var $sum = $("<summary>");
+    $sum.append($("<span>").addClass("cs-label").text("Compiled SQL"));
+    $sum.append($("<span>").addClass("node-role-badge role-" + node.role).text(node.role));
+    $det.append($sum);
     var $sqlWrap = $("<div>").addClass("sql-block-wrap");
     var $copy = $("<button>").attr("type", "button").addClass("sql-copy").text("Copy")
       .on("click", function (e) { e.preventDefault(); e.stopPropagation(); copySql(sql, $(this)); });
@@ -1250,29 +1405,7 @@
     $det.append($sqlWrap);
     $detail.append($det);
 
-    // Fixture binding surface — cute-dbt#34 messy-import-CTE medium scope.
-    // A single CTE body may reference multiple ref() targets (UNION ALL,
-    // JOIN, derived subqueries), in which case the renderer binds EVERY
-    // matching given to that one node; we stack them vertically here so
-    // each fixture card is independently scannable. Pass-1 import-CTEs
-    // with no bound given retain the historic "no fixture provided"
-    // empty-state copy; transform leaves without a binding render
-    // nothing extra (most non-import CTEs carry no fixture by design).
-    var bound = t.given.filter(function (g) { return g.bound_to_node === node.id; });
-    if (bound.length > 0) {
-      // cute-dbt#131 — `bound` is a FILTERED view of `t.given`, so its own
-      // index is not the source ordinal; recover the true position via
-      // `indexOf` (filter preserves object references) so the cell-diff binds
-      // to the right given even when two givens share a `ref(...)`.
-      bound.forEach(function (g) { $detail.append(renderGivenSection(g, t.data_diff, t.given.indexOf(g))); });
-    } else if (node.role === "import") {
-      $detail.append(
-        $("<div>").addClass("given-empty")
-          .text('no fixture provided — dbt treats unspecified inputs as empty')
-      );
-    }
     $wrap.append($detail);
-    initDataTablesIn($wrap);
   }
 
   // cute-dbt#98 — the test's cell-level data diff for THIS given input, or
