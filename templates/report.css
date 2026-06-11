@@ -397,9 +397,6 @@ html[data-style="paper"] .expected-panel {
 }
 html[data-style="paper"] .left-panel { border: var(--rule-w) solid var(--border); }
 html[data-style="paper"] .panel-row { gap: 2rem; }
-html[data-style="paper"] .test-description {
-  border-left-width: 3px; border-radius: 0 var(--radius-pan) var(--radius-pan) 0; padding: 1.05rem 1.3rem;
-}
 html[data-style="paper"] .cte-dag-cyto { height: 26rem; }
 html[data-style="paper"] .dag-legend { gap: 0.5rem 2.4rem; }
 html[data-style="paper"] .node-role-badge,
@@ -418,7 +415,6 @@ html[data-style="terminal"] select,
 html[data-style="terminal"] input,
 html[data-style="terminal"] .theme-chip,
 html[data-style="terminal"] .seg-radio,
-html[data-style="terminal"] .panel-toggle,
 html[data-style="terminal"] .test-mode-toggle,
 html[data-style="terminal"] .settings-cog,
 html[data-style="terminal"] .settings-panel,
@@ -433,8 +429,7 @@ html[data-style="terminal"] .this-badge,
 html[data-style="terminal"] .format-badge,
 html[data-style="terminal"] .row-count-badge,
 html[data-style="terminal"] .left-panel,
-html[data-style="terminal"] .expected-panel,
-html[data-style="terminal"] .test-description { border-radius: 0; }
+html[data-style="terminal"] .expected-panel { border-radius: 0; }
 html[data-style="terminal"] table.given-table,
 html[data-style="terminal"] table.expected-table { border: 1px solid var(--border-strong); }
 html[data-style="terminal"] table.given-table td,
@@ -465,7 +460,6 @@ html[data-style="swiss"] .settings-panel h2 { font-weight: 800; color: var(--tex
 html[data-style="swiss"] select,
 html[data-style="swiss"] input,
 html[data-style="swiss"] .seg-radio,
-html[data-style="swiss"] .panel-toggle,
 html[data-style="swiss"] .test-mode-toggle,
 html[data-style="swiss"] .theme-chip,
 html[data-style="swiss"] .settings-cog,
@@ -483,7 +477,6 @@ html[data-style="swiss"] .expected-panel { border-width: 0; border-top: 3px soli
 html[data-style="swiss"] .left-panel { border: 0; border-top: 2px solid var(--border-strong); border-radius: 0; padding: 0.6rem 0 1rem; }
 html[data-style="swiss"] table.given-table th,
 html[data-style="swiss"] table.expected-table th { border-bottom: 2px solid var(--text); }
-html[data-style="swiss"] .test-description { border-left-width: 4px; border-radius: 0; }
 
 /* ============================ SOFT ======================================== */
 html[data-style="soft"] {
@@ -499,11 +492,8 @@ html[data-style="soft"] .expected-panel {
   border: var(--rule-w) solid var(--border);
 }
 html[data-style="soft"] .expected-panel { border-width: 2px; border-color: var(--accent); }
-html[data-style="soft"] .test-description { border-radius: var(--radius-pan); border-left-width: 4px; padding: 0.95rem 1.2rem; }
-html[data-style="soft"] .panel-toggle,
 html[data-style="soft"] .test-mode-toggle,
 html[data-style="soft"] .seg-radio { border-radius: 999px; overflow: hidden; }
-html[data-style="soft"] .panel-toggle button,
 html[data-style="soft"] .test-mode-toggle button,
 html[data-style="soft"] .seg-radio button { padding-left: 14px; padding-right: 14px; }
 html[data-style="soft"] select,
@@ -644,7 +634,6 @@ html[data-style="soft"] .report-header h1 { letter-spacing: -0.01em; }
   .report-header { flex-wrap: wrap; gap: 0.25rem; }
   .selector-field { min-width: 0; width: 100%; }
   .test-selector-row { gap: 0.4rem; }
-  .selector-arrow { display: none; }
 }
 @media (max-width: 420px) {
   .theme-grid { grid-template-columns: 1fr; }
@@ -727,7 +716,6 @@ table.given-table th, table.expected-table th {
   font-family: var(--font-mono); background: var(--bg-alt);
   padding: 0.05rem 0.35rem; border-radius: var(--radius-sm); color: var(--text);
 }
-.cte-dag-subtitle { margin: 0 0 0.25rem; color: var(--text-muted); font-size: 0.85em; }
 .cte-dag-header { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.55rem; }
 .cte-dag-header h2 { margin: 0; }
 .cte-dag-header .cte-dag-hint { font-size: 0.95em; line-height: 1; }
@@ -735,22 +723,19 @@ table.given-table th, table.expected-table th {
 .diff-scope-banner { padding: 0; margin: 0 0 var(--gap-section); color: var(--text); }
 .diff-scope-line code, .diff-scope-text + * code { font-family: var(--font-mono); }
 
+/* cute-dbt#201 — the left-border description BANNER (and its
+   test-description-section landmark) is retired: the description renders
+   as plain larger-font text inside the always-open test card (the
+   .test-card .test-description rule below). The #74 no-empty-landmark
+   intent carries over via the `hidden` attribute the JS toggles. */
 .test-description {
-  background: var(--bg-alt); border-left: 4px solid var(--accent);
-  padding: 0.875rem 1.125rem; margin: 0 0 1.25rem; border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  margin: 0; padding: 0; background: none; border: 0;
   color: var(--text);
 }
-/* cute-dbt#74 — when the description is empty (no test selected or the
-   selected test has no description), suppress the banner entirely so the
-   aria-labeled landmark region drops from the accessibility tree. The JS
-   toggles `.is-hidden` based on description presence (explicit class toggle,
-   whitespace-robust; Gemini-disposition on PR#77). */
-.test-description-section.is-hidden { display: none; }
 
 .test-selector-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem 1rem; }
 .selector-field { display: flex; flex-direction: column; min-width: 16rem; }
 .selector-field label { color: var(--text-muted); font-size: 0.85em; margin-bottom: 0.15rem; }
-.selector-arrow { padding-bottom: 0.9rem; color: var(--text-muted); }
 
 select, input, textarea {
   background: var(--surface); color: var(--text);
@@ -800,6 +785,93 @@ g.dag-node:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3p
 }
 .legend-edge { display: inline-block; width: 28px; height: 3px; border-radius: 2px; }
 
+/* ============================================================================
+   cute-dbt#201 — design-2 layout restructure: DAG node-detail shelf +
+   the always-open test card (selector-as-title). Lifted from the pass-2
+   engine/base.css (design-return-2), deduplicated, minus the overrides
+   badge rules (those land with the badge itself in cute-dbt#202).
+   ========================================================================== */
+
+/* --- DAG node-detail shelf (beside the DAG; wraps under on narrow) ------ */
+.dag-stage { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
+.dag-canvas-col { flex: 1 1 360px; min-width: 0; }
+.dag-shelf {
+  flex: 1 1 340px; min-width: 0; align-self: stretch;
+  border: var(--rule-w) solid var(--border); border-radius: var(--radius-pan);
+  background: var(--surface); overflow: hidden;
+  display: flex; flex-direction: column; max-height: 32rem;
+}
+.dag-shelf-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.6rem;
+  padding: 0.45rem 0.7rem; background: var(--surface-2);
+  border-bottom: var(--rule-w) solid var(--border);
+}
+.dag-shelf-title { font-family: var(--font-mono); font-size: 0.82rem; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dag-shelf-close {
+  flex: 0 0 auto; width: 1.7rem; height: 1.7rem; padding: 0; line-height: 1; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: var(--rule-w) solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text-muted); font-size: 0.9rem;
+}
+.dag-shelf-close:hover { background: var(--bg-alt); color: var(--text); border-color: var(--border-strong); }
+.dag-shelf-body { padding: 0.7rem; overflow: auto; }
+
+/* model-detail card (in the shelf; also the shape the #202 ref tooltip
+   will mirror) */
+.model-detail-card { border: var(--rule-w) solid var(--border); border-radius: var(--radius-sm); background: var(--bg-alt); padding: 0.55rem 0.65rem; margin-bottom: 0.7rem; }
+.model-detail-card code { background: none; padding: 0; border-radius: 0; }
+.mdc-head { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+.mdc-name { font-family: var(--font-mono); font-weight: 700; color: var(--text); }
+.mdc-mat { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--badge-amber); background: var(--badge-amber-bg); border: var(--rule-w) solid var(--badge-amber-edge); border-radius: 999px; padding: 0.05rem 0.5rem; }
+.mdc-tags { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.45rem; }
+.mdc-tag { font-size: 0.72rem; color: var(--text-muted); background: var(--surface-2); border: var(--rule-w) solid var(--border); border-radius: 999px; padding: 0.03rem 0.5rem; }
+.mdc-desc { margin: 0.45rem 0 0; font-size: 0.95rem; line-height: 1.6; color: var(--text); text-wrap: pretty; }
+.mdc-section-label { margin: 0.7rem 0 0.3rem; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+.mdc-mtests .mdc-mtest-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+/* structured-test chips (accent keyword + value chips) */
+.dt-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.85rem; font-size: 0.8rem; }
+.dt-key { font-family: var(--font-mono); font-weight: 700; }
+.dt-vals { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
+.dt-val { font-family: var(--font-mono); border-radius: 4px; padding: 0.02rem 0.42rem; font-size: 0.85em; }
+.model-detail-card .dt-key, .mdc-col-tests .dt-key { color: var(--accent); }
+.model-detail-card .dt-val, .mdc-col-tests .dt-val { background: var(--surface-2); border: var(--rule-w) solid var(--border); color: var(--text); }
+.mdc-col-testcount { font: inherit; font-family: var(--font-mono); font-size: 0.7rem; line-height: 1.3; min-width: 1.2em; text-align: center; padding: 0 0.32rem; border-radius: 999px; cursor: pointer; color: var(--accent-hover); background: var(--accent-tint); border: var(--rule-w) solid color-mix(in oklab, var(--accent) 30%, transparent); }
+.mdc-col-testcount:hover { filter: brightness(0.97); }
+.mdc-col-testcount[aria-expanded="true"] { background: var(--accent); color: var(--accent-on); }
+.mdc-col-tests { list-style: none; margin: 0.5rem 0 0.2rem; padding: 0 0 0 0.6rem; display: flex; flex-direction: column; gap: 0.5rem; border-left: 2px solid var(--border); }
+.mdc-cols { list-style: none; margin: 0.55rem 0 0; padding: 0; }
+.mdc-cols > li { display: block; padding: 0.45rem 0; font-size: 0.84rem; border-top: var(--rule-w) solid var(--border); }
+.mdc-cols > li:first-child { border-top: 0; padding-top: 0; }
+.mdc-col-nrow { display: flex; align-items: baseline; gap: 0.45rem; flex-wrap: wrap; }
+.mdc-col-name { font-family: var(--font-mono); font-weight: 600; font-size: 0.88rem; color: var(--text); }
+.mdc-col-type { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-faint); }
+.mdc-col-desc { margin-top: 0.2rem; font-size: 0.82rem; line-height: 1.5; color: var(--text-muted); }
+
+/* role badge rides the Compiled SQL summary row in the shelf */
+.dag-shelf .compiled-sql > summary { display: flex; align-items: center; gap: 0.5rem; }
+.dag-shelf .compiled-sql > summary .cs-label { flex: 0 0 auto; }
+.dag-shelf .compiled-sql > summary .node-role-badge { margin-left: auto; }
+
+/* --- test card (selector = title; toggle right; badges far right) ------- */
+.test-section { margin: 1rem 0; }
+.test-card { border: 0; background: none; padding: 0; }
+.test-card-head { display: flex; align-items: flex-end; gap: 0.75rem; flex-wrap: wrap; }
+.test-card-head .test-select-field { flex: 0 1 auto; min-width: 0; }
+/* sizeSelectToWidest sets a static px width; this clamp keeps a long test
+   name from pushing a narrow viewport (the #157 lesson). */
+.test-card-head #test-select { max-width: 100%; }
+.test-card-head .test-mode-toggle { flex: 0 0 auto; }
+.test-card-head .test-badges { flex: 0 0 auto; margin-left: auto; align-self: center; }
+.test-badges { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
+.tb-badge { font-size: 0.72rem; line-height: 1.4; padding: 0.1rem 0.55rem; border-radius: 999px; border: var(--rule-w) solid transparent; white-space: nowrap; }
+.tb-tag { color: var(--accent-hover); background: var(--accent-tint); border-color: color-mix(in oklab, var(--accent) 35%, transparent); font-family: var(--font-mono); }
+.tb-meta { color: var(--text-muted); background: var(--surface-2); border-color: var(--border); font-family: var(--font-mono); }
+.tb-muted { color: var(--text-faint); background: transparent; border-color: var(--border); }
+/* the always-open card's description — larger font (founder decision on
+   epic cute-dbt#197); `hidden` (the #74 carry-over) removes it entirely. */
+.test-card .test-description { margin: 0.7rem 0 0; font-size: 1.34rem; line-height: 1.55; color: var(--text); text-wrap: pretty; white-space: normal; }
+.test-card .test-details-body { margin-top: 0.85rem; }
+
 /* ---- two-panel region ------------------------------------------------ */
 .panel-row { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 1.5rem; margin: 1.5rem 0; }
 /* cute-dbt#157 — the stacked track is minmax(0,1fr), NEVER bare 1fr
@@ -809,16 +881,18 @@ g.dag-node:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3p
    test pins this. */
 .panel-row.is-stacked { grid-template-columns: minmax(0, 1fr); }
 
-.panel-toggle, .test-mode-toggle { display: inline-flex; gap: 0; border: var(--rule-w) solid var(--control-border); border-radius: var(--radius-sm); overflow: hidden; }
-.panel-toggle button, .test-mode-toggle button {
+/* cute-dbt#201 — the .panel-toggle (Inspect/All-inputs) selectors are
+   retired with the segmented control; the #91 scope toggle now lives in
+   the test card's head (flex gap spaces it — no bottom margin). */
+.test-mode-toggle { display: inline-flex; gap: 0; border: var(--rule-w) solid var(--control-border); border-radius: var(--radius-sm); overflow: hidden; }
+.test-mode-toggle button {
   font-size: 0.85em; padding: 4px 12px; border: none; border-radius: 0;
   background: var(--control-bg); color: var(--control-fg); cursor: pointer; opacity: 1;
   font-family: var(--font-ui);
 }
-.panel-toggle button + button, .test-mode-toggle button + button { border-left: var(--rule-w) solid var(--control-border); }
-.panel-toggle button:not(.is-active), .test-mode-toggle button:not(.is-active) { opacity: 0.85; color: var(--text-muted); }
-.panel-toggle button.is-active, .test-mode-toggle button.is-active { background: var(--control-active-bg); color: var(--control-active-fg); }
-.test-mode-toggle { margin-bottom: 0.75rem; }
+.test-mode-toggle button + button { border-left: var(--rule-w) solid var(--control-border); }
+.test-mode-toggle button:not(.is-active) { opacity: 0.85; color: var(--text-muted); }
+.test-mode-toggle button.is-active { background: var(--control-active-bg); color: var(--control-active-fg); }
 
 .zero-updated-hint, .zero-updated-affirm { margin: 0.5rem 0 0; color: var(--text-muted); font-style: italic; font-size: 0.9em; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
@@ -833,7 +907,6 @@ g.dag-node:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3p
 
 .empty-hint, .no-tests-empty { padding: 2rem; text-align: center; color: var(--text-muted); border: var(--rule-w) dashed var(--border); border-radius: var(--radius-pan); }
 .no-tests-empty { padding: 1.25rem 1rem; font-style: italic; }
-.node-detail-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
 
 /* ---- badges ---------------------------------------------------------- */
 .node-role-badge, .incremental-badge, .mode-badge, .this-badge, .format-badge, .row-count-badge {

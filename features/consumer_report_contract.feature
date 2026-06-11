@@ -48,13 +48,16 @@ Feature: Rendered report is suitable for CI sticky-comment delivery
     And the Authoring YAML drawer for at least one unit test contains the substring "INSIDE bracket"
     And the Authoring YAML drawer for at least one unit test contains the substring "TRAILING bracket"
 
-  # cute-dbt#74: the description banner renders between the CTE DAG
-  # and the inspect/expected panels — context lives next to the
-  # substance reviewers are evaluating. The byte-identity insta snapshot
-  # also catches a regression here, but snapshots are reflexively
-  # rebaselined; this scenario pins the structural intent so a future
-  # template refactor that moves the description back to the top fails
-  # loudly with a load-bearing message.
-  Scenario: Description banner renders between the CTE DAG and the inspect/expected panels
+  # cute-dbt#74 (re-homed by cute-dbt#201): the test description renders
+  # between the CTE DAG and the given/expected panels — context lives
+  # next to the substance reviewers are evaluating. Since the #201
+  # layout restructure the description lives inside the always-open test
+  # card (the .test-section below the DAG); the structural intent is
+  # unchanged. The byte-identity insta snapshot also catches a
+  # regression here, but snapshots are reflexively rebaselined; this
+  # scenario pins the intent so a future template refactor that moves
+  # the description back to the top fails loudly with a load-bearing
+  # message.
+  Scenario: Test section with the description renders between the CTE DAG and the given/expected panels
     When I run cute-dbt against the playground fixture pair
-    Then the rendered HTML places the test-description section between the cte-dag section and the panel-row
+    Then the rendered HTML places the test section between the cte-dag section and the panel-row
