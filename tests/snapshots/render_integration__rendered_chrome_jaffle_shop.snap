@@ -739,6 +739,17 @@ table.given-table th, table.expected-table th {
 
 .diff-scope-banner { padding: 0; margin: 0 0 var(--gap-section); color: var(--text); }
 .diff-scope-line code, .diff-scope-text + * code { font-family: var(--font-mono); }
+/* cute-dbt#240 (defects C+E) — Sakura's base `code { background:#f1f1f1 }`
+   is a light-theme constant: on the dark themes it pairs with the
+   near-white --text at ≈1.2:1 (illegible "near-white pills"). The two
+   founder-reported surfaces — the baseline-manifest path in the scope
+   banner (E) and the COVERED finding row's "Covered by" test ids (C) —
+   re-skin with theme tokens (the .td-defined-in idiom; --bg-alt is each
+   theme's sunken code-well pair for --text). AA-pinned on all 8 themes by
+   the headless guard family. */
+.diff-scope-line code, .finding-covered-by code {
+  background: var(--bg-alt); color: var(--text);
+}
 
 /* cute-dbt#201 — the left-border description BANNER (and its
    test-description-section landmark) is retired: the description renders
@@ -1294,13 +1305,23 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
 th.has-col-meta { cursor: help; }
 th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .col-tooltip {
-  position: fixed; z-index: 90; max-width: 24rem; min-width: 12rem;
+  position: fixed; z-index: 90; min-width: 12rem;
+  /* cute-dbt#240 (defects A+D) — the bubble must CONTAIN its content:
+     (1) the width cap can never exceed the viewport (the calc term mirrors
+     the #232/#234 CSS-bubble cap, so positionTipNear's clamp always has a
+     box that fits), and (2) long unbreakable mono tokens (test names,
+     override values) wrap inside the painted background instead of
+     painting past its right edge. */
+  max-width: min(24rem, calc(100vw - 16px));
+  overflow-wrap: anywhere;
   background: var(--tooltip-bg); color: var(--tooltip-fg);
   border-radius: var(--radius-pan); box-shadow: 0 6px 22px rgba(0,0,0,0.32);
   padding: 0.7rem 0.8rem; font-size: 12px; line-height: 1.45;
   font-weight: normal; text-transform: none; letter-spacing: normal; pointer-events: none;
 }
 .col-tooltip .ct-desc { font-size: 1.12em; line-height: 1.5; opacity: 0.97; }
+/* cute-dbt#240 (defect B) — the truthful no-metadata fallback line. */
+.col-tooltip .ct-empty { margin-top: 0.2rem; font-size: 0.95em; opacity: 0.75; }
 .col-tooltip .ct-tests-label { margin-top: 0.6rem; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.07em; opacity: 0.6; }
 .col-tooltip .ct-tests { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.3rem; }
 .col-tooltip .ct-test { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.7rem; }
@@ -1318,7 +1339,10 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
    model tip too (it rides the .col-tooltip shell). */
 :root[data-theme="latte"] .col-tooltip .ct-key { color: color-mix(in oklab, var(--accent) 35%, white); }
 .col-tooltip .ct-vals { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
-.col-tooltip .ct-val { background: rgba(255,255,255,0.14); border-radius: 4px; padding: 0.05rem 0.42rem; font-family: var(--font-mono); font-size: 0.9em; white-space: nowrap; }
+/* cute-dbt#240 (defect A) — chips wrap mid-token when (and only when) a
+   single value exceeds the bubble width: `anywhere` breaks ONLY on
+   overflow, so the short shipped args stay one-line chips. */
+.col-tooltip .ct-val { background: rgba(255,255,255,0.14); border-radius: 4px; padding: 0.05rem 0.42rem; font-family: var(--font-mono); font-size: 0.9em; overflow-wrap: anywhere; }
 /* (cute-dbt#202 — the .ct-detail run is retired: detail strings now split
    into the same ct-vals/ct-val chips the values branch uses.) */
 
@@ -1326,7 +1350,9 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
    (body-appended #model-tooltip / #ov-tooltip singletons, position:fixed
    via the shared class above; hardcoded whites follow the ct-val
    precedent — the tooltip interior is dark in every theme). */
-.col-tooltip.ov-tooltip, .col-tooltip.model-tooltip { max-width: 32rem; }
+/* cute-dbt#240 (defect D) — the wider tips keep the same can-never-exceed-
+   the-viewport cap so the positionTipNear clamp always fully contains them. */
+.col-tooltip.ov-tooltip, .col-tooltip.model-tooltip { max-width: min(32rem, calc(100vw - 16px)); }
 .model-tooltip .mt-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.45rem; }
 .model-tooltip .ct-desc { font-size: 1.3em; line-height: 1.5; }
 .model-tooltip .mt-mat { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: #f0c674; border: 1px solid currentColor; border-radius: 999px; padding: 0.02rem 0.5rem; }
@@ -1343,10 +1369,15 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
 .model-tooltip .ct-key { color: color-mix(in oklab, var(--accent) 60%, white); }
 .ov-tooltip .ov-grp + .ov-grp { margin-top: 0.55rem; }
 .ov-tooltip .ov-grp-name { font-family: var(--font-mono); font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; margin-bottom: 0.25rem; }
-.ov-tooltip .ov-row { display: flex; gap: 0.5rem; align-items: baseline; padding-left: 0.45rem; white-space: nowrap; }
-.ov-tooltip .ov-key, .ov-tooltip .ov-row code { background: none; padding: 0; font-family: var(--font-mono); font-weight: 700; color: color-mix(in oklab, var(--accent) 50%, white); white-space: nowrap; }
+/* cute-dbt#240 (defect D) — the nowrap run made any key/value longer than
+   the bubble's cap paint past the painted background and clip at the
+   viewport's right edge near right-edge triggers. Rows now flex-wrap and
+   long tokens break inside the bubble; colors stay verbatim (cute-dbt#238
+   owns the ov-tooltip palette). */
+.ov-tooltip .ov-row { display: flex; flex-wrap: wrap; gap: 0.15rem 0.5rem; align-items: baseline; padding-left: 0.45rem; }
+.ov-tooltip .ov-key, .ov-tooltip .ov-row code { background: none; padding: 0; font-family: var(--font-mono); font-weight: 700; color: color-mix(in oklab, var(--accent) 50%, white); overflow-wrap: anywhere; }
 .ov-tooltip .ov-eq { opacity: 0.45; }
-.ov-tooltip .ov-val { font-family: var(--font-mono); color: rgba(255,255,255,0.9); white-space: nowrap; }
+.ov-tooltip .ov-val { font-family: var(--font-mono); color: rgba(255,255,255,0.9); overflow-wrap: anywhere; min-width: 0; }
 
 /* cute-dbt#202 — the format-block tip (#fmt-tooltip): a mini framed code
    surface (NOT the dark .col-tooltip shell — it reuses the code-card
@@ -3506,7 +3537,22 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     });
   }
 
-  function renderGivenSection(given, dataDiff, ordinal) {
+  // cute-dbt#240 (defect B) — the human name of the node that OWNS a
+  // given's columns, for the metadata-less fallback bubble: the bare model
+  // name for ref('x'), `source.table` for source('source','table'), the
+  // target model for `this`. Unparseable inputs fall back to the raw input
+  // string (still truthful, never empty).
+  function givenOwnerLabel(given, targetModel) {
+    if (given.is_this) return targetModel || "this";
+    var input = given.input || "";
+    var ref = /^ref\(\s*'([^']+)'\s*\)$/.exec(input);
+    if (ref) return ref[1];
+    var src = /^source\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)$/.exec(input);
+    if (src) return src[1] + "." + src[2];
+    return input;
+  }
+
+  function renderGivenSection(given, dataDiff, ordinal, targetModel) {
     // The section keeps `data-input-name` (the test seam) even though the
     // visible title is now the #202 ref() pill rendering.
     var $sec = $("<section>").addClass("given-section").attr("data-input-name", given.input);
@@ -3571,7 +3617,8 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       .text(rowCount + " row" + (rowCount === 1 ? "" : "s")));
     $sec.append($hdr);
     var diff = givenDataDiff(dataDiff, ordinal);
-    $sec.append(buildFixtureView(table, "given-table", diff, given.column_meta));
+    $sec.append(buildFixtureView(table, "given-table", diff, given.column_meta,
+      givenOwnerLabel(given, targetModel)));
     return $sec;
   }
 
@@ -3581,7 +3628,9 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       $wrap.append($("<div>").addClass("empty-hint").text("No fixtures defined for this test."));
       return;
     }
-    t.given.forEach(function (given, idx) { $wrap.append(renderGivenSection(given, t.data_diff, idx)); });
+    t.given.forEach(function (given, idx) {
+      $wrap.append(renderGivenSection(given, t.data_diff, idx, t.target_model));
+    });
     initDataTablesIn($wrap);
   }
 
@@ -3676,7 +3725,8 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     // real change (cute-dbt#98). `data_diff.expect` already passed
     // `has_real_change()`, so its presence === "default this table to Diff".
     var diff = (t.data_diff && t.data_diff.expect) || undefined;
-    $body.append(buildFixtureView(table, "expected-table", diff, t.expected.column_meta));
+    $body.append(buildFixtureView(table, "expected-table", diff, t.expected.column_meta,
+      t.target_model));
     // cute-dbt#178 / cute-dbt#202 / cute-dbt#232 — the meta row ALWAYS
     // rides a .fixture-view-bar below the "Expected" title, mirroring the
     // Given headers (the pass-2 spec; audit D2): reading order
@@ -4710,18 +4760,37 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     }
     return '<div class="ct-test">' + inner + "</div>";
   }
-  function decorateColHeader($th, name, meta) {
-    if (!meta || (!meta.description && !(meta.tests && meta.tests.length))) return;
-    var tests = meta.tests || [];
+  // cute-dbt#240 (defect B, third report) — EVERY fixture column header is
+  // a tooltip trigger now. The #165/#178 "no metadata ⇒ no affordance"
+  // posture made undeclared columns silently hover-dead; on real projects
+  // (staging models declare a couple of columns, target models declare
+  // all) that meant MOST given headers showed nothing while every expected
+  // header answered — read three times by the founder as "given tooltips
+  // are broken". A metadata-less header now reveals a truthful fallback
+  // ("no description or data tests declared …") naming the owning node, so
+  // hover always answers and the honesty invariant strengthens: never an
+  // empty bubble, and no dead headers either. `owner` is the human name of
+  // the node that owns the columns (input model / seed / source for a
+  // given, the target model for `this` and the expected table).
+  function decorateColHeader($th, name, meta, owner) {
+    var m = meta || {};
+    var tests = m.tests || [];
+    var hasMeta = Boolean(m.description || tests.length);
     var parts = ["Column " + name];
-    if (meta.description) parts.push(meta.description);
+    if (m.description) parts.push(m.description);
     if (tests.length) parts.push("column tests: " + tests.map(colTestSummary).join("; "));
+    if (!hasMeta) {
+      parts.push("no description or data tests declared"
+        + (owner ? " on " + owner : "") + " in the project YAML");
+    }
     $th.removeAttr("title")
       .addClass("has-col-meta")
+      .toggleClass("col-meta-empty", !hasMeta)
       .attr("tabindex", "0")
       .attr("aria-label", parts.join(" — "))
       .attr("data-col-name", name)
-      .attr("data-col-desc", meta.description || "")
+      .attr("data-col-desc", m.description || "")
+      .attr("data-col-owner", owner || "")
       .attr("data-col-tests", JSON.stringify(tests));
   }
   // The singleton bubble, lazily appended to <body> (one element serves
@@ -4740,6 +4809,7 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     var el = ensureColTooltip();
     var name = trigger.getAttribute("data-col-name");
     var desc = trigger.getAttribute("data-col-desc");
+    var owner = trigger.getAttribute("data-col-owner");
     var tests = [];
     try { tests = JSON.parse(trigger.getAttribute("data-col-tests") || "[]"); } catch (e) { tests = []; }
     var h = '<div class="ct-desc">' + escapeHtml(desc || name) + "</div>";
@@ -4747,6 +4817,13 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       h += '<div class="ct-tests-label">Data tests</div><div class="ct-tests">'
          + tests.map(ctTestHtml).join("")
          + "</div>";
+    }
+    // cute-dbt#240 (defect B) — the truthful no-metadata fallback: name the
+    // column and say plainly that the project YAML declares nothing for it
+    // on the owning node. Never an empty bubble; never a dead header.
+    if (!desc && !tests.length) {
+      h += '<div class="ct-empty">No description or data tests declared'
+         + (owner ? " on " + escapeHtml(owner) : "") + " in the project YAML.</div>";
     }
     el.innerHTML = h;
     el.hidden = false;
@@ -4759,13 +4836,21 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     // measuring: a stale left near the viewport edge squeezes the layout,
     // so offsetWidth under-reports and the clamp below overshoots.
     el.style.left = "0px";
+    // cute-dbt#240 (defect D) — clamp against documentElement.clientWidth,
+    // not window.innerWidth: innerWidth includes a classic scrollbar's
+    // gutter, so an innerWidth-based clamp can park the bubble's right edge
+    // under the scrollbar — visually clipped at the screen edge. The CSS
+    // side caps every singleton's max-width at calc(100vw - 16px) so the
+    // measured box below can never exceed the clamping range.
+    var vw = document.documentElement.clientWidth || window.innerWidth;
+    var vh = document.documentElement.clientHeight || window.innerHeight;
     var r = trigger.getBoundingClientRect();
     var tw = el.offsetWidth, th = el.offsetHeight;
     var left = r.left;
-    if (left + tw > window.innerWidth - 8) left = window.innerWidth - 8 - tw;
+    if (left + tw > vw - 8) left = vw - 8 - tw;
     if (left < 8) left = 8;
     var top = r.bottom + 6;
-    if (top + th > window.innerHeight - 8) top = r.top - 6 - th; // flip above
+    if (top + th > vh - 8) top = r.top - 6 - th; // flip above
     el.style.left = Math.round(left) + "px";
     el.style.top = Math.round(top) + "px";
   }
@@ -4788,8 +4873,9 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   }
 
   // `colMeta` (cute-dbt#165) is the per-table column-metadata map keyed by
-  // column name (absent key/entry => no affordance on that th).
-  function buildTable(table, cls, colMeta) {
+  // column name (absent key/entry ⇒ the cute-dbt#240 truthful fallback
+  // bubble naming `owner`, never a dead header).
+  function buildTable(table, cls, colMeta, owner) {
     var columns = (table && table.columns) || [];
     var rows = (table && table.rows) || [];
     var $wrap = $("<div>").addClass("table-fit");
@@ -4799,9 +4885,10 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     columns.forEach(function (c) {
       var html = escapeHtml(c).replace(/_/g, "_<wbr>");
       var $th = $("<th>").attr("title", c).html(html);
-      // cute-dbt#178 — decorate (and de-title) the th when metadata exists;
-      // the header cell itself becomes the tooltip trigger.
-      decorateColHeader($th, c, colMeta && colMeta[c]);
+      // cute-dbt#178 — decorate (and de-title) the th; the header cell
+      // itself is the tooltip trigger (cute-dbt#240: every th, fallback
+      // content when the manifest carries no metadata for the column).
+      decorateColHeader($th, c, colMeta && colMeta[c], owner);
       $hr.append($th);
     });
     var $tbody = $("<tbody>").appendTo($tbl);
@@ -4884,14 +4971,14 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   // is present — also build the Diff grid and a Current↔Diff toggle that flips
   // exactly one view visible at a time (the inactive view carries `hidden`).
   // Default-Diff when a diff exists, else Current with no toggle.
-  function buildFixtureView(table, cls, diff, colMeta) {
+  function buildFixtureView(table, cls, diff, colMeta, owner) {
     if (!diff) {
       // No cell diff for this table → the plain Current grid from the POD.
-      return buildTable(table, cls, colMeta);
+      return buildTable(table, cls, colMeta, owner);
     }
     var $wrap = $("<div>").addClass("fixture-view");
-    var $diffView = buildDiffTable(diff, cls, colMeta);
-    var $currentView = buildTable(table, cls, colMeta).prop("hidden", true);
+    var $diffView = buildDiffTable(diff, cls, colMeta, owner);
+    var $currentView = buildTable(table, cls, colMeta, owner).prop("hidden", true);
 
     var $toggle = $("<div>").addClass("cell-diff-toggle");
     var $diffBtn = $("<button>").attr("type", "button")
@@ -4966,7 +5053,7 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   // added/removed column badges from DiffColumn.status) and rows tinted by
   // RowChangeKind. A `Modified` cell flagged by the active lens (cellChanged)
   // renders inline `old → new`; otherwise the cell shows its current value.
-  function buildDiffTable(diff, cls, colMeta) {
+  function buildDiffTable(diff, cls, colMeta, owner) {
     var $wrap = $("<div>").addClass("table-fit");
     var $tbl = $("<table>").addClass(cls).addClass("cell-diff-table");
     var $thead = $("<thead>").appendTo($tbl);
@@ -4982,8 +5069,9 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       // cute-dbt#165 — the Diff grid's unified column axis shares the same
       // metadata map (a removed column simply has no entry — the map is
       // filtered to the CURRENT table's columns in Rust). cute-dbt#178: the
-      // th itself is the tooltip trigger.
-      decorateColHeader($th, c.name, colMeta && colMeta[c.name]);
+      // th itself is the tooltip trigger (cute-dbt#240: every th, with the
+      // truthful fallback when the manifest carries no column metadata).
+      decorateColHeader($th, c.name, colMeta && colMeta[c.name], owner);
       $hr.append($th);
     });
     var $tbody = $("<tbody>").appendTo($tbl);
@@ -5085,8 +5173,8 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   // element so a test can assert the authored-display rendering, the toggle,
   // and the tinted markup.
   if (typeof window !== "undefined") {
-    window.__cuteBuildFixtureView = function (table, cls, diff, colMeta) {
-      return buildFixtureView(table, cls, diff, colMeta)[0];
+    window.__cuteBuildFixtureView = function (table, cls, diff, colMeta, owner) {
+      return buildFixtureView(table, cls, diff, colMeta, owner)[0];
     };
     window.__cuteCellText = cellText;
     // cute-dbt#139 — the cell-change lens + the settings object, exposed so the
