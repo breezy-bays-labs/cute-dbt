@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cute-dbt explore — model lineage</title>
+<link rel="icon" href="{{ favicon_data_uri }}">
+<style>
+{{ sakura_css|safe }}
+</style>
+<style>
+{# cute-dbt#100 — first-party explore-page chrome. Deliberately tiny: the
+   V1 lineage view is the epic #99 conscious throwaway (V2 replaces it
+   with the interactive Cytoscape engine + the report chassis), so this
+   page carries only what the static Mermaid render needs. #}
+body { max-width: 72rem; }
+.explore-header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.explore-header h1 { margin-bottom: 0.25rem; }
+.explore-nav a { font-size: 0.95rem; }
+.explore-counts { color: #555; font-size: 0.9rem; }
+.lineage-dag { overflow-x: auto; padding: 0.5rem 0; }
+.lineage-dag svg { max-width: none; }
+.lineage-empty { color: #555; font-style: italic; }
+.lineage-legend { color: #555; font-size: 0.85rem; }
+.lineage-legend .legend-chip { display: inline-block; padding: 0 0.4rem; border: 1.5px solid #0072B2; border-radius: 4px; background: #e8f1f8; color: #1c1c1f; }
+.lineage-legend .legend-chip.notcompiled { border-color: #b07400; border-style: dashed; background: #f4f4f5; }
+</style>
+</head>
+<body>
+
+<header class="explore-header">
+  <div>
+    <h1>Model lineage</h1>
+    <p class="explore-counts">full manifest — {{ model_count }} model{% if model_count != 1 %}s{% endif %}, {{ edge_count }} edge{% if edge_count != 1 %}s{% endif %}{% if not_compiled_count > 0 %}, {{ not_compiled_count }} not compiled{% endif %}</p>
+  </div>
+  <nav class="explore-nav" aria-label="Explore pages">
+    <a href="tests.html">Unit tests &rarr;</a>
+  </nav>
+</header>
+
+<section class="lineage" aria-label="Model lineage DAG">
+  <div class="lineage-dag"></div>
+  <p class="lineage-empty" hidden>No models in this manifest.</p>
+  <div class="lineage-legend">
+    <span class="legend-chip">model</span>
+    <span class="legend-chip notcompiled">not compiled</span>
+    — a dashed node has no compiled SQL in this manifest (<code>dbt parse</code>); run <code>dbt compile</code> to fill it in. The explorer renders it anyway (fail-open).
+  </div>
+</section>
+
+<script type="application/json" id="explore-dag-data">{{ dag_json|safe }}</script>
+
+<script>
+{{ mermaid_js|safe }}
+</script>
+<script>
+{# cute-dbt#100 — the static lineage boot. Same Mermaid init contract as
+   the report engine (templates/interaction.js): UMD bundle, strict
+   security level, explicit non-webfont system fontFamily, never
+   startOnLoad. The graph definition is server-built in Rust
+   (src/adapters/explore.rs mermaid_lineage_def) and arrives through the
+   JSON carrier above, so this script is a pure renderer. #}
+(function () {
+  "use strict";
+  var data = JSON.parse(document.getElementById("explore-dag-data").textContent);
+  var host = document.querySelector(".lineage-dag");
+  var empty = document.querySelector(".lineage-empty");
+  if (!data.model_count) {
+    empty.hidden = false;
+    return;
+  }
+  window.mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: "strict",
+    theme: "base",
+    fontFamily: 'system-ui,-apple-system,"Segoe UI",sans-serif'
+  });
+  window.mermaid.render("lineage-svg", data.def).then(function (result) {
+    host.innerHTML = result.svg;
+  }).catch(function (err) {
+    empty.textContent = "Lineage could not be rendered: " + err;
+    empty.hidden = false;
+  });
+})();
+</script>
+</body>
+</html>
