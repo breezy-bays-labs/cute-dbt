@@ -270,6 +270,31 @@ mod tests {
             1,
             "exactly one selectedModel write site (the Space focus commit)",
         );
+        // The host-bridge half of the dual binding (cute-dbt#105): the
+        // versioned commit event posts from exactly ONE site — inside
+        // commitFocus, beside the attribute write — so the two bindings
+        // can never fire on different interactions.
+        assert_eq!(
+            EXPLORE_LINEAGE_JS
+                .matches("hostBridge.postMessage(")
+                .count(),
+            1,
+            "exactly one host-bridge commit-event post site",
+        );
+        // The external-drive contract surface (cute-dbt#105) ships on
+        // the page: the version global and both forward hooks.
+        assert!(
+            EXPLORE_LINEAGE_JS.contains("window.cuteDbtContract"),
+            "the contract-version global is declared",
+        );
+        assert!(
+            EXPLORE_LINEAGE_JS.contains("window.focusModel"),
+            "the focusModel forward hook is declared",
+        );
+        assert!(
+            EXPLORE_LINEAGE_JS.contains("window.setView"),
+            "the setView inert default is declared (rebound by the CTE engine)",
+        );
     }
 
     #[test]
@@ -290,6 +315,18 @@ mod tests {
         assert!(
             !EXPLORE_CTE_JS.contains("dataset.selectedModel ="),
             "explore-cte.js must not write the focus-commit signal",
+        );
+        // …and never a second bridge-commit post site (cute-dbt#105):
+        // the dual-bound commit lives only in explore-lineage.js.
+        assert!(
+            !EXPLORE_CTE_JS.contains("postMessage("),
+            "explore-cte.js must not post host-bridge events",
+        );
+        // The setView forward hook (cute-dbt#105) rebinds here — the
+        // view-state owner.
+        assert!(
+            EXPLORE_CTE_JS.contains("window.setView = function"),
+            "explore-cte.js rebinds the setView forward hook",
         );
     }
 

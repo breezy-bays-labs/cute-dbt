@@ -72,11 +72,19 @@ body { max-width: 72rem; }
 .model-detail-card .detail-columns th, .model-detail-card .detail-columns td { text-align: left; padding: 0.15rem 0.6rem 0.15rem 0; border-bottom: 1px solid #ececef; vertical-align: top; }
 .model-detail-card .detail-columns code { overflow-wrap: anywhere; }
 .model-detail-card .detail-empty { color: #777; font-style: italic; }
+/* cute-dbt#105 — the read-only per-node file paths on the detail card. */
+.model-detail-card .detail-paths { font-size: 0.85rem; }
+.model-detail-card .detail-paths code { overflow-wrap: anywhere; }
+.model-detail-card .detail-path-fixtures { color: #555; }
 .model-detail-card .detail-notcompiled { display: inline-block; padding: 0 0.4rem; border: 1.5px dashed #b07400; border-radius: 4px; background: #f4f4f5; font-size: 0.8rem; }
 .model-detail-card .detail-section-title { margin: 0.5rem 0 0.15rem; font-size: 0.85rem; color: #555; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
 </style>
 </head>
-<body>
+{# cute-dbt#105 — the external-drive contract version, server-rendered
+   so attribute-only observers can read it without executing JS. The
+   in-page window.cuteDbtContract global reads THIS attribute back (the
+   single source — the two surfaces cannot drift). #}
+<body data-cute-dbt-contract="{{ contract_version }}">
 
 <header class="explore-header">
   <div>

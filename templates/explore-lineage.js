@@ -58,6 +58,27 @@
    - search-result rows are DOM built with createElement + textContent
      ONLY — no innerHTML anywhere on this surface.
 
+   External-drive contract (cute-dbt#105 — the host-bridge respec):
+   - window.cuteDbtContract mirrors the server-rendered
+     data-cute-dbt-contract version attribute on <body> (the single
+     source; this engine only reads it back).
+   - window.focusModel(id) is the host's forward hook: highlight +
+     center ONLY — no data-selected-model write and no bridge commit
+     event (the NO-ECHO rule: a host pushing editor-sync focus must
+     never hear its own push back as a commit).
+   - the Space focus commit is DUAL-BOUND: it writes the
+     data-selected-model attribute (the file:// / cmux browser-pane
+     binding) AND, iff a host bridge registered at boot, posts the
+     versioned commit event via postMessage. Registration is
+     detection-based (acquireVsCodeApi presence, or an injected
+     window.cuteDbtHostBridge) and INERT standalone — presence checks
+     only, zero behavior change on plain file://, zero-egress
+     unaffected (postMessage to a host is in-process message passing,
+     never a network request).
+   - window.setView(kind) is rebound by the CTE engine
+     (explore-cte.js); the inert default here keeps the hook callable
+     on every page (fail-open).
+
    First-party, NOT vendored: lives at templates/explore-lineage.js,
    embedded at compile time via asset_embed::EXPLORE_LINEAGE_JS
    (include_str!) and interpolated inline by the askama renderer.
@@ -77,6 +98,42 @@
   // cute-dbt#104 — payload nodes by id, for the detail card + tooltip.
   var nodeById = {};
   data.nodes.forEach(function (n) { nodeById[n.id] = n; });
+
+  // ---- external-drive contract surface (cute-dbt#105) ----------------------
+  // The version is server-rendered as <body data-cute-dbt-contract>
+  // (readable by attribute-only observers without executing JS); this
+  // global mirrors it for JS consumers — the attribute is the single
+  // source, so the two surfaces cannot drift. Declared BEFORE the
+  // empty-manifest return with inert hook defaults (rebound by the
+  // booted engines below) so driving an empty page is a fail-open
+  // no-op, never a TypeError.
+  var CONTRACT_VERSION = String(document.body.dataset.cuteDbtContract || "");
+  window.cuteDbtContract = {
+    version: CONTRACT_VERSION,
+    commitEventType: "cute-dbt/commit",
+    attribute: "data-selected-model",
+    hooks: ["focusModel", "setView"],
+    views: ["lineage", "cte"]
+  };
+  window.focusModel = function () { return false; };
+  window.setView = function () { return false; };
+
+  // Host-bridge detection (cute-dbt#105): registration is
+  // detection-based and INERT standalone — presence checks only, no
+  // call that could touch the network. A VS Code webview exposes
+  // acquireVsCodeApi (called exactly once per its contract); any other
+  // embedding host injects window.cuteDbtHostBridge ({ postMessage })
+  // before this script parses. On plain file:// neither exists and
+  // hostBridge stays null — zero behavior change.
+  var hostBridge = null;
+  if (typeof window.acquireVsCodeApi === "function") {
+    hostBridge = window.acquireVsCodeApi();
+  } else if (
+    window.cuteDbtHostBridge &&
+    typeof window.cuteDbtHostBridge.postMessage === "function"
+  ) {
+    hostBridge = window.cuteDbtHostBridge;
+  }
 
   if (!data.nodes.length) {
     if (host) host.hidden = true;
@@ -319,6 +376,30 @@
       card.appendChild(metaFacts);
     }
 
+    // cute-dbt#105 — read-only per-node file paths (the external-drive
+    // contract's NodePathsPayload, surfaced for humans too). All values
+    // are project-relative manifest facts; textContent only.
+    card.appendChild(el("p", "detail-section-title", "files"));
+    var pathFacts = el("dl", "detail-facts detail-paths", null);
+    fact(pathFacts, "sql", n.paths.sql
+      ? el("code", null, n.paths.sql)
+      : el("span", "detail-empty", "not in manifest"));
+    fact(pathFacts, "schema yaml", n.paths.schema_yaml
+      ? el("code", null, n.paths.schema_yaml)
+      : el("span", "detail-empty", "none"));
+    n.paths.unit_tests.forEach(function (t) {
+      var holder = document.createElement("span");
+      holder.appendChild(t.yaml
+        ? el("code", null, t.yaml)
+        : el("span", "detail-empty", "yaml not in manifest"));
+      t.fixtures.forEach(function (fixture) {
+        holder.appendChild(document.createTextNode(" "));
+        holder.appendChild(el("code", "detail-path-fixtures", fixture));
+      });
+      fact(pathFacts, t.name, holder);
+    });
+    card.appendChild(pathFacts);
+
     card.appendChild(el("p", "detail-section-title", "columns"));
     if (d.columns.length) {
       var table = el("table", "detail-columns", null);
@@ -381,11 +462,45 @@
   }
 
   // ---- FOCUS COMMIT (Space only — the one selectedModel write site) -------
+  // Dual-bound since cute-dbt#105: the DOM attribute always writes (the
+  // standalone file:// binding); the versioned bridge commit event
+  // posts iff a host registered at boot. Both fire ONLY here — never on
+  // hover/click/search/focusModel.
   function commitFocus() {
     if (!highlighted) return;
     cy.center(highlighted);
     document.body.dataset.selectedModel = highlighted.id();
+    if (hostBridge) {
+      var committed = nodeById[highlighted.id()];
+      hostBridge.postMessage({
+        type: "cute-dbt/commit",
+        contractVersion: CONTRACT_VERSION,
+        modelId: highlighted.id(),
+        // The active view at commit time (the V3 toggle's state
+        // vocabulary). Defensive fallback: the CTE engine parses after
+        // this file, so it exists by any user-driven commit.
+        view: window.CuteExploreCte ? window.CuteExploreCte.activeView() : "lineage",
+        // The committed node's project-relative file paths — so a host
+        // can open the files without re-parsing the payload carrier.
+        paths: committed ? committed.paths : null
+      });
+    }
   }
+
+  // ---- forward hook: window.focusModel(id) (cute-dbt#105) ------------------
+  // Host-pushed editor sync — highlight + center, and NOTHING else: no
+  // data-selected-model write, no bridge commit event (the no-echo
+  // rule). The page-local cute-explore-highlight CustomEvent still
+  // fires inside highlightNode — that is in-page wiring (the CTE arm's
+  // gate/retarget), not the external-drive signal. An unknown id is a
+  // fail-open no-op returning false.
+  window.focusModel = function (id) {
+    var node = cy.getElementById(String(id));
+    if (!node || !node.length) return false;
+    highlightNode(node);
+    cy.center(node);
+    return true;
+  };
 
   cy.on("tap", "node", function (evt) { highlightNode(evt.target); });
   cy.on("tap", function (evt) { if (evt.target === cy) clearHighlight(); });
