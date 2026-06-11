@@ -25,6 +25,22 @@
    contiguous runs, top-ranked matches in a listbox (ArrowUp/ArrowDown +
    Enter + Escape + pointer).
 
+   Model detail (cute-dbt#104 — epic #99 V5):
+   - HIGHLIGHT opens the model-detail card (.model-detail-card):
+     description, materialization, tags, meta, the resolved GRAIN (with
+     its source + every detected signal; "unknown" rendered explicitly)
+     and the declared columns. Clearing the highlight hides it.
+   - hovering a node shows a TRANSIENT key-facts tooltip
+     (.lineage-tooltip). The tooltip never changes the highlighted model
+     and never writes document.body.dataset.selectedModel — commitFocus
+     below stays the single write site.
+   - both surfaces are DOM-built with createElement + textContent ONLY
+     (no innerHTML, no string-interpolated markup): hostile
+     manifest-derived values land as glyphs, the same posture as the
+     canvas labels and the search rows. All display strings (badge,
+     grain value/source, meta values) are composed server-side in Rust —
+     this engine stays a pure renderer (the cute-dbt#138 posture).
+
    Init hygiene (the ADR-4-amendment contract, explore-page variant):
    - node labels are CANVAS TEXT (Cytoscape's default canvas renderer) —
      XSS-safe by construction: hostile manifest-derived names draw as
@@ -55,6 +71,12 @@
   var empty = document.querySelector(".lineage-empty");
   var input = document.querySelector(".lineage-search-input");
   var list = document.querySelector(".lineage-search-results");
+  var card = document.querySelector(".model-detail-card");
+  var tooltip = document.querySelector(".lineage-tooltip");
+
+  // cute-dbt#104 — payload nodes by id, for the detail card + tooltip.
+  var nodeById = {};
+  data.nodes.forEach(function (n) { nodeById[n.id] = n; });
 
   if (!data.nodes.length) {
     if (host) host.hidden = true;
@@ -197,6 +219,7 @@
   function clearHighlight() {
     cy.elements().removeClass("dim sel trace");
     highlighted = null;
+    hideDetailCard();
     notifyHighlight(null);
   }
 
@@ -209,7 +232,152 @@
       node.removeClass("dim").addClass("sel");
     });
     highlighted = node;
+    renderDetailCard(node.id());
     notifyHighlight(node.id());
+  }
+
+  // ---- model-detail card + hover tooltip (cute-dbt#104) -------------------
+  // Both surfaces are DOM-built with createElement + textContent ONLY —
+  // hostile manifest-derived values land as glyphs, never markup. All
+  // display strings (badge, grain value/source/origins, meta values)
+  // arrive pre-composed from Rust; this engine is a pure renderer.
+
+  function el(tag, className, text) {
+    var out = document.createElement(tag);
+    if (className) out.className = className;
+    if (text !== undefined && text !== null) out.textContent = String(text);
+    return out;
+  }
+
+  function fact(dl, label, valueNode) {
+    dl.appendChild(el("dt", null, label));
+    var dd = document.createElement("dd");
+    dd.appendChild(valueNode);
+    dl.appendChild(dd);
+  }
+
+  function grainValueNode(grain) {
+    var holder = document.createElement("span");
+    if (!grain.known) {
+      // The explicit-unknown rung — rendered as such, never guessed.
+      holder.appendChild(el("span", "detail-grain-unknown", "unknown"));
+      return holder;
+    }
+    holder.appendChild(el("code", null, grain.value));
+    holder.appendChild(document.createTextNode(" "));
+    holder.appendChild(el("span", "detail-grain-source", "(" + grain.source + ")"));
+    if (grain.detected.length > 1) {
+      var detected = el("ul", "detail-grain-detected", null);
+      grain.detected.forEach(function (signal) {
+        detected.appendChild(el(
+          "li", null,
+          signal.kind + ": " + signal.value + " — " + signal.origin
+        ));
+      });
+      holder.appendChild(detected);
+    }
+    return holder;
+  }
+
+  function renderDetailCard(id) {
+    var n = nodeById[id];
+    if (!card || !n) return;
+    var d = n.detail;
+    while (card.firstChild) card.removeChild(card.firstChild);
+
+    card.appendChild(el("h2", null, n.name || n.id));
+    if (n.not_compiled) {
+      card.appendChild(el("span", "detail-notcompiled", "not compiled"));
+    }
+    card.appendChild(d.description
+      ? el("p", "detail-description", d.description)
+      : el("p", "detail-description detail-empty", "no description"));
+
+    var facts = el("dl", "detail-facts", null);
+    fact(facts, "tests", document.createTextNode(n.badge || ""));
+    fact(facts, "materialized", d.materialized
+      ? el("code", null, d.materialized)
+      : el("span", "detail-empty", "not set"));
+    fact(facts, "grain", grainValueNode(d.grain));
+    var tagsNode = document.createElement("span");
+    if (d.tags.length) {
+      d.tags.forEach(function (tag) {
+        tagsNode.appendChild(el("span", "detail-tag", tag));
+      });
+    } else {
+      tagsNode.appendChild(el("span", "detail-empty", "none"));
+    }
+    fact(facts, "tags", tagsNode);
+    card.appendChild(facts);
+
+    if (d.meta.length) {
+      card.appendChild(el("p", "detail-section-title", "meta"));
+      var metaFacts = el("dl", "detail-facts", null);
+      d.meta.forEach(function (entry) {
+        fact(metaFacts, entry.key, el("span", "detail-meta-value", entry.value));
+      });
+      card.appendChild(metaFacts);
+    }
+
+    card.appendChild(el("p", "detail-section-title", "columns"));
+    if (d.columns.length) {
+      var table = el("table", "detail-columns", null);
+      var head = document.createElement("tr");
+      head.appendChild(el("th", null, "column"));
+      head.appendChild(el("th", null, "type"));
+      head.appendChild(el("th", null, "description"));
+      table.appendChild(head);
+      d.columns.forEach(function (column) {
+        var row = document.createElement("tr");
+        var name = document.createElement("td");
+        name.appendChild(el("code", null, column.name));
+        row.appendChild(name);
+        row.appendChild(el("td", null, column.data_type || ""));
+        row.appendChild(el("td", null, column.description || ""));
+        table.appendChild(row);
+      });
+      card.appendChild(table);
+    } else {
+      card.appendChild(el("p", "detail-empty", "no declared columns"));
+    }
+
+    card.hidden = false;
+  }
+
+  function hideDetailCard() {
+    if (!card) return;
+    card.hidden = true;
+    while (card.firstChild) card.removeChild(card.firstChild);
+  }
+
+  // The hover tooltip is TRANSIENT key facts only. It never touches the
+  // highlight classes, the `highlighted` binding, or
+  // document.body.dataset.selectedModel — commitFocus below stays the
+  // single write site (pinned by the cute-dbt#101 headless test).
+  function showTooltip(node) {
+    var n = nodeById[node.id()];
+    if (!tooltip || !n) return;
+    while (tooltip.firstChild) tooltip.removeChild(tooltip.firstChild);
+    tooltip.appendChild(el("span", "tooltip-name", n.name || n.id));
+    tooltip.appendChild(el("span", "tooltip-fact", n.badge || ""));
+    if (n.detail.materialized) {
+      tooltip.appendChild(el("span", "tooltip-fact", "materialized: " + n.detail.materialized));
+    }
+    tooltip.appendChild(el("span", "tooltip-fact", "grain: " + n.detail.grain.value));
+    if (n.not_compiled) {
+      tooltip.appendChild(el("span", "tooltip-fact", "not compiled"));
+    }
+    var rp = node.renderedPosition();
+    tooltip.style.left = rp.x + "px";
+    tooltip.style.top = (rp.y - 32) + "px";
+    tooltip.style.transform = "translate(-50%, -100%)";
+    tooltip.hidden = false;
+  }
+
+  function hideTooltip() {
+    if (!tooltip) return;
+    tooltip.hidden = true;
+    while (tooltip.firstChild) tooltip.removeChild(tooltip.firstChild);
   }
 
   // ---- FOCUS COMMIT (Space only — the one selectedModel write site) -------
@@ -221,6 +389,14 @@
 
   cy.on("tap", "node", function (evt) { highlightNode(evt.target); });
   cy.on("tap", function (evt) { if (evt.target === cy) clearHighlight(); });
+
+  // ---- tooltip wiring (hover = transient; never a highlight change) -------
+  cy.on("mouseover", "node", function (evt) { showTooltip(evt.target); });
+  cy.on("mouseout", "node", function () { hideTooltip(); });
+  // Pan/zoom/drag move the anchor out from under the tooltip — hide it.
+  cy.on("viewport", function () { hideTooltip(); });
+  cy.on("drag", "node", function () { hideTooltip(); });
+  cy.on("tap", function () { hideTooltip(); });
 
   // ---- Space commit gating (the hard AC's half b) -------------------------
   function inTypingContext(el) {

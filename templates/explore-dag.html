@@ -11,8 +11,8 @@
 <style>
 {# cute-dbt#101 — first-party explore-page chrome for the interactive
    Cytoscape lineage: the search combobox, the focusable canvas host and
-   the legend. Still deliberately small — the model-detail card and the
-   hover tooltip are V5 (epic #99), not this slice. #}
+   the legend. cute-dbt#104 adds the model-detail card (highlight) and
+   the transient hover tooltip. #}
 body { max-width: 72rem; }
 .explore-header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
 .explore-header h1 { margin-bottom: 0.25rem; }
@@ -48,6 +48,32 @@ body { max-width: 72rem; }
 .cte-legend .legend-chip.final { border: 1.5px solid #0072B2; background: #e8f1f8; }
 .cte-legend .legend-chip.import { border: 1.5px solid #1f8a5b; background: #eef7ee; }
 .cte-legend .legend-chip.transform { border: 1.5px solid #6b6b76; background: #f4f4f5; }
+/* cute-dbt#104 — the model-detail card (shown on HIGHLIGHT) and the
+   transient hover tooltip. The tooltip is pointer-events:none so it can
+   never intercept the pointer (hovering it must not flicker), and it is
+   purely transient — it never changes the highlighted model. */
+.lineage-view { position: relative; }
+.lineage-tooltip { position: absolute; z-index: 20; max-width: 22rem; padding: 0.35rem 0.6rem; background: #1c1c1f; color: #fcfcfd; border-radius: 5px; box-shadow: 0 4px 14px rgba(28, 28, 31, 0.25); font-size: 0.8rem; line-height: 1.35; pointer-events: none; }
+.lineage-tooltip .tooltip-name { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 600; display: block; }
+.lineage-tooltip .tooltip-fact { display: block; color: #d8d8de; }
+.model-detail-card { margin-top: 0.75rem; padding: 0.75rem 1rem; border: 1px solid #c5c5cc; border-radius: 6px; background: #fcfcfd; }
+.model-detail-card h2 { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 1.05rem; margin: 0 0 0.35rem; overflow-wrap: anywhere; }
+.model-detail-card .detail-description { margin: 0 0 0.5rem; color: #1c1c1f; }
+.model-detail-card .detail-facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.1rem 0.8rem; margin: 0 0 0.5rem; font-size: 0.9rem; }
+.model-detail-card .detail-facts dt { color: #555; font-weight: 600; }
+.model-detail-card .detail-facts dd { margin: 0; overflow-wrap: anywhere; }
+.model-detail-card .detail-grain-source { color: #555; font-size: 0.85rem; }
+.model-detail-card .detail-grain-unknown { color: #b07400; font-weight: 600; }
+.model-detail-card .detail-grain-detected { margin: 0.1rem 0 0; padding-left: 1.1rem; font-size: 0.85rem; color: #555; }
+.model-detail-card .detail-grain-detected li { margin: 0; overflow-wrap: anywhere; }
+.model-detail-card .detail-tag { display: inline-block; margin-right: 0.3rem; padding: 0 0.45rem; border: 1px solid #c5c5cc; border-radius: 999px; background: #f4f4f5; font-size: 0.8rem; }
+.model-detail-card .detail-meta-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; display: block; }
+.model-detail-card .detail-columns { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin: 0.25rem 0 0; }
+.model-detail-card .detail-columns th, .model-detail-card .detail-columns td { text-align: left; padding: 0.15rem 0.6rem 0.15rem 0; border-bottom: 1px solid #ececef; vertical-align: top; }
+.model-detail-card .detail-columns code { overflow-wrap: anywhere; }
+.model-detail-card .detail-empty { color: #777; font-style: italic; }
+.model-detail-card .detail-notcompiled { display: inline-block; padding: 0 0.4rem; border: 1.5px dashed #b07400; border-radius: 4px; background: #f4f4f5; font-size: 0.8rem; }
+.model-detail-card .detail-section-title { margin: 0.5rem 0 0.15rem; font-size: 0.85rem; color: #555; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
 </style>
 </head>
 <body>
@@ -89,6 +115,11 @@ body { max-width: 72rem; }
      here so the follow-up Space lands on the document handler, never in
      the search box (the cute-dbt#101 hard AC). #}
   <div class="lineage-canvas" tabindex="0" aria-label="Interactive model lineage graph"></div>
+  {# cute-dbt#104 — the transient hover tooltip (key facts only). It is
+     aria-hidden (the card is the accessible surface), pointer-inert and
+     NEVER changes the highlighted model or writes the focus-commit
+     attribute. The engine fills it with createElement/textContent only. #}
+  <div class="lineage-tooltip" role="tooltip" aria-hidden="true" hidden></div>
   <p class="lineage-empty" hidden>No models in this manifest.</p>
   <div class="lineage-legend">
     <span class="legend-chip">model</span>
@@ -112,6 +143,11 @@ body { max-width: 72rem; }
       &mdash; edges are labeled with their join type.
     </div>
   </div>
+  {# cute-dbt#104 — the model-detail card. Shown on HIGHLIGHT
+     (click / search-select), hidden on clear; hover never opens it (the
+     tooltip is the transient hover surface). The engine fills it with
+     createElement/textContent only — no innerHTML on this surface. #}
+  <aside class="model-detail-card" aria-label="Model detail" hidden></aside>
 </section>
 
 <script type="application/json" id="explore-dag-data">{{ dag_json|safe }}</script>

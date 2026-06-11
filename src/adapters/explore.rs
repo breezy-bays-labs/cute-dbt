@@ -50,7 +50,9 @@ use crate::adapters::asset_embed::{
     FAVICON_DATA_URI, SAKURA_CSS,
 };
 use crate::adapters::render::{DagPayload, ReportPayload};
-use crate::domain::{Manifest, ModelInScopeSet, NodeId, resolve_target_model};
+use crate::domain::{
+    GrainKind, Manifest, ModelInScopeSet, Node, NodeId, model_grain_signals, resolve_target_model,
+};
 
 /// One model node in the lineage graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +205,185 @@ pub struct LineageNodePayload {
     /// off the manifest — never check-engine (coverage-intelligence)
     /// output, so no display toggle gates them.
     pub badge: String,
+    /// The model-detail facts (cute-dbt#104) — the highlight card's and
+    /// the hover tooltip's data, all manifest-derived and pre-rendered
+    /// in Rust (the engine stays a pure renderer).
+    pub detail: ModelDetailPayload,
+}
+
+/// Per-model detail facts for the highlight card + hover tooltip
+/// (cute-dbt#104). Every field is manifest-derived; every key is always
+/// serialized (the explicit-0/0 posture — absence is `null`/`[]`, never
+/// an omitted key).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ModelDetailPayload {
+    /// Authored model description (cute-dbt#200 ingestion) — `null` for
+    /// an undescribed model.
+    pub description: Option<String>,
+    /// `config.materialized` — `null` when the manifest omits it.
+    pub materialized: Option<String>,
+    /// Resolved model tags (the authoritative deduplicated top-level
+    /// wire list — the cute-dbt#200 decision; `config.tags` carries
+    /// merge duplicates on real dbt-core manifests and is not read).
+    pub tags: Vec<String>,
+    /// `config.meta` entries, key-ordered, values pre-rendered (strings
+    /// verbatim, everything else compact JSON — the private
+    /// `render_meta_value` helper).
+    pub meta: Vec<MetaEntryPayload>,
+    /// Declared columns (name-ordered): declared `data_type` and
+    /// authored description, each `null` when absent.
+    pub columns: Vec<ColumnDetailPayload>,
+    /// The resolved grain + every detected signal (cute-dbt#104).
+    pub grain: GrainPayload,
+}
+
+/// One `config.meta` entry — the value pre-rendered to a display string
+/// in Rust (strings verbatim; everything else compact JSON).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MetaEntryPayload {
+    /// Meta key.
+    pub key: String,
+    /// Pre-rendered value.
+    pub value: String,
+}
+
+/// One declared column on the detail card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ColumnDetailPayload {
+    /// Column name.
+    pub name: String,
+    /// Declared `data_type`, when present.
+    pub data_type: Option<String>,
+    /// Authored description, when present (the cute-dbt#165
+    /// non-empty-only ingestion).
+    pub description: Option<String>,
+}
+
+/// The model's grain, resolved by the cute-dbt#104 precedence ladder
+/// (explicit `config.meta.grain` → primary-key-class test →
+/// compound-unique test → single `unique` test → explicit "unknown").
+/// `detected` carries EVERY detected signal in precedence order — all
+/// surfaced, never silently dropped; an unresolved grain is the
+/// explicit `"unknown"`/`known: false` shape, never a guess.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GrainPayload {
+    /// The resolved grain value, or the literal `"unknown"`.
+    pub value: String,
+    /// Where the winning signal came from: `"config.meta.grain"`,
+    /// `"primary-key test"`, `"compound-unique test"`, `"unique test"`,
+    /// or the literal `"unknown"`.
+    pub source: String,
+    /// `false` ⇔ the explicit-unknown rung.
+    pub known: bool,
+    /// Every detected signal, precedence-ordered (the winner first).
+    pub detected: Vec<GrainDetectedPayload>,
+}
+
+impl Default for GrainPayload {
+    fn default() -> Self {
+        Self {
+            value: "unknown".to_owned(),
+            source: "unknown".to_owned(),
+            known: false,
+            detected: Vec::new(),
+        }
+    }
+}
+
+/// One detected grain signal on the card's "all detected" surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GrainDetectedPayload {
+    /// The signal's precedence class, in the [`GrainPayload::source`]
+    /// vocabulary.
+    pub kind: String,
+    /// Rendered grain value.
+    pub value: String,
+    /// `"config.meta.grain"` or the detecting test's node id.
+    pub origin: String,
+}
+
+/// The display label for one grain precedence class (the carrier's
+/// `source`/`kind` vocabulary).
+fn grain_kind_label(kind: GrainKind) -> &'static str {
+    match kind {
+        GrainKind::Meta => "config.meta.grain",
+        GrainKind::PrimaryKey => "primary-key test",
+        GrainKind::CompoundUnique => "compound-unique test",
+        GrainKind::Unique => "unique test",
+    }
+}
+
+/// Resolve the grain carrier for one model via the domain ladder
+/// ([`model_grain_signals`]). No signals ⇒ the explicit-unknown shape.
+fn grain_payload(current: &Manifest, node: &Node) -> GrainPayload {
+    let signals = model_grain_signals(current, node);
+    let Some(winner) = signals.first() else {
+        return GrainPayload::default();
+    };
+    GrainPayload {
+        value: winner.value.clone(),
+        source: grain_kind_label(winner.kind).to_owned(),
+        known: true,
+        detected: signals
+            .iter()
+            .map(|s| GrainDetectedPayload {
+                kind: grain_kind_label(s.kind).to_owned(),
+                value: s.value.clone(),
+                origin: s.origin.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Pre-render one `config.meta` value: strings verbatim, everything
+/// else (numbers, bools, arrays, objects, null) as compact JSON — the
+/// card surfaces the authored value, never interprets it.
+fn render_meta_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Assemble the cute-dbt#104 detail facts for one model node. A missing
+/// node (defensive — explore ids come from the manifest) yields the
+/// empty detail with the explicit-unknown grain.
+fn model_detail(current: &Manifest, node: Option<&Node>) -> ModelDetailPayload {
+    let Some(node) = node else {
+        return ModelDetailPayload::default();
+    };
+    let meta = node
+        .config()
+        .config()
+        .get("meta")
+        .and_then(serde_json::Value::as_object)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|(key, value)| MetaEntryPayload {
+                    key: key.clone(),
+                    value: render_meta_value(value),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let columns = node
+        .columns()
+        .iter()
+        .map(|(name, data_type)| ColumnDetailPayload {
+            name: name.clone(),
+            data_type: data_type.clone(),
+            description: node.column_descriptions().get(name).cloned(),
+        })
+        .collect();
+    ModelDetailPayload {
+        description: node.description().map(str::to_owned),
+        materialized: node.config().materialized().map(str::to_owned),
+        tags: node.tags().to_vec(),
+        meta,
+        columns,
+        grain: grain_payload(current, node),
+    }
 }
 
 /// One dependency edge in the serialized lineage payload, by node id.
@@ -257,16 +438,21 @@ pub fn build_lineage_payload(current: &Manifest, models: &ModelInScopeSet) -> Li
             to: lineage.nodes[to].id.clone(),
         })
         .collect();
+    // `lineage.nodes` mirrors `models` one-to-one and in the same order
+    // (build_lineage maps the same set), so the zip rebinds each node to
+    // its manifest entry for the cute-dbt#104 detail assembly.
     let nodes = lineage
         .nodes
         .into_iter()
-        .map(|n| LineageNodePayload {
+        .zip(models.iter())
+        .map(|(n, id)| LineageNodePayload {
             id: n.id,
             name: n.name,
             not_compiled: n.not_compiled,
             data_tests: n.data_tests,
             unit_tests: n.unit_tests,
             badge: test_badge(n.data_tests, n.unit_tests),
+            detail: model_detail(current, current.node(id)),
         })
         .collect();
     LineagePayload {
@@ -1232,5 +1418,170 @@ mod tests {
             .expect("mart_orders present");
         assert!(mart.not_compiled, "fail-open badge data");
         assert!(mart.tests.is_empty(), "zero-test model still renders");
+    }
+
+    // ----- model-detail card payload (cute-dbt#104) ---------------------
+
+    /// A described / tagged / configured model with declared columns —
+    /// the full detail-card input shape.
+    fn detailed_model(id: &str) -> Node {
+        let mut config = BTreeMap::new();
+        config.insert("materialized".to_owned(), serde_json::json!("table"));
+        config.insert(
+            "meta".to_owned(),
+            serde_json::json!({
+                "grain": "order_id + order_date",
+                "owner": "analytics",
+                "uses": ["reporting", "billing"],
+            }),
+        );
+        let mut columns: BTreeMap<String, Option<String>> = BTreeMap::new();
+        columns.insert("order_id".to_owned(), Some("varchar".to_owned()));
+        columns.insert("order_date".to_owned(), None);
+        let mut descriptions = BTreeMap::new();
+        descriptions.insert("order_id".to_owned(), "Primary key.".to_owned());
+        Node::new(
+            NodeId::new(id),
+            "model",
+            Checksum::new("sha256", "ck"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            crate::domain::NodeConfig::new(config, false),
+            None,
+            columns,
+        )
+        .with_column_descriptions(descriptions)
+        .with_model_metadata(
+            Some("One row per order.".to_owned()),
+            vec!["marts".to_owned(), "core".to_owned()],
+        )
+    }
+
+    /// A `unique`-class data test attached to `target` (the cute-dbt#104
+    /// grain-inference input shape).
+    fn unique_test(id: &str, target: &str, column: &str) -> Node {
+        data_test(id, Some(target), &[target], None).with_test_attachment(
+            Some(column.to_owned()),
+            Some(NodeId::new(target)),
+            Some(crate::domain::TestMetadata::new(
+                "unique",
+                None,
+                serde_json::json!({ "column_name": column }),
+            )),
+        )
+    }
+
+    #[test]
+    fn payload_carries_the_model_detail_facts() {
+        let current = manifest_of(vec![detailed_model("model.shop.dim_orders")]);
+        let payload = build_lineage_payload(&current, &all_models(&current));
+        let detail = &payload.nodes[0].detail;
+        assert_eq!(detail.description.as_deref(), Some("One row per order."));
+        assert_eq!(detail.materialized.as_deref(), Some("table"));
+        assert_eq!(detail.tags, vec!["marts", "core"]);
+        assert_eq!(
+            detail
+                .meta
+                .iter()
+                .map(|m| (m.key.as_str(), m.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("grain", "order_id + order_date"),
+                ("owner", "analytics"),
+                ("uses", "[\"reporting\",\"billing\"]"),
+            ],
+            "meta entries are key-ordered; strings verbatim, the rest compact JSON",
+        );
+        assert_eq!(
+            detail.columns,
+            vec![
+                ColumnDetailPayload {
+                    name: "order_date".to_owned(),
+                    data_type: None,
+                    description: None,
+                },
+                ColumnDetailPayload {
+                    name: "order_id".to_owned(),
+                    data_type: Some("varchar".to_owned()),
+                    description: Some("Primary key.".to_owned()),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn payload_grain_resolves_meta_over_inferred_and_surfaces_all_detected() {
+        let current = manifest_of(vec![
+            detailed_model("model.shop.dim_orders"),
+            unique_test(
+                "test.shop.unique_dim_orders",
+                "model.shop.dim_orders",
+                "order_id",
+            ),
+        ]);
+        let payload = build_lineage_payload(&current, &all_models(&current));
+        let grain = &payload.nodes[0].detail.grain;
+        assert_eq!(grain.value, "order_id + order_date");
+        assert_eq!(grain.source, "config.meta.grain");
+        assert!(grain.known);
+        // ALL detected grains surfaced — the inferred signal rides along.
+        assert_eq!(grain.detected.len(), 2, "{grain:?}");
+        assert_eq!(grain.detected[0].kind, "config.meta.grain");
+        assert_eq!(grain.detected[1].kind, "unique test");
+        assert_eq!(grain.detected[1].value, "order_id");
+        assert_eq!(grain.detected[1].origin, "test.shop.unique_dim_orders");
+    }
+
+    #[test]
+    fn payload_grain_infers_from_a_unique_test_without_meta() {
+        let current = manifest_of(vec![
+            model("model.shop.stg_orders", Some("select 1"), &[]),
+            unique_test(
+                "test.shop.unique_stg_orders",
+                "model.shop.stg_orders",
+                "order_id",
+            ),
+        ]);
+        let payload = build_lineage_payload(&current, &all_models(&current));
+        let grain = &payload.nodes[0].detail.grain;
+        assert_eq!(grain.value, "order_id");
+        assert_eq!(grain.source, "unique test");
+        assert!(grain.known);
+    }
+
+    #[test]
+    fn payload_grain_is_explicitly_unknown_when_nothing_is_detected() {
+        let current = three_model_manifest();
+        let payload = build_lineage_payload(&current, &all_models(&current));
+        for node in &payload.nodes {
+            assert_eq!(node.detail.grain.value, "unknown", "{}", node.name);
+            assert_eq!(node.detail.grain.source, "unknown");
+            assert!(!node.detail.grain.known, "never silently guessed");
+            assert!(node.detail.grain.detected.is_empty());
+        }
+        // The unknown rung is EXPLICIT in the carrier — never an omitted
+        // key (the 0/0-badge posture).
+        let json = json_for_html_script(&payload).expect("serializes");
+        assert!(json.contains("\"value\":\"unknown\""), "{json}");
+        assert!(json.contains("\"known\":false"), "{json}");
+    }
+
+    #[test]
+    fn detail_of_an_undetailed_model_is_empty_but_explicit() {
+        let current = three_model_manifest();
+        let payload = build_lineage_payload(&current, &all_models(&current));
+        let detail = &payload.nodes[0].detail;
+        assert_eq!(detail.description, None);
+        assert_eq!(detail.materialized, None);
+        assert!(detail.tags.is_empty());
+        assert!(detail.meta.is_empty());
+        assert!(detail.columns.is_empty());
+        // Every detail key serializes — absence is null/[], never an
+        // omitted key.
+        let json = json_for_html_script(&payload).expect("serializes");
+        assert!(json.contains("\"description\":null"), "{json}");
+        assert!(json.contains("\"materialized\":null"), "{json}");
     }
 }

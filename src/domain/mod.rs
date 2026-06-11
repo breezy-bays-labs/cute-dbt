@@ -40,6 +40,7 @@ pub mod check_config;
 pub mod checks;
 pub mod config;
 pub mod cte;
+pub mod grain;
 pub mod manifest;
 pub mod path;
 pub mod pr_diff;
@@ -66,6 +67,7 @@ pub use checks::{
 };
 pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, Span};
+pub use grain::{GrainKind, GrainSignal, model_grain_signals, test_is_enabled};
 pub use manifest::{
     Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, SourceNode,
     TestMetadata, UniqueKey,

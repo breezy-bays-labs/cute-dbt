@@ -210,6 +210,30 @@ pub struct ExplorePlan {
     /// fusion wire shape (`attached_node`, `depends_on`,
     /// `original_file_path`) by the explore `When`.
     pub data_tests: Vec<ExploreDataTestDecl>,
+    /// Declared uniqueness-test nodes (cute-dbt#104 — the grain-ladder
+    /// scenarios). Spliced in the REAL fusion wire shape
+    /// (`test_metadata.{name,namespace,kwargs}` + `attached_node` +
+    /// flat `config.enabled`) by the explore `When` — the synthetic
+    /// wire-splice path for the signatures absent from the committed
+    /// playground fixture (`dbt_constraints.*`, `dbt_expectations.*`).
+    pub uniqueness_tests: Vec<ExploreUniquenessTestDecl>,
+}
+
+/// One uniqueness-test node in an [`ExplorePlan`] (cute-dbt#104).
+#[derive(Debug, Clone)]
+pub struct ExploreUniquenessTestDecl {
+    /// Test-node id leaf (`test.jaffle_shop.<name>`).
+    pub name: String,
+    /// Bare name of the model the test's `attached_node` points at.
+    pub attached: String,
+    /// `test_metadata.name` (the generic test's bare name).
+    pub test_name: String,
+    /// `test_metadata.namespace` — `None` for dbt-core built-ins.
+    pub namespace: Option<String>,
+    /// `test_metadata.kwargs`, verbatim wire JSON.
+    pub kwargs: serde_json::Value,
+    /// Flat wire `config.enabled` (the disabled-test scenario).
+    pub enabled: bool,
 }
 
 /// One data-test node in an [`ExplorePlan`] (cute-dbt#103).
@@ -245,6 +269,21 @@ pub struct ExploreModelDecl {
     pub deps: Vec<String>,
     /// Bare names of unit tests targeting this model.
     pub tests: Vec<String>,
+    /// Authored model description (cute-dbt#104) — rides the domain
+    /// node (`description` round-trips the wire verbatim).
+    pub description: Option<String>,
+    /// Resolved top-level tags (cute-dbt#104) — same round-trip.
+    pub tags: Vec<String>,
+    /// Flat wire `config` dict (cute-dbt#104 — `materialized` /
+    /// `meta.grain`). Spliced by the explore `When`: the domain
+    /// `NodeConfig` serializes nested, the wire reader flattens (the
+    /// cute-dbt#145 divergence).
+    pub flat_config: Option<serde_json::Value>,
+    /// Declared columns as `(name, data_type, description)`
+    /// (cute-dbt#104). Spliced in the wire object shape — the domain
+    /// serializes `columns` as a name→type map the wire reader cannot
+    /// ingest.
+    pub columns: Vec<(String, Option<String>, Option<String>)>,
 }
 
 /// A cute-dbt#145 incremental scenario plan — the models (each with its

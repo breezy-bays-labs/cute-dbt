@@ -63,7 +63,7 @@ use cute_dbt::adapters::explore::render_explore;
 use cute_dbt::adapters::render::build_payload;
 use cute_dbt::domain::{
     Checksum, DependsOn, InScopeSet, Manifest, ManifestMetadata, Node, NodeConfig, NodeId,
-    all_models,
+    TestMetadata, all_models,
 };
 
 fn report_file_url(filename: &str) -> String {
@@ -937,6 +937,348 @@ fn explore_dag_canvas_labels_stay_xss_safe_and_highlight_cost_is_subframe() {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n"),
+    );
+
+    let _ = tab.close(true);
+}
+
+// ===== cute-dbt#104 — model-detail card (highlight) + hover tooltip =====
+
+/// A described / tagged / configured model with a meta grain and one
+/// described column — the cute-dbt#104 detail-card input shape
+/// (in-process domain objects, the headless fixture discipline).
+fn detailed_explore_model(id: &str) -> Node {
+    let mut config: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    config.insert("materialized".to_owned(), serde_json::json!("table"));
+    config.insert(
+        "meta".to_owned(),
+        serde_json::json!({ "grain": "order_id + order_date", "owner": "analytics" }),
+    );
+    let mut columns: BTreeMap<String, Option<String>> = BTreeMap::new();
+    columns.insert("order_id".to_owned(), Some("varchar".to_owned()));
+    let mut descriptions = BTreeMap::new();
+    descriptions.insert("order_id".to_owned(), "Primary key.".to_owned());
+    Node::new(
+        NodeId::new(id),
+        "model",
+        Checksum::new("sha256", "ck"),
+        Some("select 1".to_owned()),
+        None,
+        DependsOn::default(),
+        None,
+        NodeConfig::new(config, false),
+        None,
+        columns,
+    )
+    .with_column_descriptions(descriptions)
+    .with_model_metadata(
+        Some("One row per order.".to_owned()),
+        vec!["marts".to_owned()],
+    )
+}
+
+/// A native `unique` data test attached to `target` — the inferred-grain
+/// signal that must ride the card's "all detected" list.
+fn unique_test_node(id: &str, target: &str, column: &str) -> Node {
+    Node::new(
+        NodeId::new(id),
+        "test",
+        Checksum::new("none", ""),
+        None,
+        None,
+        DependsOn::default(),
+        None,
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+    .with_test_attachment(
+        Some(column.to_owned()),
+        Some(NodeId::new(target)),
+        Some(TestMetadata::new(
+            "unique",
+            None,
+            serde_json::json!({ "column_name": column }),
+        )),
+    )
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_dag_detail_card_renders_on_highlight_and_tooltip_never_steals_it() {
+    // cute-dbt#104 — the HIGHLIGHT-card / hover-tooltip contract, driven
+    // through the real CDP input pipeline. Proof points, in order:
+    //   1. the pristine page shows neither card nor tooltip.
+    //   2. a real pointer click HIGHLIGHTS a model -> the detail card
+    //      opens with description, materialization, tags, meta, the
+    //      resolved grain (+ source + every detected signal) and the
+    //      described columns.
+    //   3. hovering ANOTHER node shows the transient tooltip with its
+    //      key facts — and does NOT change the highlighted model, does
+    //      NOT retarget the card, and never writes the focus-commit
+    //      attribute (document.body.dataset.selectedModel stays absent:
+    //      commitFocus is the single write site).
+    //   4. moving the pointer off the node hides the tooltip.
+    //   5. highlighting a signal-less model renders the grain
+    //      EXPLICITLY as "unknown" (never silently guessed).
+    //   6. clearing the highlight (background tap) hides the card.
+    // Rider: the whole session emits zero console warnings/errors.
+    let dir = render_explore_pages(
+        "explore-detail-card",
+        vec![
+            detailed_explore_model("model.shop.dim_orders"),
+            explore_model("model.shop.mystery", &[]),
+            unique_test_node(
+                "test.shop.unique_dim_orders_order_id",
+                "model.shop.dim_orders",
+                "order_id",
+            ),
+        ],
+        HashMap::new(),
+    );
+    let page = dir.join("dag.html");
+    let url = format!("file://{}", page.to_str().expect("page path is UTF-8"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+
+    // Console recorder (the cute-dbt#101 console-clean rider).
+    tab.call_method(Runtime::Enable(None))
+        .expect("enable Runtime domain");
+    tab.call_method(headless_chrome::protocol::cdp::Log::Enable(None))
+        .expect("enable Log domain");
+    let console_noise = Arc::new(Mutex::new(Vec::<String>::new()));
+    let console_recorder = console_noise.clone();
+    tab.add_event_listener(Arc::new(move |event: &Event| match event {
+        Event::RuntimeConsoleAPICalled(e) => {
+            use headless_chrome::protocol::cdp::Runtime::ConsoleAPICalledEventTypeOption as T;
+            if matches!(e.params.Type, T::Warning | T::Error) {
+                let text = e
+                    .params
+                    .args
+                    .first()
+                    .and_then(|a| {
+                        a.description
+                            .clone()
+                            .or_else(|| a.value.as_ref().map(ToString::to_string))
+                    })
+                    .unwrap_or_default();
+                console_recorder
+                    .lock()
+                    .unwrap()
+                    .push(format!("console.{:?}: {text}", e.params.Type));
+            }
+        }
+        Event::LogEntryAdded(e) => {
+            use headless_chrome::protocol::cdp::Log::LogEntryLevel as L;
+            if matches!(e.params.entry.level, L::Warning | L::Error) {
+                console_recorder.lock().unwrap().push(format!(
+                    "log.{:?}: {}",
+                    e.params.entry.level, e.params.entry.text
+                ));
+            }
+        }
+        _ => {}
+    }))
+    .expect("subscribe console events");
+
+    tab.navigate_to(&url).expect("navigate to file:// URL");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(".lineage-canvas canvas", Duration::from_secs(15))
+        .expect("the Cytoscape canvas boots offline");
+
+    // --- 1. pristine: no card, no tooltip --------------------------------
+    assert_eq!(
+        eval(&tab, "document.querySelector('.model-detail-card').hidden"),
+        serde_json::Value::Bool(true),
+        "the detail card starts hidden",
+    );
+    assert_eq!(
+        eval(&tab, "document.querySelector('.lineage-tooltip').hidden"),
+        serde_json::Value::Bool(true),
+        "the tooltip starts hidden",
+    );
+
+    // Rendered coordinates of a node, page-relative.
+    let _ = eval(
+        &tab,
+        "document.querySelector('.lineage-canvas').scrollIntoView({block:'center'})",
+    );
+    let node_point = |id: &str| -> Point {
+        let coords = eval(
+            &tab,
+            &format!(
+                "(function () {{ \
+                   var cy = window.CuteExploreLineage.cyInstance(); \
+                   var n = cy.getElementById('{id}'); \
+                   var rp = n.renderedPosition(); \
+                   var r = cy.container().getBoundingClientRect(); \
+                   return JSON.stringify({{x: r.left + rp.x, y: r.top + rp.y}}); \
+                 }})()"
+            ),
+        );
+        let coords: serde_json::Value =
+            serde_json::from_str(coords.as_str().expect("coords JSON")).expect("coords parse");
+        Point {
+            x: coords["x"].as_f64().expect("x"),
+            y: coords["y"].as_f64().expect("y"),
+        }
+    };
+
+    // --- 2. click highlights -> the full detail card ----------------------
+    tab.click_point(node_point("model.shop.dim_orders"))
+        .expect("real pointer click on dim_orders");
+    assert_eq!(
+        eval(&tab, "window.CuteExploreLineage.highlightedId()"),
+        serde_json::Value::String("model.shop.dim_orders".to_owned()),
+        "the click highlights dim_orders",
+    );
+    assert_eq!(
+        eval(&tab, "document.querySelector('.model-detail-card').hidden"),
+        serde_json::Value::Bool(false),
+        "highlighting opens the detail card",
+    );
+    let card_text = eval(
+        &tab,
+        "document.querySelector('.model-detail-card').textContent",
+    );
+    let card_text = card_text.as_str().expect("card text").to_owned();
+    for expected in [
+        "dim_orders",
+        "One row per order.",                   // description
+        "table",                                // materialization
+        "marts",                                // tag
+        "owner",                                // meta key
+        "analytics",                            // meta value
+        "order_id + order_date",                // resolved grain (meta rung)
+        "config.meta.grain",                    // grain source
+        "unique test",                          // the also-detected inferred signal
+        "test.shop.unique_dim_orders_order_id", // its origin
+        "Primary key.",                         // column description
+        "varchar",                              // column type
+    ] {
+        assert!(
+            card_text.contains(expected),
+            "the detail card must show {expected:?}; got:\n{card_text}",
+        );
+    }
+
+    // --- 3. hovering another node = transient tooltip, highlight intact ---
+    // Park the pointer off-node first so the move ONTO the node emits a
+    // clean mouseover.
+    let mystery_point = node_point("model.shop.mystery");
+    tab.move_mouse_to_point(Point {
+        x: mystery_point.x,
+        y: (mystery_point.y - 60.0).max(1.0),
+    })
+    .expect("park the pointer off-node");
+    tab.move_mouse_to_point(mystery_point)
+        .expect("hover the mystery node");
+    assert_eq!(
+        eval(&tab, "document.querySelector('.lineage-tooltip').hidden"),
+        serde_json::Value::Bool(false),
+        "hovering a node shows the tooltip",
+    );
+    let tip_text = eval(
+        &tab,
+        "document.querySelector('.lineage-tooltip').textContent",
+    );
+    let tip_text = tip_text.as_str().expect("tooltip text").to_owned();
+    assert!(
+        tip_text.contains("mystery") && tip_text.contains("grain: unknown"),
+        "the tooltip carries the hovered node's key facts (grain explicit \
+         even when unknown); got:\n{tip_text}",
+    );
+    // The tooltip is TRANSIENT: highlight unchanged, card untouched,
+    // and the focus-commit attribute never written.
+    assert_eq!(
+        eval(&tab, "window.CuteExploreLineage.highlightedId()"),
+        serde_json::Value::String("model.shop.dim_orders".to_owned()),
+        "hover must NOT change the highlighted model",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelector('.model-detail-card h2').textContent"
+        ),
+        serde_json::Value::String("dim_orders".to_owned()),
+        "hover must NOT retarget the detail card",
+    );
+    assert_eq!(
+        eval(&tab, "'selectedModel' in document.body.dataset"),
+        serde_json::Value::Bool(false),
+        "hover must NEVER write data-selected-model (commitFocus stays \
+         the single write site)",
+    );
+
+    // --- 4. moving off the node hides the tooltip --------------------------
+    tab.move_mouse_to_point(Point {
+        x: mystery_point.x,
+        y: (mystery_point.y - 60.0).max(1.0),
+    })
+    .expect("move the pointer off the node");
+    assert_eq!(
+        eval(&tab, "document.querySelector('.lineage-tooltip').hidden"),
+        serde_json::Value::Bool(true),
+        "the tooltip hides on mouseout (transient, never sticky)",
+    );
+
+    // --- 5. a signal-less model renders the explicit unknown grain ---------
+    tab.click_point(node_point("model.shop.mystery"))
+        .expect("click the mystery node");
+    let card_text = eval(
+        &tab,
+        "document.querySelector('.model-detail-card').textContent",
+    );
+    let card_text = card_text.as_str().expect("card text").to_owned();
+    assert!(
+        card_text.contains("mystery") && card_text.contains("unknown"),
+        "a model with no grain signal renders the grain EXPLICITLY as \
+         unknown; got:\n{card_text}",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelector('.model-detail-card .detail-grain-unknown')\
+               .textContent"
+        ),
+        serde_json::Value::String("unknown".to_owned()),
+        "the unknown grain renders through its dedicated affordance",
+    );
+
+    // --- 6. clearing the highlight hides the card ----------------------------
+    // A background tap clears the highlight. The canvas top-left corner
+    // (inside the fit padding) is reliably node-free.
+    let corner = eval(
+        &tab,
+        "(function () { \
+           var r = document.querySelector('.lineage-canvas').getBoundingClientRect(); \
+           return JSON.stringify({x: r.left + 8, y: r.top + 8}); \
+         })()",
+    );
+    let corner: serde_json::Value =
+        serde_json::from_str(corner.as_str().expect("corner JSON")).expect("corner parse");
+    tab.click_point(Point {
+        x: corner["x"].as_f64().expect("x"),
+        y: corner["y"].as_f64().expect("y"),
+    })
+    .expect("background tap");
+    assert_eq!(
+        eval(&tab, "window.CuteExploreLineage.highlightedId()"),
+        serde_json::Value::Null,
+        "the background tap clears the highlight",
+    );
+    assert_eq!(
+        eval(&tab, "document.querySelector('.model-detail-card').hidden"),
+        serde_json::Value::Bool(true),
+        "clearing the highlight hides the detail card",
+    );
+
+    let noise = console_noise.lock().unwrap().clone();
+    assert!(
+        noise.is_empty(),
+        "the detail-card session must emit zero console warnings/errors; got:\n{}",
+        noise.join("\n"),
     );
 
     let _ = tab.close(true);
