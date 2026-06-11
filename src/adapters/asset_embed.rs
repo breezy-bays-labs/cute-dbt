@@ -52,12 +52,29 @@ pub const MERMAID_JS: &str = include_str!("../../assets/mermaid-11.15.0.umd.min.
 
 /// Cytoscape 3.30.2 — the second graph engine (cute-dbt#180), behind the
 /// report's Mermaid ⇄ Cytoscape DAG-engine picker (Mermaid stays the
-/// static default). The minified **UMD** bundle (never ESM), core only:
-/// no layout extension is vendored (no `cytoscape-dagre`, never the
-/// EPL-licensed `cytoscape-elk`) — node positions come from the
-/// first-party preset layout in [`CYTO_DAG_JS`]. Vendored at
+/// static default), and the engine of the explore page's interactive
+/// model-lineage DAG (cute-dbt#101). The minified **UMD** bundle (never
+/// ESM), core only. The REPORT page loads no layout extension (its
+/// node positions come from the first-party preset layout in
+/// [`CYTO_DAG_JS`] — the ADR-4-amendment init contract); the EXPLORE
+/// page pairs this core with [`CYTOSCAPE_DAGRE_JS`]. `cytoscape-elk`
+/// stays forbidden everywhere (EPL). Vendored at
 /// `assets/cytoscape-3.30.2.min.js`; provenance in `assets/MANIFEST.toml`.
 pub const CYTOSCAPE_JS: &str = include_str!("../../assets/cytoscape-3.30.2.min.js");
+
+/// cytoscape-dagre 4.0.0 — the left-to-right rank layout for the EXPLORE
+/// page's interactive model-lineage DAG (cute-dbt#101). **Never loaded by
+/// the report page** (whose init contract stays layout-plugin-free). The
+/// minified **UMD** bundle; v4.0.0 bundles its layout dependency
+/// internally (`@dagrejs/dagre` 3.0.0 + `@dagrejs/graphlib` 4.0.1, both
+/// MIT), so there is no separate dagre asset. The upstream
+/// `//# sourceMappingURL=…` trailer is stripped at vendoring (it
+/// references a sibling `.map` file the self-contained page must never
+/// point at); the upstream dist banner reads "cytoscape-dagre 3.0.0" — a
+/// stale banner inside the 4.0.0 tarball (upstream packaging quirk),
+/// documented in `assets/MANIFEST.toml`. Vendored at
+/// `assets/cytoscape-dagre-4.0.0.min.js`.
+pub const CYTOSCAPE_DAGRE_JS: &str = include_str!("../../assets/cytoscape-dagre-4.0.0.min.js");
 
 /// The report's first-party chassis CSS (cute-dbt#177) — semantic token
 /// layer, the five `[data-theme]` blocks, the four `html[data-style]`
@@ -96,6 +113,24 @@ pub const INTERACTION_JS: &str = include_str!("../../templates/interaction.js");
 /// First-party, NOT vendored: lives at `templates/theme.js`. Integrity
 /// gates: the banner-pin + end-of-file sentinel test in this module.
 pub const THEME_JS: &str = include_str!("../../templates/theme.js");
+
+/// The explore page's first-party interactive lineage engine
+/// (cute-dbt#101) — boots Cytoscape + the dagre left-to-right layout
+/// over the embedded `explore-dag-data` [`LineagePayload`] carrier,
+/// hand-rolled dependency-free fuzzy search, click / search-select
+/// **highlight** (emphasize + dim complement, in-place class mutation,
+/// no commit signal) and the deliberate **Space** focus commit
+/// (center + `document.body.dataset.selectedModel`). Same init hygiene
+/// as [`CYTO_DAG_JS`]: canvas-text labels (XSS-safe by construction),
+/// non-webfont system `fontFamily`, no workers, handlers bound from our
+/// JS, never a re-render per interaction.
+///
+/// First-party, NOT vendored: lives at `templates/explore-lineage.js`.
+/// Integrity gates: the banner-pin + end-of-file sentinel test in this
+/// module.
+///
+/// [`LineagePayload`]: crate::adapters::explore::LineagePayload
+pub const EXPLORE_LINEAGE_JS: &str = include_str!("../../templates/explore-lineage.js");
 
 /// The report's first-party Cytoscape DAG engine (cute-dbt#180) — the
 /// opt-in interactive alternative behind the settings-panel engine
@@ -147,11 +182,59 @@ mod tests {
             CYTOSCAPE_JS.contains("\"3.30.2\""),
             "cytoscape version string",
         );
+        // cytoscape-dagre (cute-dbt#101): the head banner — upstream ships
+        // a stale "3.0.0" banner inside the 4.0.0 tarball (the npm
+        // package.json says 4.0.0; documented in assets/MANIFEST.toml),
+        // so the pin is the banner line as shipped plus the UMD global.
+        assert!(
+            CYTOSCAPE_DAGRE_JS.contains("cytoscape-dagre"),
+            "cytoscape-dagre banner",
+        );
+        assert!(
+            CYTOSCAPE_DAGRE_JS.contains("cytoscapeDagre"),
+            "cytoscape-dagre UMD global",
+        );
+        // The bundle is self-contained: dagre is inlined (no external
+        // `require("dagre")` UMD factory argument like the 2.x builds).
+        assert!(
+            !CYTOSCAPE_DAGRE_JS.contains("require(\"dagre\")"),
+            "cytoscape-dagre must bundle dagre internally, never require it",
+        );
+        // The sourceMappingURL trailer is stripped at vendoring — a .map
+        // sibling reference has no place in a self-contained page.
+        assert!(
+            !CYTOSCAPE_DAGRE_JS.contains("sourceMappingURL"),
+            "cytoscape-dagre sourceMappingURL trailer must stay stripped",
+        );
         // DataTables CSS ships no banner comment; assert a DataTables-only
         // custom property is present.
         assert!(
             DATATABLES_CSS.contains("--dt-row-selected"),
             "datatables css content",
+        );
+    }
+
+    #[test]
+    fn the_explore_lineage_js_carries_its_banner_and_is_not_truncated() {
+        assert!(
+            EXPLORE_LINEAGE_JS.contains("cute-dbt explore lineage engine v1"),
+            "explore-lineage.js head banner",
+        );
+        assert!(
+            EXPLORE_LINEAGE_JS
+                .trim_end()
+                .ends_with("/* end of cute-dbt explore lineage engine v1 (cute-dbt#101) */"),
+            "explore-lineage.js end-of-file sentinel (truncation guard)",
+        );
+        // The focus-commit contract (epic #99): the ONLY interaction that
+        // writes the external-drive signal is the deliberate Space commit.
+        // Pin the dataset write so a rename is a conscious act.
+        assert_eq!(
+            EXPLORE_LINEAGE_JS
+                .matches("document.body.dataset.selectedModel =")
+                .count(),
+            1,
+            "exactly one selectedModel write site (the Space focus commit)",
         );
     }
 

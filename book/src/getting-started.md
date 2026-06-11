@@ -80,7 +80,10 @@ cute-dbt explore \
 ```
 
 It writes two self-contained pages under `explore/`: `dag.html` (the
-model-lineage DAG) and `tests.html` (the per-model unit-test index).
+**interactive** model-lineage DAG — pan/zoom/drag, fuzzy search, click
+or search-select to highlight a model's full lineage, <kbd>Space</kbd>
+to commit focus on the highlighted model) and `tests.html` (the
+per-model unit-test index).
 Explore is **fail-open** on uncompiled models — a `dbt parse`-only
 model renders as a "not compiled" node instead of aborting the run
 (the manifest itself must still be readable and schema v12+). Bare

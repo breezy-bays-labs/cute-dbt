@@ -114,10 +114,12 @@ fn payload_carries_n_models(world: &mut World, expected: usize) {
 
 #[then(regex = r#"^dag\.html marks "([^"]+)" as not compiled$"#)]
 fn dag_marks_not_compiled(world: &mut World, bare: String) {
-    let def = lineage_def(world);
-    assert!(
-        def.contains(&format!("\"{bare} (not compiled)\"]:::notcompiled")),
-        "the lineage def must mark {bare:?} not-compiled (fail-open): {def}",
+    let payload = lineage_payload(world);
+    let node = payload_node(&payload, &bare);
+    assert_eq!(
+        node["not_compiled"],
+        Value::Bool(true),
+        "the lineage payload must mark {bare:?} not-compiled (fail-open): {payload}",
     );
 }
 
@@ -153,22 +155,15 @@ fn tests_html_lists_test(world: &mut World, test: String, bare: String) {
 
 #[then(regex = r#"^dag\.html carries a lineage edge from "([^"]+)" to "([^"]+)"$"#)]
 fn dag_carries_edge(world: &mut World, from: String, to: String) {
-    let def = lineage_def(world);
-    // Recover the positional node ids (`n<i>["<label>"...`) from the def,
-    // then assert the `n<from> --> n<to>` edge line.
-    let node_id = |bare: &str| -> String {
-        def.lines()
-            .find_map(|line| {
-                let line = line.trim();
-                line.contains(&format!("[\"{bare}\"]"))
-                    .then(|| line.split('[').next().unwrap_or_default().to_owned())
-            })
-            .unwrap_or_else(|| panic!("model {bare:?} is not a lineage node: {def}"))
-    };
-    let (from_id, to_id) = (node_id(&from), node_id(&to));
+    let payload = lineage_payload(world);
+    let from_id = payload_node(&payload, &from)["id"].clone();
+    let to_id = payload_node(&payload, &to)["id"].clone();
+    let edges = payload["edges"].as_array().expect("edges array");
     assert!(
-        def.contains(&format!("{from_id} --> {to_id}")),
-        "expected the {from:?} -> {to:?} edge ({from_id} --> {to_id}): {def}",
+        edges
+            .iter()
+            .any(|e| e["from"] == from_id && e["to"] == to_id),
+        "expected the {from:?} -> {to:?} edge in the lineage payload: {payload}",
     );
 }
 
@@ -208,9 +203,9 @@ fn explore_payload(world: &World) -> Value {
     serde_json::from_str(&node.inner_text(parser)).expect("embedded payload must be valid JSON")
 }
 
-/// Parse the Mermaid lineage definition out of dag.html's
-/// `explore-dag-data` JSON carrier.
-fn lineage_def(world: &World) -> String {
+/// Parse the lineage payload (cute-dbt#101 — nodes + forward edges) out
+/// of dag.html's `explore-dag-data` JSON carrier.
+pub fn lineage_payload(world: &World) -> Value {
     let html = world
         .explore_dag_html
         .clone()
@@ -222,10 +217,16 @@ fn lineage_def(world: &World) -> String {
         .expect("dag.html must embed <script id=\"explore-dag-data\">")
         .get(parser)
         .expect("dag data node resolves");
-    let data: Value =
-        serde_json::from_str(&node.inner_text(parser)).expect("dag data must be valid JSON");
-    data["def"]
-        .as_str()
-        .expect("dag data carries the def string")
-        .to_owned()
+    serde_json::from_str(&node.inner_text(parser)).expect("dag data must be valid JSON")
+}
+
+/// Find one payload node by bare model name, panicking with the payload
+/// as context when absent.
+pub fn payload_node<'p>(payload: &'p Value, bare: &str) -> &'p Value {
+    payload["nodes"]
+        .as_array()
+        .expect("nodes array")
+        .iter()
+        .find(|n| n["name"] == Value::String(bare.to_owned()))
+        .unwrap_or_else(|| panic!("model {bare:?} is not a lineage node: {payload}"))
 }

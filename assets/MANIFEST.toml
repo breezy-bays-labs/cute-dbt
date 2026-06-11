@@ -67,17 +67,45 @@ sha256 = "70137e77bb273bb2ef972b86e8b0400cca8be53cb25bfc45911a186dc98665de"
 license = "MIT"
 
 # Cytoscape.js core ONLY (cute-dbt#180): the second graph engine behind the
-# report's Mermaid <-> Cytoscape picker. The minified UMD build, extracted
-# from `package/dist/cytoscape.min.js` inside the npm registry tarball below
-# (no CDN involved). The bundle ships with NO `sourceMappingURL` trailer
-# (verified at vendoring — nothing to strip). Deliberately NO layout
-# extension is vendored (no cytoscape-dagre, never the EPL-licensed
-# cytoscape-elk): the report's CTE DAG is laid out by the first-party
-# longest-path preset positions in templates/cyto-dag.js.
+# report's Mermaid <-> Cytoscape picker, and (cute-dbt#101) the engine of
+# the explore page's interactive model-lineage DAG. The minified UMD build,
+# extracted from `package/dist/cytoscape.min.js` inside the npm registry
+# tarball below (no CDN involved). The bundle ships with NO
+# `sourceMappingURL` trailer (verified at vendoring — nothing to strip).
+# The REPORT page's init contract stays layout-plugin-free (its CTE DAG is
+# laid out by the first-party longest-path preset positions in
+# templates/cyto-dag.js); the EXPLORE page pairs this core with the
+# cytoscape-dagre extension below (epic cute-dbt#99 contract).
+# cytoscape-elk stays forbidden everywhere (EPL).
 [[asset]]
 name = "cytoscape"
 version = "3.30.2"
 path = "cytoscape-3.30.2.min.js"
 source = "https://registry.npmjs.org/cytoscape/-/cytoscape-3.30.2.tgz"
 sha256 = "83e8c54a6bec655bfd81df07df605649c268af69aeca67a5ea2da54ea42dac81"
+license = "MIT"
+
+# cytoscape-dagre (cute-dbt#101): the left-to-right rank layout for the
+# EXPLORE page's interactive model-lineage DAG — never loaded by the report
+# page (whose init contract stays layout-plugin-free, see the core entry
+# above). The minified UMD build, extracted from
+# `package/dist/cytoscape-dagre.min.js` inside the npm registry tarball
+# below (no CDN involved). v4.0.0 bundles its layout dependency INTERNALLY
+# (@dagrejs/dagre 3.0.0 + @dagrejs/graphlib 4.0.1, both MIT) — two vendored
+# assets total, not three; there is no separate dagre file to pin. Two
+# vendoring notes an auditor should know:
+#   - the upstream dist banner reads "cytoscape-dagre 3.0.0" — a stale
+#     banner shipped inside the 4.0.0 tarball (upstream packaging quirk);
+#     the npm `package.json` in the same tarball says 4.0.0, which is what
+#     `version` pins here.
+#   - the upstream file ends with a `//# sourceMappingURL=…` trailer; it is
+#     STRIPPED at vendoring (it references a sibling .map file — a
+#     resource-style ref the self-contained-page posture forbids), so this
+#     sha256 is of the stripped bytes.
+[[asset]]
+name = "cytoscape-dagre"
+version = "4.0.0"
+path = "cytoscape-dagre-4.0.0.min.js"
+source = "https://registry.npmjs.org/cytoscape-dagre/-/cytoscape-dagre-4.0.0.tgz"
+sha256 = "d99de4f8df137ad8849089f17c6d312361e625653b30c4418caac50caf40e107"
 license = "MIT"

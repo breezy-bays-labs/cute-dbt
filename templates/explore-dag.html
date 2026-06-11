@@ -9,19 +9,28 @@
 {{ sakura_css|safe }}
 </style>
 <style>
-{# cute-dbt#100 — first-party explore-page chrome. Deliberately tiny: the
-   V1 lineage view is the epic #99 conscious throwaway (V2 replaces it
-   with the interactive Cytoscape engine + the report chassis), so this
-   page carries only what the static Mermaid render needs. #}
+{# cute-dbt#101 — first-party explore-page chrome for the interactive
+   Cytoscape lineage: the search combobox, the focusable canvas host and
+   the legend. Still deliberately small — the model-detail card and the
+   hover tooltip are V5 (epic #99), not this slice. #}
 body { max-width: 72rem; }
 .explore-header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
 .explore-header h1 { margin-bottom: 0.25rem; }
 .explore-nav a { font-size: 0.95rem; }
 .explore-counts { color: #555; font-size: 0.9rem; }
-.lineage-dag { overflow-x: auto; padding: 0.5rem 0; }
-.lineage-dag svg { max-width: none; }
+.lineage-toolbar { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.lineage-search { position: relative; flex: 0 1 22rem; }
+.lineage-search-input { width: 100%; margin-bottom: 0; }
+.lineage-search-results { position: absolute; z-index: 10; left: 0; right: 0; margin: 0.15rem 0 0; padding: 0.2rem 0; list-style: none; background: #fff; border: 1px solid #c5c5cc; border-radius: 4px; box-shadow: 0 4px 14px rgba(28, 28, 31, 0.12); max-height: 16rem; overflow-y: auto; }
+.lineage-search-results li { margin: 0; padding: 0.25rem 0.6rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; cursor: pointer; }
+.lineage-search-results li.is-active { background: #e8f1f8; }
+.lineage-search-results li.lineage-search-none { color: #777; font-style: italic; cursor: default; }
+.lineage-hint { color: #555; font-size: 0.85rem; margin: 0; }
+.lineage-hint kbd { border: 1px solid #c5c5cc; border-bottom-width: 2px; border-radius: 3px; padding: 0 0.3rem; font-size: 0.8rem; background: #f4f4f5; }
+.lineage-canvas { height: min(70vh, 40rem); border: 1px solid #c5c5cc; border-radius: 6px; background: #fcfcfd; }
+.lineage-canvas:focus { outline: 2px solid #0072B2; outline-offset: 2px; }
 .lineage-empty { color: #555; font-style: italic; }
-.lineage-legend { color: #555; font-size: 0.85rem; }
+.lineage-legend { color: #555; font-size: 0.85rem; margin-top: 0.5rem; }
 .lineage-legend .legend-chip { display: inline-block; padding: 0 0.4rem; border: 1.5px solid #0072B2; border-radius: 4px; background: #e8f1f8; color: #1c1c1f; }
 .lineage-legend .legend-chip.notcompiled { border-color: #b07400; border-style: dashed; background: #f4f4f5; }
 </style>
@@ -39,49 +48,51 @@ body { max-width: 72rem; }
 </header>
 
 <section class="lineage" aria-label="Model lineage DAG">
-  <div class="lineage-dag"></div>
+  <div class="lineage-toolbar">
+    <div class="lineage-search">
+      <input type="search" class="lineage-search-input" placeholder="Search models&hellip;"
+             aria-label="Search models" role="combobox" aria-expanded="false"
+             aria-controls="lineage-search-results" autocomplete="off" spellcheck="false">
+      <ul class="lineage-search-results" id="lineage-search-results" role="listbox"
+          aria-label="Matching models" hidden></ul>
+    </div>
+    <p class="lineage-hint">click or search-select highlights a model&rsquo;s lineage &middot; <kbd>Space</kbd> commits focus on the highlighted model</p>
+  </div>
+  {# The canvas host is FOCUSABLE (tabindex) — a search-select moves focus
+     here so the follow-up Space lands on the document handler, never in
+     the search box (the cute-dbt#101 hard AC). #}
+  <div class="lineage-canvas" tabindex="0" aria-label="Interactive model lineage graph"></div>
   <p class="lineage-empty" hidden>No models in this manifest.</p>
   <div class="lineage-legend">
     <span class="legend-chip">model</span>
     <span class="legend-chip notcompiled">not compiled</span>
-    — a dashed node has no compiled SQL in this manifest (<code>dbt parse</code>); run <code>dbt compile</code> to fill it in. The explorer renders it anyway (fail-open).
+    &mdash; a dashed node has no compiled SQL in this manifest (<code>dbt parse</code>); run <code>dbt compile</code> to fill it in. The explorer renders it anyway (fail-open).
   </div>
 </section>
 
 <script type="application/json" id="explore-dag-data">{{ dag_json|safe }}</script>
 
 <script>
-{{ mermaid_js|safe }}
+{# cute-dbt#101 — the vendored Cytoscape UMD core (the same pinned bundle
+   the report's opt-in second engine uses; see assets/MANIFEST.toml). Same
+   embedding contract as every asset: include_str! into .rodata, inline
+   interpolation, never ESM, never a runtime asset dir. #}
+{{ cytoscape_js|safe }}
 </script>
 <script>
-{# cute-dbt#100 — the static lineage boot. Same Mermaid init contract as
-   the report engine (templates/interaction.js): UMD bundle, strict
-   security level, explicit non-webfont system fontFamily, never
-   startOnLoad. The graph definition is server-built in Rust
-   (src/adapters/explore.rs mermaid_lineage_def) and arrives through the
-   JSON carrier above, so this script is a pure renderer. #}
-(function () {
-  "use strict";
-  var data = JSON.parse(document.getElementById("explore-dag-data").textContent);
-  var host = document.querySelector(".lineage-dag");
-  var empty = document.querySelector(".lineage-empty");
-  if (!data.model_count) {
-    empty.hidden = false;
-    return;
-  }
-  window.mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: "strict",
-    theme: "base",
-    fontFamily: 'system-ui,-apple-system,"Segoe UI",sans-serif'
-  });
-  window.mermaid.render("lineage-svg", data.def).then(function (result) {
-    host.innerHTML = result.svg;
-  }).catch(function (err) {
-    empty.textContent = "Lineage could not be rendered: " + err;
-    empty.hidden = false;
-  });
-})();
+{# cute-dbt#101 — the vendored cytoscape-dagre UMD layout extension
+   (dagre bundled internally; sourceMappingURL trailer stripped at
+   vendoring). Parses AFTER the core so its UMD tail auto-registers the
+   `dagre` layout against window.cytoscape. Explore-page only — the
+   report's init contract stays layout-plugin-free. #}
+{{ cytoscape_dagre_js|safe }}
+</script>
+<script>
+{# cute-dbt#101 — the first-party explore lineage engine (interactive
+   boot, fuzzy search, highlight/focus interaction), embedded from
+   templates/explore-lineage.js via asset_embed::EXPLORE_LINEAGE_JS.
+   Banner-pin + end-of-file sentinel tests guard the include. #}
+{{ explore_lineage_js|safe }}
 </script>
 </body>
 </html>

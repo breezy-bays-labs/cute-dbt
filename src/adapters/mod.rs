@@ -20,11 +20,13 @@
 //!   node-role classification + import-CTE binding (produces the v0.1
 //!   `report.html`).
 //! - [`explore`] — the `cute-dbt explore` two-page renderer
-//!   (cute-dbt#100): full-manifest model lineage (`dag.html`, static
-//!   Mermaid — the conscious V1 throwaway that V2 replaces with
-//!   interactive Cytoscape) + the unit-test index (`tests.html`).
-//!   Reuses [`render`]'s engine-agnostic `build_payload` output;
-//!   fail-open on uncompiled models (rendered as "not compiled").
+//!   (cute-dbt#100, cute-dbt#101): the interactive full-manifest model
+//!   lineage (`dag.html` — Cytoscape + cytoscape-dagre over the
+//!   `LineagePayload` carrier, with hand-rolled fuzzy search and the
+//!   epic-#99 highlight/focus interaction) + the unit-test index
+//!   (`tests.html`). Reuses [`render`]'s engine-agnostic
+//!   `build_payload` output; fail-open on uncompiled models (rendered
+//!   as "not compiled").
 //! - [`project_file`] — the v0.2 `ProjectFileReader` port impl
 //!   (`FsProjectFileReader`). Reads project-relative files for the
 //!   authoring-YAML drawer (cute-dbt#69) and the external unit-test

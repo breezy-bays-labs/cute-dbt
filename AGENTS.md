@@ -186,7 +186,14 @@ non-webfont system `fontFamily`, no layout plugins (no `cytoscape-dagre`,
 never EPL `cytoscape-elk`; the preset layout is first-party in
 `templates/cyto-dag.js`), no workers, handlers bound from our JS, and
 per-click interaction mutates classes in place (never re-calls a render
-entry point). Carrying both engines in `report.html` is a conscious
+entry point). That no-layout-plugin line is the **report page's** init
+contract; the **explore page** (cute-dbt#101, epic #99) pairs the same
+pinned Cytoscape core with the vendored `cytoscape-dagre` UMD extension
+(MIT; dagre bundled internally; `sourceMappingURL` trailer stripped at
+vendoring) for its left-to-right lineage layout, keeping every other
+clause (canvas-text labels, system fonts, no workers, in-place class
+mutation, our handlers). `cytoscape-elk` stays forbidden everywhere
+(EPL). Carrying both engines in `report.html` is a conscious
 reversal of the one-engine-per-page posture — see the 2026-06-10 ADR-4
 amendment in the ops repo.
 
