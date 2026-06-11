@@ -5,6 +5,9 @@ against to self-dogfood the `--pr-diff` sticky preview. A PR can edit a
 model's `.sql` or a `unit_test`'s YAML here, and the preview job can run
 cute-dbt `--pr-diff` on the PR's *own* git diff — making every PrDiff
 diff feature (cute-dbt #91/#96/#111/#98) validatable from one CI artifact.
+This directory is the **live self-dogfood source** for those PR preview
+reports: the sticky comment's `dbt-project` row renders only on PRs that
+touch files under `dbt-project/`.
 
 This directory holds **dbt project source only** — models, tests, seeds,
 config. The compiled `target/manifest.json` is **gitignored build output**:

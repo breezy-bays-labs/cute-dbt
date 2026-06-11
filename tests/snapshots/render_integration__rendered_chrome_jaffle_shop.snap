@@ -1490,6 +1490,24 @@ html[data-coverage="off"] .model-findings { display: none; }
 :root[data-theme="rosepine"] .findings-suppressed > summary,
 :root[data-theme="rosepine"] .finding-row.is-suppressed .f-construct { --text-muted: #5d5780; }
 :root[data-theme="solarized"] .finding-row.is-suppressed .f-construct { --text-muted: #586e75; }
+/* cute-dbt#231 — normal-row construct chip AA: the #227 overrides above
+   scope to SUPPRESSED surfaces only, but the NORMAL finding row's
+   construct chip rides the same verbatim muted on its own --bg-alt fill
+   and sits sub-AA on three light themes (measured empirically on the
+   resolved chip fill): latte #6c6f85 on #e6e9ef = 4.06:1, rosepine
+   #726d8d on #f7f1ea = 4.37:1, and solarized #5e6e73 on #f3ecd6 =
+   4.497:1 — a hair under, the SAME pairing #227 deepened on suppressed
+   rows (the issue named only latte+rosepine; hex resolves to exact
+   integer RGB, so the painted ratio equals the token math and solarized
+   fails the floor too). The established deepened stand-ins extend to
+   the chip page-wide (latte Catppuccin subtext1 #5c5f77 = 5.14:1;
+   rosepine #5d5780 = 5.96:1; solarized base01 #586e75 = 4.56:1) —
+   suppressed chips already paint these exact values, so the #227 rules
+   above keep their meaning unchanged. Token overrides only; the
+   verbatim theme blocks stay pinned. */
+:root[data-theme="latte"] .f-construct { --text-muted: #5c5f77; }
+:root[data-theme="rosepine"] .f-construct { --text-muted: #5d5780; }
+:root[data-theme="solarized"] .f-construct { --text-muted: #586e75; }
 html[data-style="terminal"] .tier-chip,
 html[data-style="terminal"] .suppress-chip,
 html[data-style="swiss"] .tier-chip,
