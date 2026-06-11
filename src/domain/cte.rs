@@ -72,6 +72,156 @@ impl Span {
     }
 }
 
+/// One equi-join key pair recovered from a LEFT JOIN's `ON` clause —
+/// `<left qualifier>.<left_column> = <right qualifier>.<right_column>`
+/// where the right qualifier names the LEFT-JOINed relation
+/// (cute-dbt#173, catalog class C4).
+///
+/// All identifiers are lowercased (SQL identifiers are
+/// case-insensitive). `left_leaf` is the lowercased leaf name of the
+/// relation the left-side qualifier resolved to within the same
+/// `SELECT` (a CTE name or an external table leaf); `None` when the
+/// qualifier did not resolve to a plain named table factor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinKeyPair {
+    left_leaf: Option<String>,
+    left_column: String,
+    right_column: String,
+}
+
+impl JoinKeyPair {
+    /// Canonical constructor.
+    #[must_use]
+    pub fn new(
+        left_leaf: Option<String>,
+        left_column: impl Into<String>,
+        right_column: impl Into<String>,
+    ) -> Self {
+        Self {
+            left_leaf,
+            left_column: left_column.into(),
+            right_column: right_column.into(),
+        }
+    }
+
+    /// Lowercased leaf name of the relation the left-side qualifier
+    /// resolved to, or `None` when not statically resolvable.
+    #[must_use]
+    pub fn left_leaf(&self) -> Option<&str> {
+        self.left_leaf.as_deref()
+    }
+
+    /// Lowercased left-side key column.
+    #[must_use]
+    pub fn left_column(&self) -> &str {
+        &self.left_column
+    }
+
+    /// Lowercased right-side key column (qualified by the LEFT-JOINed
+    /// relation in the source SQL).
+    #[must_use]
+    pub fn right_column(&self) -> &str {
+        &self.right_column
+    }
+}
+
+/// Engine-computed structural facts about one `LEFT [OUTER] JOIN` in
+/// one query body — the cute-dbt#40 additive-facts pattern extended
+/// with the where-predicate fact the anti-join check needs
+/// (cute-dbt#173).
+///
+/// Computed during the engine's existing single AST-parse pass — never
+/// a second parse. Facts hang off the [`CteGraph`] (tagged with their
+/// `consumer` body's node name) rather than off [`CteNode`]s, so a
+/// model with **no** `WITH` clause — whose graph carries zero nodes —
+/// still surfaces its LEFT JOINs (the catalog C4 canonical shape).
+/// They are **render-pass internal** (consumed by the domain check
+/// detectors only): the field is `#[serde(skip)]` on [`CteGraph`], so
+/// the embedded report payload is byte-identical to the pre-#173 shape.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LeftJoinFact {
+    consumer: String,
+    right_leaf: String,
+    equi_keys: Vec<JoinKeyPair>,
+    where_is_null_columns: Vec<String>,
+    projects_right_columns: bool,
+    select_is_distinct: bool,
+}
+
+impl LeftJoinFact {
+    /// Canonical constructor.
+    #[must_use]
+    pub fn new(
+        consumer: impl Into<String>,
+        right_leaf: impl Into<String>,
+        equi_keys: Vec<JoinKeyPair>,
+        where_is_null_columns: Vec<String>,
+        projects_right_columns: bool,
+        select_is_distinct: bool,
+    ) -> Self {
+        Self {
+            consumer: consumer.into(),
+            right_leaf: right_leaf.into(),
+            equi_keys,
+            where_is_null_columns,
+            projects_right_columns,
+            select_is_distinct,
+        }
+    }
+
+    /// Name of the body the join appears in — a CTE name, or the
+    /// engine's terminal-node name for the final `SELECT` (also the
+    /// name used when the model has no `WITH` clause at all).
+    #[must_use]
+    pub fn consumer(&self) -> &str {
+        &self.consumer
+    }
+
+    /// Lowercased leaf name of the LEFT-JOINed (right-side) relation.
+    #[must_use]
+    pub fn right_leaf(&self) -> &str {
+        &self.right_leaf
+    }
+
+    /// Equi-join key pairs recovered from the `ON` clause's top-level
+    /// `AND` conjuncts. Empty when the join key is not statically
+    /// recoverable (non-equi predicates, expressions, `USING`,
+    /// unqualified columns).
+    #[must_use]
+    pub fn equi_keys(&self) -> &[JoinKeyPair] {
+        &self.equi_keys
+    }
+
+    /// Lowercased right-qualified columns appearing under `IS NULL` in
+    /// the containing `SELECT`'s top-level `AND`ed `WHERE` conjuncts —
+    /// the anti-join where-predicate fact. An `IS NULL` inside an `OR`
+    /// (different semantics) or on an unqualified column (not
+    /// attributable) is never recorded.
+    #[must_use]
+    pub fn where_is_null_columns(&self) -> &[String] {
+        &self.where_is_null_columns
+    }
+
+    /// `true` when the containing `SELECT`'s projection **provably**
+    /// carries right-side columns: a bare `*`, a `<right>.*` qualified
+    /// wildcard, or a direct `<right>.<column>` reference. Right-side
+    /// columns reaching the output only through expressions (e.g.
+    /// wrapped in `COALESCE`) do not set this — the conservative,
+    /// never-false-fire direction.
+    #[must_use]
+    pub fn projects_right_columns(&self) -> bool {
+        self.projects_right_columns
+    }
+
+    /// `true` when the containing `SELECT` dedups its output
+    /// (`SELECT DISTINCT` / `DISTINCT ON`) — the dedup-after-fan-out
+    /// signal the instrument routing keys off (catalog C4/C10).
+    #[must_use]
+    pub fn select_is_distinct(&self) -> bool {
+        self.select_is_distinct
+    }
+}
+
 /// A node in the CTE dependency DAG — one `WITH name AS (...)` block.
 ///
 /// `desc` is reserved for a future `-- @desc <text>` per-CTE comment
@@ -87,6 +237,7 @@ impl Span {
 /// classifies as `Transform`, the safer default. New facts of this
 /// kind are additive POD fields with `#[serde(default)]`; no domain
 /// layer ever pulls in `sqlparser`.
+///
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CteNode {
     name: String,
@@ -260,6 +411,14 @@ pub struct CteGraph {
     /// setting it.
     #[serde(default)]
     is_recursive: bool,
+    /// Per-LEFT-JOIN structural facts across every body in the query
+    /// (cute-dbt#173). Engine-computed, consumed by the domain check
+    /// detectors only — `#[serde(skip)]` keeps the embedded report
+    /// payload byte-stable. Populated even when the query has no `WITH`
+    /// clause (the graph then has zero nodes but still carries the
+    /// terminal body's facts).
+    #[serde(skip)]
+    left_join_facts: Vec<LeftJoinFact>,
 }
 
 impl CteGraph {
@@ -273,6 +432,7 @@ impl CteGraph {
             nodes,
             edges,
             is_recursive: false,
+            left_join_facts: Vec::new(),
         }
     }
 
@@ -284,6 +444,25 @@ impl CteGraph {
     pub fn with_recursive(mut self) -> Self {
         self.is_recursive = true;
         self
+    }
+
+    /// Attach engine-computed per-LEFT-JOIN facts (cute-dbt#173).
+    ///
+    /// Returns `self` with `left_join_facts` set. Called by the CTE
+    /// engine from the same parsed AST that feeds the cute-dbt#40 shape
+    /// facts — never a second parse.
+    #[must_use]
+    pub fn with_left_join_facts(mut self, left_join_facts: Vec<LeftJoinFact>) -> Self {
+        self.left_join_facts = left_join_facts;
+        self
+    }
+
+    /// Per-LEFT-JOIN structural facts across every body in the query,
+    /// in source order (cute-dbt#173). Empty for join-free queries and
+    /// for graphs constructed without engine-computed facts.
+    #[must_use]
+    pub fn left_join_facts(&self) -> &[LeftJoinFact] {
+        &self.left_join_facts
     }
 
     /// CTE nodes in declaration order.
@@ -495,6 +674,67 @@ mod tests {
         assert!(
             back.is_recursive(),
             "is_recursive round-trips through serde"
+        );
+    }
+
+    #[test]
+    fn left_join_fact_constructor_and_getters() {
+        let fact = LeftJoinFact::new(
+            "(final select)",
+            "customers",
+            vec![JoinKeyPair::new(
+                Some("orders".to_owned()),
+                "customer_id",
+                "id",
+            )],
+            vec!["id".to_owned()],
+            true,
+            false,
+        );
+        assert_eq!(fact.consumer(), "(final select)");
+        assert_eq!(fact.right_leaf(), "customers");
+        assert_eq!(fact.equi_keys().len(), 1);
+        assert_eq!(fact.equi_keys()[0].left_leaf(), Some("orders"));
+        assert_eq!(fact.equi_keys()[0].left_column(), "customer_id");
+        assert_eq!(fact.equi_keys()[0].right_column(), "id");
+        assert_eq!(fact.where_is_null_columns(), &["id".to_owned()]);
+        assert!(fact.projects_right_columns());
+        assert!(!fact.select_is_distinct());
+    }
+
+    #[test]
+    fn cte_graph_with_left_join_facts_attaches_engine_computed_data() {
+        let fact = LeftJoinFact::new("final", "customers", Vec::new(), Vec::new(), false, true);
+        let g = CteGraph::new(vec![], vec![]).with_left_join_facts(vec![fact.clone()]);
+        assert_eq!(g.left_join_facts(), &[fact]);
+        assert!(
+            CteGraph::new(vec![], vec![]).left_join_facts().is_empty(),
+            "constructor carries no left-join facts by default"
+        );
+    }
+
+    #[test]
+    fn left_join_facts_never_reach_the_wire() {
+        // #[serde(skip)] — the facts are render-pass internal (domain
+        // check detectors only); the embedded report payload must stay
+        // byte-identical to the pre-#173 shape.
+        let g = CteGraph::new(vec![], vec![]).with_left_join_facts(vec![LeftJoinFact::new(
+            "final",
+            "customers",
+            Vec::new(),
+            Vec::new(),
+            true,
+            false,
+        )]);
+        let json = serde_json::to_string(&g).unwrap();
+        assert!(
+            !json.contains("left_join_facts"),
+            "left_join_facts must not serialize: {json}"
+        );
+        let back: CteGraph = serde_json::from_str(&json).unwrap();
+        assert!(
+            back.left_join_facts().is_empty(),
+            "deserialization defaults to no facts"
         );
     }
 
