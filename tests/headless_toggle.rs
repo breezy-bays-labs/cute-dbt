@@ -7469,7 +7469,7 @@ const SUPPRESSED_TEXT_CONTRAST_SWEEP_JS: &str = r#"(function () {
     for (var n = el; n; n = n.parentElement) {
       if (parseFloat(getComputedStyle(n).opacity) < 1) {
         out.push(n.tagName.toLowerCase()
-          + (n.className ? "." + String(n.className).split(" ").join(".") : ""));
+          + (n.className ? "." + String(n.className).trim().split(/\s+/).join(".") : ""));
       }
     }
     return out;
@@ -7479,9 +7479,18 @@ const SUPPRESSED_TEXT_CONTRAST_SWEEP_JS: &str = r#"(function () {
   var kill = document.createElement("style");
   kill.textContent = "* { transition: none !important; animation: none !important; }";
   document.head.appendChild(kill);
+  /* fail legibly on missing markup: a null target would otherwise die
+     inside getComputedStyle as an opaque TypeError — name the absentee
+     instead (the eval harness surfaces thrown messages verbatim) */
   var reveal = document.querySelector('[data-testid="findings-suppressed"]');
+  if (!reveal) {
+    throw new Error("suppressed-text sweep: no [data-testid=findings-suppressed] reveal in the DOM");
+  }
   reveal.open = true;
   var row = document.querySelector(".finding-row.is-suppressed");
+  if (!row) {
+    throw new Error("suppressed-text sweep: no .finding-row.is-suppressed row in the DOM");
+  }
   var TARGETS = [
     ["suppress-chip", row.querySelector(".suppress-chip")],
     ["f-verdict", row.querySelector(".f-verdict")],
@@ -7489,6 +7498,12 @@ const SUPPRESSED_TEXT_CONTRAST_SWEEP_JS: &str = r#"(function () {
     ["f-construct", row.querySelector(".f-construct")],
     ["suppressed-summary", reveal.querySelector(":scope > summary")]
   ];
+  var missing = TARGETS.filter(function (t) { return !t[1]; })
+    .map(function (t) { return t[0]; });
+  if (missing.length) {
+    throw new Error("suppressed-text sweep: target element(s) not found: "
+      + missing.join(", "));
+  }
   var root = document.documentElement;
   var out = [];
   for (var i = 0; i < THEMES.length; i++) {
