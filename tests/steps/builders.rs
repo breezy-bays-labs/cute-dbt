@@ -363,6 +363,43 @@ pub fn serialize_coverage_to_tmp(
     path
 }
 
+/// Serialize a synthetic CURRENT manifest for the explore scenarios
+/// (cute-dbt#104), injecting the wire shapes the flat-domain
+/// serialization cannot express (the [`serialize_coverage_to_tmp`]
+/// precedent, generalized to arbitrary top-level node keys):
+///
+/// 1. **node patches** — each `(bare, key, value)` triple rewrites one
+///    top-level key on the model's wire node: the flat `config` dict
+///    (domain `NodeConfig` serializes nested; the wire reader flattens)
+///    and the object-shaped `columns` map (the domain serializes a
+///    name→type map the wire reader cannot ingest);
+/// 2. **test nodes** — each `(node id, node json)` entry is spliced
+///    into `nodes` verbatim in the real wire shape (`resource_type:
+///    "test"`, `attached_node`, `test_metadata`, flat `config.enabled`).
+#[must_use]
+pub fn serialize_explore_to_tmp(
+    manifest: &Manifest,
+    name: &str,
+    node_patches: &[(String, String, Value)],
+    test_nodes: &[(String, Value)],
+) -> PathBuf {
+    let mut value: Value = serde_json::to_value(manifest).expect("manifest serializes to Value");
+    for (bare, key, patch) in node_patches {
+        let id = model_id(bare);
+        value["nodes"][id.as_str()][key.as_str()] = patch.clone();
+    }
+    for (id, node) in test_nodes {
+        value["nodes"][id.as_str()] = node.clone();
+    }
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.json"));
+    std::fs::write(
+        &path,
+        serde_json::to_string(&value).expect("injected manifest serializes"),
+    )
+    .expect("write explore manifest to temp file");
+    path
+}
+
 // ---------------------------------------------------------------------
 // Incremental-model builders (incremental_models.feature — cute-dbt#145).
 // ---------------------------------------------------------------------

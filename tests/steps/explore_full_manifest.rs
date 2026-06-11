@@ -16,10 +16,11 @@ use serde_json::Value;
 
 use super::World;
 use super::builders::{
-    empty_manifest, model_node_with_deps, serialize_coverage_to_tmp, unit_test_for, with_node,
+    empty_manifest, model_node_with_deps, serialize_explore_to_tmp, unit_test_for, with_node,
     with_unit_test,
 };
 use super::explore_cli::run_explore;
+use super::explore_model_detail::wire_uniqueness_test;
 use super::explore_test_badges::wire_data_test;
 use super::world::ExploreModelDecl;
 
@@ -40,6 +41,10 @@ fn declares_model(world: &mut World, bare: String) {
         compiled_sql: None,
         deps: Vec::new(),
         tests: Vec::new(),
+        description: None,
+        tags: Vec::new(),
+        flat_config: None,
+        columns: Vec::new(),
     });
 }
 
@@ -75,6 +80,10 @@ fn model_mut<'w>(world: &'w mut World, bare: &str) -> &'w mut ExploreModelDecl {
 fn run_explore_on_synthetic(world: &mut World) {
     let plan = world.explore_plan.clone();
     let mut manifest = empty_manifest();
+    // cute-dbt#104 — wire-level patches the flat-domain serialization
+    // cannot express: the flat `config` dict and the object-shaped
+    // `columns` map (`(bare, top-level key, value)` triples).
+    let mut node_patches: Vec<(String, String, serde_json::Value)> = Vec::new();
     for m in &plan.models {
         let deps: Vec<&str> = m.deps.iter().map(String::as_str).collect();
         // cute-dbt#102 — an explicit compiled body (the CTE-view
@@ -82,22 +91,53 @@ fn run_explore_on_synthetic(world: &mut World) {
         let compiled = m
             .compiled
             .then(|| m.compiled_sql.as_deref().unwrap_or("select 1"));
-        manifest = with_node(
-            manifest,
-            model_node_with_deps(&m.bare, "ck", compiled, &deps),
-        );
+        // cute-dbt#104 — description + tags ride the domain node (both
+        // round-trip the wire verbatim as top-level keys).
+        let node = model_node_with_deps(&m.bare, "ck", compiled, &deps)
+            .with_model_metadata(m.description.clone(), m.tags.clone());
+        manifest = with_node(manifest, node);
         for test in &m.tests {
             manifest = with_unit_test(manifest, unit_test_for(test, &m.bare));
+        }
+        if let Some(config) = &m.flat_config {
+            node_patches.push((m.bare.clone(), "config".to_owned(), config.clone()));
+        }
+        if !m.columns.is_empty() {
+            let columns: serde_json::Map<String, serde_json::Value> = m
+                .columns
+                .iter()
+                .map(|(name, data_type, description)| {
+                    (
+                        name.clone(),
+                        serde_json::json!({
+                            "name": name,
+                            "data_type": data_type,
+                            "description": description.clone().unwrap_or_default(),
+                        }),
+                    )
+                })
+                .collect();
+            node_patches.push((
+                m.bare.clone(),
+                "columns".to_owned(),
+                serde_json::Value::Object(columns),
+            ));
         }
     }
     // cute-dbt#103 — splice the declared data-test nodes in the REAL
     // fusion wire shape (the coverage_checks.rs precedent: the domain
     // types do not round-trip a flat test-node `config`). An empty
     // declaration list degenerates to the plain serialization.
-    let test_nodes: Vec<(String, serde_json::Value)> =
+    // cute-dbt#104 — the uniqueness-test nodes ride the same splice.
+    let mut test_nodes: Vec<(String, serde_json::Value)> =
         plan.data_tests.iter().map(wire_data_test).collect();
-    let manifest_path =
-        serialize_coverage_to_tmp(&manifest, "explore_full_manifest", &[], &test_nodes, &[]);
+    test_nodes.extend(plan.uniqueness_tests.iter().map(wire_uniqueness_test));
+    let manifest_path = serialize_explore_to_tmp(
+        &manifest,
+        "explore_full_manifest",
+        &node_patches,
+        &test_nodes,
+    );
     let out_dir = super::super::common::tmp("explore_full_manifest_pages");
     let _ = std::fs::remove_dir_all(&out_dir);
     run_explore(world, &manifest_path, out_dir);
