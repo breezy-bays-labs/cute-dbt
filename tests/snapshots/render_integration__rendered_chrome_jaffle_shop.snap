@@ -414,9 +414,6 @@ html[data-style="paper"] .expected-panel {
 }
 html[data-style="paper"] .left-panel { border: var(--rule-w) solid var(--border); }
 html[data-style="paper"] .panel-row { gap: 2rem; }
-html[data-style="paper"] .test-description {
-  border-left-width: 3px; border-radius: 0 var(--radius-pan) var(--radius-pan) 0; padding: 1.05rem 1.3rem;
-}
 html[data-style="paper"] .cte-dag-cyto { height: 26rem; }
 html[data-style="paper"] .dag-legend { gap: 0.5rem 2.4rem; }
 html[data-style="paper"] .node-role-badge,
@@ -435,7 +432,6 @@ html[data-style="terminal"] select,
 html[data-style="terminal"] input,
 html[data-style="terminal"] .theme-chip,
 html[data-style="terminal"] .seg-radio,
-html[data-style="terminal"] .panel-toggle,
 html[data-style="terminal"] .test-mode-toggle,
 html[data-style="terminal"] .settings-cog,
 html[data-style="terminal"] .settings-panel,
@@ -450,8 +446,7 @@ html[data-style="terminal"] .this-badge,
 html[data-style="terminal"] .format-badge,
 html[data-style="terminal"] .row-count-badge,
 html[data-style="terminal"] .left-panel,
-html[data-style="terminal"] .expected-panel,
-html[data-style="terminal"] .test-description { border-radius: 0; }
+html[data-style="terminal"] .expected-panel { border-radius: 0; }
 html[data-style="terminal"] table.given-table,
 html[data-style="terminal"] table.expected-table { border: 1px solid var(--border-strong); }
 html[data-style="terminal"] table.given-table td,
@@ -482,7 +477,6 @@ html[data-style="swiss"] .settings-panel h2 { font-weight: 800; color: var(--tex
 html[data-style="swiss"] select,
 html[data-style="swiss"] input,
 html[data-style="swiss"] .seg-radio,
-html[data-style="swiss"] .panel-toggle,
 html[data-style="swiss"] .test-mode-toggle,
 html[data-style="swiss"] .theme-chip,
 html[data-style="swiss"] .settings-cog,
@@ -500,7 +494,6 @@ html[data-style="swiss"] .expected-panel { border-width: 0; border-top: 3px soli
 html[data-style="swiss"] .left-panel { border: 0; border-top: 2px solid var(--border-strong); border-radius: 0; padding: 0.6rem 0 1rem; }
 html[data-style="swiss"] table.given-table th,
 html[data-style="swiss"] table.expected-table th { border-bottom: 2px solid var(--text); }
-html[data-style="swiss"] .test-description { border-left-width: 4px; border-radius: 0; }
 
 /* ============================ SOFT ======================================== */
 html[data-style="soft"] {
@@ -516,11 +509,8 @@ html[data-style="soft"] .expected-panel {
   border: var(--rule-w) solid var(--border);
 }
 html[data-style="soft"] .expected-panel { border-width: 2px; border-color: var(--accent); }
-html[data-style="soft"] .test-description { border-radius: var(--radius-pan); border-left-width: 4px; padding: 0.95rem 1.2rem; }
-html[data-style="soft"] .panel-toggle,
 html[data-style="soft"] .test-mode-toggle,
 html[data-style="soft"] .seg-radio { border-radius: 999px; overflow: hidden; }
-html[data-style="soft"] .panel-toggle button,
 html[data-style="soft"] .test-mode-toggle button,
 html[data-style="soft"] .seg-radio button { padding-left: 14px; padding-right: 14px; }
 html[data-style="soft"] select,
@@ -661,7 +651,6 @@ html[data-style="soft"] .report-header h1 { letter-spacing: -0.01em; }
   .report-header { flex-wrap: wrap; gap: 0.25rem; }
   .selector-field { min-width: 0; width: 100%; }
   .test-selector-row { gap: 0.4rem; }
-  .selector-arrow { display: none; }
 }
 @media (max-width: 420px) {
   .theme-grid { grid-template-columns: 1fr; }
@@ -744,7 +733,6 @@ table.given-table th, table.expected-table th {
   font-family: var(--font-mono); background: var(--bg-alt);
   padding: 0.05rem 0.35rem; border-radius: var(--radius-sm); color: var(--text);
 }
-.cte-dag-subtitle { margin: 0 0 0.25rem; color: var(--text-muted); font-size: 0.85em; }
 .cte-dag-header { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.55rem; }
 .cte-dag-header h2 { margin: 0; }
 .cte-dag-header .cte-dag-hint { font-size: 0.95em; line-height: 1; }
@@ -752,22 +740,19 @@ table.given-table th, table.expected-table th {
 .diff-scope-banner { padding: 0; margin: 0 0 var(--gap-section); color: var(--text); }
 .diff-scope-line code, .diff-scope-text + * code { font-family: var(--font-mono); }
 
+/* cute-dbt#201 — the left-border description BANNER (and its
+   test-description-section landmark) is retired: the description renders
+   as plain larger-font text inside the always-open test card (the
+   .test-card .test-description rule below). The #74 no-empty-landmark
+   intent carries over via the `hidden` attribute the JS toggles. */
 .test-description {
-  background: var(--bg-alt); border-left: 4px solid var(--accent);
-  padding: 0.875rem 1.125rem; margin: 0 0 1.25rem; border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  margin: 0; padding: 0; background: none; border: 0;
   color: var(--text);
 }
-/* cute-dbt#74 — when the description is empty (no test selected or the
-   selected test has no description), suppress the banner entirely so the
-   aria-labeled landmark region drops from the accessibility tree. The JS
-   toggles `.is-hidden` based on description presence (explicit class toggle,
-   whitespace-robust; Gemini-disposition on PR#77). */
-.test-description-section.is-hidden { display: none; }
 
 .test-selector-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.5rem 1rem; }
 .selector-field { display: flex; flex-direction: column; min-width: 16rem; }
 .selector-field label { color: var(--text-muted); font-size: 0.85em; margin-bottom: 0.15rem; }
-.selector-arrow { padding-bottom: 0.9rem; color: var(--text-muted); }
 
 select, input, textarea {
   background: var(--surface); color: var(--text);
@@ -817,6 +802,93 @@ g.dag-node:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3p
 }
 .legend-edge { display: inline-block; width: 28px; height: 3px; border-radius: 2px; }
 
+/* ============================================================================
+   cute-dbt#201 — design-2 layout restructure: DAG node-detail shelf +
+   the always-open test card (selector-as-title). Lifted from the pass-2
+   engine/base.css (design-return-2), deduplicated, minus the overrides
+   badge rules (those land with the badge itself in cute-dbt#202).
+   ========================================================================== */
+
+/* --- DAG node-detail shelf (beside the DAG; wraps under on narrow) ------ */
+.dag-stage { display: flex; flex-wrap: wrap; gap: 1rem; align-items: flex-start; }
+.dag-canvas-col { flex: 1 1 360px; min-width: 0; }
+.dag-shelf {
+  flex: 1 1 340px; min-width: 0; align-self: stretch;
+  border: var(--rule-w) solid var(--border); border-radius: var(--radius-pan);
+  background: var(--surface); overflow: hidden;
+  display: flex; flex-direction: column; max-height: 32rem;
+}
+.dag-shelf-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 0.6rem;
+  padding: 0.45rem 0.7rem; background: var(--surface-2);
+  border-bottom: var(--rule-w) solid var(--border);
+}
+.dag-shelf-title { font-family: var(--font-mono); font-size: 0.82rem; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dag-shelf-close {
+  flex: 0 0 auto; width: 1.7rem; height: 1.7rem; padding: 0; line-height: 1; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: var(--rule-w) solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text-muted); font-size: 0.9rem;
+}
+.dag-shelf-close:hover { background: var(--bg-alt); color: var(--text); border-color: var(--border-strong); }
+.dag-shelf-body { padding: 0.7rem; overflow: auto; }
+
+/* model-detail card (in the shelf; also the shape the #202 ref tooltip
+   will mirror) */
+.model-detail-card { border: var(--rule-w) solid var(--border); border-radius: var(--radius-sm); background: var(--bg-alt); padding: 0.55rem 0.65rem; margin-bottom: 0.7rem; }
+.model-detail-card code { background: none; padding: 0; border-radius: 0; }
+.mdc-head { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+.mdc-name { font-family: var(--font-mono); font-weight: 700; color: var(--text); }
+.mdc-mat { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--badge-amber); background: var(--badge-amber-bg); border: var(--rule-w) solid var(--badge-amber-edge); border-radius: 999px; padding: 0.05rem 0.5rem; }
+.mdc-tags { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.45rem; }
+.mdc-tag { font-size: 0.72rem; color: var(--text-muted); background: var(--surface-2); border: var(--rule-w) solid var(--border); border-radius: 999px; padding: 0.03rem 0.5rem; }
+.mdc-desc { margin: 0.45rem 0 0; font-size: 0.95rem; line-height: 1.6; color: var(--text); text-wrap: pretty; }
+.mdc-section-label { margin: 0.7rem 0 0.3rem; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+.mdc-mtests .mdc-mtest-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+/* structured-test chips (accent keyword + value chips) */
+.dt-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.3rem 0.85rem; font-size: 0.8rem; }
+.dt-key { font-family: var(--font-mono); font-weight: 700; }
+.dt-vals { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
+.dt-val { font-family: var(--font-mono); border-radius: 4px; padding: 0.02rem 0.42rem; font-size: 0.85em; }
+.model-detail-card .dt-key, .mdc-col-tests .dt-key { color: var(--accent); }
+.model-detail-card .dt-val, .mdc-col-tests .dt-val { background: var(--surface-2); border: var(--rule-w) solid var(--border); color: var(--text); }
+.mdc-col-testcount { font: inherit; font-family: var(--font-mono); font-size: 0.7rem; line-height: 1.3; min-width: 1.2em; text-align: center; padding: 0 0.32rem; border-radius: 999px; cursor: pointer; color: var(--accent-hover); background: var(--accent-tint); border: var(--rule-w) solid color-mix(in oklab, var(--accent) 30%, transparent); }
+.mdc-col-testcount:hover { filter: brightness(0.97); }
+.mdc-col-testcount[aria-expanded="true"] { background: var(--accent); color: var(--accent-on); }
+.mdc-col-tests { list-style: none; margin: 0.5rem 0 0.2rem; padding: 0 0 0 0.6rem; display: flex; flex-direction: column; gap: 0.5rem; border-left: 2px solid var(--border); }
+.mdc-cols { list-style: none; margin: 0.55rem 0 0; padding: 0; }
+.mdc-cols > li { display: block; padding: 0.45rem 0; font-size: 0.84rem; border-top: var(--rule-w) solid var(--border); }
+.mdc-cols > li:first-child { border-top: 0; padding-top: 0; }
+.mdc-col-nrow { display: flex; align-items: baseline; gap: 0.45rem; flex-wrap: wrap; }
+.mdc-col-name { font-family: var(--font-mono); font-weight: 600; font-size: 0.88rem; color: var(--text); }
+.mdc-col-type { font-family: var(--font-mono); font-size: 0.82rem; color: var(--text-faint); }
+.mdc-col-desc { margin-top: 0.2rem; font-size: 0.82rem; line-height: 1.5; color: var(--text-muted); }
+
+/* role badge rides the Compiled SQL summary row in the shelf */
+.dag-shelf .compiled-sql > summary { display: flex; align-items: center; gap: 0.5rem; }
+.dag-shelf .compiled-sql > summary .cs-label { flex: 0 0 auto; }
+.dag-shelf .compiled-sql > summary .node-role-badge { margin-left: auto; }
+
+/* --- test card (selector = title; toggle right; badges far right) ------- */
+.test-section { margin: 1rem 0; }
+.test-card { border: 0; background: none; padding: 0; }
+.test-card-head { display: flex; align-items: flex-end; gap: 0.75rem; flex-wrap: wrap; }
+.test-card-head .test-select-field { flex: 0 1 auto; min-width: 0; }
+/* sizeSelectToWidest sets a static px width; this clamp keeps a long test
+   name from pushing a narrow viewport (the #157 lesson). */
+.test-card-head #test-select { max-width: 100%; }
+.test-card-head .test-mode-toggle { flex: 0 0 auto; }
+.test-card-head .test-badges { flex: 0 0 auto; margin-left: auto; align-self: center; }
+.test-badges { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
+.tb-badge { font-size: 0.72rem; line-height: 1.4; padding: 0.1rem 0.55rem; border-radius: 999px; border: var(--rule-w) solid transparent; white-space: nowrap; }
+.tb-tag { color: var(--accent-hover); background: var(--accent-tint); border-color: color-mix(in oklab, var(--accent) 35%, transparent); font-family: var(--font-mono); }
+.tb-meta { color: var(--text-muted); background: var(--surface-2); border-color: var(--border); font-family: var(--font-mono); }
+.tb-muted { color: var(--text-faint); background: transparent; border-color: var(--border); }
+/* the always-open card's description — larger font (founder decision on
+   epic cute-dbt#197); `hidden` (the #74 carry-over) removes it entirely. */
+.test-card .test-description { margin: 0.7rem 0 0; font-size: 1.34rem; line-height: 1.55; color: var(--text); text-wrap: pretty; white-space: normal; }
+.test-card .test-details-body { margin-top: 0.85rem; }
+
 /* ---- two-panel region ------------------------------------------------ */
 .panel-row { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 1.5rem; margin: 1.5rem 0; }
 /* cute-dbt#157 — the stacked track is minmax(0,1fr), NEVER bare 1fr
@@ -826,16 +898,18 @@ g.dag-node:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3p
    test pins this. */
 .panel-row.is-stacked { grid-template-columns: minmax(0, 1fr); }
 
-.panel-toggle, .test-mode-toggle { display: inline-flex; gap: 0; border: var(--rule-w) solid var(--control-border); border-radius: var(--radius-sm); overflow: hidden; }
-.panel-toggle button, .test-mode-toggle button {
+/* cute-dbt#201 — the .panel-toggle (Inspect/All-inputs) selectors are
+   retired with the segmented control; the #91 scope toggle now lives in
+   the test card's head (flex gap spaces it — no bottom margin). */
+.test-mode-toggle { display: inline-flex; gap: 0; border: var(--rule-w) solid var(--control-border); border-radius: var(--radius-sm); overflow: hidden; }
+.test-mode-toggle button {
   font-size: 0.85em; padding: 4px 12px; border: none; border-radius: 0;
   background: var(--control-bg); color: var(--control-fg); cursor: pointer; opacity: 1;
   font-family: var(--font-ui);
 }
-.panel-toggle button + button, .test-mode-toggle button + button { border-left: var(--rule-w) solid var(--control-border); }
-.panel-toggle button:not(.is-active), .test-mode-toggle button:not(.is-active) { opacity: 0.85; color: var(--text-muted); }
-.panel-toggle button.is-active, .test-mode-toggle button.is-active { background: var(--control-active-bg); color: var(--control-active-fg); }
-.test-mode-toggle { margin-bottom: 0.75rem; }
+.test-mode-toggle button + button { border-left: var(--rule-w) solid var(--control-border); }
+.test-mode-toggle button:not(.is-active) { opacity: 0.85; color: var(--text-muted); }
+.test-mode-toggle button.is-active { background: var(--control-active-bg); color: var(--control-active-fg); }
 
 .zero-updated-hint, .zero-updated-affirm { margin: 0.5rem 0 0; color: var(--text-muted); font-style: italic; font-size: 0.9em; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
@@ -850,7 +924,6 @@ g.dag-node:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3p
 
 .empty-hint, .no-tests-empty { padding: 2rem; text-align: center; color: var(--text-muted); border: var(--rule-w) dashed var(--border); border-radius: var(--radius-pan); }
 .no-tests-empty { padding: 1.25rem 1rem; font-style: italic; }
-.node-detail-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
 
 /* ---- badges ---------------------------------------------------------- */
 .node-role-badge, .incremental-badge, .mode-badge, .this-badge, .format-badge, .row-count-badge {
@@ -1430,34 +1503,24 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
 </section>
 
 <section class="test-selection" aria-label="Test selection">
-  <!-- cute-dbt#91 — global scope toggle. "Updated only" (default)
-       foregrounds the tests this diff updated; "All tests" reveals every
-       test on the in-scope models. The server marks "Updated only" active;
-       the JS re-syncs at boot (auto-selecting "All tests" when the diff
-       updated zero tests). data-testid handles keep the headless toggle
-       test off brittle class names. -->
-  <div class="test-mode-toggle" role="group" aria-label="Test scope" data-testid="updated-toggle">
-    <button type="button" data-test-mode="updated" class="is-active" aria-pressed="true">Updated only</button>
-    <button type="button" data-test-mode="all" aria-pressed="false">All tests</button>
-  </div>
+  
   <div class="test-selector-row">
     <div class="selector-field">
       <label for="model-select">Model</label>
       <select id="model-select"></select>
       
     </div>
-    <span class="selector-arrow" aria-hidden="true">→</span>
-    <div class="selector-field">
-      <label for="test-select">Unit test</label>
-      <select id="test-select"></select>
-    </div>
   </div>
   <p class="zero-updated-hint" data-testid="zero-updated-hint" hidden></p>
+</section>
 
-  <details class="test-details">
-    <summary>Test details</summary>
-    <div class="test-details-body"></div>
-  </details>
+
+<section class="model-findings" aria-label="Coverage checks" data-testid="model-findings">
+  <div class="findings-header">
+    <h2>Coverage checks</h2>
+    <p class="findings-subtitle">Static checks over the manifest and compiled SQL — tiers are labeled, never averaged.</p>
+  </div>
+  <div class="findings-body"></div>
 </section>
 
 <section class="model-sql" aria-label="Model SQL">
@@ -1473,63 +1536,69 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
 <section class="cte-dag" aria-label="CTE dependency DAG">
   <div class="cte-dag-header">
     <h2>CTE dependency DAG</h2>
-    <p class="cte-dag-subtitle">Click a node (or Tab to it and press Enter) to inspect.</p>
+    
+    <button type="button" class="expect-tooltip cte-dag-hint" aria-label="Click a node (or Tab to it and press Enter) to inspect.">ⓘ<span class="expect-tooltip-bubble" aria-hidden="true">Click a node (or Tab to it and press Enter) to inspect.</span></button>
   </div>
   <div class="recursive-banner" hidden>
     Recursive CTE present; recursive arm omitted from DAG (v0.1 limit).
   </div>
-  <div class="cte-dag-mermaid"></div>
   
-  <div class="cte-dag-cyto is-hidden">
-    <div class="cyto-canvas" aria-label="Interactive CTE DAG (Cytoscape)"></div>
-    <div class="cyto-node-card" role="status" aria-live="polite"></div>
-  </div>
-  <div class="dag-legend">
-    <div class="dag-legend-group">
-      <span class="dag-legend-title">node role</span>
-      <span class="dag-legend-roles"></span>
+  <div class="dag-stage">
+    <div class="dag-canvas-col">
+      <div class="cte-dag-mermaid"></div>
+      
+      <div class="cte-dag-cyto is-hidden">
+        <div class="cyto-canvas" aria-label="Interactive CTE DAG (Cytoscape)"></div>
+        <div class="cyto-node-card" role="status" aria-live="polite"></div>
+      </div>
+      <div class="dag-legend">
+        <div class="dag-legend-group">
+          <span class="dag-legend-title">node role</span>
+          <span class="dag-legend-roles"></span>
+        </div>
+        <div class="dag-legend-group">
+          <span class="dag-legend-title">edge type</span>
+          <span class="dag-legend-joins"></span>
+        </div>
+      </div>
     </div>
-    <div class="dag-legend-group">
-      <span class="dag-legend-title">edge type</span>
-      <span class="dag-legend-joins"></span>
-    </div>
+    <aside class="dag-shelf" aria-label="Node detail" hidden>
+      <div class="dag-shelf-head">
+        <span class="dag-shelf-title">Node detail</span>
+        <button type="button" class="dag-shelf-close" aria-label="Close node detail">✕</button>
+      </div>
+      <div class="dag-shelf-body"></div>
+    </aside>
   </div>
 </section>
 
 
-<section class="model-findings" aria-label="Coverage checks" data-testid="model-findings">
-  <div class="findings-header">
-    <h2>Coverage checks</h2>
-    <p class="findings-subtitle">Static checks over the manifest and compiled SQL — tiers are labeled, never averaged.</p>
+<section class="test-section" aria-label="Unit test">
+  <div class="test-card">
+    <div class="test-card-head">
+      <div class="selector-field test-select-field">
+        <label for="test-select">Unit test</label>
+        <select id="test-select"></select>
+      </div>
+      <div class="test-mode-toggle" role="group" aria-label="Test scope" data-testid="updated-toggle">
+        <button type="button" data-test-mode="updated" class="is-active" aria-pressed="true">Updated only</button>
+        <button type="button" data-test-mode="all" aria-pressed="false">All tests</button>
+      </div>
+      <div class="test-badges"></div>
+    </div>
+    <p class="test-description" hidden></p>
+    <div class="test-details-body"></div>
   </div>
-  <div class="findings-body"></div>
-</section>
-
-<!-- cute-dbt#74 — Description banner relocated between CTE DAG and
-     inspect/expected sections. Reduces cognitive scroll for reviewers
-     (context lives next to the test substance they're evaluating) and
-     nudges analytics engineers to author better descriptions. The
-     section starts with `.is-hidden`; the JS toggles the class based
-     on whether the selected test carries a description so the
-     aria-labeled landmark drops from both the DOM and the
-     accessibility tree on empty (class-based toggle is whitespace-
-     robust per Gemini-disposition on PR#77). Full long-form context
-     remains surfaced in the Authoring YAML drawer above (catch-all). -->
-<section class="test-description-section is-hidden" aria-label="Test description">
-  <p class="test-description"></p>
 </section>
 
 <div class="panel-row">
 
-  <section class="panel left-panel" aria-label="Node detail / All inputs">
+  <section class="panel left-panel" aria-label="Given inputs">
+    
     <div class="panel-header">
-      <h2>Inspect</h2>
-      <div class="panel-toggle" role="group" aria-label="Left panel mode">
-        <button type="button" data-mode="node"   class="is-active" aria-pressed="true">Node detail</button>
-        <button type="button" data-mode="inputs" aria-pressed="false">All inputs</button>
-      </div>
+      <h2>Given</h2>
     </div>
-    <div class="left-panel-body" data-mode="node"></div>
+    <div class="left-panel-body" data-mode="inputs"></div>
   </section>
 
   <section class="panel expected-panel" aria-label="Expected output">
@@ -1675,8 +1744,11 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   var state = {
     selectedModel:  null,
     selectedTestId: null,
+    // cute-dbt#201 — the DAG node-detail shelf's selection. Non-null while
+    // the shelf is open; openNodeShelf/closeNodeShelf own it. (The old
+    // leftPanelMode is retired with the Inspect/All-inputs toggle: the
+    // left panel is always the Given panel now.)
     selectedNodeId: null,
-    leftPanelMode:  "node",
     // cute-dbt#91 — false: show only updated tests (default); true: show
     // all tests on the in-scope models. Global + persistent across model
     // switches. Auto-set to true at boot when the diff updated 0 tests.
@@ -1748,6 +1820,7 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       $(".model-sql").hide();
       $(".cte-dag").hide();
       $(".model-findings").hide();
+      $(".test-section").hide();
       $(".panel-row").hide();
       return;
     }
@@ -1787,22 +1860,23 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     window.__cuteSetDagEngine = function (engine) {
       dagEngine = engine === "cytoscape" ? "cytoscape" : "mermaid";
     };
-    // cute-dbt#180 — the Cytoscape tap path's selection hook. Updates the
-    // Inspect panel ONLY — deliberately NO renderDag() call (the spike's
+    // cute-dbt#180 / cute-dbt#201 — the shared node-selection seam. The
+    // Cytoscape tap (cyto-dag.js) and the #194 findings pin both route
+    // through this one global; since the #201 restructure it opens the DAG
+    // node-detail shelf. Deliberately NO renderDag() call (the spike's
     // no-renderDag-per-click rule: a rebuild would reset pan/zoom and wipe
     // the in-place lineage highlight). Mermaid's own activate() keeps its
     // full re-render — selection there is baked into the generated source.
     window.__cuteSelectNode = function (id) {
-      state.selectedNodeId = id;
-      if (state.leftPanelMode !== "node") {
-        state.leftPanelMode = "node";
-        renderSegmentedToggle();
-      }
-      renderLeftPanel();
+      openNodeShelf(id);
     };
     // cute-dbt#178 — delegated hover/focus handlers for the column-header
     // tooltips (the th.has-col-meta triggers decorateColHeader marks).
     bindColTooltips();
+    // cute-dbt#201 — the DAG node-detail shelf's ✕ close + the model-card
+    // column test-count expanders (delegated; shelf content is rebuilt per
+    // node selection).
+    bindShelf();
   });
 
   // cute-dbt#91 — scope-toggle helpers --------------------------------
@@ -1901,12 +1975,33 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     $sel.off("change.cuteDbt").on("change.cuteDbt", function () {
       state.selectedModel = $(this).val();
       // Land on the first VISIBLE test under the (persistent) toggle mode.
+      // (renderForSelectedModel closes any open node shelf — cute-dbt#201.)
       state.selectedTestId = firstVisibleTestId(currentModel());
-      state.selectedNodeId = null;
-      state.leftPanelMode = "node";
       renderTestSelector();
       renderForSelectedModel();
     });
+  }
+
+  // cute-dbt#201 — size a <select> to its WIDEST option (+ arrow/padding)
+  // so its width is static across selections instead of stretching to fill
+  // the row. Canvas-measured with the select's own computed font; the
+  // cached canvas is a measurement scratchpad only (never attached to the
+  // DOM, nothing rendered — zero-egress untouched). The CSS clamps the
+  // resulting width with `max-width: 100%` so a long test name can never
+  // push a narrow viewport (the #157 lesson).
+  function sizeSelectToWidest($sel) {
+    var el = $sel[0];
+    if (!el || !el.options.length) return;
+    var cs = window.getComputedStyle(el);
+    var c = sizeSelectToWidest._c || (sizeSelectToWidest._c = document.createElement("canvas"));
+    var ctx = c.getContext("2d");
+    ctx.font = cs.fontWeight + " " + cs.fontSize + " " + cs.fontFamily;
+    var max = 0;
+    for (var i = 0; i < el.options.length; i++) {
+      var w = ctx.measureText(el.options[i].text).width;
+      if (w > max) max = w;
+    }
+    el.style.width = Math.ceil(max + 46) + "px"; // text + arrow + L/R padding
   }
 
   function renderTestSelector() {
@@ -1917,10 +2012,10 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       $sel.append($("<option>").val(t.id).text(t.name));
     });
     $sel.val(state.selectedTestId);
+    sizeSelectToWidest($sel);
     $sel.off("change.cuteDbt").on("change.cuteDbt", function () {
+      // (renderForSelectedModel closes any open node shelf — cute-dbt#201.)
       state.selectedTestId = $(this).val();
-      state.selectedNodeId = null;
-      state.leftPanelMode = "node";
       renderForSelectedModel();
     });
     renderZeroUpdatedHint(m, tests);
@@ -1959,6 +2054,11 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     // unconditionally too (targeted — never touches .expected-rowcount).
     // (gemini review, PR #146.)
     $(".expected-panel .panel-header .mode-badge, .expected-panel .panel-header .expect-tooltip").remove();
+    // cute-dbt#201 — a fresh model/test selection closes any open
+    // node-detail shelf BEFORE the DAG re-renders below, so the rebuilt
+    // DAG re-centers with no baked selection (the shelf's ✕ handler does
+    // its own renderDag; this path lets the one below suffice).
+    closeNodeShelf();
     renderTestDetails(t);
     renderModelSql(m);
     // cute-dbt#170 — the coverage-checks panel is MODEL-scoped: it renders
@@ -1967,21 +2067,12 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     renderFindingsPanel(m);
     renderDagLegend();
     renderDag();
-    renderSegmentedToggle();
     if (t) {
-      var desc = t.description || "";
-      $(".test-description").text(desc);
-      // cute-dbt#74 — toggle the section's `.is-hidden` class so the
-      // aria-labeled landmark drops from the accessibility tree when
-      // the test carries no description (Gemini-disposition on PR#77:
-      // class-based toggle is whitespace-robust where `:empty` /
-      // `:has(:empty)` selectors are not).
-      $(".test-description-section").toggleClass("is-hidden", !desc);
       renderLeftPanel();
       renderExpectedPanel(t);
     } else {
-      $(".test-description").text("");
-      $(".test-description-section").addClass("is-hidden");
+      // (renderTestDetails(null) above already cleared the badge row, the
+      // description, and the details body — cute-dbt#201.)
       // cute-dbt#91 — distinguish "model has tests but none are updated
       // (Updated-only mode hides them)" from the genuine explorer-mode
       // "model is modified but has zero unit tests" case.
@@ -2039,34 +2130,36 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     return $b;
   }
 
+  // cute-dbt#201 — the always-open test card (founder decision on epic
+  // cute-dbt#197, 2026-06-10: NOT a drawer). The selector is the card's
+  // title; this populates the badge row (tag chips, the muted `untagged`
+  // fallback, meta chips — the overrides badge arrives with cute-dbt#202),
+  // the larger-font description (hidden when empty: the #74
+  // no-empty-landmark intent carries over from the retired
+  // test-description-section), and the details body (defined-in fallback +
+  // the authoring-YAML drawer — the one piece that stays collapsible).
   function renderTestDetails(t) {
+    var $badges = $(".test-badges").empty();
+    var desc = t && t.description ? t.description : "";
+    $(".test-description").text(desc).prop("hidden", !desc);
     var $body = $(".test-details-body").empty();
     if (!t) return;
-    var $tagsLine = $("<div>").addClass("td-line td-tags-line");
-    if (t.tags && t.tags.length) {
-      $tagsLine.append($("<span>").addClass("td-label").text("Tagged "));
-      t.tags.forEach(function (tag, i) {
-        if (i > 0) $tagsLine.append(document.createTextNode(", "));
-        $tagsLine.append($("<span>").addClass("td-tag").text(tag));
-      });
-    } else {
-      $tagsLine.addClass("muted").text("Untagged");
-    }
-    $body.append($tagsLine);
 
-    var $metaLine = $("<div>").addClass("td-line td-meta-line");
-    var metaKeys = t.meta ? Object.keys(t.meta) : [];
-    if (metaKeys.length === 0) {
-      $metaLine.addClass("muted").text("No metadata");
-    } else {
-      metaKeys.forEach(function (k, i) {
-        if (i > 0) $metaLine.append(document.createTextNode(" · "));
-        $metaLine.append($("<span>").addClass("td-meta-key").text(k));
-        $metaLine.append(document.createTextNode(": "));
-        $metaLine.append($("<span>").addClass("td-meta-val").text(String(t.meta[k])));
+    // tag badges — chips replace the #178 "Tagged …"/"Untagged" text lines.
+    if (t.tags && t.tags.length) {
+      t.tags.forEach(function (tag) {
+        $badges.append($("<span>").addClass("tb-badge tb-tag").text(tag));
       });
+    } else {
+      $badges.append($("<span>").addClass("tb-badge tb-muted").text("untagged"));
     }
-    $body.append($metaLine);
+    // meta chips — one chip per key (replaces the "No metadata" line; zero
+    // meta keys simply render zero chips).
+    var metaKeys = t.meta ? Object.keys(t.meta) : [];
+    metaKeys.forEach(function (k) {
+      $badges.append($("<span>").addClass("tb-badge tb-meta")
+        .text(k + ": " + String(t.meta[k])));
+    });
 
     // cute-dbt#178 — the authoring-YAML drawer's code-card header now shows
     // this path (GitHub-style). Keep this row ONLY as a fallback for tests
@@ -2618,12 +2711,11 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       g.setAttribute("aria-label", "Inspect DAG node: " + (safeToLabel[safeId] || originalId));
       g.style.cursor = "pointer";
       function activate() {
-        state.selectedNodeId = originalId;
-        if (state.leftPanelMode !== "node") {
-          state.leftPanelMode = "node";
-          renderSegmentedToggle();
-        }
-        renderLeftPanel();
+        // cute-dbt#201 — open the node-detail shelf, then re-render: the
+        // Mermaid selection ring is baked into the generated source, so
+        // the Mermaid path keeps its full re-render (Cytoscape's tap goes
+        // through __cuteSelectNode and never re-renders — the #180 rule).
+        openNodeShelf(originalId);
         renderDag();
       }
       g.addEventListener("click", activate);
@@ -2646,16 +2738,9 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     }
   }
 
-  function renderSegmentedToggle() {
-    $(".panel-toggle [data-mode]").each(function () {
-      var mode = $(this).attr("data-mode");
-      $(this).attr("aria-pressed", mode === state.leftPanelMode ? "true" : "false");
-      $(this).toggleClass("is-active", mode === state.leftPanelMode);
-    });
-  }
-
   // cute-dbt#91 — sync the Updated-only ↔ All-tests toggle's active state
-  // to state.showAll (mirrors renderSegmentedToggle's idiom).
+  // to state.showAll. (renderSegmentedToggle is retired with the
+  // Inspect/All-inputs panel toggle — cute-dbt#201.)
   function renderTestModeToggle() {
     var active = state.showAll ? "all" : "updated";
     $(".test-mode-toggle [data-test-mode]").each(function () {
@@ -2666,16 +2751,12 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   }
 
   function bindGlobalHandlers() {
-    $(".panel-toggle").on("click", "[data-mode]", function () {
-      state.leftPanelMode = $(this).attr("data-mode");
-      renderSegmentedToggle();
-      renderLeftPanel();
-    });
     // cute-dbt#91 — global Updated-only ↔ All-tests toggle. state.showAll
     // is global and persists across model switches (the model-change
     // handler never resets it). On flip, keep the selection valid: if the
     // currently selected test is no longer visible, fall back to the first
-    // visible test (or null).
+    // visible test (or null). (renderForSelectedModel closes any open node
+    // shelf — cute-dbt#201.)
     $(".test-mode-toggle").on("click", "[data-test-mode]", function () {
       var nextShowAll = $(this).attr("data-test-mode") === "all";
       if (nextShowAll === state.showAll) return;
@@ -2683,8 +2764,6 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       var vis = visibleTests(currentModel());
       var stillVisible = vis.some(function (t) { return t.id === state.selectedTestId; });
       if (!stillVisible) state.selectedTestId = vis.length ? vis[0].id : null;
-      state.selectedNodeId = null;
-      state.leftPanelMode = "node";
       renderTestModeToggle();
       renderModelSelector();
       renderTestSelector();
@@ -2728,8 +2807,9 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       // cute-dbt#180 contract: per-click Cytoscape interaction mutates
       // classes IN PLACE — never a renderDag() rebuild (which would
       // reset pan/zoom). Emitting a tap on the node runs the exact
-      // bound click path (lineage highlight + __cuteSelectNode →
-      // Inspect). Mermaid keeps its render-driven selection.
+      // bound click path (lineage highlight + __cuteSelectNode → the
+      // node-detail shelf, cute-dbt#201). Mermaid keeps its
+      // render-driven selection.
       var cyto = dagEngine === "cytoscape" && window.CuteCyto
         ? window.CuteCyto.cyInstance()
         : null;
@@ -2737,12 +2817,7 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       if (cyEle && cyEle.length) {
         cyEle.emit("tap");
       } else {
-        state.selectedNodeId = id;
-        if (state.leftPanelMode !== "node") {
-          state.leftPanelMode = "node";
-          renderSegmentedToggle();
-        }
-        renderLeftPanel();
+        openNodeShelf(id);
         renderDag();
       }
       var dag = document.querySelector(".cte-dag");
@@ -2770,21 +2845,167 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     });
   }
 
+  // ---- manifest helpers (model details from DATA.manifest_nodes) ---------
+  // cute-dbt#201 — the node-detail shelf's model card reads the #200
+  // manifest_nodes lookup. All graceful: a model absent from the lookup
+  // simply renders no card (compiled SQL still shows).
+  function refTargetName(input) {
+    var mm = /^ref\(['"](.+)['"]\)$/.exec(input || "");
+    return mm ? mm[1] : null;
+  }
+  function manifestNode(name) {
+    return (DATA.manifest_nodes && DATA.manifest_nodes[name]) || null;
+  }
+  // The manifest model a DAG node maps to: the final-select node => this
+  // model; an import node => the ref() target of its bound given (the #131
+  // bound_to_node seam); anything else only when the node id itself names a
+  // known model. Null => no card.
+  function nodeManifestName(node, t, m) {
+    if (!node) return null;
+    if (node.role === "final") return m ? m.name : null;
+    if (node.role === "import") {
+      var g = ((t && t.given) || []).filter(function (x) { return x.bound_to_node === node.id; })[0];
+      if (g) {
+        var r = refTargetName(g.input);
+        if (r && manifestNode(r)) return r;
+      }
+    }
+    return manifestNode(node.id) ? node.id : null;
+  }
+  // Structured-test chips: accent keyword + one value chip per argument —
+  // the #166/#189 ColumnTestPayload display shape ({name, values?,
+  // detail?}), reused for the shelf card's model-level + column tests.
+  function testChipsHtml(tt) {
+    var h = '<span class="dt-key">' + escapeHtml(tt.name) + "</span>";
+    if (tt.values && tt.values.length) {
+      h += '<span class="dt-vals">'
+        + tt.values.map(function (v) { return '<span class="dt-val">' + escapeHtml(String(v)) + "</span>"; }).join("")
+        + "</span>";
+    } else if (tt.detail) {
+      // split a multi-arg detail ("field: x, datepart: day, interval: 2")
+      // into one chip per argument.
+      h += '<span class="dt-vals">'
+        + String(tt.detail).split(/,\s*/).map(function (a) {
+            return '<span class="dt-val">' + escapeHtml(a) + "</span>";
+          }).join("")
+        + "</span>";
+    }
+    return h;
+  }
+  // The shelf's model-detail card: tags → name + materialized →
+  // description → model-level tests → columns (each with a
+  // click-to-expand test-count chip). Built from manifest_nodes[name].
+  function buildModelDetailCard(name) {
+    var info = manifestNode(name);
+    var $c = $("<div>").addClass("model-detail-card");
+    // tags first (above the name), then the name + materialized, then desc.
+    if (info && info.tags && info.tags.length) {
+      var $tg = $("<div>").addClass("mdc-tags");
+      info.tags.forEach(function (tag) { $tg.append($("<span>").addClass("mdc-tag").text(tag)); });
+      $c.append($tg);
+    }
+    var $h = $("<div>").addClass("mdc-head");
+    $h.append($("<code>").addClass("mdc-name").text(name));
+    if (info && info.materialized) $h.append($("<span>").addClass("mdc-mat").text(info.materialized));
+    $c.append($h);
+    if (info && info.description) $c.append($("<p>").addClass("mdc-desc").text(info.description));
+    // model-level data tests (below the description, above the columns).
+    if (info && info.model_tests && info.model_tests.length) {
+      var $mt = $("<div>").addClass("mdc-mtests");
+      $mt.append($("<div>").addClass("mdc-section-label")
+        .text("Model tests · " + info.model_tests.length));
+      var $mul = $("<ul>").addClass("mdc-mtest-list");
+      info.model_tests.forEach(function (tt) {
+        $mul.append($("<li>").addClass("dt-row").html(testChipsHtml(tt)));
+      });
+      $mt.append($mul);
+      $c.append($mt);
+    }
+    if (info && info.columns && info.columns.length) {
+      $c.append($("<div>").addClass("mdc-section-label").text("Columns · " + info.columns.length));
+      var $cols = $("<ul>").addClass("mdc-cols");
+      info.columns.forEach(function (col) {
+        var $li = $("<li>");
+        var $nrow = $("<div>").addClass("mdc-col-nrow");
+        $nrow.append($("<code>").addClass("mdc-col-name").text(col.name));
+        if (col.type) $nrow.append($("<span>").addClass("mdc-col-type").text(col.type));
+        // test-count chip — click to expand this column's tests.
+        var hasTests = col.tests && col.tests.length;
+        if (hasTests) {
+          $nrow.append($("<button>").attr("type", "button")
+            .addClass("mdc-col-testcount").attr("aria-expanded", "false")
+            .attr("aria-label", col.tests.length + " data test" + (col.tests.length === 1 ? "" : "s"))
+            .text(col.tests.length));
+        }
+        $li.append($nrow);
+        if (col.description) $li.append($("<div>").addClass("mdc-col-desc").text(col.description));
+        if (hasTests) {
+          var $tl = $("<ul>").addClass("mdc-col-tests").prop("hidden", true);
+          col.tests.forEach(function (tt) {
+            $tl.append($("<li>").addClass("dt-row").html(testChipsHtml(tt)));
+          });
+          $li.append($tl);
+        }
+        $cols.append($li);
+      });
+      $c.append($cols);
+    }
+    return $c;
+  }
+
+  // ---- node-detail shelf (slides out beside the DAG; cute-dbt#201) -------
+  function openNodeShelf(nodeId) {
+    state.selectedNodeId = nodeId;
+    $(".dag-shelf").prop("hidden", false);
+    $(".dag-stage").addClass("shelf-open");
+    renderNodeDetail(currentTest());
+  }
+  // Hide + clear the shelf. Pure state/DOM reset — the DAG re-render is
+  // the CALLER's choice: the ✕ handler re-renders (re-centers, clears the
+  // baked Mermaid selection) while renderForSelectedModel calls this just
+  // before its own renderDag() so a fresh selection never double-renders.
+  function closeNodeShelf() {
+    state.selectedNodeId = null;
+    $(".dag-shelf").prop("hidden", true);
+    $(".dag-stage").removeClass("shelf-open");
+    $(".dag-shelf-body").empty();
+  }
+  function bindShelf() {
+    $(document).on("click", ".dag-shelf-close", function () {
+      closeNodeShelf();
+      renderDag(); // ✕ re-centers the DAG (the cute-dbt#201 close contract)
+    });
+    // expand/collapse a column's tests in the shelf model-detail card.
+    $(document).on("click", ".mdc-col-testcount", function () {
+      var $btn = $(this);
+      var open = $btn.attr("aria-expanded") === "true";
+      $btn.attr("aria-expanded", open ? "false" : "true");
+      $btn.closest("li").find(".mdc-col-tests").prop("hidden", open);
+    });
+  }
+
+  // cute-dbt#201 — the left panel is the Given panel: always every given
+  // input (the Inspect/All-inputs segmented toggle is retired; node detail
+  // lives in the DAG shelf). The #131 ordinal binding rides the render
+  // loop index in renderAllInputs — t.given is the full in-order list.
   function renderLeftPanel() {
     var t = currentTest();
     if (!t) return;
-    if (state.leftPanelMode === "inputs") {
-      renderAllInputs(t);
-    } else {
-      renderNodeDetail(t);
-    }
+    renderAllInputs(t);
   }
 
+  // cute-dbt#201 — render the selected DAG node into the shelf: the
+  // model-detail card (when manifest_nodes knows the node's model) + the
+  // node's compiled SQL with the role badge riding the summary row. The
+  // unit-test given fixtures are deliberately NOT shown here — they live
+  // in the Given panel below (the pre-#201 duplicate ordinal-bound
+  // cell-diff rendering disappears with this rule), so the shelf stays
+  // focused on the node: model details + compiled SQL.
   function renderNodeDetail(t) {
-    var $wrap = $(".left-panel-body").empty().attr("data-mode", "node");
+    var $wrap = $(".dag-shelf-body").empty();
     var m = currentModel();
     if (!state.selectedNodeId) {
-      $wrap.append($("<div>").addClass("empty-hint").text("Click a node above to inspect."));
+      $wrap.append($("<div>").addClass("empty-hint").text("Click a node to inspect."));
       return;
     }
     var node = m && m.dag.nodes.filter(function (n) { return n.id === state.selectedNodeId; })[0];
@@ -2792,18 +3013,21 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       $wrap.append($("<div>").addClass("empty-hint").text("Node not found."));
       return;
     }
+    $(".dag-shelf-title").text(node.label || node.id);
     var $detail = $("<div>").addClass("node-detail")
       .attr("data-node-id", node.id)
       .attr("data-node-role", node.role);
 
-    var $hdr = $("<div>").addClass("node-detail-header");
-    $hdr.append($("<h3>").addClass("node-detail-title").text(node.label || node.id));
-    $hdr.append($("<span>").addClass("node-role-badge role-" + node.role).text(node.role));
-    $detail.append($hdr);
+    var mfName = nodeManifestName(node, t, m);
+    if (mfName) $detail.append(buildModelDetailCard(mfName));
 
+    // role badge rides the Compiled SQL summary row (saves vertical space).
     var sql = (m.compiled_sql && m.compiled_sql[node.id]) || "-- compiled SQL not available";
     var $det = $("<details>").addClass("compiled-sql").attr("open", "open");
-    $det.append($("<summary>").text("Compiled SQL"));
+    var $sum = $("<summary>");
+    $sum.append($("<span>").addClass("cs-label").text("Compiled SQL"));
+    $sum.append($("<span>").addClass("node-role-badge role-" + node.role).text(node.role));
+    $det.append($sum);
     var $sqlWrap = $("<div>").addClass("sql-block-wrap");
     var $copy = $("<button>").attr("type", "button").addClass("sql-copy").text("Copy")
       .on("click", function (e) { e.preventDefault(); e.stopPropagation(); copySql(sql, $(this)); });
@@ -2812,29 +3036,7 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     $det.append($sqlWrap);
     $detail.append($det);
 
-    // Fixture binding surface — cute-dbt#34 messy-import-CTE medium scope.
-    // A single CTE body may reference multiple ref() targets (UNION ALL,
-    // JOIN, derived subqueries), in which case the renderer binds EVERY
-    // matching given to that one node; we stack them vertically here so
-    // each fixture card is independently scannable. Pass-1 import-CTEs
-    // with no bound given retain the historic "no fixture provided"
-    // empty-state copy; transform leaves without a binding render
-    // nothing extra (most non-import CTEs carry no fixture by design).
-    var bound = t.given.filter(function (g) { return g.bound_to_node === node.id; });
-    if (bound.length > 0) {
-      // cute-dbt#131 — `bound` is a FILTERED view of `t.given`, so its own
-      // index is not the source ordinal; recover the true position via
-      // `indexOf` (filter preserves object references) so the cell-diff binds
-      // to the right given even when two givens share a `ref(...)`.
-      bound.forEach(function (g) { $detail.append(renderGivenSection(g, t.data_diff, t.given.indexOf(g))); });
-    } else if (node.role === "import") {
-      $detail.append(
-        $("<div>").addClass("given-empty")
-          .text('no fixture provided — dbt treats unspecified inputs as empty')
-      );
-    }
     $wrap.append($detail);
-    initDataTablesIn($wrap);
   }
 
   // cute-dbt#98 — the test's cell-level data diff for THIS given input, or
