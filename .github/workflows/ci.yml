@@ -327,6 +327,7 @@ jobs:
     #   - 16 after explore_cli + explore_full_manifest (cute-dbt#100)
     #   - 17 after explore_lineage_dag (cute-dbt#101)
     #   - 18 after explore_view_toggle (cute-dbt#102)
+    #   - 19 after explore_test_badges (cute-dbt#103)
     # The README is not a feature. The job name deliberately carries no
     # number (cute-dbt#68 — the old `==6` display label went stale across
     # several bumps): the enforced count lives ONLY in the `expected=`
@@ -344,7 +345,7 @@ jobs:
       - name: features/*.feature count matches expected
         run: |
           set -euo pipefail
-          expected=18
+          expected=19
           count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
           echo "feature-count: expected ${expected}, found ${count}"
           if [ "$count" != "$expected" ]; then
