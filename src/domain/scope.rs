@@ -130,6 +130,29 @@ pub fn select_in_scope(current: &Manifest, input: &ScopeInput) -> ScopeSelection
     }
 }
 
+/// The full-manifest model scope (cute-dbt#100 — the `explore` verb's
+/// `all_models` seam): every `model` node in the manifest, no baseline,
+/// no diff.
+///
+/// Non-model resource types (`test`, `seed`, `snapshot`, …) are
+/// excluded — the same `resource_type == "model"` filter both
+/// diff-scoping arms apply (cute-dbt#167), so a generic test node can
+/// never surface as a model card on the explore pages either.
+/// Compiled-ness is deliberately **not** consulted here: explore is
+/// fail-open on uncompiled models (they render as "not compiled"), so
+/// the seam returns them like any other model. The returned
+/// [`ModelInScopeSet`] iterates in deterministic node-id order
+/// (`BTreeSet`).
+#[must_use]
+pub fn all_models(current: &Manifest) -> ModelInScopeSet {
+    current
+        .nodes()
+        .iter()
+        .filter(|(_, node)| node.resource_type() == "model")
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
 // ---------------------------------------------------------------------
 // PrDiff arm
 // ---------------------------------------------------------------------
@@ -916,6 +939,97 @@ mod tests {
             !selection.changed.contains(ctx_id),
             "test_ctx is context (in scope via its model's SQL, YAML unchanged)",
         );
+    }
+
+    // ----- all_models (cute-dbt#100 — the explore verb's seam) -----
+
+    #[test]
+    fn all_models_returns_every_model_node_and_nothing_else() {
+        // Three models (one of them UNCOMPILED — explore is fail-open, so
+        // compiled-ness must not filter) plus a generic test node and a
+        // seed node that must both stay out.
+        let m1 = NodeId::new("model.shop.dim_payers");
+        let m2 = NodeId::new("model.shop.stg_customers");
+        let m3 = NodeId::new("model.shop.stg_uncompiled");
+        let t1 = NodeId::new("test.shop.not_null_dim_payers_id");
+        let s1 = NodeId::new("seed.shop.raw_payers");
+
+        let mut nodes = HashMap::new();
+        nodes.insert(m1.clone(), model_node(&m1, "ck1", None));
+        nodes.insert(m2.clone(), model_node(&m2, "ck2", None));
+        nodes.insert(m3.clone(), uncompiled_model_node(&m3, "ck3"));
+        nodes.insert(t1.clone(), typed_node(&t1, "test", "ck4"));
+        nodes.insert(s1.clone(), typed_node(&s1, "seed", "ck5"));
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let models = all_models(&current);
+
+        assert_eq!(models.len(), 3, "exactly the three model nodes");
+        assert!(models.contains(&m1));
+        assert!(models.contains(&m2));
+        assert!(
+            models.contains(&m3),
+            "an uncompiled model is still in the full-manifest scope (fail-open)",
+        );
+        assert!(!models.contains(&t1), "a generic test node is not a model");
+        assert!(!models.contains(&s1), "a seed node is not a model");
+    }
+
+    #[test]
+    fn all_models_of_an_empty_manifest_is_empty() {
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        assert!(all_models(&current).is_empty());
+    }
+
+    #[test]
+    fn all_models_iterates_in_deterministic_node_id_order() {
+        // BTreeSet-backed: insertion order (HashMap) must not leak into
+        // iteration order — the rendered explore pages depend on it.
+        let ids = ["model.shop.zeta", "model.shop.alpha", "model.shop.mid"];
+        let mut nodes = HashMap::new();
+        for id in ids {
+            let node_id = NodeId::new(id);
+            nodes.insert(node_id.clone(), model_node(&node_id, "ck", None));
+        }
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let models = all_models(&current);
+        let ordered: Vec<&str> = models.iter().map(NodeId::as_str).collect();
+        assert_eq!(
+            ordered,
+            vec!["model.shop.alpha", "model.shop.mid", "model.shop.zeta"],
+        );
+    }
+
+    /// A model node with `compiled_code: None` — the `dbt parse` shape
+    /// explore renders fail-open as "not compiled".
+    fn uncompiled_model_node(id: &NodeId, ck: &str) -> Node {
+        Node::new(
+            id.clone(),
+            "model",
+            checksum(ck),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
     }
 
     // ----- helpers -----
