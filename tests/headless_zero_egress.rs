@@ -419,6 +419,22 @@ fn every_committed_explore_page_makes_zero_external_requests_when_opened_via_fil
                      does not parse to a non-empty models array.",
                 ));
             }
+            // cute-dbt#102 — the unit-test viewer booted: explore-tests.js
+            // populated the shared partial's selector from the payload
+            // (the playground fixture carries unit tests).
+            let viewer_ok = eval(
+                &tab,
+                "document.querySelectorAll('#test-select option').length",
+            )
+            .as_u64()
+            .unwrap_or(0)
+                > 0;
+            if !viewer_ok {
+                failures.push(format!(
+                    "examples/{filename}: the unit-test viewer did not populate \
+                     #test-select — explore-tests.js failed to boot offline.",
+                ));
+            }
         }
 
         let captured = external.lock().unwrap().clone();
@@ -450,14 +466,15 @@ fn every_committed_explore_page_makes_zero_external_requests_when_opened_via_fil
 // (a probe into OUR OWN generated page inside a hermetic headless test)
 // — not JS `eval()` over untrusted input.
 
-/// A synthetic compiled model node with explicit `depends_on.nodes`
-/// edges — the in-process explore-page harness's only builder.
-fn explore_model(id: &str, deps: &[&str]) -> Node {
+/// A synthetic model node with explicit `depends_on.nodes` edges and an
+/// explicit compiled body (`None` = the fail-open `dbt parse` shape) —
+/// the in-process explore-page harness's base builder.
+fn explore_node(id: &str, deps: &[&str], compiled: Option<&str>) -> Node {
     Node::new(
         NodeId::new(id),
         "model",
         Checksum::new("sha256", "ck"),
-        Some("select 1".to_owned()),
+        compiled.map(str::to_owned),
         None,
         DependsOn::new(Vec::new(), deps.iter().map(|d| NodeId::new(*d)).collect()),
         None,
@@ -467,14 +484,23 @@ fn explore_model(id: &str, deps: &[&str]) -> Node {
     )
 }
 
-/// Render an explore page in-process (the headless fixture discipline:
+/// A synthetic compiled model node (`select 1` body — no CTE structure).
+fn explore_model(id: &str, deps: &[&str]) -> Node {
+    explore_node(id, deps, Some("select 1"))
+}
+
+/// Render the explore pages in-process (the headless fixture discipline:
 /// domain objects -> `render_explore`, no subprocess) and return the
-/// `file://` URL of the emitted `dag.html`.
-fn render_explore_dag(stem: &str, nodes: Vec<Node>) -> String {
+/// out directory. `unit_tests` is keyed by manifest unit-test id.
+fn render_explore_pages(
+    stem: &str,
+    nodes: Vec<Node>,
+    unit_tests: HashMap<String, cute_dbt::domain::UnitTest>,
+) -> PathBuf {
     let manifest = Manifest::new(
         ManifestMetadata::new("v12"),
         nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
-        HashMap::new(),
+        unit_tests,
         HashMap::new(),
     );
     let models = all_models(&manifest);
@@ -491,6 +517,13 @@ fn render_explore_dag(stem: &str, nodes: Vec<Node>) -> String {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
     let _ = std::fs::remove_dir_all(&dir);
     render_explore(&dir, &manifest, &models, &payload).expect("explore renders");
+    dir
+}
+
+/// Render an explore page in-process and return the `file://` URL of
+/// the emitted `dag.html`.
+fn render_explore_dag(stem: &str, nodes: Vec<Node>) -> String {
+    let dir = render_explore_pages(stem, nodes, HashMap::new());
     let p = dir.join("dag.html");
     format!("file://{}", p.to_str().expect("page path is valid UTF-8"))
 }
@@ -886,6 +919,400 @@ fn explore_dag_canvas_labels_stay_xss_safe_and_highlight_cost_is_subframe() {
     assert!(
         captured.is_empty(),
         "the hostile-name page must make zero external requests; got:\n{}",
+        captured
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+
+    let _ = tab.close(true);
+}
+
+// ===== cute-dbt#102 — the CTE ⇄ model view toggle + the tests.html =====
+// ===== unit-test viewer                                            =====
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_dag_cte_toggle_renders_cte_view_and_preserves_lineage_state() {
+    // cute-dbt#102 — the CTE ⇄ model view toggle, driven end to end:
+    //   1. boot: the CTE arm is DISABLED (no highlight yet).
+    //   2. a search-select highlight enables it.
+    //   3. clicking the CTE arm renders the highlighted model's CTE DAG
+    //      with the page's Cytoscape + dagre engine (nodes + the
+    //      join-typed edge off the cte_dags carrier).
+    //   4. toggling back to lineage reveals the SAME lineage instance —
+    //      its highlight classes survived (chrome + selection persist;
+    //      local state, same page, no reload).
+    //   5. highlighting the uncompiled model and re-entering the CTE
+    //      view renders the labeled fail-open degraded view — never an
+    //      error.
+    // Riders: zero console warnings/errors and zero external requests
+    // for the whole session.
+    let cte_sql = "with src_orders as (select * from db.sch.raw_orders) \
+                   select * from src_orders";
+    let url = render_explore_dag(
+        "explore-cte-toggle",
+        vec![
+            explore_node("model.shop.dim_orders", &[], Some(cte_sql)),
+            explore_model("model.shop.stg_orders", &[]),
+            // The fail-open witness: no compiled SQL (dbt parse).
+            explore_node("model.shop.mart_orders", &["model.shop.dim_orders"], None),
+        ],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+
+    // Console + network recorders, subscribed BEFORE navigate.
+    tab.call_method(Runtime::Enable(None))
+        .expect("enable Runtime domain");
+    tab.call_method(headless_chrome::protocol::cdp::Log::Enable(None))
+        .expect("enable Log domain");
+    let console_noise = Arc::new(Mutex::new(Vec::<String>::new()));
+    let console_recorder = console_noise.clone();
+    tab.call_method(Network::Enable {
+        max_total_buffer_size: None,
+        max_resource_buffer_size: None,
+        max_post_data_size: None,
+        report_direct_socket_traffic: None,
+        enable_durable_messages: None,
+    })
+    .expect("enable Network domain");
+    let external = Arc::new(Mutex::new(Vec::<ExternalRequest>::new()));
+    let external_recorder = external.clone();
+    tab.add_event_listener(Arc::new(move |event: &Event| match event {
+        Event::RuntimeConsoleAPICalled(e) => {
+            use headless_chrome::protocol::cdp::Runtime::ConsoleAPICalledEventTypeOption as T;
+            if matches!(e.params.Type, T::Warning | T::Error) {
+                let text = e
+                    .params
+                    .args
+                    .first()
+                    .and_then(|a| {
+                        a.description
+                            .clone()
+                            .or_else(|| a.value.as_ref().map(ToString::to_string))
+                    })
+                    .unwrap_or_default();
+                console_recorder
+                    .lock()
+                    .unwrap()
+                    .push(format!("console.{:?}: {text}", e.params.Type));
+            }
+        }
+        Event::LogEntryAdded(e) => {
+            use headless_chrome::protocol::cdp::Log::LogEntryLevel as L;
+            if matches!(e.params.entry.level, L::Warning | L::Error) {
+                console_recorder.lock().unwrap().push(format!(
+                    "log.{:?}: {}",
+                    e.params.entry.level, e.params.entry.text
+                ));
+            }
+        }
+        Event::NetworkRequestWillBeSent(e) => {
+            let req_url = e.params.request.url.clone();
+            if scheme_is_external(&req_url) {
+                external_recorder.lock().unwrap().push(ExternalRequest {
+                    url: req_url,
+                    initiator_type: format!("{:?}", e.params.initiator.Type),
+                    initiator_url: e.params.initiator.url.clone(),
+                    initiator_line: e.params.initiator.line_number,
+                });
+            }
+        }
+        _ => {}
+    }))
+    .expect("subscribe console + network events");
+
+    tab.navigate_to(&url).expect("navigate to file:// URL");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(".lineage-canvas canvas", Duration::from_secs(15))
+        .expect("the lineage Cytoscape canvas boots offline");
+
+    // --- 1. boot: the CTE arm is gated --------------------------------------
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelector('.view-toggle [data-view=\"cte\"]').disabled"
+        ),
+        serde_json::Value::Bool(true),
+        "the CTE arm starts disabled — no model is highlighted yet",
+    );
+
+    // --- 2. a search-select highlight enables it ------------------------------
+    let _ = eval(
+        &tab,
+        "document.querySelector('.lineage-search-input').focus()",
+    );
+    tab.type_str("dim").expect("type the query");
+    tab.press_key("Enter").expect("select the top match");
+    assert_eq!(
+        eval(&tab, "window.CuteExploreLineage.highlightedId()"),
+        serde_json::Value::String("model.shop.dim_orders".to_owned()),
+        "search-select highlights dim_orders",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelector('.view-toggle [data-view=\"cte\"]').disabled"
+        ),
+        serde_json::Value::Bool(false),
+        "the highlight unlocks the CTE arm",
+    );
+
+    // --- 3. the CTE view renders the highlighted model's CTE DAG --------------
+    let _ = eval(
+        &tab,
+        "document.querySelector('.view-toggle [data-view=\"cte\"]').click()",
+    );
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-view .cte-canvas canvas",
+        Duration::from_secs(15),
+    )
+    .expect("the CTE Cytoscape canvas renders offline");
+    assert_eq!(
+        eval(&tab, "window.CuteExploreCte.activeView()"),
+        serde_json::Value::String("cte".to_owned()),
+        "the active view is the CTE view",
+    );
+    assert_eq!(
+        eval(&tab, "window.CuteExploreCte.renderedModelId()"),
+        serde_json::Value::String("model.shop.dim_orders".to_owned()),
+        "the CTE view binds to the HIGHLIGHTED model",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "JSON.stringify([window.CuteExploreCte.cyInstance().nodes().length, \
+              window.CuteExploreCte.cyInstance().edges().length])"
+        ),
+        serde_json::Value::String("[2,1]".to_owned()),
+        "the CTE DAG carries the src_orders CTE + the terminal and one edge",
+    );
+    assert_eq!(
+        eval(&tab, "document.querySelector('.lineage-view').hidden"),
+        serde_json::Value::Bool(true),
+        "the lineage host hides while the CTE view is active (same page)",
+    );
+
+    // --- 4. toggling back preserves the lineage instance + highlight ----------
+    let _ = eval(
+        &tab,
+        "document.querySelector('.view-toggle [data-view=\"lineage\"]').click()",
+    );
+    assert_eq!(
+        eval(&tab, "document.querySelector('.lineage-view').hidden"),
+        serde_json::Value::Bool(false),
+        "the lineage view returns",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "window.CuteExploreLineage.cyInstance()\
+               .getElementById('model.shop.dim_orders').hasClass('sel')"
+        ),
+        serde_json::Value::Bool(true),
+        "the lineage highlight SURVIVES the round trip — the instance \
+         was never rebuilt (selection persists)",
+    );
+
+    // --- 5. the uncompiled model renders the labeled degraded view ------------
+    let _ = eval(
+        &tab,
+        "document.querySelector('.lineage-search-input').focus()",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.lineage-search-input').value = ''",
+    );
+    tab.type_str("mart").expect("type the second query");
+    tab.press_key("Enter").expect("select the uncompiled model");
+    let _ = eval(
+        &tab,
+        "document.querySelector('.view-toggle [data-view=\"cte\"]').click()",
+    );
+    assert_eq!(
+        eval(&tab, "document.querySelector('.cte-degraded').hidden"),
+        serde_json::Value::Bool(false),
+        "an uncompiled model shows the labeled fail-open degraded view",
+    );
+    let degraded = eval(&tab, "document.querySelector('.cte-degraded').textContent");
+    assert!(
+        degraded
+            .as_str()
+            .is_some_and(|t| t.contains("mart_orders") && t.contains("dbt compile")),
+        "the degraded view names the model + the remediation: {degraded:?}",
+    );
+    assert_eq!(
+        eval(&tab, "document.querySelector('.cte-canvas').hidden"),
+        serde_json::Value::Bool(true),
+        "no canvas pretends to be a DAG on the degraded view",
+    );
+
+    // --- riders: console-clean + zero egress ----------------------------------
+    let noise = console_noise.lock().unwrap().clone();
+    assert!(
+        noise.is_empty(),
+        "the toggle session must emit zero console warnings/errors; got:\n{}",
+        noise.join("\n"),
+    );
+    let captured = external.lock().unwrap().clone();
+    assert!(
+        captured.is_empty(),
+        "the toggle session must make zero external requests; got:\n{}",
+        captured
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_tests_viewer_renders_fixture_grids_offline() {
+    // cute-dbt#102 — the tests.html unit-test viewer: the shared
+    // test-card partial filled by explore-tests.js from the embedded
+    // payload. Proof points: the selector populates, the given grid
+    // renders the Rust FixtureTable POD (incl. the NULL-cell
+    // vocabulary), the expected row count lands, and the index row's
+    // jump button drives the viewer. Riders: zero console noise, zero
+    // external requests.
+    use cute_dbt::domain::{UnitTest, UnitTestExpect, UnitTestGiven};
+
+    let given = UnitTestGiven::new(
+        "ref('stg_orders')",
+        serde_json::json!([
+            {"id": 1, "name": "a"},
+            {"id": 2, "name": null}
+        ]),
+        Some("dict".to_owned()),
+        None,
+    );
+    let ut = UnitTest::new(
+        "test_dim_orders_grain",
+        NodeId::new("dim_orders"),
+        vec![given],
+        UnitTestExpect::new(serde_json::json!([{"id": 1}]), None, None),
+        Some("one row per order".to_owned()),
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+    let mut unit_tests = HashMap::new();
+    unit_tests.insert(
+        "unit_test.shop.dim_orders.test_dim_orders_grain".to_owned(),
+        ut,
+    );
+    let dir = render_explore_pages(
+        "explore-tests-viewer",
+        vec![
+            explore_model("model.shop.dim_orders", &[]),
+            explore_model("model.shop.stg_orders", &[]),
+        ],
+        unit_tests,
+    );
+    let p = dir.join("tests.html");
+    let url = format!("file://{}", p.to_str().expect("page path is valid UTF-8"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.call_method(Network::Enable {
+        max_total_buffer_size: None,
+        max_resource_buffer_size: None,
+        max_post_data_size: None,
+        report_direct_socket_traffic: None,
+        enable_durable_messages: None,
+    })
+    .expect("enable Network domain");
+    let external = Arc::new(Mutex::new(Vec::<ExternalRequest>::new()));
+    let external_recorder = external.clone();
+    tab.add_event_listener(Arc::new(move |event: &Event| {
+        if let Event::NetworkRequestWillBeSent(e) = event {
+            let req_url = e.params.request.url.clone();
+            if scheme_is_external(&req_url) {
+                external_recorder.lock().unwrap().push(ExternalRequest {
+                    url: req_url,
+                    initiator_type: format!("{:?}", e.params.initiator.Type),
+                    initiator_url: e.params.initiator.url.clone(),
+                    initiator_line: e.params.initiator.line_number,
+                });
+            }
+        }
+    }))
+    .expect("subscribe Network.requestWillBeSent");
+
+    tab.navigate_to(&url).expect("navigate to file:// URL");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // The selector populated from the payload.
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelectorAll('#test-select option').length"
+        ),
+        serde_json::Value::from(1u64),
+        "the unit-test selector lists the one declared test",
+    );
+    // The given grid renders the FixtureTable POD: 2 rows x 2 columns,
+    // with the NULL cell in the report's vocabulary.
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelectorAll('.left-panel-body table.given-table tbody td').length"
+        ),
+        serde_json::Value::from(4u64),
+        "the given grid renders 2x2 cells",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelector('.left-panel-body td.cell-null').textContent"
+        ),
+        serde_json::Value::String("NULL".to_owned()),
+        "a null fixture value renders the NULL cell affordance",
+    );
+    // The expected panel's row count.
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelector('.expected-rowcount').textContent"
+        ),
+        serde_json::Value::String("1 row".to_owned()),
+        "the expected row count lands in the panel header",
+    );
+    // The description landed and is visible.
+    assert_eq!(
+        eval(&tab, "document.querySelector('.test-description').hidden"),
+        serde_json::Value::Bool(false),
+        "the authored description is visible",
+    );
+    // The index row's jump button drives the viewer (same test here —
+    // the click must keep the card coherent, not throw).
+    let _ = eval(
+        &tab,
+        "document.querySelector('.test-jump[data-test-id]').click()",
+    );
+    assert_eq!(
+        eval(&tab, "document.getElementById('test-select').value"),
+        serde_json::Value::String("unit_test.shop.dim_orders.test_dim_orders_grain".to_owned()),
+        "the jump button selects its test in the viewer",
+    );
+    // No graph engine on this page.
+    assert_eq!(
+        eval(&tab, "typeof window.cytoscape"),
+        serde_json::Value::String("undefined".to_owned()),
+        "tests.html ships no Cytoscape global",
+    );
+
+    let captured = external.lock().unwrap().clone();
+    assert!(
+        captured.is_empty(),
+        "the tests.html viewer must make zero external requests; got:\n{}",
         captured
             .iter()
             .map(ToString::to_string)

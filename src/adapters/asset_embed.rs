@@ -132,6 +132,40 @@ pub const THEME_JS: &str = include_str!("../../templates/theme.js");
 /// [`LineagePayload`]: crate::adapters::explore::LineagePayload
 pub const EXPLORE_LINEAGE_JS: &str = include_str!("../../templates/explore-lineage.js");
 
+/// The explore page's first-party CTE-view engine (cute-dbt#102) — the
+/// CTE ⇄ model view toggle on `dag.html` plus the per-model Cytoscape
+/// CTE DAG it renders for the highlighted model: dagre left-to-right
+/// layout (the vendored extension is already on the page), role-styled
+/// nodes (final / import / transform — the report's vocabulary),
+/// join-type-labeled edges, and the fail-open degraded view for a
+/// `not_compiled` model (labeled, never an error). Same init hygiene as
+/// [`EXPLORE_LINEAGE_JS`]: canvas-text labels, system `fontFamily`,
+/// measured node widths (no `width: label`), no workers, handlers bound
+/// from our JS, in-place class mutation per interaction (a view switch
+/// or model retarget is a view change and may rebuild the CTE
+/// instance; the lineage instance is never rebuilt).
+///
+/// First-party, NOT vendored: lives at `templates/explore-cte.js`.
+/// Integrity gates: the banner-pin + end-of-file sentinel test in this
+/// module.
+pub const EXPLORE_CTE_JS: &str = include_str!("../../templates/explore-cte.js");
+
+/// The explore page's first-party unit-test viewer engine (cute-dbt#102)
+/// — renders the selected test's description, given fixtures and
+/// expected table into the shared test-card partial on `tests.html`,
+/// reading the embedded `cute-dbt-data` [`ReportPayload`] (the
+/// `build_payload` reuse seam). DOM built with `createElement` +
+/// `textContent` only; no jQuery, no `DataTables`, no graph engine —
+/// the page stays a light static-plus-viewer surface and passes the
+/// zero-egress gate on its own.
+///
+/// First-party, NOT vendored: lives at `templates/explore-tests.js`.
+/// Integrity gates: the banner-pin + end-of-file sentinel test in this
+/// module.
+///
+/// [`ReportPayload`]: crate::adapters::render::ReportPayload
+pub const EXPLORE_TESTS_JS: &str = include_str!("../../templates/explore-tests.js");
+
 /// The report's first-party Cytoscape DAG engine (cute-dbt#180) — the
 /// opt-in interactive alternative behind the settings-panel engine
 /// picker: longest-path preset layout (no layout plugin), canvas-text
@@ -235,6 +269,48 @@ mod tests {
                 .count(),
             1,
             "exactly one selectedModel write site (the Space focus commit)",
+        );
+    }
+
+    #[test]
+    fn the_explore_cte_js_carries_its_banner_and_is_not_truncated() {
+        assert!(
+            EXPLORE_CTE_JS.contains("cute-dbt explore CTE engine v1"),
+            "explore-cte.js head banner",
+        );
+        assert!(
+            EXPLORE_CTE_JS
+                .trim_end()
+                .ends_with("/* end of cute-dbt explore CTE engine v1 (cute-dbt#102) */"),
+            "explore-cte.js end-of-file sentinel (truncation guard)",
+        );
+        // The focus-commit contract (epic #99): the CTE view must never
+        // grow a second selectedModel write site — the Space commit in
+        // explore-lineage.js stays the only one.
+        assert!(
+            !EXPLORE_CTE_JS.contains("dataset.selectedModel ="),
+            "explore-cte.js must not write the focus-commit signal",
+        );
+    }
+
+    #[test]
+    fn the_explore_tests_js_carries_its_banner_and_is_not_truncated() {
+        assert!(
+            EXPLORE_TESTS_JS.contains("cute-dbt explore tests viewer v1"),
+            "explore-tests.js head banner",
+        );
+        assert!(
+            EXPLORE_TESTS_JS
+                .trim_end()
+                .ends_with("/* end of cute-dbt explore tests viewer v1 (cute-dbt#102) */"),
+            "explore-tests.js end-of-file sentinel (truncation guard)",
+        );
+        // The viewer builds DOM with createElement + textContent only —
+        // innerHTML over payload-derived strings would reopen the XSS
+        // surface the canvas-label discipline closed.
+        assert!(
+            !EXPLORE_TESTS_JS.contains("innerHTML"),
+            "explore-tests.js must never assign innerHTML",
         );
     }
 

@@ -33,6 +33,21 @@ body { max-width: 72rem; }
 .lineage-legend { color: #555; font-size: 0.85rem; margin-top: 0.5rem; }
 .lineage-legend .legend-chip { display: inline-block; padding: 0 0.4rem; border: 1.5px solid #0072B2; border-radius: 4px; background: #e8f1f8; color: #1c1c1f; }
 .lineage-legend .legend-chip.notcompiled { border-color: #b07400; border-style: dashed; background: #f4f4f5; }
+/* cute-dbt#102 — the CTE ⇄ model view toggle + the CTE view host. */
+.view-toggle { display: inline-flex; border: 1px solid #c5c5cc; border-radius: 6px; overflow: hidden; }
+.view-toggle button { border: none; border-radius: 0; margin: 0; background: #fff; color: #1c1c1f; padding: 0.25rem 0.7rem; font-size: 0.85rem; cursor: pointer; }
+.view-toggle button + button { border-left: 1px solid #c5c5cc; }
+.view-toggle button.is-active { background: #e8f1f8; font-weight: 600; }
+.view-toggle button:disabled { color: #999; background: #f4f4f5; cursor: not-allowed; }
+.cte-canvas { height: min(70vh, 40rem); border: 1px solid #c5c5cc; border-radius: 6px; background: #fcfcfd; }
+.cte-canvas:focus { outline: 2px solid #0072B2; outline-offset: 2px; }
+.cte-view-title { color: #555; font-size: 0.9rem; margin: 0 0 0.4rem; }
+.cte-degraded, .cte-view-empty { color: #555; font-style: italic; }
+.cte-legend { color: #555; font-size: 0.85rem; margin-top: 0.5rem; }
+.cte-legend .legend-chip { display: inline-block; padding: 0 0.4rem; border-radius: 4px; color: #1c1c1f; }
+.cte-legend .legend-chip.final { border: 1.5px solid #0072B2; background: #e8f1f8; }
+.cte-legend .legend-chip.import { border: 1.5px solid #1f8a5b; background: #eef7ee; }
+.cte-legend .legend-chip.transform { border: 1.5px solid #6b6b76; background: #f4f4f5; }
 </style>
 </head>
 <body>
@@ -56,8 +71,20 @@ body { max-width: 72rem; }
       <ul class="lineage-search-results" id="lineage-search-results" role="listbox"
           aria-label="Matching models" hidden></ul>
     </div>
-    <p class="lineage-hint">click or search-select highlights a model&rsquo;s lineage &middot; <kbd>Space</kbd> commits focus on the highlighted model</p>
+    {# cute-dbt#102 — the CTE ⇄ model view toggle. The CTE arm is gated
+       on a highlight (disabled at render time; explore-cte.js enables it
+       when a model is highlighted and binds the CTE view to it). #}
+    <div class="view-toggle" role="group" aria-label="Graph view">
+      <button type="button" data-view="lineage" class="is-active" aria-pressed="true">Model lineage</button>
+      <button type="button" data-view="cte" aria-pressed="false" disabled>CTE view</button>
+    </div>
+    <p class="lineage-hint">click or search-select highlights a model&rsquo;s lineage &middot; <kbd>Space</kbd> commits focus &middot; a highlighted model unlocks its CTE view</p>
   </div>
+  {# cute-dbt#102 — the two view hosts. explore-cte.js flips `hidden`
+     between them; the lineage Cytoscape instance is never rebuilt, so
+     its pan/zoom/highlight persist across toggles (local state, same
+     page, no reload). #}
+  <div class="lineage-view">
   {# The canvas host is FOCUSABLE (tabindex) — a search-select moves focus
      here so the follow-up Space lands on the document handler, never in
      the search box (the cute-dbt#101 hard AC). #}
@@ -67,6 +94,23 @@ body { max-width: 72rem; }
     <span class="legend-chip">model</span>
     <span class="legend-chip notcompiled">not compiled</span>
     &mdash; a dashed node has no compiled SQL in this manifest (<code>dbt parse</code>); run <code>dbt compile</code> to fill it in. The explorer renders it anyway (fail-open).
+  </div>
+  </div>
+  {# cute-dbt#102 — the CTE view host (hidden until the toggle opens it).
+     A not_compiled model renders the labeled fail-open degraded view in
+     .cte-degraded — never an error; a compiled CTE-less model renders
+     the .cte-view-empty sparse state. #}
+  <div class="cte-view" hidden>
+    <p class="cte-view-title">CTE DAG &mdash; <code class="cte-view-model"></code></p>
+    <div class="cte-canvas" tabindex="0" aria-label="CTE dependency DAG"></div>
+    <p class="cte-degraded" hidden></p>
+    <p class="cte-view-empty" hidden>No CTE DAG available &mdash; this model&rsquo;s compiled SQL has no CTE structure.</p>
+    <div class="cte-legend">
+      <span class="legend-chip final">final select</span>
+      <span class="legend-chip import">import CTE</span>
+      <span class="legend-chip transform">transform CTE</span>
+      &mdash; edges are labeled with their join type.
+    </div>
   </div>
 </section>
 
@@ -93,6 +137,15 @@ body { max-width: 72rem; }
    templates/explore-lineage.js via asset_embed::EXPLORE_LINEAGE_JS.
    Banner-pin + end-of-file sentinel tests guard the include. #}
 {{ explore_lineage_js|safe }}
+</script>
+<script>
+{# cute-dbt#102 — the first-party explore CTE engine (the CTE ⇄ model
+   view toggle + the per-model Cytoscape CTE DAG), embedded from
+   templates/explore-cte.js via asset_embed::EXPLORE_CTE_JS. Parses
+   AFTER the lineage engine so the highlight event + the
+   window.CuteExploreLineage seam it consumes already exist. Banner-pin
+   + end-of-file sentinel tests guard the include. #}
+{{ explore_cte_js|safe }}
 </script>
 </body>
 </html>

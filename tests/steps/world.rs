@@ -215,6 +215,10 @@ pub struct ExploreModelDecl {
     /// `false` ⇒ `compiled_code: null` (the fail-open "not compiled"
     /// scenario); `true` ⇒ a compiled model.
     pub compiled: bool,
+    /// Explicit compiled SQL for a compiled model (cute-dbt#102 — the
+    /// CTE-view scenarios need a `WITH` clause). `None` ⇒ the default
+    /// `select 1` body (no CTE structure).
+    pub compiled_sql: Option<String>,
     /// Bare names of models this model depends on (lineage edges).
     pub deps: Vec<String>,
     /// Bare names of unit tests targeting this model.
