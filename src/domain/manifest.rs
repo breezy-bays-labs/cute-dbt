@@ -422,8 +422,9 @@ pub struct Node {
     /// `description` (cute-dbt#200) — only **non-empty** prose appears
     /// (the cute-dbt#165 precedent: fusion serializes an unset
     /// description as `None`/absent, dbt-core as `""`; the adapter drops
-    /// both). Feeds [`ModelPayload::description`] and the report's
-    /// `manifest_nodes` lookup.
+    /// both). Feeds the render payload's `ModelPayload.description` and
+    /// the report's `manifest_nodes` lookup (no link — domain docs never
+    /// reference adapter items, the inward-dependency discipline).
     #[serde(default)]
     description: Option<String>,
     /// Resolved model tags from the node's top-level wire `tags`
