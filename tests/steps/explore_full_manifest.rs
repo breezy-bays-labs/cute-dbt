@@ -80,6 +80,18 @@ fn model_mut<'w>(world: &'w mut World, bare: &str) -> &'w mut ExploreModelDecl {
 
 #[when("I run cute-dbt explore on the synthetic manifest")]
 fn run_explore_on_synthetic(world: &mut World) {
+    let manifest_path = serialize_plan_manifest(world, "explore_full_manifest");
+    let out_dir = super::super::common::tmp("explore_full_manifest_pages");
+    let _ = std::fs::remove_dir_all(&out_dir);
+    run_explore(world, &manifest_path, out_dir);
+}
+
+/// Serialize the accumulated [`ExplorePlan`](super::world::ExplorePlan)
+/// to a temp wire manifest — the full cute-dbt#103/#104/#105 splice
+/// assembly. Shared by the explore `When` steps (the cute-dbt#106
+/// change-context `When` reuses the exact same assembly, so the two
+/// subprocess paths cannot drift).
+pub fn serialize_plan_manifest(world: &World, stem: &str) -> std::path::PathBuf {
     let plan = world.explore_plan.clone();
     let mut manifest = empty_manifest();
     // cute-dbt#104 — wire-level patches the flat-domain serialization
@@ -159,15 +171,7 @@ fn run_explore_on_synthetic(world: &mut World) {
     let mut test_nodes: Vec<(String, serde_json::Value)> =
         plan.data_tests.iter().map(wire_data_test).collect();
     test_nodes.extend(plan.uniqueness_tests.iter().map(wire_uniqueness_test));
-    let manifest_path = serialize_explore_to_tmp(
-        &manifest,
-        "explore_full_manifest",
-        &node_patches,
-        &test_nodes,
-    );
-    let out_dir = super::super::common::tmp("explore_full_manifest_pages");
-    let _ = std::fs::remove_dir_all(&out_dir);
-    run_explore(world, &manifest_path, out_dir);
+    serialize_explore_to_tmp(&manifest, stem, &node_patches, &test_nodes)
 }
 
 // --- Then ----------------------------------------------------------------

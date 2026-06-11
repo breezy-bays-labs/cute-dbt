@@ -183,6 +183,30 @@ pub struct World {
     /// `When I run cute-dbt explore on the synthetic manifest` step
     /// serializes and runs the real subprocess against.
     pub explore_plan: ExplorePlan,
+
+    /// cute-dbt#106: changed-file paths for the explore change-context
+    /// scenarios. The `When … with the PR diff` step synthesizes a
+    /// `git diff --unified=0` patch covering them (one minimal hunk
+    /// each — explore's change context is file-granular) and passes
+    /// `--pr-diff @<patch>` to the explore verb.
+    pub explore_changed_files: Vec<String>,
+
+    /// cute-dbt#106: pure-rename directives for the synthesized explore
+    /// patch (`(from, to)` — the `rename from`/`rename to` extended
+    /// headers with NO hunks, the real `git diff` 100%-similarity
+    /// shape; the cute-dbt#80 reuse).
+    pub explore_renames: Vec<(String, String)>,
+
+    /// cute-dbt#106: the `--project-root` strip the explore `When`
+    /// passes alongside `--pr-diff` (relative; the step creates the
+    /// sub-dir inside its temp workdir so clap's existence validation
+    /// passes — the `pr_diff_scoping` precedent). `None` ⇒ no flag.
+    pub explore_project_root: Option<String>,
+
+    /// cute-dbt#106: an explicit (malformed) patch file a Given
+    /// prepared; the explore `When` passes it verbatim as `@<path>`
+    /// instead of synthesizing one.
+    pub explore_explicit_patch: Option<PathBuf>,
 }
 
 /// A cute-dbt#200 data-contract scenario plan — described/tagged models,

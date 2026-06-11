@@ -236,6 +236,27 @@ pub struct LineageNodePayload {
     /// is `null`/`[]`, never an omitted key — the explicit-0/0
     /// posture).
     pub paths: NodePathsPayload,
+    /// PR-diff **change context** (cute-dbt#106): `true` when the
+    /// explore run carried `--pr-diff` and this model's source file
+    /// appears in the diff (the cute-dbt#81 `original_file_path`
+    /// matching via [`crate::domain::changed_models`], renames included
+    /// per cute-dbt#80). Serialized **only when `true`** — a deliberate
+    /// exception to the explicit-0/0 posture so the no-context payload
+    /// stays byte-identical to the pre-#106 shape (the committed
+    /// explore goldens render without `--pr-diff`). Context never
+    /// narrows scope: every model is still a node; this flag only
+    /// decorates.
+    #[serde(skip_serializing_if = "is_false")]
+    pub changed: bool,
+}
+
+/// `serde(skip_serializing_if)` predicate for
+/// [`LineageNodePayload::changed`]: omit the key when `false`, so a
+/// no-context lineage payload carries no `changed` keys at all
+/// (cute-dbt#106).
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde passes &bool
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Per-node file paths (cute-dbt#105) — everything a host needs to open
@@ -546,8 +567,19 @@ pub struct LineagePayload {
 /// `depends_on.nodes` filtered to models, **forward only**) into the
 /// id-keyed POD the Cytoscape engine consumes. Pure assembly over owned
 /// manifest data — no I/O.
+///
+/// `changed` is the optional PR-diff **change context** (cute-dbt#106):
+/// `Some(set)` marks each member node `changed: true` (the set comes
+/// from [`crate::domain::changed_models`]); `None` — the no-`--pr-diff`
+/// path — marks nothing, and the serialized payload carries no
+/// `changed` keys at all (byte-identical to the pre-#106 shape).
+/// Context never narrows scope: the node set is `models` either way.
 #[must_use]
-pub fn build_lineage_payload(current: &Manifest, models: &ModelInScopeSet) -> LineagePayload {
+pub fn build_lineage_payload(
+    current: &Manifest,
+    models: &ModelInScopeSet,
+    changed: Option<&ModelInScopeSet>,
+) -> LineagePayload {
     let lineage = build_lineage(current, models);
     let edges = lineage
         .edges
@@ -574,6 +606,7 @@ pub fn build_lineage_payload(current: &Manifest, models: &ModelInScopeSet) -> Li
             badge: test_badge(n.data_tests, n.unit_tests),
             detail: model_detail(current, current.node(id)),
             paths: node_paths(current.node(id), test_paths.remove(id).unwrap_or_default()),
+            changed: changed.is_some_and(|set| set.contains(id)),
         })
         .collect();
     LineagePayload {
@@ -690,6 +723,15 @@ struct ExploreDagTemplate<'a> {
     /// the `data-cute-dbt-contract` attribute on `<body>`, the single
     /// source the in-page `window.cuteDbtContract` global reads back.
     contract_version: &'a str,
+    /// `true` iff the run carried `--pr-diff` change context
+    /// (cute-dbt#106) — gates the header's "changed in this diff"
+    /// count and the legend's "changed" chip. When `false` (the
+    /// no-context path) the template emits NOTHING extra, keeping the
+    /// no-flag render shape unchanged.
+    has_change_context: bool,
+    /// Number of lineage nodes the change context marked (0 is honest:
+    /// a diff touching no model files still renders the count).
+    changed_count: usize,
 }
 
 /// askama binding for `templates/explore-tests.html`.
@@ -790,6 +832,12 @@ fn explore_models(
 /// rendering itself is compile-time-checked askama (the same
 /// infallible-at-runtime posture as the report renderer).
 ///
+/// `changed` is the optional `--pr-diff` change context (cute-dbt#106):
+/// `Some(set)` marks the member lineage nodes and renders the header
+/// count + legend chip; `None` renders exactly the pre-#106 no-context
+/// page. Either way the full `models` set renders — context never
+/// narrows scope.
+///
 /// # Errors
 ///
 /// Returns the underlying [`io::Error`] when `out_dir` cannot be
@@ -798,15 +846,19 @@ pub fn render_explore(
     out_dir: &Path,
     current: &Manifest,
     models: &ModelInScopeSet,
+    changed: Option<&ModelInScopeSet>,
     payload: &ReportPayload,
 ) -> io::Result<()> {
     fs::create_dir_all(out_dir)?;
 
-    let mut lineage = build_lineage_payload(current, models);
+    let mut lineage = build_lineage_payload(current, models, changed);
     // cute-dbt#102 — the CTE ⇄ model toggle's per-model CTE DAGs ride
     // the same carrier (the payload's graphs, parsed once upstream).
     lineage.cte_dags = cte_dags_by_model(models, payload);
     let not_compiled_count = lineage.nodes.iter().filter(|n| n.not_compiled).count();
+    // The marked-node count (what actually renders), not `changed.len()`
+    // — a defensive id outside the model set must not inflate the banner.
+    let changed_count = lineage.nodes.iter().filter(|n| n.changed).count();
     let dag_json = json_for_html_script(&lineage)
         .map_err(|err| io::Error::other(format!("dag payload serialization: {err}")))?;
     let dag_html = ExploreDagTemplate {
@@ -821,6 +873,8 @@ pub fn render_explore(
         edge_count: lineage.edges.len(),
         not_compiled_count,
         contract_version: EXPLORE_CONTRACT_VERSION,
+        has_change_context: changed.is_some(),
+        changed_count,
     }
     .render()
     .map_err(|err| io::Error::other(format!("render dag.html: {err}")))?;
@@ -950,7 +1004,7 @@ mod tests {
     #[test]
     fn payload_carries_id_keyed_nodes_in_id_order() {
         let current = three_model_manifest();
-        let payload = build_lineage_payload(&current, &all_models(&current));
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
         let ids: Vec<&str> = payload.nodes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(
             ids,
@@ -970,7 +1024,7 @@ mod tests {
     #[test]
     fn payload_edges_are_forward_only_and_id_keyed() {
         let current = three_model_manifest();
-        let payload = build_lineage_payload(&current, &all_models(&current));
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
         // stg_orders -> dim_orders; dim_orders -> mart_orders. The
         // source.shop.raw.orders dependency is NOT a lineage edge, and
         // no reverse edge is ever emitted (the client traverses both
@@ -1002,7 +1056,7 @@ mod tests {
     #[test]
     fn payload_of_an_empty_manifest_is_empty() {
         let current = manifest_of(Vec::new());
-        let payload = build_lineage_payload(&current, &all_models(&current));
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
         assert!(payload.nodes.is_empty());
         assert!(payload.edges.is_empty());
     }
@@ -1014,7 +1068,7 @@ mod tests {
             Some("select 1"),
             &[],
         )]);
-        let payload = build_lineage_payload(&current, &all_models(&current));
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
         let json = json_for_html_script(&payload).expect("serializes");
         assert!(
             !json.contains("</script>") && !json.contains("<img"),
@@ -1079,7 +1133,7 @@ mod tests {
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("both-pages");
 
-        render_explore(&dir, &current, &models, &payload).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload).expect("explore renders");
 
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html written");
         let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html written");
@@ -1121,8 +1175,8 @@ mod tests {
         let payload = payload_for(&current, &models);
         let dir_a = tmp_dir("det-a");
         let dir_b = tmp_dir("det-b");
-        render_explore(&dir_a, &current, &models, &payload).expect("first render");
-        render_explore(&dir_b, &current, &models, &payload).expect("second render");
+        render_explore(&dir_a, &current, &models, None, &payload).expect("first render");
+        render_explore(&dir_b, &current, &models, None, &payload).expect("second render");
         for page in ["dag.html", "tests.html"] {
             let a = fs::read(dir_a.join(page)).expect("page a");
             let b = fs::read(dir_b.join(page)).expect("page b");
@@ -1138,7 +1192,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("nested").join("deeper");
-        render_explore(&dir, &current, &models, &payload).expect("creates out-dir");
+        render_explore(&dir, &current, &models, None, &payload).expect("creates out-dir");
         assert!(dir.join("dag.html").exists());
         assert!(dir.join("tests.html").exists());
         let _ = fs::remove_dir_all(dir.parent().expect("parent"));
@@ -1150,7 +1204,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("empty");
-        render_explore(&dir, &current, &models, &payload).expect("empty manifest renders");
+        render_explore(&dir, &current, &models, None, &payload).expect("empty manifest renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
             dag.contains("\"nodes\":[]"),
@@ -1226,7 +1280,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("cte-toggle");
-        render_explore(&dir, &current, &models, &payload).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload).expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         // The carrier embeds the per-model CTE DAG map.
         assert!(dag.contains("\"cte_dags\":{"), "cte_dags carrier present");
@@ -1281,7 +1335,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("tests-viewer");
-        render_explore(&dir, &current, &models, &payload).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload).expect("explore renders");
         let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html");
         // The shared askama partial (report.html's test card) renders.
         assert!(
@@ -1479,7 +1533,7 @@ mod tests {
             ],
             vec![("unit_test.shop.dim_orders.a", unit_test_on("dim_orders"))],
         );
-        let payload = build_lineage_payload(&current, &all_models(&current));
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
         let by_name: StdHashMap<&str, &LineageNodePayload> =
             payload.nodes.iter().map(|n| (n.name.as_str(), n)).collect();
         let dim = by_name["dim_orders"];
@@ -1602,7 +1656,7 @@ mod tests {
     #[test]
     fn payload_carries_the_model_detail_facts() {
         let current = manifest_of(vec![detailed_model("model.shop.dim_orders")]);
-        let payload = build_lineage_payload(&current, &all_models(&current));
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
         let detail = &payload.nodes[0].detail;
         assert_eq!(detail.description.as_deref(), Some("One row per order."));
         assert_eq!(detail.materialized.as_deref(), Some("table"));
@@ -1647,7 +1701,7 @@ mod tests {
                 "order_id",
             ),
         ]);
-        let payload = build_lineage_payload(&current, &all_models(&current));
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
         let grain = &payload.nodes[0].detail.grain;
         assert_eq!(grain.value, "order_id + order_date");
         assert_eq!(grain.source, "config.meta.grain");
@@ -1670,7 +1724,7 @@ mod tests {
                 "order_id",
             ),
         ]);
-        let payload = build_lineage_payload(&current, &all_models(&current));
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
         let grain = &payload.nodes[0].detail.grain;
         assert_eq!(grain.value, "order_id");
         assert_eq!(grain.source, "unique test");
@@ -1680,7 +1734,7 @@ mod tests {
     #[test]
     fn payload_grain_is_explicitly_unknown_when_nothing_is_detected() {
         let current = three_model_manifest();
-        let payload = build_lineage_payload(&current, &all_models(&current));
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
         for node in &payload.nodes {
             assert_eq!(node.detail.grain.value, "unknown", "{}", node.name);
             assert_eq!(node.detail.grain.source, "unknown");
@@ -1777,7 +1831,7 @@ mod tests {
                 ),
             ],
         );
-        let payload = build_lineage_payload(&current, &all_models(&current));
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
         let paths = &payload.nodes[0].paths;
         assert_eq!(paths.sql.as_deref(), Some("models/marts/dim_orders.sql"));
         assert_eq!(
@@ -1815,7 +1869,7 @@ mod tests {
     #[test]
     fn pathless_model_paths_are_explicit_nulls_never_omitted_keys() {
         let current = three_model_manifest();
-        let payload = build_lineage_payload(&current, &all_models(&current));
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
         for node in &payload.nodes {
             assert!(node.paths.sql.is_none(), "{}", node.name);
             assert!(node.paths.schema_yaml.is_none(), "{}", node.name);
@@ -1839,7 +1893,7 @@ mod tests {
                 pathed_unit_test("g", "ghost_model", Some("models/g.yml"), &[], None),
             )],
         );
-        let payload = build_lineage_payload(&current, &all_models(&current));
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
         assert!(
             payload.nodes[0].paths.unit_tests.is_empty(),
             "an unresolvable model: reference is skipped, not failed (fail-open)",
@@ -1852,7 +1906,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("contract-version");
-        render_explore(&dir, &current, &models, &payload).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload).expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
             dag.contains(&format!(
@@ -1874,7 +1928,7 @@ mod tests {
     #[test]
     fn detail_of_an_undetailed_model_is_empty_but_explicit() {
         let current = three_model_manifest();
-        let payload = build_lineage_payload(&current, &all_models(&current));
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
         let detail = &payload.nodes[0].detail;
         assert_eq!(detail.description, None);
         assert_eq!(detail.materialized, None);
@@ -1886,5 +1940,145 @@ mod tests {
         let json = json_for_html_script(&payload).expect("serializes");
         assert!(json.contains("\"description\":null"), "{json}");
         assert!(json.contains("\"materialized\":null"), "{json}");
+    }
+
+    // ----- PR-diff change context (cute-dbt#106) ------------------------
+
+    /// A compiled model with an `original_file_path` (the change-context
+    /// matching key).
+    fn model_at(id: &str, ofp: &str) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "model",
+            Checksum::new("sha256", "ck"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            Some(ofp.to_owned()),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    fn changed_set(ids: &[&str]) -> ModelInScopeSet {
+        ids.iter().map(|s| NodeId::new(*s)).collect()
+    }
+
+    #[test]
+    fn payload_marks_changed_nodes_and_never_narrows_the_node_set() {
+        let current = manifest_of(vec![
+            model_at("model.shop.dim_orders", "models/marts/dim_orders.sql"),
+            model_at("model.shop.stg_orders", "models/staging/stg_orders.sql"),
+        ]);
+        let changed = changed_set(&["model.shop.dim_orders"]);
+        let payload = build_lineage_payload(&current, &all_models(&current), Some(&changed));
+        // The FULL graph renders — context never narrows scope.
+        assert_eq!(payload.nodes.len(), 2);
+        let by_name: StdHashMap<&str, &LineageNodePayload> =
+            payload.nodes.iter().map(|n| (n.name.as_str(), n)).collect();
+        assert!(by_name["dim_orders"].changed);
+        assert!(!by_name["stg_orders"].changed);
+        // Carrier shape: the marked node serializes `"changed":true`;
+        // the unmarked node serializes NO `changed` key (never false).
+        let json = json_for_html_script(&payload).expect("serializes");
+        assert_eq!(json.matches("\"changed\":true").count(), 1, "{json}");
+        assert!(!json.contains("\"changed\":false"), "{json}");
+    }
+
+    #[test]
+    fn no_context_payload_carries_no_changed_keys_at_all() {
+        // The byte-stability guarantee for the committed explore goldens
+        // (rendered WITHOUT --pr-diff): a no-context payload is
+        // byte-identical to the pre-#106 shape — zero `changed` keys.
+        let current = three_model_manifest();
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
+        assert!(payload.nodes.iter().all(|n| !n.changed));
+        let json = json_for_html_script(&payload).expect("serializes");
+        assert!(
+            !json.contains("\"changed\""),
+            "the no-context carrier must omit the key entirely: {json}",
+        );
+    }
+
+    #[test]
+    fn render_explore_with_context_renders_the_count_and_legend_chip() {
+        let current = manifest_of(vec![
+            model_at("model.shop.dim_orders", "models/marts/dim_orders.sql"),
+            model_at("model.shop.stg_orders", "models/staging/stg_orders.sql"),
+        ]);
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let changed = changed_set(&["model.shop.dim_orders"]);
+        let dir = tmp_dir("change-context");
+        render_explore(&dir, &current, &models, Some(&changed), &payload).expect("explore renders");
+        let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
+        assert!(
+            dag.contains("1 changed in this diff"),
+            "the header counts the changed models",
+        );
+        assert!(
+            dag.contains("<span class=\"legend-chip changed\">changed</span>"),
+            "the legend explains the changed treatment",
+        );
+        assert!(
+            dag.contains("the full graph always renders every model"),
+            "the legend states the never-narrows contract",
+        );
+        assert!(
+            dag.contains("\"changed\":true"),
+            "the carrier marks the changed node",
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_explore_with_context_but_zero_changed_is_honest() {
+        // --pr-diff given, but the diff touched no model files: context
+        // exists (Some(empty)), so the banner renders the honest 0.
+        let current = manifest_of(vec![model_at(
+            "model.shop.dim_orders",
+            "models/marts/dim_orders.sql",
+        )]);
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let empty = ModelInScopeSet::new();
+        let dir = tmp_dir("change-context-zero");
+        render_explore(&dir, &current, &models, Some(&empty), &payload).expect("explore renders");
+        let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
+        assert!(dag.contains("0 changed in this diff"), "honest zero");
+        assert!(
+            !dag.contains("\"changed\":true"),
+            "no node marks changed in the carrier",
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_explore_without_context_renders_no_change_chrome() {
+        // The no-flag page: no legend chip, no header clause — the
+        // committed explore goldens keep rendering this shape. (The
+        // literal "changed in this diff" still appears INSIDE the
+        // embedded engine source — the oracles below target the
+        // server-rendered chrome, not the JS string literals.)
+        let current = three_model_manifest();
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let dir = tmp_dir("no-change-context");
+        render_explore(&dir, &current, &models, None, &payload).expect("explore renders");
+        let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
+        assert!(
+            !dag.contains("<span class=\"legend-chip changed\">"),
+            "no change-context legend chip without --pr-diff",
+        );
+        assert!(
+            !dag.contains("changed in this diff</p>"),
+            "no header clause without --pr-diff",
+        );
+        assert!(
+            !dag.contains("\"changed\":"),
+            "no changed keys in the no-context carrier",
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

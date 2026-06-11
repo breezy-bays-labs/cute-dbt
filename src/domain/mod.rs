@@ -78,7 +78,7 @@ pub use pr_diff::{
     reconstruct_block_diffs, reconstruct_model_sql_diffs, refine_changed_by_hunks, ws_equal,
 };
 pub use preflight::{PreflightError, preflight_compiled};
-pub use scope::{ScopeInput, ScopeSelection, all_models, select_in_scope};
+pub use scope::{ScopeInput, ScopeSelection, all_models, changed_models, select_in_scope};
 pub use state::{
     BANNER_EMPTY_SCOPE, BodyChecksumModifier, ConfigsModifier, ContractModifier, InScopeSet,
     MacrosModifier, ModelInScopeSet, ModifiedSet, ModifierKind, RelationModifier, StateComparator,

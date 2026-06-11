@@ -89,9 +89,10 @@ pre-push:
     feature-count:
       # Asserts the .feature-count invariant; the enforced count lives ONLY
       # in the `expected=` line below (cute-dbt#68 — numbers in labels and
-      # comments go stale). History: bumped to 21 in cute-dbt#105 when
-      # explore_js_contract.feature joined the contract; previously bumped
-      # in cute-dbt#104 (explore_model_detail),
+      # comments go stale). History: bumped to 22 in cute-dbt#106 when
+      # explore_change_context.feature joined the contract; previously
+      # bumped in cute-dbt#105 (explore_js_contract),
+      # cute-dbt#104 (explore_model_detail),
       # cute-dbt#103 (explore_test_badges),
       # cute-dbt#102 (explore_view_toggle),
       # cute-dbt#101 (explore_lineage_dag),
@@ -103,7 +104,7 @@ pre-push:
       # Mirrors the `feature-count` CI job; the README is not a feature.
       run: |
         set -euo pipefail
-        expected=21
+        expected=22
         count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
         if [ "$count" != "$expected" ]; then
           echo "feature-count: expected ${expected} .feature files, found ${count}"

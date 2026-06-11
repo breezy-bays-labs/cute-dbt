@@ -16,6 +16,7 @@ pub mod consumer_report_contract;
 pub mod coverage_checks;
 pub mod cte_rendering;
 pub mod diff_scoping;
+pub mod explore_change_context;
 pub mod explore_cli;
 pub mod explore_full_manifest;
 pub mod explore_js_contract;
