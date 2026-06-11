@@ -318,7 +318,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "87ca4c9c678991ff57567db34080d9a0e985a5347da91301552ea20251c28da3"
+sha256 = "cf3395bd1ea4b8e623cb8d6cae1d52a10bf07f50a963e0660c9c4304c8fc1fd4"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -367,7 +367,14 @@ UNCOVERED verdict with its copyable given-row sketches + a covered grain \
 check). cute-dbt#153's external-fixture conversion on the cross-join \
 test's csv given (see the baseline entry — applied identically to both \
 sides) keeps the external-fixture GRID visible in the playground golden \
-and feeds the diff-showcase's external old→new cell diff.\
+and feeds the diff-showcase's external old→new cell diff. cute-dbt#196's \
+synthetic anti-join model node \
+(model.healthcare_analytics.int_patients__never_admitted — a correlated \
+NOT EXISTS over stg_synthea__encounters, hand-authored synthetic JSON \
+spliced programmatically into the dbt-core output, NOT engine-emitted) \
+is new-in-current ⇒ modified ⇒ in scope, carries NO unit test, and \
+surfaces the cute-dbt#196 join.anti-join not_exists construct UNCOVERED \
+with its inverted (matching-row) given sketch in the playground golden.\
 """
 
 [[fixture]]

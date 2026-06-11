@@ -24,9 +24,9 @@ use super::super::common;
 use super::World;
 use super::builders::{
     empty_manifest, model_id, model_node, serialize_coverage_to_tmp, serialize_to_tmp,
-    unit_test_for, unit_test_key, with_node, with_unit_test,
+    unit_test_for, unit_test_key, unit_test_with_givens, with_node, with_unit_test,
 };
-use super::world::{CoverageDataTest, CoverageIncrementalModel};
+use super::world::{CoverageDataTest, CoverageGivenUnitTest, CoverageIncrementalModel};
 
 // --- Background -----------------------------------------------------
 
@@ -128,6 +128,40 @@ fn unit_test_without_override(world: &mut World, name: String, target: String) {
     world.coverage_plan.unit_tests.push((name, target, None));
 }
 
+// cute-dbt#196 — the subquery-satisfaction Given: a unit test whose two
+// literal dict givens carry the matching outer↔inner key pair proving
+// the anti-join's exclusion.
+
+#[given(
+    regex = r#"^a unit test "([^"]+)" on "([^"]+)" giving "([^"]+)" rows (\[.+\]) and "([^"]+)" rows (\[.+\])$"#
+)]
+#[allow(clippy::needless_pass_by_value)]
+fn unit_test_with_given_rows(
+    world: &mut World,
+    name: String,
+    target: String,
+    first_input: String,
+    first_rows: String,
+    second_input: String,
+    second_rows: String,
+) {
+    let parse = |rows: &str| -> Value {
+        serde_json::from_str(rows)
+            .unwrap_or_else(|err| panic!("rows literal {rows:?} must be a JSON array: {err}"))
+    };
+    world
+        .coverage_plan
+        .given_unit_tests
+        .push(CoverageGivenUnitTest {
+            name,
+            target,
+            givens: vec![
+                (first_input, parse(&first_rows)),
+                (second_input, parse(&second_rows)),
+            ],
+        });
+}
+
 // --- When -----------------------------------------------------------
 
 /// Deterministic test-node id for a declared uniqueness data test — the
@@ -198,6 +232,12 @@ fn render_coverage_report(world: &mut World) {
     }
     for (name, target, _mode) in &plan.unit_tests {
         current = with_unit_test(current, unit_test_for(name, target));
+    }
+    for test in &plan.given_unit_tests {
+        current = with_unit_test(
+            current,
+            unit_test_with_givens(&test.name, &test.target, &test.givens),
+        );
     }
 
     // Wire-shape injection: flat config (materialized + unique_key as

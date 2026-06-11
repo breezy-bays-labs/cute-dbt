@@ -58,7 +58,9 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Location, Span};
 
-use crate::domain::{CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact};
+use crate::domain::{
+    CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, SubqueryFact, SubqueryKind,
+};
 
 /// Display name of the synthetic terminal node — the final `SELECT` that
 /// follows a model's `WITH` clause. The compiled SQL does not carry the
@@ -121,15 +123,21 @@ fn build_graph(compiled_sql: &str, query: &Query) -> CteGraph {
     if ctes.is_empty() {
         // No CTE structure to visualise — but the body's LEFT JOIN
         // facts still surface (cute-dbt#173): the catalog C4 canonical
-        // shape is a WITH-less `… FROM a LEFT JOIN b …` model.
+        // shape is a WITH-less `… FROM a LEFT JOIN b …` model. The
+        // cute-dbt#196 subquery facts ride the same path (the WITH-less
+        // `… WHERE NOT EXISTS (…)` anti-join is just as canonical).
         let facts = compute_shape_facts(TERMINAL_NODE_NAME, &query.body);
-        return CteGraph::default().with_left_join_facts(facts.left_joins);
+        return CteGraph::default()
+            .with_left_join_facts(facts.left_joins)
+            .with_subquery_facts(facts.subqueries);
     }
     let recursive = query.with.as_ref().is_some_and(|with| with.recursive);
-    let (nodes, left_joins) = build_nodes(compiled_sql, ctes, query);
+    let (nodes, left_joins, subqueries) = build_nodes(compiled_sql, ctes, query);
     let index = name_index(ctes);
     let edges = build_edges(ctes, query, &index);
-    let graph = CteGraph::new(nodes, edges).with_left_join_facts(left_joins);
+    let graph = CteGraph::new(nodes, edges)
+        .with_left_join_facts(left_joins)
+        .with_subquery_facts(subqueries);
     if recursive {
         graph.with_recursive()
     } else {
@@ -159,16 +167,18 @@ fn cte_tables(query: &Query) -> &[Cte] {
 /// `body_leaf_table_refs` (cute-dbt#40). The renderer reads these
 /// directly via the POD accessors; it never re-parses the slice.
 ///
-/// The second return value aggregates every body's per-LEFT-JOIN facts
-/// (cute-dbt#173), each tagged with its consumer body's node name —
+/// The second and third return values aggregate every body's
+/// per-LEFT-JOIN facts (cute-dbt#173) and per-negated-subquery facts
+/// (cute-dbt#196), each tagged with its consumer body's node name —
 /// they hang off the [`CteGraph`] for the domain check detectors.
 fn build_nodes(
     compiled_sql: &str,
     ctes: &[Cte],
     query: &Query,
-) -> (Vec<CteNode>, Vec<LeftJoinFact>) {
+) -> (Vec<CteNode>, Vec<LeftJoinFact>, Vec<SubqueryFact>) {
     let byte_index = ByteIndex::new(compiled_sql);
     let mut left_joins: Vec<LeftJoinFact> = Vec::new();
+    let mut subqueries: Vec<SubqueryFact> = Vec::new();
     let mut nodes: Vec<CteNode> = ctes
         .iter()
         .map(|cte| {
@@ -177,6 +187,7 @@ fn build_nodes(
             });
             let facts = compute_shape_facts(cte_name(cte), &cte.query.body);
             left_joins.extend(facts.left_joins);
+            subqueries.extend(facts.subqueries);
             CteNode::new(cte_name(cte), None, Some(raw), None)
                 .with_shape_facts(facts.is_simple, facts.leaf_refs)
         })
@@ -185,36 +196,43 @@ fn build_nodes(
         slice_terminal(compiled_sql, &byte_index, ctes).unwrap_or_else(|| query.body.to_string());
     let terminal_facts = compute_shape_facts(TERMINAL_NODE_NAME, &query.body);
     left_joins.extend(terminal_facts.left_joins);
+    subqueries.extend(terminal_facts.subqueries);
     nodes.push(
         CteNode::new(TERMINAL_NODE_NAME, None, Some(terminal_raw), None)
             .with_shape_facts(terminal_facts.is_simple, terminal_facts.leaf_refs),
     );
-    (nodes, left_joins)
+    (nodes, left_joins, subqueries)
 }
 
 /// Engine-computed structural facts about a query body
-/// (cute-dbt#40 Option C; `left_joins` added by cute-dbt#173).
+/// (cute-dbt#40 Option C; `left_joins` added by cute-dbt#173;
+/// `subqueries` by cute-dbt#196).
 struct BodyShapeFacts {
     is_simple: bool,
     leaf_refs: Vec<String>,
     left_joins: Vec<LeftJoinFact>,
+    subqueries: Vec<SubqueryFact>,
 }
 
 /// Compute the structural facts the renderer needs to classify a CTE
 /// node's role and resolve import-CTE body matches — without ever
 /// exposing the AST outside the adapter layer. The per-LEFT-JOIN facts
-/// (cute-dbt#173) ride the same pass over the same parsed AST: never a
-/// second parse. `consumer` is the body's node name — a CTE name or
+/// (cute-dbt#173) and per-negated-subquery facts (cute-dbt#196) ride
+/// the same pass over the same parsed AST: never a second parse.
+/// `consumer` is the body's node name — a CTE name or
 /// [`TERMINAL_NODE_NAME`] — tagged onto each fact.
 fn compute_shape_facts(consumer: &str, body: &SetExpr) -> BodyShapeFacts {
     let mut leaf_refs = Vec::new();
     collect_leaf_table_refs(body, &mut leaf_refs);
     let mut left_joins = Vec::new();
     collect_left_join_facts(consumer, body, &mut left_joins);
+    let mut subqueries = Vec::new();
+    collect_subquery_facts(consumer, body, &mut subqueries);
     BodyShapeFacts {
         is_simple: is_body_simple_from_select(body),
         leaf_refs,
         left_joins,
+        subqueries,
     }
 }
 
@@ -419,6 +437,300 @@ fn where_is_null_columns(selection: Option<&Expr>, right_qualifier: &str) -> Vec
         }
     }
     columns
+}
+
+// ---------------------------------------------------------------------
+// Per-negated-subquery facts (cute-dbt#196 — the correlated-subquery
+// evidence family, v1).
+// ---------------------------------------------------------------------
+
+/// Walk `body` recursively (the [`collect_left_join_facts`] descent
+/// shape), appending one [`SubqueryFact`] per detected negated
+/// subquery in a `SELECT`'s top-level `WHERE` `AND` conjuncts. Negated
+/// forms anywhere else (OR branches, HAVING, JOIN ON, projections) and
+/// non-negated `EXISTS` / `IN` (semi-join / membership — future
+/// consumers) are deliberately NOT extracted.
+fn collect_subquery_facts(consumer: &str, body: &SetExpr, facts: &mut Vec<SubqueryFact>) {
+    match body {
+        SetExpr::Select(select) => select_subquery_facts(consumer, select, facts),
+        SetExpr::Query(inner) => collect_subquery_facts(consumer, &inner.body, facts),
+        SetExpr::SetOperation { left, right, .. } => {
+            collect_subquery_facts(consumer, left, facts);
+            collect_subquery_facts(consumer, right, facts);
+        }
+        _ => {}
+    }
+}
+
+/// Facts for every conforming `NOT EXISTS` / `NOT IN` subquery in one
+/// `SELECT`'s top-level `WHERE` `AND` conjuncts.
+fn select_subquery_facts(consumer: &str, select: &Select, facts: &mut Vec<SubqueryFact>) {
+    let Some(selection) = select.selection.as_ref() else {
+        return;
+    };
+    let outer_aliases = select_alias_map(select);
+    let mut conjuncts = Vec::new();
+    collect_and_conjuncts(selection, &mut conjuncts);
+    for conjunct in conjuncts {
+        let fact = match conjunct {
+            Expr::Exists {
+                subquery,
+                negated: true,
+            } => not_exists_fact(consumer, subquery, &outer_aliases),
+            Expr::InSubquery {
+                expr,
+                subquery,
+                negated: true,
+            } => not_in_fact(consumer, expr, subquery, &outer_aliases, select),
+            _ => None,
+        };
+        facts.extend(fact);
+    }
+}
+
+/// The single plain named inner relation of a conforming subquery —
+/// `(inner Select, inner leaf)` — or `None` when the subquery carries
+/// its own `WITH` clause, is a set operation, reads more than one
+/// relation, joins, or reads anything but a plain named table (derived
+/// tables, table functions): all declared exclusions, silent by
+/// construction.
+fn conforming_inner(subquery: &Query) -> Option<(&Select, String)> {
+    if subquery.with.is_some() {
+        return None;
+    }
+    let SetExpr::Select(inner) = subquery.body.as_ref() else {
+        return None;
+    };
+    if inner.from.len() != 1 || !inner.from[0].joins.is_empty() {
+        return None;
+    }
+    let (_, inner_leaf) = factor_qualifier_and_leaf(&inner.from[0].relation)?;
+    Some((inner, inner_leaf))
+}
+
+/// Classify one `NOT EXISTS (SELECT … FROM <inner> WHERE …)` conjunct
+/// (cute-dbt#196). A fact is emitted only for a **correlated** subquery
+/// over a conforming single-relation inner: at least one inner-`WHERE`
+/// qualified reference must resolve in the OUTER alias map (and not in
+/// the inner one — SQL scoping: the innermost binding wins). The
+/// `equi_keys` are the inner-`WHERE` top-level `AND` equi-conjuncts
+/// between one inner-resolvable and one outer-resolvable column,
+/// normalized OUTER-side-left. Resolvable correlation with NO
+/// resolvable equi pair yields a fact with EMPTY keys (the downstream
+/// bind fails → honest UNKNOWN). An uncorrelated `NOT EXISTS` is not a
+/// keyed anti-join — no fact, silence.
+fn not_exists_fact(
+    consumer: &str,
+    subquery: &Query,
+    outer_aliases: &HashMap<String, String>,
+) -> Option<SubqueryFact> {
+    let (inner, inner_leaf) = conforming_inner(subquery)?;
+    let inner_where = inner.selection.as_ref()?;
+    let inner_aliases = select_alias_map(inner);
+    let mut refs = Vec::new();
+    collect_qualified_refs(inner_where, &mut refs);
+    let correlated = refs
+        .iter()
+        .any(|(qualifier, _)| resolves_outer(qualifier, &inner_aliases, outer_aliases));
+    if !correlated {
+        return None;
+    }
+    let mut conjuncts = Vec::new();
+    collect_and_conjuncts(inner_where, &mut conjuncts);
+    let pairs = conjuncts
+        .iter()
+        .filter_map(|conjunct| correlated_equi_pair(conjunct, &inner_aliases, outer_aliases))
+        .collect();
+    Some(SubqueryFact::new(
+        SubqueryKind::NotExists,
+        consumer,
+        inner_leaf,
+        pairs,
+    ))
+}
+
+/// Classify one `<col> NOT IN (SELECT <col> FROM <inner>)` conjunct
+/// (cute-dbt#196). The inner must be a conforming single-relation
+/// subquery projecting EXACTLY one column; the outer expression must
+/// itself be a column reference. The membership pair (outer column ↔
+/// inner projected column) is the single equi key. An outer column
+/// whose side does not resolve (unknown qualifier, or unqualified over
+/// a multi-relation outer `FROM`) yields a fact with EMPTY keys (→
+/// UNKNOWN); a non-column outer expression or non-conforming inner
+/// yields no fact.
+fn not_in_fact(
+    consumer: &str,
+    outer_expr: &Expr,
+    subquery: &Query,
+    outer_aliases: &HashMap<String, String>,
+    outer_select: &Select,
+) -> Option<SubqueryFact> {
+    let (inner, inner_leaf) = conforming_inner(subquery)?;
+    let inner_aliases = select_alias_map(inner);
+    let inner_column = single_projected_column(&inner.projection, &inner_aliases)?;
+    let (outer_qualifier, outer_column) = match outer_expr {
+        Expr::Identifier(ident) => (None, ident.value.to_ascii_lowercase()),
+        Expr::CompoundIdentifier(_) => {
+            let (qualifier, column) = qualified_column(outer_expr)?;
+            (Some(qualifier), column)
+        }
+        _ => return None,
+    };
+    let left_leaf = match outer_qualifier {
+        Some(qualifier) => outer_aliases.get(&qualifier).cloned(),
+        // An unqualified column resolves only when the outer FROM reads
+        // exactly one relation.
+        None => sole_relation_leaf(outer_select),
+    };
+    let pairs = left_leaf.map_or_else(Vec::new, |leaf| {
+        vec![JoinKeyPair::new(Some(leaf), outer_column, inner_column)]
+    });
+    Some(SubqueryFact::new(
+        SubqueryKind::NotIn,
+        consumer,
+        inner_leaf,
+        pairs,
+    ))
+}
+
+/// `true` when `qualifier` resolves in the OUTER alias map and not in
+/// the inner one — the correlation-evidence test (SQL scoping: a
+/// qualifier bound by the inner `FROM` shadows the outer binding).
+fn resolves_outer(
+    qualifier: &str,
+    inner_aliases: &HashMap<String, String>,
+    outer_aliases: &HashMap<String, String>,
+) -> bool {
+    !inner_aliases.contains_key(qualifier) && outer_aliases.contains_key(qualifier)
+}
+
+/// Classify one inner-`WHERE` conjunct as a correlated equi-key pair:
+/// `=` between two qualified columns, one resolving in the INNER alias
+/// map and the other in the OUTER one. Normalized OUTER-side-left —
+/// the inner relation plays the LEFT JOIN's right-leaf role, so the
+/// pair binds through the existing key-match machinery unchanged.
+fn correlated_equi_pair(
+    expr: &Expr,
+    inner_aliases: &HashMap<String, String>,
+    outer_aliases: &HashMap<String, String>,
+) -> Option<JoinKeyPair> {
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Eq,
+        right,
+    } = expr
+    else {
+        return None;
+    };
+    let a = qualified_column(left)?;
+    let b = qualified_column(right)?;
+    let a_inner = inner_aliases.contains_key(&a.0);
+    let b_inner = inner_aliases.contains_key(&b.0);
+    let (inner_side, outer_side) = match (a_inner, b_inner) {
+        (true, false) if resolves_outer(&b.0, inner_aliases, outer_aliases) => (a, b),
+        (false, true) if resolves_outer(&a.0, inner_aliases, outer_aliases) => (b, a),
+        _ => return None,
+    };
+    Some(JoinKeyPair::new(
+        outer_aliases.get(&outer_side.0).cloned(),
+        outer_side.1,
+        inner_side.1,
+    ))
+}
+
+/// Append every qualified column reference under `expr`, descending
+/// the predicate shapes correlated anti-join `WHERE`s realistically
+/// use (AND/OR trees, comparisons, IS \[NOT\] NULL, BETWEEN, IN lists,
+/// LIKE, CAST, parens, unary NOT). Unknown variants are deliberately
+/// not descended: a correlation reference hidden in an exotic shape
+/// yields no evidence, so the fact is not emitted — silence, never
+/// misclassification.
+fn collect_qualified_refs(expr: &Expr, refs: &mut Vec<(String, String)>) {
+    match expr {
+        Expr::CompoundIdentifier(_) => refs.extend(qualified_column(expr)),
+        Expr::BinaryOp { left, right, .. } => {
+            collect_qualified_refs(left, refs);
+            collect_qualified_refs(right, refs);
+        }
+        Expr::UnaryOp { expr: inner, .. }
+        | Expr::Nested(inner)
+        | Expr::IsNull(inner)
+        | Expr::IsNotNull(inner)
+        | Expr::Cast { expr: inner, .. } => collect_qualified_refs(inner, refs),
+        Expr::Between {
+            expr: inner,
+            low,
+            high,
+            ..
+        } => {
+            collect_qualified_refs(inner, refs);
+            collect_qualified_refs(low, refs);
+            collect_qualified_refs(high, refs);
+        }
+        Expr::InList {
+            expr: inner, list, ..
+        } => {
+            collect_qualified_refs(inner, refs);
+            for item in list {
+                collect_qualified_refs(item, refs);
+            }
+        }
+        Expr::Like {
+            expr: inner,
+            pattern,
+            ..
+        }
+        | Expr::ILike {
+            expr: inner,
+            pattern,
+            ..
+        } => {
+            collect_qualified_refs(inner, refs);
+            collect_qualified_refs(pattern, refs);
+        }
+        _ => {}
+    }
+}
+
+/// The single projected column of a `NOT IN` inner subquery — lowercased,
+/// the underlying column the membership values come from (an alias
+/// renames the output; the given mocks the relation's raw columns).
+/// `None` unless the projection is exactly one plain or aliased column
+/// reference whose qualifier (when present) resolves in the inner alias
+/// map.
+fn single_projected_column(
+    projection: &[SelectItem],
+    inner_aliases: &HashMap<String, String>,
+) -> Option<String> {
+    let [item] = projection else {
+        return None;
+    };
+    let (SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. }) = item else {
+        return None;
+    };
+    match expr {
+        Expr::Identifier(ident) => Some(ident.value.to_ascii_lowercase()),
+        Expr::CompoundIdentifier(_) => {
+            let (qualifier, column) = qualified_column(expr)?;
+            inner_aliases.contains_key(&qualifier).then_some(column)
+        }
+        _ => None,
+    }
+}
+
+/// The leaf of the `SELECT`'s sole relation — `None` unless the `FROM`
+/// reads exactly one table factor of any kind AND that factor is a
+/// plain named table (an unqualified outer column over several
+/// relations, or over a derived table, is ambiguous — unresolvable).
+fn sole_relation_leaf(select: &Select) -> Option<String> {
+    let mut factors = select.from.iter().flat_map(|table| {
+        std::iter::once(&table.relation).chain(table.joins.iter().map(|join| &join.relation))
+    });
+    let first = factors.next()?;
+    if factors.next().is_some() {
+        return None;
+    }
+    factor_qualifier_and_leaf(first).map(|(_, leaf)| leaf)
 }
 
 /// `true` when the projection **provably** carries columns of the
@@ -1622,9 +1934,11 @@ mod tests {
 
     #[test]
     fn not_exists_anti_join_emits_no_left_join_fact() {
-        // The declared cute-dbt#173 exclusion: only the LEFT JOIN +
-        // IS NULL form is detected in v1 — the NOT EXISTS equivalent is
-        // invisible at the fact level (negative test, book-page note).
+        // Family separation: a NOT EXISTS anti-join is never a
+        // LeftJoinFact — since cute-dbt#196 it surfaces through the
+        // SIBLING SubqueryFact family (tested below), not by
+        // normalizing subqueries into join facts (the rejected
+        // alternative: it would lie in the POD).
         let facts = terminal_facts(
             "SELECT * FROM stg_orders o \
              WHERE NOT EXISTS (SELECT 1 FROM stg_returns r WHERE r.order_id = o.order_id)",
@@ -1674,5 +1988,242 @@ mod tests {
         assert_eq!(facts.len(), 2);
         assert_eq!(facts[0].right_leaf(), "condition_stats");
         assert_eq!(facts[1].right_leaf(), "chronic_flags");
+    }
+
+    // ===== per-negated-subquery facts (cute-dbt#196) =====
+
+    /// The graph-level subquery facts for a single-statement query.
+    fn subquery_facts(sql: &str) -> Vec<crate::domain::SubqueryFact> {
+        graph(sql).subquery_facts().to_vec()
+    }
+
+    #[test]
+    fn correlated_not_exists_yields_a_fact_with_one_equi_key() {
+        let facts = subquery_facts(
+            "SELECT * FROM stg_orders o \
+             WHERE NOT EXISTS (SELECT 1 FROM stg_returns r WHERE r.order_id = o.order_id)",
+        );
+        assert_eq!(facts.len(), 1, "one NOT EXISTS, one fact");
+        let fact = &facts[0];
+        assert_eq!(fact.kind(), SubqueryKind::NotExists);
+        assert_eq!(
+            fact.consumer(),
+            TERMINAL_NODE_NAME,
+            "a WITH-less body's facts are tagged with the terminal name"
+        );
+        assert_eq!(fact.inner_leaf(), "stg_returns");
+        assert_eq!(fact.equi_keys().len(), 1);
+        assert_eq!(
+            fact.equi_keys()[0].left_leaf(),
+            Some("stg_orders"),
+            "the OUTER side is the pair's left"
+        );
+        assert_eq!(fact.equi_keys()[0].left_column(), "order_id");
+        assert_eq!(fact.equi_keys()[0].right_column(), "order_id");
+    }
+
+    #[test]
+    fn multi_key_correlation_yields_one_pair_per_equi_conjunct() {
+        let facts = subquery_facts(
+            "SELECT * FROM stg_rates o \
+             WHERE NOT EXISTS (SELECT 1 FROM stg_quotes q \
+             WHERE q.currency = o.currency AND o.quote_date = q.rate_date)",
+        );
+        assert_eq!(facts.len(), 1);
+        let pairs = facts[0].equi_keys();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].left_column(), "currency");
+        assert_eq!(pairs[0].right_column(), "currency");
+        assert_eq!(
+            pairs[1].left_column(),
+            "quote_date",
+            "the outer side is normalized left regardless of source order"
+        );
+        assert_eq!(pairs[1].right_column(), "rate_date");
+    }
+
+    #[test]
+    fn not_exists_alias_resolution_follows_both_alias_maps() {
+        // dbt-style schema-qualified names with aliases on BOTH sides:
+        // the outer qualifier resolves through the outer alias map, the
+        // inner through the inner one.
+        let facts = subquery_facts(
+            "SELECT c.customer_id FROM \"db\".\"main\".\"stg_customers\" c \
+             WHERE NOT EXISTS (SELECT 1 FROM \"db\".\"main\".\"stg_orders\" o \
+             WHERE o.customer_id = c.customer_id)",
+        );
+        assert_eq!(facts.len(), 1);
+        let fact = &facts[0];
+        assert_eq!(fact.inner_leaf(), "stg_orders");
+        assert_eq!(fact.equi_keys()[0].left_leaf(), Some("stg_customers"));
+    }
+
+    #[test]
+    fn correlated_but_non_equi_not_exists_yields_a_fact_with_empty_keys() {
+        // Correlation evidence (o.signup_date is outer-resolvable) but
+        // no resolvable equi conjunct — the unrecoverable-key shape:
+        // fact emitted, EMPTY keys, downstream bind degrades UNKNOWN.
+        let facts = subquery_facts(
+            "SELECT * FROM stg_customers o \
+             WHERE NOT EXISTS (SELECT 1 FROM stg_orders r \
+             WHERE r.order_date > o.signup_date)",
+        );
+        assert_eq!(facts.len(), 1);
+        assert!(facts[0].equi_keys().is_empty());
+    }
+
+    #[test]
+    fn uncorrelated_not_exists_emits_no_fact() {
+        // Zero outer references — not a keyed anti-join: silence.
+        let facts = subquery_facts(
+            "SELECT * FROM stg_customers c \
+             WHERE NOT EXISTS (SELECT 1 FROM stg_orders o WHERE o.status = 'void')",
+        );
+        assert!(facts.is_empty(), "{facts:?}");
+    }
+
+    #[test]
+    fn or_branch_not_exists_emits_no_fact() {
+        // An OR conjunct has different semantics and is never
+        // decomposed — the negated subquery inside it is invisible.
+        let facts = subquery_facts(
+            "SELECT * FROM stg_customers c \
+             WHERE c.is_active = true OR NOT EXISTS \
+             (SELECT 1 FROM stg_orders o WHERE o.customer_id = c.customer_id)",
+        );
+        assert!(facts.is_empty(), "{facts:?}");
+    }
+
+    #[test]
+    fn non_negated_exists_and_in_emit_no_facts() {
+        // Semi-join + membership are FUTURE consumers — extracting them
+        // now would be dead variants; pinned silent.
+        let exists = subquery_facts(
+            "SELECT * FROM stg_customers c \
+             WHERE EXISTS (SELECT 1 FROM stg_orders o WHERE o.customer_id = c.customer_id)",
+        );
+        assert!(exists.is_empty(), "{exists:?}");
+        let inn = subquery_facts(
+            "SELECT * FROM stg_orders o \
+             WHERE o.order_id IN (SELECT r.order_id FROM stg_refunds r)",
+        );
+        assert!(inn.is_empty(), "{inn:?}");
+    }
+
+    #[test]
+    fn derived_table_inner_emits_no_fact() {
+        let facts = subquery_facts(
+            "SELECT * FROM stg_customers c \
+             WHERE NOT EXISTS (SELECT 1 FROM (SELECT * FROM stg_orders) o \
+             WHERE o.customer_id = c.customer_id)",
+        );
+        assert!(facts.is_empty(), "{facts:?}");
+    }
+
+    #[test]
+    fn multi_table_inner_emits_no_fact() {
+        let joined = subquery_facts(
+            "SELECT * FROM stg_customers c \
+             WHERE NOT EXISTS (SELECT 1 FROM stg_orders o \
+             JOIN stg_payments p ON o.order_id = p.order_id \
+             WHERE o.customer_id = c.customer_id)",
+        );
+        assert!(joined.is_empty(), "{joined:?}");
+        let comma = subquery_facts(
+            "SELECT * FROM stg_customers c \
+             WHERE NOT EXISTS (SELECT 1 FROM stg_orders o, stg_payments p \
+             WHERE o.customer_id = c.customer_id)",
+        );
+        assert!(comma.is_empty(), "{comma:?}");
+    }
+
+    #[test]
+    fn not_in_happy_path_yields_the_membership_pair() {
+        let facts = subquery_facts(
+            "SELECT o.order_id FROM stg_orders o \
+             WHERE o.order_id NOT IN (SELECT r.order_id FROM stg_refunds r)",
+        );
+        assert_eq!(facts.len(), 1);
+        let fact = &facts[0];
+        assert_eq!(fact.kind(), SubqueryKind::NotIn);
+        assert_eq!(fact.inner_leaf(), "stg_refunds");
+        assert_eq!(fact.equi_keys().len(), 1);
+        assert_eq!(fact.equi_keys()[0].left_leaf(), Some("stg_orders"));
+        assert_eq!(fact.equi_keys()[0].left_column(), "order_id");
+        assert_eq!(fact.equi_keys()[0].right_column(), "order_id");
+    }
+
+    #[test]
+    fn not_in_unqualified_outer_column_resolves_over_a_sole_relation() {
+        // One outer relation: the unqualified membership column is
+        // unambiguous. An ALIASED single projection keeps the SOURCE
+        // column (the given mocks the relation's raw columns).
+        let facts = subquery_facts(
+            "SELECT order_id FROM stg_orders \
+             WHERE order_id NOT IN (SELECT order_id AS refunded_id FROM stg_refunds)",
+        );
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].equi_keys().len(), 1);
+        assert_eq!(facts[0].equi_keys()[0].left_leaf(), Some("stg_orders"));
+        assert_eq!(facts[0].equi_keys()[0].right_column(), "order_id");
+    }
+
+    #[test]
+    fn not_in_unresolvable_outer_column_yields_empty_keys() {
+        // Two outer relations + an unqualified column: the outer side
+        // is present but ambiguous — fact with EMPTY keys (→ UNKNOWN).
+        let facts = subquery_facts(
+            "SELECT * FROM stg_orders o JOIN stg_shipments s ON o.order_id = s.order_id \
+             WHERE order_id NOT IN (SELECT r.order_id FROM stg_refunds r)",
+        );
+        assert_eq!(facts.len(), 1);
+        assert!(facts[0].equi_keys().is_empty());
+    }
+
+    #[test]
+    fn not_in_multi_column_or_expression_projection_emits_no_fact() {
+        let two_columns = subquery_facts(
+            "SELECT * FROM stg_orders o \
+             WHERE o.order_id NOT IN (SELECT r.order_id, r.refund_id FROM stg_refunds r)",
+        );
+        assert!(two_columns.is_empty(), "{two_columns:?}");
+        let expression = subquery_facts(
+            "SELECT * FROM stg_orders o \
+             WHERE o.order_id NOT IN (SELECT abs(r.order_id) FROM stg_refunds r)",
+        );
+        assert!(expression.is_empty(), "{expression:?}");
+        let non_column_outer = subquery_facts(
+            "SELECT * FROM stg_orders o \
+             WHERE upper(o.status) NOT IN (SELECT r.status FROM stg_refunds r)",
+        );
+        assert!(non_column_outer.is_empty(), "{non_column_outer:?}");
+    }
+
+    #[test]
+    fn subquery_facts_in_cte_bodies_carry_their_consumer_name() {
+        let g = graph(
+            "WITH unrefunded AS (\
+                 SELECT o.order_id FROM stg_orders o \
+                 WHERE NOT EXISTS (SELECT 1 FROM stg_refunds r WHERE r.order_id = o.order_id)\
+             ) \
+             SELECT * FROM unrefunded \
+             WHERE order_id NOT IN (SELECT v.order_id FROM stg_voids v)",
+        );
+        let facts = g.subquery_facts();
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].kind(), SubqueryKind::NotExists);
+        assert_eq!(facts[0].consumer(), "unrefunded");
+        assert_eq!(facts[1].kind(), SubqueryKind::NotIn);
+        assert_eq!(
+            facts[1].consumer(),
+            TERMINAL_NODE_NAME,
+            "the terminal body's NOT IN is collected under the terminal name"
+        );
+        assert_eq!(
+            facts[1].equi_keys()[0].left_leaf(),
+            Some("unrefunded"),
+            "the sole outer relation may itself be a CTE — the detector \
+             binds it through the simple-FROM closure"
+        );
     }
 }
