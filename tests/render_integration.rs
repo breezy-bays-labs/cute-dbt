@@ -15,8 +15,12 @@ use cute_dbt::adapters::asset_embed::{
     CYTOSCAPE_JS, DATATABLES_CSS, DATATABLES_JS, JQUERY_JS, MERMAID_JS, SAKURA_CSS,
 };
 use cute_dbt::adapters::manifest::FileManifestSource;
-use cute_dbt::adapters::render::{ScopeSource, column_meta_for_model, render_report};
-use cute_dbt::domain::{DEFAULT_REPORT_TITLE, Manifest, NodeId, StateComparator};
+use cute_dbt::adapters::render::{
+    ScopeSource, build_payload, column_meta_for_model, render_report,
+};
+use cute_dbt::domain::{
+    DEFAULT_REPORT_TITLE, InScopeSet, Manifest, ModelInScopeSet, NodeId, StateComparator,
+};
 use cute_dbt::ports::ManifestSource;
 
 /// Absolute path to a committed fixture under `tests/fixtures/`.
@@ -367,4 +371,57 @@ fn column_meta_matches_the_handoff_mapping_against_the_real_fusion_fixture() {
         "relationships detail is \"model.field\" with the real ref('…') unwrapped",
     );
     assert!(rel.values.is_empty(), "relationships carries no pills");
+}
+
+#[test]
+fn source_given_binds_end_to_end_from_a_committed_fixture() {
+    // cute-dbt#57 vertical, file → Stage-1 preflight → sources block →
+    // payload binding: the committed synthetic fixture carries a model
+    // with BOTH a ref()-based import CTE and a source()-based import
+    // CTE, plus a two-dialect `sources` block (core-style explicit
+    // nulls AND fusion-style absent keys — the #145 rule).
+    let current = load("ref-and-source-import-cte.json");
+
+    // The adapter parsed both dialects of the sources block.
+    assert_eq!(current.sources().len(), 2);
+    let patients = current
+        .source_by_name("demo_raw", "patients")
+        .expect("the core-style (explicit-null) source entry resolves");
+    assert_eq!(
+        patients.relation_name(),
+        Some("\"mixed_shop\".\"raw_layer\".\"patients\"")
+    );
+    let encounters = current
+        .source_by_name("demo_raw", "encounters")
+        .expect("the fusion-style (absent-key) source entry resolves");
+    assert!(encounters.identifier().is_none());
+    assert!(encounters.relation_name().is_none());
+
+    // The render payload binds each given to its own import CTE.
+    let test_id = "unit_test.mixed_shop.test_stg_mixed_joins_ref_and_source";
+    let model_id = NodeId::new("model.mixed_shop.stg_mixed");
+    let in_scope = InScopeSet::from_iter([test_id.to_owned()]);
+    let models = ModelInScopeSet::from_iter([model_id]);
+    let payload = build_payload(
+        &current,
+        &in_scope,
+        &models,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "baseline",
+    );
+    let test = &payload.models[0].tests[0];
+    assert_eq!(
+        test.given[0].bound_to_node.as_deref(),
+        Some("orders"),
+        "ref('raw_orders') binds to the ref-based import CTE",
+    );
+    assert_eq!(
+        test.given[1].bound_to_node.as_deref(),
+        Some("patients"),
+        "source('demo_raw','patients') binds to the source-based import CTE \
+         via the manifest sources block",
+    );
 }

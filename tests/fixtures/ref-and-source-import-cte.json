@@ -1,0 +1,95 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "1.11.9",
+    "generated_at": "1970-01-01T00:00:00Z",
+    "invocation_id": "00000000-0000-0000-0000-000000000000",
+    "project_name": "mixed_shop",
+    "project_id": "0000000000000000000000000000000000000000",
+    "user_id": "00000000-0000-0000-0000-000000000000",
+    "send_anonymous_usage_stats": false,
+    "adapter_type": "duckdb"
+  },
+  "nodes": {
+    "model.mixed_shop.stg_mixed": {
+      "database": "mixed_shop",
+      "schema": "main",
+      "name": "stg_mixed",
+      "resource_type": "model",
+      "package_name": "mixed_shop",
+      "path": "staging/stg_mixed.sql",
+      "original_file_path": "models/staging/stg_mixed.sql",
+      "unique_id": "model.mixed_shop.stg_mixed",
+      "fqn": ["mixed_shop", "staging", "stg_mixed"],
+      "alias": "stg_mixed",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "REF_AND_SOURCE_SYNTHETIC_SENTINEL_0001"
+      },
+      "raw_code": "{# Synthetic ref+source import-CTE fixture exercising source() binding (cute-dbt#57). #}\nwith orders as (\n  select * from {{ ref('raw_orders') }}\n), patients as (\n  select * from {{ source('demo_raw', 'patients') }}\n)\nselect o.order_id, p.patient_name\nfrom orders o\njoin patients p on p.patient_id = o.patient_id",
+      "compiled_code": "with orders as (\n  select * from \"mixed_shop\".\"main\".\"raw_orders\"\n), patients as (\n  select * from \"mixed_shop\".\"raw_layer\".\"patients\"\n)\nselect o.order_id, p.patient_name\nfrom orders o\njoin patients p on p.patient_id = o.patient_id",
+      "depends_on": {
+        "nodes": [
+          "model.mixed_shop.raw_orders",
+          "source.mixed_shop.demo_raw.patients"
+        ]
+      }
+    }
+  },
+  "sources": {
+    "source.mixed_shop.demo_raw.patients": {
+      "database": "mixed_shop",
+      "schema": "raw_layer",
+      "name": "patients",
+      "resource_type": "source",
+      "package_name": "mixed_shop",
+      "unique_id": "source.mixed_shop.demo_raw.patients",
+      "source_name": "demo_raw",
+      "identifier": "patients",
+      "relation_name": "\"mixed_shop\".\"raw_layer\".\"patients\"",
+      "loaded_at_field": null,
+      "loaded_at_query": null,
+      "freshness": null,
+      "external": null,
+      "patch_path": null
+    },
+    "source.mixed_shop.demo_raw.encounters": {
+      "schema": "raw_layer",
+      "name": "encounters",
+      "resource_type": "source",
+      "package_name": "mixed_shop",
+      "unique_id": "source.mixed_shop.demo_raw.encounters",
+      "source_name": "demo_raw"
+    }
+  },
+  "unit_tests": {
+    "unit_test.mixed_shop.test_stg_mixed_joins_ref_and_source": {
+      "name": "test_stg_mixed_joins_ref_and_source",
+      "model": "stg_mixed",
+      "package_name": "mixed_shop",
+      "resource_type": "unit_test",
+      "unique_id": "unit_test.mixed_shop.test_stg_mixed_joins_ref_and_source",
+      "original_file_path": "models/staging/_unit_tests.yml",
+      "given": [
+        {
+          "input": "ref('raw_orders')",
+          "rows": [{"order_id": 1, "patient_id": 7}]
+        },
+        {
+          "input": "source('demo_raw', 'patients')",
+          "rows": [{"patient_id": 7, "patient_name": "Synthetic Sam"}]
+        }
+      ],
+      "expect": {
+        "rows": [
+          {"order_id": 1, "patient_name": "Synthetic Sam"}
+        ]
+      },
+      "description": "Synthetic ref+source binding case: the ref() given must bind to the `orders` import CTE and the source() given must bind to the `patients` import CTE via the manifest sources block (cute-dbt#57).",
+      "config": {
+        "tags": [],
+        "meta": {}
+      }
+    }
+  }
+}

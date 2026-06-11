@@ -209,6 +209,29 @@ the `messy_shop` package name and node names are fictitious.\
 """
 
 [[fixture]]
+path = "ref-and-source-import-cte.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/57"
+sha256 = "459074a1f145aaf14bcf72210d3a7d050df7e6df06f66df4871e77a7874a3a92"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Synthetic single-model manifest exercising source() given binding \
+(cute-dbt#57). The `stg_mixed` model carries BOTH a ref()-based import \
+CTE (`orders`) and a source()-based import CTE (`patients`); its unit \
+test mocks both inputs. The top-level `sources` block carries two \
+entries in the two engine dialects the #145 rule demands: the bound \
+`demo_raw.patients` entry in dbt-core style (explicit `null` for unset \
+optional keys) and a `demo_raw.encounters` entry in dbt-fusion style \
+(unset keys omitted entirely). The renderer must bind the ref() given \
+to `orders` directly and the source() given to `patients` by resolving \
+(source_name, name) through the sources map to the physical identifier \
+matched against the CTE body leaf. Pure synthetic data only; the \
+`mixed_shop` package, the names, and the rows are fictitious.\
+"""
+
+[[fixture]]
 path = "fusion-csv-raw-string.json"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/127"
