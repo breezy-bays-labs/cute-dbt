@@ -7409,3 +7409,224 @@ fn tier_chips_meet_aa_contrast_on_every_theme() {
 
     let _ = tab.close(true);
 }
+
+// ===== cute-dbt#227 — suppressed-row text AA contrast across every theme ====
+//
+// The #206 guard above deliberately skipped suppress-chips: every one of
+// them sat inside `.finding-row.is-suppressed { opacity: 0.72 }`, which
+// composited ALL descendant text toward the page background — effective
+// contrast was both sub-AA (2.7–3.9 across themes) and uncomputable from
+// resolved tokens. The recorded #227 decision moves "visible-but-quiet"
+// from opacity to token-level dimming (muted-but-AA colors, normal
+// weight, subtle border), so token math equals effective contrast again.
+// This guard pins both halves:
+//   · CONTRAST — every informational text surface of the suppressed
+//     reveal (suppress-chip, verdict word, check name, construct chip,
+//     collapsed-count summary) reaches AA 4.5:1 on its true backdrop in
+//     every theme;
+//   · MECHANISM — no ancestor of any of those surfaces carries computed
+//     opacity < 1, the structural guarantee that the token-derived ratio
+//     IS the painted one (a reintroduced row opacity fails loudly here).
+// The decorative `.f-mark` stays aria-hidden + `--text-faint` (WCAG
+// non-text exemption) and is deliberately NOT measured.
+
+/// The suppressed-surface sweep, evaluated in-page. Returns a JSON array
+/// of `{theme, el, ratio, fg, bg, dimmed}` — one entry per
+/// (theme, suppressed text surface); `dimmed` lists any self-or-ancestor
+/// node whose computed opacity is below 1.
+const SUPPRESSED_TEXT_CONTRAST_SWEEP_JS: &str = r#"(function () {
+  var THEMES = ["light", "solarized", "latte", "rosepine",
+                "dark", "tokyo", "gruvbox", "dracula"];
+  var DARK = { dark: true, tokyo: true, gruvbox: true, dracula: true };
+  function parseRgb(s) {
+    var m = /rgba?\(([^)]+)\)/.exec(s || "");
+    if (!m) return null;
+    var p = m[1].split(",");
+    return { r: parseFloat(p[0]), g: parseFloat(p[1]), b: parseFloat(p[2]),
+             a: p.length > 3 ? parseFloat(p[3]) : 1 };
+  }
+  function chan(v) {
+    v = v / 255;
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  function lum(c) {
+    return 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
+  }
+  function ratio(f, b) {
+    var lf = lum(f), lb = lum(b);
+    var hi = Math.max(lf, lb), lo = Math.min(lf, lb);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+  function backdropOf(el) {
+    for (var n = el; n; n = n.parentElement) {
+      var c = parseRgb(getComputedStyle(n).backgroundColor);
+      if (c && c.a === 1) return c;
+    }
+    return null; /* no opaque ancestor — surfaced as ratio -1 */
+  }
+  function dimmedChain(el) {
+    var out = [];
+    for (var n = el; n; n = n.parentElement) {
+      if (parseFloat(getComputedStyle(n).opacity) < 1) {
+        out.push(n.tagName.toLowerCase()
+          + (n.className ? "." + String(n.className).trim().split(/\s+/).join(".") : ""));
+      }
+    }
+    return out;
+  }
+  /* measurement hygiene: body backgrounds transition over 120ms, so a
+     just-switched theme would otherwise be read mid-interpolation */
+  var kill = document.createElement("style");
+  kill.textContent = "* { transition: none !important; animation: none !important; }";
+  document.head.appendChild(kill);
+  /* fail legibly on missing markup: a null target would otherwise die
+     inside getComputedStyle as an opaque TypeError — name the absentee
+     instead (the eval harness surfaces thrown messages verbatim) */
+  var reveal = document.querySelector('[data-testid="findings-suppressed"]');
+  if (!reveal) {
+    throw new Error("suppressed-text sweep: no [data-testid=findings-suppressed] reveal in the DOM");
+  }
+  reveal.open = true;
+  var row = document.querySelector(".finding-row.is-suppressed");
+  if (!row) {
+    throw new Error("suppressed-text sweep: no .finding-row.is-suppressed row in the DOM");
+  }
+  var TARGETS = [
+    ["suppress-chip", row.querySelector(".suppress-chip")],
+    ["f-verdict", row.querySelector(".f-verdict")],
+    ["f-name", row.querySelector(".f-name")],
+    ["f-construct", row.querySelector(".f-construct")],
+    ["suppressed-summary", reveal.querySelector(":scope > summary")]
+  ];
+  var missing = TARGETS.filter(function (t) { return !t[1]; })
+    .map(function (t) { return t[0]; });
+  if (missing.length) {
+    throw new Error("suppressed-text sweep: target element(s) not found: "
+      + missing.join(", "));
+  }
+  var root = document.documentElement;
+  var out = [];
+  for (var i = 0; i < THEMES.length; i++) {
+    /* exactly theme.js applyTheme: set data-theme + sync html.dark */
+    root.setAttribute("data-theme", THEMES[i]);
+    root.classList.toggle("dark", !!DARK[THEMES[i]]);
+    for (var j = 0; j < TARGETS.length; j++) {
+      var el = TARGETS[j][1];
+      var cs = getComputedStyle(el);
+      var fg = parseRgb(cs.color);
+      var own = parseRgb(cs.backgroundColor);
+      var bg = own && own.a === 1 ? own : backdropOf(el.parentElement);
+      out.push({
+        theme: THEMES[i], el: TARGETS[j][0],
+        ratio: fg && bg ? ratio(fg, bg) : -1,
+        fg: cs.color,
+        bg: bg ? "rgb(" + bg.r + ", " + bg.g + ", " + bg.b + ")" : "none",
+        dimmed: dimmedChain(el)
+      });
+    }
+  }
+  return JSON.stringify(out);
+})()"#;
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
+    // The same suppressed fixture as the visible-but-quiet reveal test:
+    // dim_both trips grain + union; the grain finding is suppressed via
+    // config, so the reveal carries one `.is-suppressed` row with its
+    // suppress-chip next to one normal row (the quietness comparator).
+    use cute_dbt::domain::{CheckPolicy, HeuristicId, SuppressRule, SuppressionSource};
+
+    let node = findings_model("model.shop.dim_both");
+    let m = manifest(
+        vec![node],
+        vec![("unit_test.shop.dim_both.t1", unit_test("t1", "dim_both"))],
+    );
+    let in_scope: InScopeSet = ["unit_test.shop.dim_both.t1".to_owned()]
+        .into_iter()
+        .collect();
+    let models: ModelInScopeSet = [NodeId::new("model.shop.dim_both")].into_iter().collect();
+    let changed: InScopeSet = ["unit_test.shop.dim_both.t1".to_owned()]
+        .into_iter()
+        .collect();
+    let policy = CheckPolicy::<HeuristicId> {
+        suppressions: vec![SuppressRule {
+            check: HeuristicId::GrainUniqueKeyUnbacked,
+            model: "dim_both".to_owned(),
+            reason: Some("duplicate grain accepted during backfill".to_owned()),
+            source: SuppressionSource::Config,
+        }],
+        ..Default::default()
+    };
+    let out = tmp("headless_suppressed_contrast.html");
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &changed,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "baseline.json",
+        ScopeSource::Baseline,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &policy,
+    )
+    .expect("render writes the report");
+    let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    let raw = eval_string(&tab, SUPPRESSED_TEXT_CONTRAST_SWEEP_JS);
+    let measured: Vec<serde_json::Value> =
+        serde_json::from_str(&raw).expect("the suppressed-text sweep returns valid JSON");
+    assert_eq!(
+        measured.len(),
+        40,
+        "8 themes x 5 suppressed text surfaces measured, got: {raw}",
+    );
+
+    let mut dim_failures = Vec::new();
+    let mut aa_failures = Vec::new();
+    for m in &measured {
+        let theme = m["theme"].as_str().expect("theme is a string");
+        let el = m["el"].as_str().expect("el is a string");
+        let ratio = m["ratio"].as_f64().expect("ratio is a number");
+        let fg = m["fg"].as_str().unwrap_or("?");
+        let bg = m["bg"].as_str().unwrap_or("?");
+        let dimmed = m["dimmed"].as_array().expect("dimmed is an array");
+        assert!(
+            ratio > 0.0,
+            "the {theme}/{el} text resolved no opaque backdrop — the \
+             backdrop walk must end on a painted surface",
+        );
+        eprintln!("suppressed-text contrast {theme:>9} / {el:<18} = {ratio:.2}  ({fg} on {bg})");
+        if !dimmed.is_empty() {
+            dim_failures.push(format!("{theme}/{el} dimmed by {dimmed:?}"));
+        }
+        if ratio < 4.5 {
+            aa_failures.push(format!("{theme}/{el} = {ratio:.2} ({fg} on {bg})"));
+        }
+    }
+    assert!(
+        dim_failures.is_empty(),
+        "suppressed-row text sits under an opacity-dimmed ancestor — token \
+         math no longer equals effective contrast (the cute-dbt#227 \
+         mechanism pin): {dim_failures:#?}",
+    );
+    assert!(
+        aa_failures.is_empty(),
+        "suppressed-row text below the WCAG AA 4.5:1 floor (cute-dbt#227): {aa_failures:#?}",
+    );
+
+    let _ = tab.close(true);
+}
