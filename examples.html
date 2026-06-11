@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-8cc4b0e7.js";
+            window.path_to_searchindex_js = "searchindex-f0aa6ff4.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-f14af9d1.js"></script>
@@ -205,17 +205,23 @@ cargo test --test headless_zero_egress -- --ignored
 <p>The richer example — cute-dbt run against a real dbt project
 (<a href="https://github.com/cmbays/dbt-playground"><code>cmbays/dbt-playground</code></a>, built
 on synthetic <a href="https://synthetichealth.github.io/synthea/">Synthea</a> patient
-data). One diff touches three models, so the report shows off:</p>
+data). One diff puts multiple models in scope, so the report shows off:</p>
 <ul>
 <li><strong>multiple model cards</strong> side by side,</li>
 <li><strong>UNION arm rendering</strong> in the CTE DAG (the dashed-orange edge + legend),</li>
+<li><strong>cross-join rendering</strong> in the CTE DAG (<code>mart_date_state_grid</code> builds a
+dense months × states grid with an explicit <code>CROSS JOIN</code> CTE — the pink
+<code>cross</code> edge + its legend entry), exercised by a unit test that <strong>mixes
+dict and csv givens</strong> in a single test,</li>
+<li>a <strong><code>source()</code>-given unit test</strong> (<code>stg_synthea__patients</code> mocks
+<code>source('synthea_raw', 'patients')</code> instead of a <code>ref()</code>),</li>
 <li>an <strong>empty-state card</strong> (a model in scope with no unit tests wired).</li>
 </ul>
 <p>Open it and click around — the fastest way to get a feel for a real-world
 report.</p>
 <h2 id="diff-view-showcase-pr-diff-mode"><a class="header" href="#diff-view-showcase-pr-diff-mode">diff-view showcase (PR-diff mode)</a></h2>
-<p>👉 <strong><a href="./examples/playground-pr-diff-report.html">Open the rendered diff-view showcase</a></strong>
-(<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/playground-pr-diff-report.html">source</a>)</p>
+<p>👉 <strong><a href="./examples/diff-showcase-report.html">Open the rendered diff-view showcase</a></strong>
+(<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/diff-showcase-report.html">source</a>)</p>
 <p>The two reports above run in <strong>baseline</strong> mode. This one runs in <strong><code>--pr-diff</code>
 mode</strong> — the way cute-dbt runs inside a CI PR review — so it shows the diff-view
 feature set in action:</p>
