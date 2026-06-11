@@ -1416,6 +1416,25 @@ html[data-coverage="off"] .model-findings { display: none; }
    tier-advisory (4.92:1) already pass, so accent is the only token
    overridden and the verbatim solarized theme block stays pinned. */
 :root[data-theme="solarized"] .tier-chip { --accent: #1d6fa8; }
+/* cute-dbt#227 — suppressed-surface AA: the latte override above scopes
+   to .tier-chip only, but the suppress-chip and the suppressed row's
+   informational text ride the SAME verbatim latte muted on the same
+   surface (#6c6f85 on #eff1f5 = 4.37:1, sub-AA) — the same deepened
+   stand-in (Catppuccin subtext1 #5c5f77; 5.53:1 on surface, 5.14:1 on
+   the construct chip's --bg-alt) extends to every suppressed surface.
+   Two narrower spot fixes ride along: the rosepine collapsed count sits
+   on the page --bg (#726d8d on #e6d9c9 = 3.53:1) and its suppressed
+   construct chip on --bg-alt (4.37:1) — deepened to #5d5780 (4.82:1 /
+   5.96:1); the solarized suppressed construct chip misses the floor by
+   a hair (#5e6e73 on #f3ecd6 = 4.497:1) — deepened to the theme's own
+   base01 #586e75 (4.56:1). Token overrides only; the verbatim theme
+   blocks stay pinned. */
+:root[data-theme="latte"] .suppress-chip,
+:root[data-theme="latte"] .finding-row.is-suppressed,
+:root[data-theme="latte"] .findings-suppressed > summary { --text-muted: #5c5f77; }
+:root[data-theme="rosepine"] .findings-suppressed > summary,
+:root[data-theme="rosepine"] .finding-row.is-suppressed .f-construct { --text-muted: #5d5780; }
+:root[data-theme="solarized"] .finding-row.is-suppressed .f-construct { --text-muted: #586e75; }
 html[data-style="terminal"] .tier-chip,
 html[data-style="terminal"] .suppress-chip,
 html[data-style="swiss"] .tier-chip,
@@ -1460,8 +1479,20 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
 .findings-suppressed > summary { cursor: pointer; color: var(--text-muted); font-size: 0.85em; font-style: italic; }
 .findings-suppressed > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .findings-checklist-suppressed { margin-top: 0.35rem; }
-.finding-row.is-suppressed { opacity: 0.72; }
-.finding-row.is-suppressed .f-verdict, .finding-row.is-suppressed .f-mark { color: var(--text-faint); }
+/* cute-dbt#227 — "visible-but-quiet" rides TOKEN dimming, never opacity.
+   The retired `opacity: 0.72` composited every descendant toward the
+   page bg, dropping EFFECTIVE text contrast sub-AA in all eight themes
+   (2.7–3.9:1) and making it uncomputable from resolved tokens — the
+   exact failure mode the #206 contrast guard exists to catch. Quietness
+   now comes from the muted-but-AA text family at normal weight plus the
+   subtle default border (chrome may dim freely — non-text); the
+   decorative aria-hidden mark is the only --text-faint survivor
+   (WCAG-exempt). The headless suppressed-text sweep pins both the
+   ratios and the no-ancestor-opacity mechanism. */
+.finding-row.is-suppressed { border-color: var(--border); }
+.finding-row.is-suppressed .f-mark { color: var(--text-faint); }
+.finding-row.is-suppressed .f-verdict { color: var(--text-muted); font-weight: 400; }
+.finding-row.is-suppressed .f-name { color: var(--text-muted); }
 .suppress-chip {
   font-size: 0.68em; padding: 0.12rem 0.55rem; border-radius: 999px;
   font-family: var(--font-ui); white-space: nowrap; flex: 0 0 auto;
