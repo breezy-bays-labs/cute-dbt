@@ -44,7 +44,7 @@ use serde::Deserialize;
 
 use crate::domain::{
     Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, PreflightError,
-    TestMetadata, UnitTest, UnitTestExpect, UnitTestGiven,
+    SourceNode, TestMetadata, UnitTest, UnitTestExpect, UnitTestGiven,
 };
 use crate::ports::ManifestSource;
 use serde_json::Value;
@@ -78,6 +78,8 @@ struct WireManifest {
     unit_tests: HashMap<String, WireUnitTest>,
     #[serde(default)]
     macros: HashMap<String, WireMacro>,
+    #[serde(default)]
+    sources: HashMap<String, WireSource>,
 }
 
 /// Wire projection of one `nodes` entry.
@@ -182,6 +184,53 @@ impl WireNodeConfig {
 #[derive(Debug, Deserialize)]
 struct WireMacro {
     macro_sql: String,
+}
+
+/// Wire projection of one top-level `sources` entry (cute-dbt#57).
+///
+/// Like [`WireNode`], no `id` field — dbt keys the `sources` map by
+/// `unique_id` (`source.<package>.<source_name>.<name>`) and the map key
+/// is folded into the domain [`SourceNode`] during translation.
+///
+/// **Every** field is `#[serde(default)] Option<…>` — the cute-dbt#145
+/// engine-divergence rule applied verbatim: dbt-core emits explicit
+/// `null` for unset fields (an `Option` is required; a bare `String`
+/// rejects `null`), while fusion's `#[skip_serializing_none]` omits the
+/// keys entirely (`default` covers absence). One malformed source entry
+/// must never fail the whole manifest parse (ADR-5); a source whose
+/// `source_name` / `name` defaults to `""` simply never matches a parsed
+/// `source('a', 'b')` given — the same fail-open posture as an
+/// unresolvable `ref(...)`.
+#[derive(Debug, Deserialize)]
+struct WireSource {
+    #[serde(default)]
+    source_name: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    identifier: Option<String>,
+    #[serde(default)]
+    schema: Option<String>,
+    #[serde(default)]
+    database: Option<String>,
+    #[serde(default)]
+    relation_name: Option<String>,
+}
+
+impl WireSource {
+    /// Translate into the domain [`SourceNode`], folding the
+    /// authoritative map `key` into the id (the [`WireNode`] precedent).
+    fn into_domain(self, key: String) -> SourceNode {
+        SourceNode::new(
+            NodeId::new(key),
+            self.source_name.unwrap_or_default(),
+            self.name.unwrap_or_default(),
+            self.identifier,
+            self.schema.unwrap_or_default(),
+            self.database,
+            self.relation_name,
+        )
+    }
 }
 
 /// Wire projection of one `unit_tests` map entry.
@@ -360,7 +409,12 @@ impl WireManifest {
             .into_iter()
             .map(|(key, wire)| (key, wire.macro_sql))
             .collect();
-        Manifest::new(self.metadata, nodes, unit_tests, macros)
+        let sources = self
+            .sources
+            .into_iter()
+            .map(|(key, wire)| (NodeId::new(key.clone()), wire.into_domain(key)))
+            .collect();
+        Manifest::new(self.metadata, nodes, unit_tests, macros).with_sources(sources)
     }
 }
 
@@ -783,6 +837,91 @@ mod tests {
         assert!(manifest.nodes().is_empty());
         assert!(manifest.unit_tests().is_empty());
         assert!(manifest.macros().is_empty());
+        assert!(manifest.sources().is_empty());
+    }
+
+    // ----- cute-dbt#57: top-level `sources` block ---------------------
+
+    #[test]
+    fn parse_manifest_translates_a_core_style_source_entry() {
+        // dbt-core 1.11 dialect: unset Option fields serialize as
+        // explicit `null` (here `database`), and the entry carries
+        // sibling keys cute-dbt does not consume (ADR-5 tolerance).
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "sources": {{
+                "source.shop.synthea_raw.patients": {{
+                  "database": null,
+                  "schema": "main",
+                  "name": "patients",
+                  "resource_type": "source",
+                  "source_name": "synthea_raw",
+                  "identifier": "patients",
+                  "relation_name": "\"memory\".\"main\".\"patients\"",
+                  "loaded_at_field": null,
+                  "freshness": null,
+                  "quoting": {{ "database": null }}
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("core-style source entry parses");
+        assert_eq!(manifest.sources().len(), 1);
+        let source = manifest
+            .source_by_name("synthea_raw", "patients")
+            .expect("the (source_name, name) pair resolves");
+        assert_eq!(source.id().as_str(), "source.shop.synthea_raw.patients");
+        assert_eq!(source.schema(), "main");
+        assert_eq!(source.identifier(), Some("patients"));
+        assert_eq!(source.database(), None, "explicit null → None");
+        assert_eq!(
+            source.relation_name(),
+            Some("\"memory\".\"main\".\"patients\"")
+        );
+    }
+
+    #[test]
+    fn parse_manifest_translates_a_fusion_style_source_entry() {
+        // dbt-fusion dialect: `#[skip_serializing_none]` OMITS unset keys
+        // entirely (no `identifier`, `database`, `relation_name`) — the
+        // cute-dbt#145 absent-key half of the engine-divergence rule.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "sources": {{
+                "source.shop.synthea_raw.encounters": {{
+                  "schema": "main",
+                  "name": "encounters",
+                  "source_name": "synthea_raw"
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("fusion-style source entry parses");
+        let source = manifest
+            .source_by_name("synthea_raw", "encounters")
+            .expect("the (source_name, name) pair resolves");
+        assert_eq!(source.identifier(), None);
+        assert_eq!(source.database(), None);
+        assert_eq!(source.relation_name(), None);
+    }
+
+    #[test]
+    fn parse_manifest_tolerates_a_degenerate_source_entry() {
+        // A sources entry with every consumed key absent must not fail
+        // the whole manifest (ADR-5); it translates to empty-string
+        // names that can never match a parsed `source('a','b')` given —
+        // the fail-open posture of an unresolvable ref.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "sources": {{ "source.shop.broken.entry": {{}} }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("degenerate source entry tolerated");
+        assert_eq!(manifest.sources().len(), 1);
+        assert!(manifest.source_by_name("broken", "entry").is_none());
     }
 
     // ----- cute-dbt#165: column descriptions + test attribution ------
