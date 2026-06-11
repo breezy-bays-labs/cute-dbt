@@ -23,15 +23,16 @@ operating notes.
 - **`src/main.rs`** — thin entry; parses args, calls `cli::run`, maps
   `ExitCode`.
 
-## Phased roadmap (v0.1 → v1.0)
+## Phased roadmap (the MVP ladder, founder-set 2026-06-10)
 
-| Phase | Adds                                                                          | Release? |
-|-------|-------------------------------------------------------------------------------|----------|
-| v0.1  | Walking skeleton: domain + ingestion + StateComparator + fail-closed + CTE engine + askama render + zero-egress gate + ATDD | No — git tag only |
-| v0.2  | `-- @desc` per-CTE descriptions + collapsible raw-SQL drawer (tokenizer + CommentMap seam); StateComparator sub-selectors | No |
-| v0.3  | Performance at scale (large-manifest pagination, optional lazy renderer); markdown / JSON export modes | No |
-| v0.4+ | Cross-tool integration (cute-dbt scorecard composite action, mokumo consumer if relevant) | No |
-| **v1.0** | API + CLI surface + JSON envelope stabilize; first crates.io publish + binstall path | **YES** |
+| Phase | Adds | Release? |
+|-------|------|----------|
+| Baseline (on main, unreleased) | PR-review report: ingestion + scope (baseline XOR pr-diff) + CTE/diff views + design system + coverage-intelligence checks + findings surface | No — v0.1.0 held on product judgment |
+| Explorer arc (epic #99) | `explore` subcommand V1–V6: full-manifest two-page output, interactive Cytoscape lineage, host-bridge external-drive contract (#105), pr-diff change context (#106 — the explorer takes **no baseline manifest**) | No |
+| Restructure (epic #209) | Cargo workspace split (`crates/`) + monorepo layout (`editors/`) — ADR-gated reversal of the no-workspace simplification; after explorer V1–V2 prove the seams, before the extension | No |
+| **v0.1.0** | First crates.io publish + binstall; cargo-dist GitHub-Release binaries feed Homebrew (PyPI is a shaping candidate — dbt teams are pip-native); unblocks the Marketplace action, workflow template, and private-repo delivery | **YES — founder's call** |
+| Extension + MVP (epic #210) | VS Code extension in `editors/vscode` (webview panes rendering the emitted explore pages + editor sync) + full mdbook pass → MVP declaration | Marketplace (own version line) |
+| **v1.0** | API + CLI surface stabilize | **YES** |
 
 ## Commit convention
 
