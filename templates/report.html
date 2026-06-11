@@ -49,13 +49,15 @@
 
 {# cute-dbt#139 / cute-dbt#178 — report settings menu. A cog button (top-right,
    keyboard-accessible, aria-labelled) toggles a non-blocking panel. The
-   APPEARANCE section (theme / style / accent / density / diff-style /
-   diff-layout, wired by theme.js, persisted under cute-dbt.appearance.v1)
-   renders in EVERY report — themes apply to baseline mode too. The two #139
-   diff-behavior rows (context lines, normalize lens) act on the inline diffs
-   and stay PR-diff-only. Everything is zero-egress: in-memory client state
-   with optional localStorage persistence + a file:// fallback. Wired in
-   bindSettingsMenu (interaction.js) + theme.js. #}
+   APPEARANCE section (theme / style / accent / density / diff-layout, wired
+   by theme.js, persisted under cute-dbt.appearance.v1) renders in EVERY
+   report — themes apply to baseline mode too. The #188 diff-cells
+   colour/marks control was retired by design pass-2 (cute-dbt#198): cells
+   always render in colour. The two #139 diff-behavior rows (context lines,
+   normalize lens) act on the inline diffs and stay PR-diff-only. Everything
+   is zero-egress: in-memory client state with optional localStorage
+   persistence + a file:// fallback. Wired in bindSettingsMenu
+   (interaction.js) + theme.js. #}
 <div class="settings-cog-wrap">
   <button type="button" class="settings-cog" aria-label="Report settings"
           aria-haspopup="true" aria-expanded="false" aria-controls="settings-panel">
@@ -79,10 +81,13 @@
         <label>Theme</label>
         <div class="theme-grid">
           <button type="button" class="theme-chip" data-theme-id="light"><span class="swatch-dots"><i style="background:#ffffff"></i><i style="background:#1d7484"></i><i style="background:#33363d"></i></span><span class="theme-name">Light</span></button>
+          <button type="button" class="theme-chip" data-theme-id="solarized"><span class="swatch-dots"><i style="background:#fdf6e3"></i><i style="background:#268bd2"></i><i style="background:#b58900"></i></span><span class="theme-name">Solarized</span></button>
+          <button type="button" class="theme-chip" data-theme-id="latte"><span class="swatch-dots"><i style="background:#eff1f5"></i><i style="background:#1e66f5"></i><i style="background:#8839ef"></i></span><span class="theme-name">Catppuccin Latte</span></button>
+          <button type="button" class="theme-chip" data-theme-id="rosepine"><span class="swatch-dots"><i style="background:#faf4ed"></i><i style="background:#286983"></i><i style="background:#907aa9"></i></span><span class="theme-name">Ros&eacute; Pine Dawn</span></button>
           <button type="button" class="theme-chip" data-theme-id="dark"><span class="swatch-dots"><i style="background:#15171c"></i><i style="background:#5fb3c4"></i><i style="background:#d7dae1"></i></span><span class="theme-name">Dark</span></button>
           <button type="button" class="theme-chip" data-theme-id="tokyo"><span class="swatch-dots"><i style="background:#1a1b26"></i><i style="background:#7aa2f7"></i><i style="background:#bb9af7"></i></span><span class="theme-name">Tokyo Night</span></button>
-          <button type="button" class="theme-chip" data-theme-id="solarized"><span class="swatch-dots"><i style="background:#fdf6e3"></i><i style="background:#268bd2"></i><i style="background:#b58900"></i></span><span class="theme-name">Solarized</span></button>
           <button type="button" class="theme-chip" data-theme-id="gruvbox"><span class="swatch-dots"><i style="background:#282828"></i><i style="background:#83a598"></i><i style="background:#fabd2f"></i></span><span class="theme-name">Gruvbox</span></button>
+          <button type="button" class="theme-chip" data-theme-id="dracula"><span class="swatch-dots"><i style="background:#282a36"></i><i style="background:#bd93f9"></i><i style="background:#ff79c6"></i></span><span class="theme-name">Dracula</span></button>
         </div>
       </div>
       <div class="settings-row settings-row-stack">
@@ -102,13 +107,6 @@
           <button type="button" data-density="compact">Compact</button>
           <button type="button" data-density="cozy">Cozy</button>
           <button type="button" data-density="comfortable">Roomy</button>
-        </div>
-      </div>
-      <div class="settings-row settings-row-stack">
-        <label>Diff cells<span class="settings-hint">colour, or +/&minus; marks</span></label>
-        <div class="seg-radio diff-seg">
-          <button type="button" data-diffstyle="color">Colour</button>
-          <button type="button" data-diffstyle="marks">Marks</button>
         </div>
       </div>
       <div class="settings-row settings-row-stack">
