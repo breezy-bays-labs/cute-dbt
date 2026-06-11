@@ -19,6 +19,7 @@ pub mod diff_scoping;
 pub mod explore_cli;
 pub mod explore_full_manifest;
 pub mod explore_lineage_dag;
+pub mod explore_view_toggle;
 pub mod fail_closed;
 pub mod incremental_models;
 pub mod pr_diff_scoping;
