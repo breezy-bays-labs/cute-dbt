@@ -35,3 +35,4 @@ lcov.info
 .playwright-mcp/
 /scratch/
 *.tmp
+/PR_BODY.md
