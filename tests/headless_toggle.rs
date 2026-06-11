@@ -3365,6 +3365,11 @@ fn appearance_settings_flip_theme_density_diff_layout_and_persist() {
         // live keys, sets no data-diffstyle attribute, and the surviving
         // appearance keys still hydrate. Poll the hydrated theme — boot runs
         // after DOMContentLoaded, which wait_until_navigated alone races.
+        // The poll expression is NULL-SAFE on documentElement: immediately
+        // after a reload the document can be transiently empty
+        // (documentElement === null), and the fail-loud eval() contract
+        // (cute-dbt#109) would otherwise panic on the TypeError instead of
+        // polling through it (seen twice on CI runners, 2026-06-10).
         let _ = eval(
             &tab,
             "window.localStorage.setItem('cute-dbt.appearance.v1', \
@@ -3375,7 +3380,11 @@ fn appearance_settings_flip_theme_density_diff_layout_and_persist() {
         tab.wait_until_navigated().expect("await reload");
         let mut theme = String::new();
         for _ in 0..50 {
-            theme = eval_string(&tab, &format!("{ROOT}.getAttribute('data-theme') || ''"));
+            theme = eval_string(
+                &tab,
+                "(document.documentElement \
+                 && document.documentElement.getAttribute('data-theme')) || ''",
+            );
             if theme == "dark" {
                 break;
             }
