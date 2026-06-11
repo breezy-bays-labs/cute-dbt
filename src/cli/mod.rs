@@ -1,7 +1,13 @@
-//! CLI surface: clap argument parsing, the named run loop, and the
-//! mapping from a run outcome to a process [`ExitCode`].
+//! CLI surface: clap argument parsing, the two named run-loop
+//! compositions, and the mapping from a run outcome to a process
+//! [`ExitCode`].
 //!
-//! The run loop is composed here as named stages —
+//! Since cute-dbt#100 the CLI is verb-structured and this module owns
+//! one named composition per verb — `execute_report` and
+//! `execute_explore` — dispatched from [`run`]; deliberately two
+//! functions, never an if-branch inside one run loop.
+//!
+//! **`execute_report`** is composed as named stages —
 //! `load_current` → `resolve_scope_input` → `select_in_scope` →
 //! `preflight_compiled` → `parse_ctes` → `gather_authoring_yaml` →
 //! `render` (`ARCHITECTURE.md` §3, §6). `resolve_scope_input` picks
@@ -19,11 +25,19 @@
 //! missing file or unsupported manifest never breaks the report
 //! (cute-dbt#69). The `render` step invokes the askama renderer.
 //!
+//! **`execute_explore`** is the cute-dbt#100 walking skeleton —
+//! `load_current` → `all_models` → `build_payload` → `render_explore`.
+//! Stage-1 pre-flight stays fail-CLOSED (unreadable / pre-v12 manifests
+//! abort with remediation); Stage-2 is deliberately fail-OPEN — there
+//! is **no** `preflight_compiled` call on this path, and an uncompiled
+//! model renders as a "not compiled" node. `PreflightError` keeps its
+//! four variants; explore raises no fifth.
+//!
 //! Three exit codes: `0` success, `1` a run-time failure (a fail-closed
 //! manifest or an unwritable output path — no partial report is ever
 //! written), `2` an operator usage error (clap rejected the arguments,
-//! including supplying neither or both scope sources —
-//! `--baseline-manifest` / `--pr-diff`).
+//! including a bare `cute-dbt` with no subcommand, or supplying neither
+//! or both `report` scope sources — `--baseline-manifest` / `--pr-diff`).
 
 mod args;
 mod exit;
@@ -31,29 +45,30 @@ mod pr_diff;
 
 use std::collections::HashMap;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
 
+use crate::adapters::explore::render_explore;
 use crate::adapters::manifest::{FileManifestSource, load_baseline};
 use crate::adapters::project_file::FsProjectFileReader;
 use crate::adapters::render::{
-    ExternalFixtures, LoadedFixture, ScopeSource, index_tests_for_models,
+    ExternalFixtures, LoadedFixture, ScopeSource, build_payload, index_tests_for_models,
     render_report_with_externals,
 };
 use crate::domain::{
     BlockDiff, CheckPolicy, DEFAULT_REPORT_TITLE, FixtureTableDiff, HeuristicId, InScopeSet,
     Manifest, ModelInScopeSet, NamedTableDiff, NormalizedDiffIndex, PreflightError, ScopeInput,
     ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock,
-    check_by_id, effective_fixture_format, external_fixture_table, extract_unit_test_block,
-    preflight_compiled, reconstruct_block_diffs, reconstruct_external_fixture_diff,
-    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks,
-    resolve_check_policy, scan_pragmas, select_in_scope,
+    all_models, check_by_id, effective_fixture_format, external_fixture_table,
+    extract_unit_test_block, preflight_compiled, reconstruct_block_diffs,
+    reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
+    refine_changed_by_hunks, resolve_check_policy, scan_pragmas, select_in_scope,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
-use args::Cli;
+use args::{Cli, Command, ExploreArgs, ReportArgs};
 
 /// Exit code for a run-time failure: a fail-closed manifest (Stage-1 or
 /// Stage-2) or an unwritable `--out` path.
@@ -62,18 +77,22 @@ const EXIT_FAILURE: u8 = 1;
 /// Exit code for an operator usage error (clap rejected the arguments).
 const EXIT_USAGE: u8 = 2;
 
-/// Binary entry point: parse arguments, run the pipeline, and map the
-/// outcome to a process exit code.
+/// Binary entry point: parse arguments, dispatch the selected verb's
+/// composition, and map the outcome to a process exit code.
 #[must_use]
 pub fn run() -> ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => return report_arg_error(&err),
     };
-    match execute(&cli) {
+    let outcome = match &cli.command {
+        Command::Report(report) => execute_report(report),
+        Command::Explore(explore) => execute_explore(explore),
+    };
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {
-            eprintln!("{}", failure.message(&cli));
+            eprintln!("{}", failure.message());
             ExitCode::from(EXIT_FAILURE)
         }
     }
@@ -98,8 +117,14 @@ enum RunError {
     /// A fail-closed [`PreflightError`] from Stage-1 (adapter) or
     /// Stage-2 (domain).
     Preflight(PreflightError),
-    /// The generated report could not be written to `--out`.
-    Output(io::Error),
+    /// The generated output could not be written — `path` names the
+    /// `report` verb's `--out` file or the `explore` verb's `--out-dir`.
+    Output {
+        /// The output location the operator asked for.
+        path: PathBuf,
+        /// The underlying I/O failure.
+        source: io::Error,
+    },
 }
 
 impl From<PreflightError> for RunError {
@@ -108,36 +133,38 @@ impl From<PreflightError> for RunError {
     }
 }
 
-impl From<io::Error> for RunError {
-    fn from(err: io::Error) -> Self {
-        Self::Output(err)
-    }
-}
-
 impl RunError {
+    /// Wrap an I/O failure with the output path it occurred at.
+    fn output(path: &Path, source: io::Error) -> Self {
+        Self::Output {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
     /// The operator-facing stderr message for this failure.
-    fn message(&self, cli: &Cli) -> String {
+    fn message(&self) -> String {
         match self {
             Self::Preflight(err) => exit::remediation(err),
-            Self::Output(err) => format!(
-                "cute-dbt: could not write the report to {}: {err}",
-                cli.out.display()
+            Self::Output { path, source } => format!(
+                "cute-dbt: could not write the output to {}: {source}",
+                path.display()
             ),
         }
     }
 }
 
-/// The named run loop — `load_current` → `resolve_scope_input` →
-/// `select_in_scope` → `preflight_compiled` → `parse_ctes` →
+/// The named `report` run loop — `load_current` → `resolve_scope_input`
+/// → `select_in_scope` → `preflight_compiled` → `parse_ctes` →
 /// `gather_authoring_yaml` → `render`.
 ///
 /// `resolve_scope_input` runs Stage-1 pre-flight on the baseline manifest
 /// only on the `--baseline-manifest` path; the `--pr-diff`
 /// path needs no baseline. `?` short-circuits before `render`, so a
 /// fail-closed manifest never produces a partial `report.html`.
-fn execute(cli: &Cli) -> Result<(), RunError> {
-    let current = load_current(cli)?;
-    let scope_input = resolve_scope_input(cli)?;
+fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
+    let current = load_current(args)?;
+    let scope_input = resolve_scope_input(args)?;
     let ScopeSelection {
         in_scope,
         models_in_scope,
@@ -152,12 +179,12 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
     // the render payload, so context siblings keep their YAML drawer
     // (cute-dbt#91).
     let render_test_ids = render_test_ids(&current, &models_in_scope);
-    let authoring_yaml = gather_authoring_yaml(cli, &current, &render_test_ids);
+    let authoring_yaml = gather_authoring_yaml(args, &current, &render_test_ids);
     // External fixture files (cute-dbt#126): read each rendered test's
     // external `given`/`expect` fixture so the report inlines a real grid
     // instead of the #98 affordance. Reads the working tree at generation
     // time only (zero-egress unaffected); soft-fails per fixture.
-    let external_fixtures = gather_external_fixtures(cli, &current, &render_test_ids);
+    let external_fixtures = gather_external_fixtures(args, &current, &render_test_ids);
     // Block-precise narrowing (cute-dbt#96): on the PR-diff path, narrow the
     // file-granular `changed` label down to the tests whose sliced YAML block
     // a diff hunk actually touches. The slice spans (`authoring_yaml`) are
@@ -227,15 +254,15 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
     if let ScopeInput::PrDiff { index } = &scope_input {
         warn_if_not_unified_zero(index);
     }
-    let (report_title, report_subtitle) = resolve_report_strings(cli);
-    let (baseline_label, scope_source) = scope_banner(cli, &scope_input);
+    let (report_title, report_subtitle) = resolve_report_strings(args);
+    let (baseline_label, scope_source) = scope_banner(args, &scope_input);
     // Check selection + suppression (cute-dbt#171): the `[checks]` config
     // policy plus inline SQL pragmas scanned from each in-scope model's
     // manifest `raw_code`. Display-layer only — applied inside payload
     // assembly strictly after supersedes resolution.
-    let check_policy = build_check_policy(cli, &current, &models_in_scope);
+    let check_policy = build_check_policy(args, &current, &models_in_scope);
     render(
-        &cli.out,
+        &args.out,
         &current,
         &in_scope,
         &models_in_scope,
@@ -250,8 +277,49 @@ fn execute(cli: &Cli) -> Result<(), RunError> {
         &report_title,
         report_subtitle.as_deref(),
         &check_policy,
-    )?;
+    )
+    .map_err(|err| RunError::output(&args.out, err))?;
     Ok(())
+}
+
+/// The named `explore` run loop (cute-dbt#100) — `load_current` →
+/// `all_models` → `build_payload` → `render_explore`.
+///
+/// Stage-1 pre-flight is fail-CLOSED exactly like `report` (an
+/// unreadable or pre-v12 manifest aborts with remediation). Stage-2 is
+/// deliberately **fail-OPEN**: there is no `preflight_compiled` call on
+/// this path — an uncompiled model renders as a "not compiled" node in
+/// the emitted pages instead of raising. No baseline is read and no
+/// scope source exists: the scope is the **full manifest** via the
+/// [`all_models`] domain seam, and the payload reuses the existing
+/// engine-agnostic [`build_payload`] with an empty `changed` set and no
+/// diff artifacts.
+fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
+    let current = load_explore_manifest(args)?;
+    let models = all_models(&current);
+    // Stage-2 fail-OPEN: no preflight_compiled here, by design.
+    let payload = build_payload(
+        &current,
+        &InScopeSet::new(),
+        &models,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+    );
+    render_explore(&args.out_dir, &current, &models, &payload)
+        .map_err(|err| RunError::output(&args.out_dir, err))?;
+    Ok(())
+}
+
+/// Stage-1 pre-flight for the `explore` verb: load `--manifest` through
+/// the file-backed [`ManifestSource`]. A load failure is `Unreadable` /
+/// `SchemaUnsupported` — the same fail-closed gate as `report`.
+fn load_explore_manifest(args: &ExploreArgs) -> Result<Manifest, RunError> {
+    let source = FileManifestSource;
+    let current = source.load(&args.manifest)?;
+    Ok(current)
 }
 
 /// The widened render set (cute-dbt#91): the ids of every current unit
@@ -284,12 +352,12 @@ fn render_test_ids(current: &Manifest, models_in_scope: &ModelInScopeSet) -> InS
 /// fail the run. A slice that returns [`None`] (test name not found
 /// inside its declared source YAML) is silent.
 fn gather_authoring_yaml(
-    cli: &Cli,
+    args: &ReportArgs,
     current: &Manifest,
     in_scope: &InScopeSet,
 ) -> HashMap<String, UnitTestYamlBlock> {
     let (resolved, derived) =
-        args::resolve_project_root(cli.project_root.as_deref(), &cli.manifest);
+        self::args::resolve_project_root(args.project_root.as_deref(), &args.manifest);
     let Some(project_root) = resolved else {
         return HashMap::new();
     };
@@ -347,12 +415,12 @@ fn gather_authoring_yaml_with_reader(
 /// the working tree — this is a render-time read, so the zero-egress
 /// property of the generated HTML is untouched.
 fn gather_external_fixtures(
-    cli: &Cli,
+    args: &ReportArgs,
     current: &Manifest,
     in_scope: &InScopeSet,
 ) -> HashMap<String, ExternalFixtures> {
     let (resolved, _derived) =
-        args::resolve_project_root(cli.project_root.as_deref(), &cli.manifest);
+        self::args::resolve_project_root(args.project_root.as_deref(), &args.manifest);
     let Some(project_root) = resolved else {
         return HashMap::new();
     };
@@ -565,8 +633,8 @@ fn external_expect_diff(
 /// config is supplied or the config omits `[report].subtitle` (the
 /// renderer then omits the `<p class="report-subtitle">` element
 /// entirely).
-fn resolve_report_strings(cli: &Cli) -> (String, Option<String>) {
-    let report_cfg = cli.config.as_ref().map(|c| &c.report);
+fn resolve_report_strings(args: &ReportArgs) -> (String, Option<String>) {
+    let report_cfg = args.config.as_ref().map(|c| &c.report);
     let title = report_cfg
         .and_then(|r| r.title.clone())
         .unwrap_or_else(|| DEFAULT_REPORT_TITLE.to_owned());
@@ -592,11 +660,11 @@ fn resolve_report_strings(cli: &Cli) -> (String, Option<String>) {
 /// re-resolving here cannot fail; the `expect` pins that invariant for
 /// any future caller constructing [`Cli`] by hand.
 fn build_check_policy(
-    cli: &Cli,
+    args: &ReportArgs,
     current: &Manifest,
     models_in_scope: &ModelInScopeSet,
 ) -> CheckPolicy<HeuristicId> {
-    let mut policy = cli.config.as_ref().map_or_else(CheckPolicy::default, |c| {
+    let mut policy = args.config.as_ref().map_or_else(CheckPolicy::default, |c| {
         resolve_check_policy::<HeuristicId>(&c.checks)
             .expect("[checks] was validated by the --config value-parser at parse time")
     });
@@ -640,9 +708,9 @@ fn warn_unknown_pragma(model_id: &str, check: &str) {
 /// manifest (when scoping via `--baseline-manifest`) is loaded separately
 /// in [`resolve_scope_input`] so the `--pr-diff` path can skip
 /// it entirely.
-fn load_current(cli: &Cli) -> Result<Manifest, RunError> {
+fn load_current(args: &ReportArgs) -> Result<Manifest, RunError> {
     let source = FileManifestSource;
-    let current = source.load(&cli.manifest)?;
+    let current = source.load(&args.manifest)?;
     Ok(current)
 }
 
@@ -661,11 +729,11 @@ fn load_current(cli: &Cli) -> Result<Manifest, RunError> {
 /// clap's `scope_source` [`ArgGroup`](clap::ArgGroup) (`required`,
 /// single) guarantees exactly one arm is set, so the trailing branch is
 /// unreachable.
-fn resolve_scope_input(cli: &Cli) -> Result<ScopeInput, RunError> {
-    if let Some(baseline_path) = cli.baseline_manifest.as_deref() {
+fn resolve_scope_input(args: &ReportArgs) -> Result<ScopeInput, RunError> {
+    if let Some(baseline_path) = args.baseline_manifest.as_deref() {
         let source = FileManifestSource;
         let baseline = load_baseline(&source, baseline_path)?;
-        let sub_selectors = cli
+        let sub_selectors = args
             .modified_selectors
             .iter()
             .map(|selector| selector.kind())
@@ -674,13 +742,13 @@ fn resolve_scope_input(cli: &Cli) -> Result<ScopeInput, RunError> {
             manifest: baseline,
             sub_selectors,
         })
-    } else if let Some(diff) = cli.pr_diff.as_ref() {
+    } else if let Some(diff) = args.pr_diff.as_ref() {
         // Build the single NormalizedDiffIndex ONCE here and thread the
         // one instance through scope selection (and cute-dbt#96's
         // block-precise refinement + inline diff). It is the sole
         // normalization authority — the `--project-root` strip is baked
         // in as its diff-side strip (CAO plan-audit Decision 2).
-        let index = NormalizedDiffIndex::new(diff, cli.project_root.as_deref());
+        let index = NormalizedDiffIndex::new(diff, args.project_root.as_deref());
         Ok(ScopeInput::PrDiff { index })
     } else {
         unreachable!(
@@ -696,10 +764,10 @@ fn resolve_scope_input(cli: &Cli) -> Result<ScopeInput, RunError> {
 /// `--baseline-manifest` path verbatim (rendered in the banner's
 /// `.diff-scope-baseline` element); the PR-diff arm carries an empty
 /// label — its banner names no baseline manifest (cute-dbt#85).
-fn scope_banner(cli: &Cli, scope_input: &ScopeInput) -> (String, ScopeSource) {
+fn scope_banner(args: &ReportArgs, scope_input: &ScopeInput) -> (String, ScopeSource) {
     match scope_input {
         ScopeInput::Baseline { .. } => (
-            cli.baseline_manifest
+            args.baseline_manifest
                 .as_ref()
                 .map_or_else(String::new, |p| p.display().to_string()),
             ScopeSource::Baseline,
@@ -790,8 +858,8 @@ fn render(
 mod tests {
     use super::*;
 
-    fn cli(out: &str) -> Cli {
-        Cli {
+    fn cli(out: &str) -> ReportArgs {
+        ReportArgs {
             manifest: "current.json".into(),
             baseline_manifest: Some("baseline.json".into()),
             out: out.into(),
@@ -808,7 +876,7 @@ mod tests {
             node_id: "model.shop.stg_orders".to_owned(),
             unit_test: Some("t".to_owned()),
         });
-        let msg = failure.message(&cli("report.html"));
+        let msg = failure.message();
         assert!(msg.contains("model.shop.stg_orders"), "{msg}");
         assert!(msg.contains("dbt compile"), "{msg}");
     }
@@ -899,7 +967,7 @@ mod tests {
         ids.iter().map(|s| NodeId::new(*s)).collect()
     }
 
-    fn cli_with_checks(checks: crate::domain::ChecksConfig) -> Cli {
+    fn cli_with_checks(checks: crate::domain::ChecksConfig) -> ReportArgs {
         let mut cli = cli("report.html");
         cli.config = Some(crate::domain::AnalysisConfig {
             report: crate::domain::ReportConfig::default(),
@@ -998,11 +1066,11 @@ mod tests {
 
     #[test]
     fn an_output_failure_message_names_the_out_path() {
-        let failure = RunError::Output(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "permission denied",
-        ));
-        let msg = failure.message(&cli("/locked/report.html"));
+        let failure = RunError::output(
+            Path::new("/locked/report.html"),
+            io::Error::new(io::ErrorKind::PermissionDenied, "permission denied"),
+        );
+        let msg = failure.message();
         assert!(msg.contains("/locked/report.html"), "names the path: {msg}");
         assert!(msg.contains("could not write"), "{msg}");
         assert!(
