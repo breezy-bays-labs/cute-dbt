@@ -7558,14 +7558,18 @@ fn badge_tip_bubble_stays_inside_a_narrow_viewport() {
     let right = m["right"].as_f64().expect("bubble right is a number");
     let vw = m["vw"].as_f64().expect("innerWidth is a number");
     eprintln!("badge tip bubble geometry: left={left:.1} right={right:.1} innerWidth={vw:.1}");
+    // 1px tolerance for sub-pixel rounding (the #157 precedent —
+    // getBoundingClientRect returns fractional px in headless Chrome). The
+    // regression this guards is 23–47px of clipping, so the tolerance
+    // costs no teeth.
     assert!(
-        right <= vw,
+        right <= vw + 1.0,
         "the badge bubble must not paint past the right viewport edge \
          (cute-dbt#232 audit D1 — 47.7px clipped at 375px on the unfixed CSS): \
-         bubble.right={right} > innerWidth={vw}",
+         bubble.right={right} > innerWidth={vw} + 1",
     );
     assert!(
-        left >= 0.0,
+        left >= -1.0,
         "the badge bubble must not paint past the LEFT viewport edge either: bubble.left={left}",
     );
 
