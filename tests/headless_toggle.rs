@@ -10287,3 +10287,224 @@ fn model_yaml_section_hides_when_the_payload_has_no_gather_outcome() {
 
     let _ = tab.close(true);
 }
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn fold_toggle_hides_in_file_view_and_folds_only_the_visible_diff_universal() {
+    // PR #250 review (gemini, templates/interaction.js): with a non-diff
+    // view active, the per-diff fold toggle used to stay visible and
+    // mutate the HIDDEN diff pre (its only meaningful target — File/raw/
+    // authored views carry zero .diff-folded structure), flipping its own
+    // label with no visible effect. The truthful fix: the fold toggle is
+    // a Diff-view affordance — hidden while the non-diff view is active.
+    //
+    // UNIVERSAL quantification (the #240 lesson): swept over EVERY
+    // dual-view drawer kind in one report — Model SQL (#111), Model YAML
+    // (#247), and the unit-test YAML drawer (#96) — not one known-good
+    // case. Real clicks throughout.
+    let long_ctx = |name: &str| {
+        let mut lines = vec![
+            dl(DiffLineKind::Context, &format!("  - name: {name}"), None),
+            dl(
+                DiffLineKind::Removed,
+                "    description: old",
+                Some((17, 20)),
+            ),
+            dl(DiffLineKind::Added, "    description: new", Some((17, 20))),
+        ];
+        for i in 0..14 {
+            lines.push(dl(DiffLineKind::Context, &format!("    # ctx {i}"), None));
+        }
+        BlockDiff { lines }
+    };
+
+    let test_id = "unit_test.shop.dim_a.upd";
+    let raw_block = "  - name: upd\n    model: dim_a\n    given: []";
+    let m = manifest(
+        vec![model_node_with_raw_and_path(
+            "model.shop.dim_a",
+            "select 1 from x",
+            "models/dim_a.sql",
+        )],
+        vec![(test_id, unit_test("upd", "dim_a"))],
+    );
+    let in_scope: InScopeSet = [test_id.to_owned()].into_iter().collect();
+    let models: ModelInScopeSet = [NodeId::new("model.shop.dim_a")].into_iter().collect();
+    let changed: InScopeSet = [test_id.to_owned()].into_iter().collect();
+    let mut authoring_yaml: HashMap<String, UnitTestYamlBlock> = HashMap::new();
+    authoring_yaml.insert(
+        test_id.to_owned(),
+        UnitTestYamlBlock::new(raw_block.to_owned(), 1, 1, 3),
+    );
+    let mut yaml_diffs: HashMap<String, BlockDiff> = HashMap::new();
+    yaml_diffs.insert(test_id.to_owned(), long_ctx("upd"));
+    let mut sql_diffs: HashMap<String, BlockDiff> = HashMap::new();
+    sql_diffs.insert("model.shop.dim_a".to_owned(), long_ctx("dim_a_sql"));
+    let mut model_yaml: HashMap<String, ModelYamlOutcome> = HashMap::new();
+    model_yaml.insert(
+        "model.shop.dim_a".to_owned(),
+        ModelYamlOutcome::Found {
+            path: "models/schema.yml".to_owned(),
+            block: UnitTestYamlBlock::new("  - name: dim_a".to_owned(), 2, 2, 2),
+            diff: Some(long_ctx("dim_a")),
+        },
+    );
+    let out = tmp("headless_fold_toggle_dual_view_universal.html");
+    let _ = std::fs::remove_file(&out);
+    render_report(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &changed,
+        &authoring_yaml,
+        &yaml_diffs,
+        &sql_diffs,
+        &model_yaml,
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+    )
+    .expect("render writes the report");
+    let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // (drawer label, section selector, diff-pre selector, file-side
+    // data-view value, file-pre selector, summary selector to open)
+    let drawers = [
+        (
+            "Model SQL",
+            ".model-sql",
+            ".model-sql .sql-diff-view",
+            "raw",
+            ".model-sql .sql-raw-view",
+            Some(".model-sql > details > summary"),
+        ),
+        (
+            "Model YAML",
+            ".model-yaml",
+            ".model-yaml .yaml-diff-view",
+            "file",
+            ".model-yaml .yaml-authored-view",
+            Some(".model-yaml > details > summary"),
+        ),
+        // The unit-test YAML drawer renders open by default.
+        (
+            "Unit test YAML",
+            ".authoring-yaml",
+            ".authoring-yaml .yaml-diff-view",
+            "authored",
+            ".authoring-yaml .yaml-authored-view",
+            None,
+        ),
+    ];
+
+    for (label, section, diff_pre, file_view, file_pre, summary) in drawers {
+        if let Some(summary) = summary {
+            let _ = eval(
+                &tab,
+                &format!("document.querySelector('{summary}').click()"),
+            );
+        }
+        let folded_hidden = |tab: &Tab| {
+            eval(
+                tab,
+                &format!(
+                    "Array.from(document.querySelector('{diff_pre}')\
+                     .querySelectorAll('.diff-folded')).filter(function(e){{return e.hidden;}}).length"
+                ),
+            )
+            .as_u64()
+            .expect("folded count")
+        };
+        let fold_btn_hidden = |tab: &Tab| {
+            eval_bool(
+                tab,
+                &format!(
+                    "(function(){{var b=document.querySelector('{section} .code-header .diff-fold-toggle');\
+                     return !b || b.hidden || getComputedStyle(b).display === 'none';}})()"
+                ),
+            )
+        };
+
+        // Diff view (default): the toggle is visible and folds exist.
+        assert!(
+            !fold_btn_hidden(&tab),
+            "[{label}] the fold toggle is visible in the Diff view",
+        );
+        let initial = folded_hidden(&tab);
+        assert!(
+            initial > 0,
+            "[{label}] the diff renders with folded context (got {initial})",
+        );
+        // The file-side pre carries NO fold structure (nothing to fold).
+        assert_eq!(
+            eval(
+                &tab,
+                &format!(
+                    "document.querySelector('{file_pre}').querySelectorAll('.diff-folded').length"
+                ),
+            )
+            .as_u64(),
+            Some(0),
+            "[{label}] the file-side view has no fold structure",
+        );
+        // REAL click in Diff view: expands the VISIBLE diff pre.
+        let _ = eval(
+            &tab,
+            &format!("document.querySelector('{section} .code-header .diff-fold-toggle').click()"),
+        );
+        assert_eq!(
+            folded_hidden(&tab),
+            0,
+            "[{label}] clicking the fold toggle in the Diff view expands the visible diff",
+        );
+
+        // Switch to the file-side view with a REAL click: the toggle hides
+        // and the diff pre's fold state is untouched by the switch.
+        let _ = eval(
+            &tab,
+            &format!(
+                "document.querySelector('{section} .yaml-view-btn[data-view=\"{file_view}\"]').click()"
+            ),
+        );
+        assert!(
+            fold_btn_hidden(&tab),
+            "[{label}] the fold toggle hides while the file-side view is active \
+             (it would otherwise mutate the hidden diff)",
+        );
+        assert_eq!(
+            folded_hidden(&tab),
+            0,
+            "[{label}] switching views does not mutate the diff's fold state",
+        );
+
+        // Back to Diff: the toggle returns and still works.
+        let _ = eval(
+            &tab,
+            &format!(
+                "document.querySelector('{section} .yaml-view-btn[data-view=\"diff\"]').click()"
+            ),
+        );
+        assert!(
+            !fold_btn_hidden(&tab),
+            "[{label}] the fold toggle returns when the Diff view is re-selected",
+        );
+        let _ = eval(
+            &tab,
+            &format!("document.querySelector('{section} .code-header .diff-fold-toggle').click()"),
+        );
+        assert!(
+            folded_hidden(&tab) > 0,
+            "[{label}] the returned fold toggle still collapses the visible diff",
+        );
+    }
+
+    let _ = tab.close(true);
+}

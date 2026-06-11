@@ -613,6 +613,13 @@
           .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
         var $authBtn = $("<button>").attr("type", "button")
           .addClass("yaml-view-btn").attr("data-view", "authored").text("File");
+        // cute-dbt#199 — per-diff fold toggle + copy-icon button ride the
+        // code header: fold toggle left of the view toggle, copy far right.
+        // PR #250 review (gemini): the fold toggle drives the DIFF pre's
+        // folds — its only meaningful target (the File view has no fold
+        // structure) — so it hides while the File view is active rather
+        // than mutating an invisible pre.
+        var $foldBtn = buildFoldToggleBtn(function () { return $diffPre[0]; });
         $toggle.append($diffBtn).append($authBtn);
         $toggle.on("click", ".yaml-view-btn", function () {
           var view = $(this).attr("data-view");
@@ -620,10 +627,9 @@
           $(this).addClass("active");
           $diffPre.prop("hidden", view !== "diff");
           $authPre.prop("hidden", view !== "authored");
+          $foldBtn.prop("hidden", view !== "diff");
         });
-        // cute-dbt#199 — per-diff fold toggle + copy-icon button ride the
-        // code header: fold toggle left of the view toggle, copy far right.
-        $yamlHeader.append(buildFoldToggleBtn(function () { return $diffPre[0]; }));
+        $yamlHeader.append($foldBtn);
         $yamlHeader.append($toggle);
         $yamlHeader.append(copyIconBtn(function () { return t.authoring_yaml; }));
         $yamlWrap.append($yamlHeader).append($diffPre).append($authPre);
@@ -694,6 +700,11 @@
         .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
       var $rawBtn = $("<button>").attr("type", "button")
         .addClass("yaml-view-btn").attr("data-view", "raw").text("File");
+      // cute-dbt#199 — per-diff fold toggle + copy-icon button in the header.
+      // Copy always copies the raw SQL regardless of the active view.
+      // PR #250 review (gemini): the fold toggle hides while the File view
+      // is active — its only meaningful target is the diff pre's folds.
+      var $foldBtn = buildFoldToggleBtn(function () { return $diffPre[0]; });
       $toggle.append($diffBtn).append($rawBtn);
       $toggle.on("click", ".yaml-view-btn", function () {
         var view = $(this).attr("data-view");
@@ -701,10 +712,9 @@
         $(this).addClass("active");
         $diffPre.prop("hidden", view !== "diff");
         $rawPre.prop("hidden", view !== "raw");
+        $foldBtn.prop("hidden", view !== "diff");
       });
-      // cute-dbt#199 — per-diff fold toggle + copy-icon button in the header.
-      // Copy always copies the raw SQL regardless of the active view.
-      $mHeader.append(buildFoldToggleBtn(function () { return $diffPre[0]; }));
+      $mHeader.append($foldBtn);
       $mHeader.append($toggle);
       $mHeader.append(copyIconBtn(function () { return raw; }));
       $wrap.append($mHeader).append($diffPre).append($rawPre);
@@ -771,6 +781,11 @@
         .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
       var $fileBtn = $("<button>").attr("type", "button")
         .addClass("yaml-view-btn").attr("data-view", "file").text("File");
+      // cute-dbt#199 — per-diff fold toggle + copy-icon button in the
+      // header. Copy always copies the raw block regardless of view.
+      // PR #250 review (gemini): the fold toggle hides while the File view
+      // is active — its only meaningful target is the diff pre's folds.
+      var $foldBtn = buildFoldToggleBtn(function () { return $diffPre[0]; });
       $toggle.append($diffBtn).append($fileBtn);
       $toggle.on("click", ".yaml-view-btn", function () {
         var view = $(this).attr("data-view");
@@ -778,10 +793,9 @@
         $(this).addClass("active");
         $diffPre.prop("hidden", view !== "diff");
         $filePre.prop("hidden", view !== "file");
+        $foldBtn.prop("hidden", view !== "diff");
       });
-      // cute-dbt#199 — per-diff fold toggle + copy-icon button in the
-      // header. Copy always copies the raw block regardless of view.
-      $header.append(buildFoldToggleBtn(function () { return $diffPre[0]; }));
+      $header.append($foldBtn);
       $header.append($toggle);
       $header.append(copyIconBtn(function () { return my.raw; }));
       $wrap.append($header).append($diffPre).append($filePre);
