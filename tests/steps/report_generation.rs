@@ -14,9 +14,13 @@
 use std::path::PathBuf;
 
 use cucumber::{given, then, when};
+use cute_dbt::domain::UnitTestOverrides;
 
 use super::super::common;
 use super::World;
+use super::builders::{
+    empty_manifest, incremental_unit_test, model_node, serialize_to_tmp, with_node, with_unit_test,
+};
 use super::world::FixtureChoice;
 
 // --- Background -----------------------------------------------------
@@ -419,4 +423,197 @@ fn stderr_explains_baseline_required(world: &mut World) {
         "expected the stderr to explain the baseline requirement; got: {}",
         world.last_stderr
     );
+}
+
+// --- cute-dbt#200 — data contracts (manifest_nodes / description /
+//     overrides), self-contained synthetic steps -----------------------
+//
+// Unlike the #145/#169 plans, NO wire-shape injection is needed: the
+// domain serializes `description`/`tags` (top-level node fields) and the
+// grouped `overrides` in exactly the wire shapes the manifest reader
+// consumes, so `serialize_to_tmp`'s native round-trip exercises the real
+// ingestion path end to end.
+
+#[given(regex = r#"^a context model "([^"]+)" described as "([^"]+)"$"#)]
+fn context_model(world: &mut World, bare: String, description: String) {
+    world
+        .context_plan
+        .models
+        .push((bare, description, Vec::new()));
+}
+
+#[given(regex = r#"^a context model "([^"]+)" described as "([^"]+)" tagged "([^"]+)"$"#)]
+fn context_model_tagged(world: &mut World, bare: String, description: String, tag: String) {
+    world
+        .context_plan
+        .models
+        .push((bare, description, vec![tag]));
+}
+
+#[given(regex = r#"^"([^"]+)" carries a context unit test "([^"]+)" reading from "([^"]+)"$"#)]
+fn context_unit_test(world: &mut World, model: String, test: String, input: String) {
+    world.context_plan.test = Some((test, model, input));
+}
+
+#[given(
+    regex = r#"^the context test overrides var "([^"]+)" to (\d+) and macro "([^"]+)" to (true|false)$"#
+)]
+fn context_test_overrides(world: &mut World, var: String, value: u64, mac: String, flag: String) {
+    // NATIVE scalars from the start — the scenario asserts they survive
+    // the manifest round-trip untouched (the #197 founder decision).
+    world
+        .context_plan
+        .overrides
+        .push(("vars".to_owned(), var, serde_json::json!(value)));
+    world.context_plan.overrides.push((
+        "macros".to_owned(),
+        mac,
+        serde_json::json!(flag == "true"),
+    ));
+}
+
+#[when(regex = r#"^I render the context report for the modified model "([^"]+)"$"#)]
+fn render_context_report(world: &mut World, modified: String) {
+    let plan = world.context_plan.clone();
+
+    let mut current = empty_manifest();
+    let mut baseline = empty_manifest();
+    for (bare, description, tags) in &plan.models {
+        // Only the named model is modified — the other models stay
+        // baseline-identical, proving their manifest_nodes entries come
+        // from the ref() arm, not from scope.
+        let (cur_ck, base_ck) = if *bare == modified {
+            ("current", "baseline")
+        } else {
+            ("same", "same")
+        };
+        let decorated = |ck: &str| {
+            model_node(bare, ck, Some("select 1"))
+                .with_model_metadata(Some(description.clone()), tags.clone())
+        };
+        current = with_node(current, decorated(cur_ck));
+        baseline = with_node(baseline, decorated(base_ck));
+    }
+    if let Some((name, target, input)) = &plan.test {
+        let mut unit_test = incremental_unit_test(name, target, std::slice::from_ref(input));
+        if !plan.overrides.is_empty() {
+            let mut grouped = UnitTestOverrides::new();
+            for (group, key, value) in &plan.overrides {
+                grouped
+                    .entry(group.clone())
+                    .or_default()
+                    .insert(key.clone(), value.clone());
+            }
+            unit_test = unit_test.with_overrides(Some(grouped));
+        }
+        current = with_unit_test(current, unit_test);
+    }
+
+    let current_path = serialize_to_tmp(&current, "context_current");
+    let baseline_path = serialize_to_tmp(&baseline, "context_baseline");
+    let out = common::tmp("context_report.html");
+    common::clear(&out);
+    let output = common::run_cli(&[
+        "--manifest",
+        common::s(&current_path),
+        "--baseline-manifest",
+        common::s(&baseline_path),
+        "--out",
+        common::s(&out),
+    ]);
+    world.last_exit_code = output.status.code();
+    world.last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    world.report_html = std::fs::read_to_string(&out).ok();
+    if let Some(html) = &world.report_html {
+        common::assert_no_external_refs(html);
+    }
+    world.out_path = Some(out);
+}
+
+#[then(regex = r#"^the report payload describes the model "([^"]+)" as "([^"]+)"$"#)]
+fn payload_model_description(world: &mut World, model: String, description: String) {
+    let payload = report_payload(world);
+    let m = payload["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|m| m["name"].as_str() == Some(&model))
+        .unwrap_or_else(|| panic!("model {model:?} not in payload: {payload}"));
+    assert_eq!(
+        m["description"].as_str(),
+        Some(description.as_str()),
+        "ModelPayload.description threads the authored prose; got {m}"
+    );
+}
+
+/// The `manifest_nodes[name]` entry, panicking with the full lookup when
+/// absent.
+fn manifest_nodes_entry(world: &World, name: &str) -> serde_json::Value {
+    let payload = report_payload(world);
+    let entry = &payload["manifest_nodes"][name];
+    assert!(
+        !entry.is_null(),
+        "manifest_nodes must carry an entry for {name:?}; got {}",
+        payload["manifest_nodes"]
+    );
+    entry.clone()
+}
+
+#[then(
+    regex = r#"^the manifest-nodes entry for "([^"]+)" carries description "([^"]+)" and tag "([^"]+)"$"#
+)]
+fn manifest_nodes_with_tag(world: &mut World, name: String, description: String, tag: String) {
+    let entry = manifest_nodes_entry(world, &name);
+    assert_eq!(entry["description"].as_str(), Some(description.as_str()));
+    assert_eq!(
+        entry["tags"],
+        serde_json::json!([tag]),
+        "the model's tags list rides the entry; got {entry}"
+    );
+}
+
+#[then(regex = r#"^the manifest-nodes entry for "([^"]+)" carries description "([^"]+)"$"#)]
+fn manifest_nodes_description(world: &mut World, name: String, description: String) {
+    let entry = manifest_nodes_entry(world, &name);
+    assert_eq!(
+        entry["description"].as_str(),
+        Some(description.as_str()),
+        "the ref()-ed upstream's entry carries its description; got {entry}"
+    );
+}
+
+#[then(
+    regex = r#"^the payload overrides for "([^"]+)" carry var "([^"]+)" = (\d+) and macro "([^"]+)" = (true|false)$"#
+)]
+fn payload_overrides_native_scalars(
+    world: &mut World,
+    test: String,
+    var: String,
+    value: u64,
+    mac: String,
+    flag: String,
+) {
+    let payload = report_payload(world);
+    let t = payload["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["tests"].as_array())
+        .flatten()
+        .find(|t| t["name"].as_str() == Some(&test))
+        .unwrap_or_else(|| panic!("test {test:?} not in payload: {payload}"));
+    let overrides = &t["overrides"];
+    // NATIVE scalar contract (the #197 founder decision): a JSON number
+    // and a JSON bool on the wire — `"7"` / `"true"` strings would fail
+    // both the type probes and the equality.
+    assert!(
+        overrides["vars"][&var].is_u64(),
+        "var {var:?} must be a native JSON number; got {overrides}"
+    );
+    assert_eq!(overrides["vars"][&var], serde_json::json!(value));
+    assert!(
+        overrides["macros"][&mac].is_boolean(),
+        "macro {mac:?} must be a native JSON bool; got {overrides}"
+    );
+    assert_eq!(overrides["macros"][&mac], serde_json::json!(flag == "true"));
 }

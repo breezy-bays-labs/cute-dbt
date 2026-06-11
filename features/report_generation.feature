@@ -58,6 +58,26 @@ Feature: Generate a self-contained report from a compiled dbt manifest
     When I run cute-dbt with --manifest current.json --baseline-manifest baseline.json --out report.html
     Then the report payload carries the model source path "models/staging/stg_customers.sql"
 
+  # cute-dbt#200 — the design-2 data contracts, asserted through the real
+  # subprocess wire round-trip: the report-level manifest_nodes lookup
+  # covers the in-scope model AND its ref()-ed upstream (keyed by bare
+  # name; the upstream is NOT in scope — its entry proves the ref() arm),
+  # ModelPayload carries the authored model description, and TestPayload
+  # carries the FULL overrides groups with NATIVE scalar values
+  # (bool/number — never stringified; the cute-dbt#197 founder decision).
+  # The consuming shelf/hover-card JS lands in cute-dbt#201/#202; the
+  # report degrades gracefully until then.
+  Scenario: The report payload carries the model-context lookup and native-scalar overrides
+    Given a context model "dim_payers" described as "One row per payer." tagged "marts"
+    And a context model "stg_payers" described as "Staged payers."
+    And "dim_payers" carries a context unit test "test_dim_payers" reading from "ref('stg_payers')"
+    And the context test overrides var "lookback_days" to 7 and macro "is_incremental" to true
+    When I render the context report for the modified model "dim_payers"
+    Then the report payload describes the model "dim_payers" as "One row per payer."
+    And the manifest-nodes entry for "dim_payers" carries description "One row per payer." and tag "marts"
+    And the manifest-nodes entry for "stg_payers" carries description "Staged payers."
+    And the payload overrides for "test_dim_payers" carry var "lookback_days" = 7 and macro "is_incremental" = true
+
   # The locked v0.1 policy: --baseline-manifest is REQUIRED. Omitting it is
   # a clap usage error raised BEFORE the manifest is read (NOT a
   # PreflightError; full-manifest reports are a documented trick — pass an

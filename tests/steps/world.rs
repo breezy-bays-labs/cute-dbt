@@ -150,6 +150,30 @@ pub struct World {
     /// the real subprocess). The Thens assert the embedded payload's
     /// `findings` (presence, removal, and the `suppressed` mark).
     pub selection_plan: SelectionPlan,
+
+    /// cute-dbt#200: the data-contract scenario accumulator. Filled by
+    /// the `report_generation.feature` context Givens (described/tagged
+    /// models, a unit test with its `given.input`, and the grouped
+    /// overrides), then consumed by the self-contained `When I render
+    /// the context report …` step. Unlike the #145/#169 plans, NO wire
+    /// injection is needed: the domain serializes `description`/`tags`
+    /// (top-level on the node) and the grouped `overrides` in exactly
+    /// the wire shapes the reader consumes, so `serialize_to_tmp`'s
+    /// native round-trip exercises the real ingestion.
+    pub context_plan: ContextPlan,
+}
+
+/// A cute-dbt#200 data-contract scenario plan — described/tagged models,
+/// one unit test with a `ref(...)` given, and the grouped overrides.
+#[derive(Debug, Default, Clone)]
+pub struct ContextPlan {
+    /// `(bare model name, description, tags)` per model.
+    pub models: Vec<(String, String, Vec<String>)>,
+    /// The declared unit test: `(name, target bare name, given input)`.
+    pub test: Option<(String, String, String)>,
+    /// Grouped overrides for the declared test:
+    /// `(group, name, native JSON value)`.
+    pub overrides: Vec<(String, String, serde_json::Value)>,
 }
 
 /// A cute-dbt#145 incremental scenario plan — the models (each with its

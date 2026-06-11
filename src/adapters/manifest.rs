@@ -44,7 +44,7 @@ use serde::Deserialize;
 
 use crate::domain::{
     Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, PreflightError,
-    SourceNode, TestMetadata, UnitTest, UnitTestExpect, UnitTestGiven,
+    SourceNode, TestMetadata, UnitTest, UnitTestExpect, UnitTestGiven, UnitTestOverrides,
 };
 use crate::ports::ManifestSource;
 use serde_json::Value;
@@ -131,6 +131,24 @@ struct WireNode {
     attached_node: Option<NodeId>,
     #[serde(default)]
     test_metadata: Option<TestMetadata>,
+    /// Authored model description (cute-dbt#200) — a top-level wire
+    /// field (fusion `ManifestMaterializableCommonAttributes.description`,
+    /// `dbt-schemas` `manifest_nodes.rs` @ `9977b6cb…`). fusion omits an
+    /// unset description (`#[skip_serializing_none]`); dbt-core emits
+    /// `""`. The translation drops the empty-string shape (the
+    /// cute-dbt#165 column-description precedent) so the domain carries
+    /// only real prose.
+    #[serde(default)]
+    description: Option<String>,
+    /// Resolved model tags (cute-dbt#200) — the top-level wire list,
+    /// which is the authoritative DEDUPLICATED set. The nested
+    /// `config.tags` is deliberately not read: real dbt-core manifests
+    /// carry project-level + model-level merge duplicates there
+    /// (verified on the committed playground fixture, e.g.
+    /// `dim_conditions` `config.tags` = the same three tags twice).
+    /// `Option` (not a bare `Vec`) for the #145 null-fill tolerance.
+    #[serde(default)]
+    tags: Option<Vec<String>>,
 }
 
 /// Tolerant wire projection of a node's `config` sub-object.
@@ -286,13 +304,13 @@ struct WireUnitTestConfig {
 ///
 /// dbt-fusion types `overrides` as three sibling open maps — `env_vars`,
 /// `macros`, and `vars` — each a `name -> arbitrary value` map
-/// (`UnitTestOverrides` in `dbt-schemas`). cute-dbt consumes only the
-/// `macros.is_incremental` channel (cute-dbt#145); `env_vars` and `vars`
-/// are simply not modeled (tolerant default-discard, ADR-5 — no
-/// `deny_unknown_fields`). `macros` is kept as the same untyped
-/// passthrough map fusion uses, mirroring how `config.meta` is carried;
-/// the untyped → typed collapse happens at the domain boundary in
-/// [`WireUnitTestOverrides::is_incremental_mode`].
+/// (`UnitTestOverrides` in `dbt-schemas`
+/// `properties/unit_test_properties.rs` @ `9977b6cb…`). Since
+/// cute-dbt#200 all three channels are retained as untyped passthrough
+/// maps (mirroring how `config.meta` is carried) and fold into the
+/// domain's grouped [`UnitTestOverrides`] via [`Self::into_grouped`];
+/// the `macros.is_incremental` flag keeps its dedicated typed lift
+/// (cute-dbt#145) in [`WireUnitTestOverrides::is_incremental_mode`].
 #[derive(Debug, Default, Deserialize)]
 struct WireUnitTestOverrides {
     /// `overrides.macros`. `Option` (not a bare map) because dbt-fusion
@@ -304,6 +322,17 @@ struct WireUnitTestOverrides {
     /// (ADR-5 violation). Values stay untyped passthrough.
     #[serde(default)]
     macros: Option<BTreeMap<String, Value>>,
+    /// `overrides.vars` (cute-dbt#200) — same tolerance contract as
+    /// [`Self::macros`]. The committed playground fixture additionally
+    /// shows dbt-core emitting an unset channel as an EMPTY map
+    /// (`"vars": {}`); both null and `{}` collapse to "no overrides in
+    /// this group".
+    #[serde(default)]
+    vars: Option<BTreeMap<String, Value>>,
+    /// `overrides.env_vars` (cute-dbt#200) — same tolerance contract as
+    /// [`Self::macros`]/[`Self::vars`].
+    #[serde(default)]
+    env_vars: Option<BTreeMap<String, Value>>,
 }
 
 impl WireUnitTestOverrides {
@@ -327,6 +356,29 @@ impl WireUnitTestOverrides {
             _ => None,
         }
     }
+
+    /// Fold the three wire channels into the domain's grouped
+    /// [`UnitTestOverrides`] (cute-dbt#200): group name → name → untyped
+    /// passthrough [`Value`] (native scalars preserved end-to-end — the
+    /// cute-dbt#197 founder decision). Null and EMPTY channels are
+    /// dropped (both unset shapes observed on real fixtures: fusion
+    /// null-fills, dbt-core emits `{}`), and a blob with no effective
+    /// override collapses to `None` so the payload key is omitted.
+    fn into_grouped(self) -> Option<UnitTestOverrides> {
+        let grouped: UnitTestOverrides = [
+            ("env_vars", self.env_vars),
+            ("macros", self.macros),
+            ("vars", self.vars),
+        ]
+        .into_iter()
+        .filter_map(|(group, channel)| {
+            channel
+                .filter(|map| !map.is_empty())
+                .map(|map| (group.to_owned(), map))
+        })
+        .collect();
+        (!grouped.is_empty()).then_some(grouped)
+    }
 }
 
 impl WireUnitTest {
@@ -338,6 +390,9 @@ impl WireUnitTest {
             .overrides
             .as_ref()
             .and_then(WireUnitTestOverrides::is_incremental_mode);
+        // cute-dbt#200 — the FULL grouped blob rides alongside the lifted
+        // incremental flag (additive context, not a replacement).
+        let overrides = self.overrides.and_then(WireUnitTestOverrides::into_grouped);
         UnitTest::new(
             self.name,
             self.model,
@@ -350,6 +405,7 @@ impl WireUnitTest {
             self.original_file_path,
         )
         .with_incremental_mode(is_incremental_mode)
+        .with_overrides(overrides)
     }
 }
 
@@ -391,10 +447,13 @@ impl WireManifest {
                     columns,
                 )
                 .with_column_descriptions(column_descriptions)
-                .with_test_attachment(
-                    wire.column_name,
-                    wire.attached_node,
-                    wire.test_metadata,
+                .with_test_attachment(wire.column_name, wire.attached_node, wire.test_metadata)
+                // cute-dbt#200 — model description (dbt-core's
+                // empty-string unset shape dropped, the #165 precedent)
+                // + the authoritative deduplicated top-level tags.
+                .with_model_metadata(
+                    wire.description.filter(|d| !d.is_empty()),
+                    wire.tags.unwrap_or_default(),
                 );
                 (id, node)
             })
@@ -1411,9 +1470,10 @@ mod tests {
     /// cute-dbt#145 regression: `is_incremental_mode` is `None` whenever the
     /// `overrides.macros.is_incremental` channel is absent — no `overrides`,
     /// an empty `overrides` block, an empty `macros` map, or only sibling
-    /// channels (`vars` / `env_vars`) and other macro stubs present. The
-    /// sibling channels and other macro keys are tolerantly discarded
-    /// (ADR-5 — we model only the `macros.is_incremental` channel).
+    /// channels (`vars` / `env_vars`) and other macro stubs present. Since
+    /// cute-dbt#200 the sibling channels and other macro keys are RETAINED
+    /// on [`UnitTest::overrides`] — but they never feed the typed
+    /// incremental flag, which reads only `macros.is_incremental`.
     #[test]
     fn parse_manifest_incremental_mode_none_when_channel_absent() {
         let tails = [
@@ -1482,6 +1542,197 @@ mod tests {
                 .unit_test("unit_test.shop.t")
                 .expect("unit test present");
             assert_eq!(ut.is_incremental_mode(), expected, "value = {value}");
+        }
+    }
+
+    // ----- cute-dbt#200 — full overrides blob + model description/tags -----
+
+    /// cute-dbt#200: the full `overrides` blob is retained as the grouped
+    /// domain map with NATIVE scalar values (the cute-dbt#197 founder
+    /// decision: serde `Value` passthrough, never stringified). All three
+    /// channels survive; the lifted `is_incremental_mode` flag rides
+    /// alongside unchanged.
+    #[test]
+    fn parse_manifest_retains_full_overrides_with_native_scalars() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "unit_tests": {{
+                "unit_test.shop.t": {{
+                  "name": "t", "model": "order_events",
+                  "given": [], "expect": {{ "rows": [] }},
+                  "overrides": {{
+                    "macros": {{ "is_incremental": true, "current_timestamp": "'2025-02-01'" }},
+                    "vars": {{ "encounter_lookback_days": 7, "dq_quarantine_threshold": 0.05 }},
+                    "env_vars": {{ "DBT_TARGET": "ci" }}
+                  }}
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        let ut = manifest
+            .unit_test("unit_test.shop.t")
+            .expect("unit test present");
+        let overrides = ut.overrides().expect("full blob retained");
+        assert_eq!(
+            overrides["macros"]["is_incremental"],
+            serde_json::json!(true),
+            "bool stays a JSON bool"
+        );
+        assert_eq!(
+            overrides["macros"]["current_timestamp"],
+            serde_json::json!("'2025-02-01'"),
+            "string stays a JSON string"
+        );
+        assert_eq!(
+            overrides["vars"]["encounter_lookback_days"],
+            serde_json::json!(7),
+            "integer stays a JSON number"
+        );
+        assert_eq!(
+            overrides["vars"]["dq_quarantine_threshold"],
+            serde_json::json!(0.05),
+            "float stays a JSON number"
+        );
+        assert_eq!(
+            overrides["env_vars"]["DBT_TARGET"],
+            serde_json::json!("ci"),
+            "env_vars channel retained"
+        );
+        assert_eq!(
+            ut.is_incremental_mode(),
+            Some(true),
+            "the #145 lifted flag is unchanged by the #200 retention"
+        );
+    }
+
+    /// cute-dbt#200 tolerance matrix over BOTH engine dialects: the
+    /// grouped blob is `None` for every no-effective-override wire shape —
+    /// absent key, fusion's explicit `null` (whole blob or per channel),
+    /// and dbt-core's empty-map channels (the committed playground fixture
+    /// emits `"env_vars": {}, "vars": {}` beside a populated `macros`).
+    #[test]
+    fn parse_manifest_overrides_none_for_every_unset_wire_shape() {
+        let tails = [
+            "",                                   // fusion/core: key absent
+            r#", "overrides": null"#,             // fusion: explicit null blob
+            r#", "overrides": {}"#,               // empty blob
+            r#", "overrides": { "macros": {} }"#, // core: empty channel
+            r#", "overrides": { "macros": null, "vars": null, "env_vars": null }"#,
+            r#", "overrides": { "macros": {}, "vars": {}, "env_vars": {} }"#,
+        ];
+        for tail in tails {
+            let json = format!(
+                r#"{{
+                  "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+                  "unit_tests": {{
+                    "unit_test.shop.t": {{
+                      "name": "t", "model": "order_events",
+                      "given": [], "expect": {{ "rows": [] }}{tail}
+                    }}
+                  }}
+                }}"#
+            );
+            let manifest = parse_manifest(&json).expect("valid manifest (tolerant)");
+            let ut = manifest
+                .unit_test("unit_test.shop.t")
+                .expect("unit test present");
+            assert_eq!(ut.overrides(), None, "tail = {tail:?}");
+        }
+    }
+
+    /// cute-dbt#200: empty/null channels are dropped INDIVIDUALLY — a
+    /// populated `macros` beside core's `"vars": {}` / fusion's
+    /// `"vars": null` yields a one-group blob (the committed playground
+    /// fixture's exact shape).
+    #[test]
+    fn parse_manifest_overrides_drops_only_the_empty_channels() {
+        for empties in [
+            r#""vars": {}, "env_vars": {}"#,
+            r#""vars": null, "env_vars": null"#,
+        ] {
+            let json = format!(
+                r#"{{
+                  "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+                  "unit_tests": {{
+                    "unit_test.shop.t": {{
+                      "name": "t", "model": "order_events",
+                      "given": [], "expect": {{ "rows": [] }},
+                      "overrides": {{ "macros": {{ "is_incremental": true }}, {empties} }}
+                    }}
+                  }}
+                }}"#
+            );
+            let manifest = parse_manifest(&json).expect("valid manifest");
+            let ut = manifest
+                .unit_test("unit_test.shop.t")
+                .expect("unit test present");
+            let overrides = ut.overrides().expect("macros group retained");
+            assert_eq!(
+                overrides.keys().collect::<Vec<_>>(),
+                ["macros"],
+                "only the populated channel appears (empties = {empties:?})"
+            );
+        }
+    }
+
+    /// cute-dbt#200: model `description` + `tags` ingest from the node's
+    /// TOP-LEVEL wire fields. dbt-core's empty-string unset description is
+    /// dropped (the #165 precedent); fusion's absent key and a defensive
+    /// explicit `null` both default. `config.tags` is NOT read (real
+    /// dbt-core manifests carry merge duplicates there).
+    #[test]
+    fn parse_manifest_extracts_model_description_and_tags() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.described": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "aa" }},
+                  "description": "One row per payer.",
+                  "tags": ["marts", "finance"],
+                  "config": {{ "tags": ["marts", "finance", "marts", "finance"] }}
+                }},
+                "model.shop.core_unset": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "bb" }},
+                  "description": "",
+                  "tags": []
+                }},
+                "model.shop.fusion_unset": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "cc" }}
+                }},
+                "model.shop.null_filled": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "dd" }},
+                  "description": null,
+                  "tags": null
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        let node = |id: &str| manifest.node(&NodeId::new(id)).expect("node present");
+
+        let described = node("model.shop.described");
+        assert_eq!(described.description(), Some("One row per payer."));
+        assert_eq!(
+            described.tags(),
+            ["marts".to_owned(), "finance".to_owned()],
+            "top-level tags verbatim — never the duplicate-carrying config.tags"
+        );
+
+        for id in [
+            "model.shop.core_unset",   // core: "" + []
+            "model.shop.fusion_unset", // fusion: keys absent
+            "model.shop.null_filled",  // defensive: explicit nulls
+        ] {
+            let n = node(id);
+            assert!(n.description().is_none(), "unset description on {id}");
+            assert!(n.tags().is_empty(), "unset tags on {id}");
         }
     }
 }
