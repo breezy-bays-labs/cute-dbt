@@ -34,7 +34,7 @@ See [the zero-egress page](./zero-egress.md) for how it works.
 The richer example — cute-dbt run against a real dbt project
 ([`cmbays/dbt-playground`](https://github.com/cmbays/dbt-playground), built
 on synthetic [Synthea](https://synthetichealth.github.io/synthea/) patient
-data). One diff puts seven models in scope, so the report shows off:
+data). One diff puts multiple models in scope, so the report shows off:
 
 - **multiple model cards** side by side,
 - **UNION arm rendering** in the CTE DAG (the dashed-orange edge + legend),
