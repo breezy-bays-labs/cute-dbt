@@ -222,6 +222,96 @@ impl LeftJoinFact {
     }
 }
 
+/// Which negated-subquery construct a [`SubqueryFact`] describes
+/// (cute-dbt#196 — the correlated-subquery evidence family, v1).
+///
+/// `#[non_exhaustive]` per the enums-yes-structs-no rule: future
+/// consumers (non-negated `EXISTS` semi-joins, `IN` membership, scalar
+/// aggregates) arrive as additive variants — never extracted ahead of a
+/// consumer.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubqueryKind {
+    /// `WHERE NOT EXISTS (SELECT … FROM <inner> WHERE <correlation>)`.
+    NotExists,
+    /// `WHERE <col> NOT IN (SELECT <col> FROM <inner>)`.
+    NotIn,
+}
+
+/// Engine-computed structural facts about one negated subquery in one
+/// query body's top-level `WHERE` conjuncts — the cute-dbt#196
+/// evidence family that lifts the cute-dbt#173 NOT EXISTS / NOT IN
+/// anti-join exclusions.
+///
+/// Computed during the engine's existing single AST-parse pass — never
+/// a second parse. The sibling of [`LeftJoinFact`] (the #191/#40
+/// additive-facts pattern): facts hang off the [`CteGraph`] tagged with
+/// their `consumer` body's node name, are **render-pass internal**
+/// (`#[serde(skip)]` on [`CteGraph`]), and reuse the [`JoinKeyPair`]
+/// key vocabulary — the OUTER side is the pair's "left", the inner
+/// relation plays the LEFT JOIN's `right_leaf` role. Empty `equi_keys`
+/// is the unrecoverable-key shape (downstream key binding fails and the
+/// verdict degrades to honest UNKNOWN, mirroring the LEFT JOIN
+/// degrade).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubqueryFact {
+    kind: SubqueryKind,
+    consumer: String,
+    inner_leaf: String,
+    equi_keys: Vec<JoinKeyPair>,
+}
+
+impl SubqueryFact {
+    /// Canonical constructor.
+    #[must_use]
+    pub fn new(
+        kind: SubqueryKind,
+        consumer: impl Into<String>,
+        inner_leaf: impl Into<String>,
+        equi_keys: Vec<JoinKeyPair>,
+    ) -> Self {
+        Self {
+            kind,
+            consumer: consumer.into(),
+            inner_leaf: inner_leaf.into(),
+            equi_keys,
+        }
+    }
+
+    /// Which negated-subquery construct this fact describes.
+    #[must_use]
+    pub fn kind(&self) -> SubqueryKind {
+        self.kind
+    }
+
+    /// Name of the body the subquery's outer `SELECT` appears in — a
+    /// CTE name, or the engine's terminal-node name for the final
+    /// `SELECT` (also the name used when the model has no `WITH` clause
+    /// at all).
+    #[must_use]
+    pub fn consumer(&self) -> &str {
+        &self.consumer
+    }
+
+    /// Lowercased leaf name of the subquery's single plain named inner
+    /// relation (the LEFT JOIN `right_leaf` analogue).
+    #[must_use]
+    pub fn inner_leaf(&self) -> &str {
+        &self.inner_leaf
+    }
+
+    /// Outer↔inner key pairs, normalized so the OUTER side is the
+    /// pair's "left" and the inner column the "right": the resolvable
+    /// inner-`WHERE` equi-conjuncts for `NOT EXISTS`, or the single
+    /// membership pair (outer column ↔ inner projected column) for
+    /// `NOT IN`. Empty when the key is not statically recoverable —
+    /// the honest-UNKNOWN degrade.
+    #[must_use]
+    pub fn equi_keys(&self) -> &[JoinKeyPair] {
+        &self.equi_keys
+    }
+}
+
 /// A node in the CTE dependency DAG — one `WITH name AS (...)` block.
 ///
 /// `desc` is reserved for a future `-- @desc <text>` per-CTE comment
@@ -419,6 +509,12 @@ pub struct CteGraph {
     /// terminal body's facts).
     #[serde(skip)]
     left_join_facts: Vec<LeftJoinFact>,
+    /// Per-negated-subquery structural facts across every body in the
+    /// query (cute-dbt#196) — the [`LeftJoinFact`] sibling family.
+    /// Engine-computed, consumed by the domain check detectors only —
+    /// `#[serde(skip)]` keeps the embedded report payload byte-stable.
+    #[serde(skip)]
+    subquery_facts: Vec<SubqueryFact>,
 }
 
 impl CteGraph {
@@ -433,6 +529,7 @@ impl CteGraph {
             edges,
             is_recursive: false,
             left_join_facts: Vec::new(),
+            subquery_facts: Vec::new(),
         }
     }
 
@@ -463,6 +560,28 @@ impl CteGraph {
     #[must_use]
     pub fn left_join_facts(&self) -> &[LeftJoinFact] {
         &self.left_join_facts
+    }
+
+    /// Attach engine-computed per-negated-subquery facts
+    /// (cute-dbt#196).
+    ///
+    /// Returns `self` with `subquery_facts` set. Called by the CTE
+    /// engine from the same parsed AST that feeds the cute-dbt#40 shape
+    /// facts and the cute-dbt#173 LEFT JOIN facts — never a second
+    /// parse.
+    #[must_use]
+    pub fn with_subquery_facts(mut self, subquery_facts: Vec<SubqueryFact>) -> Self {
+        self.subquery_facts = subquery_facts;
+        self
+    }
+
+    /// Per-negated-subquery structural facts across every body in the
+    /// query, in source order (cute-dbt#196). Empty for subquery-free
+    /// queries and for graphs constructed without engine-computed
+    /// facts.
+    #[must_use]
+    pub fn subquery_facts(&self) -> &[SubqueryFact] {
+        &self.subquery_facts
     }
 
     /// CTE nodes in declaration order.
@@ -734,6 +853,62 @@ mod tests {
         let back: CteGraph = serde_json::from_str(&json).unwrap();
         assert!(
             back.left_join_facts().is_empty(),
+            "deserialization defaults to no facts"
+        );
+    }
+
+    #[test]
+    fn subquery_fact_constructor_and_getters() {
+        let fact = SubqueryFact::new(
+            SubqueryKind::NotExists,
+            "(final select)",
+            "stg_orders",
+            vec![JoinKeyPair::new(
+                Some("stg_customers".to_owned()),
+                "customer_id",
+                "customer_id",
+            )],
+        );
+        assert_eq!(fact.kind(), SubqueryKind::NotExists);
+        assert_eq!(fact.consumer(), "(final select)");
+        assert_eq!(fact.inner_leaf(), "stg_orders");
+        assert_eq!(fact.equi_keys().len(), 1);
+        assert_eq!(fact.equi_keys()[0].left_leaf(), Some("stg_customers"));
+        assert_eq!(fact.equi_keys()[0].left_column(), "customer_id");
+        assert_eq!(fact.equi_keys()[0].right_column(), "customer_id");
+    }
+
+    #[test]
+    fn cte_graph_with_subquery_facts_attaches_engine_computed_data() {
+        let fact = SubqueryFact::new(SubqueryKind::NotIn, "final", "stg_refunds", Vec::new());
+        let g = CteGraph::new(vec![], vec![]).with_subquery_facts(vec![fact.clone()]);
+        assert_eq!(g.subquery_facts(), &[fact]);
+        assert!(
+            CteGraph::new(vec![], vec![]).subquery_facts().is_empty(),
+            "constructor carries no subquery facts by default"
+        );
+    }
+
+    #[test]
+    fn subquery_facts_never_reach_the_wire() {
+        // #[serde(skip)] — the facts are render-pass internal (domain
+        // check detectors only); the embedded report payload must stay
+        // byte-identical to the pre-#196 shape (the
+        // left_join_facts_never_reach_the_wire twin).
+        let g = CteGraph::new(vec![], vec![]).with_subquery_facts(vec![SubqueryFact::new(
+            SubqueryKind::NotExists,
+            "final",
+            "stg_orders",
+            Vec::new(),
+        )]);
+        let json = serde_json::to_string(&g).unwrap();
+        assert!(
+            !json.contains("subquery_facts"),
+            "subquery_facts must not serialize: {json}"
+        );
+        let back: CteGraph = serde_json::from_str(&json).unwrap();
+        assert!(
+            back.subquery_facts().is_empty(),
             "deserialization defaults to no facts"
         );
     }

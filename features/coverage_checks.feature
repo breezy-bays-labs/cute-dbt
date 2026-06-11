@@ -102,6 +102,54 @@ Feature: cute-dbt surfaces unique-key coverage findings at the payload level
     And the payload carries no "join.anti-join" finding for "order_emails"
     And the "join.left-null-propagation" finding for "order_emails" suggests a no-match given row
 
+  # cute-dbt#196 — the correlated-subquery evidence family lifts the
+  # declared cute-dbt#173 NOT EXISTS / NOT IN anti-join exclusions: both
+  # forms now fire join.anti-join with the SAME inverted recommendation
+  # (a given row that DOES match, with expect proving the exclusion),
+  # and the same matched-pair satisfaction. left-null-propagation never
+  # enumerates subquery constructs at all.
+  Scenario: A correlated NOT EXISTS anti-join is detected with the inverted recommendation
+    Given the modified coverage model "customers_without_orders" compiles to:
+      """
+      select c.customer_id, c.email
+      from "db"."main"."stg_customers" c
+      where not exists (
+          select 1 from "db"."main"."stg_orders" o
+          where o.customer_id = c.customer_id
+      )
+      """
+    When I render the coverage report
+    Then the payload carries a "join.anti-join" finding for "customers_without_orders" with verdict "uncovered"
+    And the payload carries no "join.left-null-propagation" finding for "customers_without_orders"
+    And the "join.anti-join" finding for "customers_without_orders" suggests a given row that matches
+
+  Scenario: A NOT IN membership anti-join is detected with the inverted recommendation
+    Given the modified coverage model "orders_never_refunded" compiles to:
+      """
+      select o.order_id
+      from "db"."main"."stg_orders" o
+      where o.order_id not in (
+          select r.order_id from "db"."main"."stg_refunds" r
+      )
+      """
+    When I render the coverage report
+    Then the payload carries a "join.anti-join" finding for "orders_never_refunded" with verdict "uncovered"
+    And the "join.anti-join" finding for "orders_never_refunded" suggests a given row that matches
+
+  Scenario: A matching given pair satisfies the NOT EXISTS anti-join
+    Given the modified coverage model "customers_without_orders" compiles to:
+      """
+      select c.customer_id, c.email
+      from "db"."main"."stg_customers" c
+      where not exists (
+          select 1 from "db"."main"."stg_orders" o
+          where o.customer_id = c.customer_id
+      )
+      """
+    And a unit test "test_exclusion_proven" on "customers_without_orders" giving "ref('stg_customers')" rows [{"customer_id": 1}] and "ref('stg_orders')" rows [{"customer_id": 1}]
+    When I render the coverage report
+    Then the payload carries a "join.anti-join" finding for "customers_without_orders" with verdict "covered"
+
   # cute-dbt#164 — incremental.branch-coverage (coverage-intelligence
   # rule #1): an incremental model's unit tests must exercise BOTH
   # is_incremental() branches. A test overriding is_incremental to true

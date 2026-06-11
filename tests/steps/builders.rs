@@ -152,6 +152,34 @@ pub fn unit_test_for(name: &str, target_bare: &str) -> UnitTest {
     )
 }
 
+/// Construct a `UnitTest` targeting the model `target` whose givens
+/// carry literal dict rows — the cute-dbt#196 subquery-satisfaction
+/// scenarios assert key-match coverage over these rows.
+#[must_use]
+pub fn unit_test_with_givens(
+    name: &str,
+    target_bare: &str,
+    givens: &[(String, Value)],
+) -> UnitTest {
+    let givens = givens
+        .iter()
+        .map(|(input, rows)| {
+            UnitTestGiven::new(input.clone(), rows.clone(), Some("dict".to_owned()), None)
+        })
+        .collect();
+    UnitTest::new(
+        name,
+        NodeId::new(target_bare),
+        givens,
+        UnitTestExpect::new(Value::Array(Vec::new()), None, None),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+}
+
 /// Insert a `Node` into a `Manifest`, returning the modified manifest.
 #[must_use]
 pub fn with_node(mut manifest: Manifest, node: Node) -> Manifest {
