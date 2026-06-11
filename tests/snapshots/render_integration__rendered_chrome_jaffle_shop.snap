@@ -2016,15 +2016,25 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   // diff affordances). getRoot() returns the diff <pre> whose folds this
   // button drives via the same setAllFolds symmetric DOM mirror the
   // __cuteExpandAllFolds hooks use.
+  //
+  // STATELESS by design (Gemini, PR #213): the click derives its intent
+  // from the DOM at activation time — any hidden folded line left in this
+  // diff means "expand all", else "collapse all". A cached boolean would
+  // desync the moment a hunk is stepped individually or the __cute hooks
+  // move fold state. The label/aria-pressed are owned by syncFoldToggles
+  // (driven from updateFoldControl after EVERY fold mutation), reading the
+  // root accessor stored on the element.
   function buildFoldToggleBtn(getRoot) {
-    var expanded = false;
     var $b = $("<button>").attr("type", "button").addClass("diff-fold-toggle")
       .attr("aria-pressed", "false").text("Expand all");
+    $b[0].__cuteFoldRoot = getRoot;
     $b.on("click", function (e) {
       e.preventDefault();
-      expanded = !expanded;
-      setAllFolds(expanded, getRoot());
-      $b.text(expanded ? "Collapse all" : "Expand all").attr("aria-pressed", expanded ? "true" : "false");
+      var root = getRoot();
+      var anyHidden = $(root).find(".diff-folded").filter(function () { return this.hidden; }).length > 0;
+      // setAllFolds funnels through updateFoldControl -> syncFoldToggles,
+      // which relabels this button from the resulting DOM truth.
+      setAllFolds(anyHidden, root);
     });
     return $b;
   }
@@ -2211,11 +2221,19 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   }
 
   // cute-dbt#199 — copy-to-clipboard icon button (preserves the icon — a
-  // `copied` class flash, not a text swap). Used in the Model SQL + Model
-  // YAML code headers, far right. Inline SVG only (the README §2.4
-  // functional-SVG iconography rule): no icon font, nothing external, so the
-  // zero-egress gate is untouched. A real focusable <button> with an
-  // aria-label (the #146 lesson — never a hover-only affordance).
+  // class flash, not a text swap). Used in the Model SQL + Model YAML code
+  // headers, far right. Inline SVG only (the README §2.4 functional-SVG
+  // iconography rule): no icon font, nothing external, so the zero-egress
+  // gate is untouched. A real focusable <button> with an aria-label (the
+  // #146 lesson — never a hover-only affordance).
+  //
+  // Outcome is TRUTHFUL (Gemini, PR #213): success flashes `copied`,
+  // failure flashes `copy-failed` — a rejected write never claims Copied.
+  // title AND aria-label both carry the outcome (so AT users get the same
+  // signal) and reset to the rest state after the flash. The write strategy
+  // mirrors copySql: navigator.clipboard.writeText first, then the shared
+  // execCommand fallbackCopy (which reports its own success) on rejection
+  // or where the async API is unavailable.
   var COPY_SVG = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">'
     + '<rect x="9" y="9" width="11" height="11" rx="2"></rect>'
     + '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
@@ -2224,20 +2242,23 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       .attr("aria-label", "Copy").attr("title", "Copy").html(COPY_SVG);
     $b.on("click", function (e) {
       e.preventDefault(); e.stopPropagation();
-      var ok = function () {
-        $b.addClass("copied").attr("title", "Copied");
-        setTimeout(function () { $b.removeClass("copied").attr("title", "Copy"); }, 1200);
+      var done = function (ok) {
+        var msg = ok ? "Copied" : "Copy failed";
+        $b.addClass(ok ? "copied" : "copy-failed")
+          .attr("title", msg).attr("aria-label", msg);
+        setTimeout(function () {
+          $b.removeClass("copied copy-failed")
+            .attr("title", "Copy").attr("aria-label", "Copy");
+        }, 1200);
       };
       var text = getText();
-      try {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(text).then(ok, ok);
-        } else {
-          var ta = document.createElement("textarea"); ta.value = text;
-          document.body.appendChild(ta); ta.select(); document.execCommand("copy");
-          document.body.removeChild(ta); ok();
-        }
-      } catch (e2) { ok(); }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { done(true); }, function () {
+          fallbackCopy(text, done);
+        });
+      } else {
+        fallbackCopy(text, done);
+      }
     });
     return $b;
   }
@@ -3766,6 +3787,28 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     // hidden run while partial, or below the whole run once fully revealed.
     if (fully) $ctrl.insertAfter($allFolded.last());
     else $ctrl.insertBefore($allFolded.filter(function () { return this.hidden; }).first());
+    // Every fold mutation funnels through here — keep the per-diff fold
+    // toggles truthful too (Gemini, PR #213).
+    syncFoldToggles();
+  }
+  // Relabel every mounted per-diff fold toggle from ITS OWN diff's DOM
+  // truth: pressed ("Collapse all") iff the diff has folds and none remain
+  // hidden. Each button reads the root accessor buildFoldToggleBtn stored on
+  // it, so per-hunk steppers, the per-hunk collapse-all, AND the global
+  // __cuteExpandAllFolds/__cuteCollapseAllFolds hooks all keep the button
+  // honest — no cached state anywhere. (Per-root truth is deliberately
+  // stronger than relabeling "toggles in scope" to one shared state: a
+  // partial-scope op never lies about an untouched sibling diff.)
+  function syncFoldToggles() {
+    $(".diff-fold-toggle").each(function () {
+      var getRoot = this.__cuteFoldRoot;
+      if (!getRoot) return;
+      var $folded = $(getRoot()).find(".diff-folded");
+      if (!$folded.length) return; // fold-less diff: leave the rest label.
+      var anyHidden = $folded.filter(function () { return this.hidden; }).length > 0;
+      $(this).text(anyHidden ? "Expand all" : "Collapse all")
+        .attr("aria-pressed", anyHidden ? "false" : "true");
+    });
   }
   // Expand by one step. settings.expandStep is read live on every activation
   // (0 = reveal all), so a settings change needs NO re-render. "up" folds

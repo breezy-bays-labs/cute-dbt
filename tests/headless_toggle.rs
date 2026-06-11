@@ -1608,6 +1608,174 @@ fn per_diff_fold_toggle_drives_its_own_diffs_folds() {
         "the released toggle reports aria-pressed=false",
     );
 
+    // --- Gemini PR #213 — the toggle's state is DERIVED, never cached -----
+    // (a) a global fold op through the __cute hooks keeps the per-diff
+    // toggle truthful (label + aria-pressed flip without the button being
+    // clicked).
+    let _ = eval(&tab, "window.__cuteExpandAllFolds(document)");
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .diff-fold-toggle').textContent.trim()\
+             + '|' + document.querySelector('.model-sql .code-header .diff-fold-toggle').getAttribute('aria-pressed')"
+        ),
+        "Collapse all|true",
+        "global expand-all flips the per-diff toggle's label + aria-pressed",
+    );
+    // ...and a click NOW acts on the DOM truth: nothing is hidden, so the
+    // click COLLAPSES (a cached boolean would have 'expanded' a no-op and
+    // relabeled into a lie).
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-sql .code-header .diff-fold-toggle').click()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.model-sql .sql-diff-view .diff-unified .diff-folded[hidden]').length"
+        ),
+        4,
+        "a toggle click after a global expand acts on DOM truth and collapses",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .diff-fold-toggle').textContent.trim()\
+             + '|' + document.querySelector('.model-sql .code-header .diff-fold-toggle').getAttribute('aria-pressed')"
+        ),
+        "Expand all|false",
+        "the toggle relabels from the resulting DOM state after the collapse",
+    );
+
+    // (b) stepping a fold to fully-revealed keeps the toggle truthful: the
+    // unified band-click (step 20) reveals the unified fold, but the diff as
+    // a whole still holds hidden rows (the split twin), so the toggle
+    // truthfully stays unpressed; clicking it then expands the remainder.
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-sql .sql-diff-view .diff-unified .diff-fold').click()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.model-sql .sql-diff-view .diff-unified .diff-folded[hidden]').length"
+        ),
+        0,
+        "the unified band-click fully reveals the unified fold",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .diff-fold-toggle').textContent.trim()\
+             + '|' + document.querySelector('.model-sql .code-header .diff-fold-toggle').getAttribute('aria-pressed')"
+        ),
+        "Expand all|false",
+        "the toggle stays truthful while the split twin still holds hidden rows",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-sql .code-header .diff-fold-toggle').click()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.model-sql .sql-diff-view .diff-folded[hidden]').length"
+        ),
+        0,
+        "the toggle click expands the remaining (split) folds from DOM-derived state",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .diff-fold-toggle').textContent.trim()\
+             + '|' + document.querySelector('.model-sql .code-header .diff-fold-toggle').getAttribute('aria-pressed')"
+        ),
+        "Collapse all|true",
+        "the fully-revealed diff presses the toggle",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn copy_icon_button_signals_failure_truthfully() {
+    // Gemini PR #213 — a failed copy must NEVER flash "Copied". Both write
+    // paths are stubbed to fail in-page (writeText rejects; execCommand
+    // returns false), which deterministically drives the copy-failed branch:
+    // the button gains `.copy-failed` with title/aria-label "Copy failed"
+    // (asserted inside the 1.2s flash window via a bounded poll), never
+    // gains `.copied`, and resets to the rest "Copy" state afterwards.
+    let url = render_pr_diff_with_sql_diffs(
+        "headless_copy_failed.html",
+        vec![model_node_with_raw("model.shop.dim_a", "select id\nfrom t")],
+        vec![("unit_test.shop.dim_a.t", unit_test("t", "dim_a"))],
+        &["model.shop.dim_a"],
+        vec![],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    let _ = eval(
+        &tab,
+        "(function(){\
+           try{if(navigator.clipboard){\
+             navigator.clipboard.writeText=function(){return Promise.reject(new Error('denied'));};\
+           }}catch(e){}\
+           document.execCommand=function(){return false;};\
+         })()",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-sql .code-header .code-copy-btn').click()",
+    );
+    // The writeText rejection lands on a microtask; poll within the flash
+    // window for the failure state.
+    let mut state = String::new();
+    for _ in 0..20 {
+        state = eval_string(
+            &tab,
+            "(function(){var b=document.querySelector('.model-sql .code-header .code-copy-btn');\
+               return b.classList.contains('copy-failed')\
+                 ? b.getAttribute('aria-label')+'|'+b.getAttribute('title') : '';})()",
+        );
+        if !state.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(
+        state, "Copy failed|Copy failed",
+        "a failed copy flashes copy-failed with a truthful title + aria-label",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('.model-sql .code-header .code-copy-btn').classList.contains('copied')"
+        ),
+        "a failed copy never claims Copied",
+    );
+    // After the flash window the button returns to its rest state.
+    let mut rest = String::new();
+    for _ in 0..30 {
+        rest = eval_string(
+            &tab,
+            "(function(){var b=document.querySelector('.model-sql .code-header .code-copy-btn');\
+               return (!b.classList.contains('copy-failed') && !b.classList.contains('copied'))\
+                 ? b.getAttribute('aria-label')+'|'+b.getAttribute('title') : '';})()",
+        );
+        if !rest.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(
+        rest, "Copy|Copy",
+        "the button resets to the rest Copy state after the flash",
+    );
+
     let _ = tab.close(true);
 }
 
