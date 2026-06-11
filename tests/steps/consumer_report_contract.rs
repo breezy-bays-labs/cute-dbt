@@ -89,6 +89,7 @@ fn when_run_against_playground_with_project_root(world: &mut World) {
     common::clear(&out);
 
     let output = common::run_cli(&[
+        "report",
         "--manifest",
         common::s(&manifest),
         "--baseline-manifest",

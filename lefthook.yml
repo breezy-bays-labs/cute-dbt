@@ -50,11 +50,14 @@ pre-push:
       timeout: 30s
     baseline-required-grep:
       # Mirror the `baseline-required-grep` CI job. Every feature line
-      # invoking the CLI must pass exactly one scope source
+      # invoking `cute-dbt report` must pass exactly one scope source
       # (--baseline-manifest OR --pr-diff, cute-dbt#85) unless
       # explicitly tagged @no-baseline-usage-error (the deliberate
-      # neither-source case). Makes the locked gate decision a structural
-      # invariant.
+      # neither-source case). VERB-AWARE since cute-dbt#100: `explore`
+      # invocations are allowed (no scope source by design); bare
+      # verbless invocations are flagged; a ZERO-MATCH TRIPWIRE fails
+      # loudly if the trigger prose ever matches nothing. Keep in
+      # lockstep with ci.yml (the canonical version).
       run: |
         set -euo pipefail
         # Gherkin tag semantics: a tag line applies to the NEXT scenario.
@@ -62,23 +65,33 @@ pre-push:
         if ! awk '
           /^[[:space:]]*@no-baseline-usage-error([[:space:]]|$)/ { pending_skip=1; next }
           /^[[:space:]]*Scenario(:|[[:space:]]+Outline)/ { skip=pending_skip; pending_skip=0; next }
-          /cute-dbt with --manifest/ && !skip {
-            if ($0 !~ /--baseline-manifest/ && $0 !~ /--pr-diff/) {
+          /cute-dbt( report| explore)? with --manifest/ {
+            matched++
+            if ($0 ~ /cute-dbt explore with /) next
+            if (!skip && $0 !~ /--baseline-manifest/ && $0 !~ /--pr-diff/) {
               print FILENAME ":" NR ": " $0
               found=1
             }
+            next
           }
-          END { exit (found ? 1 : 0) }
+          END {
+            if (matched == 0) {
+              print "TRIPWIRE: the CLI-invocation trigger matched ZERO feature lines — the invocation prose drifted; update this gate alongside it"
+              exit 1
+            }
+            exit (found ? 1 : 0)
+          }
         ' features/*.feature; then
-          echo "baseline-required-grep: scenarios invoking the CLI without a scope source (--baseline-manifest or --pr-diff) must be tagged @no-baseline-usage-error"
+          echo "baseline-required-grep: report scenarios without a scope source (--baseline-manifest or --pr-diff) must be tagged @no-baseline-usage-error — or the trigger matched nothing (tripwire)"
           exit 1
         fi
       timeout: 15s
     feature-count:
       # Asserts the .feature-count invariant; the enforced count lives ONLY
       # in the `expected=` line below (cute-dbt#68 — numbers in labels and
-      # comments go stale). History: bumped to 14 in cute-dbt#171 when
-      # check_selection.feature joined the contract; previously bumped in
+      # comments go stale). History: bumped to 16 in cute-dbt#100 when
+      # explore_cli.feature + explore_full_manifest.feature joined the
+      # contract; previously bumped in cute-dbt#171 (check_selection),
       # cute-dbt#169 (coverage_checks),
       # cute-dbt#145 (incremental_models), cute-dbt#98 (cell_table_diff),
       # cute-dbt#84 (pr_diff_scoping), cute-dbt#71 (consumer_report_contract),
@@ -86,7 +99,7 @@ pre-push:
       # Mirrors the `feature-count` CI job; the README is not a feature.
       run: |
         set -euo pipefail
-        expected=14
+        expected=16
         count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
         if [ "$count" != "$expected" ]; then
           echo "feature-count: expected ${expected} .feature files, found ${count}"

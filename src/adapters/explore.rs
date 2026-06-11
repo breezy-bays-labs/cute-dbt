@@ -1,0 +1,649 @@
+//! The `cute-dbt explore` two-page renderer (cute-dbt#100).
+//!
+//! Emits the full-manifest explorer into `--out-dir`:
+//!
+//! - **`dag.html`** — the model-lineage DAG (every `model` node, edges
+//!   from `depends_on.nodes`), rendered by the vendored Mermaid UMD
+//!   bundle exactly like the report's CTE DAG (`securityLevel:
+//!   "strict"`, non-webfont system `fontFamily`, `startOnLoad: false`).
+//!   This static lineage view is the epic #99 **conscious throwaway**:
+//!   V2 replaces it with the interactive Cytoscape engine.
+//! - **`tests.html`** — the unit-test index: one section per model with
+//!   its unit tests, plus the full engine-agnostic
+//!   [`ReportPayload`] embedded
+//!   as the `cute-dbt-data` JSON carrier (the same `build_payload`
+//!   output the report renders — the verified reuse seam). The page
+//!   carries **no** Mermaid and no `DataTables`; it is a server-rendered
+//!   static page, so the headless liveness oracle for it is page-aware
+//!   (DOM facts, never the report's Mermaid/DataTables probes).
+//!
+//! Fail-open contract: an uncompiled model (`compiled_code: null`)
+//! renders as a **"not compiled"** node/badge on both pages — explore
+//! never raises Stage-2 `NotCompiled`, and `PreflightError` keeps its
+//! four variants.
+//!
+//! Both pages hold the zero-egress invariant independently: every asset
+//! is embedded from [`asset_embed`](crate::adapters::asset_embed)
+//! `.rodata` constants; the favicon is a `data:` URI; the only hrefs
+//! are same-directory navigation anchors (`dag.html` ⇄ `tests.html`),
+//! which load nothing until clicked and resolve over `file://`.
+
+use std::collections::HashMap;
+use std::fs;
+use std::io;
+use std::path::Path;
+
+use askama::Template;
+use serde::Serialize;
+
+use crate::adapters::asset_embed::{FAVICON_DATA_URI, MERMAID_JS, SAKURA_CSS};
+use crate::adapters::render::ReportPayload;
+use crate::domain::{Manifest, ModelInScopeSet, NodeId};
+
+/// One model node in the lineage graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineageNode {
+    /// Full manifest node id (`model.<package>.<name>`).
+    pub id: String,
+    /// Bare model name (the last dotted segment) — the rendered label.
+    pub name: String,
+    /// `true` when the manifest carries `compiled_code: null` for this
+    /// model (`dbt parse`) — rendered as a "not compiled" node, never
+    /// raised (the cute-dbt#100 fail-open contract).
+    pub not_compiled: bool,
+}
+
+/// The full-manifest model lineage: nodes in deterministic node-id
+/// order, edges as `(from_index, to_index)` pairs pointing **upstream →
+/// downstream** (a model depends on its `from`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Lineage {
+    /// Every `model` node, ordered by node id.
+    pub nodes: Vec<LineageNode>,
+    /// Dependency edges between models in `nodes` (indices), ordered.
+    pub edges: Vec<(usize, usize)>,
+}
+
+/// Build the model-lineage graph for the explore scope.
+///
+/// Nodes are exactly the `models` set (the
+/// [`all_models`](crate::domain::all_models) seam), in its deterministic
+/// `BTreeSet` order. Edges come from each model's `depends_on.nodes`,
+/// filtered to ids inside the same set — sources, seeds, macros and
+/// cross-project refs outside the model set are silently skipped (they
+/// are not model-lineage edges in v0.x). Self-edges are skipped
+/// defensively (a manifest should never carry one).
+#[must_use]
+pub fn build_lineage(current: &Manifest, models: &ModelInScopeSet) -> Lineage {
+    let index_of: HashMap<&NodeId, usize> =
+        models.iter().enumerate().map(|(i, id)| (id, i)).collect();
+    let nodes: Vec<LineageNode> = models
+        .iter()
+        .map(|id| {
+            let node = current.node(id);
+            LineageNode {
+                id: id.as_str().to_owned(),
+                name: leaf_segment(id.as_str()).to_owned(),
+                not_compiled: node.is_none_or(|n| n.compiled_code().is_none()),
+            }
+        })
+        .collect();
+    let mut edges: Vec<(usize, usize)> = Vec::new();
+    for (to_idx, id) in models.iter().enumerate() {
+        let Some(node) = current.node(id) else {
+            continue;
+        };
+        for dep in node.depends_on().nodes() {
+            if let Some(&from_idx) = index_of.get(dep) {
+                if from_idx != to_idx {
+                    edges.push((from_idx, to_idx));
+                }
+            }
+        }
+    }
+    edges.sort_unstable();
+    edges.dedup();
+    Lineage { nodes, edges }
+}
+
+/// Build the Mermaid `graph LR` definition for the lineage.
+///
+/// Mirrors the report engine's `buildMermaidSource` conventions
+/// (`templates/interaction.js`): positional `n<i>` node ids with quoted
+/// labels (so arbitrary model names cannot break the grammar; `"` is
+/// HTML-entity-escaped inside the label), `:::` class per node, and
+/// trailing `classDef` lines. A "not compiled" model renders with the
+/// `notcompiled` class and an explicit label suffix so the fail-open
+/// state is visible without color.
+#[must_use]
+pub fn mermaid_lineage_def(lineage: &Lineage) -> String {
+    let mut lines = vec!["graph LR".to_owned()];
+    for (i, node) in lineage.nodes.iter().enumerate() {
+        let safe = node.name.replace('"', "&quot;");
+        let (label, class) = if node.not_compiled {
+            (format!("{safe} (not compiled)"), "notcompiled")
+        } else {
+            (safe, "model")
+        };
+        lines.push(format!("    n{i}[\"{label}\"]:::{class}"));
+    }
+    for (from, to) in &lineage.edges {
+        lines.push(format!("    n{from} --> n{to}"));
+    }
+    lines.push(
+        "    classDef model fill:#e8f1f8,stroke:#0072B2,stroke-width:1.5px,color:#1c1c1f;"
+            .to_owned(),
+    );
+    lines.push(
+        "    classDef notcompiled fill:#f4f4f5,stroke:#b07400,stroke-width:2px,\
+         stroke-dasharray:5 3,color:#1c1c1f;"
+            .to_owned(),
+    );
+    lines.join("\n")
+}
+
+/// The JSON carrier embedded in `dag.html`.
+#[derive(Debug, Serialize)]
+struct DagData {
+    /// The Mermaid `graph LR` definition for the full-manifest lineage.
+    def: String,
+    /// Total model count — `0` selects the empty-state message instead
+    /// of a Mermaid render.
+    model_count: usize,
+}
+
+/// One model section on `tests.html` (server-rendered).
+struct ExploreModel {
+    /// Full manifest node id — the `data-model-id` DOM handle.
+    id: String,
+    /// Bare model name.
+    name: String,
+    /// Project-relative source path, when the manifest carries one.
+    path: Option<String>,
+    /// The fail-open "not compiled" badge (cute-dbt#100).
+    not_compiled: bool,
+    /// The model's unit tests (every test targeting it — full manifest,
+    /// so there is no in-scope/changed distinction here).
+    tests: Vec<ExploreTest>,
+}
+
+/// One unit-test row on `tests.html`.
+struct ExploreTest {
+    /// User-facing test name.
+    name: String,
+    /// Optional `description:` from the manifest.
+    description: Option<String>,
+    /// Pre-formatted fixture-shape summary (given count + expect row
+    /// count) — built in Rust so the template stays a pure renderer.
+    shape: String,
+}
+
+/// The one-line fixture-shape summary for a test row
+/// (`"2 givens, expects 1 row"`).
+fn test_shape(given_count: usize, expect_rows: Option<usize>) -> String {
+    let givens = plural(given_count, "given");
+    match expect_rows {
+        Some(n) => format!("{givens}, expects {}", plural(n, "row")),
+        None => givens,
+    }
+}
+
+/// `1 given` / `2 givens` — simple `+s` pluralization.
+fn plural(n: usize, noun: &str) -> String {
+    if n == 1 {
+        format!("{n} {noun}")
+    } else {
+        format!("{n} {noun}s")
+    }
+}
+
+/// askama binding for `templates/explore-dag.html`.
+#[derive(Template)]
+#[template(path = "explore-dag.html", escape = "html")]
+struct ExploreDagTemplate<'a> {
+    sakura_css: &'a str,
+    mermaid_js: &'a str,
+    favicon_data_uri: &'a str,
+    /// Pre-escaped JSON for the `explore-dag-data` carrier.
+    dag_json: &'a str,
+    model_count: usize,
+    edge_count: usize,
+    not_compiled_count: usize,
+}
+
+/// askama binding for `templates/explore-tests.html`.
+#[derive(Template)]
+#[template(path = "explore-tests.html", escape = "html")]
+struct ExploreTestsTemplate<'a> {
+    sakura_css: &'a str,
+    favicon_data_uri: &'a str,
+    models: &'a [ExploreModel],
+    model_count: usize,
+    test_count: usize,
+    /// Pre-escaped JSON for the `cute-dbt-data` carrier (the full
+    /// [`ReportPayload`] — the `build_payload` reuse seam).
+    payload_json: &'a str,
+}
+
+/// Serialize `value` for safe embedding inside an HTML
+/// `<script type="application/json">` block.
+///
+/// The generic twin of the report renderer's
+/// `payload_json_for_html_script` (`src/adapters/render.rs`) — kept
+/// local so the explore lane never touches the render-lane file; the
+/// escape contract is identical: every `<` followed by `/`, `!`, `?`,
+/// or an ASCII letter becomes `<` (the tag-opening shapes under
+/// HTML5's script-data state machine), which is a documented JSON
+/// escape, so `JSON.parse` round-trips the original characters.
+fn json_for_html_script<T: Serialize>(value: &T) -> Result<String, serde_json::Error> {
+    let json = serde_json::to_string(value)?;
+    let mut out = String::with_capacity(json.len() + 16);
+    let mut chars = json.chars().peekable();
+    while let Some(c) = chars.next() {
+        let tag_opener = matches!(chars.peek(), Some('/' | '!' | '?' | 'a'..='z' | 'A'..='Z'));
+        if c == '<' && tag_opener {
+            out.push_str("\\u003c");
+        } else {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+/// The last dotted segment of a manifest node id — the bare model name.
+/// (Local twin of the render module's private `leaf_segment`.)
+fn leaf_segment(id: &str) -> &str {
+    id.rsplit('.').next().unwrap_or(id)
+}
+
+/// Assemble the server-rendered model sections for `tests.html`.
+///
+/// `payload.models` mirrors `models` one-to-one and in the same order:
+/// `build_payload` iterates the same `ModelInScopeSet`, and under the
+/// explore composition every id in the set came **from** the manifest
+/// (`all_models`), so its skip-missing-node branch never fires. The zip
+/// therefore pairs each node id with its payload entry; the
+/// `not_compiled` flag is read from the manifest node (fail-open).
+fn explore_models(
+    current: &Manifest,
+    models: &ModelInScopeSet,
+    payload: &ReportPayload,
+) -> Vec<ExploreModel> {
+    models
+        .iter()
+        .zip(payload.models.iter())
+        .map(|(id, model_payload)| {
+            let node = current.node(id);
+            ExploreModel {
+                id: id.as_str().to_owned(),
+                name: model_payload.name.clone(),
+                path: model_payload.path.clone(),
+                not_compiled: node.is_none_or(|n| n.compiled_code().is_none()),
+                tests: model_payload
+                    .tests
+                    .iter()
+                    .map(|t| ExploreTest {
+                        name: t.name.clone(),
+                        description: t.description.clone(),
+                        shape: test_shape(
+                            t.given.len(),
+                            t.expected.table.as_ref().map(|table| table.rows.len()),
+                        ),
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+/// Render the two explore pages into `out_dir` (created if absent).
+///
+/// Writes `dag.html` then `tests.html`; a failure on either write (or
+/// on directory creation) surfaces the underlying [`io::Error`] —
+/// the cli layer names `--out-dir` in the operator message. Template
+/// rendering itself is compile-time-checked askama (the same
+/// infallible-at-runtime posture as the report renderer).
+///
+/// # Errors
+///
+/// Returns the underlying [`io::Error`] when `out_dir` cannot be
+/// created or either page cannot be written.
+pub fn render_explore(
+    out_dir: &Path,
+    current: &Manifest,
+    models: &ModelInScopeSet,
+    payload: &ReportPayload,
+) -> io::Result<()> {
+    fs::create_dir_all(out_dir)?;
+
+    let lineage = build_lineage(current, models);
+    let not_compiled_count = lineage.nodes.iter().filter(|n| n.not_compiled).count();
+    let dag_data = DagData {
+        def: mermaid_lineage_def(&lineage),
+        model_count: lineage.nodes.len(),
+    };
+    let dag_json = json_for_html_script(&dag_data)
+        .map_err(|err| io::Error::other(format!("dag payload serialization: {err}")))?;
+    let dag_html = ExploreDagTemplate {
+        sakura_css: SAKURA_CSS,
+        mermaid_js: MERMAID_JS,
+        favicon_data_uri: FAVICON_DATA_URI,
+        dag_json: &dag_json,
+        model_count: lineage.nodes.len(),
+        edge_count: lineage.edges.len(),
+        not_compiled_count,
+    }
+    .render()
+    .map_err(|err| io::Error::other(format!("render dag.html: {err}")))?;
+    fs::write(out_dir.join("dag.html"), dag_html)?;
+
+    let models_pod = explore_models(current, models, payload);
+    let test_count = models_pod.iter().map(|m| m.tests.len()).sum();
+    let payload_json = json_for_html_script(payload)
+        .map_err(|err| io::Error::other(format!("payload serialization: {err}")))?;
+    let tests_html = ExploreTestsTemplate {
+        sakura_css: SAKURA_CSS,
+        favicon_data_uri: FAVICON_DATA_URI,
+        models: &models_pod,
+        model_count: models_pod.len(),
+        test_count,
+        payload_json: &payload_json,
+    }
+    .render()
+    .map_err(|err| io::Error::other(format!("render tests.html: {err}")))?;
+    fs::write(out_dir.join("tests.html"), tests_html)?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{BTreeMap, HashMap as StdHashMap};
+
+    use crate::adapters::render::build_payload;
+    use crate::domain::{
+        Checksum, DependsOn, InScopeSet, ManifestMetadata, Node, NodeConfig, all_models,
+    };
+
+    fn model(id: &str, compiled: Option<&str>, deps: &[&str]) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "model",
+            Checksum::new("sha256", "ck"),
+            compiled.map(str::to_owned),
+            None,
+            DependsOn::new(Vec::new(), deps.iter().map(|d| NodeId::new(*d)).collect()),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    fn manifest_of(nodes: Vec<Node>) -> Manifest {
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+            StdHashMap::new(),
+            StdHashMap::new(),
+        )
+    }
+
+    fn three_model_manifest() -> Manifest {
+        manifest_of(vec![
+            model("model.shop.stg_orders", Some("select 1"), &[]),
+            model(
+                "model.shop.dim_orders",
+                Some("select 1"),
+                &["model.shop.stg_orders"],
+            ),
+            // Uncompiled — the fail-open node.
+            model(
+                "model.shop.mart_orders",
+                None,
+                &["model.shop.dim_orders", "source.shop.raw.orders"],
+            ),
+        ])
+    }
+
+    // ----- build_lineage --------------------------------------------
+
+    #[test]
+    fn lineage_has_one_node_per_model_in_id_order() {
+        let current = three_model_manifest();
+        let lineage = build_lineage(&current, &all_models(&current));
+        let ids: Vec<&str> = lineage.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "model.shop.dim_orders",
+                "model.shop.mart_orders",
+                "model.shop.stg_orders",
+            ],
+        );
+        assert_eq!(lineage.nodes[0].name, "dim_orders");
+    }
+
+    #[test]
+    fn lineage_edges_connect_models_and_skip_non_model_deps() {
+        let current = three_model_manifest();
+        let lineage = build_lineage(&current, &all_models(&current));
+        // stg_orders(2) -> dim_orders(0); dim_orders(0) -> mart_orders(1).
+        // The source.shop.raw.orders dependency is NOT a lineage edge.
+        assert_eq!(lineage.edges, vec![(0, 1), (2, 0)]);
+    }
+
+    #[test]
+    fn lineage_marks_uncompiled_models_not_compiled() {
+        let current = three_model_manifest();
+        let lineage = build_lineage(&current, &all_models(&current));
+        let by_name: StdHashMap<&str, bool> = lineage
+            .nodes
+            .iter()
+            .map(|n| (n.name.as_str(), n.not_compiled))
+            .collect();
+        assert!(by_name["mart_orders"], "dbt-parse model is flagged");
+        assert!(!by_name["stg_orders"]);
+    }
+
+    #[test]
+    fn lineage_of_an_empty_manifest_is_empty() {
+        let current = manifest_of(Vec::new());
+        let lineage = build_lineage(&current, &all_models(&current));
+        assert!(lineage.nodes.is_empty());
+        assert!(lineage.edges.is_empty());
+    }
+
+    // ----- mermaid_lineage_def --------------------------------------
+
+    #[test]
+    fn mermaid_def_renders_nodes_edges_and_not_compiled_class() {
+        let current = three_model_manifest();
+        let def = mermaid_lineage_def(&build_lineage(&current, &all_models(&current)));
+        assert!(def.starts_with("graph LR"), "{def}");
+        assert!(def.contains("n0[\"dim_orders\"]:::model"), "{def}");
+        assert!(
+            def.contains("n1[\"mart_orders (not compiled)\"]:::notcompiled"),
+            "the fail-open node is labeled AND classed: {def}",
+        );
+        assert!(def.contains("n2 --> n0"), "stg -> dim edge: {def}");
+        assert!(def.contains("n0 --> n1"), "dim -> mart edge: {def}");
+        assert!(def.contains("classDef notcompiled"), "{def}");
+    }
+
+    #[test]
+    fn mermaid_def_quotes_hostile_labels() {
+        let current = manifest_of(vec![model("model.shop.we\"ird", Some("select 1"), &[])]);
+        let def = mermaid_lineage_def(&build_lineage(&current, &all_models(&current)));
+        assert!(
+            def.contains("n0[\"we&quot;ird\"]"),
+            "a double quote in a model name cannot break the label grammar: {def}",
+        );
+    }
+
+    // ----- json_for_html_script --------------------------------------
+
+    #[test]
+    fn json_escapes_tag_opening_lt() {
+        #[derive(Serialize)]
+        struct Doc {
+            s: String,
+        }
+        let out = json_for_html_script(&Doc {
+            s: "</script><!-- <b> but 1 < 2 stays".to_owned(),
+        })
+        .expect("serializes");
+        assert!(!out.contains("</script>"), "{out}");
+        assert!(out.contains("\\u003c/script>"), "{out}");
+        assert!(out.contains("\\u003c!--"), "{out}");
+        assert!(out.contains("\\u003cb>"), "{out}");
+        assert!(
+            out.contains("1 < 2"),
+            "bare < before space stays raw: {out}"
+        );
+    }
+
+    // ----- render_explore (filesystem integration) -------------------
+
+    fn tmp_dir(stem: &str) -> std::path::PathBuf {
+        let p =
+            std::env::temp_dir().join(format!("cute-dbt-explore-{}-{stem}", std::process::id()));
+        let _ = fs::remove_dir_all(&p);
+        p
+    }
+
+    fn payload_for(current: &Manifest, models: &ModelInScopeSet) -> ReportPayload {
+        build_payload(
+            current,
+            &InScopeSet::new(),
+            models,
+            &StdHashMap::new(),
+            &StdHashMap::new(),
+            &StdHashMap::new(),
+            &StdHashMap::new(),
+            "",
+        )
+    }
+
+    #[test]
+    fn render_explore_writes_both_pages_under_out_dir() {
+        let current = three_model_manifest();
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let dir = tmp_dir("both-pages");
+
+        render_explore(&dir, &current, &models, &payload).expect("explore renders");
+
+        let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html written");
+        let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html written");
+        // The model-count oracle: the rendered model set equals the
+        // manifest's model count on BOTH pages.
+        assert!(dag.contains("\"model_count\":3"), "dag carries the count");
+        assert_eq!(
+            tests.matches("class=\"explore-model\"").count(),
+            3,
+            "tests.html renders one section per manifest model",
+        );
+        // The fail-open badge surfaces on the tests page too.
+        assert!(tests.contains("not compiled"), "{tests}");
+        // tests.html embeds the build_payload reuse seam.
+        assert!(tests.contains("id=\"cute-dbt-data\""), "payload embedded");
+        // tests.html is the page-aware static page: no Mermaid bundle.
+        assert!(!tests.contains("mermaid"), "tests.html carries no Mermaid");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_explore_is_deterministic() {
+        let current = three_model_manifest();
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let dir_a = tmp_dir("det-a");
+        let dir_b = tmp_dir("det-b");
+        render_explore(&dir_a, &current, &models, &payload).expect("first render");
+        render_explore(&dir_b, &current, &models, &payload).expect("second render");
+        for page in ["dag.html", "tests.html"] {
+            let a = fs::read(dir_a.join(page)).expect("page a");
+            let b = fs::read(dir_b.join(page)).expect("page b");
+            assert_eq!(a, b, "{page} renders byte-identically");
+        }
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
+    }
+
+    #[test]
+    fn render_explore_creates_the_out_dir() {
+        let current = three_model_manifest();
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let dir = tmp_dir("nested").join("deeper");
+        render_explore(&dir, &current, &models, &payload).expect("creates out-dir");
+        assert!(dir.join("dag.html").exists());
+        assert!(dir.join("tests.html").exists());
+        let _ = fs::remove_dir_all(dir.parent().expect("parent"));
+    }
+
+    #[test]
+    fn render_explore_empty_manifest_renders_the_empty_state() {
+        let current = manifest_of(Vec::new());
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let dir = tmp_dir("empty");
+        render_explore(&dir, &current, &models, &payload).expect("empty manifest renders");
+        let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
+        assert!(dag.contains("\"model_count\":0"), "{dag}");
+        let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html");
+        assert!(
+            tests.contains("No models in this manifest"),
+            "the empty state is explicit, not a blank page: {tests}",
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explore_models_zip_carries_tests_and_badges() {
+        let mut current = three_model_manifest();
+        // Attach one unit test to dim_orders.
+        let ut = crate::domain::UnitTest::new(
+            "test_dim_orders",
+            NodeId::new("dim_orders"),
+            Vec::new(),
+            crate::domain::UnitTestExpect::new(serde_json::Value::Null, None, None),
+            Some("checks the dim".to_owned()),
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let mut unit_tests = StdHashMap::new();
+        unit_tests.insert("unit_test.shop.dim_orders.test_dim_orders".to_owned(), ut);
+        current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            current.nodes().clone(),
+            unit_tests,
+            StdHashMap::new(),
+        );
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let pods = explore_models(&current, &models, &payload);
+        assert_eq!(pods.len(), 3);
+        let dim = pods
+            .iter()
+            .find(|m| m.name == "dim_orders")
+            .expect("dim_orders present");
+        assert_eq!(dim.tests.len(), 1);
+        assert_eq!(dim.tests[0].name, "test_dim_orders");
+        assert_eq!(dim.tests[0].description.as_deref(), Some("checks the dim"));
+        assert_eq!(
+            dim.tests[0].shape, "0 givens, expects 0 rows",
+            "a Null expect tabulates to an empty grid (0 rows)",
+        );
+        let mart = pods
+            .iter()
+            .find(|m| m.name == "mart_orders")
+            .expect("mart_orders present");
+        assert!(mart.not_compiled, "fail-open badge data");
+        assert!(mart.tests.is_empty(), "zero-test model still renders");
+    }
+}

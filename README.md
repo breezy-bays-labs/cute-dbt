@@ -59,7 +59,7 @@ vocabulary, and the chosen selectors compose **alongside** the always-on
 body checksum (dbt's OR union across sub-selectors):
 
 ```bash
-cute-dbt --manifest target/current/manifest.json \
+cute-dbt report --manifest target/current/manifest.json \
          --baseline-manifest target/baseline/manifest.json \
          --modified-selectors configs,relation,macros,contract \
          --out report.html
@@ -97,15 +97,24 @@ target model body changed (or whose test definition itself changed).
 `--baseline-manifest` is required:
 
 ```bash
-cute-dbt --manifest target/current/manifest.json \
+cute-dbt report --manifest target/current/manifest.json \
          --baseline-manifest target/baseline/manifest.json \
          --out report.html
 ```
 
-A full-manifest overview is a documented trick: diff against an empty/
-genesis baseline. There is no implicit "full manifest" path — keeping
-diff-scoping the default keeps reports bounded and the fail-closed surface
-narrow.
+For a full-manifest overview, use the **`explore`** verb instead of a
+diff trick:
+
+```bash
+cute-dbt explore --manifest target/manifest.json --out-dir explore/
+```
+
+It renders **every** model to two self-contained pages — `explore/dag.html`
+(the model-lineage DAG) and `explore/tests.html` (the unit-test index) —
+with no baseline, fail-open on uncompiled models (they render as
+"not compiled" nodes). `report` itself stays diff-scoped by design:
+bounded reports, narrow fail-closed surface. Bare `cute-dbt` without a
+verb is a usage error.
 
 ## Known v0.1 fidelity limits
 

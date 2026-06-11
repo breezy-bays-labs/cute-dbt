@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cute-dbt explore — unit tests</title>
+<link rel="icon" href="{{ favicon_data_uri }}">
+<style>
+{{ sakura_css|safe }}
+</style>
+<style>
+{# cute-dbt#100 — first-party explore-page chrome. This page is a
+   server-rendered static index (no Mermaid, no DataTables, no JS): the
+   page-aware liveness oracle for it is plain DOM facts. The full
+   interactive unit-test viewer is the epic #99 V3 slice. #}
+body { max-width: 72rem; }
+.explore-header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.explore-header h1 { margin-bottom: 0.25rem; }
+.explore-nav a { font-size: 0.95rem; }
+.explore-counts { color: #555; font-size: 0.9rem; }
+.explore-model { border-top: 1px solid #ddd; padding-top: 0.75rem; margin-top: 0.75rem; }
+.explore-model h2 { margin-bottom: 0.2rem; }
+.model-path { color: #555; font-size: 0.85rem; margin: 0 0 0.4rem; }
+.not-compiled-badge { font-size: 0.7em; vertical-align: middle; padding: 0.1rem 0.45rem; border: 1.5px dashed #b07400; border-radius: 4px; background: #f4f4f5; color: #1c1c1f; }
+.explore-tests { margin-bottom: 0.5rem; }
+.explore-test .test-name { font-weight: 600; }
+.explore-test .test-shape { color: #555; font-size: 0.85rem; }
+.explore-test .test-description { color: #555; font-size: 0.9rem; margin: 0.1rem 0 0; }
+.no-tests { color: #555; font-style: italic; }
+.explore-empty { color: #555; font-style: italic; }
+</style>
+</head>
+<body>
+
+<header class="explore-header">
+  <div>
+    <h1>Unit tests</h1>
+    <p class="explore-counts">full manifest — {{ model_count }} model{% if model_count != 1 %}s{% endif %}, {{ test_count }} unit test{% if test_count != 1 %}s{% endif %}</p>
+  </div>
+  <nav class="explore-nav" aria-label="Explore pages">
+    <a href="dag.html">&larr; Model lineage</a>
+  </nav>
+</header>
+
+{% if models.is_empty() %}
+<p class="explore-empty">No models in this manifest.</p>
+{% endif %}
+{% for m in models %}
+<section class="explore-model" data-model-id="{{ m.id }}" aria-label="Model {{ m.name }}">
+  <h2>{{ m.name }}{% if m.not_compiled %} <span class="not-compiled-badge">not compiled</span>{% endif %}</h2>
+  {% match m.path %}{% when Some with (p) %}<p class="model-path"><code>{{ p }}</code></p>
+  {% when None %}{% endmatch %}{% if m.tests.is_empty() %}<p class="no-tests">0 unit tests wired</p>
+  {% else %}<ul class="explore-tests">
+    {% for t in m.tests %}<li class="explore-test">
+      <span class="test-name">{{ t.name }}</span>
+      <span class="test-shape">&mdash; {{ t.shape }}</span>
+      {% match t.description %}{% when Some with (d) %}<p class="test-description">{{ d }}</p>
+      {% when None %}{% endmatch %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+</section>
+{% endfor %}
+
+{# cute-dbt#100 — the build_payload reuse seam: the SAME engine-agnostic
+   ReportPayload the report renders, scoped to the full manifest (the
+   all_models seam, empty changed set). Embedded under the report's
+   carrier id so payload-consuming tooling reads both surfaces the same
+   way; the V3 unit-test viewer renders from it. #}
+<script type="application/json" id="cute-dbt-data">{{ payload_json|safe }}</script>
+</body>
+</html>

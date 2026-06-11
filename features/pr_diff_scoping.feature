@@ -31,7 +31,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Given a PR diff that changes "models/marts/core/dim_payers.sql"
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report's models-in-scope listing contains "dim_payers"
     And the rendered report contains a CTE diagram for "dim_payers"
@@ -41,7 +41,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Given a PR diff that changes "models/marts/core/_core__models.yml"
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel" declared in "models/marts/core/_core__models.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report's test rows include "test_dim_payers_injects_unknown_sentinel"
 
@@ -49,7 +49,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Given a PR diff that changes "models/marts/core/dim_payers.sql" and "models/marts/analytics/mart_dq_summary.sql"
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the manifest contains a model with original_file_path "models/marts/analytics/mart_dq_summary.sql"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report's models-in-scope listing contains both "dim_payers" and "mart_dq_summary"
     And the rendered report contains a CTE diagram for "dim_payers"
@@ -60,7 +60,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Given a PR diff that changes "models/marts/core/dim_payers.sql"
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the manifest also contains an unchanged model "stg_customers" with a unit test "test_stg_customers_unique"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report's models-in-scope listing contains "dim_payers"
     And the rendered report's models-in-scope listing does NOT contain "stg_customers"
@@ -69,7 +69,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
   Scenario: A modified model with zero unit tests is in models_in_scope (explorer mode)
     Given a PR diff that changes "models/staging/stg_payments.sql"
     And the manifest contains a model with original_file_path "models/staging/stg_payments.sql"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report shows "stg_payments" with the "no unit tests wired" empty state
 
@@ -78,7 +78,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
   Scenario: --project-root rewrites PR-diff paths so a sub-directory dbt project is in scope
     Given a PR diff that changes "dbt_project/models/marts/core/dim_payers.sql"
     And the manifest (compiled with project root "dbt_project") contains a model with original_file_path "models/marts/core/dim_payers.sql"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root dbt_project --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root dbt_project --out report.html
     Then the exit code is 0
     And the rendered report's models-in-scope listing contains "dim_payers"
 
@@ -86,7 +86,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
 
   Scenario: A PR with no dbt-relevant changes produces an empty in-scope report
     Given a PR diff that changes only "README.md" and ".github/workflows/ci.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report shows the "0 unit tests in scope" banner
     And the rendered report contains no CTE diagrams
@@ -94,7 +94,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
   Scenario: A changed path that doesn't map to any manifest node is silently skipped
     Given a PR diff that changes "models/deleted_model.sql"
     And the manifest has no node with original_file_path "models/deleted_model.sql"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report shows the "0 unit tests in scope" banner
 
@@ -110,7 +110,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Given a PR diff that renames "models/marts/core/dim_payers.sql" to "models/marts/core/payer_dimensions.sql" with no content change
     And the manifest contains a model with original_file_path "models/marts/core/payer_dimensions.sql"
     And the model "payer_dimensions" has a unit test "test_payer_dimensions_injects_unknown_sentinel"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report's models-in-scope listing contains "payer_dimensions"
     And the rendered report's models-in-scope listing does NOT contain "dim_payers"
@@ -119,7 +119,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
   Scenario: A rename with edits puts the renamed model in scope under its new name
     Given a PR diff that renames "models/marts/core/dim_payers.sql" to "models/marts/core/payer_dimensions.sql" and edits it
     And the manifest contains a model with original_file_path "models/marts/core/payer_dimensions.sql"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report's models-in-scope listing contains "payer_dimensions"
 
@@ -127,7 +127,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
 
   Scenario: A malformed PR diff is a usage error
     Given a PR diff file whose contents are not a valid unified diff
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 2
     And no file "report.html" is written
     And stderr explains the --pr-diff argument could not be parsed as a unified diff
@@ -137,14 +137,14 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
   Scenario: Passing both --pr-diff and --baseline-manifest is a clap usage error
     Given a baseline manifest "baseline.json"
     And a PR diff that changes "models/marts/core/dim_payers.sql"
-    When I run cute-dbt with --manifest current.json --baseline-manifest baseline.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --baseline-manifest baseline.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is non-zero
     And no file "report.html" is written
     And stderr explains exactly one of --pr-diff or --baseline-manifest must be provided
 
   @no-baseline-usage-error
   Scenario: Passing neither --pr-diff nor --baseline-manifest is a clap usage error
-    When I run cute-dbt with --manifest current.json --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --project-root . --out report.html
     Then the exit code is non-zero
     And no file "report.html" is written
     And stderr explains exactly one of --pr-diff or --baseline-manifest must be provided
@@ -155,7 +155,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Given a PR diff that changes "models/marts/core/dim_payers.sql"
     And the manifest contains a model with no compiled SQL at "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is non-zero
     And no file "report.html" is written
     And stderr names "dim_payers" as the offending node and recommends running "dbt compile"
@@ -167,7 +167,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     # diff to distinguish a config-block change from a unit_tests-block change.
     # Adopters needing config-aware scoping use --baseline-manifest instead.
     Given a PR diff that changes only "dbt_project.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report shows the "0 unit tests in scope" banner
 
@@ -175,7 +175,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     # PR-diff sees only packages.yml change; no dbt SQL files change.
     # Adopters needing dependency-aware scoping use --baseline-manifest instead.
     Given a PR diff that changes only "packages.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report shows the "0 unit tests in scope" banner
 
@@ -212,7 +212,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Given a PR diff that changes "models/marts/core/_core__models.yml"
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel" declared in "models/marts/core/_core__models.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the test "test_dim_payers_injects_unknown_sentinel" is marked updated
 
@@ -220,7 +220,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Given a PR diff that changes "models/marts/core/dim_payers.sql"
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel" declared in "models/marts/core/_core__models.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the test "test_dim_payers_injects_unknown_sentinel" is marked context
 
@@ -233,7 +233,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
     And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_extra_tests.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the test "test_a" is marked updated
     And the test "test_b" is marked context
@@ -255,7 +255,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
     And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report's models-in-scope listing contains "dim_payers"
     And the test "test_a" is marked context
@@ -270,7 +270,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
     And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_other_unchanged.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report's test rows include "test_b"
     And the test "test_a" is marked updated
@@ -295,7 +295,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
     And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the test "test_a" is marked updated
     And the test "test_b" is marked context
@@ -305,7 +305,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
     And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the test "test_a" is marked updated
     And the test "test_b" is marked updated
@@ -317,7 +317,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
     And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report's test rows include "test_a"
     And the test "test_a" is marked context
@@ -330,7 +330,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
     And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the test "test_a" is marked updated
     And the test "test_b" is marked context
@@ -340,7 +340,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the manifest (compiled with project root "dbt_project") contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
     And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root dbt_project --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root dbt_project --out report.html
     Then the exit code is 0
     And the test "test_a" is marked updated
     And the test "test_b" is marked context
@@ -353,7 +353,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
     And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the test "test_a" is marked updated
     And the test "test_b" is marked updated
@@ -369,7 +369,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
     And the model "dim_payers" has a unit test "test_b" declared in "models/marts/core/_core__models.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the test "test_a" carries an inline YAML diff with a removed and an added line
     And the test "test_b" carries no inline YAML diff
@@ -390,7 +390,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Given a PR diff that changes the SQL of "models/marts/core/dim_payers.sql"
     And the manifest contains a model with raw SQL at "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report's models-in-scope listing contains "dim_payers"
     And the model "dim_payers" carries an inline SQL diff with a removed and an added line
@@ -401,7 +401,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Given a PR diff that changes "models/marts/core/_core__models.yml"
     And the manifest contains a model with raw SQL at "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_a" declared in "models/marts/core/_core__models.yml"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report's models-in-scope listing contains "dim_payers"
     And the model "dim_payers" carries no inline SQL diff
@@ -412,7 +412,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Given a PR diff whose SQL hunks no longer line up with "models/marts/core/dim_payers.sql"
     And the manifest contains a model with raw SQL at "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report's models-in-scope listing contains "dim_payers"
     And the model "dim_payers" carries no inline SQL diff
@@ -423,7 +423,7 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Given a PR diff that re-indents the SQL of "models/marts/core/dim_payers.sql" (whitespace only)
     And the manifest contains a model with raw SQL at "models/marts/core/dim_payers.sql"
     And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel"
-    When I run cute-dbt with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
     Then the exit code is 0
     And the rendered report's models-in-scope listing contains "dim_payers"
     And the model "dim_payers" carries no inline SQL diff
