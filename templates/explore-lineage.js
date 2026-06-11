@@ -66,15 +66,39 @@
 
   // ---- measured node widths (no deprecated `width: label`) ---------------
   var FONT_STACK = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  var MAX_TEXT_WIDTH = 274;
   var measureCtx = document.createElement("canvas").getContext("2d");
   measureCtx.font = "13px " + FONT_STACK;
-  function labelWidth(label) {
-    return Math.min(300, Math.ceil(measureCtx.measureText(label).width) + 26);
+  function nodeWidth(name, badge) {
+    var widest = Math.max(
+      measureCtx.measureText(name).width,
+      measureCtx.measureText(badge).width
+    );
+    return Math.min(300, Math.ceil(widest) + 26);
+  }
+  // Manual single-line ellipsis (the label is two lines under
+  // `text-wrap: wrap` for the cute-dbt#103 badge, so Cytoscape's
+  // one-line `ellipsis` mode no longer applies — truncate the NAME line
+  // ourselves the same canvas-measured way).
+  function ellipsize(text) {
+    if (measureCtx.measureText(text).width <= MAX_TEXT_WIDTH) return text;
+    var out = text;
+    while (out.length > 1 && measureCtx.measureText(out + "…").width > MAX_TEXT_WIDTH) {
+      out = out.slice(0, -1);
+    }
+    return out + "…";
   }
 
   // ---- elements off the LineagePayload carrier ----------------------------
   var elements = [];
   data.nodes.forEach(function (n) {
+    // cute-dbt#103 — the per-node test-count badge rides the label's
+    // second line as CANVAS TEXT (same XSS-by-construction posture as
+    // the name: glyphs, never HTML). The badge string is composed
+    // server-side ("N data-tests · M unit-tests", 0/0 explicit) — these
+    // are manifest test-count facts, not check-engine output.
+    var name = ellipsize(String(n.name || n.id));
+    var badge = String(n.badge || "");
     elements.push({
       group: "nodes",
       // The element id is the full manifest node id. It is only ever
@@ -83,8 +107,8 @@
       // cute-dbt#155 / #180 precedent).
       data: {
         id: n.id,
-        label: String(n.name || n.id),
-        w: labelWidth(String(n.name || n.id)),
+        label: badge ? name + "\n" + badge : name,
+        w: nodeWidth(name, badge),
         notCompiled: n.not_compiled ? 1 : 0
       }
     });
@@ -105,10 +129,13 @@
       "font-family": FONT_STACK,
       "font-size": 13,
       "color": "#1c1c1f",
-      "text-wrap": "ellipsis",
+      // cute-dbt#103 — two-line labels (name + test-count badge): wrap
+      // honors the explicit \n; the name line is pre-ellipsized above
+      // (canvas-measured), so the max-width is only a backstop.
+      "text-wrap": "wrap",
       "text-max-width": 280,
       "width": "data(w)",
-      "height": 30,
+      "height": 46,
       "shape": "round-rectangle",
       "background-color": "#e8f1f8",
       "border-width": 1.6,

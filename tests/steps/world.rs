@@ -205,6 +205,28 @@ pub struct ContextPlan {
 pub struct ExplorePlan {
     /// The declared models.
     pub models: Vec<ExploreModelDecl>,
+    /// Declared data-test nodes (cute-dbt#103 — the test-count badge
+    /// scenarios). Spliced into the serialized manifest in the REAL
+    /// fusion wire shape (`attached_node`, `depends_on`,
+    /// `original_file_path`) by the explore `When`.
+    pub data_tests: Vec<ExploreDataTestDecl>,
+}
+
+/// One data-test node in an [`ExplorePlan`] (cute-dbt#103).
+#[derive(Debug, Clone)]
+pub struct ExploreDataTestDecl {
+    /// Test-node id leaf (`test.jaffle_shop.<name>`).
+    pub name: String,
+    /// Bare name of the model the test's `attached_node` points at —
+    /// `None` is the singular-test wire shape (`attached_node: null`,
+    /// the fusion null-fill).
+    pub attached: Option<String>,
+    /// Bare names of the models on `depends_on.nodes` (a relationships
+    /// test reaches its `to:` target here WITHOUT attributing).
+    pub depends_on: Vec<String>,
+    /// The declaring file's `original_file_path`, when the scenario
+    /// pins one (attribution must ignore it).
+    pub declared_in: Option<String>,
 }
 
 /// One model in an [`ExplorePlan`].

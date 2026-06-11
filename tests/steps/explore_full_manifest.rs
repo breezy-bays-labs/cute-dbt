@@ -16,10 +16,11 @@ use serde_json::Value;
 
 use super::World;
 use super::builders::{
-    empty_manifest, model_node_with_deps, serialize_to_tmp, unit_test_for, with_node,
+    empty_manifest, model_node_with_deps, serialize_coverage_to_tmp, unit_test_for, with_node,
     with_unit_test,
 };
 use super::explore_cli::run_explore;
+use super::explore_test_badges::wire_data_test;
 use super::world::ExploreModelDecl;
 
 // --- Background -------------------------------------------------------
@@ -89,7 +90,14 @@ fn run_explore_on_synthetic(world: &mut World) {
             manifest = with_unit_test(manifest, unit_test_for(test, &m.bare));
         }
     }
-    let manifest_path = serialize_to_tmp(&manifest, "explore_full_manifest");
+    // cute-dbt#103 — splice the declared data-test nodes in the REAL
+    // fusion wire shape (the coverage_checks.rs precedent: the domain
+    // types do not round-trip a flat test-node `config`). An empty
+    // declaration list degenerates to the plain serialization.
+    let test_nodes: Vec<(String, serde_json::Value)> =
+        plan.data_tests.iter().map(wire_data_test).collect();
+    let manifest_path =
+        serialize_coverage_to_tmp(&manifest, "explore_full_manifest", &[], &test_nodes, &[]);
     let out_dir = super::super::common::tmp("explore_full_manifest_pages");
     let _ = std::fs::remove_dir_all(&out_dir);
     run_explore(world, &manifest_path, out_dir);
