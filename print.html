@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f0aa6ff4.js";
+            window.path_to_searchindex_js = "searchindex-993df1f2.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-f14af9d1.js"></script>
+        <script src="toc-db4d1b28.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -752,6 +752,7 @@ TOML file.</p>
 <tr><td><a href="#unionarm-coverage"><code>union.arm-coverage</code></a></td><td>Unexercised UNION arm</td><td><code>high</code></td><td><code>unit-test</code></td></tr>
 <tr><td><a href="#joinleft-null-propagation"><code>join.left-null-propagation</code></a></td><td>LEFT JOIN null propagation untested</td><td><code>high</code></td><td><code>both</code></td></tr>
 <tr><td><a href="#joinanti-join"><code>join.anti-join</code></a></td><td>Anti-join exclusion untested</td><td><code>high</code></td><td><code>unit-test</code></td></tr>
+<tr><td><a href="#incrementalbranch-coverage"><code>incremental.branch-coverage</code></a></td><td>Unexercised is_incremental() branch</td><td><code>high</code></td><td><code>unit-test</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -888,6 +889,38 @@ TOML file.</p>
 <p>Add a matching given pair: one left row whose join key IS present in the right-side given rows, then assert in <code>expect</code> that the matched row is excluded from the output. This finding’s evidence carries a copy-pasteable given sketch.</p>
 <h2 id="rationale-3"><a class="header" href="#rationale-3">Rationale</a></h2>
 <p>An anti-join’s output is defined by what it excludes. Every existing given that only carries unmatched rows proves the keep path, never the exclusion: if the ON key drifts or the IS NULL column changes, matched rows leak into the output and no test catches it.</p>
+<div style="break-before: page; page-break-before: always;"></div><!-- GENERATED — do not edit. Source of truth: the `heuristics!` block in src/domain/checks.rs. Regenerate: GEN_HEURISTICS_LEDGER=1 cargo test --test heuristics_ledger -->
+<h1 id="incrementalbranch-coverage"><a class="header" href="#incrementalbranch-coverage">incremental.branch-coverage</a></h1>
+<p><strong>Unexercised is_incremental() branch</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th></th></tr>
+</thead>
+<tbody>
+<tr><td>Group</td><td><code>incremental</code></td></tr>
+<tr><td>Tier</td><td><code>high</code></td></tr>
+<tr><td>Instrument</td><td><code>unit-test</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="conditions-4"><a class="header" href="#conditions-4">Conditions</a></h2>
+<ul>
+<li>the model is materialized incremental (config.materialized = “incremental”) — its body forks on is_incremental(), and a dbt unit test compiles exactly one side of that fork</li>
+<li>a unit test with overrides.macros.is_incremental = true exercises the incremental branch; an explicit false override OR no override at all exercises the initial full-build branch (dbt compiles is_incremental() as false in unit tests by default)</li>
+<li>branch coverage rolls up per model as none / false-only / true-only / both; only BOTH satisfies the construct, attributing every unit test on the model (each test compiles one side of the fork)</li>
+<li>the HIGH-tier cue boundary (the union.arm-coverage precedent): a test on a branch proves that branch’s compiled SQL runs under fixtures — whether the branch’s filter/merge semantics are meaningfully asserted, or whether the body’s Jinja even calls is_incremental(), is not statically decidable from the manifest, so the recommendation is a cue, never an assertion of a bug</li>
+</ul>
+<h2 id="exclusions-4"><a class="header" href="#exclusions-4">Exclusions</a></h2>
+<ul>
+<li>models whose materialization is absent, non-string, or anything other than incremental (view, table, ephemeral, custom) emit no finding — when the fork provably cannot exist or cannot be statically known, the check is silent, never misclassifies</li>
+<li>microbatch-strategy models (incremental_strategy = “microbatch”, or any non-null event_time config) are OUT of rule #1: dbt replays them through event-time batch windows, not the is_incremental() fork, so true/false override coverage does not describe their semantics — never classified</li>
+<li>a non-boolean is_incremental override collapses to the no-override default at ingestion (cute-dbt#145 tolerant truthiness) and counts toward the full-build branch — the conservative side of the cue</li>
+</ul>
+<h2 id="recommendation-4"><a class="header" href="#recommendation-4">Recommendation</a></h2>
+<p>Add a unit test for each missing is_incremental() branch: one with <code>overrides: macros: is_incremental: true</code> (mock the prior model state with a <code>given: - input: this</code> entry) to exercise the incremental branch, and one without the override for the initial full build (dbt compiles is_incremental() as false by default). This finding’s evidence carries a copy-pasteable unit-test sketch per missing branch.</p>
+<h2 id="rationale-4"><a class="header" href="#rationale-4">Rationale</a></h2>
+<p>An incremental model is two programs in one body: the initial full build, and the incremental run that filters on the high-water mark and merges by key. Each unit test compiles only one of them, so a suite living entirely on one branch ships the other untested — exactly where incremental models silently drop, duplicate, or re-process rows.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="selecting--suppressing-checks"><a class="header" href="#selecting--suppressing-checks">Selecting &amp; suppressing checks</a></h1>
 <p>cute-dbt’s coverage checks (see <a href="#checks">Checks</a>) are tuned
