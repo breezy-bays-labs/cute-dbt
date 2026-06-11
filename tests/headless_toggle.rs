@@ -8107,12 +8107,19 @@ fn badge_tip_bubble_rounds_at_small_radius() {
          ref.style.borderRadius = 'var(--radius-pan)';\
          var pan = getComputedStyle(ref).borderRadius;\
          ref.remove();\
-         var got = getComputedStyle(document.querySelector(\
-           '.expected-panel .mode-badge.has-mode-tip .expect-tooltip-bubble'\
-         )).borderRadius;\
+         var bubble = document.querySelector(\
+           '.expected-panel .mode-badge.has-mode-tip .expect-tooltip-bubble');\
+         var got = bubble ? getComputedStyle(bubble).borderRadius : '';\
          return {got: got, sm: sm, pan: pan};})()",
     );
+    // A missing bubble surfaces as got == "" so the assert below names the
+    // mismatch cleanly instead of a cryptic in-page TypeError.
     let got = m["got"].as_str().expect("bubble radius resolves");
+    assert!(
+        !got.is_empty(),
+        "precondition: the badge-borne bubble renders \
+         ('.expected-panel .mode-badge.has-mode-tip .expect-tooltip-bubble' not found)",
+    );
     let sm = m["sm"].as_str().expect("--radius-sm resolves");
     let pan = m["pan"].as_str().expect("--radius-pan resolves");
     assert_ne!(
