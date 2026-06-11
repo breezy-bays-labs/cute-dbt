@@ -95,6 +95,7 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::domain::cte::{CteGraph, EdgeType, LeftJoinFact};
+use crate::domain::grain::test_is_enabled;
 use crate::domain::manifest::{Manifest, Node, NodeConfig, NodeId};
 use crate::domain::state::resolve_target_model;
 use crate::domain::unit_test::{UnitTest, UnitTestGiven};
@@ -865,16 +866,6 @@ fn covers_grain(node: &Node, model_id: &NodeId, key_set: &BTreeSet<String>) -> b
         && columns
             .iter()
             .all(|column| key_set.contains(&column.to_ascii_lowercase()))
-}
-
-/// `config.enabled` on a test node, defaulting to enabled — mirrors
-/// fusion's `get_enabled_with_default` (a disabled test asserts nothing).
-fn test_is_enabled(node: &Node) -> bool {
-    node.config()
-        .config()
-        .get("enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
 }
 
 /// The column set a uniqueness test asserts, or `None` when `node` is
