@@ -40,7 +40,9 @@
 //!
 //! ## v0.1 registry
 //!
-//! Two checks ship today:
+//! The `heuristics!` block below is the registry (the committed
+//! `heuristics/registry.toml` ledger is generated from it). Wire-shape
+//! verification provenance for the manifest-fact checks:
 //!
 //! - `grain.unique-key-unbacked` (TOTAL, the cute-dbt#169 walking
 //!   skeleton) — a model declares `config.unique_key` (merge/
@@ -65,6 +67,19 @@
 //!   mock CTE per `given` entry — a relation with no given keeps
 //!   reading its real table, which is why an unmocked *seed* input is
 //!   honest UNKNOWN, never UNCOVERED).
+//! - `incremental.branch-coverage` (HIGH, cute-dbt#164 —
+//!   coverage-intelligence rule #1) — an incremental model's unit tests
+//!   exercise only one side of the `is_incremental()` fork. Consumes the
+//!   cute-dbt#145 ingestion (`config.materialized` +
+//!   `overrides.macros.is_incremental` are already on the domain types).
+//!   Override semantics verified against dbt-fusion
+//!   `9977b6cbb1b761065536300037560d8e3c037011` (`bind_override_macros`
+//!   in `dbt-tasks-sa/src/renderable/renderable/unit_test.rs` stubs the
+//!   overridden macro; without the stub the unit test compiles the
+//!   full-build branch — dbt's documented default). The microbatch
+//!   exclusion's wire shape (`incremental_strategy = "microbatch"`,
+//!   `DbtIncrementalStrategy::Microbatch`, serde `snake_case`) is pinned
+//!   to `dbt-schemas/src/schemas/common.rs` at the same SHA.
 //!
 //! Domain purity: `std` + `serde` (+ `serde_json::Value` passthrough)
 //! only — no I/O, no parser deps. Checks stay thin pattern-matchers over
@@ -80,7 +95,7 @@ use serde::{Serialize, Serializer};
 use serde_json::Value;
 
 use crate::domain::cte::{CteGraph, EdgeType, LeftJoinFact};
-use crate::domain::manifest::{Manifest, Node, NodeId};
+use crate::domain::manifest::{Manifest, Node, NodeConfig, NodeId};
 use crate::domain::state::resolve_target_model;
 use crate::domain::unit_test::{UnitTest, UnitTestGiven};
 use crate::domain::unit_test_table::{CellValue, FixtureTable, table_from_manifest_rows};
@@ -724,6 +739,35 @@ heuristics! {
             recommendation: "Add a matching given pair: one left row whose join key IS present in the right-side given rows, then assert in `expect` that the matched row is excluded from the output. This finding's evidence carries a copy-pasteable given sketch.",
             rationale: "An anti-join's output is defined by what it excludes. Every existing given that only carries unmatched rows proves the keep path, never the exclusion: if the ON key drifts or the IS NULL column changes, matched rows leak into the output and no test catches it.",
             detector: detect_join_anti_join,
+        },
+        /// `incremental.branch-coverage` — the `is_incremental()`
+        /// true/false branch rollup on incremental models (cute-dbt#164,
+        /// coverage-intelligence rule #1).
+        IncrementalBranchCoverage {
+            id: "incremental.branch-coverage",
+            name: "Unexercised is_incremental() branch",
+            group: "incremental",
+            tier: High,
+            instrument: UnitTest,
+            supersedes: [],
+            evidence: [
+                "manifest.config.materialized",
+                "manifest.unit-test-overrides",
+            ],
+            conditions: [
+                "the model is materialized incremental (config.materialized = \"incremental\") — its body forks on is_incremental(), and a dbt unit test compiles exactly one side of that fork",
+                "a unit test with overrides.macros.is_incremental = true exercises the incremental branch; an explicit false override OR no override at all exercises the initial full-build branch (dbt compiles is_incremental() as false in unit tests by default)",
+                "branch coverage rolls up per model as none / false-only / true-only / both; only BOTH satisfies the construct, attributing every unit test on the model (each test compiles one side of the fork)",
+                "the HIGH-tier cue boundary (the union.arm-coverage precedent): a test on a branch proves that branch's compiled SQL runs under fixtures — whether the branch's filter/merge semantics are meaningfully asserted, or whether the body's Jinja even calls is_incremental(), is not statically decidable from the manifest, so the recommendation is a cue, never an assertion of a bug",
+            ],
+            exclusions: [
+                "models whose materialization is absent, non-string, or anything other than incremental (view, table, ephemeral, custom) emit no finding — when the fork provably cannot exist or cannot be statically known, the check is silent, never misclassifies",
+                "microbatch-strategy models (incremental_strategy = \"microbatch\", or any non-null event_time config) are OUT of rule #1: dbt replays them through event-time batch windows, not the is_incremental() fork, so true/false override coverage does not describe their semantics — never classified",
+                "a non-boolean is_incremental override collapses to the no-override default at ingestion (cute-dbt#145 tolerant truthiness) and counts toward the full-build branch — the conservative side of the cue",
+            ],
+            recommendation: "Add a unit test for each missing is_incremental() branch: one with `overrides: macros: is_incremental: true` (mock the prior model state with a `given: - input: this` entry) to exercise the incremental branch, and one without the override for the initial full build (dbt compiles is_incremental() as false by default). This finding's evidence carries a copy-pasteable unit-test sketch per missing branch.",
+            rationale: "An incremental model is two programs in one body: the initial full build, and the incremental run that filters on the high-water mark and merges by key. Each unit test compiles only one of them, so a suite living entirely on one branch ships the other untested — exactly where incremental models silently drop, duplicate, or re-process rows.",
+            detector: detect_incremental_branch_coverage,
         },
     }
 }
@@ -1739,6 +1783,253 @@ fn detect_join_anti_join(ctx: &CheckContext<'_>) -> Vec<Finding<HeuristicId>> {
 }
 
 // ---------------------------------------------------------------------
+// incremental.branch-coverage — the is_incremental() true/false rollup
+// (cute-dbt#164, coverage-intelligence rule #1).
+// ---------------------------------------------------------------------
+
+/// The construct discriminator for the incremental branch check — the
+/// model-level `is_incremental()` fork declared by `config.materialized`.
+const INCREMENTAL_BRANCH_CONSTRUCT: &str = "config.materialized";
+
+/// A model's unit-test rollup over the two `is_incremental()` branches
+/// (cute-dbt#164): which sides of the fork its tests compile.
+///
+/// A test with `overrides.macros.is_incremental = true` exercises the
+/// incremental branch; an explicit `false` override — or NO override,
+/// dbt's unit-test default — exercises the initial full-build branch.
+/// (fusion stubs only *overridden* macros: `bind_override_macros` in
+/// `dbt-tasks-sa/src/renderable/renderable/unit_test.rs`, `9977b6cb…`;
+/// without the stub the unit test compiles the full-build branch.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchCoverage {
+    /// The model has no unit tests at all.
+    None,
+    /// Only the full-build (false) branch is exercised.
+    FalseOnly,
+    /// Only the incremental (true) branch is exercised.
+    TrueOnly,
+    /// Both branches are exercised — the satisfied state.
+    Both,
+}
+
+/// Classify a model's unit-test `is_incremental` override modes into the
+/// four-state branch rollup. Pure and total: `Some(true)` counts toward
+/// the incremental branch; `Some(false)` **and** `None` (no override)
+/// count toward the full-build branch; no modes at all is
+/// [`BranchCoverage::None`].
+fn classify_branch_coverage<I>(modes: I) -> BranchCoverage
+where
+    I: IntoIterator<Item = Option<bool>>,
+{
+    let mut any_true = false;
+    let mut any_false = false;
+    for mode in modes {
+        match mode {
+            Some(true) => any_true = true,
+            Some(false) | None => any_false = true,
+        }
+    }
+    match (any_true, any_false) {
+        (true, true) => BranchCoverage::Both,
+        (true, false) => BranchCoverage::TrueOnly,
+        (false, true) => BranchCoverage::FalseOnly,
+        (false, false) => BranchCoverage::None,
+    }
+}
+
+/// `true` when the model's resolved config marks dbt's microbatch
+/// incremental strategy: `incremental_strategy = "microbatch"`
+/// (`DbtIncrementalStrategy::Microbatch`, serde `snake_case` —
+/// `dbt-schemas/src/schemas/common.rs`, dbt-fusion `9977b6cb…`) or any
+/// non-null `event_time` config (the microbatch window column). The
+/// declared cute-dbt#164 exclusion: microbatch models replay event-time
+/// batch windows, not the `is_incremental()` fork, so the check stays
+/// silent on them — never classified, never misclassified.
+fn is_microbatch(config: &NodeConfig) -> bool {
+    let microbatch_strategy = config
+        .config()
+        .get("incremental_strategy")
+        .and_then(Value::as_str)
+        .is_some_and(|strategy| strategy.eq_ignore_ascii_case("microbatch"));
+    let event_time = config
+        .config()
+        .get("event_time")
+        .is_some_and(|value| !value.is_null());
+    microbatch_strategy || event_time
+}
+
+/// The copy-pasteable unit-test sketch for the missing incremental
+/// (true) branch (the cute-dbt#164 recommendation payload).
+fn incremental_run_sketch(model_bare: &str) -> String {
+    format!(
+        "- name: test_{model_bare}_incremental_run\n  model: {model_bare}\n  overrides:\n    macros:\n      is_incremental: true\n  given:\n    - input: this\n      rows:\n        - {{...}}   # the prior model state the incremental run reads\n    # plus the model's normal input givens\n  # expect: only the rows the incremental run emits (the delta), not the merged table",
+    )
+}
+
+/// The copy-pasteable unit-test sketch for the missing full-build
+/// (false) branch.
+fn full_build_sketch(model_bare: &str) -> String {
+    format!(
+        "- name: test_{model_bare}_initial_build\n  model: {model_bare}\n  # no overrides block \u{2014} dbt compiles is_incremental() as false by default\n  given:\n    - input: ref('...')\n      rows:\n        - {{...}}\n  # expect: the full first-build output",
+    )
+}
+
+/// Detector for `incremental.branch-coverage` (cute-dbt#164 —
+/// coverage-intelligence rule #1).
+///
+/// Trigger: a `model` node with `config.materialized = "incremental"`,
+/// excluding microbatch-strategy models ([`is_microbatch`] — the
+/// declared rule-#1 exclusion). Satisfaction: the model's unit tests
+/// exercise BOTH `is_incremental()` branches
+/// ([`classify_branch_coverage`]).
+///
+/// Verdicts: BOTH ⇒ [`Verdict::Covered`] attributing every unit test on
+/// the model (each one compiles one side of the fork); none /
+/// false-only / true-only ⇒ [`Verdict::Uncovered`] with the missing
+/// branch(es) named in evidence and a copy-pasteable unit-test sketch
+/// per missing branch. There is deliberately no UNKNOWN arm: the inputs
+/// (a string `materialized`, boolean overrides) are statically total —
+/// every not-statically-known shape (absent/non-string materialization,
+/// microbatch) emits NOTHING. Miss direction is silence, never
+/// misclassification.
+fn detect_incremental_branch_coverage(ctx: &CheckContext<'_>) -> Vec<Finding<HeuristicId>> {
+    let check = HeuristicId::IncrementalBranchCoverage;
+    if ctx.model.resource_type() != "model" {
+        return Vec::new();
+    }
+    if ctx.model.config().materialized() != Some("incremental") {
+        return Vec::new();
+    }
+    if is_microbatch(ctx.model.config()) {
+        return Vec::new();
+    }
+    let tests = tests_on_model(ctx);
+    let modes: Vec<Option<bool>> = tests
+        .iter()
+        .map(|(_, unit_test)| unit_test.is_incremental_mode())
+        .collect();
+    let coverage = classify_branch_coverage(modes.iter().copied());
+    let true_count = modes.iter().filter(|mode| **mode == Some(true)).count();
+    let false_count = tests.len() - true_count;
+    let materialized = ctx
+        .model
+        .config()
+        .config()
+        .get("incremental_strategy")
+        .and_then(Value::as_str)
+        .map_or_else(
+            || "incremental".to_owned(),
+            |strategy| format!("incremental (strategy: {strategy})"),
+        );
+    let mut evidence = vec![Evidence::new("materialized", materialized)];
+    let model_bare = ctx
+        .model
+        .id()
+        .as_str()
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    // tests_on_model sorts by unit-test id, so `by` is already
+    // deterministic.
+    let by: Vec<String> = tests.iter().map(|(id, _)| (*id).clone()).collect();
+    let verdict = branch_rollup_verdict(
+        coverage,
+        true_count,
+        false_count,
+        &model_bare,
+        by,
+        &mut evidence,
+    );
+    vec![Finding::new(
+        check,
+        ctx.model.id().clone(),
+        INCREMENTAL_BRANCH_CONSTRUCT,
+        verdict,
+        evidence,
+    )]
+}
+
+/// Turn the [`BranchCoverage`] rollup into the finding's verdict,
+/// appending the per-state evidence: the rollup line, the missing
+/// branch(es), and one `suggested given` unit-test sketch per missing
+/// branch (lifted into copyable sketches by the renderer). `by` is the
+/// sorted unit-test ids attributed on [`BranchCoverage::Both`].
+fn branch_rollup_verdict(
+    coverage: BranchCoverage,
+    true_count: usize,
+    false_count: usize,
+    model_bare: &str,
+    by: Vec<String>,
+    evidence: &mut Vec<Evidence>,
+) -> Verdict {
+    match coverage {
+        BranchCoverage::Both => {
+            evidence.push(Evidence::new(
+                "branch coverage",
+                format!(
+                    "both — {true_count} test(s) exercise the incremental (true) branch, {false_count} the initial full-build (false) branch",
+                ),
+            ));
+            Verdict::Covered { by }
+        }
+        BranchCoverage::TrueOnly => {
+            evidence.push(Evidence::new(
+                "branch coverage",
+                format!(
+                    "true-only — {true_count} test(s) override is_incremental to true; none exercise the initial full-build (false) branch",
+                ),
+            ));
+            evidence.push(Evidence::new(
+                "missing branch",
+                "the initial full-build branch (is_incremental() = false) runs in no unit test",
+            ));
+            evidence.push(Evidence::new(
+                "suggested given",
+                full_build_sketch(model_bare),
+            ));
+            Verdict::Uncovered
+        }
+        BranchCoverage::FalseOnly => {
+            evidence.push(Evidence::new(
+                "branch coverage",
+                format!(
+                    "false-only — {false_count} test(s) exercise the initial full-build branch (no override compiles is_incremental() as false); none override is_incremental to true",
+                ),
+            ));
+            evidence.push(Evidence::new(
+                "missing branch",
+                "the incremental branch (is_incremental() = true) runs in no unit test",
+            ));
+            evidence.push(Evidence::new(
+                "suggested given",
+                incremental_run_sketch(model_bare),
+            ));
+            Verdict::Uncovered
+        }
+        BranchCoverage::None => {
+            evidence.push(Evidence::new(
+                "branch coverage",
+                "none — the model has no unit tests; neither is_incremental() branch is exercised",
+            ));
+            evidence.push(Evidence::new(
+                "missing branch",
+                "both branches: neither the incremental (true) nor the initial full-build (false) side runs in any unit test",
+            ));
+            evidence.push(Evidence::new(
+                "suggested given",
+                incremental_run_sketch(model_bare),
+            ));
+            evidence.push(Evidence::new(
+                "suggested given",
+                full_build_sketch(model_bare),
+            ));
+            Verdict::Uncovered
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // Ledger generation — heuristics/registry.toml + book check pages,
 // generated from SPECS, byte-gated by tests/heuristics_ledger.rs.
 // ---------------------------------------------------------------------
@@ -2399,12 +2690,13 @@ mod tests {
     const ORDERS: &str = "model.shop.orders";
 
     fn orders_with_key(key: Value) -> Node {
+        // `table`, not `incremental`: the grain check is
+        // materialization-agnostic, and a table model keeps the
+        // cute-dbt#164 incremental.branch-coverage check silent so these
+        // tests stay single-concern (`single_finding`).
         model_with_config(
             ORDERS,
-            &[
-                ("materialized", Value::from("incremental")),
-                ("unique_key", key),
-            ],
+            &[("materialized", Value::from("table")), ("unique_key", key)],
         )
     }
 
@@ -3981,6 +4273,305 @@ mod tests {
                 .is_empty(),
         );
         assert!(supersedes_is_acyclic::<HeuristicId>());
+    }
+
+    // ===== incremental.branch-coverage detector (cute-dbt#164) =======
+
+    const EVENTS_INC: &str = "model.shop.order_events";
+
+    /// An incremental model with an optional extra flat-config pair.
+    fn incremental_model(extra: &[(&str, Value)]) -> Node {
+        let mut config = vec![("materialized", Value::from("incremental"))];
+        config.extend(extra.iter().map(|(k, v)| (*k, v.clone())));
+        model_with_config(EVENTS_INC, &config)
+    }
+
+    /// A unit test on the incremental model carrying an explicit
+    /// `is_incremental` override mode (`None` = no override, dbt's
+    /// full-build default).
+    fn mode_test(name: &str, mode: Option<bool>) -> UnitTest {
+        UnitTest::new(
+            name,
+            NodeId::new("order_events"),
+            Vec::new(),
+            UnitTestExpect::new(serde_json::json!([{ "order_id": 1 }]), None, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        )
+        .with_incremental_mode(mode)
+    }
+
+    /// Manifest of the incremental model plus mode-carrying unit tests,
+    /// keyed `unit_test.shop.order_events.<name>`.
+    fn incremental_manifest(extra: &[(&str, Value)], modes: &[(&str, Option<bool>)]) -> Manifest {
+        let tests: Vec<(String, UnitTest)> = modes
+            .iter()
+            .map(|(name, mode)| {
+                (
+                    format!("unit_test.shop.order_events.{name}"),
+                    mode_test(name, *mode),
+                )
+            })
+            .collect();
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            [incremental_model(extra)]
+                .into_iter()
+                .map(|n| (n.id().clone(), n))
+                .collect(),
+            tests.into_iter().collect(),
+            HashMap::new(),
+        )
+    }
+
+    /// The incremental.branch-coverage findings only.
+    fn incremental_findings(manifest: &Manifest) -> Vec<Finding<HeuristicId>> {
+        run(manifest, EVENTS_INC)
+            .into_iter()
+            .filter(|f| f.check == HeuristicId::IncrementalBranchCoverage)
+            .collect()
+    }
+
+    #[test]
+    fn branch_classifier_covers_all_four_states_exhaustively() {
+        // Exhaustive coverage over sampling (the StateComparator test
+        // posture — no proptest dep): EVERY multiset of override modes
+        // up to length 3 classifies Both iff a true-exerciser AND a
+        // false-exerciser are present; FalseOnly/TrueOnly iff only one
+        // side is; None iff the mode list is empty.
+        let modes = [Some(true), Some(false), None];
+        let mut cases: Vec<Vec<Option<bool>>> = vec![vec![]];
+        for a in modes {
+            cases.push(vec![a]);
+            for b in modes {
+                cases.push(vec![a, b]);
+                for c in modes {
+                    cases.push(vec![a, b, c]);
+                }
+            }
+        }
+        for case in cases {
+            let any_true = case.contains(&Some(true));
+            let any_false = case.iter().any(|m| !matches!(m, Some(true)));
+            let expected = match (any_true, any_false) {
+                (true, true) => BranchCoverage::Both,
+                (true, false) => BranchCoverage::TrueOnly,
+                (false, true) => BranchCoverage::FalseOnly,
+                (false, false) => BranchCoverage::None,
+            };
+            assert_eq!(
+                classify_branch_coverage(case.iter().copied()),
+                expected,
+                "case {case:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_override_defaults_to_the_full_build_branch() {
+        // The cute-dbt#164 AC case: a single test with NO override
+        // exercises the false branch (dbt compiles is_incremental() as
+        // false in unit tests by default) — the incremental branch is
+        // the gap, and the sketch recommends the true override.
+        let manifest = incremental_manifest(&[], &[("test_full_build", None)]);
+        let finding = single_finding(incremental_findings(&manifest));
+        assert_eq!(finding.tier, Tier::High);
+        assert_eq!(finding.instrument, Instrument::UnitTest);
+        assert_eq!(finding.construct, INCREMENTAL_BRANCH_CONSTRUCT);
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+        let rollup = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "branch coverage")
+            .expect("rollup evidence present");
+        assert!(
+            rollup.value.starts_with("false-only"),
+            "no-override classifies false-only: {}",
+            rollup.value,
+        );
+        let sketch = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "suggested given")
+            .expect("sketch present");
+        assert!(
+            sketch.value.contains("is_incremental: true") && sketch.value.contains("input: this"),
+            "the sketch recommends the true override + a `this` given: {}",
+            sketch.value,
+        );
+        assert!(finding.recommendation.is_some());
+    }
+
+    #[test]
+    fn true_only_tests_leave_the_full_build_branch_uncovered() {
+        let manifest = incremental_manifest(
+            &[],
+            &[("test_inc_a", Some(true)), ("test_inc_b", Some(true))],
+        );
+        let finding = single_finding(incremental_findings(&manifest));
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+        let rollup = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "branch coverage")
+            .expect("rollup evidence present");
+        assert!(
+            rollup.value.starts_with("true-only"),
+            "true-only rollup: {}",
+            rollup.value,
+        );
+        let sketch = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "suggested given")
+            .expect("sketch present");
+        assert!(
+            sketch.value.contains("no overrides block"),
+            "the missing-false sketch is the no-override test: {}",
+            sketch.value,
+        );
+    }
+
+    #[test]
+    fn incremental_model_with_no_tests_fires_none_with_both_sketches() {
+        let manifest = incremental_manifest(&[], &[]);
+        let finding = single_finding(incremental_findings(&manifest));
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+        let rollup = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "branch coverage")
+            .expect("rollup evidence present");
+        assert!(rollup.value.starts_with("none"), "{}", rollup.value);
+        let sketches: Vec<&Evidence> = finding
+            .evidence
+            .iter()
+            .filter(|e| e.label == "suggested given")
+            .collect();
+        assert_eq!(
+            sketches.len(),
+            2,
+            "a test-less incremental model gets one sketch per branch"
+        );
+    }
+
+    #[test]
+    fn both_branches_covered_attributes_every_test() {
+        // An explicit-false override AND a no-override test both count
+        // toward the full-build branch; either pairing with a true
+        // override is BOTH.
+        let manifest = incremental_manifest(
+            &[("incremental_strategy", Value::from("merge"))],
+            &[
+                ("test_full_build", Some(false)),
+                ("test_incremental_run", Some(true)),
+            ],
+        );
+        let finding = single_finding(incremental_findings(&manifest));
+        assert_eq!(
+            finding.verdict,
+            Verdict::Covered {
+                by: vec![
+                    "unit_test.shop.order_events.test_full_build".to_owned(),
+                    "unit_test.shop.order_events.test_incremental_run".to_owned(),
+                ],
+            },
+            "BOTH attributes every test on the model, sorted by id",
+        );
+        assert!(finding.recommendation.is_none());
+        let materialized = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "materialized")
+            .expect("materialized evidence present");
+        assert_eq!(materialized.value, "incremental (strategy: merge)");
+    }
+
+    #[test]
+    fn non_incremental_and_unknown_materializations_emit_nothing() {
+        // Miss direction is silence, never misclassification: view /
+        // table / ephemeral, an absent materialized key, and a
+        // non-string value all stay silent even with zero unit tests.
+        for config in [
+            vec![("materialized", Value::from("view"))],
+            vec![("materialized", Value::from("table"))],
+            vec![("materialized", Value::from("ephemeral"))],
+            vec![("materialized", Value::from(42))],
+            vec![("materialized", Value::Null)],
+            vec![],
+        ] {
+            let manifest = manifest_of(vec![model_with_config(EVENTS_INC, &config)]);
+            assert!(
+                incremental_findings(&manifest).is_empty(),
+                "config {config:?} must emit no incremental finding",
+            );
+        }
+    }
+
+    #[test]
+    fn microbatch_models_are_never_classified() {
+        // The declared rule-#1 exclusion: microbatch (by strategy or by
+        // a non-null event_time) is OUT — silent even with a coverage
+        // gap that would otherwise fire.
+        for extra in [
+            vec![("incremental_strategy", Value::from("microbatch"))],
+            vec![("event_time", Value::from("occurred_at"))],
+            vec![
+                ("incremental_strategy", Value::from("microbatch")),
+                ("event_time", Value::from("occurred_at")),
+            ],
+        ] {
+            let manifest = incremental_manifest(&extra, &[("test_full_build", None)]);
+            assert!(
+                incremental_findings(&manifest).is_empty(),
+                "microbatch config {extra:?} must emit no finding",
+            );
+        }
+        // A null event_time is fusion's unset Option fill (cute-dbt#145)
+        // — NOT microbatch; the check classifies normally.
+        let manifest =
+            incremental_manifest(&[("event_time", Value::Null)], &[("test_full_build", None)]);
+        assert_eq!(incremental_findings(&manifest).len(), 1);
+        // A non-microbatch strategy string is classified normally too.
+        let manifest = incremental_manifest(
+            &[("incremental_strategy", Value::from("delete+insert"))],
+            &[("test_full_build", None)],
+        );
+        assert_eq!(incremental_findings(&manifest).len(), 1);
+    }
+
+    #[test]
+    fn non_model_resource_types_are_silent_for_the_incremental_check() {
+        // A snapshot node can carry materialized config shapes; only
+        // `model` nodes trigger the check.
+        let mut config = BTreeMap::new();
+        config.insert("materialized".to_owned(), Value::from("incremental"));
+        let node = Node::new(
+            NodeId::new("snapshot.shop.order_events"),
+            "snapshot",
+            Checksum::new("sha256", "x"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(config, false),
+            None,
+            BTreeMap::new(),
+        );
+        let manifest = manifest_of(vec![node]);
+        let model = manifest
+            .node(&NodeId::new("snapshot.shop.order_events"))
+            .expect("node exists");
+        let findings = model_findings(&manifest, model, None);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.check != HeuristicId::IncrementalBranchCoverage),
+            "non-model resource types never trigger: {findings:?}",
+        );
     }
 
     // ===== ledger generation =========================================

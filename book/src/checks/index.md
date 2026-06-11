@@ -10,3 +10,4 @@ The coverage-intelligence check registry. Each check pairs a construct trigger w
 | [`union.arm-coverage`](./union.arm-coverage.md) | Unexercised UNION arm | `high` | `unit-test` |
 | [`join.left-null-propagation`](./join.left-null-propagation.md) | LEFT JOIN null propagation untested | `high` | `both` |
 | [`join.anti-join`](./join.anti-join.md) | Anti-join exclusion untested | `high` | `unit-test` |
+| [`incremental.branch-coverage`](./incremental.branch-coverage.md) | Unexercised is_incremental() branch | `high` | `unit-test` |

@@ -16,6 +16,7 @@
   - [union.arm-coverage](./checks/union.arm-coverage.md)
   - [join.left-null-propagation](./checks/join.left-null-propagation.md)
   - [join.anti-join](./checks/join.anti-join.md)
+  - [incremental.branch-coverage](./checks/incremental.branch-coverage.md)
 - [Selecting & suppressing checks](./check-selection.md)
 - [Examples](./examples.md)
 - [Release discipline](./release-discipline.md)
