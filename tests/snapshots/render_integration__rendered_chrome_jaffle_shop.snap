@@ -1058,6 +1058,129 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
 .settings-row.settings-row-stack { display: block; }
 .settings-row.settings-row-stack > label { display: block; margin-bottom: 0.35rem; }
 
+/* ============================================================================
+   7. COVERAGE-CHECKS PANEL (cute-dbt#170)
+   ----------------------------------------------------------------------------
+   The per-model findings surface. Token-native: every colour rides the
+   semantic layer so all five themes + four style packs apply. Trust-model
+   rules made visual: the three verdicts are a CHECKLIST (mark + word, never
+   colour-only); the three tiers are LABELED chips with distinct emphasis
+   (filled / outlined / muted — never blended, no score, no percentage);
+   suppressed findings are visible-but-quiet behind a collapsed count.
+   ========================================================================== */
+.model-findings { margin-bottom: var(--gap-section); }
+.findings-header { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.45rem; flex-wrap: wrap; }
+.findings-header h2 {
+  font-size: var(--fs-label); text-transform: uppercase;
+  letter-spacing: var(--label-tracking); color: var(--text-muted); margin: 0;
+  font-family: var(--label-font); white-space: nowrap;
+}
+.findings-subtitle { margin: 0; color: var(--text-muted); font-size: 0.85em; }
+.findings-empty { margin: 0; padding: 0.55rem 0.8rem; color: var(--text-muted); font-style: italic; font-size: 0.9em; border: var(--rule-w) dashed var(--border); border-radius: var(--radius-sm); }
+.findings-tally { margin: 0 0 0.4rem; color: var(--text-muted); font-size: 0.85em; }
+
+.findings-checklist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.finding-row { margin: 0; border: var(--rule-w) solid var(--border); border-radius: var(--radius-sm); background: var(--surface); }
+.finding-details > summary {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  padding: 0.35rem 0.6rem; cursor: pointer; list-style: none;
+}
+.finding-details > summary::-webkit-details-marker { display: none; }
+.finding-details > summary::after { content: "▸"; margin-left: auto; color: var(--text-faint); font-size: 0.8em; }
+.finding-details[open] > summary::after { content: "▾"; }
+.finding-details > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* three-valued checklist mark + word — never colour-only */
+.f-mark { font-weight: 700; width: 1.1em; text-align: center; flex: 0 0 auto; }
+.verdict-covered   .f-mark { color: var(--diff-add-fg); }
+.verdict-uncovered .f-mark { color: var(--warn); }
+.verdict-unknown   .f-mark { color: var(--text-faint); }
+.f-verdict {
+  font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.05em;
+  font-family: var(--font-ui); white-space: nowrap; flex: 0 0 auto;
+}
+.verdict-covered   .f-verdict { color: var(--diff-add-fg); }
+.verdict-uncovered .f-verdict { color: var(--warn); font-weight: 700; }
+.verdict-unknown   .f-verdict { color: var(--text-muted); }
+.verdict-uncovered { border-color: var(--badge-amber-edge); }
+.f-name { color: var(--text); font-size: 0.9em; }
+.f-construct {
+  font-family: var(--font-mono); font-size: 0.78em; color: var(--text-muted);
+  background: var(--bg-alt); padding: 0.05rem 0.35rem; border-radius: var(--radius-sm);
+}
+
+/* tier chips — labeled, three DISTINCT emphasis levels, never blended:
+   TOTAL = solid fill, HIGH = outlined accent, advisory = muted outline. */
+.tier-chip {
+  font-size: 0.68em; padding: 0.12rem 0.55rem; border-radius: 999px;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  font-family: var(--font-ui); white-space: nowrap; flex: 0 0 auto;
+  border: var(--rule-w) solid transparent; cursor: help;
+}
+.tier-chip.tier-total    { background: var(--control-active-bg); color: var(--control-active-fg); border-color: var(--control-active-bg); }
+.tier-chip.tier-high     { background: transparent; color: var(--accent); border-color: var(--accent); }
+.tier-chip.tier-advisory { background: transparent; color: var(--text-muted); border-color: var(--border-strong); text-transform: none; }
+.tier-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+html[data-style="terminal"] .tier-chip,
+html[data-style="terminal"] .suppress-chip,
+html[data-style="swiss"] .tier-chip,
+html[data-style="swiss"] .suppress-chip { border-radius: 0; }
+
+/* finding body */
+.finding-body { padding: 0.45rem 0.7rem 0.6rem; border-top: var(--rule-w) solid var(--border); font-size: 0.88em; }
+.finding-body p { margin: 0.3rem 0; }
+.f-label { color: var(--text-muted); }
+.finding-covered-by code, .finding-suppress-reason code { font-size: 0.92em; }
+.finding-evidence { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.15rem; }
+.finding-evidence li { line-height: 1.45; }
+.f-ev-label { color: var(--text-muted); font-size: 0.92em; }
+.f-ev-value { font-family: var(--font-mono); font-size: 0.92em; overflow-wrap: anywhere; }
+.finding-pin {
+  font: inherit; font-size: 0.92em; padding: 0.15rem 0.6rem; margin: 0.25rem 0; cursor: pointer;
+  border: var(--rule-w) solid var(--control-border); border-radius: var(--radius-sm);
+  background: var(--control-bg); color: var(--control-fg);
+}
+.finding-pin:hover { border-color: var(--accent); color: var(--accent); }
+.finding-pin:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.finding-recommendation { color: var(--text); }
+.finding-sketch { margin-top: 0.45rem; }
+.finding-sketch .sql-block { padding: 0.5rem 0.7rem; }
+
+/* the inline rationale drawer */
+.finding-rationale { margin-top: 0.5rem; }
+.finding-rationale > summary { cursor: pointer; color: var(--accent); font-size: 0.95em; }
+.finding-rationale > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.finding-rationale-body { padding: 0.35rem 0 0.1rem 0.9rem; border-left: 2px solid var(--border); margin-top: 0.3rem; }
+.f-rationale { color: var(--text); }
+.f-spec-label {
+  margin: 0.45rem 0 0.1rem; font-size: var(--fs-label); text-transform: uppercase;
+  letter-spacing: var(--label-tracking); color: var(--text-muted); font-family: var(--label-font);
+}
+.f-spec-list { margin: 0.1rem 0 0.3rem; padding-left: 1.1rem; color: var(--text-muted); }
+.f-spec-list li { margin: 0.12rem 0; line-height: 1.45; }
+.f-book-link { margin-top: 0.45rem; }
+
+/* suppressed findings — visible-but-quiet, never vanished */
+.findings-suppressed { margin-top: 0.5rem; }
+.findings-suppressed > summary { cursor: pointer; color: var(--text-muted); font-size: 0.85em; font-style: italic; }
+.findings-suppressed > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.findings-checklist-suppressed { margin-top: 0.35rem; }
+.finding-row.is-suppressed { opacity: 0.72; }
+.finding-row.is-suppressed .f-verdict, .finding-row.is-suppressed .f-mark { color: var(--text-faint); }
+.suppress-chip {
+  font-size: 0.68em; padding: 0.12rem 0.55rem; border-radius: 999px;
+  font-family: var(--font-ui); white-space: nowrap; flex: 0 0 auto;
+  color: var(--text-muted); border: var(--rule-w) dashed var(--border-strong);
+}
+.finding-suppress-reason { color: var(--text-muted); font-style: italic; }
+
+/* evidence-pin flash on the DAG section (cute-dbt#170) */
+@keyframes cute-pin-flash {
+  0%   { box-shadow: 0 0 0 3px var(--accent); }
+  100% { box-shadow: 0 0 0 0 rgba(0,0,0,0); }
+}
+.cte-dag.pin-flash { animation: cute-pin-flash 1.4s ease-out; border-radius: var(--radius-sm); }
+
 /* end of cute-dbt report chassis v1 (cute-dbt#177) */
 
 </style>
@@ -1225,6 +1348,15 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
       <span class="dag-legend-joins"></span>
     </div>
   </div>
+</section>
+
+
+<section class="model-findings" aria-label="Coverage checks" data-testid="model-findings">
+  <div class="findings-header">
+    <h2>Coverage checks</h2>
+    <p class="findings-subtitle">Static checks over the manifest and compiled SQL — tiers are labeled, never averaged.</p>
+  </div>
+  <div class="findings-body"></div>
 </section>
 
 <!-- cute-dbt#74 — Description banner relocated between CTE DAG and
@@ -1461,6 +1593,7 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
       $(".test-selection").hide();
       $(".model-sql").hide();
       $(".cte-dag").hide();
+      $(".model-findings").hide();
       $(".panel-row").hide();
       return;
     }
@@ -1674,6 +1807,10 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
     $(".expected-panel .panel-header .mode-badge, .expected-panel .panel-header .expect-tooltip").remove();
     renderTestDetails(t);
     renderModelSql(m);
+    // cute-dbt#170 — the coverage-checks panel is MODEL-scoped: it renders
+    // for the selected model in both scope-toggle views and regardless of
+    // whether a test is selected (findings are current-state facts).
+    renderFindingsPanel(m);
     renderDagLegend();
     renderDag();
     renderSegmentedToggle();
@@ -1893,6 +2030,200 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
       );
       $wrap.append($mHeader).append($pre);
     }
+  }
+
+  // cute-dbt#170 — the per-model coverage checklist panel ----------------
+  //
+  // Renders m.findings (Rust-computed FindingPayloads: the cute-dbt#169
+  // engine verdicts plus pin_node/sketches) and the payload-level
+  // check_specs catalog into the static .model-findings section. PURE
+  // rendering — no verdict/tier/suppression logic happens here. The trust
+  // model rules (epic cute-dbt#168): tiers are LABELED chips, never
+  // blended into a score; coverage is a three-valued checklist with
+  // counts, never a percentage; suppressed findings stay visible-but-quiet
+  // behind a collapsed count, never vanish.
+
+  var TIER_LABEL = { total: "TOTAL", high: "HIGH", advisory: "advisory" };
+  // Chip hover/focus bubble copy — mirrors the domain Tier docs.
+  var TIER_TIP = {
+    total: "TOTAL tier — deterministic over manifest facts; zero false positives by construction.",
+    high: "HIGH tier — high-confidence pattern match; rare false positives possible.",
+    advisory: "Advisory tier — heuristic advice; informational only."
+  };
+  var VERDICT_MARK = { covered: "✓", uncovered: "✕", unknown: "?" };
+  var INSTRUMENT_LABEL = { "unit-test": "unit test", "data-test": "data test", "both": "unit or data test" };
+
+  function renderFindingsPanel(m) {
+    var $body = $(".model-findings .findings-body").empty();
+    var findings = (m && m.findings) || [];
+    if (!findings.length) {
+      // Deliberate quiet empty state — the panel never hides.
+      $body.append($("<p>").addClass("findings-empty")
+        .attr("data-testid", "findings-empty")
+        .text("No coverage checks fired for this model."));
+      return;
+    }
+    var active = findings.filter(function (f) { return !f.suppressed; });
+    var suppressed = findings.filter(function (f) { return f.suppressed; });
+    var counts = { covered: 0, uncovered: 0, unknown: 0 };
+    active.forEach(function (f) {
+      var s = f.verdict && f.verdict.status;
+      // Own-property guard: a prototype name (`toString`, …) can never
+      // count — only the three verdict keys above tally.
+      if (Object.prototype.hasOwnProperty.call(counts, s)) counts[s] += 1;
+    });
+    var parts = [];
+    ["covered", "uncovered", "unknown"].forEach(function (s) {
+      if (counts[s]) parts.push(counts[s] + " " + s);
+    });
+    if (parts.length) {
+      $body.append($("<p>").addClass("findings-tally").text(parts.join(" · ")));
+    }
+    var $list = $("<ul>").addClass("findings-checklist");
+    active.forEach(function (f) { $list.append(buildFindingRow(f)); });
+    $body.append($list);
+    if (suppressed.length) {
+      // cute-dbt#171/#170 — visible-but-quiet: a collapsed count that
+      // reveals the acknowledged findings WITH their reasons on demand.
+      var $det = $("<details>").addClass("findings-suppressed")
+        .attr("data-testid", "findings-suppressed");
+      $det.append($("<summary>").text(
+        suppressed.length + " suppressed finding" + (suppressed.length === 1 ? "" : "s")
+      ));
+      var $slist = $("<ul>").addClass("findings-checklist findings-checklist-suppressed");
+      suppressed.forEach(function (f) { $slist.append(buildFindingRow(f)); });
+      $det.append($slist);
+      $body.append($det);
+    }
+  }
+
+  // One checklist row = one (construct, check) finding: a <details> whose
+  // summary is the three-valued checklist line (mark + verdict + check
+  // name + construct + tier chip) and whose body carries attribution,
+  // evidence, the DAG pin, the recommendation + copyable sketches, the
+  // suppression acknowledgement, and the inline rationale drawer.
+  function buildFindingRow(f) {
+    var spec = (DATA.check_specs && DATA.check_specs[f.check]) || {};
+    var status = (f.verdict && f.verdict.status) || "unknown";
+    var $li = $("<li>").addClass("finding-row verdict-" + status)
+      .attr("data-check", f.check)
+      .attr("data-construct", f.construct);
+    if (f.suppressed) $li.addClass("is-suppressed");
+    var $det = $("<details>").addClass("finding-details");
+    var $sum = $("<summary>").addClass("finding-summary");
+    $sum.append($("<span>").addClass("f-mark").attr("aria-hidden", "true")
+      .text(VERDICT_MARK[status] || "?"));
+    $sum.append($("<span>").addClass("f-verdict").text(status));
+    $sum.append($("<span>").addClass("f-name").text(spec.name || f.check));
+    $sum.append($("<code>").addClass("f-construct").text(f.construct));
+    // Tier chip — the #146/#188 tooltip contract: a focusable trigger
+    // with a CSS-positioned bubble on hover AND focus; aria-label is the
+    // AT surface; never a native title, never an info icon.
+    var tierTip = TIER_TIP[f.tier] || String(f.tier);
+    $sum.append($("<span>")
+      .addClass("tier-chip tier-" + f.tier + " has-finding-tip")
+      .attr("tabindex", "0")
+      .attr("aria-label", tierTip)
+      .attr("data-tip", tierTip)
+      .text(TIER_LABEL[f.tier] || f.tier));
+    if (f.suppressed) {
+      $sum.append($("<span>").addClass("suppress-chip")
+        .text("suppressed · " + f.suppressed.source));
+    }
+    $det.append($sum);
+
+    var $bd = $("<div>").addClass("finding-body");
+    if (f.suppressed) {
+      var why = f.suppressed.reason
+        ? "Acknowledged via " + f.suppressed.source + " — " + f.suppressed.reason
+        : "Acknowledged via " + f.suppressed.source + " (no reason given).";
+      $bd.append($("<p>").addClass("finding-suppress-reason").text(why));
+    }
+    if (status === "covered" && f.verdict.by && f.verdict.by.length) {
+      var $cov = $("<p>").addClass("finding-covered-by")
+        .append($("<span>").addClass("f-label").text("Covered by "));
+      f.verdict.by.forEach(function (id, i) {
+        if (i > 0) $cov.append(document.createTextNode(", "));
+        $cov.append($("<code>").text(id));
+      });
+      $bd.append($cov);
+    }
+    if (f.evidence && f.evidence.length) {
+      var $ev = $("<ul>").addClass("finding-evidence");
+      f.evidence.forEach(function (e) {
+        $ev.append($("<li>")
+          .append($("<span>").addClass("f-ev-label").text(e.label))
+          .append(document.createTextNode(": "))
+          .append($("<span>").addClass("f-ev-value").text(e.value)));
+      });
+      $bd.append($ev);
+    }
+    if (f.pin_node) {
+      // Evidence pinning — selects + scrolls to the construct in the DAG.
+      $bd.append($("<button>").attr("type", "button").addClass("finding-pin")
+        .attr("data-pin", f.pin_node)
+        .text("Show in DAG → " + f.pin_node));
+    }
+    if (f.recommendation) {
+      var instr = INSTRUMENT_LABEL[f.instrument];
+      $bd.append($("<p>").addClass("finding-recommendation")
+        .append($("<span>").addClass("f-label")
+          .text("Recommended fix" + (instr ? " (" + instr + ")" : "") + ": "))
+        .append(document.createTextNode(f.recommendation)));
+    }
+    // Copyable given-row YAML sketches (the cute-dbt#172 recommendation
+    // payload) — the #188 copy-button pattern on a yaml-highlighted block.
+    (f.sketches || []).forEach(function (sketch) {
+      var $wrap = $("<div>").addClass("sql-block-wrap finding-sketch");
+      var $copy = $("<button>").attr("type", "button").addClass("sql-copy").text("Copy")
+        .on("click", function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          copySql(sketch, $(this));
+        });
+      var $pre = $("<pre>").addClass("sql-block")
+        .append($("<code>").html(highlightLinesYaml(sketch)));
+      $wrap.append($copy).append($pre);
+      $bd.append($wrap);
+    });
+    $bd.append(buildFindingRationale(f, spec));
+    $det.append($bd);
+    return $li.append($det);
+  }
+
+  // The inline "what is this check?" drawer — fully offline: rationale,
+  // conditions, and exclusions all ride the payload's check_specs
+  // catalog. The book reference is a plain click-only outbound anchor
+  // (URL computed in Rust, carried on the payload; nothing here fetches).
+  function buildFindingRationale(f, spec) {
+    var $det = $("<details>").addClass("finding-rationale");
+    $det.append($("<summary>").text("What is this check?"));
+    var $bd = $("<div>").addClass("finding-rationale-body");
+    if (spec.rationale) {
+      $bd.append($("<p>").addClass("f-rationale").text(spec.rationale));
+    }
+    if (spec.conditions && spec.conditions.length) {
+      $bd.append($("<p>").addClass("f-spec-label").text("Fires when"));
+      var $c = $("<ul>").addClass("f-spec-list");
+      spec.conditions.forEach(function (s) { $c.append($("<li>").text(s)); });
+      $bd.append($c);
+    }
+    if (spec.exclusions && spec.exclusions.length) {
+      $bd.append($("<p>").addClass("f-spec-label").text("Deliberately silent on"));
+      var $x = $("<ul>").addClass("f-spec-list");
+      spec.exclusions.forEach(function (s) { $x.append($("<li>").text(s)); });
+      $bd.append($x);
+    }
+    if (spec.book_href) {
+      $bd.append($("<p>").addClass("f-book-link").append(
+        $("<a>").attr("href", spec.book_href)
+          .attr("target", "_blank")
+          .attr("rel", "noopener noreferrer")
+          .text("Full check reference: " + f.check + " (opens the cute-dbt book)")
+      ));
+    }
+    $det.append($bd);
+    return $det;
   }
 
   function renderDagLegend() {
@@ -2146,6 +2477,48 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
     }
     $(document).on("click", ".diff-fold", function () {
       toggleFold($(this));
+    });
+    // cute-dbt#170 — evidence pinning: select the cited construct's DAG
+    // node (the same selection path a node click takes), smooth-scroll
+    // the DAG into view, and flash the section briefly. Delegated on
+    // `document` because finding rows are rebuilt per model switch.
+    $(document).on("click", ".finding-pin", function () {
+      var id = $(this).attr("data-pin");
+      if (!id || !currentModel()) return;
+      // cute-dbt#180 contract: per-click Cytoscape interaction mutates
+      // classes IN PLACE — never a renderDag() rebuild (which would
+      // reset pan/zoom). Emitting a tap on the node runs the exact
+      // bound click path (lineage highlight + __cuteSelectNode →
+      // Inspect). Mermaid keeps its render-driven selection.
+      var cyto = dagEngine === "cytoscape" && window.CuteCyto
+        ? window.CuteCyto.cyInstance()
+        : null;
+      var cyEle = cyto ? cyto.getElementById(String(id)) : null;
+      if (cyEle && cyEle.length) {
+        cyEle.emit("tap");
+      } else {
+        state.selectedNodeId = id;
+        if (state.leftPanelMode !== "node") {
+          state.leftPanelMode = "node";
+          renderSegmentedToggle();
+        }
+        renderLeftPanel();
+        renderDag();
+      }
+      var dag = document.querySelector(".cte-dag");
+      if (dag) {
+        if (dag.scrollIntoView) dag.scrollIntoView({ behavior: "smooth", block: "start" });
+        // One flash at a time: a rapid re-pin clears the pending
+        // removal so an old timer can't cut the new animation short.
+        if (dag.__cutePinFlashTimer) clearTimeout(dag.__cutePinFlashTimer);
+        dag.classList.remove("pin-flash");
+        void dag.offsetWidth; // restart the CSS flash animation
+        dag.classList.add("pin-flash");
+        dag.__cutePinFlashTimer = setTimeout(function () {
+          dag.classList.remove("pin-flash");
+          dag.__cutePinFlashTimer = null;
+        }, 1600);
+      }
     });
     $(document).on("keydown", ".diff-fold", function (e) {
       // Enter or Space activates (both directions); preventDefault on Space
@@ -3318,6 +3691,11 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
     }
     el.innerHTML = h;
     el.hidden = false;
+    positionTipNear(el, trigger);
+  }
+  // Shared fixed-position clamp for the singleton bubble: below the
+  // trigger, horizontally clamped, flipping above on bottom overflow.
+  function positionTipNear(el, trigger) {
     var r = trigger.getBoundingClientRect();
     var tw = el.offsetWidth, th = el.offsetHeight;
     var left = r.left;
@@ -3328,11 +3706,22 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
     el.style.left = Math.round(left) + "px";
     el.style.top = Math.round(top) + "px";
   }
+  // cute-dbt#170 — plain-text variant of the singleton bubble for the
+  // findings-panel tier chips (`.has-finding-tip` + data-tip). Same
+  // element, same positioning, same hover-AND-focus reveal contract.
+  function showPlainTip(trigger) {
+    var el = ensureColTooltip();
+    el.innerHTML = '<div class="ct-desc">' + escapeHtml(trigger.getAttribute("data-tip") || "") + "</div>";
+    el.hidden = false;
+    positionTipNear(el, trigger);
+  }
   function hideColTip() { var el = document.getElementById("col-tooltip"); if (el) el.hidden = true; }
   function bindColTooltips() {
     $(document)
       .on("mouseenter focusin", ".has-col-meta", function () { showColTip(this); })
-      .on("mouseleave focusout", ".has-col-meta", function () { hideColTip(); });
+      .on("mouseleave focusout", ".has-col-meta", function () { hideColTip(); })
+      .on("mouseenter focusin", ".has-finding-tip", function () { showPlainTip(this); })
+      .on("mouseleave focusout", ".has-finding-tip", function () { hideColTip(); });
   }
 
   // `colMeta` (cute-dbt#165) is the per-table column-metadata map keyed by

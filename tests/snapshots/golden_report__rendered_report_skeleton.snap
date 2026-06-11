@@ -177,6 +177,15 @@ expression: skeleton
   </div>
 </section>
 
+
+<section class="model-findings" aria-label="Coverage checks" data-testid="model-findings">
+  <div class="findings-header">
+    <h2>Coverage checks</h2>
+    <p class="findings-subtitle">Static checks over the manifest and compiled SQL — tiers are labeled, never averaged.</p>
+  </div>
+  <div class="findings-body"></div>
+</section>
+
 <!-- cute-dbt#74 — Description banner relocated between CTE DAG and
      inspect/expected sections. Reduces cognitive scroll for reviewers
      (context lives next to the test substance they're evaluating) and

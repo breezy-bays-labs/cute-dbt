@@ -177,6 +177,7 @@
       $(".test-selection").hide();
       $(".model-sql").hide();
       $(".cte-dag").hide();
+      $(".model-findings").hide();
       $(".panel-row").hide();
       return;
     }
@@ -390,6 +391,10 @@
     $(".expected-panel .panel-header .mode-badge, .expected-panel .panel-header .expect-tooltip").remove();
     renderTestDetails(t);
     renderModelSql(m);
+    // cute-dbt#170 — the coverage-checks panel is MODEL-scoped: it renders
+    // for the selected model in both scope-toggle views and regardless of
+    // whether a test is selected (findings are current-state facts).
+    renderFindingsPanel(m);
     renderDagLegend();
     renderDag();
     renderSegmentedToggle();
@@ -609,6 +614,200 @@
       );
       $wrap.append($mHeader).append($pre);
     }
+  }
+
+  // cute-dbt#170 — the per-model coverage checklist panel ----------------
+  //
+  // Renders m.findings (Rust-computed FindingPayloads: the cute-dbt#169
+  // engine verdicts plus pin_node/sketches) and the payload-level
+  // check_specs catalog into the static .model-findings section. PURE
+  // rendering — no verdict/tier/suppression logic happens here. The trust
+  // model rules (epic cute-dbt#168): tiers are LABELED chips, never
+  // blended into a score; coverage is a three-valued checklist with
+  // counts, never a percentage; suppressed findings stay visible-but-quiet
+  // behind a collapsed count, never vanish.
+
+  var TIER_LABEL = { total: "TOTAL", high: "HIGH", advisory: "advisory" };
+  // Chip hover/focus bubble copy — mirrors the domain Tier docs.
+  var TIER_TIP = {
+    total: "TOTAL tier — deterministic over manifest facts; zero false positives by construction.",
+    high: "HIGH tier — high-confidence pattern match; rare false positives possible.",
+    advisory: "Advisory tier — heuristic advice; informational only."
+  };
+  var VERDICT_MARK = { covered: "✓", uncovered: "✕", unknown: "?" };
+  var INSTRUMENT_LABEL = { "unit-test": "unit test", "data-test": "data test", "both": "unit or data test" };
+
+  function renderFindingsPanel(m) {
+    var $body = $(".model-findings .findings-body").empty();
+    var findings = (m && m.findings) || [];
+    if (!findings.length) {
+      // Deliberate quiet empty state — the panel never hides.
+      $body.append($("<p>").addClass("findings-empty")
+        .attr("data-testid", "findings-empty")
+        .text("No coverage checks fired for this model."));
+      return;
+    }
+    var active = findings.filter(function (f) { return !f.suppressed; });
+    var suppressed = findings.filter(function (f) { return f.suppressed; });
+    var counts = { covered: 0, uncovered: 0, unknown: 0 };
+    active.forEach(function (f) {
+      var s = f.verdict && f.verdict.status;
+      // Own-property guard: a prototype name (`toString`, …) can never
+      // count — only the three verdict keys above tally.
+      if (Object.prototype.hasOwnProperty.call(counts, s)) counts[s] += 1;
+    });
+    var parts = [];
+    ["covered", "uncovered", "unknown"].forEach(function (s) {
+      if (counts[s]) parts.push(counts[s] + " " + s);
+    });
+    if (parts.length) {
+      $body.append($("<p>").addClass("findings-tally").text(parts.join(" · ")));
+    }
+    var $list = $("<ul>").addClass("findings-checklist");
+    active.forEach(function (f) { $list.append(buildFindingRow(f)); });
+    $body.append($list);
+    if (suppressed.length) {
+      // cute-dbt#171/#170 — visible-but-quiet: a collapsed count that
+      // reveals the acknowledged findings WITH their reasons on demand.
+      var $det = $("<details>").addClass("findings-suppressed")
+        .attr("data-testid", "findings-suppressed");
+      $det.append($("<summary>").text(
+        suppressed.length + " suppressed finding" + (suppressed.length === 1 ? "" : "s")
+      ));
+      var $slist = $("<ul>").addClass("findings-checklist findings-checklist-suppressed");
+      suppressed.forEach(function (f) { $slist.append(buildFindingRow(f)); });
+      $det.append($slist);
+      $body.append($det);
+    }
+  }
+
+  // One checklist row = one (construct, check) finding: a <details> whose
+  // summary is the three-valued checklist line (mark + verdict + check
+  // name + construct + tier chip) and whose body carries attribution,
+  // evidence, the DAG pin, the recommendation + copyable sketches, the
+  // suppression acknowledgement, and the inline rationale drawer.
+  function buildFindingRow(f) {
+    var spec = (DATA.check_specs && DATA.check_specs[f.check]) || {};
+    var status = (f.verdict && f.verdict.status) || "unknown";
+    var $li = $("<li>").addClass("finding-row verdict-" + status)
+      .attr("data-check", f.check)
+      .attr("data-construct", f.construct);
+    if (f.suppressed) $li.addClass("is-suppressed");
+    var $det = $("<details>").addClass("finding-details");
+    var $sum = $("<summary>").addClass("finding-summary");
+    $sum.append($("<span>").addClass("f-mark").attr("aria-hidden", "true")
+      .text(VERDICT_MARK[status] || "?"));
+    $sum.append($("<span>").addClass("f-verdict").text(status));
+    $sum.append($("<span>").addClass("f-name").text(spec.name || f.check));
+    $sum.append($("<code>").addClass("f-construct").text(f.construct));
+    // Tier chip — the #146/#188 tooltip contract: a focusable trigger
+    // with a CSS-positioned bubble on hover AND focus; aria-label is the
+    // AT surface; never a native title, never an info icon.
+    var tierTip = TIER_TIP[f.tier] || String(f.tier);
+    $sum.append($("<span>")
+      .addClass("tier-chip tier-" + f.tier + " has-finding-tip")
+      .attr("tabindex", "0")
+      .attr("aria-label", tierTip)
+      .attr("data-tip", tierTip)
+      .text(TIER_LABEL[f.tier] || f.tier));
+    if (f.suppressed) {
+      $sum.append($("<span>").addClass("suppress-chip")
+        .text("suppressed · " + f.suppressed.source));
+    }
+    $det.append($sum);
+
+    var $bd = $("<div>").addClass("finding-body");
+    if (f.suppressed) {
+      var why = f.suppressed.reason
+        ? "Acknowledged via " + f.suppressed.source + " — " + f.suppressed.reason
+        : "Acknowledged via " + f.suppressed.source + " (no reason given).";
+      $bd.append($("<p>").addClass("finding-suppress-reason").text(why));
+    }
+    if (status === "covered" && f.verdict.by && f.verdict.by.length) {
+      var $cov = $("<p>").addClass("finding-covered-by")
+        .append($("<span>").addClass("f-label").text("Covered by "));
+      f.verdict.by.forEach(function (id, i) {
+        if (i > 0) $cov.append(document.createTextNode(", "));
+        $cov.append($("<code>").text(id));
+      });
+      $bd.append($cov);
+    }
+    if (f.evidence && f.evidence.length) {
+      var $ev = $("<ul>").addClass("finding-evidence");
+      f.evidence.forEach(function (e) {
+        $ev.append($("<li>")
+          .append($("<span>").addClass("f-ev-label").text(e.label))
+          .append(document.createTextNode(": "))
+          .append($("<span>").addClass("f-ev-value").text(e.value)));
+      });
+      $bd.append($ev);
+    }
+    if (f.pin_node) {
+      // Evidence pinning — selects + scrolls to the construct in the DAG.
+      $bd.append($("<button>").attr("type", "button").addClass("finding-pin")
+        .attr("data-pin", f.pin_node)
+        .text("Show in DAG → " + f.pin_node));
+    }
+    if (f.recommendation) {
+      var instr = INSTRUMENT_LABEL[f.instrument];
+      $bd.append($("<p>").addClass("finding-recommendation")
+        .append($("<span>").addClass("f-label")
+          .text("Recommended fix" + (instr ? " (" + instr + ")" : "") + ": "))
+        .append(document.createTextNode(f.recommendation)));
+    }
+    // Copyable given-row YAML sketches (the cute-dbt#172 recommendation
+    // payload) — the #188 copy-button pattern on a yaml-highlighted block.
+    (f.sketches || []).forEach(function (sketch) {
+      var $wrap = $("<div>").addClass("sql-block-wrap finding-sketch");
+      var $copy = $("<button>").attr("type", "button").addClass("sql-copy").text("Copy")
+        .on("click", function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          copySql(sketch, $(this));
+        });
+      var $pre = $("<pre>").addClass("sql-block")
+        .append($("<code>").html(highlightLinesYaml(sketch)));
+      $wrap.append($copy).append($pre);
+      $bd.append($wrap);
+    });
+    $bd.append(buildFindingRationale(f, spec));
+    $det.append($bd);
+    return $li.append($det);
+  }
+
+  // The inline "what is this check?" drawer — fully offline: rationale,
+  // conditions, and exclusions all ride the payload's check_specs
+  // catalog. The book reference is a plain click-only outbound anchor
+  // (URL computed in Rust, carried on the payload; nothing here fetches).
+  function buildFindingRationale(f, spec) {
+    var $det = $("<details>").addClass("finding-rationale");
+    $det.append($("<summary>").text("What is this check?"));
+    var $bd = $("<div>").addClass("finding-rationale-body");
+    if (spec.rationale) {
+      $bd.append($("<p>").addClass("f-rationale").text(spec.rationale));
+    }
+    if (spec.conditions && spec.conditions.length) {
+      $bd.append($("<p>").addClass("f-spec-label").text("Fires when"));
+      var $c = $("<ul>").addClass("f-spec-list");
+      spec.conditions.forEach(function (s) { $c.append($("<li>").text(s)); });
+      $bd.append($c);
+    }
+    if (spec.exclusions && spec.exclusions.length) {
+      $bd.append($("<p>").addClass("f-spec-label").text("Deliberately silent on"));
+      var $x = $("<ul>").addClass("f-spec-list");
+      spec.exclusions.forEach(function (s) { $x.append($("<li>").text(s)); });
+      $bd.append($x);
+    }
+    if (spec.book_href) {
+      $bd.append($("<p>").addClass("f-book-link").append(
+        $("<a>").attr("href", spec.book_href)
+          .attr("target", "_blank")
+          .attr("rel", "noopener noreferrer")
+          .text("Full check reference: " + f.check + " (opens the cute-dbt book)")
+      ));
+    }
+    $det.append($bd);
+    return $det;
   }
 
   function renderDagLegend() {
@@ -862,6 +1061,48 @@
     }
     $(document).on("click", ".diff-fold", function () {
       toggleFold($(this));
+    });
+    // cute-dbt#170 — evidence pinning: select the cited construct's DAG
+    // node (the same selection path a node click takes), smooth-scroll
+    // the DAG into view, and flash the section briefly. Delegated on
+    // `document` because finding rows are rebuilt per model switch.
+    $(document).on("click", ".finding-pin", function () {
+      var id = $(this).attr("data-pin");
+      if (!id || !currentModel()) return;
+      // cute-dbt#180 contract: per-click Cytoscape interaction mutates
+      // classes IN PLACE — never a renderDag() rebuild (which would
+      // reset pan/zoom). Emitting a tap on the node runs the exact
+      // bound click path (lineage highlight + __cuteSelectNode →
+      // Inspect). Mermaid keeps its render-driven selection.
+      var cyto = dagEngine === "cytoscape" && window.CuteCyto
+        ? window.CuteCyto.cyInstance()
+        : null;
+      var cyEle = cyto ? cyto.getElementById(String(id)) : null;
+      if (cyEle && cyEle.length) {
+        cyEle.emit("tap");
+      } else {
+        state.selectedNodeId = id;
+        if (state.leftPanelMode !== "node") {
+          state.leftPanelMode = "node";
+          renderSegmentedToggle();
+        }
+        renderLeftPanel();
+        renderDag();
+      }
+      var dag = document.querySelector(".cte-dag");
+      if (dag) {
+        if (dag.scrollIntoView) dag.scrollIntoView({ behavior: "smooth", block: "start" });
+        // One flash at a time: a rapid re-pin clears the pending
+        // removal so an old timer can't cut the new animation short.
+        if (dag.__cutePinFlashTimer) clearTimeout(dag.__cutePinFlashTimer);
+        dag.classList.remove("pin-flash");
+        void dag.offsetWidth; // restart the CSS flash animation
+        dag.classList.add("pin-flash");
+        dag.__cutePinFlashTimer = setTimeout(function () {
+          dag.classList.remove("pin-flash");
+          dag.__cutePinFlashTimer = null;
+        }, 1600);
+      }
     });
     $(document).on("keydown", ".diff-fold", function (e) {
       // Enter or Space activates (both directions); preventDefault on Space
@@ -2034,6 +2275,11 @@
     }
     el.innerHTML = h;
     el.hidden = false;
+    positionTipNear(el, trigger);
+  }
+  // Shared fixed-position clamp for the singleton bubble: below the
+  // trigger, horizontally clamped, flipping above on bottom overflow.
+  function positionTipNear(el, trigger) {
     var r = trigger.getBoundingClientRect();
     var tw = el.offsetWidth, th = el.offsetHeight;
     var left = r.left;
@@ -2044,11 +2290,22 @@
     el.style.left = Math.round(left) + "px";
     el.style.top = Math.round(top) + "px";
   }
+  // cute-dbt#170 — plain-text variant of the singleton bubble for the
+  // findings-panel tier chips (`.has-finding-tip` + data-tip). Same
+  // element, same positioning, same hover-AND-focus reveal contract.
+  function showPlainTip(trigger) {
+    var el = ensureColTooltip();
+    el.innerHTML = '<div class="ct-desc">' + escapeHtml(trigger.getAttribute("data-tip") || "") + "</div>";
+    el.hidden = false;
+    positionTipNear(el, trigger);
+  }
   function hideColTip() { var el = document.getElementById("col-tooltip"); if (el) el.hidden = true; }
   function bindColTooltips() {
     $(document)
       .on("mouseenter focusin", ".has-col-meta", function () { showColTip(this); })
-      .on("mouseleave focusout", ".has-col-meta", function () { hideColTip(); });
+      .on("mouseleave focusout", ".has-col-meta", function () { hideColTip(); })
+      .on("mouseenter focusin", ".has-finding-tip", function () { showPlainTip(this); })
+      .on("mouseleave focusout", ".has-finding-tip", function () { hideColTip(); });
   }
 
   // `colMeta` (cute-dbt#165) is the per-table column-metadata map keyed by

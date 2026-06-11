@@ -101,3 +101,17 @@ Feature: cute-dbt surfaces unique-key coverage findings at the payload level
     Then the payload carries a "join.left-null-propagation" finding for "order_emails" with verdict "uncovered"
     And the payload carries no "join.anti-join" finding for "order_emails"
     And the "join.left-null-propagation" finding for "order_emails" suggests a no-match given row
+
+  # cute-dbt#170 — the findings SURFACE consumes a payload-level spec
+  # catalog (check_specs) so the inline rationale drawer renders fully
+  # offline and the book reference stays a plain click-only anchor.
+  Scenario: The payload carries the spec catalog for fired checks
+    Given the modified coverage model "order_rollup" declares unique_key ["customer_id", "order_date"]
+    When I render the coverage report
+    Then the payload's check catalog describes "grain.unique-key-unbacked" with tier "total" and an inline rationale
+    And the "grain.unique-key-unbacked" catalog entry links the book page "checks/grain.unique-key-unbacked.html"
+
+  Scenario: A findings-free payload carries no check catalog
+    Given the modified coverage model "plain_model" declares no unique_key
+    When I render the coverage report
+    Then the payload carries no check catalog
