@@ -35,7 +35,7 @@
             const path_to_root = "../";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "../searchindex-993df1f2.js";
+            window.path_to_searchindex_js = "../searchindex-0577d594.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="../toc-db4d1b28.js"></script>
@@ -258,7 +258,7 @@ git diff --unified=0 --find-renames \
   "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
   &gt; diff.patch
 
-cute-dbt \
+cute-dbt report \
   --manifest dbt_project/target/manifest.json \
   --pr-diff @diff.patch \
   --project-root dbt_project \
@@ -408,7 +408,7 @@ jobs:
           git diff --unified=0 --find-renames \
             "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
             &gt; diff.patch
-          cute-dbt \
+          cute-dbt report \
             --manifest dbt_project/target/manifest.json \
             --pr-diff @diff.patch \
             --project-root dbt_project \

@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-993df1f2.js";
+            window.path_to_searchindex_js = "searchindex-0577d594.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-db4d1b28.js"></script>
@@ -324,8 +324,8 @@ source via <code>cargo install --git https://github.com/breezy-bays-labs/cute-db
 <pre><code class="language-sh">cute-dbt --help
 </code></pre>
 <h2 id="generate-a-report"><a class="header" href="#generate-a-report">Generate a report</a></h2>
-<p>cute-dbt always reads a <strong>current</strong> <code>manifest.json</code>, plus exactly one
-<strong>scope source</strong> telling it what changed:</p>
+<p><code>cute-dbt report</code> always reads a <strong>current</strong> <code>manifest.json</code>, plus
+exactly one <strong>scope source</strong> telling it what changed:</p>
 <ul>
 <li><strong>Local dev</strong> (this page): a <code>--baseline-manifest</code> to diff against.</li>
 <li><strong>CI / PR review</strong>: <code>--pr-diff</code> with the PR’s unified diff (<code>git diff --unified=0</code>) — see the <a href="#ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback">GitHub Actions PR-review
@@ -333,7 +333,7 @@ recipe</a>, the headline team
 path. (<a href="#which-scope-source">Which should I use?</a>)</li>
 </ul>
 <p>The local flow below uses a baseline manifest.</p>
-<pre><code class="language-sh">cute-dbt \
+<pre><code class="language-sh">cute-dbt report \
     --manifest         target/manifest.json \
     --baseline-manifest path/to/baseline-manifest.json \
     --out              report.html
@@ -344,7 +344,7 @@ macro-dependency / contract changes, opt into the wider fidelity with
 <code>--modified-selectors</code> — the tokens match dbt’s <code>state:modified.&lt;sub&gt;</code>
 sub-selector vocabulary and compose alongside the always-on body
 checksum (baseline mode only; the flag conflicts with <code>--pr-diff</code>):</p>
-<pre><code class="language-sh">cute-dbt \
+<pre><code class="language-sh">cute-dbt report \
     --manifest          target/manifest.json \
     --baseline-manifest path/to/baseline-manifest.json \
     --modified-selectors configs,relation,macros,contract \
@@ -359,6 +359,19 @@ xdg-open report.html
 </code></pre>
 <p>The HTML opens via <code>file://</code>. No server. No outbound requests. Your
 data does not leave your machine.</p>
+<h2 id="explore-the-full-project"><a class="header" href="#explore-the-full-project">Explore the full project</a></h2>
+<p>Where <code>report</code> is diff-scoped, the <strong><code>explore</code></strong> verb renders the
+<strong>full manifest</strong> — no baseline, no scope source:</p>
+<pre><code class="language-sh">cute-dbt explore \
+    --manifest target/manifest.json \
+    --out-dir  explore/
+</code></pre>
+<p>It writes two self-contained pages under <code>explore/</code>: <code>dag.html</code> (the
+model-lineage DAG) and <code>tests.html</code> (the per-model unit-test index).
+Explore is <strong>fail-open</strong> on uncompiled models — a <code>dbt parse</code>-only
+model renders as a “not compiled” node instead of aborting the run
+(the manifest itself must still be readable and schema v12+). Bare
+<code>cute-dbt</code> without a verb is a usage error listing both.</p>
 <h2 id="producing-the-manifests"><a class="header" href="#producing-the-manifests">Producing the manifests</a></h2>
 <p>cute-dbt expects compiled dbt manifests (i.e. produced by <code>dbt compile</code> or any command that compiles, like <code>dbt run</code>/<code>dbt build</code>).
 A <code>dbt parse</code>-only manifest will fail the second-stage compiled-SQL
@@ -377,7 +390,7 @@ git checkout -    # back to your branch
 git stash pop
 
 # Render the report
-cute-dbt \
+cute-dbt report \
     --manifest          target/manifest.json \
     --baseline-manifest /tmp/baseline-manifest.json \
     --out               report.html
@@ -1194,7 +1207,7 @@ git diff --unified=0 --find-renames \
   "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
   &gt; diff.patch
 
-cute-dbt \
+cute-dbt report \
   --manifest dbt_project/target/manifest.json \
   --pr-diff @diff.patch \
   --project-root dbt_project \
@@ -1344,7 +1357,7 @@ jobs:
           git diff --unified=0 --find-renames \
             "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
             &gt; diff.patch
-          cute-dbt \
+          cute-dbt report \
             --manifest dbt_project/target/manifest.json \
             --pr-diff @diff.patch \
             --project-root dbt_project \
