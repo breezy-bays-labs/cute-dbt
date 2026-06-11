@@ -8,10 +8,21 @@
 //! renderer (PR 8b) and any future format-aware logic decide what to do
 //! with each.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::domain::manifest::{DependsOn, NodeId};
+
+/// The full dbt unit-test `overrides` blob in domain shape (cute-dbt#200):
+/// override group (`"macros"` / `"vars"` / `"env_vars"`) → name →
+/// **untyped passthrough value**. Values stay [`serde_json::Value`] —
+/// never stringified — so native scalars (`true`, `7`, `0.05`) survive
+/// end-to-end into the render payload (founder decision on cute-dbt#197;
+/// the `BTreeMap<String, BTreeMap<String, String>>` sketch was rejected
+/// as lossy). `BTreeMap`s give deterministic JSON ordering.
+pub type UnitTestOverrides = BTreeMap<String, BTreeMap<String, Value>>;
 
 /// A single `given` block on a dbt unit test.
 ///
@@ -169,6 +180,16 @@ pub struct UnitTest {
     /// distinction that the render layer collapses for display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     is_incremental_mode: Option<bool>,
+    /// The FULL `overrides` blob (cute-dbt#200): group → name → untyped
+    /// passthrough value (see [`UnitTestOverrides`]). Populated by the
+    /// adapter from the wire's top-level `overrides` — only non-empty
+    /// groups appear, and a test with no effective overrides carries
+    /// `None` (key omitted on serialization, so pre-#200 payloads stay
+    /// byte-stable). ADDITIVE context next to the lifted
+    /// [`Self::is_incremental_mode`] flag (cute-dbt#145), which stays
+    /// the authoritative incremental-branch discriminator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    overrides: Option<UnitTestOverrides>,
 }
 
 impl UnitTest {
@@ -196,6 +217,7 @@ impl UnitTest {
             meta,
             original_file_path,
             is_incremental_mode: None,
+            overrides: None,
         }
     }
 
@@ -272,6 +294,24 @@ impl UnitTest {
     #[must_use]
     pub fn is_incremental_mode(&self) -> Option<bool> {
         self.is_incremental_mode
+    }
+
+    /// Set the full overrides blob (builder, cute-dbt#200). The adapter
+    /// threads the wire's grouped `overrides` here after constructing
+    /// the `UnitTest` — the [`Self::with_incremental_mode`] precedent
+    /// (no constructor churn across the many test call sites).
+    #[must_use]
+    pub fn with_overrides(mut self, overrides: Option<UnitTestOverrides>) -> Self {
+        self.overrides = overrides;
+        self
+    }
+
+    /// The full `overrides` blob (cute-dbt#200) — group → name →
+    /// untyped passthrough value. `None` when the test declares no
+    /// effective overrides.
+    #[must_use]
+    pub fn overrides(&self) -> Option<&UnitTestOverrides> {
+        self.overrides.as_ref()
     }
 }
 
@@ -591,5 +631,85 @@ mod tests {
         let back: UnitTest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.is_incremental_mode(), Some(false));
         assert_eq!(back, some_false, "flat round-trip preserves all fields");
+    }
+
+    // ----- cute-dbt#200 — full overrides blob -----
+
+    /// The demo-payload-shaped grouped overrides: native bool / integer /
+    /// float / string values, never stringified.
+    fn sample_overrides() -> UnitTestOverrides {
+        let mut overrides = UnitTestOverrides::new();
+        overrides.insert(
+            "macros".to_owned(),
+            [("is_incremental".to_owned(), json!(true))].into(),
+        );
+        overrides.insert(
+            "vars".to_owned(),
+            [
+                ("encounter_lookback_days".to_owned(), json!(7)),
+                ("dq_quarantine_threshold".to_owned(), json!(0.05)),
+            ]
+            .into(),
+        );
+        overrides.insert(
+            "env_vars".to_owned(),
+            [("DBT_TARGET".to_owned(), json!("ci"))].into(),
+        );
+        overrides
+    }
+
+    #[test]
+    fn overrides_default_to_none_and_skip_the_key() {
+        let ut = bare_unit_test();
+        assert!(ut.overrides().is_none(), "no overrides by default");
+        let json = serde_json::to_string(&ut).unwrap();
+        assert!(
+            !json.contains("\"overrides\""),
+            "None must skip the key (pre-#200 payloads stay byte-stable): {json}"
+        );
+    }
+
+    #[test]
+    fn overrides_round_trip_preserving_native_scalar_types() {
+        // Founder decision (cute-dbt#197/#200): values are serde Value
+        // passthrough — a bool stays a JSON bool, a number a number,
+        // a string a string. Never stringified.
+        let ut = bare_unit_test().with_overrides(Some(sample_overrides()));
+        let json = serde_json::to_string(&ut).unwrap();
+        assert!(
+            json.contains("\"is_incremental\":true"),
+            "bool stays a JSON bool: {json}"
+        );
+        assert!(
+            json.contains("\"encounter_lookback_days\":7"),
+            "integer stays a JSON number: {json}"
+        );
+        assert!(
+            json.contains("\"dq_quarantine_threshold\":0.05"),
+            "float stays a JSON number: {json}"
+        );
+        assert!(
+            json.contains("\"DBT_TARGET\":\"ci\""),
+            "string stays a JSON string: {json}"
+        );
+        let back: UnitTest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ut, "grouped round-trip preserves all fields");
+        assert_eq!(back.overrides(), Some(&sample_overrides()));
+    }
+
+    #[test]
+    fn overrides_groups_serialize_in_deterministic_btreemap_order() {
+        let ut = bare_unit_test().with_overrides(Some(sample_overrides()));
+        let json = serde_json::to_string(&ut).unwrap();
+        // Scope the order probe to the overrides object — `depends_on`
+        // also carries a "macros" key earlier in the document.
+        let json = &json[json.find("\"overrides\"").expect("overrides present")..];
+        let env = json.find("\"env_vars\"").expect("env_vars present");
+        let mac = json.find("\"macros\"").expect("macros present");
+        let vars = json.find("\"vars\"").expect("vars present");
+        assert!(
+            env < mac && mac < vars,
+            "groups emit in BTreeMap (lexicographic) order: {json}"
+        );
     }
 }

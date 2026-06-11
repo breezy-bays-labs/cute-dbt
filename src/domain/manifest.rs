@@ -418,6 +418,23 @@ pub struct Node {
     /// (SQL-file) tests and non-test nodes.
     #[serde(default)]
     test_metadata: Option<TestMetadata>,
+    /// Authored model description from the node's top-level wire
+    /// `description` (cute-dbt#200) — only **non-empty** prose appears
+    /// (the cute-dbt#165 precedent: fusion serializes an unset
+    /// description as `None`/absent, dbt-core as `""`; the adapter drops
+    /// both). Feeds [`ModelPayload::description`] and the report's
+    /// `manifest_nodes` lookup.
+    #[serde(default)]
+    description: Option<String>,
+    /// Resolved model tags from the node's top-level wire `tags`
+    /// (cute-dbt#200). The TOP-LEVEL list is the authoritative
+    /// deduplicated set (fusion `ManifestMaterializableCommonAttributes
+    /// .tags`, `dbt-schemas` `manifest_nodes.rs` @ `9977b6cb…`); the
+    /// nested `config.tags` carries project-level + model-level merge
+    /// DUPLICATES on real dbt-core manifests and is deliberately not
+    /// read. Empty for untagged nodes and every pre-#200 fixture.
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 impl Node {
@@ -451,6 +468,8 @@ impl Node {
             column_name: None,
             attached_node: None,
             test_metadata: None,
+            description: None,
+            tags: Vec::new(),
         }
     }
 
@@ -465,6 +484,19 @@ impl Node {
         column_descriptions: BTreeMap<String, String>,
     ) -> Self {
         self.column_descriptions = column_descriptions;
+        self
+    }
+
+    /// Attach the authored model metadata (cute-dbt#200): the model's
+    /// top-level `description` (the adapter passes `None` for an
+    /// empty-string description — the cute-dbt#165 drop-empty precedent)
+    /// and the top-level resolved `tags` list. Builder for the same
+    /// reason as [`Self::with_column_descriptions`] — no constructor
+    /// churn across the many existing test call sites.
+    #[must_use]
+    pub fn with_model_metadata(mut self, description: Option<String>, tags: Vec<String>) -> Self {
+        self.description = description;
+        self.tags = tags;
         self
     }
 
@@ -587,6 +619,21 @@ impl Node {
     #[must_use]
     pub fn test_metadata(&self) -> Option<&TestMetadata> {
         self.test_metadata.as_ref()
+    }
+
+    /// Authored model description (cute-dbt#200) — `None` for an
+    /// undescribed model (the adapter drops dbt-core's empty-string
+    /// unset shape) and for non-model nodes.
+    #[must_use]
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    /// Resolved model tags (cute-dbt#200) — the deduplicated top-level
+    /// wire list. Empty for untagged nodes.
+    #[must_use]
+    pub fn tags(&self) -> &[String] {
+        &self.tags
     }
 }
 
@@ -1244,6 +1291,96 @@ mod tests {
         assert_eq!(n.column_name(), Some("status"));
         assert_eq!(n.attached_node(), Some(&NodeId::new("model.shop.x")));
         assert_eq!(n.test_metadata(), Some(&tm));
+    }
+
+    // ----- cute-dbt#200 — model description + tags -----
+
+    #[test]
+    fn node_new_defaults_model_metadata_empty() {
+        let n = Node::new(
+            NodeId::new("model.shop.bare"),
+            "model",
+            sample_checksum(),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        );
+        assert!(n.description().is_none());
+        assert!(n.tags().is_empty());
+    }
+
+    #[test]
+    fn with_model_metadata_sets_description_and_tags() {
+        let n = Node::new(
+            NodeId::new("model.shop.dim_payers"),
+            "model",
+            sample_checksum(),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_model_metadata(
+            Some("One row per payer.".to_owned()),
+            vec!["marts".to_owned(), "finance".to_owned()],
+        );
+        assert_eq!(n.description(), Some("One row per payer."));
+        assert_eq!(n.tags(), ["marts".to_owned(), "finance".to_owned()]);
+    }
+
+    #[test]
+    fn node_model_metadata_round_trips_through_serde() {
+        let n = Node::new(
+            NodeId::new("model.shop.dim_payers"),
+            "model",
+            sample_checksum(),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_model_metadata(
+            Some("One row per payer.".to_owned()),
+            vec!["marts".to_owned()],
+        );
+        let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
+        assert_eq!(back, n);
+        assert_eq!(back.description(), Some("One row per payer."));
+        assert_eq!(back.tags(), ["marts".to_owned()]);
+    }
+
+    #[test]
+    fn node_without_model_metadata_deserializes_from_pre_200_json() {
+        // ADR-5 tolerance: a serialized pre-#200 Node (no description /
+        // tags keys) still deserializes, defaulting both fields.
+        let n = Node::new(
+            NodeId::new("model.shop.x"),
+            "model",
+            sample_checksum(),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        );
+        let mut value = serde_json::to_value(&n).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("description");
+        obj.remove("tags");
+        let back: Node = serde_json::from_value(value).unwrap();
+        assert_eq!(back, n);
     }
 
     #[test]
