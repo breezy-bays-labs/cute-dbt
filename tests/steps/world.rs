@@ -191,6 +191,10 @@ pub struct CoveragePlan {
     /// `(bare model name, config.unique_key wire value)` per model —
     /// `serde_json::Value::Null` when the scenario declares no key.
     pub models: Vec<(String, serde_json::Value)>,
+    /// `(bare model name, compiled SQL)` per model — the cute-dbt#173
+    /// join-pair scenarios feed real SQL through the engine's CTE
+    /// graph parse (no unique_key: the grain check stays silent).
+    pub sql_models: Vec<(String, String)>,
     /// Uniqueness data tests the scenario declares.
     pub tests: Vec<CoverageDataTest>,
 }

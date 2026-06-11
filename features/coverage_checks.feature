@@ -60,3 +60,44 @@ Feature: cute-dbt surfaces unique-key coverage findings at the payload level
     Given the modified coverage model "plain_model" declares no unique_key
     When I render the coverage report
     Then the payload carries no findings for "plain_model"
+
+  # cute-dbt#173 — the supersedes showcase (catalog C4 + the anti-join
+  # refinement): on the LEFT JOIN + WHERE <right key> IS NULL construct,
+  # the more specific join.anti-join check fires with the INVERTED
+  # recommendation and SILENCES join.left-null-propagation — the rules
+  # recognize the pattern instead of forcing the user to suppress a
+  # false positive.
+  Scenario: An anti-join supersedes the general left-join check on the same construct
+    Given the modified coverage model "customers_with_no_orders" compiles to:
+      """
+      with customers as (select * from "db"."main"."stg_customers"),
+      orders as (select * from "db"."main"."stg_orders"),
+      final as (
+          select *
+          from customers
+          left join orders on customers.customer_id = orders.customer_id
+          where orders.customer_id is null
+      )
+      select * from final
+      """
+    When I render the coverage report
+    Then the payload carries a "join.anti-join" finding for "customers_with_no_orders" with verdict "uncovered"
+    And the payload carries no "join.left-null-propagation" finding for "customers_with_no_orders"
+    And the "join.anti-join" finding for "customers_with_no_orders" suggests a given row that matches
+
+  Scenario: A LEFT JOIN whose right columns reach the output flags untested null propagation
+    Given the modified coverage model "order_emails" compiles to:
+      """
+      with orders as (select * from "db"."main"."stg_orders"),
+      customers as (select * from "db"."main"."stg_customers"),
+      final as (
+          select orders.order_id, customers.email
+          from orders
+          left join customers on orders.customer_id = customers.id
+      )
+      select * from final
+      """
+    When I render the coverage report
+    Then the payload carries a "join.left-null-propagation" finding for "order_emails" with verdict "uncovered"
+    And the payload carries no "join.anti-join" finding for "order_emails"
+    And the "join.left-null-propagation" finding for "order_emails" suggests a no-match given row

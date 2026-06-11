@@ -16,6 +16,7 @@
 //! `I render the coverage report`) so it cannot collide with the
 //! scaffolding bound by other feature modules.
 
+use cucumber::gherkin::Step;
 use cucumber::{given, then, when};
 use serde_json::{Value, json};
 
@@ -45,6 +46,19 @@ fn model_declares_unique_key(world: &mut World, bare: String, key: String) {
 #[given(regex = r#"^the modified coverage model "([^"]+)" declares no unique_key$"#)]
 fn model_declares_no_unique_key(world: &mut World, bare: String) {
     world.coverage_plan.models.push((bare, Value::Null));
+}
+
+#[given(regex = r#"^the modified coverage model "([^"]+)" compiles to:$"#)]
+fn model_compiles_to(world: &mut World, step: &Step, bare: String) {
+    // The cute-dbt#173 join-pair scenarios: the docstring is the
+    // model's compiled SQL, fed through the real CTE-graph parse.
+    let sql = step
+        .docstring
+        .as_ref()
+        .expect("the step carries a SQL docstring")
+        .trim()
+        .to_owned();
+    world.coverage_plan.sql_models.push((bare, sql));
 }
 
 #[given(regex = r#"^an? (enabled|disabled) unique data test on column "([^"]+)" of "([^"]+)"$"#)]
@@ -124,6 +138,10 @@ fn render_coverage_report(world: &mut World) {
     for (bare, _key) in &plan.models {
         current = with_node(current, model_node(bare, "current", Some("select 1")));
         baseline = with_node(baseline, model_node(bare, "baseline", Some("select 1")));
+    }
+    for (bare, sql) in &plan.sql_models {
+        current = with_node(current, model_node(bare, "current", Some(sql)));
+        baseline = with_node(baseline, model_node(bare, "baseline", Some(sql)));
     }
 
     // Wire-shape injection: flat config (materialized + unique_key as
@@ -218,6 +236,61 @@ fn payload_carries_no_findings(world: &mut World, model: String) {
         m.get("findings").is_none(),
         "model {model:?} must carry NO findings key (serde-skipped when empty); got {m}"
     );
+}
+
+#[then(regex = r#"^the payload carries no "([^"]+)" finding for "([^"]+)"$"#)]
+fn payload_carries_no_finding_of_check(world: &mut World, check: String, model: String) {
+    // The supersedes contract at the wire level (cute-dbt#173): the
+    // silenced check's finding must be ABSENT from the payload.
+    let p = payload(world);
+    let m = find_model(&p, &model);
+    let offending: Vec<&Value> = m["findings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|f| f["check"].as_str() == Some(check.as_str()))
+        .collect();
+    assert!(
+        offending.is_empty(),
+        "model {model:?} must carry no {check:?} finding; got {offending:?}"
+    );
+}
+
+#[then(regex = r#"^the "([^"]+)" finding for "([^"]+)" suggests a given row that matches$"#)]
+fn finding_suggests_matching_given(world: &mut World, check: String, model: String) {
+    // The INVERTED anti-join recommendation: a left row that DOES
+    // match, proving the matched class is excluded.
+    let sketch = suggested_given(world, &check, &model);
+    assert!(
+        sketch.contains("# matches the right row below"),
+        "anti-join sketch suggests a MATCHING row; got {sketch:?}"
+    );
+    assert!(
+        sketch.contains("must exclude it"),
+        "anti-join sketch asserts the exclusion; got {sketch:?}"
+    );
+}
+
+#[then(regex = r#"^the "([^"]+)" finding for "([^"]+)" suggests a no-match given row$"#)]
+fn finding_suggests_no_match_given(world: &mut World, check: String, model: String) {
+    let sketch = suggested_given(world, &check, &model);
+    assert!(
+        sketch.contains("# 404 has no match below"),
+        "left-null sketch suggests a NO-MATCH row; got {sketch:?}"
+    );
+}
+
+/// The `suggested given` evidence value on a finding.
+fn suggested_given(world: &World, check: &str, model: &str) -> String {
+    let finding = find_finding(world, check, model);
+    finding["evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|e| e["label"].as_str() == Some("suggested given"))
+        .and_then(|e| e["value"].as_str())
+        .unwrap_or_else(|| panic!("finding carries a suggested-given sketch: {finding}"))
+        .to_owned()
 }
 
 // --- Payload helpers ------------------------------------------------
