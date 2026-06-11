@@ -4746,3 +4746,364 @@ fn cytoscape_hover_card_appears_and_tap_highlights_lineage_in_place() {
 
     let _ = tab.close(true);
 }
+
+// ===== cute-dbt#170 — the per-model coverage-checks panel ==============
+//
+// The findings surface is client-side JS over the payload's
+// `m.findings` (FindingPayloads) + `check_specs` catalog, so a real
+// browser is the only honest verification: panel presence in both
+// scope-toggle views, the three-valued checklist, tier-chip
+// distinctness + the hover/focus tooltip contract, the rationale
+// drawer (offline) + click-only book link, the copyable YAML sketch,
+// evidence pinning, and the visible-but-quiet suppressed reveal.
+
+/// A model tripping BOTH registered checks: `config.unique_key` with no
+/// backing uniqueness test (grain, TOTAL, UNCOVERED) and a UNION whose
+/// arms no unit-test given feeds (union, HIGH, UNCOVERED + sketches).
+fn findings_model(full_id: &str) -> Node {
+    let mut config = BTreeMap::new();
+    config.insert("unique_key".to_owned(), serde_json::json!("k"));
+    let compiled = "with arm_a as (select * from src_a), \
+                    arm_b as (select * from src_b), \
+                    unioned as (select * from arm_a union all select * from arm_b) \
+                    select * from unioned";
+    Node::new(
+        NodeId::new(full_id),
+        "model",
+        Checksum::new("sha256", "ck"),
+        Some(compiled.to_owned()),
+        None,
+        DependsOn::default(),
+        None,
+        NodeConfig::new(config, false),
+        None,
+        BTreeMap::new(),
+    )
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn findings_panel_renders_checklist_tiers_sketch_rationale_and_pin() {
+    // dim_both trips grain (TOTAL, uncovered) + union (HIGH, uncovered
+    // with sketches); dim_quiet trips nothing (the deliberate quiet
+    // empty state) and has zero tests (the panel must render without a
+    // selected test).
+    let url = render_to_file(
+        "headless_findings_panel.html",
+        vec![
+            findings_model("model.shop.dim_both"),
+            model_node("model.shop.dim_quiet"),
+        ],
+        vec![("unit_test.shop.dim_both.t1", unit_test("t1", "dim_both"))],
+        &["model.shop.dim_both", "model.shop.dim_quiet"],
+        &["unit_test.shop.dim_both.t1"],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // --- panel + three-valued checklist ------------------------------
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"model-findings\"]') !== null",
+        ),
+        "the coverage-checks panel section renders",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.findings-checklist > .finding-row').length",
+        ),
+        2,
+        "one checklist row per (construct, check) finding",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelectorAll('.finding-row.verdict-uncovered .f-verdict').length === 2",
+        ),
+        "each row carries its verdict WORD (mark is never colour-only)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-findings').textContent.indexOf('%') === -1",
+        ),
+        "coverage is a checklist — no percentage anywhere in the panel",
+    );
+
+    // --- tier chips: labeled + visually distinct ----------------------
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.tier-chip.tier-total') !== null \
+             && document.querySelector('.tier-chip.tier-high') !== null",
+        ),
+        "both tier chips render, labeled by tier",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){\
+               var a = getComputedStyle(document.querySelector('.tier-chip.tier-total'));\
+               var b = getComputedStyle(document.querySelector('.tier-chip.tier-high'));\
+               return a.backgroundColor !== b.backgroundColor \
+                   || a.borderTopColor !== b.borderTopColor;\
+             })()",
+        ),
+        "TOTAL and HIGH chips are visually distinct (never blended)",
+    );
+    // The #146/#188 tooltip contract: focusable trigger, aria-label for
+    // AT, NO native title; keyboard focus reveals the bubble.
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){\
+               var c = document.querySelector('.tier-chip.tier-total');\
+               return c.getAttribute('tabindex') === '0' \
+                   && !c.hasAttribute('title') \
+                   && (c.getAttribute('aria-label') || '').indexOf('TOTAL tier') === 0;\
+             })()",
+        ),
+        "tier chip is a focusable, aria-labelled trigger with no native title",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){\
+               document.querySelector('.tier-chip.tier-total').focus();\
+               var t = document.getElementById('col-tooltip');\
+               return !!t && !t.hidden && t.textContent.indexOf('TOTAL tier') === 0;\
+             })()",
+        ),
+        "keyboard focus reveals the tier tooltip bubble",
+    );
+
+    // --- recommendation + copyable YAML sketch ------------------------
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelectorAll('.finding-sketch .sql-copy').length >= 1",
+        ),
+        "the union sketch renders with the #188 copy button",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            // textContent includes the numbered gutter (the #178 code-line
+            // DOM), so `contains`, not a position-0 anchor.
+            "document.querySelector('.finding-sketch .sql-block').textContent\
+             .indexOf(\"- input: ref('\") >= 0",
+        ),
+        "the sketch code block carries the copy-pasteable given-row YAML",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelectorAll('.finding-recommendation').length === 2",
+        ),
+        "each uncovered finding carries its recommendation copy",
+    );
+
+    // --- rationale drawer (offline) + click-only book link ------------
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){\
+               var d = document.querySelector('.finding-rationale');\
+               if (!d) return false;\
+               d.open = true;\
+               var body = d.querySelector('.finding-rationale-body');\
+               return !!body && body.textContent.length > 40;\
+             })()",
+        ),
+        "the rationale drawer opens with embedded (offline) check prose",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){\
+               var a = document.querySelector('.finding-rationale-body a');\
+               return !!a \
+                   && a.getAttribute('href').indexOf('checks/') > 0 \
+                   && a.getAttribute('target') === '_blank' \
+                   && a.getAttribute('rel') === 'noopener noreferrer';\
+             })()",
+        ),
+        "the book reference is a plain click-only anchor (no fetch-on-load)",
+    );
+
+    // --- evidence pinning ---------------------------------------------
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.finding-pin[data-pin=\"unioned\"]') !== null",
+        ),
+        "the union finding pins the consumer CTE node",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.finding-pin[data-pin=\"(final select)\"]') !== null",
+        ),
+        "the model-level grain finding pins the terminal node",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.finding-pin[data-pin=\"unioned\"]').click()",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.left-panel-body .node-detail').getAttribute('data-node-id')",
+        ),
+        "unioned",
+        "the pin selects the cited construct (Inspect follows)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.cte-dag').classList.contains('pin-flash')",
+        ),
+        "the pin flashes the DAG section (the scroll target exists)",
+    );
+
+    // --- visible in BOTH scope-toggle views (the #91 contract) ---------
+    click_mode(&tab, "all");
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.findings-checklist > .finding-row').length",
+        ),
+        2,
+        "the panel persists across the Updated-only ↔ All-tests flip",
+    );
+    click_mode(&tab, "updated");
+
+    // --- quiet empty state on a findings-free, test-free model ---------
+    select_model(&tab, "dim_quiet");
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"findings-empty\"]') !== null",
+        ),
+        "a model with no findings renders the quiet empty line (never a hidden panel)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.findings-checklist') === null",
+        ),
+        "no checklist renders on a findings-free model",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
+    // The cute-dbt#171 policy marks (never removes) suppressed findings;
+    // the surface renders them visible-but-quiet: a collapsed count that
+    // reveals the acknowledged rows WITH their reasons.
+    use cute_dbt::domain::{CheckPolicy, HeuristicId, SuppressRule, SuppressionSource};
+
+    let node = findings_model("model.shop.dim_both");
+    let m = manifest(
+        vec![node],
+        vec![("unit_test.shop.dim_both.t1", unit_test("t1", "dim_both"))],
+    );
+    let in_scope: InScopeSet = ["unit_test.shop.dim_both.t1".to_owned()]
+        .into_iter()
+        .collect();
+    let models: ModelInScopeSet = [NodeId::new("model.shop.dim_both")].into_iter().collect();
+    let changed: InScopeSet = ["unit_test.shop.dim_both.t1".to_owned()]
+        .into_iter()
+        .collect();
+    let policy = CheckPolicy::<HeuristicId> {
+        suppressions: vec![SuppressRule {
+            check: HeuristicId::GrainUniqueKeyUnbacked,
+            model: "dim_both".to_owned(),
+            reason: Some("duplicate grain accepted during backfill".to_owned()),
+            source: SuppressionSource::Config,
+        }],
+        ..Default::default()
+    };
+    let out = tmp("headless_findings_suppressed.html");
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &changed,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "baseline.json",
+        ScopeSource::Baseline,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &policy,
+    )
+    .expect("render writes the report");
+    let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    assert_eq!(
+        eval_i64(&tab, "document.querySelectorAll('.finding-row').length",),
+        2,
+        "suppression never removes a finding from the surface",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.findings-checklist > .finding-row:not(.is-suppressed)').length",
+        ),
+        1,
+        "only the unsuppressed finding sits in the main checklist",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"findings-suppressed\"] > summary')\
+             .textContent.trim()",
+        ),
+        "1 suppressed finding",
+        "the suppressed count renders collapsed (visible-but-quiet)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "!document.querySelector('[data-testid=\"findings-suppressed\"]').open",
+        ),
+        "the suppressed reveal starts collapsed",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){\
+               var d = document.querySelector('[data-testid=\"findings-suppressed\"]');\
+               d.open = true;\
+               var row = d.querySelector('.finding-row.is-suppressed');\
+               if (!row) return false;\
+               row.querySelector('.finding-details').open = true;\
+               var reason = row.querySelector('.finding-suppress-reason');\
+               return !!reason \
+                   && reason.textContent.indexOf('duplicate grain accepted during backfill') > 0 \
+                   && row.querySelector('.suppress-chip').textContent === 'suppressed · config';\
+             })()",
+        ),
+        "opening the reveal shows the acknowledged row with its reason + source",
+    );
+
+    let _ = tab.close(true);
+}

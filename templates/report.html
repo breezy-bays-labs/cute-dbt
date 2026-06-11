@@ -239,6 +239,25 @@
   </div>
 </section>
 
+{# cute-dbt#170 — per-model coverage checklist (the report findings
+   surface). A SELF-CONTAINED container: everything inside .findings-body
+   is JS-rendered per model selection (renderFindingsPanel, from
+   m.findings + the payload's check_specs catalog), so relocating the
+   panel is moving this one section. Rendered for the selected model in
+   BOTH scope-toggle views (findings are current-state facts, not diff
+   artifacts) and also when the model has zero unit tests. Coverage is a
+   three-valued checklist (covered / uncovered / unknown) — counts, never
+   a percentage; tiers are labeled chips, never blended into a score. A
+   model with no findings renders a quiet empty line, never a hidden
+   panel. #}
+<section class="model-findings" aria-label="Coverage checks" data-testid="model-findings">
+  <div class="findings-header">
+    <h2>Coverage checks</h2>
+    <p class="findings-subtitle">Static checks over the manifest and compiled SQL — tiers are labeled, never averaged.</p>
+  </div>
+  <div class="findings-body"></div>
+</section>
+
 <!-- cute-dbt#74 — Description banner relocated between CTE DAG and
      inspect/expected sections. Reduces cognitive scroll for reviewers
      (context lives next to the test substance they're evaluating) and

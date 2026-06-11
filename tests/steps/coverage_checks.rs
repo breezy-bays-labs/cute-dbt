@@ -228,6 +228,57 @@ fn finding_attributes_coverage(world: &mut World, model: String, column: String)
     );
 }
 
+// cute-dbt#170 — the payload-level check_specs catalog the findings
+// surface renders the rationale drawer + book link from.
+
+#[then(
+    regex = r#"^the payload's check catalog describes "([^"]+)" with tier "([^"]+)" and an inline rationale$"#
+)]
+fn catalog_describes_check(world: &mut World, check: String, tier: String) {
+    let p = payload(world);
+    let entry = &p["check_specs"][&check];
+    assert!(
+        entry.is_object(),
+        "check_specs must carry an entry for {check:?}; got {p}"
+    );
+    assert_eq!(
+        entry["tier"].as_str(),
+        Some(tier.as_str()),
+        "the catalog labels the tier verbatim (never blended): {entry}"
+    );
+    assert!(
+        entry["rationale"].as_str().is_some_and(|r| !r.is_empty()),
+        "the rationale embeds inline so the drawer is offline-usable: {entry}"
+    );
+    assert!(
+        entry["conditions"]
+            .as_array()
+            .is_some_and(|c| !c.is_empty()),
+        "the conditions embed inline: {entry}"
+    );
+}
+
+#[then(regex = r#"^the "([^"]+)" catalog entry links the book page "([^"]+)"$"#)]
+fn catalog_links_book_page(world: &mut World, check: String, page: String) {
+    let p = payload(world);
+    let href = p["check_specs"][&check]["book_href"]
+        .as_str()
+        .unwrap_or_else(|| panic!("catalog entry for {check:?} carries book_href: {p}"));
+    assert!(
+        href.starts_with("https://") && href.ends_with(&page),
+        "book_href is the absolute generated check page (click-only anchor); got {href:?}"
+    );
+}
+
+#[then("the payload carries no check catalog")]
+fn payload_carries_no_catalog(world: &mut World) {
+    let p = payload(world);
+    assert!(
+        p.get("check_specs").is_none(),
+        "a findings-free payload must omit check_specs (byte-stability); got {p}"
+    );
+}
+
 #[then(regex = r#"^the payload carries no findings for "([^"]+)"$"#)]
 fn payload_carries_no_findings(world: &mut World, model: String) {
     let p = payload(world);

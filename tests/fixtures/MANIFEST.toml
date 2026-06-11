@@ -279,7 +279,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"
-sha256 = "7f3762f8ca9b472c4b2eeed0d4d477e1d017a8b4b3e3fa743e68636d0a5a58a6"
+sha256 = "8b36e99a43df4a9a90402ccdd7f2480f4981eb449db19ba7169f04f1f970de10"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -304,7 +304,18 @@ new-in-current ⇒ modified ⇒ in scope, absent from the baseline — so the \
 example surfaces the incremental-model affordances (model badge, \
 incremental-branch mode badge + expect-semantics tooltip, this-given \
 "prior model state" badge). This pair of nodes is hand-authored synthetic \
-JSON spliced into the fusion output, NOT fusion-emitted.\
+JSON spliced into the fusion output, NOT fusion-emitted. cute-dbt#170 \
+then made three more synthetic local-only edits so the findings surface \
+dogfoods in the committed goldens: mart_dq_summary's config gains \
+unique_key = "entity_type" (its meta already declares grain: entity_type; \
+no uniqueness test exists ⇒ grain.unique-key-unbacked UNCOVERED with its \
+recommendation), dim_payers' raw_code gains an inline \
+`-- cute-dbt: ignore(union.arm-coverage, ...)` pragma (⇒ the sentinel-arm \
+UNKNOWN renders suppressed-with-reason, the visible-but-quiet reveal), and \
+fct_clinical_events gains the same synthetic-body-mod comment idiom as \
+int_dq_quarantine__encounters (raw_code comment + recomputed checksum ⇒ \
+modified ⇒ in scope, surfacing the union UNCOVERED verdict with its \
+copyable given-row sketches + a covered grain check).\
 """
 
 [[fixture]]

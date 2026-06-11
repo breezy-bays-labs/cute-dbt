@@ -67,10 +67,10 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, BlockDiff, CheckPolicy, CteGraph, EdgeType, Finding, FixtureTable,
-    HeuristicId, InScopeSet, Manifest, ModelInScopeSet, Node, NodeId, TestMetadata, UnitTest,
-    UnitTestDataDiff, UnitTestGiven, UnitTestYamlBlock, apply_check_policy, model_findings,
-    resolve_target_model, table_from_manifest_rows,
+    BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, CteGraph, EdgeType, Finding, FixtureTable,
+    HeuristicId, InScopeSet, Instrument, Manifest, ModelInScopeSet, Node, NodeId, TestMetadata,
+    Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestYamlBlock, apply_check_policy,
+    model_findings, resolve_target_model, table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -246,12 +246,135 @@ pub struct ModelPayload {
     /// the per-(construct, check) verdicts the check engine computed
     /// during payload assembly ([`model_findings`]: evaluate ALL
     /// registered checks → resolve supersedes; display filtering is a
-    /// separate downstream concern). Payload-level only in this slice —
-    /// the report findings surface renders these in cute-dbt#170.
-    /// Omitted from JSON when empty so every pre-#169 payload (and the
-    /// committed goldens whose models trip no check) stays byte-stable.
+    /// separate downstream concern). Since cute-dbt#170 each entry is a
+    /// [`FindingPayload`] — the domain [`Finding`] flattened verbatim
+    /// plus the render-resolved `pin_node` / `sketches` fields the
+    /// findings surface consumes. Omitted from JSON when empty so every
+    /// pre-#169 payload (and the committed goldens whose models trip no
+    /// check) stays byte-stable.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub findings: Vec<Finding<HeuristicId>>,
+    pub findings: Vec<FindingPayload>,
+}
+
+/// One coverage finding in render shape (cute-dbt#170): the domain
+/// [`Finding`] — serialized FLAT, so every cute-dbt#169 wire key
+/// (`check` / `tier` / `instrument` / `model_id` / `construct` /
+/// `verdict` / `evidence` / `recommendation` / `suppressed`) is
+/// unchanged — plus the two render-resolved fields the findings panel
+/// consumes. Rust computes, JS only renders.
+#[derive(Debug, Clone, Serialize)]
+pub struct FindingPayload {
+    /// The policy-applied domain finding, flattened onto this object.
+    #[serde(flatten)]
+    pub finding: Finding<HeuristicId>,
+    /// The DAG node id this finding's evidence pins to: a
+    /// `group[<node>]` construct (e.g. `union[combined_metrics]`) pins
+    /// the named CTE node; a model-level construct (e.g.
+    /// `config.unique_key`) pins the terminal node. `None` (key
+    /// omitted) when the model's graph is empty or the named node is
+    /// not in the graph — the template then renders no pin affordance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pin_node: Option<String>,
+    /// Copy-pasteable fixture sketches LIFTED out of the evidence list
+    /// (the `SUGGESTED_GIVEN_LABEL` entries the union check emits,
+    /// cute-dbt#172) — the template renders each as a copyable code
+    /// block instead of a plain evidence row. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sketches: Vec<String>,
+}
+
+/// The evidence label the union check stamps on its copy-pasteable
+/// given-row sketches (`suggested_given_sketch` in
+/// `src/domain/checks.rs`). [`finding_payload`] lifts these entries into
+/// [`FindingPayload::sketches`]; everything else stays plain evidence.
+const SUGGESTED_GIVEN_LABEL: &str = "suggested given";
+
+/// Resolve the DAG node a finding pins to (see
+/// [`FindingPayload::pin_node`]). Bracketed constructs name an engine
+/// node verbatim today; the match is case-insensitive anyway because
+/// SQL identifiers fold.
+fn resolve_pin_node(graph: &CteGraph, construct: &str) -> Option<String> {
+    let named = construct
+        .find('[')
+        .and_then(|open| construct[open + 1..].strip_suffix(']'))
+        .and_then(|name| {
+            graph
+                .nodes()
+                .iter()
+                .find(|node| node.name().eq_ignore_ascii_case(name))
+                .map(|node| node.name().to_owned())
+        });
+    named.or_else(|| {
+        graph
+            .nodes()
+            .iter()
+            .find(|node| node.name() == TERMINAL_NODE_NAME)
+            .map(|node| node.name().to_owned())
+    })
+}
+
+/// Wrap one policy-applied domain [`Finding`] into its render shape:
+/// resolve the pin target and lift the `suggested given` evidence
+/// entries into [`FindingPayload::sketches`].
+fn finding_payload(graph: &CteGraph, mut finding: Finding<HeuristicId>) -> FindingPayload {
+    let pin_node = resolve_pin_node(graph, &finding.construct);
+    let (sketches, evidence): (Vec<_>, Vec<_>) = std::mem::take(&mut finding.evidence)
+        .into_iter()
+        .partition(|entry| entry.label == SUGGESTED_GIVEN_LABEL);
+    finding.evidence = evidence;
+    FindingPayload {
+        finding,
+        pin_node,
+        sketches: sketches.into_iter().map(|entry| entry.value).collect(),
+    }
+}
+
+/// Base URL of the published book's GENERATED check pages
+/// (`book/src/checks/<id>.md` → `<base><id>.html`; mdBook `site-url`
+/// `/cute-dbt/`). Rides the payload as [`CheckSpecPayload::book_href`]
+/// and renders as a plain click-only `<a>` — never fetched at load, so
+/// the zero-egress gate holds (the report makes zero requests until the
+/// user deliberately leaves it).
+const BOOK_CHECKS_BASE: &str = "https://breezy-bays-labs.github.io/cute-dbt/checks/";
+
+/// The spec catalog entry for one registered check (cute-dbt#170) —
+/// everything the inline rationale drawer ("what is this check?")
+/// renders OFFLINE, denormalized from the [`HeuristicId`] spec statics
+/// so the JS never reaches back into Rust. Carried once per check id in
+/// [`ReportPayload::check_specs`], not per finding.
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckSpecPayload {
+    /// Human-facing display name (e.g. `Unexercised UNION arm`).
+    pub name: &'static str,
+    /// Check group (the dotted id's prefix).
+    pub group: &'static str,
+    /// Accuracy tier — labeled in the UI, never blended.
+    pub tier: Tier,
+    /// Recommended testing instrument.
+    pub instrument: Instrument,
+    /// Prose mirror of the trigger + satisfaction predicate.
+    pub conditions: &'static [&'static str],
+    /// Shapes the check deliberately stays silent (or `UNKNOWN`) on.
+    pub exclusions: &'static [&'static str],
+    /// Why the gap matters — embedded inline (zero-egress).
+    pub rationale: &'static str,
+    /// Outbound link to the generated book check page — click-only.
+    pub book_href: String,
+}
+
+/// Build the [`CheckSpecPayload`] for one registered check.
+fn check_spec_payload(id: HeuristicId) -> CheckSpecPayload {
+    let spec = id.spec();
+    CheckSpecPayload {
+        name: spec.name,
+        group: spec.group,
+        tier: spec.tier,
+        instrument: spec.instrument,
+        conditions: spec.conditions,
+        exclusions: spec.exclusions,
+        rationale: spec.rationale,
+        book_href: format!("{BOOK_CHECKS_BASE}{}.html", spec.id_str),
+    }
 }
 
 /// One DAG node — stable id, display label, and role.
@@ -726,6 +849,14 @@ pub struct ReportPayload {
     /// One entry per model in `models_in_scope` (deterministic
     /// `BTreeSet` ordering inherited from the comparator).
     pub models: Vec<ModelPayload>,
+    /// Spec catalog for every check that appears in any model's
+    /// `findings` (cute-dbt#170), keyed by dotted check id — the
+    /// rationale drawer, tier vocabulary, and book link render from
+    /// this. Omitted from JSON when no finding fired anywhere, so
+    /// findings-free payloads (and the jaffle-shop golden) stay
+    /// byte-stable.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub check_specs: BTreeMap<String, CheckSpecPayload>,
 }
 
 /// Which scope source produced this report — selects the diff-scope
@@ -961,9 +1092,21 @@ pub fn build_payload_with_externals(
             check_policy,
         ));
     }
+    // cute-dbt#170 — the spec catalog covers exactly the checks that
+    // fired (suppressed findings included: they render, quietly).
+    let mut check_specs = BTreeMap::new();
+    for model in &models {
+        for finding in &model.findings {
+            let id = finding.finding.check;
+            check_specs
+                .entry(id.as_str().to_owned())
+                .or_insert_with(|| check_spec_payload(id));
+        }
+    }
     ReportPayload {
         baseline: baseline_label.to_owned(),
         models,
+        check_specs,
     }
 }
 
@@ -1163,7 +1306,13 @@ fn build_model_payload(
         // model_findings' evaluate-all → resolve-supersedes pipeline:
         // selection removes, suppression marks (reason rides into the
         // payload). The default policy is a no-op.
-        findings: apply_check_policy(model_findings(current, model, Some(&graph)), check_policy),
+        // cute-dbt#170 — each finding is then wrapped into its render
+        // shape (pin target resolved against the parsed graph; sketch
+        // evidence lifted into copyable code blocks).
+        findings: apply_check_policy(model_findings(current, model, Some(&graph)), check_policy)
+            .into_iter()
+            .map(|finding| finding_payload(&graph, finding))
+            .collect(),
     }
 }
 
@@ -2050,6 +2199,191 @@ mod tests {
         assert!(
             json.get("findings").is_none(),
             "empty findings must be serde-skipped; got {json}"
+        );
+    }
+
+    /// A model tripping BOTH registered checks: `config.unique_key` with
+    /// no backing uniqueness test (grain, UNCOVERED) and a UNION whose
+    /// arms no unit test feeds (union, UNCOVERED with sketches).
+    fn findings_surface_payload() -> ReportPayload {
+        let mut config = BTreeMap::new();
+        config.insert("unique_key".to_owned(), json!("event_id"));
+        let compiled = "with arm_a as (select * from src_a), \
+                        arm_b as (select * from src_b), \
+                        unioned as (select * from arm_a union all select * from arm_b) \
+                        select * from unioned";
+        let node = Node::new(
+            NodeId::new("model.shop.events"),
+            "model",
+            checksum("body"),
+            Some(compiled.to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(config, false),
+            None,
+            BTreeMap::new(),
+        );
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.events")]);
+        build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        )
+    }
+
+    #[test]
+    fn finding_payload_pins_bracketed_constructs_to_the_named_node() {
+        // cute-dbt#170 — `union[unioned]` resolves to the `unioned` CTE
+        // node; the model-level grain construct pins the terminal node.
+        let payload = findings_surface_payload();
+        let json = serde_json::to_value(&payload.models[0]).expect("serialize");
+        let findings = json["findings"].as_array().expect("findings present");
+        let union = findings
+            .iter()
+            .find(|f| f["check"] == "union.arm-coverage")
+            .expect("union finding fires");
+        assert_eq!(union["pin_node"], "unioned");
+        let grain = findings
+            .iter()
+            .find(|f| f["check"] == "grain.unique-key-unbacked")
+            .expect("grain finding fires");
+        assert_eq!(
+            grain["pin_node"], TERMINAL_NODE_NAME,
+            "model-level constructs pin the terminal node"
+        );
+    }
+
+    #[test]
+    fn finding_payload_omits_pin_node_when_the_graph_is_empty() {
+        // A `select 1` model has no CTE graph — no pin affordance.
+        let mut config = BTreeMap::new();
+        config.insert("unique_key".to_owned(), json!("order_id"));
+        let node = Node::new(
+            NodeId::new("model.shop.flat"),
+            "model",
+            checksum("body"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(config, false),
+            None,
+            BTreeMap::new(),
+        );
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.flat")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        let json = serde_json::to_value(&payload.models[0]).expect("serialize");
+        assert!(
+            json["findings"][0].get("pin_node").is_none(),
+            "empty graph ⇒ pin_node omitted; got {json}"
+        );
+    }
+
+    #[test]
+    fn finding_payload_lifts_suggested_given_sketches_out_of_evidence() {
+        // cute-dbt#170 — the union check's `suggested given` evidence
+        // entries become the copyable `sketches` array; the remaining
+        // evidence list never carries that label.
+        let payload = findings_surface_payload();
+        let json = serde_json::to_value(&payload.models[0]).expect("serialize");
+        let union = json["findings"]
+            .as_array()
+            .expect("findings present")
+            .iter()
+            .find(|f| f["check"] == "union.arm-coverage")
+            .cloned()
+            .expect("union finding fires");
+        let sketches = union["sketches"].as_array().expect("sketches lifted");
+        assert!(!sketches.is_empty(), "uncovered arms carry sketches");
+        assert!(
+            sketches
+                .iter()
+                .all(|s| s.as_str().is_some_and(|s| s.starts_with("- input: ref('"))),
+            "each sketch is the copy-pasteable given-row YAML: {sketches:?}"
+        );
+        let labels: Vec<&str> = union["evidence"]
+            .as_array()
+            .expect("evidence stays present")
+            .iter()
+            .filter_map(|e| e["label"].as_str())
+            .collect();
+        assert!(
+            !labels.contains(&"suggested given"),
+            "sketch entries are LIFTED, not duplicated: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn report_payload_carries_the_check_spec_catalog_for_fired_checks() {
+        // cute-dbt#170 — the rationale drawer renders offline from
+        // `check_specs`; the book link is a plain click-only href.
+        let payload = findings_surface_payload();
+        let json = serde_json::to_value(&payload).expect("serialize");
+        let specs = json["check_specs"]
+            .as_object()
+            .expect("check_specs present when findings fired");
+        assert_eq!(specs.len(), 2, "exactly the fired checks: {specs:?}");
+        let grain = &specs["grain.unique-key-unbacked"];
+        assert_eq!(grain["tier"], "total");
+        assert_eq!(grain["instrument"], "data-test");
+        assert!(
+            grain["rationale"].as_str().is_some_and(|r| !r.is_empty()),
+            "rationale embeds inline (zero-egress)"
+        );
+        assert!(
+            grain["conditions"]
+                .as_array()
+                .is_some_and(|c| !c.is_empty()),
+            "conditions embed inline"
+        );
+        assert_eq!(
+            grain["book_href"],
+            "https://breezy-bays-labs.github.io/cute-dbt/checks/grain.unique-key-unbacked.html",
+        );
+        assert_eq!(
+            specs["union.arm-coverage"]["tier"], "high",
+            "tier vocabulary rides per check, never blended"
+        );
+    }
+
+    #[test]
+    fn report_payload_omits_check_specs_when_no_finding_fires() {
+        // Findings-free payloads (the jaffle-shop golden) stay
+        // byte-stable: no `check_specs` key at all.
+        let node = model_node("model.shop.plain", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.plain")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        let json = serde_json::to_value(&payload).expect("serialize");
+        assert!(
+            json.get("check_specs").is_none(),
+            "no findings ⇒ no check_specs key; got {json}"
         );
     }
 
@@ -3046,6 +3380,7 @@ mod tests {
         let payload = ReportPayload {
             baseline: "</script><script>alert(1)</script>".to_owned(),
             models: vec![],
+            check_specs: BTreeMap::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -3063,6 +3398,7 @@ mod tests {
         let payload = ReportPayload {
             baseline: "x<!--hostile-->y".to_owned(),
             models: vec![],
+            check_specs: BTreeMap::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -3082,6 +3418,7 @@ mod tests {
         let payload = ReportPayload {
             baseline: "a < b".to_owned(),
             models: vec![],
+            check_specs: BTreeMap::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(serialized.contains("a < b"), "bare `<` is preserved");
@@ -3094,6 +3431,7 @@ mod tests {
         let original = ReportPayload {
             baseline: "</script><!--end".to_owned(),
             models: vec![],
+            check_specs: BTreeMap::new(),
         };
         let serialized = payload_json_for_html_script(&original).unwrap();
         let parsed: serde_json::Value =
