@@ -165,6 +165,7 @@ fn run_with_edit(world: &mut World, edit: Edit) {
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"))
         .args([
+            "report",
             "--manifest",
             common::s(&manifest_path),
             "--pr-diff",

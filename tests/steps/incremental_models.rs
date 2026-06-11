@@ -133,6 +133,7 @@ fn render_incremental_report(world: &mut World) {
     let out = common::tmp("incremental_report.html");
     common::clear(&out);
     let output = common::run_cli(&[
+        "report",
         "--manifest",
         common::s(&current_path),
         "--baseline-manifest",

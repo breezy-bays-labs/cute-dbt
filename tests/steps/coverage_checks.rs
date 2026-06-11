@@ -169,6 +169,7 @@ fn render_coverage_report(world: &mut World) {
     let out = common::tmp("coverage_report.html");
     common::clear(&out);
     let output = common::run_cli(&[
+        "report",
         "--manifest",
         common::s(&current_path),
         "--baseline-manifest",

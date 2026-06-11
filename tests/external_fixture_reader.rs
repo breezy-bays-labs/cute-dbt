@@ -62,6 +62,7 @@ fn external_fixture_files_are_read_through_project_root_and_inlined() {
     let out = root.join("report.html");
     let status = Command::new(env!("CARGO_BIN_EXE_cute-dbt"))
         .args([
+            "report",
             "--manifest",
             &committed_manifest(),
             "--pr-diff",

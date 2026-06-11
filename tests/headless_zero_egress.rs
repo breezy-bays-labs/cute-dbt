@@ -113,7 +113,7 @@ fn every_committed_example_makes_zero_external_requests_when_opened_via_file_url
         assert!(
             path.exists(),
             "examples/{filename} missing — regenerate via the \
-             `example-report-up-to-date` CI step or run:\n  cargo run --bin cute-dbt -- \
+             `example-report-up-to-date` CI step or run:\n  cargo run --bin cute-dbt -- report \
              --manifest <fixture-current.json> --baseline-manifest <fixture-baseline.json> \
              --out examples/{filename}",
         );
@@ -279,6 +279,153 @@ fn every_committed_example_makes_zero_external_requests_when_opened_via_file_url
     assert!(
         failures.is_empty(),
         "zero-egress proof FAILED on one or more committed examples — each is a hole in the auditability story:\n{}",
+        failures.join("\n"),
+    );
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn every_committed_explore_page_makes_zero_external_requests_when_opened_via_file_url() {
+    // cute-dbt#100 — the explore pages' arm of the primary gate. The
+    // zero-egress request-log assertion is UNIFORM with the report
+    // examples above; the LIVENESS oracle is page-aware:
+    //   - dag.html renders the model lineage through the inlined Mermaid
+    //     UMD bundle → wait for the SVG inside .lineage-dag;
+    //   - tests.html is a static server-rendered page with NO Mermaid
+    //     and NO DataTables → assert DOM facts (the per-model sections
+    //     exist and the embedded cute-dbt-data payload parses). Applying
+    //     the report's Mermaid/DataTables probes here would be a
+    //     category error — there is nothing to initialize.
+    for filename in common::COMMITTED_EXPLORE_PAGES {
+        let path = common::example_path(filename);
+        assert!(
+            path.exists(),
+            "examples/{filename} missing — regenerate via:\n  cargo run --bin cute-dbt -- \
+             explore --manifest tests/fixtures/playground-current.json --out-dir examples/explore",
+        );
+    }
+
+    let chrome_path = std::env::var_os("CHROME").map(PathBuf::from);
+    let host_resolver = OsStr::new("--host-resolver-rules=MAP * ~NOTFOUND");
+    let no_first_run = OsStr::new("--no-first-run");
+    let no_default_check = OsStr::new("--no-default-browser-check");
+    let disable_breakpad = OsStr::new("--disable-breakpad");
+
+    let mut builder = LaunchOptionsBuilder::default();
+    builder.headless(true).sandbox(false).args(vec![
+        host_resolver,
+        no_first_run,
+        no_default_check,
+        disable_breakpad,
+    ]);
+    if let Some(p) = chrome_path.as_ref() {
+        builder.path(Some(p.clone()));
+    }
+    let opts = builder.build().expect("LaunchOptions must build");
+    let browser = Browser::new(opts).expect("Chromium must launch");
+
+    let mut failures: Vec<String> = Vec::new();
+    for filename in common::COMMITTED_EXPLORE_PAGES {
+        let url = report_file_url(filename);
+        assert!(
+            url.starts_with("file://"),
+            "zero-egress proof MUST run against a real file:// origin; got {url}",
+        );
+        let tab = browser.new_tab().expect("new tab");
+        tab.call_method(Network::Enable {
+            max_total_buffer_size: None,
+            max_resource_buffer_size: None,
+            max_post_data_size: None,
+            report_direct_socket_traffic: None,
+            enable_durable_messages: None,
+        })
+        .expect("enable Network domain");
+
+        let external = Arc::new(Mutex::new(Vec::<ExternalRequest>::new()));
+        let external_recorder = external.clone();
+        tab.add_event_listener(Arc::new(move |event: &Event| {
+            if let Event::NetworkRequestWillBeSent(e) = event {
+                let req_url = e.params.request.url.clone();
+                if scheme_is_external(&req_url) {
+                    external_recorder.lock().unwrap().push(ExternalRequest {
+                        url: req_url,
+                        initiator_type: format!("{:?}", e.params.initiator.Type),
+                        initiator_url: e.params.initiator.url.clone(),
+                        initiator_line: e.params.initiator.line_number,
+                    });
+                }
+            }
+        }))
+        .expect("subscribe Network.requestWillBeSent");
+
+        tab.navigate_to(&url).expect("navigate to file:// URL");
+        tab.wait_until_navigated().expect("await navigation");
+
+        // Page-aware liveness oracle (cute-dbt#100).
+        if filename.ends_with("dag.html") {
+            let lineage_ok = tab
+                .wait_for_element_with_custom_timeout(".lineage-dag svg", Duration::from_secs(15))
+                .is_ok();
+            if !lineage_ok {
+                failures.push(format!(
+                    "examples/{filename}: the Mermaid lineage SVG never appeared inside \
+                     .lineage-dag — either the inlined UMD bundle is broken offline or the \
+                     lineage boot script failed.",
+                ));
+            }
+        } else {
+            // `eval` is this file's Runtime.Evaluate helper (a CDP probe
+            // into OUR OWN generated page inside a hermetic headless
+            // test) — not JS eval() over untrusted input.
+            let sections = eval(
+                &tab,
+                "document.querySelectorAll('section.explore-model').length",
+            )
+            .as_u64()
+            .unwrap_or(0);
+            if sections == 0 {
+                failures.push(format!(
+                    "examples/{filename}: no section.explore-model rendered — the static \
+                     unit-test index is empty or broken.",
+                ));
+            }
+            let payload_ok = eval(
+                &tab,
+                "(function () { \
+                   try { \
+                     var el = document.getElementById('cute-dbt-data'); \
+                     return !!(el && JSON.parse(el.textContent).models.length); \
+                   } catch (_) { return false; } \
+                 })()",
+            )
+            .as_bool()
+            .unwrap_or(false);
+            if !payload_ok {
+                failures.push(format!(
+                    "examples/{filename}: the embedded cute-dbt-data payload is missing or \
+                     does not parse to a non-empty models array.",
+                ));
+            }
+        }
+
+        let captured = external.lock().unwrap().clone();
+        if !captured.is_empty() {
+            let listing = captured
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            failures.push(format!(
+                "examples/{filename}: {n} external request(s):\n{listing}",
+                n = captured.len(),
+            ));
+        }
+        let _ = tab.close(true);
+    }
+
+    assert!(
+        failures.is_empty(),
+        "zero-egress proof FAILED on one or more committed explore pages:\n{}",
         failures.join("\n"),
     );
 }

@@ -23,6 +23,7 @@ fn run_with_pr_diff_file(diff_path: &str, out: &std::path::Path) -> std::process
     let current = fixture("jaffle-shop-current.json");
     let at_arg = format!("@{diff_path}");
     run_cli(&[
+        "report",
         "--manifest",
         s(&current),
         "--pr-diff",
@@ -128,6 +129,7 @@ fn valid_diff_touching_unit_test_yaml_puts_that_test_in_scope_exit_0() {
     clear(&out);
 
     let output = run_cli(&[
+        "report",
         "--manifest",
         s(&current),
         "--pr-diff",
@@ -187,6 +189,7 @@ fn a_default_context_git_diff_does_not_panic_and_renders_a_report() {
     clear(&out);
 
     let output = run_cli(&[
+        "report",
         "--manifest",
         s(&current),
         "--pr-diff",
@@ -240,6 +243,7 @@ fn a_unified_zero_diff_emits_no_context_bearing_note() {
     clear(&out);
 
     let output = run_cli(&[
+        "report",
         "--manifest",
         s(&current),
         "--pr-diff",

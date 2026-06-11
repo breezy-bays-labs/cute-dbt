@@ -52,6 +52,7 @@ fn empty_scope_writes_a_valid_report_with_the_banner() {
     let out = tmp("empty_scope.html");
     clear(&out);
     let output = run(&[
+        "report",
         "--manifest",
         s(&baseline),
         "--baseline-manifest",
@@ -74,6 +75,7 @@ fn a_non_empty_diff_writes_a_report() {
     let out = tmp("non_empty.html");
     clear(&out);
     let output = run(&[
+        "report",
         "--manifest",
         s(&fixture("jaffle-shop-current.json")),
         "--baseline-manifest",
@@ -101,6 +103,7 @@ fn a_parse_only_manifest_fails_closed_naming_the_node() {
     let out = tmp("parse_only.html");
     clear(&out);
     let output = run(&[
+        "report",
         "--manifest",
         s(&fixture("jaffle-shop-parse-only.json")),
         "--baseline-manifest",
@@ -132,6 +135,7 @@ fn a_missing_baseline_manifest_is_a_usage_error() {
     let out = tmp("missing_baseline.html");
     clear(&out);
     let output = run(&[
+        "report",
         "--manifest",
         s(&fixture("jaffle-shop-current.json")),
         "--out",
@@ -157,6 +161,7 @@ fn an_unreadable_manifest_fails_closed() {
     let out = tmp("unreadable.html");
     clear(&out);
     let output = run(&[
+        "report",
         "--manifest",
         s(&bad),
         "--baseline-manifest",
@@ -188,6 +193,7 @@ fn a_pre_1_8_manifest_fails_closed_at_the_schema_gate() {
     let out = tmp("schema_v11.html");
     clear(&out);
     let output = run(&[
+        "report",
         "--manifest",
         s(&old),
         "--baseline-manifest",
@@ -213,6 +219,7 @@ fn an_unusable_baseline_fails_closed() {
     let out = tmp("unusable_baseline.html");
     clear(&out);
     let output = run(&[
+        "report",
         "--manifest",
         s(&fixture("jaffle-shop-current.json")),
         "--baseline-manifest",
@@ -239,6 +246,7 @@ fn an_unwritable_output_path_is_reported() {
     // the run loop reports a clear error instead of panicking.
     let out = tmp("no_such_dir/report.html");
     let output = run(&[
+        "report",
         "--manifest",
         s(&fixture("jaffle-shop-baseline.json")),
         "--baseline-manifest",
@@ -267,6 +275,7 @@ fn a_modified_model_with_zero_unit_tests_and_no_compiled_sql_fails_closed() {
     let out = tmp("no_test_uncompiled.html");
     clear(&out);
     let output = run(&[
+        "report",
         "--manifest",
         s(&fixture("jaffle-shop-no-test-uncompiled.json")),
         "--baseline-manifest",
@@ -304,11 +313,40 @@ fn help_exits_zero() {
 }
 
 #[test]
-fn no_arguments_is_a_usage_error() {
+fn no_arguments_is_a_usage_error_listing_both_subcommands() {
+    // The cute-dbt#100 CLI restructure: bare `cute-dbt` is a usage error
+    // (exit 2, never the help-on-missing display that can exit 0), and
+    // the error names BOTH verbs so the operator can self-serve. The
+    // clap ErrorKind itself (`MissingSubcommand`) is pinned by the
+    // src/cli/args.rs unit test; this asserts the process-level mapping.
     let output = run(&[]);
     assert_eq!(
         output.status.code(),
         Some(2),
-        "missing required arguments is a usage error: {output:?}",
+        "a missing subcommand is a usage error: {output:?}",
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("report") && stderr.contains("explore"),
+        "the usage error lists both subcommands: {stderr}",
+    );
+}
+
+#[test]
+fn flat_pre_verb_invocation_is_a_usage_error() {
+    // The pre-#100 flat surface must not silently keep working: flags
+    // without a verb are rejected at parse time (deliberate v0.x break).
+    let output = run(&[
+        "--manifest",
+        s(&fixture("jaffle-shop-current.json")),
+        "--baseline-manifest",
+        s(&fixture("jaffle-shop-baseline.json")),
+        "--out",
+        s(&tmp("flat_invocation.html")),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "the flat pre-verb shape is a usage error: {output:?}",
     );
 }

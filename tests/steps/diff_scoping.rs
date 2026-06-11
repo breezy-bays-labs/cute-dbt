@@ -233,6 +233,7 @@ fn run_synthetic_pair(world: &mut World, selectors: Option<&str>) {
     common::clear(&out);
 
     let mut args: Vec<&str> = vec![
+        "report",
         "--manifest",
         common::s(&current_path),
         "--baseline-manifest",

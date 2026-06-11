@@ -650,7 +650,7 @@ fn capture(world: &mut World, output: std::process::Output, out: std::path::Path
 }
 
 #[when(
-    regex = r#"^I run cute-dbt with --manifest current\.json --pr-diff @diff\.patch --project-root (\S+) --out report\.html$"#
+    regex = r#"^I run cute-dbt report with --manifest current\.json --pr-diff @diff\.patch --project-root (\S+) --out report\.html$"#
 )]
 fn run_pr_diff(world: &mut World, project_root: String) {
     let manifest = take_current(world);
@@ -686,6 +686,7 @@ fn run_pr_diff(world: &mut World, project_root: String) {
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"))
         .args([
+            "report",
             "--manifest",
             common::s(&manifest_path),
             "--pr-diff",
@@ -702,7 +703,7 @@ fn run_pr_diff(world: &mut World, project_root: String) {
 }
 
 #[when(
-    regex = r#"^I run cute-dbt with --manifest current\.json --baseline-manifest baseline\.json --pr-diff @diff\.patch --project-root \. --out report\.html$"#
+    regex = r#"^I run cute-dbt report with --manifest current\.json --baseline-manifest baseline\.json --pr-diff @diff\.patch --project-root \. --out report\.html$"#
 )]
 fn run_both_scope_sources(world: &mut World) {
     // clap rejects the conflicting scope sources at parse time. The
@@ -722,6 +723,7 @@ fn run_both_scope_sources(world: &mut World) {
     let scope_arg = format!("@{}", common::s(&patch_path));
 
     let output = common::run_cli(&[
+        "report",
         "--manifest",
         common::s(&manifest_path),
         "--baseline-manifest",
@@ -737,7 +739,7 @@ fn run_both_scope_sources(world: &mut World) {
 }
 
 #[when(
-    regex = r#"^I run cute-dbt with --manifest current\.json --project-root \. --out report\.html$"#
+    regex = r#"^I run cute-dbt report with --manifest current\.json --project-root \. --out report\.html$"#
 )]
 fn run_no_scope_source(world: &mut World) {
     // Neither scope source — clap's required `scope_source` group fails.
@@ -748,6 +750,7 @@ fn run_no_scope_source(world: &mut World) {
     let out = common::tmp("pr_diff_neither_report.html");
     common::clear(&out);
     let output = common::run_cli(&[
+        "report",
         "--manifest",
         common::s(&manifest_path),
         "--project-root",

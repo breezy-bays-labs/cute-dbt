@@ -81,6 +81,30 @@ pub fn model_node(bare: &str, checksum: &str, compiled: Option<&str>) -> Node {
     )
 }
 
+/// Construct a model `Node` like [`model_node`] but carrying explicit
+/// `depends_on.nodes` edges to other models, by bare name (cute-dbt#100
+/// — the explore lineage scenarios).
+#[must_use]
+pub fn model_node_with_deps(
+    bare: &str,
+    checksum: &str,
+    compiled: Option<&str>,
+    dep_bares: &[&str],
+) -> Node {
+    Node::new(
+        model_id(bare),
+        "model",
+        Checksum::new("sha256", checksum),
+        compiled.map(str::to_owned),
+        None,
+        DependsOn::new(Vec::new(), dep_bares.iter().map(|d| model_id(d)).collect()),
+        None,
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+}
+
 /// Construct a model `Node` like [`model_node`] but carrying an explicit
 /// resolved config dict (cute-dbt#160 — the config-only-change
 /// scenarios). Contract stays unenforced; the other facets mirror

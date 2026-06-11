@@ -55,7 +55,7 @@ fn every_model_unchanged(world: &mut World) {
 // --- When -----------------------------------------------------------
 
 #[when(
-    regex = r#"^I run cute-dbt with --manifest current\.json --baseline-manifest baseline\.json --out report\.html$"#
+    regex = r#"^I run cute-dbt report with --manifest current\.json --baseline-manifest baseline\.json --out report\.html$"#
 )]
 fn when_run_cute_dbt(world: &mut World) {
     // Both `report_generation.feature` and two scenarios in
@@ -84,6 +84,7 @@ fn when_run_cute_dbt(world: &mut World) {
     common::clear(&out);
 
     let output = common::run_cli(&[
+        "report",
         "--manifest",
         common::s(&manifest),
         "--baseline-manifest",
@@ -94,14 +95,20 @@ fn when_run_cute_dbt(world: &mut World) {
     capture_subprocess(world, output, out);
 }
 
-#[when("I run cute-dbt with --manifest current.json --out report.html")]
+#[when("I run cute-dbt report with --manifest current.json --out report.html")]
 fn when_run_cute_dbt_missing_baseline(world: &mut World) {
     // The @no-baseline-usage-error scenario — clap rejects this at
     // parse time before any manifest is read.
     let manifest = common::fixture("jaffle-shop-current.json");
     let out = common::tmp("bdd_missing_baseline.html");
     common::clear(&out);
-    let output = common::run_cli(&["--manifest", common::s(&manifest), "--out", common::s(&out)]);
+    let output = common::run_cli(&[
+        "report",
+        "--manifest",
+        common::s(&manifest),
+        "--out",
+        common::s(&out),
+    ]);
     capture_subprocess(world, output, out);
 }
 

@@ -150,6 +150,51 @@ pub struct World {
     /// the real subprocess). The Thens assert the embedded payload's
     /// `findings` (presence, removal, and the `suppressed` mark).
     pub selection_plan: SelectionPlan,
+
+    // --- Explore (explore_cli / explore_full_manifest, cute-dbt#100) -----
+    /// The out directory the last `cute-dbt explore` invocation wrote
+    /// into. Set by the explore `When` steps; the Thens read
+    /// `dag.html` / `tests.html` from it.
+    pub explore_out_dir: Option<PathBuf>,
+
+    /// Contents of `<explore_out_dir>/dag.html`, when written.
+    pub explore_dag_html: Option<String>,
+
+    /// Contents of `<explore_out_dir>/tests.html`, when written.
+    pub explore_tests_html: Option<String>,
+
+    /// An explicit (usually broken) manifest path a Given prepared for
+    /// the next explore invocation — the Stage-1 fail-closed scenarios.
+    pub explore_manifest_path: Option<PathBuf>,
+
+    /// cute-dbt#100: the explore full-manifest scenario accumulator —
+    /// the synthetic models (compiled-ness, deps, unit tests) the
+    /// `When I run cute-dbt explore on the synthetic manifest` step
+    /// serializes and runs the real subprocess against.
+    pub explore_plan: ExplorePlan,
+}
+
+/// A cute-dbt#100 explore scenario plan — the synthetic models the
+/// feature's Givens declare. Every model is in scope by construction
+/// (explore is full-manifest), so there is no modified/baseline notion.
+#[derive(Debug, Default, Clone)]
+pub struct ExplorePlan {
+    /// The declared models.
+    pub models: Vec<ExploreModelDecl>,
+}
+
+/// One model in an [`ExplorePlan`].
+#[derive(Debug, Clone)]
+pub struct ExploreModelDecl {
+    /// Bare model name (`stg_orders`).
+    pub bare: String,
+    /// `false` ⇒ `compiled_code: null` (the fail-open "not compiled"
+    /// scenario); `true` ⇒ a compiled model.
+    pub compiled: bool,
+    /// Bare names of models this model depends on (lineage edges).
+    pub deps: Vec<String>,
+    /// Bare names of unit tests targeting this model.
+    pub tests: Vec<String>,
 }
 
 /// A cute-dbt#145 incremental scenario plan — the models (each with its
