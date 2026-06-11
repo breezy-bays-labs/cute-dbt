@@ -59,9 +59,10 @@ use crate::adapters::render::{
 };
 use crate::domain::{
     BlockDiff, CheckPolicy, DEFAULT_REPORT_TITLE, FixtureTableDiff, HeuristicId, InScopeSet,
-    Manifest, ModelInScopeSet, NamedTableDiff, NormalizedDiffIndex, PreflightError, ScopeInput,
-    ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock,
-    all_models, changed_models, check_by_id, effective_fixture_format, external_fixture_table,
+    Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex,
+    PreflightError, ScopeInput, ScopeSelection, SuppressRule, SuppressionSource, UnitTest,
+    UnitTestDataDiff, UnitTestYamlBlock, all_models, attach_model_yaml_diffs, changed_models,
+    check_by_id, effective_fixture_format, external_fixture_table, extract_model_block,
     extract_unit_test_block, preflight_compiled, reconstruct_block_diffs,
     reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
     refine_changed_by_hunks, resolve_check_policy, scan_pragmas, select_in_scope,
@@ -220,6 +221,17 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
         }
         ScopeInput::Baseline { .. } => HashMap::new(),
     };
+    // Model-YAML gather (cute-dbt#247): for each in-scope model, slice the
+    // authored `models:` entry out of the schema file `patch_path` points
+    // at — or record the truthful degrade (no patch_path / no project root
+    // / file missing / entry not found) the section renders instead. On
+    // the PrDiff arm, attach an inline block diff to each found entry the
+    // diff genuinely edited (same gates as the unit-test YAML drawer);
+    // baseline mode has no hunks, so the section shows the plain File view.
+    let mut model_yaml = gather_model_yaml(args, &current, &models_in_scope);
+    if let ScopeInput::PrDiff { index } = &scope_input {
+        attach_model_yaml_diffs(&mut model_yaml, index);
+    }
     // Cell-level unit-test data-table diffs (cute-dbt#98): the structured
     // sibling of `yaml_diffs`. For each in-scope changed test whose own YAML
     // block the diff touched, reconstruct an aligned given/expect cell diff
@@ -270,6 +282,7 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
         &authoring_yaml,
         &yaml_diffs,
         &sql_diffs,
+        &model_yaml,
         &data_diffs,
         &external_fixtures,
         &baseline_label,
@@ -312,6 +325,7 @@ fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
         &current,
         &InScopeSet::new(),
         &models,
+        &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
@@ -425,6 +439,117 @@ fn gather_authoring_yaml_with_reader(
             continue;
         };
         out.insert(id.to_owned(), block);
+    }
+    out
+}
+
+/// The `gather_model_yaml` stage (cute-dbt#247) — for each in-scope
+/// model, read the schema/properties file the manifest's `patch_path`
+/// points at and slice the model's authored `models:` entry
+/// ([`extract_model_block`]).
+///
+/// Same project-root resolution as [`gather_authoring_yaml`], but the
+/// failure surface is NOT a silent skip: every in-scope model gets a
+/// [`ModelYamlOutcome`], including the honest-degrade arms (no
+/// `patch_path` in the manifest, no resolvable project root, file
+/// missing / outside the root, unreadable, entry not found) — the
+/// rendered Model-YAML section must always say something truthful, never
+/// vanish or render empty. The run never fails on any arm (a render-time
+/// working-tree read, exactly like the authoring-YAML gather; the
+/// zero-egress property of the generated HTML is untouched).
+fn gather_model_yaml(
+    args: &ReportArgs,
+    current: &Manifest,
+    models_in_scope: &ModelInScopeSet,
+) -> HashMap<String, ModelYamlOutcome> {
+    let (resolved, _derived) =
+        self::args::resolve_project_root(args.project_root.as_deref(), &args.manifest);
+    let Some(project_root) = resolved else {
+        return model_yaml_without_root(current, models_in_scope);
+    };
+    let reader = FsProjectFileReader::new(project_root);
+    gather_model_yaml_with_reader(&reader, current, models_in_scope)
+}
+
+/// The no-project-root arm of [`gather_model_yaml`]: nothing can be
+/// read, so each model degrades to [`ModelYamlOutcome::NoProjectRoot`]
+/// (naming the unread schema file) or [`ModelYamlOutcome::NoPatchPath`].
+fn model_yaml_without_root(
+    current: &Manifest,
+    models_in_scope: &ModelInScopeSet,
+) -> HashMap<String, ModelYamlOutcome> {
+    let mut out = HashMap::new();
+    for model_id in models_in_scope.iter() {
+        let Some(node) = current.node(model_id) else {
+            continue;
+        };
+        let outcome = match node.patch_path() {
+            Some(path) => ModelYamlOutcome::NoProjectRoot {
+                path: path.to_owned(),
+            },
+            None => ModelYamlOutcome::NoPatchPath,
+        };
+        out.insert(model_id.as_str().to_owned(), outcome);
+    }
+    out
+}
+
+/// Pure composition step over the [`ProjectFileReader`] port — testable
+/// without touching the filesystem by passing an in-memory impl.
+///
+/// Per-model outcome mapping: a [`io::ErrorKind::NotFound`] read — and an
+/// [`io::ErrorKind::InvalidInput`] (the adapter's path-safety rejection
+/// of a package model's escaping `patch_path`) — is
+/// [`ModelYamlOutcome::FileMissing`]; any other read error warns on
+/// stderr and degrades to [`ModelYamlOutcome::Unreadable`]; a readable
+/// file without the model's `models:` entry is
+/// [`ModelYamlOutcome::EntryNotFound`].
+fn gather_model_yaml_with_reader(
+    reader: &dyn ProjectFileReader,
+    current: &Manifest,
+    models_in_scope: &ModelInScopeSet,
+) -> HashMap<String, ModelYamlOutcome> {
+    let mut out = HashMap::new();
+    for model_id in models_in_scope.iter() {
+        let Some(node) = current.node(model_id) else {
+            continue;
+        };
+        let Some(path) = node.patch_path() else {
+            out.insert(model_id.as_str().to_owned(), ModelYamlOutcome::NoPatchPath);
+            continue;
+        };
+        let outcome = match reader.read(path) {
+            Ok(contents) => {
+                // The `models:` entry is keyed by the model's name — the
+                // final id segment (`model.<package>.<name>`).
+                let name = model_id.as_str().rsplit('.').next().unwrap_or_default();
+                match extract_model_block(&contents, name) {
+                    Some(block) => ModelYamlOutcome::Found {
+                        path: path.to_owned(),
+                        block,
+                        diff: None,
+                    },
+                    None => ModelYamlOutcome::EntryNotFound {
+                        path: path.to_owned(),
+                    },
+                }
+            }
+            Err(err)
+                if err.kind() == io::ErrorKind::NotFound
+                    || err.kind() == io::ErrorKind::InvalidInput =>
+            {
+                ModelYamlOutcome::FileMissing {
+                    path: path.to_owned(),
+                }
+            }
+            Err(err) => {
+                eprintln!("cute-dbt: warning: could not read schema YAML for {model_id}: {err}");
+                ModelYamlOutcome::Unreadable {
+                    path: path.to_owned(),
+                }
+            }
+        };
+        out.insert(model_id.as_str().to_owned(), outcome);
     }
     out
 }
@@ -854,6 +979,7 @@ fn render(
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     yaml_diffs: &HashMap<String, BlockDiff>,
     sql_diffs: &HashMap<String, BlockDiff>,
+    model_yaml: &HashMap<String, ModelYamlOutcome>,
     data_diffs: &HashMap<String, UnitTestDataDiff>,
     external_fixtures: &HashMap<String, ExternalFixtures>,
     baseline_label: &str,
@@ -871,6 +997,7 @@ fn render(
         authoring_yaml,
         yaml_diffs,
         sql_diffs,
+        model_yaml,
         data_diffs,
         external_fixtures,
         baseline_label,
@@ -1163,6 +1290,235 @@ mod tests {
 
     fn in_scope_of(ids: &[&str]) -> InScopeSet {
         ids.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    // -----------------------------------------------------------------
+    // gather_model_yaml_with_reader / model_yaml_without_root — the
+    // cute-dbt#247 Model-YAML gather. Unlike the authoring-YAML gather
+    // (silent skips), EVERY in-scope model gets an outcome so the
+    // rendered section can degrade truthfully instead of vanishing.
+    // -----------------------------------------------------------------
+
+    use std::collections::BTreeMap as StdBTreeMap;
+
+    use crate::domain::{Checksum, ModelInScopeSet, ModelYamlOutcome, Node, NodeConfig};
+
+    fn model_node_with_patch(id: &str, patch_path: Option<&str>) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "model",
+            Checksum::new("sha256", "ck"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            StdBTreeMap::new(),
+        )
+        .with_patch_path(patch_path.map(str::to_owned))
+    }
+
+    fn manifest_with_models(nodes: Vec<Node>) -> Manifest {
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+            StdHashMap::new(),
+            StdHashMap::new(),
+        )
+    }
+
+    fn models_in_scope_of(ids: &[&str]) -> ModelInScopeSet {
+        ids.iter().map(|id| NodeId::new(*id)).collect()
+    }
+
+    #[test]
+    fn gather_model_yaml_slices_the_models_entry_when_reader_resolves() {
+        let model_id = "model.shop.dim_users";
+        let manifest = manifest_with_models(vec![model_node_with_patch(
+            model_id,
+            Some("models/schema.yml"),
+        )]);
+        let mut entries = StdHashMap::new();
+        entries.insert(
+            "models/schema.yml".to_owned(),
+            StubResult::Ok("models:\n  - name: dim_users\n    description: a model\n".to_owned()),
+        );
+        let reader = StubReader { entries };
+
+        let result =
+            gather_model_yaml_with_reader(&reader, &manifest, &models_in_scope_of(&[model_id]));
+
+        assert_eq!(result.len(), 1);
+        match result.get(model_id).expect("outcome stored under model id") {
+            ModelYamlOutcome::Found { path, block, diff } => {
+                assert_eq!(path, "models/schema.yml");
+                assert!(block.raw.contains("- name: dim_users"));
+                assert!(block.raw.contains("description: a model"));
+                assert!(diff.is_none(), "the gather never attaches a diff");
+            }
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gather_model_yaml_marks_a_model_without_patch_path() {
+        let model_id = "model.shop.dim_users";
+        let manifest = manifest_with_models(vec![model_node_with_patch(model_id, None)]);
+        let reader = StubReader {
+            entries: StdHashMap::new(),
+        };
+
+        let result =
+            gather_model_yaml_with_reader(&reader, &manifest, &models_in_scope_of(&[model_id]));
+
+        assert_eq!(result.get(model_id), Some(&ModelYamlOutcome::NoPatchPath));
+    }
+
+    #[test]
+    fn gather_model_yaml_marks_a_missing_schema_file() {
+        let model_id = "model.shop.dim_users";
+        let manifest = manifest_with_models(vec![model_node_with_patch(
+            model_id,
+            Some("models/missing.yml"),
+        )]);
+        // Empty stub returns NotFound by default.
+        let reader = StubReader {
+            entries: StdHashMap::new(),
+        };
+
+        let result =
+            gather_model_yaml_with_reader(&reader, &manifest, &models_in_scope_of(&[model_id]));
+
+        assert_eq!(
+            result.get(model_id),
+            Some(&ModelYamlOutcome::FileMissing {
+                path: "models/missing.yml".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
+    fn gather_model_yaml_marks_a_path_guard_rejection_as_file_missing() {
+        // A package model's patch file outside the project root: the
+        // FsProjectFileReader path-safety guard maps it to InvalidInput.
+        // Honest degrade = "not found under the project root".
+        let model_id = "model.shop.pkg_model";
+        let manifest = manifest_with_models(vec![model_node_with_patch(
+            model_id,
+            Some("../dbt_packages/pkg/models/schema.yml"),
+        )]);
+        let mut entries = StdHashMap::new();
+        entries.insert(
+            "../dbt_packages/pkg/models/schema.yml".to_owned(),
+            StubResult::Err(io::ErrorKind::InvalidInput, "stub: escapes project root"),
+        );
+        let reader = StubReader { entries };
+
+        let result =
+            gather_model_yaml_with_reader(&reader, &manifest, &models_in_scope_of(&[model_id]));
+
+        assert_eq!(
+            result.get(model_id),
+            Some(&ModelYamlOutcome::FileMissing {
+                path: "../dbt_packages/pkg/models/schema.yml".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
+    fn gather_model_yaml_marks_an_unreadable_schema_file() {
+        let model_id = "model.shop.dim_users";
+        let manifest = manifest_with_models(vec![model_node_with_patch(
+            model_id,
+            Some("models/locked.yml"),
+        )]);
+        let mut entries = StdHashMap::new();
+        entries.insert(
+            "models/locked.yml".to_owned(),
+            StubResult::Err(io::ErrorKind::PermissionDenied, "stub: permission denied"),
+        );
+        let reader = StubReader { entries };
+
+        // The stage warns to stderr but does NOT propagate the error.
+        let result =
+            gather_model_yaml_with_reader(&reader, &manifest, &models_in_scope_of(&[model_id]));
+
+        assert_eq!(
+            result.get(model_id),
+            Some(&ModelYamlOutcome::Unreadable {
+                path: "models/locked.yml".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
+    fn gather_model_yaml_marks_a_file_without_the_models_entry() {
+        let model_id = "model.shop.dim_users";
+        let manifest = manifest_with_models(vec![model_node_with_patch(
+            model_id,
+            Some("models/schema.yml"),
+        )]);
+        let mut entries = StdHashMap::new();
+        // File exists but only declares a DIFFERENT model.
+        entries.insert(
+            "models/schema.yml".to_owned(),
+            StubResult::Ok("models:\n  - name: dim_payers\n".to_owned()),
+        );
+        let reader = StubReader { entries };
+
+        let result =
+            gather_model_yaml_with_reader(&reader, &manifest, &models_in_scope_of(&[model_id]));
+
+        assert_eq!(
+            result.get(model_id),
+            Some(&ModelYamlOutcome::EntryNotFound {
+                path: "models/schema.yml".to_owned(),
+            }),
+        );
+    }
+
+    #[test]
+    fn gather_model_yaml_skips_a_model_id_absent_from_the_manifest() {
+        let manifest = manifest_with_models(Vec::new());
+        let reader = StubReader {
+            entries: StdHashMap::new(),
+        };
+
+        let result = gather_model_yaml_with_reader(
+            &reader,
+            &manifest,
+            &models_in_scope_of(&["model.shop.ghost"]),
+        );
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn model_yaml_without_root_marks_every_in_scope_model() {
+        // No resolvable project root: a patch-carrying model degrades to
+        // NoProjectRoot (naming the unread file); a patch-less model is
+        // NoPatchPath — the section never silently vanishes.
+        let with_patch = "model.shop.dim_users";
+        let without_patch = "model.shop.int_orphan";
+        let manifest = manifest_with_models(vec![
+            model_node_with_patch(with_patch, Some("models/schema.yml")),
+            model_node_with_patch(without_patch, None),
+        ]);
+
+        let result =
+            model_yaml_without_root(&manifest, &models_in_scope_of(&[with_patch, without_patch]));
+
+        assert_eq!(
+            result.get(with_patch),
+            Some(&ModelYamlOutcome::NoProjectRoot {
+                path: "models/schema.yml".to_owned(),
+            }),
+        );
+        assert_eq!(
+            result.get(without_patch),
+            Some(&ModelYamlOutcome::NoPatchPath),
+        );
     }
 
     #[test]
