@@ -1,13 +1,22 @@
-//! The `cute-dbt explore` two-page renderer (cute-dbt#100).
+//! The `cute-dbt explore` two-page renderer (cute-dbt#100, cute-dbt#101).
 //!
 //! Emits the full-manifest explorer into `--out-dir`:
 //!
-//! - **`dag.html`** — the model-lineage DAG (every `model` node, edges
-//!   from `depends_on.nodes`), rendered by the vendored Mermaid UMD
-//!   bundle exactly like the report's CTE DAG (`securityLevel:
-//!   "strict"`, non-webfont system `fontFamily`, `startOnLoad: false`).
-//!   This static lineage view is the epic #99 **conscious throwaway**:
-//!   V2 replaces it with the interactive Cytoscape engine.
+//! - **`dag.html`** — the **interactive** model-lineage DAG
+//!   (cute-dbt#101): every `model` node, edges from `depends_on.nodes`,
+//!   rendered by the vendored Cytoscape UMD core + the cytoscape-dagre
+//!   layout extension (left-to-right ranks) and driven by the
+//!   first-party explore lineage engine
+//!   (`templates/explore-lineage.js`). The server embeds the
+//!   [`LineagePayload`] JSON carrier (nodes + **forward** dependency
+//!   edges only — the client traverses both directions); the engine
+//!   adds pan/zoom/drag, hand-rolled fuzzy search, click /
+//!   search-select **highlight** (emphasize the node + its full
+//!   transitive lineage, dim the complement) and the deliberate
+//!   **Space** focus commit (center + write
+//!   `document.body.dataset.selectedModel` — the only interaction that
+//!   writes the external-drive signal). This replaced the V1 static
+//!   Mermaid lineage (the epic #99 conscious throwaway).
 //! - **`tests.html`** — the unit-test index: one section per model with
 //!   its unit tests, plus the full engine-agnostic
 //!   [`ReportPayload`] embedded
@@ -36,7 +45,9 @@ use std::path::Path;
 use askama::Template;
 use serde::Serialize;
 
-use crate::adapters::asset_embed::{FAVICON_DATA_URI, MERMAID_JS, SAKURA_CSS};
+use crate::adapters::asset_embed::{
+    CYTOSCAPE_DAGRE_JS, CYTOSCAPE_JS, EXPLORE_LINEAGE_JS, FAVICON_DATA_URI, SAKURA_CSS,
+};
 use crate::adapters::render::ReportPayload;
 use crate::domain::{Manifest, ModelInScopeSet, NodeId};
 
@@ -106,50 +117,75 @@ pub fn build_lineage(current: &Manifest, models: &ModelInScopeSet) -> Lineage {
     Lineage { nodes, edges }
 }
 
-/// Build the Mermaid `graph LR` definition for the lineage.
-///
-/// Mirrors the report engine's `buildMermaidSource` conventions
-/// (`templates/interaction.js`): positional `n<i>` node ids with quoted
-/// labels (so arbitrary model names cannot break the grammar; `"` is
-/// HTML-entity-escaped inside the label), `:::` class per node, and
-/// trailing `classDef` lines. A "not compiled" model renders with the
-/// `notcompiled` class and an explicit label suffix so the fail-open
-/// state is visible without color.
-#[must_use]
-pub fn mermaid_lineage_def(lineage: &Lineage) -> String {
-    let mut lines = vec!["graph LR".to_owned()];
-    for (i, node) in lineage.nodes.iter().enumerate() {
-        let safe = node.name.replace('"', "&quot;");
-        let (label, class) = if node.not_compiled {
-            (format!("{safe} (not compiled)"), "notcompiled")
-        } else {
-            (safe, "model")
-        };
-        lines.push(format!("    n{i}[\"{label}\"]:::{class}"));
-    }
-    for (from, to) in &lineage.edges {
-        lines.push(format!("    n{from} --> n{to}"));
-    }
-    lines.push(
-        "    classDef model fill:#e8f1f8,stroke:#0072B2,stroke-width:1.5px,color:#1c1c1f;"
-            .to_owned(),
-    );
-    lines.push(
-        "    classDef notcompiled fill:#f4f4f5,stroke:#b07400,stroke-width:2px,\
-         stroke-dasharray:5 3,color:#1c1c1f;"
-            .to_owned(),
-    );
-    lines.join("\n")
+/// One node in the serialized lineage payload (the `explore-dag-data`
+/// JSON carrier consumed by `templates/explore-lineage.js`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LineageNodePayload {
+    /// Full manifest node id (`model.<package>.<name>`) — the Cytoscape
+    /// element id and the value the Space focus commit writes to
+    /// `document.body.dataset.selectedModel`.
+    pub id: String,
+    /// Bare model name — the canvas-text label and the fuzzy-search
+    /// candidate.
+    pub name: String,
+    /// The fail-open "not compiled" flag (cute-dbt#100) — rendered as a
+    /// dashed node, never raised.
+    pub not_compiled: bool,
 }
 
-/// The JSON carrier embedded in `dag.html`.
-#[derive(Debug, Serialize)]
-struct DagData {
-    /// The Mermaid `graph LR` definition for the full-manifest lineage.
-    def: String,
-    /// Total model count — `0` selects the empty-state message instead
-    /// of a Mermaid render.
-    model_count: usize,
+/// One dependency edge in the serialized lineage payload, by node id.
+///
+/// Edges are **forward only** — upstream (`from`) → downstream (`to`),
+/// straight off `depends_on.nodes`. The client engine traverses both
+/// directions (`predecessors()` / `successors()`) for the highlight, so
+/// the payload never carries a reverse edge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LineageEdgePayload {
+    /// The upstream model's node id (the dependency).
+    pub from: String,
+    /// The downstream model's node id (the dependent).
+    pub to: String,
+}
+
+/// The `explore-dag-data` JSON carrier embedded in `dag.html` —
+/// nodes = models, edges = forward dependency edges. An empty `nodes`
+/// array selects the page's empty-state message instead of a Cytoscape
+/// render.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct LineagePayload {
+    /// Every model node, in deterministic node-id order.
+    pub nodes: Vec<LineageNodePayload>,
+    /// Forward dependency edges between models in `nodes`, ordered.
+    pub edges: Vec<LineageEdgePayload>,
+}
+
+/// Build the serializable lineage payload for `dag.html` (cute-dbt#101).
+///
+/// Composes [`build_lineage`] (nodes = the model set, edges =
+/// `depends_on.nodes` filtered to models, **forward only**) into the
+/// id-keyed POD the Cytoscape engine consumes. Pure assembly over owned
+/// manifest data — no I/O.
+#[must_use]
+pub fn build_lineage_payload(current: &Manifest, models: &ModelInScopeSet) -> LineagePayload {
+    let lineage = build_lineage(current, models);
+    let edges = lineage
+        .edges
+        .iter()
+        .map(|&(from, to)| LineageEdgePayload {
+            from: lineage.nodes[from].id.clone(),
+            to: lineage.nodes[to].id.clone(),
+        })
+        .collect();
+    let nodes = lineage
+        .nodes
+        .into_iter()
+        .map(|n| LineageNodePayload {
+            id: n.id,
+            name: n.name,
+            not_compiled: n.not_compiled,
+        })
+        .collect();
+    LineagePayload { nodes, edges }
 }
 
 /// One model section on `tests.html` (server-rendered).
@@ -202,9 +238,12 @@ fn plural(n: usize, noun: &str) -> String {
 #[template(path = "explore-dag.html", escape = "html")]
 struct ExploreDagTemplate<'a> {
     sakura_css: &'a str,
-    mermaid_js: &'a str,
+    cytoscape_js: &'a str,
+    cytoscape_dagre_js: &'a str,
+    explore_lineage_js: &'a str,
     favicon_data_uri: &'a str,
-    /// Pre-escaped JSON for the `explore-dag-data` carrier.
+    /// Pre-escaped JSON for the `explore-dag-data` carrier (the
+    /// [`LineagePayload`]).
     dag_json: &'a str,
     model_count: usize,
     edge_count: usize,
@@ -316,17 +355,15 @@ pub fn render_explore(
 ) -> io::Result<()> {
     fs::create_dir_all(out_dir)?;
 
-    let lineage = build_lineage(current, models);
+    let lineage = build_lineage_payload(current, models);
     let not_compiled_count = lineage.nodes.iter().filter(|n| n.not_compiled).count();
-    let dag_data = DagData {
-        def: mermaid_lineage_def(&lineage),
-        model_count: lineage.nodes.len(),
-    };
-    let dag_json = json_for_html_script(&dag_data)
+    let dag_json = json_for_html_script(&lineage)
         .map_err(|err| io::Error::other(format!("dag payload serialization: {err}")))?;
     let dag_html = ExploreDagTemplate {
         sakura_css: SAKURA_CSS,
-        mermaid_js: MERMAID_JS,
+        cytoscape_js: CYTOSCAPE_JS,
+        cytoscape_dagre_js: CYTOSCAPE_DAGRE_JS,
+        explore_lineage_js: EXPLORE_LINEAGE_JS,
         favicon_data_uri: FAVICON_DATA_URI,
         dag_json: &dag_json,
         model_count: lineage.nodes.len(),
@@ -455,30 +492,86 @@ mod tests {
         assert!(lineage.edges.is_empty());
     }
 
-    // ----- mermaid_lineage_def --------------------------------------
+    // ----- build_lineage_payload ------------------------------------
 
     #[test]
-    fn mermaid_def_renders_nodes_edges_and_not_compiled_class() {
+    fn payload_carries_id_keyed_nodes_in_id_order() {
         let current = three_model_manifest();
-        let def = mermaid_lineage_def(&build_lineage(&current, &all_models(&current)));
-        assert!(def.starts_with("graph LR"), "{def}");
-        assert!(def.contains("n0[\"dim_orders\"]:::model"), "{def}");
-        assert!(
-            def.contains("n1[\"mart_orders (not compiled)\"]:::notcompiled"),
-            "the fail-open node is labeled AND classed: {def}",
+        let payload = build_lineage_payload(&current, &all_models(&current));
+        let ids: Vec<&str> = payload.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "model.shop.dim_orders",
+                "model.shop.mart_orders",
+                "model.shop.stg_orders",
+            ],
         );
-        assert!(def.contains("n2 --> n0"), "stg -> dim edge: {def}");
-        assert!(def.contains("n0 --> n1"), "dim -> mart edge: {def}");
-        assert!(def.contains("classDef notcompiled"), "{def}");
+        assert_eq!(payload.nodes[0].name, "dim_orders");
+        assert!(
+            payload.nodes[1].not_compiled,
+            "the dbt-parse model carries the fail-open flag",
+        );
     }
 
     #[test]
-    fn mermaid_def_quotes_hostile_labels() {
-        let current = manifest_of(vec![model("model.shop.we\"ird", Some("select 1"), &[])]);
-        let def = mermaid_lineage_def(&build_lineage(&current, &all_models(&current)));
+    fn payload_edges_are_forward_only_and_id_keyed() {
+        let current = three_model_manifest();
+        let payload = build_lineage_payload(&current, &all_models(&current));
+        // stg_orders -> dim_orders; dim_orders -> mart_orders. The
+        // source.shop.raw.orders dependency is NOT a lineage edge, and
+        // no reverse edge is ever emitted (the client traverses both
+        // directions itself).
+        assert_eq!(
+            payload.edges,
+            vec![
+                LineageEdgePayload {
+                    from: "model.shop.dim_orders".to_owned(),
+                    to: "model.shop.mart_orders".to_owned(),
+                },
+                LineageEdgePayload {
+                    from: "model.shop.stg_orders".to_owned(),
+                    to: "model.shop.dim_orders".to_owned(),
+                },
+            ],
+        );
+        for edge in &payload.edges {
+            assert!(
+                !payload
+                    .edges
+                    .iter()
+                    .any(|e| e.from == edge.to && e.to == edge.from),
+                "no reverse twin for {edge:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn payload_of_an_empty_manifest_is_empty() {
+        let current = manifest_of(Vec::new());
+        let payload = build_lineage_payload(&current, &all_models(&current));
+        assert!(payload.nodes.is_empty());
+        assert!(payload.edges.is_empty());
+    }
+
+    #[test]
+    fn payload_serializes_hostile_names_as_json_data_never_markup() {
+        let current = manifest_of(vec![model(
+            "model.shop.evil</script><img src=x>",
+            Some("select 1"),
+            &[],
+        )]);
+        let payload = build_lineage_payload(&current, &all_models(&current));
+        let json = json_for_html_script(&payload).expect("serializes");
         assert!(
-            def.contains("n0[\"we&quot;ird\"]"),
-            "a double quote in a model name cannot break the label grammar: {def}",
+            !json.contains("</script>") && !json.contains("<img"),
+            "tag-opening shapes must be escaped in the carrier: {json}",
+        );
+        let round: serde_json::Value = serde_json::from_str(&json).expect("round-trips");
+        assert_eq!(
+            round["nodes"][0]["name"].as_str(),
+            Some("evil</script><img src=x>"),
+            "the hostile name survives as DATA",
         );
     }
 
@@ -539,7 +632,21 @@ mod tests {
         let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html written");
         // The model-count oracle: the rendered model set equals the
         // manifest's model count on BOTH pages.
-        assert!(dag.contains("\"model_count\":3"), "dag carries the count");
+        assert_eq!(
+            dag.matches("\"not_compiled\":").count(),
+            3,
+            "the dag carrier embeds one payload node per manifest model",
+        );
+        // The interactive engine ships: the Cytoscape core, the dagre
+        // layout extension, and the first-party lineage engine.
+        assert!(
+            dag.contains("cytoscapeDagre"),
+            "dag.html embeds the cytoscape-dagre UMD extension",
+        );
+        assert!(
+            dag.contains("cute-dbt explore lineage engine v1"),
+            "dag.html embeds the first-party lineage engine",
+        );
         assert_eq!(
             tests.matches("class=\"explore-model\"").count(),
             3,
@@ -592,7 +699,10 @@ mod tests {
         let dir = tmp_dir("empty");
         render_explore(&dir, &current, &models, &payload).expect("empty manifest renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
-        assert!(dag.contains("\"model_count\":0"), "{dag}");
+        assert!(
+            dag.contains("\"nodes\":[]"),
+            "the empty manifest embeds an empty payload (the JS empty-state trigger)",
+        );
         let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html");
         assert!(
             tests.contains("No models in this manifest"),
