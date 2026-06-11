@@ -269,6 +269,53 @@ fn real_fixture_carries_model_description_tags_and_full_overrides() {
 }
 
 #[test]
+fn real_fixtures_carry_scheme_stripped_patch_paths_on_both_engines() {
+    // cute-dbt#105 verified against BOTH real committed fixtures (the
+    // fusion-first rule's second leg). Both engines emit `patch_path` as
+    // a package URI (`<package>://<relative-path>` — fusion
+    // `normalize_manifest_patch_path` / `package_uri_path`,
+    // `dbt-schemas` `manifest/manifest.rs` @
+    // 9977b6cbb1b761065536300037560d8e3c037011, mirroring dbt-core);
+    // ingestion strips the scheme to the plain relative YAML path.
+
+    // jaffle-shop = dbt-core 1.11 wire.
+    let jaffle = FileManifestSource
+        .load(&fixture("jaffle-shop-current.json"))
+        .expect("the current fixture is a valid compiled v12 manifest");
+    let customers = jaffle
+        .node(&NodeId::new("model.jaffle_shop.customers"))
+        .expect("customers model present");
+    assert_eq!(
+        customers.patch_path(),
+        Some("models/schema.yml"),
+        "the dbt-core package URI strips to the relative schema path",
+    );
+
+    // playground = fusion 2.0-preview wire.
+    let playground = FileManifestSource
+        .load(&fixture("playground-current.json"))
+        .expect("the playground fixture is a valid compiled v12 manifest");
+    let mart = playground
+        .node(&NodeId::new("model.healthcare_analytics.mart_dq_summary"))
+        .expect("mart_dq_summary present");
+    assert_eq!(
+        mart.patch_path(),
+        Some("models/marts/analytics/_analytics__models.yml"),
+        "the fusion package URI strips to the relative schema path",
+    );
+    // A node without a schema patch tolerates to None (the null-fill /
+    // omitted-key shapes both land here on real manifests).
+    assert!(
+        playground
+            .nodes()
+            .values()
+            .filter(|n| n.resource_type() == "test")
+            .all(|n| n.patch_path().is_none() || !n.patch_path().unwrap().contains("://")),
+        "no ingested patch_path retains a URI scheme",
+    );
+}
+
+#[test]
 fn baseline_and_current_form_the_modified_stg_customers_diff_pair() {
     // PR 5's StateComparator diffs node body checksums; PR 4b must carry
     // that signal through translation intact. The fixtures are a pair:
