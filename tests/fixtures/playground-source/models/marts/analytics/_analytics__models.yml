@@ -1491,12 +1491,7 @@ unit_tests:
             month_name: 'February'
       - input: ref('stg_synthea__patients')
         format: csv
-        rows: |
-          patient_id,state
-          a00000aa-0000-0000-0000-000000000001,Massachusetts
-          a00000aa-0000-0000-0000-000000000002,Connecticut
-          a00000aa-0000-0000-0000-000000000003,
-          a00000aa-0000-0000-0000-000000000004,Massachusetts
+        fixture: mart_date_state_grid_patients
     expect:
       format: csv
       rows: |
