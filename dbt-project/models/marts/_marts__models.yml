@@ -22,6 +22,26 @@ models:
       - name: distinct_status_count
         description: Count of distinct statuses (from the UNION-distinct arm).
 
+  # cute-dbt#173 dogfood — the anti-join supersedes showcase. Deliberately
+  # carries NO unit test: the PR preview renders join.anti-join UNCOVERED
+  # with the inverted (matching-row) given sketch, while the superseded
+  # join.left-null-propagation stays silent on the same construct.
+  - name: customers_with_no_orders
+    description: >
+      Customers with no orders — the LEFT JOIN + WHERE right-key IS NULL
+      anti-join idiom (cute-dbt#173 supersedes showcase).
+    columns:
+      - name: customer_id
+        description: Customer identifier (natural key of the kept rows).
+      - name: first_name
+        description: Customer first name.
+      - name: last_name
+        description: Customer last name.
+      - name: matched_customer_id
+        description: >
+          The right-side join key — always NULL on kept rows; projected so
+          the general left-null check provably fires and is superseded.
+
 unit_tests:
   # DICT format (given + expect). dict only compares listed columns, so
   # the derived `amount_share` / `distinct_status_count` are asserted while

@@ -50,14 +50,15 @@
 use std::collections::HashMap;
 
 use sqlparser::ast::{
-    Cte, JoinOperator, Query, SetExpr, SetOperator, SetQuantifier, Spanned, Statement, TableFactor,
-    TableWithJoins,
+    BinaryOperator, Cte, Expr, JoinConstraint, JoinOperator, Query, Select, SelectItem,
+    SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Spanned, Statement,
+    TableFactor, TableWithJoins,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Location, Span};
 
-use crate::domain::{CteEdge, CteGraph, CteNode, EdgeType};
+use crate::domain::{CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact};
 
 /// Display name of the synthetic terminal node — the final `SELECT` that
 /// follows a model's `WITH` clause. The compiled SQL does not carry the
@@ -118,13 +119,17 @@ fn parse_query(compiled_sql: &str) -> Result<Query, CteError> {
 fn build_graph(compiled_sql: &str, query: &Query) -> CteGraph {
     let ctes = cte_tables(query);
     if ctes.is_empty() {
-        return CteGraph::default();
+        // No CTE structure to visualise — but the body's LEFT JOIN
+        // facts still surface (cute-dbt#173): the catalog C4 canonical
+        // shape is a WITH-less `… FROM a LEFT JOIN b …` model.
+        let facts = compute_shape_facts(TERMINAL_NODE_NAME, &query.body);
+        return CteGraph::default().with_left_join_facts(facts.left_joins);
     }
     let recursive = query.with.as_ref().is_some_and(|with| with.recursive);
-    let nodes = build_nodes(compiled_sql, ctes, query);
+    let (nodes, left_joins) = build_nodes(compiled_sql, ctes, query);
     let index = name_index(ctes);
     let edges = build_edges(ctes, query, &index);
-    let graph = CteGraph::new(nodes, edges);
+    let graph = CteGraph::new(nodes, edges).with_left_join_facts(left_joins);
     if recursive {
         graph.with_recursive()
     } else {
@@ -153,46 +158,293 @@ fn cte_tables(query: &Query) -> &[Cte] {
 /// from the parsed body — `is_simple_from_shape` and
 /// `body_leaf_table_refs` (cute-dbt#40). The renderer reads these
 /// directly via the POD accessors; it never re-parses the slice.
-fn build_nodes(compiled_sql: &str, ctes: &[Cte], query: &Query) -> Vec<CteNode> {
+///
+/// The second return value aggregates every body's per-LEFT-JOIN facts
+/// (cute-dbt#173), each tagged with its consumer body's node name —
+/// they hang off the [`CteGraph`] for the domain check detectors.
+fn build_nodes(
+    compiled_sql: &str,
+    ctes: &[Cte],
+    query: &Query,
+) -> (Vec<CteNode>, Vec<LeftJoinFact>) {
     let byte_index = ByteIndex::new(compiled_sql);
+    let mut left_joins: Vec<LeftJoinFact> = Vec::new();
     let mut nodes: Vec<CteNode> = ctes
         .iter()
         .map(|cte| {
             let raw = slice_or_fallback(compiled_sql, &byte_index, cte.span(), || {
                 cte.query.to_string()
             });
-            let facts = compute_shape_facts(&cte.query.body);
+            let facts = compute_shape_facts(cte_name(cte), &cte.query.body);
+            left_joins.extend(facts.left_joins);
             CteNode::new(cte_name(cte), None, Some(raw), None)
                 .with_shape_facts(facts.is_simple, facts.leaf_refs)
         })
         .collect();
     let terminal_raw =
         slice_terminal(compiled_sql, &byte_index, ctes).unwrap_or_else(|| query.body.to_string());
-    let terminal_facts = compute_shape_facts(&query.body);
+    let terminal_facts = compute_shape_facts(TERMINAL_NODE_NAME, &query.body);
+    left_joins.extend(terminal_facts.left_joins);
     nodes.push(
         CteNode::new(TERMINAL_NODE_NAME, None, Some(terminal_raw), None)
             .with_shape_facts(terminal_facts.is_simple, terminal_facts.leaf_refs),
     );
-    nodes
+    (nodes, left_joins)
 }
 
 /// Engine-computed structural facts about a query body
-/// (cute-dbt#40 Option C).
+/// (cute-dbt#40 Option C; `left_joins` added by cute-dbt#173).
 struct BodyShapeFacts {
     is_simple: bool,
     leaf_refs: Vec<String>,
+    left_joins: Vec<LeftJoinFact>,
 }
 
 /// Compute the structural facts the renderer needs to classify a CTE
 /// node's role and resolve import-CTE body matches — without ever
-/// exposing the AST outside the adapter layer.
-fn compute_shape_facts(body: &SetExpr) -> BodyShapeFacts {
+/// exposing the AST outside the adapter layer. The per-LEFT-JOIN facts
+/// (cute-dbt#173) ride the same pass over the same parsed AST: never a
+/// second parse. `consumer` is the body's node name — a CTE name or
+/// [`TERMINAL_NODE_NAME`] — tagged onto each fact.
+fn compute_shape_facts(consumer: &str, body: &SetExpr) -> BodyShapeFacts {
     let mut leaf_refs = Vec::new();
     collect_leaf_table_refs(body, &mut leaf_refs);
+    let mut left_joins = Vec::new();
+    collect_left_join_facts(consumer, body, &mut left_joins);
     BodyShapeFacts {
         is_simple: is_body_simple_from_select(body),
         leaf_refs,
+        left_joins,
     }
+}
+
+// ---------------------------------------------------------------------
+// Per-LEFT-JOIN facts (cute-dbt#173 — catalog class C4).
+// ---------------------------------------------------------------------
+
+/// Walk `body` recursively (the [`collect_leaf_table_refs`] descent
+/// shape), appending one [`LeftJoinFact`] per `LEFT [OUTER] JOIN` whose
+/// right side is a plain named table factor. Derived-table right sides
+/// emit no fact (a declared check exclusion).
+fn collect_left_join_facts(consumer: &str, body: &SetExpr, facts: &mut Vec<LeftJoinFact>) {
+    match body {
+        SetExpr::Select(select) => select_left_join_facts(consumer, select, facts),
+        SetExpr::Query(inner) => collect_left_join_facts(consumer, &inner.body, facts),
+        SetExpr::SetOperation { left, right, .. } => {
+            collect_left_join_facts(consumer, left, facts);
+            collect_left_join_facts(consumer, right, facts);
+        }
+        _ => {}
+    }
+}
+
+/// Facts for every LEFT JOIN in one `SELECT`: the joined relation's
+/// leaf, the `ON` equi-key pairs, the right-qualified `IS NULL`
+/// top-level `WHERE` conjunct columns (the anti-join where-predicate
+/// fact), whether right-side columns provably reach the projection, and
+/// whether the `SELECT` dedups with `DISTINCT`.
+fn select_left_join_facts(consumer: &str, select: &Select, facts: &mut Vec<LeftJoinFact>) {
+    let aliases = select_alias_map(select);
+    for table in &select.from {
+        for join in &table.joins {
+            let (JoinOperator::Left(constraint) | JoinOperator::LeftOuter(constraint)) =
+                &join.join_operator
+            else {
+                continue;
+            };
+            let Some((right_qualifier, right_leaf)) = factor_qualifier_and_leaf(&join.relation)
+            else {
+                continue;
+            };
+            facts.push(LeftJoinFact::new(
+                consumer,
+                right_leaf,
+                on_equi_key_pairs(constraint, &right_qualifier, &aliases),
+                where_is_null_columns(select.selection.as_ref(), &right_qualifier),
+                projection_carries_qualifier(&select.projection, &right_qualifier),
+                select.distinct.is_some(),
+            ));
+        }
+    }
+}
+
+/// Lowercased qualifier (alias if present, else leaf name) → lowercased
+/// leaf name, for every plain named table factor in the `SELECT`'s
+/// `FROM` chains. Resolves the left side of an `ON` equi-predicate to
+/// the relation it reads.
+fn select_alias_map(select: &Select) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for table in &select.from {
+        insert_factor_alias(&table.relation, &mut map);
+        for join in &table.joins {
+            insert_factor_alias(&join.relation, &mut map);
+        }
+    }
+    map
+}
+
+/// Insert one factor's `(qualifier, leaf)` pair into `map` when the
+/// factor is a plain named table.
+fn insert_factor_alias(factor: &TableFactor, map: &mut HashMap<String, String>) {
+    if let Some((qualifier, leaf)) = factor_qualifier_and_leaf(factor) {
+        map.insert(qualifier, leaf);
+    }
+}
+
+/// `(qualifier, leaf)` of a plain named table factor, both lowercased:
+/// the qualifier is the alias when present (`stg_customers AS c` → `c`),
+/// else the leaf name itself. `None` for derived tables / table
+/// functions / nested joins.
+fn factor_qualifier_and_leaf(factor: &TableFactor) -> Option<(String, String)> {
+    let TableFactor::Table { name, alias, .. } = factor else {
+        return None;
+    };
+    let leaf = name.0.last()?.as_ident()?.value.to_ascii_lowercase();
+    let qualifier = alias
+        .as_ref()
+        .map_or_else(|| leaf.clone(), |a| a.name.value.to_ascii_lowercase());
+    Some((qualifier, leaf))
+}
+
+/// The equi-key pairs of one `ON` constraint: each top-level `AND`
+/// conjunct of the form `<q1>.<col1> = <q2>.<col2>` where exactly one
+/// side is qualified by the joined relation. `USING` / `NATURAL` /
+/// missing constraints and non-equi or unqualified predicates yield no
+/// pairs (the join key is then not statically recoverable — a declared
+/// check exclusion that degrades to UNKNOWN, never UNCOVERED).
+fn on_equi_key_pairs(
+    constraint: &JoinConstraint,
+    right_qualifier: &str,
+    aliases: &HashMap<String, String>,
+) -> Vec<JoinKeyPair> {
+    let JoinConstraint::On(expr) = constraint else {
+        return Vec::new();
+    };
+    let mut conjuncts = Vec::new();
+    collect_and_conjuncts(expr, &mut conjuncts);
+    conjuncts
+        .iter()
+        .filter_map(|conjunct| equi_key_pair(conjunct, right_qualifier, aliases))
+        .collect()
+}
+
+/// Flatten an expression's top-level `AND` tree (descending through
+/// parentheses) into its conjuncts. An `OR` is a single conjunct — its
+/// branches are deliberately not decomposed (different semantics).
+fn collect_and_conjuncts<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match expr {
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+        } => {
+            collect_and_conjuncts(left, out);
+            collect_and_conjuncts(right, out);
+        }
+        Expr::Nested(inner) => collect_and_conjuncts(inner, out),
+        other => out.push(other),
+    }
+}
+
+/// `(qualifier, column)` of a qualified column reference, lowercased —
+/// the last two parts of a `CompoundIdentifier` (`o.customer_id`,
+/// `"db"."schema"."t".col`). `None` for unqualified identifiers and
+/// non-column expressions.
+fn qualified_column(expr: &Expr) -> Option<(String, String)> {
+    let Expr::CompoundIdentifier(parts) = expr else {
+        return None;
+    };
+    if parts.len() < 2 {
+        return None;
+    }
+    let column = parts.last()?.value.to_ascii_lowercase();
+    let qualifier = parts[parts.len() - 2].value.to_ascii_lowercase();
+    Some((qualifier, column))
+}
+
+/// Classify one `ON` conjunct as an equi-key pair for the join
+/// qualified by `right_qualifier`: `=` between two qualified columns,
+/// exactly one side carrying the right qualifier. The left side's
+/// qualifier resolves to its relation leaf via `aliases` (or `None`
+/// when unresolvable).
+fn equi_key_pair(
+    expr: &Expr,
+    right_qualifier: &str,
+    aliases: &HashMap<String, String>,
+) -> Option<JoinKeyPair> {
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Eq,
+        right,
+    } = expr
+    else {
+        return None;
+    };
+    let a = qualified_column(left)?;
+    let b = qualified_column(right)?;
+    let (right_side, left_side) = if a.0 == right_qualifier && b.0 != right_qualifier {
+        (a, b)
+    } else if b.0 == right_qualifier && a.0 != right_qualifier {
+        (b, a)
+    } else {
+        return None;
+    };
+    Some(JoinKeyPair::new(
+        aliases.get(&left_side.0).cloned(),
+        left_side.1,
+        right_side.1,
+    ))
+}
+
+/// Lowercased columns qualified by `right_qualifier` appearing under
+/// `IS NULL` in the `WHERE` clause's top-level `AND` conjuncts — the
+/// anti-join where-predicate fact (cute-dbt#173). An `IS NULL` inside
+/// an `OR` or on an unqualified column is never recorded.
+fn where_is_null_columns(selection: Option<&Expr>, right_qualifier: &str) -> Vec<String> {
+    let Some(expr) = selection else {
+        return Vec::new();
+    };
+    let mut conjuncts = Vec::new();
+    collect_and_conjuncts(expr, &mut conjuncts);
+    let mut columns: Vec<String> = Vec::new();
+    for conjunct in conjuncts {
+        let Expr::IsNull(inner) = conjunct else {
+            continue;
+        };
+        let Some((qualifier, column)) = qualified_column(inner) else {
+            continue;
+        };
+        if qualifier == right_qualifier && !columns.contains(&column) {
+            columns.push(column);
+        }
+    }
+    columns
+}
+
+/// `true` when the projection **provably** carries columns of the
+/// relation referred to by `qualifier`: a bare `*`, a `<qualifier>.*`
+/// qualified wildcard, or a direct `<qualifier>.<column>` item. Columns
+/// reaching the output only through expressions (`COALESCE(q.col, …)`,
+/// `CASE …`) deliberately do not count — the conservative direction the
+/// left-null-propagation check's exclusion documents.
+fn projection_carries_qualifier(projection: &[SelectItem], qualifier: &str) -> bool {
+    projection.iter().any(|item| match item {
+        SelectItem::Wildcard(_) => true,
+        SelectItem::QualifiedWildcard(kind, _) => match kind {
+            SelectItemQualifiedWildcardKind::ObjectName(name) => name
+                .0
+                .last()
+                .and_then(|part| part.as_ident())
+                .is_some_and(|ident| ident.value.eq_ignore_ascii_case(qualifier)),
+            SelectItemQualifiedWildcardKind::Expr(_) => false,
+        },
+        SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
+            qualified_column(expr).is_some_and(|(item_qualifier, _)| item_qualifier == qualifier)
+        }
+        // Spark's `expr AS (a, b, …)` multi-alias form — not a direct
+        // column reference; never provably right-qualified.
+        SelectItem::ExprWithAliases { .. } => false,
+    })
 }
 
 /// `true` when `body` is a single `SELECT … FROM <Table>` with no joins
@@ -1195,5 +1447,232 @@ mod tests {
             "SELECT without FROM is not single-source-FROM",
         );
         assert!(lit.body_leaf_table_refs().is_empty());
+    }
+
+    // ===== per-LEFT-JOIN facts (cute-dbt#173, catalog class C4) =====
+
+    /// The graph-level left-join facts for a single-statement query.
+    fn terminal_facts(sql: &str) -> Vec<crate::domain::LeftJoinFact> {
+        graph(sql).left_join_facts().to_vec()
+    }
+
+    #[test]
+    fn left_join_with_aliases_yields_a_fact_with_equi_keys() {
+        let facts = terminal_facts(
+            "SELECT o.order_id, c.email \
+             FROM stg_orders o LEFT JOIN stg_customers c ON o.customer_id = c.id",
+        );
+        assert_eq!(facts.len(), 1, "one LEFT JOIN, one fact");
+        let fact = &facts[0];
+        assert_eq!(
+            fact.consumer(),
+            TERMINAL_NODE_NAME,
+            "a WITH-less body's facts are tagged with the terminal name"
+        );
+        assert_eq!(fact.right_leaf(), "stg_customers");
+        assert_eq!(fact.equi_keys().len(), 1);
+        assert_eq!(fact.equi_keys()[0].left_leaf(), Some("stg_orders"));
+        assert_eq!(fact.equi_keys()[0].left_column(), "customer_id");
+        assert_eq!(fact.equi_keys()[0].right_column(), "id");
+        assert!(fact.where_is_null_columns().is_empty());
+        assert!(
+            fact.projects_right_columns(),
+            "c.email is a direct right-qualified projection item"
+        );
+        assert!(!fact.select_is_distinct());
+    }
+
+    #[test]
+    fn left_outer_join_without_aliases_resolves_by_table_leaf() {
+        // dbt's compiled SQL often schema-qualifies: the qualifier in ON
+        // / projection is the table leaf when no alias is given.
+        let facts = terminal_facts(
+            "SELECT stg_orders.order_id, stg_customers.email \
+             FROM \"db\".\"main\".\"stg_orders\" \
+             LEFT OUTER JOIN \"db\".\"main\".\"stg_customers\" \
+             ON stg_orders.customer_id = stg_customers.id",
+        );
+        assert_eq!(facts.len(), 1);
+        let fact = &facts[0];
+        assert_eq!(fact.right_leaf(), "stg_customers");
+        assert_eq!(fact.equi_keys()[0].left_leaf(), Some("stg_orders"));
+        assert!(fact.projects_right_columns());
+    }
+
+    #[test]
+    fn where_right_key_is_null_is_captured_as_the_anti_join_fact() {
+        let facts = terminal_facts(
+            "SELECT * FROM stg_orders o \
+             LEFT JOIN stg_returns r ON o.order_id = r.order_id \
+             WHERE r.order_id IS NULL AND o.status = 'shipped'",
+        );
+        assert_eq!(facts.len(), 1);
+        let fact = &facts[0];
+        assert_eq!(fact.where_is_null_columns(), &["order_id".to_owned()]);
+        assert!(
+            fact.projects_right_columns(),
+            "bare * provably includes right columns"
+        );
+    }
+
+    #[test]
+    fn is_null_inside_an_or_is_not_an_anti_join_conjunct() {
+        // `WHERE r.k IS NULL OR …` does not exclude the matched class —
+        // different semantics, never recorded.
+        let facts = terminal_facts(
+            "SELECT * FROM stg_orders o \
+             LEFT JOIN stg_returns r ON o.order_id = r.order_id \
+             WHERE r.order_id IS NULL OR o.status = 'shipped'",
+        );
+        assert!(facts[0].where_is_null_columns().is_empty());
+    }
+
+    #[test]
+    fn unqualified_is_null_is_not_attributed_to_the_join() {
+        let facts = terminal_facts(
+            "SELECT * FROM stg_orders o \
+             LEFT JOIN stg_returns r ON o.order_id = r.order_id \
+             WHERE order_id IS NULL",
+        );
+        assert!(
+            facts[0].where_is_null_columns().is_empty(),
+            "an unqualified column cannot be attributed to the joined relation"
+        );
+    }
+
+    #[test]
+    fn projection_attribution_is_conservative() {
+        // Right columns reaching the output only through expressions
+        // (COALESCE) deliberately do not count; a right-qualified
+        // wildcard does; a wildcard qualified by ANOTHER relation does
+        // not.
+        let coalesce_only = terminal_facts(
+            "SELECT o.order_id, COALESCE(c.email, 'none') AS email \
+             FROM stg_orders o LEFT JOIN stg_customers c ON o.customer_id = c.id",
+        );
+        assert!(
+            !coalesce_only[0].projects_right_columns(),
+            "expression-wrapped right columns are not provably attributed"
+        );
+        let right_wildcard = terminal_facts(
+            "SELECT c.* FROM stg_orders o \
+             LEFT JOIN stg_customers c ON o.customer_id = c.id",
+        );
+        assert!(right_wildcard[0].projects_right_columns());
+        let other_wildcard = terminal_facts(
+            "SELECT o.* FROM stg_orders o \
+             LEFT JOIN stg_customers c ON o.customer_id = c.id",
+        );
+        assert!(!other_wildcard[0].projects_right_columns());
+    }
+
+    #[test]
+    fn non_equi_and_using_constraints_yield_no_key_pairs() {
+        let non_equi = terminal_facts(
+            "SELECT * FROM stg_orders o \
+             LEFT JOIN stg_rates r ON o.order_date >= r.valid_from",
+        );
+        assert!(non_equi[0].equi_keys().is_empty());
+        let expr_key = terminal_facts(
+            "SELECT * FROM stg_orders o \
+             LEFT JOIN stg_customers c ON upper(o.customer_id) = c.id",
+        );
+        assert!(expr_key[0].equi_keys().is_empty());
+        let using =
+            terminal_facts("SELECT * FROM stg_orders LEFT JOIN stg_customers USING(customer_id)");
+        assert!(using[0].equi_keys().is_empty());
+    }
+
+    #[test]
+    fn compound_on_clause_yields_one_pair_per_equi_conjunct() {
+        let facts = terminal_facts(
+            "SELECT * FROM stg_orders o \
+             LEFT JOIN stg_rates r \
+             ON o.currency = r.currency AND o.order_date = r.rate_date",
+        );
+        let pairs = facts[0].equi_keys();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].left_column(), "currency");
+        assert_eq!(pairs[0].right_column(), "currency");
+        assert_eq!(pairs[1].left_column(), "order_date");
+        assert_eq!(pairs[1].right_column(), "rate_date");
+    }
+
+    #[test]
+    fn derived_table_right_side_emits_no_fact() {
+        let facts = terminal_facts(
+            "SELECT * FROM stg_orders o \
+             LEFT JOIN (SELECT id FROM stg_customers) c ON o.customer_id = c.id",
+        );
+        assert!(
+            facts.is_empty(),
+            "a derived-table right side is a declared exclusion: {facts:?}"
+        );
+    }
+
+    #[test]
+    fn non_left_joins_emit_no_left_join_facts() {
+        let facts = terminal_facts(
+            "SELECT * FROM stg_orders o \
+             INNER JOIN stg_payments p ON o.order_id = p.order_id \
+             RIGHT JOIN stg_customers c ON o.customer_id = c.id",
+        );
+        assert!(facts.is_empty());
+    }
+
+    #[test]
+    fn not_exists_anti_join_emits_no_left_join_fact() {
+        // The declared cute-dbt#173 exclusion: only the LEFT JOIN +
+        // IS NULL form is detected in v1 — the NOT EXISTS equivalent is
+        // invisible at the fact level (negative test, book-page note).
+        let facts = terminal_facts(
+            "SELECT * FROM stg_orders o \
+             WHERE NOT EXISTS (SELECT 1 FROM stg_returns r WHERE r.order_id = o.order_id)",
+        );
+        assert!(facts.is_empty());
+    }
+
+    #[test]
+    fn select_distinct_sets_the_dedup_fact() {
+        let facts = terminal_facts(
+            "SELECT DISTINCT o.order_id, c.segment \
+             FROM stg_orders o LEFT JOIN stg_customers c ON o.customer_id = c.id",
+        );
+        assert!(facts[0].select_is_distinct());
+    }
+
+    #[test]
+    fn left_joins_in_cte_bodies_and_union_arms_are_collected() {
+        let g = graph(
+            "WITH joined AS (\
+                 SELECT a.id, b.v FROM ta a LEFT JOIN tb b ON a.id = b.id\
+             ) \
+             SELECT * FROM joined \
+             UNION ALL \
+             SELECT c.id, d.v FROM tc c LEFT JOIN td d ON c.id = d.id",
+        );
+        let facts = g.left_join_facts();
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].consumer(), "joined");
+        assert_eq!(facts[0].right_leaf(), "tb");
+        assert_eq!(
+            facts[1].consumer(),
+            TERMINAL_NODE_NAME,
+            "the union arm's LEFT JOIN is collected under the terminal body"
+        );
+        assert_eq!(facts[1].right_leaf(), "td");
+    }
+
+    #[test]
+    fn two_left_joins_in_one_select_yield_two_facts_in_source_order() {
+        let facts = terminal_facts(
+            "SELECT p.patient_id, cs.first_date, cf.flag \
+             FROM patients p \
+             LEFT JOIN condition_stats cs ON p.patient_id = cs.patient_id \
+             LEFT JOIN chronic_flags cf ON p.patient_id = cf.patient_id",
+        );
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0].right_leaf(), "condition_stats");
+        assert_eq!(facts[1].right_leaf(), "chronic_flags");
     }
 }

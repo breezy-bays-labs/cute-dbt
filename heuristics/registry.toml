@@ -47,3 +47,61 @@ exclusions = [
 ]
 recommendation = "Add (or fill) a given row for each unexercised UNION arm's input so every arm contributes at least one row, then extend `expect` with the row(s) that arm should emit. This finding's evidence carries the per-arm input and a given-row sketch."
 rationale = "A UNION arm with no fixture rows contributes nothing to any unit test: its projection, casts, and filters run on zero rows, so a column mix-up or a dropped row in that arm ships silently. One given row per arm makes every branch's contribution visible in the expected output."
+
+[[heuristic]]
+id = "join.left-null-propagation"
+name = "LEFT JOIN null propagation untested"
+group = "join"
+tier = "high"
+instrument = "both"
+evidence = [
+  "cte-graph.left-join-facts",
+  "cte-graph.body-leaf-table-refs",
+  "manifest.unit-test-givens",
+]
+conditions = [
+  "the model LEFT-JOINs a relation and right-side columns provably reach the containing SELECT's projection: a direct `<right>.<column>` item, a `<right>.*` qualified wildcard, or a bare `*`",
+  "satisfaction: some unit test's literal givens carry a left-side row whose ON equi-key has no match among the right-side given rows — cells compare on the value-normalized equality key, and a left row whose key cell is NULL or absent never matches (SQL join semantics), so it exercises the no-match path",
+  "given binding follows the union.arm-coverage premise: only `given` entries carry statically-visible rows — an ungiven non-seed input is an empty mock; join sides bind to givens directly by external leaf name or through an upstream closure of simple-FROM CTEs reading exactly one external relation",
+  "instrument routing (catalog C4/C10): when the SELECT containing the LEFT JOIN dedups its output with DISTINCT — the dedup-after-fan-out signal — the data-test recommendation wins: prove the right key's grain with a uniqueness data test at the source instead of adding fixtures",
+  "verdict order: any test exercising an unmatched left row makes the construct COVERED with attribution; otherwise any statically-unattributable binding or given makes it UNKNOWN; otherwise UNCOVERED",
+]
+exclusions = [
+  "right-side columns reaching the output only through expressions (COALESCE, CASE, function calls) are not attributed — the construct stays silent unless a direct right-qualified item or wildcard projects (conservative: never a false fire)",
+  "non-equi or non-column ON predicates, USING / NATURAL constraints, and unqualified key columns leave the join key statically unrecoverable — verdict UNKNOWN, never UNCOVERED",
+  "a derived-table join side emits no fact; a CTE side whose upstream closure is not a single-external chain of simple-FROM CTEs is UNKNOWN, never UNCOVERED",
+  "external `fixture:` files and non-literal `format: sql` givens make a test statically uncountable — UNKNOWN, never UNCOVERED",
+  "an ungiven seed-side input reads real seed data — UNKNOWN, never UNCOVERED",
+]
+recommendation = "Add a no-match given: one left-side row whose join key is absent from the right-side given rows, then extend `expect` with that row carrying NULL right-side columns (or the intended fallback). This finding's evidence carries a copy-pasteable given sketch."
+rationale = "A LEFT JOIN whose right-side columns reach the output propagates NULLs on every unmatched left row — the most common real dbt unit-test catch. When every left given row has a right match, the no-match path runs on zero rows in every test, so an unhandled NULL (or a wrong fallback) ships silently."
+
+[[heuristic]]
+id = "join.anti-join"
+name = "Anti-join exclusion untested"
+group = "join"
+tier = "high"
+instrument = "unit-test"
+supersedes = [
+  "join.left-null-propagation",
+]
+evidence = [
+  "cte-graph.left-join-facts",
+  "cte-graph.body-leaf-table-refs",
+  "manifest.unit-test-givens",
+]
+conditions = [
+  "the model LEFT-JOINs a relation and filters `WHERE <right>.<key> IS NULL` in a top-level AND conjunct, where `<key>` is one of the join's ON equi-key right columns — the anti-join idiom: the join deliberately keeps the UNMATCHED left rows",
+  "the recommendation INVERTS join.left-null-propagation's: the anti-join's risk is the matched class leaking through, so the missing fixture is a left row that DOES match a right row, with `expect` proving it is excluded",
+  "satisfaction: some unit test's literal givens carry a left row whose ON equi-key matches a right given row (both cells non-NULL, equal on the value-normalized key)",
+  "supersedes join.left-null-propagation on the same construct: NULL right-side columns are the anti-join's working mechanism, not an untested gap",
+  "given binding follows the union.arm-coverage premise: only `given` entries carry statically-visible rows — an ungiven non-seed input is an empty mock; join sides bind directly by external leaf name or through a single-external simple-FROM closure",
+]
+exclusions = [
+  "the NOT EXISTS / NOT IN anti-join equivalents are NOT detected in v1 — only the LEFT JOIN + IS NULL form is recognized (a declared gap: the construct is silent, never misclassified)",
+  "an IS NULL on a non-key right column is a data filter, not the anti-join idiom — join.left-null-propagation governs that construct",
+  "an IS NULL inside an OR branch has different semantics and is never treated as the anti-join filter",
+  "unrecoverable join keys, unresolvable side bindings, external `fixture:` files, non-literal `format: sql` givens, and ungiven seed inputs degrade to UNKNOWN, never UNCOVERED",
+]
+recommendation = "Add a matching given pair: one left row whose join key IS present in the right-side given rows, then assert in `expect` that the matched row is excluded from the output. This finding's evidence carries a copy-pasteable given sketch."
+rationale = "An anti-join's output is defined by what it excludes. Every existing given that only carries unmatched rows proves the keep path, never the exclusion: if the ON key drifts or the IS NULL column changes, matched rows leak into the output and no test catches it."

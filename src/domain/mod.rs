@@ -65,7 +65,7 @@ pub use checks::{
     filter_for_display, model_findings, registry_toml, resolve_supersedes, supersedes_is_acyclic,
 };
 pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
-pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, Span};
+pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, Span};
 pub use manifest::{
     Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, TestMetadata,
     UniqueKey,

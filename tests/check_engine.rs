@@ -14,14 +14,15 @@
 //! `dbt_utils.unique_combination_of_columns` node (`fct_patient_summary`)
 //! — plus models with NO unique_key and an explicit-`null` config arm.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use cute_dbt::adapters::cte_engine::parse_cte_graph;
 use cute_dbt::adapters::render::build_payload_with_externals;
 use cute_dbt::domain::{
-    CheckPolicy, ChecksConfig, Finding, HeuristicId, InScopeSet, Manifest, ModelInScopeSet, NodeId,
-    SuppressRule, SuppressionSource, Verdict, model_findings, resolve_check_policy,
+    CheckId, CheckPolicy, ChecksConfig, Checksum, DependsOn, Finding, HeuristicId, InScopeSet,
+    Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId, SuppressRule,
+    SuppressionSource, Verdict, model_findings, resolve_check_policy,
 };
 use cute_dbt::ports::ManifestSource;
 
@@ -115,20 +116,92 @@ fn playground_combination_test_stays_composite_on_real_data() {
 }
 
 #[test]
-fn jaffle_shop_models_without_unique_key_carry_no_findings() {
+fn jaffle_shop_models_carry_no_grain_or_union_findings() {
     // The jaffle-shop fixture declares no unique_key anywhere (its
     // configs carry the explicit-null fusion arm) AND no UNION-bearing
-    // model — zero findings on every model, even with the real graph
-    // threaded through.
+    // model — zero grain/union findings on every model, even with the
+    // real graph threaded through. (The cute-dbt#173 join pair DOES
+    // fire on its LEFT JOINs — pinned separately below.)
     let manifest = load("jaffle-shop-current.json");
     for (id, node) in manifest.nodes() {
         if node.resource_type() == "model" {
-            assert!(
-                findings_for(&manifest, id.as_str()).is_empty(),
-                "unexpected finding on {id}"
-            );
+            let non_join: Vec<Finding<HeuristicId>> = findings_for(&manifest, id.as_str())
+                .into_iter()
+                .filter(|f| f.check.spec().group != "join")
+                .collect();
+            assert!(non_join.is_empty(), "unexpected finding on {id}");
         }
     }
+}
+
+#[test]
+fn jaffle_shop_customers_left_joins_fire_the_left_null_check() {
+    // Real-fixture verification of join.left-null-propagation
+    // (cute-dbt#173): the customers model LEFT-JOINs CTE chains whose
+    // right-side columns reach the projection directly. Two constructs
+    // bind statically (UNCOVERED — the fixture has no unit test
+    // exercising a no-match row); the customer_payments side of the
+    // final join is a non-simple aggregate chain — honest UNKNOWN.
+    let manifest = load("jaffle-shop-current.json");
+    let findings = findings_for(&manifest, "model.jaffle_shop.customers");
+    let by_construct: Vec<(&str, &Verdict)> = findings
+        .iter()
+        .filter(|f| f.check == HeuristicId::JoinLeftNullPropagation)
+        .map(|f| (f.construct.as_str(), &f.verdict))
+        .collect();
+    assert_eq!(
+        by_construct,
+        vec![
+            ("left_join[customer_payments:orders]", &Verdict::Uncovered),
+            ("left_join[final:customer_orders]", &Verdict::Uncovered),
+            ("left_join[final:customer_payments]", &Verdict::Unknown),
+        ],
+    );
+}
+
+#[test]
+fn playground_left_join_fires_uncovered_with_a_closure_bound_sketch() {
+    // int_patients__with_conditions: `final` LEFT-JOINs the
+    // condition_stats aggregate chain and projects its columns
+    // directly (cs.first_condition_date). The model has NO unit tests,
+    // so the construct is UNCOVERED on real fusion-compiled data, and
+    // the no-match sketch binds through the simple-FROM closure to the
+    // external relations the givens would mock.
+    let manifest = load("playground-current.json");
+    let findings = findings_for(
+        &manifest,
+        "model.healthcare_analytics.int_patients__with_conditions",
+    );
+    let join_findings: Vec<&Finding<HeuristicId>> = findings
+        .iter()
+        .filter(|f| f.check == HeuristicId::JoinLeftNullPropagation)
+        .collect();
+    assert_eq!(
+        join_findings.len(),
+        1,
+        "the chronic_flags/chronic_count joins project only through \
+         COALESCE — the declared expression exclusion keeps them silent",
+    );
+    let finding = join_findings[0];
+    assert_eq!(finding.construct, "left_join[final:condition_stats]");
+    assert_eq!(finding.verdict, Verdict::Uncovered);
+    let sketch = finding
+        .evidence
+        .iter()
+        .find(|e| e.label == "suggested given")
+        .expect("no-match sketch present");
+    assert!(
+        sketch.value.contains("- input: ref('dim_patients')"),
+        "left side binds through the patients CTE: {}",
+        sketch.value,
+    );
+    assert!(
+        sketch
+            .value
+            .contains("- input: ref('stg_synthea__conditions')"),
+        "right side binds through the condition_stats -> conditions closure: {}",
+        sketch.value,
+    );
 }
 
 /// Build the real render payload for one playground model under a
@@ -341,6 +414,105 @@ fn playground_union_model_with_no_unit_tests_is_uncovered_with_a_sketch() {
             .any(|e| e.label == "suggested given" && e.value.starts_with("- input: ref('")),
         "a copy-pasteable given sketch rides in the evidence: {:?}",
         union_finding.evidence,
+    );
+}
+
+/// A minimal synthetic model node whose `compiled_code` is `sql` —
+/// for end-to-end runs through the REAL sqlparser engine.
+fn model_with_sql(id: &str, sql: &str) -> Node {
+    Node::new(
+        NodeId::new(id),
+        "model",
+        Checksum::new("sha256", "x"),
+        Some(sql.to_owned()),
+        None,
+        DependsOn::default(),
+        None,
+        NodeConfig::new(BTreeMap::new(), false),
+        None,
+        BTreeMap::new(),
+    )
+}
+
+/// The cute-dbt#173 supersedes showcase SQL: the dbt-style anti-join —
+/// import CTEs, bare `*` projection (so left-null-propagation's own
+/// conditions match), and the `WHERE <right key> IS NULL` filter.
+const ANTI_JOIN_SQL: &str = "with customers as (\n    select * from \"db\".\"main\".\"stg_customers\"\n),\norders as (\n    select * from \"db\".\"main\".\"stg_orders\"\n),\nfinal as (\n    select *\n    from customers\n    left join orders on customers.customer_id = orders.customer_id\n    where orders.customer_id is null\n)\nselect * from final";
+
+#[test]
+fn anti_join_supersedes_left_null_through_the_real_engine() {
+    // End-to-end (cute-dbt#173 AC): real sqlparser parse → graph facts
+    // → production registry pipeline. Only join.anti-join survives on
+    // the construct, with the INVERTED recommendation.
+    let node = model_with_sql("model.shop.customers_with_no_orders", ANTI_JOIN_SQL);
+    let manifest = Manifest::new(
+        ManifestMetadata::new("v12"),
+        [(node.id().clone(), node)].into_iter().collect(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let model = manifest
+        .node(&NodeId::new("model.shop.customers_with_no_orders"))
+        .expect("model exists");
+    let graph = parse_cte_graph(model.compiled_code().unwrap()).expect("anti-join SQL parses");
+    let findings = model_findings(&manifest, model, Some(&graph));
+    let join_checks: Vec<HeuristicId> = findings
+        .iter()
+        .filter(|f| f.check.spec().group == "join")
+        .map(|f| f.check)
+        .collect();
+    assert_eq!(
+        join_checks,
+        vec![HeuristicId::JoinAntiJoin],
+        "left-null-propagation is silenced by supersedes resolution: {findings:?}",
+    );
+    let anti = findings
+        .iter()
+        .find(|f| f.check == HeuristicId::JoinAntiJoin)
+        .expect("anti-join finding present");
+    assert_eq!(anti.construct, "left_join[final:orders]");
+    assert_eq!(anti.verdict, Verdict::Uncovered);
+    let sketch = anti
+        .evidence
+        .iter()
+        .find(|e| e.label == "suggested given")
+        .expect("inverted sketch present");
+    assert!(
+        sketch.value.contains("# matches the right row below"),
+        "the recommendation is the INVERTED (matching) given: {}",
+        sketch.value,
+    );
+    assert!(
+        sketch.value.contains("ref('stg_orders')") && sketch.value.contains("ref('stg_customers')"),
+        "the sketch binds through the import-CTE closures: {}",
+        sketch.value,
+    );
+}
+
+#[test]
+fn not_exists_anti_join_is_silent_through_the_real_engine() {
+    // Paired negative test for the declared NOT EXISTS exclusion
+    // (cute-dbt#173 Discovery call): v1 detects the LEFT JOIN + IS NULL
+    // form ONLY — the NOT EXISTS equivalent emits no join finding at
+    // all (silent, never misclassified).
+    let sql = "select * from \"db\".\"main\".\"stg_customers\" c \
+               where not exists (select 1 from \"db\".\"main\".\"stg_orders\" o \
+               where o.customer_id = c.customer_id)";
+    let node = model_with_sql("model.shop.customers_with_no_orders_ne", sql);
+    let manifest = Manifest::new(
+        ManifestMetadata::new("v12"),
+        [(node.id().clone(), node)].into_iter().collect(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let model = manifest
+        .node(&NodeId::new("model.shop.customers_with_no_orders_ne"))
+        .expect("model exists");
+    let graph = parse_cte_graph(model.compiled_code().unwrap()).expect("NOT EXISTS SQL parses");
+    let findings = model_findings(&manifest, model, Some(&graph));
+    assert!(
+        findings.iter().all(|f| f.check.spec().group != "join"),
+        "the NOT EXISTS form is invisible to the v1 join pair: {findings:?}",
     );
 }
 

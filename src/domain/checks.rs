@@ -79,11 +79,11 @@ use std::fmt::Write as _;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
-use crate::domain::cte::{CteGraph, EdgeType};
+use crate::domain::cte::{CteGraph, EdgeType, LeftJoinFact};
 use crate::domain::manifest::{Manifest, Node, NodeId};
 use crate::domain::state::resolve_target_model;
 use crate::domain::unit_test::{UnitTest, UnitTestGiven};
-use crate::domain::unit_test_table::table_from_manifest_rows;
+use crate::domain::unit_test_table::{CellValue, FixtureTable, table_from_manifest_rows};
 
 // ---------------------------------------------------------------------
 // Spec vocabulary.
@@ -658,6 +658,73 @@ heuristics! {
             rationale: "A UNION arm with no fixture rows contributes nothing to any unit test: its projection, casts, and filters run on zero rows, so a column mix-up or a dropped row in that arm ships silently. One given row per arm makes every branch's contribution visible in the expected output.",
             detector: detect_union_arm_coverage,
         },
+        /// `join.left-null-propagation` — LEFT JOIN right-side columns
+        /// reach the output and no given exercises the no-match path
+        /// (cute-dbt#173, catalog class C4).
+        JoinLeftNullPropagation {
+            id: "join.left-null-propagation",
+            name: "LEFT JOIN null propagation untested",
+            group: "join",
+            tier: High,
+            instrument: Both,
+            supersedes: [],
+            evidence: [
+                "cte-graph.left-join-facts",
+                "cte-graph.body-leaf-table-refs",
+                "manifest.unit-test-givens",
+            ],
+            conditions: [
+                "the model LEFT-JOINs a relation and right-side columns provably reach the containing SELECT's projection: a direct `<right>.<column>` item, a `<right>.*` qualified wildcard, or a bare `*`",
+                "satisfaction: some unit test's literal givens carry a left-side row whose ON equi-key has no match among the right-side given rows — cells compare on the value-normalized equality key, and a left row whose key cell is NULL or absent never matches (SQL join semantics), so it exercises the no-match path",
+                "given binding follows the union.arm-coverage premise: only `given` entries carry statically-visible rows — an ungiven non-seed input is an empty mock; join sides bind to givens directly by external leaf name or through an upstream closure of simple-FROM CTEs reading exactly one external relation",
+                "instrument routing (catalog C4/C10): when the SELECT containing the LEFT JOIN dedups its output with DISTINCT — the dedup-after-fan-out signal — the data-test recommendation wins: prove the right key's grain with a uniqueness data test at the source instead of adding fixtures",
+                "verdict order: any test exercising an unmatched left row makes the construct COVERED with attribution; otherwise any statically-unattributable binding or given makes it UNKNOWN; otherwise UNCOVERED",
+            ],
+            exclusions: [
+                "right-side columns reaching the output only through expressions (COALESCE, CASE, function calls) are not attributed — the construct stays silent unless a direct right-qualified item or wildcard projects (conservative: never a false fire)",
+                "non-equi or non-column ON predicates, USING / NATURAL constraints, and unqualified key columns leave the join key statically unrecoverable — verdict UNKNOWN, never UNCOVERED",
+                "a derived-table join side emits no fact; a CTE side whose upstream closure is not a single-external chain of simple-FROM CTEs is UNKNOWN, never UNCOVERED",
+                "external `fixture:` files and non-literal `format: sql` givens make a test statically uncountable — UNKNOWN, never UNCOVERED",
+                "an ungiven seed-side input reads real seed data — UNKNOWN, never UNCOVERED",
+            ],
+            recommendation: "Add a no-match given: one left-side row whose join key is absent from the right-side given rows, then extend `expect` with that row carrying NULL right-side columns (or the intended fallback). This finding's evidence carries a copy-pasteable given sketch.",
+            rationale: "A LEFT JOIN whose right-side columns reach the output propagates NULLs on every unmatched left row — the most common real dbt unit-test catch. When every left given row has a right match, the no-match path runs on zero rows in every test, so an unhandled NULL (or a wrong fallback) ships silently.",
+            detector: detect_join_left_null_propagation,
+        },
+        /// `join.anti-join` — LEFT JOIN + `WHERE <right key> IS NULL`;
+        /// the more specific shape SUPERSEDES left-null-propagation and
+        /// inverts the recommendation (cute-dbt#173, catalog C4
+        /// refinement: rules must recognize the pattern, not force
+        /// suppression).
+        JoinAntiJoin {
+            id: "join.anti-join",
+            name: "Anti-join exclusion untested",
+            group: "join",
+            tier: High,
+            instrument: UnitTest,
+            supersedes: [JoinLeftNullPropagation],
+            evidence: [
+                "cte-graph.left-join-facts",
+                "cte-graph.body-leaf-table-refs",
+                "manifest.unit-test-givens",
+            ],
+            conditions: [
+                "the model LEFT-JOINs a relation and filters `WHERE <right>.<key> IS NULL` in a top-level AND conjunct, where `<key>` is one of the join's ON equi-key right columns — the anti-join idiom: the join deliberately keeps the UNMATCHED left rows",
+                "the recommendation INVERTS join.left-null-propagation's: the anti-join's risk is the matched class leaking through, so the missing fixture is a left row that DOES match a right row, with `expect` proving it is excluded",
+                "satisfaction: some unit test's literal givens carry a left row whose ON equi-key matches a right given row (both cells non-NULL, equal on the value-normalized key)",
+                "supersedes join.left-null-propagation on the same construct: NULL right-side columns are the anti-join's working mechanism, not an untested gap",
+                "given binding follows the union.arm-coverage premise: only `given` entries carry statically-visible rows — an ungiven non-seed input is an empty mock; join sides bind directly by external leaf name or through a single-external simple-FROM closure",
+            ],
+            exclusions: [
+                "the NOT EXISTS / NOT IN anti-join equivalents are NOT detected in v1 — only the LEFT JOIN + IS NULL form is recognized (a declared gap: the construct is silent, never misclassified)",
+                "an IS NULL on a non-key right column is a data filter, not the anti-join idiom — join.left-null-propagation governs that construct",
+                "an IS NULL inside an OR branch has different semantics and is never treated as the anti-join filter",
+                "unrecoverable join keys, unresolvable side bindings, external `fixture:` files, non-literal `format: sql` givens, and ungiven seed inputs degrade to UNKNOWN, never UNCOVERED",
+            ],
+            recommendation: "Add a matching given pair: one left row whose join key IS present in the right-side given rows, then assert in `expect` that the matched row is excluded from the output. This finding's evidence carries a copy-pasteable given sketch.",
+            rationale: "An anti-join's output is defined by what it excludes. Every existing given that only carries unmatched rows proves the keep path, never the exclusion: if the ON key drifts or the IS NULL column changes, matched rows leak into the output and no test catches it.",
+            detector: detect_join_anti_join,
+        },
     }
 }
 
@@ -1135,6 +1202,540 @@ fn union_finding(
         verdict,
         evidence,
     )
+}
+
+// ---------------------------------------------------------------------
+// join.left-null-propagation + join.anti-join — the supersedes pair
+// (cute-dbt#173, catalog class C4 + the agenda §4b anti-join refinement).
+// ---------------------------------------------------------------------
+
+/// One LEFT JOIN site: the **shared** construct discriminator both join
+/// checks emit findings on. Identical by construction (both detectors
+/// consume this one enumeration), so `(model_id, construct)` is the
+/// supersedes-resolution join key.
+struct LeftJoinSite<'a> {
+    construct: String,
+    fact: &'a LeftJoinFact,
+}
+
+/// Enumerate a graph's LEFT JOIN sites in source order, deduplicating
+/// repeated `(consumer, right_leaf)` pairs with a `#<ordinal>` suffix.
+fn left_join_sites(graph: &CteGraph) -> Vec<LeftJoinSite<'_>> {
+    let mut seen: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    graph
+        .left_join_facts()
+        .iter()
+        .map(|fact| {
+            let ordinal = seen
+                .entry((fact.consumer(), fact.right_leaf()))
+                .and_modify(|n| *n += 1)
+                .or_insert(1);
+            let construct = if *ordinal == 1 {
+                format!("left_join[{}:{}]", fact.consumer(), fact.right_leaf())
+            } else {
+                format!(
+                    "left_join[{}:{}#{}]",
+                    fact.consumer(),
+                    fact.right_leaf(),
+                    ordinal
+                )
+            };
+            LeftJoinSite { construct, fact }
+        })
+        .collect()
+}
+
+/// The ON equi-key right columns that also appear under a top-level
+/// `WHERE … IS NULL` conjunct — non-empty exactly when the fact is the
+/// anti-join idiom (`LEFT JOIN … WHERE <right key> IS NULL`).
+fn anti_join_null_keys(fact: &LeftJoinFact) -> Vec<&str> {
+    fact.equi_keys()
+        .iter()
+        .map(crate::domain::cte::JoinKeyPair::right_column)
+        .filter(|column| {
+            fact.where_is_null_columns()
+                .iter()
+                .any(|null_column| null_column == column)
+        })
+        .collect()
+}
+
+/// Resolve a join side's leaf to the external relation a unit-test
+/// given mocks: the leaf itself when it is not a CTE; otherwise the
+/// single external relation read by the CTE's upstream closure,
+/// required to be a chain of simple-FROM CTEs (the dominant
+/// `select … from <one relation>` import/refine shape — the column
+/// names the ON clause keys on conventionally survive such a chain).
+/// `None` is the honest UNKNOWN degrade.
+fn resolve_side_external(graph: &CteGraph, leaf: &str) -> Option<String> {
+    let lower = leaf.to_ascii_lowercase();
+    let cte_names: BTreeSet<String> = graph
+        .nodes()
+        .iter()
+        .map(|node| node.name().to_ascii_lowercase())
+        .collect();
+    let Some(start) = graph
+        .nodes()
+        .iter()
+        .position(|node| node.name().eq_ignore_ascii_case(&lower))
+    else {
+        // Not a CTE — an external relation, directly mockable.
+        return Some(lower);
+    };
+    let mut closure = BTreeSet::from([start]);
+    let mut frontier = vec![start];
+    while let Some(node) = frontier.pop() {
+        for edge in graph.edges() {
+            if edge.to() == node && closure.insert(edge.from()) {
+                frontier.push(edge.from());
+            }
+        }
+    }
+    let mut externals: BTreeSet<String> = BTreeSet::new();
+    for index in closure {
+        let node = graph.nodes().get(index)?;
+        if !node.is_simple_from_shape() {
+            return None;
+        }
+        for leaf_ref in node.body_leaf_table_refs() {
+            if !cte_names.contains(leaf_ref) {
+                externals.insert(leaf_ref.clone());
+            }
+        }
+    }
+    if externals.len() == 1 {
+        externals.into_iter().next()
+    } else {
+        None
+    }
+}
+
+/// A LEFT JOIN site's equi keys bound to the external relations its
+/// unit-test givens mock — the statically-recoverable key-match inputs.
+struct BoundKeys {
+    left_external: String,
+    right_external: String,
+    /// `(left_column, right_column)` pairs, lowercased.
+    pairs: Vec<(String, String)>,
+}
+
+/// Bind a fact's equi keys, or `None` when not statically recoverable:
+/// no equi pairs, pairs spanning several left relations, or a side that
+/// does not resolve to a single mockable external relation.
+fn bind_keys(graph: &CteGraph, fact: &LeftJoinFact) -> Option<BoundKeys> {
+    let mut left_leaves: BTreeSet<&str> = BTreeSet::new();
+    for pair in fact.equi_keys() {
+        left_leaves.insert(pair.left_leaf()?);
+    }
+    if left_leaves.len() != 1 {
+        return None;
+    }
+    let left_external = resolve_side_external(graph, left_leaves.iter().next()?)?;
+    let right_external = resolve_side_external(graph, fact.right_leaf())?;
+    Some(BoundKeys {
+        left_external,
+        right_external,
+        pairs: fact
+            .equi_keys()
+            .iter()
+            .map(|pair| {
+                (
+                    pair.left_column().to_owned(),
+                    pair.right_column().to_owned(),
+                )
+            })
+            .collect(),
+    })
+}
+
+/// One side's statically-known given rows within one unit test.
+enum SideRows {
+    /// A literal table — possibly empty. An ungiven non-seed input is
+    /// the empty mock (the union.arm-coverage premise: only `given`
+    /// entries carry statically-visible rows).
+    Table(FixtureTable),
+    /// Not statically countable: an external `fixture:` file, a
+    /// non-literal `format: sql` given, or an ungiven seed input.
+    Unknown,
+}
+
+/// Resolve the given mocking `external` within `unit_test` to its
+/// literal table.
+fn side_rows(manifest: &Manifest, unit_test: &UnitTest, external: &str) -> SideRows {
+    for given in unit_test.given() {
+        let Some(leaf) = given_input_leaf(given.input()) else {
+            continue;
+        };
+        if leaf != external {
+            continue;
+        }
+        if given.fixture().is_some() {
+            return SideRows::Unknown;
+        }
+        return match table_from_manifest_rows(given.rows(), given.format()) {
+            Some(table) => SideRows::Table(table),
+            None => SideRows::Unknown,
+        };
+    }
+    if leaf_resolves_to_seed(manifest, external) {
+        SideRows::Unknown
+    } else {
+        SideRows::Table(FixtureTable::default())
+    }
+}
+
+/// The key cells of every row in `table` for `columns`
+/// (case-insensitive header lookup), or `None` when a **non-empty**
+/// table lacks one of the key columns — a likely misbinding, degraded
+/// honestly instead of judged.
+fn key_rows(table: &FixtureTable, columns: &[String]) -> Option<Vec<Vec<CellValue>>> {
+    if table.rows.is_empty() {
+        return Some(Vec::new());
+    }
+    let indices: Vec<usize> = columns
+        .iter()
+        .map(|column| {
+            table
+                .columns
+                .iter()
+                .position(|header| header.eq_ignore_ascii_case(column))
+        })
+        .collect::<Option<Vec<usize>>>()?;
+    Some(
+        table
+            .rows
+            .iter()
+            .map(|row| {
+                indices
+                    .iter()
+                    .map(|&index| {
+                        row.cells
+                            .get(index)
+                            .map_or(CellValue::Absent, |cell| cell.key.clone())
+                    })
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
+/// `true` when a left key tuple matches a right key tuple: every
+/// component non-NULL/non-absent on **both** sides and equal on the
+/// value-normalized key (SQL semantics: NULL never equals anything).
+fn keys_match(left: &[CellValue], right: &[CellValue]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(l, r)| {
+            !matches!(l, CellValue::Null | CellValue::Absent)
+                && !matches!(r, CellValue::Null | CellValue::Absent)
+                && l == r
+        })
+}
+
+/// What one unit test statically proves about a bound LEFT JOIN's key
+/// matching.
+struct KeyFacts {
+    /// ≥1 left given row has NO matching right row — the no-match path
+    /// carries rows.
+    has_unmatched_left: bool,
+    /// ≥1 left given row HAS a matching right row — the matched path
+    /// carries rows.
+    has_matched_left: bool,
+}
+
+/// Per-test key facts, or `None` when the test is not statically
+/// attributable for this join (the UNKNOWN degrade).
+fn test_key_facts(
+    manifest: &Manifest,
+    unit_test: &UnitTest,
+    bound: &BoundKeys,
+) -> Option<KeyFacts> {
+    let SideRows::Table(left) = side_rows(manifest, unit_test, &bound.left_external) else {
+        return None;
+    };
+    let SideRows::Table(right) = side_rows(manifest, unit_test, &bound.right_external) else {
+        return None;
+    };
+    let left_columns: Vec<String> = bound.pairs.iter().map(|(l, _)| l.clone()).collect();
+    let right_columns: Vec<String> = bound.pairs.iter().map(|(_, r)| r.clone()).collect();
+    let left_rows = key_rows(&left, &left_columns)?;
+    let right_rows = key_rows(&right, &right_columns)?;
+    let mut facts = KeyFacts {
+        has_unmatched_left: false,
+        has_matched_left: false,
+    };
+    for left_row in &left_rows {
+        if right_rows
+            .iter()
+            .any(|right_row| keys_match(left_row, right_row))
+        {
+            facts.has_matched_left = true;
+        } else {
+            facts.has_unmatched_left = true;
+        }
+    }
+    Some(facts)
+}
+
+/// The unit tests targeting `ctx.model`, sorted by id (deterministic
+/// attribution).
+fn tests_on_model<'a>(ctx: &'a CheckContext<'_>) -> Vec<(&'a String, &'a UnitTest)> {
+    let mut tests: Vec<(&String, &UnitTest)> = ctx
+        .manifest
+        .unit_tests()
+        .iter()
+        .filter(|(_, unit_test)| {
+            resolve_target_model(ctx.manifest, unit_test.model())
+                .is_some_and(|model| model.id() == ctx.model.id())
+        })
+        .collect();
+    tests.sort_by(|a, b| a.0.cmp(b.0));
+    tests
+}
+
+/// The always-present "left join" evidence naming the construct.
+fn left_join_evidence(fact: &LeftJoinFact) -> Evidence {
+    let on = if fact.equi_keys().is_empty() {
+        "ON <not statically recoverable>".to_owned()
+    } else {
+        let pairs: Vec<String> = fact
+            .equi_keys()
+            .iter()
+            .map(|pair| {
+                format!(
+                    "{}.{} = {}.{}",
+                    pair.left_leaf().unwrap_or("?"),
+                    pair.left_column(),
+                    fact.right_leaf(),
+                    pair.right_column(),
+                )
+            })
+            .collect();
+        format!("ON {}", pairs.join(" AND "))
+    };
+    Evidence::new(
+        "left join",
+        format!(
+            "{} — LEFT JOIN {} {}",
+            fact.consumer(),
+            fact.right_leaf(),
+            on
+        ),
+    )
+}
+
+/// The copy-pasteable no-match given sketch (catalog C4 worked
+/// example): a left row whose key is absent from the right given.
+fn no_match_given_sketch(bound: &BoundKeys) -> String {
+    let left_row: Vec<String> = bound
+        .pairs
+        .iter()
+        .map(|(left, _)| format!("{left}: 404"))
+        .collect();
+    let right_row: Vec<String> = bound
+        .pairs
+        .iter()
+        .map(|(_, right)| format!("{right}: 1"))
+        .collect();
+    format!(
+        "- input: ref('{left}')\n  rows:\n    - {{{left_cells}}}   # 404 has no match below — the no-match path\n- input: ref('{right}')\n  rows:\n    - {{{right_cells}}}\n# expect: the no-match row with NULL {right} columns (or the intended fallback)",
+        left = bound.left_external,
+        right = bound.right_external,
+        left_cells = left_row.join(", "),
+        right_cells = right_row.join(", "),
+    )
+}
+
+/// The INVERTED anti-join sketch: a left row that DOES match, proving
+/// the matched class is excluded.
+fn matching_given_sketch(bound: &BoundKeys) -> String {
+    let left_row: Vec<String> = bound
+        .pairs
+        .iter()
+        .map(|(left, _)| format!("{left}: 1"))
+        .collect();
+    let right_row: Vec<String> = bound
+        .pairs
+        .iter()
+        .map(|(_, right)| format!("{right}: 1"))
+        .collect();
+    format!(
+        "- input: ref('{left}')\n  rows:\n    - {{{left_cells}}}   # matches the right row below\n- input: ref('{right}')\n  rows:\n    - {{{right_cells}}}\n# expect: rows WITHOUT the matched left row — the anti-join must exclude it",
+        left = bound.left_external,
+        right = bound.right_external,
+        left_cells = left_row.join(", "),
+        right_cells = right_row.join(", "),
+    )
+}
+
+/// The routed data-test sketch for the dedup-after-fan-out case
+/// (catalog C4/C10): prove the right key's grain at the source instead
+/// of adding fixtures.
+fn grain_data_test_sketch(bound: &BoundKeys) -> String {
+    let header = format!(
+        "# DISTINCT dedups this LEFT JOIN's output — test '{}' key grain at the source\n# instead of another fixture (catalog C4/C10 routing)\n",
+        bound.right_external,
+    );
+    if bound.pairs.len() == 1 {
+        format!(
+            "{header}columns:\n  - name: {key}\n    data_tests:\n      - unique",
+            key = bound.pairs[0].1,
+        )
+    } else {
+        let columns: Vec<String> = bound.pairs.iter().map(|(_, right)| right.clone()).collect();
+        format!(
+            "{header}data_tests:\n  - dbt_utils.unique_combination_of_columns:\n      combination_of_columns: [{}]",
+            columns.join(", "),
+        )
+    }
+}
+
+/// Which key-match direction satisfies a join check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyDirection {
+    /// `join.left-null-propagation` — an UNMATCHED left row exercises
+    /// the no-match path.
+    NoMatch,
+    /// `join.anti-join` — a MATCHED left row proves the exclusion.
+    Match,
+}
+
+/// Shared verdict computation for both join checks: bind the keys,
+/// score every unit test in `direction`, and aggregate per the honest
+/// tier order (covered → unknown → uncovered).
+fn key_match_verdict(
+    ctx: &CheckContext<'_>,
+    graph: &CteGraph,
+    fact: &LeftJoinFact,
+    direction: KeyDirection,
+    evidence: &mut Vec<Evidence>,
+) -> Verdict {
+    let Some(bound) = bind_keys(graph, fact) else {
+        evidence.push(Evidence::new(
+            "unattributable join",
+            format!(
+                "{} — join key or side binding not statically recoverable",
+                fact.consumer(),
+            ),
+        ));
+        return Verdict::Unknown;
+    };
+    let mut covered_by: Vec<String> = Vec::new();
+    let mut unknown = false;
+    for (id, unit_test) in tests_on_model(ctx) {
+        match test_key_facts(ctx.manifest, unit_test, &bound) {
+            Some(facts) => {
+                let exercised = match direction {
+                    KeyDirection::NoMatch => facts.has_unmatched_left,
+                    KeyDirection::Match => facts.has_matched_left,
+                };
+                if exercised {
+                    covered_by.push(id.clone());
+                }
+            }
+            None => unknown = true,
+        }
+    }
+    if !covered_by.is_empty() {
+        covered_by.sort();
+        return Verdict::Covered { by: covered_by };
+    }
+    if unknown {
+        evidence.push(Evidence::new(
+            "unattributable given",
+            format!(
+                "{} — a unit test's rows are not statically countable (external fixture, non-literal sql, or ungiven seed input)",
+                fact.consumer(),
+            ),
+        ));
+        return Verdict::Unknown;
+    }
+    let sketch = match direction {
+        KeyDirection::NoMatch if fact.select_is_distinct() => {
+            evidence.push(Evidence::new(
+                "instrument routing",
+                format!(
+                    "{} dedups the join output with DISTINCT — the data-test recommendation wins over a unit-test fixture (dedup after a fan-out join)",
+                    fact.consumer(),
+                ),
+            ));
+            Evidence::new("suggested data test", grain_data_test_sketch(&bound))
+        }
+        KeyDirection::NoMatch => Evidence::new("suggested given", no_match_given_sketch(&bound)),
+        KeyDirection::Match => Evidence::new("suggested given", matching_given_sketch(&bound)),
+    };
+    evidence.push(sketch);
+    Verdict::Uncovered
+}
+
+/// Detector for `join.left-null-propagation` (cute-dbt#173, catalog
+/// class C4).
+///
+/// Trigger: a LEFT JOIN site whose right-side columns provably reach
+/// the containing SELECT's projection. Fires on anti-join constructs
+/// too — by design: [`resolve_supersedes`] silences it there (the
+/// founder's "rules must recognize the pattern, not force suppression"
+/// case), so a detector-level skip would mask the supersedes contract.
+fn detect_join_left_null_propagation(ctx: &CheckContext<'_>) -> Vec<Finding<HeuristicId>> {
+    if ctx.model.resource_type() != "model" {
+        return Vec::new();
+    }
+    let Some(graph) = ctx.cte_graph else {
+        return Vec::new();
+    };
+    left_join_sites(graph)
+        .into_iter()
+        .filter(|site| site.fact.projects_right_columns())
+        .map(|site| {
+            let mut evidence = vec![left_join_evidence(site.fact)];
+            let verdict =
+                key_match_verdict(ctx, graph, site.fact, KeyDirection::NoMatch, &mut evidence);
+            Finding::new(
+                HeuristicId::JoinLeftNullPropagation,
+                ctx.model.id().clone(),
+                site.construct,
+                verdict,
+                evidence,
+            )
+        })
+        .collect()
+}
+
+/// Detector for `join.anti-join` (cute-dbt#173, the agenda §4b
+/// refinement).
+///
+/// Trigger: a LEFT JOIN site filtering `WHERE <right key> IS NULL` in a
+/// top-level AND conjunct, the IS NULL column being one of the ON
+/// equi-key right columns. Emits the INVERTED recommendation (a given
+/// row that DOES match, proving the matched class is excluded) and
+/// supersedes `join.left-null-propagation` on the same construct.
+fn detect_join_anti_join(ctx: &CheckContext<'_>) -> Vec<Finding<HeuristicId>> {
+    if ctx.model.resource_type() != "model" {
+        return Vec::new();
+    }
+    let Some(graph) = ctx.cte_graph else {
+        return Vec::new();
+    };
+    left_join_sites(graph)
+        .into_iter()
+        .filter(|site| !anti_join_null_keys(site.fact).is_empty())
+        .map(|site| {
+            let mut evidence = vec![left_join_evidence(site.fact)];
+            let null_keys = anti_join_null_keys(site.fact).join(", ");
+            evidence.push(Evidence::new(
+                "anti-join filter",
+                format!("WHERE {}.{} IS NULL", site.fact.right_leaf(), null_keys),
+            ));
+            let verdict =
+                key_match_verdict(ctx, graph, site.fact, KeyDirection::Match, &mut evidence);
+            Finding::new(
+                HeuristicId::JoinAntiJoin,
+                ctx.model.id().clone(),
+                site.construct,
+                verdict,
+                evidence,
+            )
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------
@@ -2724,6 +3325,662 @@ mod tests {
                 ],
             },
         );
+    }
+
+    // ===== join.left-null-propagation + join.anti-join (cute-dbt#173) =====
+
+    use crate::domain::check_config::{
+        CheckPolicy, ChecksConfig, SuppressRule, apply_check_policy, resolve_check_policy,
+    };
+    use crate::domain::cte::JoinKeyPair;
+
+    const EMAILS: &str = "model.shop.fct_order_emails";
+
+    fn emails_model() -> Node {
+        // No unique_key (grain silent), no union edges in any test graph
+        // (union silent) — every finding asserted below is the join
+        // pair's.
+        model_with_config(EMAILS, &[("materialized", Value::from("table"))])
+    }
+
+    /// A CTE node classified simple-FROM (the import/refine shape the
+    /// closure binding requires), carrying engine-computed leaf refs.
+    fn simple_cte(name: &str, refs: &[&str]) -> CteNode {
+        CteNode::new(name, None, None, None)
+            .with_shape_facts(true, refs.iter().map(|r| (*r).to_owned()).collect())
+    }
+
+    fn key_pair(left_leaf: &str, left: &str, right: &str) -> JoinKeyPair {
+        JoinKeyPair::new(Some(left_leaf.to_owned()), left, right)
+    }
+
+    /// A terminal-body LEFT JOIN fact (the WITH-less canonical shape).
+    fn join_fact(
+        right: &str,
+        pairs: Vec<JoinKeyPair>,
+        nulls: &[&str],
+        projects: bool,
+        distinct: bool,
+    ) -> LeftJoinFact {
+        LeftJoinFact::new(
+            "(final select)",
+            right,
+            pairs,
+            nulls.iter().map(|s| (*s).to_owned()).collect(),
+            projects,
+            distinct,
+        )
+    }
+
+    /// The catalog C4 worked-example fact: `stg_orders o LEFT JOIN
+    /// stg_customers c ON o.customer_id = c.id`.
+    fn orders_customers_fact(projects: bool, nulls: &[&str], distinct: bool) -> LeftJoinFact {
+        join_fact(
+            "stg_customers",
+            vec![key_pair("stg_orders", "customer_id", "id")],
+            nulls,
+            projects,
+            distinct,
+        )
+    }
+
+    /// A graph with no CTE nodes carrying one terminal-body fact — the
+    /// WITH-less direct-join model.
+    fn direct_join_graph(fact: LeftJoinFact) -> CteGraph {
+        CteGraph::new(vec![], vec![]).with_left_join_facts(vec![fact])
+    }
+
+    fn unit_test_on(model_bare: &str, givens: Vec<UnitTestGiven>) -> UnitTest {
+        UnitTest::new(
+            format!("test_{model_bare}"),
+            NodeId::new(model_bare),
+            givens,
+            UnitTestExpect::new(serde_json::json!([{ "order_id": 1 }]), None, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    const EMAILS_TEST: &str = "unit_test.shop.fct_order_emails.test_fct_order_emails";
+
+    fn emails_manifest_with_test(givens: Vec<UnitTestGiven>) -> Manifest {
+        manifest_with_unit_tests(
+            vec![emails_model()],
+            vec![(EMAILS_TEST, unit_test_on("fct_order_emails", givens))],
+        )
+    }
+
+    const EMAILS_CONSTRUCT: &str = "left_join[(final select):stg_customers]";
+
+    #[test]
+    fn left_null_uncovered_with_zero_unit_tests_carries_the_no_match_sketch() {
+        let graph = direct_join_graph(orders_customers_fact(true, &[], false));
+        let manifest = manifest_of(vec![emails_model()]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(finding.check, HeuristicId::JoinLeftNullPropagation);
+        assert_eq!(finding.tier, Tier::High);
+        assert_eq!(finding.instrument, Instrument::Both);
+        assert_eq!(finding.construct, EMAILS_CONSTRUCT);
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+        assert!(finding.recommendation.is_some());
+        let join = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "left join")
+            .expect("join evidence present");
+        assert_eq!(
+            join.value,
+            "(final select) — LEFT JOIN stg_customers ON stg_orders.customer_id = stg_customers.id",
+        );
+        let sketch = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "suggested given")
+            .expect("no-match sketch present");
+        assert_eq!(
+            sketch.value,
+            "- input: ref('stg_orders')\n  rows:\n    - {customer_id: 404}   # 404 has no match below — the no-match path\n- input: ref('stg_customers')\n  rows:\n    - {id: 1}\n# expect: the no-match row with NULL stg_customers columns (or the intended fallback)",
+        );
+    }
+
+    #[test]
+    fn left_null_is_silent_without_provable_right_projection() {
+        // Paired negative test for the declared exclusion: right-side
+        // columns reaching the output only through expressions are not
+        // attributed — conservative, never a false fire.
+        let graph = direct_join_graph(orders_customers_fact(false, &[], false));
+        let manifest = manifest_of(vec![emails_model()]);
+        assert!(run_with_graph(&manifest, EMAILS, Some(&graph)).is_empty());
+    }
+
+    #[test]
+    fn left_null_covered_when_a_given_left_row_has_no_right_match() {
+        let graph = direct_join_graph(orders_customers_fact(true, &[], false));
+        let manifest = emails_manifest_with_test(vec![
+            given(
+                "ref('stg_orders')",
+                serde_json::json!([{ "customer_id": 1 }, { "customer_id": 404 }]),
+            ),
+            given("ref('stg_customers')", serde_json::json!([{ "id": 1 }])),
+        ]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(
+            finding.verdict,
+            Verdict::Covered {
+                by: vec![EMAILS_TEST.to_owned()],
+            },
+        );
+        assert!(finding.recommendation.is_none());
+    }
+
+    #[test]
+    fn left_null_uncovered_when_every_left_row_matches() {
+        // The catalog C4 gap: every left given row has a right match —
+        // the no-match path runs on zero rows in every test.
+        let graph = direct_join_graph(orders_customers_fact(true, &[], false));
+        let manifest = emails_manifest_with_test(vec![
+            given(
+                "ref('stg_orders')",
+                serde_json::json!([{ "customer_id": 1 }]),
+            ),
+            given("ref('stg_customers')", serde_json::json!([{ "id": 1 }])),
+        ]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+    }
+
+    #[test]
+    fn left_null_null_or_absent_left_key_exercises_the_no_match_path() {
+        // SQL join semantics: a NULL key never matches — a left row with
+        // a NULL (or sparse-dict absent) key IS a no-match row.
+        let graph = direct_join_graph(orders_customers_fact(true, &[], false));
+        for left_rows in [
+            serde_json::json!([{ "customer_id": null }]),
+            serde_json::json!([{ "customer_id": 1, "amount": 2 }, { "amount": 5 }]),
+        ] {
+            let manifest = emails_manifest_with_test(vec![
+                given("ref('stg_orders')", left_rows.clone()),
+                given("ref('stg_customers')", serde_json::json!([{ "id": 1 }])),
+            ]);
+            let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+            assert!(
+                matches!(finding.verdict, Verdict::Covered { .. }),
+                "left rows {left_rows} exercise the no-match path: {:?}",
+                finding.verdict,
+            );
+        }
+    }
+
+    #[test]
+    fn left_null_unrecoverable_key_is_unknown_never_uncovered() {
+        // Paired negative test for the declared exclusion: a non-equi /
+        // expression ON clause leaves no statically-recoverable key.
+        let graph = direct_join_graph(join_fact("stg_customers", Vec::new(), &[], true, false));
+        let manifest = manifest_of(vec![emails_model()]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Unknown);
+        assert!(finding.recommendation.is_none());
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .any(|e| e.label == "unattributable join"),
+        );
+    }
+
+    #[test]
+    fn left_null_unresolvable_side_binding_is_unknown_never_uncovered() {
+        // Paired negative test for the declared exclusion: the right
+        // side is a CTE whose body is NOT the simple-FROM shape (a join
+        // chain inside) — key columns may not survive, so the binding
+        // degrades honestly.
+        let graph = CteGraph::new(
+            vec![cte("paid_orders", &["stg_orders", "stg_payments"])],
+            vec![],
+        )
+        .with_left_join_facts(vec![join_fact(
+            "paid_orders",
+            vec![key_pair("stg_customers", "customer_id", "customer_id")],
+            &[],
+            true,
+            false,
+        )]);
+        let manifest = manifest_of(vec![emails_model()]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Unknown);
+        assert!(finding.recommendation.is_none());
+    }
+
+    #[test]
+    fn left_null_binds_through_a_simple_from_cte_closure() {
+        // The dbt-style import-CTE chain: both join sides are CTEs whose
+        // simple-FROM closures each read exactly one external relation —
+        // givens bind at the bottom of the chain.
+        let graph = CteGraph::new(
+            vec![
+                simple_cte("conditions", &["stg_conditions"]),
+                simple_cte("condition_stats", &["conditions"]),
+                simple_cte("patients", &["dim_patients"]),
+            ],
+            vec![CteEdge::new(0, 1, EdgeType::From)],
+        )
+        .with_left_join_facts(vec![join_fact(
+            "condition_stats",
+            vec![key_pair("patients", "patient_id", "patient_id")],
+            &[],
+            true,
+            false,
+        )]);
+        let manifest = emails_manifest_with_test(vec![
+            given(
+                "ref('dim_patients')",
+                serde_json::json!([{ "patient_id": 404 }]),
+            ),
+            given(
+                "ref('stg_conditions')",
+                serde_json::json!([{ "patient_id": 1 }]),
+            ),
+        ]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert!(
+            matches!(finding.verdict, Verdict::Covered { .. }),
+            "closure-bound givens attribute coverage: {:?}",
+            finding.verdict,
+        );
+    }
+
+    #[test]
+    fn left_null_external_fixture_or_opaque_sql_given_is_unknown() {
+        // Paired negative tests for the declared exclusion: rows not in
+        // the manifest are never judged.
+        let graph = direct_join_graph(orders_customers_fact(true, &[], false));
+        let fixture_given = UnitTestGiven::new(
+            "ref('stg_customers')",
+            Value::Null,
+            Some("csv".to_owned()),
+            Some("customers_fixture".to_owned()),
+        );
+        let opaque_sql = UnitTestGiven::new(
+            "ref('stg_customers')",
+            Value::from("select * from somewhere"),
+            Some("sql".to_owned()),
+            None,
+        );
+        for right in [fixture_given, opaque_sql] {
+            let manifest = emails_manifest_with_test(vec![
+                given(
+                    "ref('stg_orders')",
+                    serde_json::json!([{ "customer_id": 9 }]),
+                ),
+                right,
+            ]);
+            let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+            assert_eq!(finding.verdict, Verdict::Unknown);
+            assert!(finding.recommendation.is_none());
+        }
+    }
+
+    #[test]
+    fn left_null_ungiven_seed_side_is_unknown_never_uncovered() {
+        // Paired negative test for the declared exclusion: an ungiven
+        // seed input reads real seed data (fusion `render_unit_test`).
+        let graph = direct_join_graph(join_fact(
+            "raw_customers",
+            vec![key_pair("stg_orders", "customer_id", "id")],
+            &[],
+            true,
+            false,
+        ));
+        let seed = Node::new(
+            NodeId::new("seed.shop.raw_customers"),
+            "seed",
+            Checksum::new("sha256", "z"),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(BTreeMap::new(), false),
+            None,
+            BTreeMap::new(),
+        );
+        let manifest = manifest_with_unit_tests(
+            vec![emails_model(), seed],
+            vec![(
+                EMAILS_TEST,
+                unit_test_on(
+                    "fct_order_emails",
+                    vec![given(
+                        "ref('stg_orders')",
+                        serde_json::json!([{ "customer_id": 1 }]),
+                    )],
+                ),
+            )],
+        );
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Unknown);
+    }
+
+    #[test]
+    fn left_null_ungiven_non_seed_right_is_the_empty_mock_and_covers() {
+        // Pins the union.arm-coverage premise: only `given` entries are
+        // mocked — an ungiven non-seed right side is empty, so every
+        // left row IS a no-match row and the path runs.
+        let graph = direct_join_graph(orders_customers_fact(true, &[], false));
+        let manifest = emails_manifest_with_test(vec![given(
+            "ref('stg_orders')",
+            serde_json::json!([{ "customer_id": 1 }]),
+        )]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert!(matches!(finding.verdict, Verdict::Covered { .. }));
+    }
+
+    #[test]
+    fn left_null_distinct_dedup_routes_to_the_data_test() {
+        // THE cute-dbt#173 instrument-routing AC (catalog C4/C10):
+        // dedup after a fan-out join — the DATA-TEST recommendation wins
+        // over the unit-test fixture; never unit-test-maximalist.
+        let graph = direct_join_graph(orders_customers_fact(true, &[], true));
+        let manifest = manifest_of(vec![emails_model()]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .any(|e| e.label == "instrument routing"
+                    && e.value.contains("data-test recommendation wins")),
+            "routing evidence present: {:?}",
+            finding.evidence,
+        );
+        let sketch = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "suggested data test")
+            .expect("routed sketch is the data test");
+        assert!(sketch.value.contains("- unique"), "{}", sketch.value);
+        assert!(
+            !finding
+                .evidence
+                .iter()
+                .any(|e| e.label == "suggested given"),
+            "the unit-test fixture sketch must NOT win on the dedup shape",
+        );
+    }
+
+    #[test]
+    fn left_null_csv_and_dict_cells_match_on_the_normalized_key() {
+        // #127 value-normalization pays off: a fusion raw-csv "1" and a
+        // dict 1 are the same key.
+        let graph = direct_join_graph(orders_customers_fact(true, &[], false));
+        let csv_right = |body: &str| {
+            UnitTestGiven::new(
+                "ref('stg_customers')",
+                Value::from(body.to_owned()),
+                Some("csv".to_owned()),
+                None,
+            )
+        };
+        let matched = emails_manifest_with_test(vec![
+            given(
+                "ref('stg_orders')",
+                serde_json::json!([{ "customer_id": 1 }]),
+            ),
+            csv_right("id\n1\n"),
+        ]);
+        let finding = single_finding(run_with_graph(&matched, EMAILS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Uncovered, "csv 1 matches dict 1");
+        let unmatched = emails_manifest_with_test(vec![
+            given(
+                "ref('stg_orders')",
+                serde_json::json!([{ "customer_id": 1 }]),
+            ),
+            csv_right("id\n2\n"),
+        ]);
+        let finding = single_finding(run_with_graph(&unmatched, EMAILS, Some(&graph)));
+        assert!(matches!(finding.verdict, Verdict::Covered { .. }));
+    }
+
+    #[test]
+    fn left_null_composite_key_requires_every_pair_to_match() {
+        let graph = direct_join_graph(join_fact(
+            "stg_rates",
+            vec![
+                key_pair("stg_orders", "currency", "currency"),
+                key_pair("stg_orders", "order_date", "rate_date"),
+            ],
+            &[],
+            true,
+            false,
+        ));
+        let manifest = emails_manifest_with_test(vec![
+            given(
+                "ref('stg_orders')",
+                serde_json::json!([{ "currency": "usd", "order_date": "2026-01-01" }]),
+            ),
+            given(
+                "ref('stg_rates')",
+                serde_json::json!([{ "currency": "usd", "rate_date": "2026-01-02" }]),
+            ),
+        ]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert!(
+            matches!(finding.verdict, Verdict::Covered { .. }),
+            "a half-matching composite key is a no-match row: {:?}",
+            finding.verdict,
+        );
+    }
+
+    #[test]
+    fn repeated_join_sites_discriminate_by_ordinal() {
+        let graph = CteGraph::new(vec![], vec![]).with_left_join_facts(vec![
+            orders_customers_fact(true, &[], false),
+            orders_customers_fact(true, &[], false),
+        ]);
+        let manifest = manifest_of(vec![emails_model()]);
+        let findings = run_with_graph(&manifest, EMAILS, Some(&graph));
+        assert_eq!(findings.len(), 2);
+        assert_eq!(findings[0].construct, EMAILS_CONSTRUCT);
+        assert_eq!(
+            findings[1].construct,
+            "left_join[(final select):stg_customers#2]",
+        );
+    }
+
+    // ----- join.anti-join ---------------------------------------------
+
+    #[test]
+    fn anti_join_fires_with_the_inverted_recommendation() {
+        let graph = direct_join_graph(orders_customers_fact(false, &["id"], false));
+        let manifest = manifest_of(vec![emails_model()]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(finding.check, HeuristicId::JoinAntiJoin);
+        assert_eq!(finding.tier, Tier::High);
+        assert_eq!(finding.instrument, Instrument::UnitTest);
+        assert_eq!(finding.construct, EMAILS_CONSTRUCT);
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .any(|e| e.label == "anti-join filter"
+                    && e.value == "WHERE stg_customers.id IS NULL"),
+            "{:?}",
+            finding.evidence,
+        );
+        let sketch = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "suggested given")
+            .expect("inverted sketch present");
+        assert_eq!(
+            sketch.value,
+            "- input: ref('stg_orders')\n  rows:\n    - {customer_id: 1}   # matches the right row below\n- input: ref('stg_customers')\n  rows:\n    - {id: 1}\n# expect: rows WITHOUT the matched left row — the anti-join must exclude it",
+        );
+    }
+
+    #[test]
+    fn anti_join_is_silent_when_is_null_is_on_a_non_key_column() {
+        // Paired negative test for the declared exclusion: IS NULL on a
+        // non-key right column is a data filter, not the anti-join
+        // idiom — left-null-propagation governs the construct.
+        let graph = direct_join_graph(orders_customers_fact(true, &["email"], false));
+        let manifest = manifest_of(vec![emails_model()]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(finding.check, HeuristicId::JoinLeftNullPropagation);
+    }
+
+    #[test]
+    fn anti_join_satisfied_by_a_matching_given_pair() {
+        // The INVERSION pinned: the exact fixture that leaves
+        // left-null-propagation uncovered (every left row matches) is
+        // what SATISFIES the anti-join.
+        let graph = direct_join_graph(orders_customers_fact(false, &["id"], false));
+        let manifest = emails_manifest_with_test(vec![
+            given(
+                "ref('stg_orders')",
+                serde_json::json!([{ "customer_id": 1 }]),
+            ),
+            given("ref('stg_customers')", serde_json::json!([{ "id": 1 }])),
+        ]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(
+            finding.verdict,
+            Verdict::Covered {
+                by: vec![EMAILS_TEST.to_owned()],
+            },
+        );
+    }
+
+    #[test]
+    fn anti_join_uncovered_when_no_given_row_matches() {
+        let graph = direct_join_graph(orders_customers_fact(false, &["id"], false));
+        let manifest = emails_manifest_with_test(vec![
+            given(
+                "ref('stg_orders')",
+                serde_json::json!([{ "customer_id": 404 }]),
+            ),
+            given("ref('stg_customers')", serde_json::json!([{ "id": 1 }])),
+        ]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+    }
+
+    // ----- the supersedes showcase (production registry) ---------------
+
+    /// The `SELECT * … LEFT JOIN … WHERE right.key IS NULL` shape: both
+    /// detectors' conditions match on the SAME construct.
+    fn anti_join_with_star_projection() -> CteGraph {
+        direct_join_graph(orders_customers_fact(true, &["id"], false))
+    }
+
+    #[test]
+    fn anti_join_supersedes_left_null_on_the_same_construct() {
+        // THE cute-dbt#173 AC, end-to-end on the PRODUCTION registry:
+        // stage 1 emits BOTH findings (proving left-null fired and was
+        // silenced by RESOLUTION, not by a detector-level skip), stage 2
+        // keeps only the anti-join.
+        let graph = anti_join_with_star_projection();
+        let manifest = manifest_of(vec![emails_model()]);
+        let model = manifest.node(&node_id(EMAILS)).expect("model exists");
+        let ctx = CheckContext {
+            manifest: &manifest,
+            model,
+            cte_graph: Some(&graph),
+        };
+        let evaluated = evaluate_all::<HeuristicId>(&ctx);
+        let evaluated_checks: Vec<HeuristicId> = checks_of(&evaluated);
+        assert!(
+            evaluated_checks.contains(&HeuristicId::JoinLeftNullPropagation),
+            "left-null FIRES on the anti-join construct (its own conditions match)",
+        );
+        assert!(evaluated_checks.contains(&HeuristicId::JoinAntiJoin));
+        let constructs: BTreeSet<&str> = evaluated.iter().map(|f| f.construct.as_str()).collect();
+        assert_eq!(
+            constructs.len(),
+            1,
+            "both checks discriminate the SAME construct: {constructs:?}",
+        );
+        let resolved = model_findings(&manifest, model, Some(&graph));
+        assert_eq!(
+            checks_of(&resolved),
+            vec![HeuristicId::JoinAntiJoin],
+            "resolution silences left-null on the anti-join construct",
+        );
+    }
+
+    #[test]
+    fn left_null_survives_alone_when_the_anti_join_shape_is_absent() {
+        let graph = direct_join_graph(orders_customers_fact(true, &[], false));
+        let manifest = manifest_of(vec![emails_model()]);
+        let findings = run_with_graph(&manifest, EMAILS, Some(&graph));
+        assert_eq!(
+            checks_of(&findings),
+            vec![HeuristicId::JoinLeftNullPropagation],
+        );
+    }
+
+    #[test]
+    fn disabling_anti_join_via_checks_config_never_resurrects_left_null() {
+        // THE display-layer invariant (cute-dbt#173 AC), against the
+        // REAL registry through #193's [checks] config path: disabling
+        // the superseding check removes its finding WITHOUT resurrecting
+        // the superseded one.
+        let graph = anti_join_with_star_projection();
+        let manifest = manifest_of(vec![emails_model()]);
+        let model = manifest.node(&node_id(EMAILS)).expect("model exists");
+        let resolved = model_findings(&manifest, model, Some(&graph));
+        let config: ChecksConfig =
+            toml::from_str("disable = [\"join.anti-join\"]").expect("config parses");
+        let policy = resolve_check_policy::<HeuristicId>(&config).expect("policy resolves");
+        let displayed = apply_check_policy(resolved, &policy);
+        assert!(
+            !displayed.iter().any(|f| f.check.spec().group == "join"),
+            "no join finding may survive — disabling anti-join must NOT resurrect left-null: {displayed:?}",
+        );
+    }
+
+    #[test]
+    fn suppressing_anti_join_marks_it_and_never_resurrects_left_null() {
+        let graph = anti_join_with_star_projection();
+        let manifest = manifest_of(vec![emails_model()]);
+        let model = manifest.node(&node_id(EMAILS)).expect("model exists");
+        let resolved = model_findings(&manifest, model, Some(&graph));
+        let policy = CheckPolicy {
+            suppressions: vec![SuppressRule {
+                check: HeuristicId::JoinAntiJoin,
+                model: "fct_order_emails".to_owned(),
+                reason: Some("exclusion proven downstream".to_owned()),
+                source: SuppressionSource::Config,
+            }],
+            ..Default::default()
+        };
+        let displayed = apply_check_policy(resolved, &policy);
+        assert_eq!(checks_of(&displayed), vec![HeuristicId::JoinAntiJoin]);
+        assert!(
+            displayed[0].suppressed.is_some(),
+            "the anti-join finding is kept and marked",
+        );
+    }
+
+    #[test]
+    fn production_registry_pins_the_anti_join_supersedes_edge() {
+        // Registry-generic production-shape assertion extended to the
+        // cute-dbt#173 pair: the edge exists, points at the general
+        // check, and the graph stays acyclic.
+        assert_eq!(
+            HeuristicId::JoinAntiJoin.spec().supersedes,
+            &[HeuristicId::JoinLeftNullPropagation],
+        );
+        assert!(
+            HeuristicId::JoinLeftNullPropagation
+                .spec()
+                .supersedes
+                .is_empty(),
+        );
+        assert!(supersedes_is_acyclic::<HeuristicId>());
     }
 
     // ===== ledger generation =========================================
