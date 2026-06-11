@@ -22,6 +22,35 @@ expression: rendered
         ],
         "status": "covered"
       }
+    },
+    {
+      "check": "incremental.branch-coverage",
+      "construct": "config.materialized",
+      "evidence": [
+        {
+          "label": "materialized",
+          "value": "incremental (strategy: merge)"
+        },
+        {
+          "label": "branch coverage",
+          "value": "true-only — 1 test(s) override is_incremental to true; none exercise the initial full-build (false) branch"
+        },
+        {
+          "label": "missing branch",
+          "value": "the initial full-build branch (is_incremental() = false) runs in no unit test"
+        },
+        {
+          "label": "suggested given",
+          "value": "- name: test_fct_encounters_incremental_initial_build\n  model: fct_encounters_incremental\n  # no overrides block — dbt compiles is_incremental() as false by default\n  given:\n    - input: ref('...')\n      rows:\n        - {...}\n  # expect: the full first-build output"
+        }
+      ],
+      "instrument": "unit-test",
+      "model_id": "model.healthcare_analytics.fct_encounters_incremental",
+      "recommendation": "Add a unit test for each missing is_incremental() branch: one with `overrides: macros: is_incremental: true` (mock the prior model state with a `given: - input: this` entry) to exercise the incremental branch, and one without the override for the initial full build (dbt compiles is_incremental() as false by default). This finding's evidence carries a copy-pasteable unit-test sketch per missing branch.",
+      "tier": "high",
+      "verdict": {
+        "status": "uncovered"
+      }
     }
   ],
   "model.healthcare_analytics.fct_encounters_monthly": [

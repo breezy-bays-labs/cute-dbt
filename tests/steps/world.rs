@@ -197,6 +197,24 @@ pub struct CoveragePlan {
     pub sql_models: Vec<(String, String)>,
     /// Uniqueness data tests the scenario declares.
     pub tests: Vec<CoverageDataTest>,
+    /// Incremental models the cute-dbt#164 branch-rollup scenarios
+    /// declare (no unique_key: the grain check stays silent).
+    pub incremental_models: Vec<CoverageIncrementalModel>,
+    /// `(unit-test bare name, target bare model, is_incremental
+    /// override)` per declared unit test — `None` = no `overrides`
+    /// block (dbt's full-build default).
+    pub unit_tests: Vec<(String, String, Option<bool>)>,
+}
+
+/// One incremental model in a [`CoveragePlan`] (cute-dbt#164).
+#[derive(Debug, Clone)]
+pub struct CoverageIncrementalModel {
+    /// Bare model name.
+    pub bare: String,
+    /// `true` ⇒ the wire config carries
+    /// `incremental_strategy: "microbatch"` (the declared rule-#1
+    /// exclusion).
+    pub microbatch: bool,
 }
 
 /// One uniqueness data test in a [`CoveragePlan`].

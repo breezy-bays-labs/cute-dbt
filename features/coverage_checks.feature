@@ -102,6 +102,43 @@ Feature: cute-dbt surfaces unique-key coverage findings at the payload level
     And the payload carries no "join.anti-join" finding for "order_emails"
     And the "join.left-null-propagation" finding for "order_emails" suggests a no-match given row
 
+  # cute-dbt#164 — incremental.branch-coverage (coverage-intelligence
+  # rule #1): an incremental model's unit tests must exercise BOTH
+  # is_incremental() branches. A test overriding is_incremental to true
+  # compiles the incremental branch; an explicit false override OR no
+  # override at all compiles the initial full-build branch (dbt's
+  # unit-test default). Microbatch-strategy models are the declared
+  # rule-#1 exclusion: their batch-window replay is not the
+  # is_incremental() fork, so they are never classified.
+  Scenario: An incremental model tested on both branches is covered with attribution
+    Given the modified incremental coverage model "order_events"
+    And a unit test "test_order_events_full_build" on "order_events" with no is_incremental override
+    And a unit test "test_order_events_incremental_run" on "order_events" overriding is_incremental to true
+    When I render the coverage report
+    Then the payload carries a "incremental.branch-coverage" finding for "order_events" with verdict "covered"
+    And the "incremental.branch-coverage" finding for "order_events" classifies branch coverage as "both"
+    And the "incremental.branch-coverage" finding for "order_events" attributes coverage to unit tests "test_order_events_full_build" and "test_order_events_incremental_run"
+
+  Scenario: A no-override unit test exercises only the full-build branch
+    Given the modified incremental coverage model "order_events"
+    And a unit test "test_order_events_full_build" on "order_events" with no is_incremental override
+    When I render the coverage report
+    Then the payload carries a "incremental.branch-coverage" finding for "order_events" with verdict "uncovered"
+    And the "incremental.branch-coverage" finding for "order_events" classifies branch coverage as "false-only"
+    And the "incremental.branch-coverage" finding for "order_events" suggests the is_incremental true override
+
+  Scenario: An incremental model with no unit tests has neither branch exercised
+    Given the modified incremental coverage model "order_events"
+    When I render the coverage report
+    Then the payload carries a "incremental.branch-coverage" finding for "order_events" with verdict "uncovered"
+    And the "incremental.branch-coverage" finding for "order_events" classifies branch coverage as "none"
+
+  Scenario: A microbatch model is never classified by the branch rollup
+    Given the modified microbatch coverage model "page_views"
+    And a unit test "test_page_views_window" on "page_views" with no is_incremental override
+    When I render the coverage report
+    Then the payload carries no "incremental.branch-coverage" finding for "page_views"
+
   # cute-dbt#170 — the findings SURFACE consumes a payload-level spec
   # catalog (check_specs) so the inline rationale drawer renders fully
   # offline and the book reference stays a plain click-only anchor.

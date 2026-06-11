@@ -73,15 +73,21 @@ fn playground_composite_key_with_no_uniqueness_test_is_uncovered() {
 #[test]
 fn playground_string_key_with_unique_test_is_covered_with_attribution() {
     // fct_encounters_incremental: unique_key = "encounter_id" (string
-    // wire form) + an enabled `unique` test on encounter_id.
+    // wire form) + an enabled `unique` test on encounter_id. (The same
+    // model also trips incremental.branch-coverage — pinned separately
+    // below — so this filters to the grain finding.)
     let manifest = load("playground-current.json");
     let findings = findings_for(
         &manifest,
         "model.healthcare_analytics.fct_encounters_incremental",
     );
-    assert_eq!(findings.len(), 1);
+    let grain: Vec<&Finding<HeuristicId>> = findings
+        .iter()
+        .filter(|f| f.check == HeuristicId::GrainUniqueKeyUnbacked)
+        .collect();
+    assert_eq!(grain.len(), 1);
     assert_eq!(
-        findings[0].verdict,
+        grain[0].verdict,
         Verdict::Covered {
             by: vec![
                 "test.healthcare_analytics.unique_fct_encounters_incremental_encounter_id.a165c01d01"
@@ -89,6 +95,74 @@ fn playground_string_key_with_unique_test_is_covered_with_attribution() {
             ],
         },
     );
+}
+
+#[test]
+fn playground_incremental_true_only_coverage_is_uncovered_on_real_data() {
+    // cute-dbt#164 real-fixture verification: fct_encounters_incremental
+    // is materialized incremental (strategy merge) and its ONLY unit
+    // test overrides is_incremental to true — the true-only rollup. The
+    // initial full-build branch runs in no test, so the check fires
+    // UNCOVERED with the no-override sketch, on real fusion-compiled
+    // data (fusion null-fills unset Option config fields — the shape
+    // synthetic tests miss).
+    let manifest = load("playground-current.json");
+    let findings = findings_for(
+        &manifest,
+        "model.healthcare_analytics.fct_encounters_incremental",
+    );
+    let finding = findings
+        .iter()
+        .find(|f| f.check == HeuristicId::IncrementalBranchCoverage)
+        .expect("incremental.branch-coverage fires on fct_encounters_incremental");
+    assert_eq!(finding.construct, "config.materialized");
+    assert_eq!(finding.verdict, Verdict::Uncovered);
+    assert!(finding.recommendation.is_some());
+    let rollup = finding
+        .evidence
+        .iter()
+        .find(|e| e.label == "branch coverage")
+        .expect("rollup evidence present");
+    assert!(
+        rollup.value.starts_with("true-only"),
+        "the single true-override test classifies true-only: {}",
+        rollup.value,
+    );
+    let sketch = finding
+        .evidence
+        .iter()
+        .find(|e| e.label == "suggested given")
+        .expect("missing-branch sketch present");
+    assert!(
+        sketch.value.contains("no overrides block"),
+        "the missing full-build branch suggests the no-override test: {}",
+        sketch.value,
+    );
+}
+
+#[test]
+fn playground_non_incremental_models_carry_no_incremental_findings() {
+    // Miss direction is silence: every non-incremental playground model
+    // (and the jaffle-shop set, which has no incremental models at all)
+    // emits zero incremental.branch-coverage findings on real data.
+    for fixture in ["playground-current.json", "jaffle-shop-current.json"] {
+        let manifest = load(fixture);
+        for (id, node) in manifest.nodes() {
+            if node.resource_type() != "model"
+                || node.config().materialized() == Some("incremental")
+            {
+                continue;
+            }
+            let offending: Vec<Finding<HeuristicId>> = findings_for(&manifest, id.as_str())
+                .into_iter()
+                .filter(|f| f.check == HeuristicId::IncrementalBranchCoverage)
+                .collect();
+            assert!(
+                offending.is_empty(),
+                "{fixture}: unexpected incremental finding on {id}: {offending:?}",
+            );
+        }
+    }
 }
 
 #[test]
@@ -335,6 +409,82 @@ fn union_arm_coverage_obeys_the_display_layer_invariant_on_real_data() {
         .remove("suppressed");
     assert_eq!(
         union_suppressed, union_default,
+        "suppression marks the finding and changes NOTHING else"
+    );
+}
+
+#[test]
+fn incremental_branch_coverage_obeys_the_display_layer_invariant_on_real_data() {
+    // The cute-dbt#171 invariant extended to the cute-dbt#164 check:
+    // disabling or suppressing incremental.branch-coverage is
+    // display-layer ONLY. fct_encounters_incremental trips the check
+    // UNCOVERED (true-only) on the real fixture; the suppressed finding
+    // must be byte-identical to the default-policy finding apart from
+    // the `suppressed` mark, and disabling `incremental.*` must remove
+    // exactly it.
+    const INCREMENTAL: &str = "model.healthcare_analytics.fct_encounters_incremental";
+
+    let baseline = payload_json_for(INCREMENTAL, &CheckPolicy::default());
+    let default_finding = baseline["findings"]
+        .as_array()
+        .expect("findings present under the default policy")
+        .iter()
+        .find(|f| f["check"] == "incremental.branch-coverage")
+        .expect("incremental.branch-coverage fires on fct_encounters_incremental")
+        .clone();
+    assert_eq!(default_finding["verdict"]["status"], "uncovered");
+
+    // Disable arm: `incremental.*` removes the finding, nothing else.
+    let config = ChecksConfig {
+        disable: Some(vec!["incremental.*".to_owned()]),
+        ..Default::default()
+    };
+    let policy = resolve_check_policy::<HeuristicId>(&config).expect("policy resolves");
+    let disabled = payload_json_for(INCREMENTAL, &policy);
+    let remaining: Vec<&serde_json::Value> = disabled["findings"]
+        .as_array()
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    assert!(
+        !remaining.is_empty(),
+        "the grain finding survives the incremental.* disable"
+    );
+    assert!(
+        remaining
+            .iter()
+            .all(|f| f["check"] != "incremental.branch-coverage"),
+        "disabling incremental.* removes the incremental finding: {remaining:?}"
+    );
+
+    // Suppress arm: the finding is kept and marked; stripping the mark
+    // recovers the default-policy finding exactly.
+    let policy = CheckPolicy {
+        suppressions: vec![SuppressRule {
+            check: HeuristicId::IncrementalBranchCoverage,
+            model: "fct_encounters_incremental".to_owned(),
+            reason: Some("full-build branch exercised in staging only".to_owned()),
+            source: SuppressionSource::Config,
+        }],
+        ..Default::default()
+    };
+    let suppressed = payload_json_for(INCREMENTAL, &policy);
+    let mut marked = suppressed["findings"]
+        .as_array()
+        .expect("suppression never removes findings")
+        .iter()
+        .find(|f| f["check"] == "incremental.branch-coverage")
+        .expect("incremental finding stays present when suppressed")
+        .clone();
+    assert_eq!(
+        marked["suppressed"]["reason"],
+        "full-build branch exercised in staging only"
+    );
+    marked
+        .as_object_mut()
+        .expect("finding is an object")
+        .remove("suppressed");
+    assert_eq!(
+        marked, default_finding,
         "suppression marks the finding and changes NOTHING else"
     );
 }

@@ -5037,6 +5037,93 @@ fn findings_panel_renders_checklist_tiers_sketch_rationale_and_pin() {
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn incremental_branch_gap_renders_in_the_findings_panel() {
+    // cute-dbt#164 — the incremental.branch-coverage check surfaces
+    // through the generic findings panel (cute-dbt#194 renders ALL
+    // registered checks; no new affordance). dim_inc_gap is materialized
+    // incremental with ONE no-override unit test — the false-only
+    // rollup: the incremental branch is the gap, and the row must carry
+    // the verdict word, the HIGH tier chip, the recommendation cue, and
+    // the copyable sketch with the true override.
+    let url = render_to_file(
+        "headless_incremental_branch_finding.html",
+        vec![model_node_materialized(
+            "model.shop.dim_inc_gap",
+            "incremental",
+        )],
+        vec![(
+            "unit_test.shop.dim_inc_gap.t_full",
+            incremental_unit_test("t_full", "dim_inc_gap", None, &[]),
+        )],
+        &["model.shop.dim_inc_gap"],
+        &["unit_test.shop.dim_inc_gap.t_full"],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    const ROW: &str =
+        "document.querySelector('.finding-row[data-check=\"incremental.branch-coverage\"]')";
+    assert!(
+        eval_bool(&tab, &format!("{ROW} !== null")),
+        "the incremental.branch-coverage finding renders a checklist row",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{ROW}.classList.contains('verdict-uncovered')"),
+        ),
+        "the false-only gap renders as UNCOVERED",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{ROW}.querySelector('.f-verdict').textContent")
+        ),
+        "uncovered",
+        "the row carries its verdict WORD (mark is never colour-only)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{ROW}.querySelector('.tier-chip.tier-high') !== null"),
+        ),
+        "the check is labeled HIGH tier (a cue, never an assertion)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "{ROW}.querySelector('.finding-recommendation').textContent\
+                 .indexOf('is_incremental') >= 0",
+            ),
+        ),
+        "the recommendation cue names the is_incremental override",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "{ROW}.querySelector('.finding-sketch .sql-block').textContent\
+                 .indexOf('is_incremental: true') >= 0",
+            ),
+        ),
+        "the copyable sketch carries the missing-branch true override",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{ROW}.textContent.indexOf('false-only') >= 0",),
+        ),
+        "the branch-coverage rollup evidence renders in the row",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
     // The cute-dbt#171 policy marks (never removes) suppressed findings;
     // the surface renders them visible-but-quiet: a collapsed count that

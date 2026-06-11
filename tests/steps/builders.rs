@@ -305,13 +305,18 @@ pub fn serialize_with_wire_config_to_tmp(manifest: &Manifest, name: &str) -> Pat
 ///    spliced into `nodes` verbatim, in the real wire shape
 ///    (`resource_type: "test"`, `attached_node`, `column_name`,
 ///    `test_metadata`, flat `config.enabled`) that the domain types do
-///    not round-trip (domain `NodeConfig` serializes nested).
+///    not round-trip (domain `NodeConfig` serializes nested);
+/// 3. **unit-test `overrides.macros.is_incremental`** — each
+///    `(unit-test key, bool)` entry injects the nested wire `overrides`
+///    block (the cute-dbt#145 divergence: the domain stores the mode
+///    flat) for the cute-dbt#164 branch-rollup scenarios.
 #[must_use]
 pub fn serialize_coverage_to_tmp(
     manifest: &Manifest,
     name: &str,
     model_configs: &[(&str, Value)],
     test_nodes: &[(String, Value)],
+    unit_test_overrides: &[(String, bool)],
 ) -> PathBuf {
     let mut value: Value = serde_json::to_value(manifest).expect("manifest serializes to Value");
     for (bare, config) in model_configs {
@@ -320,6 +325,10 @@ pub fn serialize_coverage_to_tmp(
     }
     for (id, node) in test_nodes {
         value["nodes"][id.as_str()] = node.clone();
+    }
+    for (key, is_incremental) in unit_test_overrides {
+        value["unit_tests"][key.as_str()]["overrides"] =
+            serde_json::json!({ "macros": { "is_incremental": is_incremental } });
     }
     let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.json"));
     std::fs::write(
