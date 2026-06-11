@@ -266,6 +266,62 @@ fn eval_bool(tab: &Tab, expr: &str) -> bool {
     })
 }
 
+/// Condition-based document-readiness wait after a reload / re-navigation
+/// (cute-dbt#208). Call it after every `tab.reload(..)` or same-tab
+/// `tab.navigate_to(..)` + `wait_until_navigated()` pair, BEFORE the next
+/// eval.
+///
+/// `wait_until_navigated` resolves on the CDP navigation event, which can
+/// fire while the new document is still being swapped in —
+/// `document.documentElement` is briefly null mid-swap, so any eval touching
+/// it throws (`TypeError: Cannot read properties of null`; lost on PR #205's
+/// and #207's CI under load). Poll `document.readyState` on a 50ms interval
+/// until it reports `complete`; a protocol error or a thrown eval mid-swap
+/// counts as "not ready yet — keep polling", never as a failure. The 10s cap
+/// is a guardrail against a wedged tab, not the wait mechanism (no bare
+/// sleeps as the wait).
+fn wait_for_document_ready(tab: &Tab) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        // Raw Runtime::Evaluate, deliberately NOT the fail-loud `eval`
+        // helper: mid-swap the evaluation may error or throw, and readiness
+        // polling must treat both as "not yet" — while `eval` (correctly,
+        // cute-dbt#109) panics on a thrown exception.
+        let ready = tab
+            .call_method(Runtime::Evaluate {
+                expression: "document.readyState".to_string(),
+                object_group: None,
+                include_command_line_api: None,
+                silent: Some(true),
+                context_id: None,
+                return_by_value: Some(true),
+                generate_preview: None,
+                user_gesture: None,
+                await_promise: Some(false),
+                throw_on_side_effect: None,
+                timeout: None,
+                disable_breaks: None,
+                repl_mode: None,
+                allow_unsafe_eval_blocked_by_csp: None,
+                unique_context_id: None,
+                serialization_options: None,
+            })
+            .ok()
+            .filter(|r| r.exception_details.is_none())
+            .and_then(|r| r.result.value)
+            .is_some_and(|v| v.as_str() == Some("complete"));
+        if ready {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "document never reached readyState 'complete' within 10s of the \
+             reload/navigation (cute-dbt#208)"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// `|`-joined option labels of a `<select>`, trimmed per option.
 fn options_of(tab: &Tab, select_id: &str) -> String {
     eval_string(
@@ -507,6 +563,7 @@ fn updated_toggle_drives_visibility_counts_hint_and_auto_all() {
     // ===== P2 (auto-All landing) =====
     tab.navigate_to(&p2).expect("navigate P2");
     tab.wait_until_navigated().expect("await P2 navigation");
+    wait_for_document_ready(&tab);
 
     // totalUpdated === 0 → the report auto-opens in All-tests mode and
     // lands on a REAL selected test (not the empty 0-updated view).
@@ -595,6 +652,7 @@ fn pr_diff_zero_updated_affirms_block_precision() {
     tab.navigate_to(&pr_updated).expect("navigate pr_updated");
     tab.wait_until_navigated()
         .expect("await pr_updated navigation");
+    wait_for_document_ready(&tab);
     assert!(
         affirm_present(&tab),
         "the element is server-rendered on the PR-diff path regardless of count",
@@ -609,6 +667,7 @@ fn pr_diff_zero_updated_affirms_block_precision() {
         .expect("navigate baseline_zero");
     tab.wait_until_navigated()
         .expect("await baseline_zero navigation");
+    wait_for_document_ready(&tab);
     assert!(
         !affirm_present(&tab),
         "baseline mode never renders the PR-diff-specific affirmation",
@@ -2369,6 +2428,7 @@ fn fusion_csv_format_only_shows_no_diff_cell_but_value_change_shows_old_to_new()
         .expect("navigate value-change");
     tab.wait_until_navigated()
         .expect("await value-change navigation");
+    wait_for_document_ready(&tab);
     show_all_inputs(&tab);
     assert!(
         eval_bool(&tab, "document.querySelector('.cell-diff-toggle') !== null"),
@@ -3107,6 +3167,7 @@ fn settings_persist_across_reload_where_supported() {
         // poll the hydrated input value with a bounded retry.
         tab.reload(false, None).expect("reload");
         tab.wait_until_navigated().expect("await reload");
+        wait_for_document_ready(&tab);
         let mut ctx_val = String::new();
         for _ in 0..50 {
             ctx_val = eval_string(
@@ -3373,6 +3434,7 @@ fn appearance_settings_flip_theme_density_diff_layout_and_persist() {
         );
         tab.reload(false, None).expect("reload");
         tab.wait_until_navigated().expect("await reload");
+        wait_for_document_ready(&tab);
         let mut theme = String::new();
         for _ in 0..50 {
             theme = eval_string(&tab, &format!("{ROOT}.getAttribute('data-theme') || ''"));
