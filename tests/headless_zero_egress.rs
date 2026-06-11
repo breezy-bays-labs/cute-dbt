@@ -641,6 +641,19 @@ fn explore_dag_search_highlight_and_space_commit_drive_real_keyboard_and_pointer
         "no data-selected-model before any interaction",
     );
 
+    // cute-dbt#103 — every node renders the test-count badge as the
+    // canvas label's second line, EXPLICIT at 0/0 (these synthetic
+    // models carry no tests).
+    assert_eq!(
+        eval(
+            &tab,
+            "window.CuteExploreLineage.cyInstance()\
+               .getElementById('model.shop.stg_orders').data('label')"
+        ),
+        serde_json::Value::String("stg_orders\n0 data-tests \u{b7} 0 unit-tests".to_owned()),
+        "the 0/0 test-count badge rides the canvas label",
+    );
+
     // Pan / zoom / drag-reposition are live (the AC's interactivity
     // floor): user panning + zooming enabled, nodes grabbable.
     assert_eq!(

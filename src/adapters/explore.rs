@@ -50,7 +50,7 @@ use crate::adapters::asset_embed::{
     FAVICON_DATA_URI, SAKURA_CSS,
 };
 use crate::adapters::render::{DagPayload, ReportPayload};
-use crate::domain::{Manifest, ModelInScopeSet, NodeId};
+use crate::domain::{Manifest, ModelInScopeSet, NodeId, resolve_target_model};
 
 /// One model node in the lineage graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +63,60 @@ pub struct LineageNode {
     /// model (`dbt parse`) — rendered as a "not compiled" node, never
     /// raised (the cute-dbt#100 fail-open contract).
     pub not_compiled: bool,
+    /// YAML data-tests attached to this model (cute-dbt#103) — manifest
+    /// `test` nodes whose `attached_node` is this model (fusion's
+    /// `_lookup_attached_node` parity; see the private
+    /// `data_test_counts` helper below).
+    pub data_tests: usize,
+    /// Unit tests targeting this model (cute-dbt#103) — manifest
+    /// `unit_tests` entries whose bare `model:` reference resolves here
+    /// ([`resolve_target_model`], the same bridge the report uses).
+    pub unit_tests: usize,
+}
+
+/// Count the YAML data-tests per target model: manifest `test` nodes
+/// keyed by their `attached_node` (cute-dbt#103).
+///
+/// `attached_node` is the authoritative data-test → target-model
+/// linkage — fusion mirrors dbt-core's `_lookup_attached_node`
+/// (`dbt-parser/src/resolve/resolve_tests/resolve_data_tests.rs`,
+/// `9977b6cb…`): the attached node is the parent the test is declared
+/// ON, independent of which YAML file declares it; a relationships
+/// test's `to:` target rides `depends_on.nodes` but is **not** the
+/// attached node, so attribution by `depends_on` would double-count.
+/// Singular (SQL-file) tests carry `attached_node: null` on real fusion
+/// manifests (the null-fill shape, verified on the committed playground
+/// fixture) and deliberately count toward no model — the badge counts
+/// **YAML** data-tests. Keys may name non-model parents (seeds,
+/// snapshots); lineage nodes only ever look model ids up, so those
+/// entries are inert.
+fn data_test_counts(current: &Manifest) -> HashMap<&NodeId, usize> {
+    let mut counts: HashMap<&NodeId, usize> = HashMap::new();
+    for node in current.nodes().values() {
+        if node.resource_type() != "test" {
+            continue;
+        }
+        if let Some(target) = node.attached_node() {
+            *counts.entry(target).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// Count the unit tests per target model (cute-dbt#103): each manifest
+/// `unit_tests` entry stores the BARE model name, bridged to its node
+/// by [`resolve_target_model`] (the report renderer's exact resolution
+/// — the two surfaces cannot disagree on a test's target). An
+/// unresolvable `model:` reference contributes nothing (skipped, not
+/// failed — the explore fail-open posture).
+fn unit_test_counts(current: &Manifest) -> HashMap<NodeId, usize> {
+    let mut counts: HashMap<NodeId, usize> = HashMap::new();
+    for unit_test in current.unit_tests().values() {
+        if let Some(model) = resolve_target_model(current, unit_test.model()) {
+            *counts.entry(model.id().clone()).or_insert(0) += 1;
+        }
+    }
+    counts
 }
 
 /// The full-manifest model lineage: nodes in deterministic node-id
@@ -89,6 +143,8 @@ pub struct Lineage {
 pub fn build_lineage(current: &Manifest, models: &ModelInScopeSet) -> Lineage {
     let index_of: HashMap<&NodeId, usize> =
         models.iter().enumerate().map(|(i, id)| (id, i)).collect();
+    let data_tests = data_test_counts(current);
+    let unit_tests = unit_test_counts(current);
     let nodes: Vec<LineageNode> = models
         .iter()
         .map(|id| {
@@ -97,6 +153,8 @@ pub fn build_lineage(current: &Manifest, models: &ModelInScopeSet) -> Lineage {
                 id: id.as_str().to_owned(),
                 name: leaf_segment(id.as_str()).to_owned(),
                 not_compiled: node.is_none_or(|n| n.compiled_code().is_none()),
+                data_tests: data_tests.get(id).copied().unwrap_or(0),
+                unit_tests: unit_tests.get(id).copied().unwrap_or(0),
             }
         })
         .collect();
@@ -132,6 +190,19 @@ pub struct LineageNodePayload {
     /// The fail-open "not compiled" flag (cute-dbt#100) — rendered as a
     /// dashed node, never raised.
     pub not_compiled: bool,
+    /// YAML data-tests attached to this model (cute-dbt#103). Always
+    /// serialized — the 0/0 badge is explicit, never an omitted key.
+    pub data_tests: usize,
+    /// Unit tests targeting this model (cute-dbt#103). Always
+    /// serialized, same contract as `data_tests`.
+    pub unit_tests: usize,
+    /// The pre-formatted badge line (`"2 data-tests · 1 unit-test"`,
+    /// including the explicit `"0 data-tests · 0 unit-tests"`) —
+    /// composed in Rust so the lineage engine stays a pure renderer
+    /// (the cute-dbt#138 posture). These are TEST-COUNT facts straight
+    /// off the manifest — never check-engine (coverage-intelligence)
+    /// output, so no display toggle gates them.
+    pub badge: String,
 }
 
 /// One dependency edge in the serialized lineage payload, by node id.
@@ -193,6 +264,9 @@ pub fn build_lineage_payload(current: &Manifest, models: &ModelInScopeSet) -> Li
             id: n.id,
             name: n.name,
             not_compiled: n.not_compiled,
+            data_tests: n.data_tests,
+            unit_tests: n.unit_tests,
+            badge: test_badge(n.data_tests, n.unit_tests),
         })
         .collect();
     LineagePayload {
@@ -274,6 +348,17 @@ fn plural(n: usize, noun: &str) -> String {
     } else {
         format!("{n} {noun}s")
     }
+}
+
+/// The per-node test-count badge line (cute-dbt#103):
+/// `"N data-tests · M unit-tests"`, pluralized via [`plural`] and
+/// explicit at 0/0 (`"0 data-tests · 0 unit-tests"`).
+fn test_badge(data_tests: usize, unit_tests: usize) -> String {
+    format!(
+        "{} \u{b7} {}",
+        plural(data_tests, "data-test"),
+        plural(unit_tests, "unit-test")
+    )
 }
 
 /// askama binding for `templates/explore-dag.html`.
@@ -911,6 +996,196 @@ mod tests {
             "tests.html embeds NO Cytoscape assets",
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ----- per-node test-count badges (cute-dbt#103) -------------------
+
+    /// A generic/singular data-test node: `attached` is the fusion
+    /// `attached_node` linkage (`None` = the singular-test wire shape —
+    /// fusion null-fills it, verified on the real playground fixture),
+    /// `deps` the `depends_on.nodes` edges and `path` the declaring
+    /// YAML file.
+    fn data_test(id: &str, attached: Option<&str>, deps: &[&str], path: Option<&str>) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "test",
+            Checksum::new("none", ""),
+            None,
+            None,
+            DependsOn::new(Vec::new(), deps.iter().map(|d| NodeId::new(*d)).collect()),
+            path.map(str::to_owned),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_test_attachment(None, attached.map(NodeId::new), None)
+    }
+
+    /// A minimal unit test targeting `target_bare` (the manifest stores
+    /// the BARE model name — resolution is `resolve_target_model`).
+    fn unit_test_on(target_bare: &str) -> crate::domain::UnitTest {
+        crate::domain::UnitTest::new(
+            format!("test_{target_bare}"),
+            NodeId::new(target_bare),
+            Vec::new(),
+            crate::domain::UnitTestExpect::new(serde_json::Value::Null, None, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn manifest_with_unit_tests(
+        nodes: Vec<Node>,
+        unit_tests: Vec<(&str, crate::domain::UnitTest)>,
+    ) -> Manifest {
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+            unit_tests
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v))
+                .collect(),
+            StdHashMap::new(),
+        )
+    }
+
+    /// Look one lineage node up by bare name.
+    fn lineage_node<'l>(lineage: &'l Lineage, name: &str) -> &'l LineageNode {
+        lineage
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .unwrap_or_else(|| panic!("no lineage node named {name:?}"))
+    }
+
+    #[test]
+    fn lineage_counts_data_tests_by_attached_target_not_declaring_file() {
+        // One test ATTACHED to dim_orders but DECLARED in stg_orders'
+        // YAML file, plus a relationships-style test attached to
+        // dim_orders whose depends_on also reaches stg_orders.
+        // Attribution follows `attached_node` (fusion's
+        // `_lookup_attached_node` parity) — never the declaring file
+        // and never the depends_on complement.
+        let current = manifest_of(vec![
+            model("model.shop.dim_orders", Some("select 1"), &[]),
+            model("model.shop.stg_orders", Some("select 1"), &[]),
+            data_test(
+                "test.shop.not_null_dim_orders_id",
+                Some("model.shop.dim_orders"),
+                &["model.shop.dim_orders"],
+                Some("models/staging/stg_orders.yml"),
+            ),
+            data_test(
+                "test.shop.relationships_dim_orders_stg",
+                Some("model.shop.dim_orders"),
+                &["model.shop.stg_orders", "model.shop.dim_orders"],
+                None,
+            ),
+        ]);
+        let lineage = build_lineage(&current, &all_models(&current));
+        assert_eq!(lineage.nodes.len(), 2, "test nodes are never lineage nodes");
+        assert_eq!(lineage_node(&lineage, "dim_orders").data_tests, 2);
+        assert_eq!(
+            lineage_node(&lineage, "stg_orders").data_tests,
+            0,
+            "neither the declaring file nor a depends_on reach attributes \
+             a data test — only attached_node does",
+        );
+    }
+
+    #[test]
+    fn lineage_counts_unit_tests_by_resolved_bare_target() {
+        let current = manifest_with_unit_tests(
+            vec![
+                model("model.shop.dim_orders", Some("select 1"), &[]),
+                model("model.shop.stg_orders", Some("select 1"), &[]),
+            ],
+            vec![
+                ("unit_test.shop.dim_orders.a", unit_test_on("dim_orders")),
+                ("unit_test.shop.dim_orders.b", unit_test_on("dim_orders")),
+                // Unresolvable bare target — contributes nothing.
+                ("unit_test.shop.ghost.c", unit_test_on("ghost_model")),
+            ],
+        );
+        let lineage = build_lineage(&current, &all_models(&current));
+        assert_eq!(lineage_node(&lineage, "dim_orders").unit_tests, 2);
+        assert_eq!(lineage_node(&lineage, "stg_orders").unit_tests, 0);
+    }
+
+    #[test]
+    fn lineage_singular_test_without_attached_node_counts_for_no_model() {
+        // The real fusion wire shape for singular (SQL-file) tests:
+        // `attached_node: null` even though depends_on names the model
+        // (20 such nodes on the committed playground fixture).
+        let current = manifest_of(vec![
+            model("model.shop.dim_orders", Some("select 1"), &[]),
+            data_test(
+                "test.shop.assert_dim_orders_valid",
+                None,
+                &["model.shop.dim_orders"],
+                Some("tests/assert_dim_orders_valid.sql"),
+            ),
+        ]);
+        let lineage = build_lineage(&current, &all_models(&current));
+        assert_eq!(
+            lineage_node(&lineage, "dim_orders").data_tests,
+            0,
+            "a singular test (attached_node: null) is not a YAML data-test",
+        );
+    }
+
+    #[test]
+    fn lineage_zero_test_model_counts_zero_zero() {
+        let current = three_model_manifest();
+        let lineage = build_lineage(&current, &all_models(&current));
+        for node in &lineage.nodes {
+            assert_eq!((node.data_tests, node.unit_tests), (0, 0), "{}", node.name);
+        }
+    }
+
+    #[test]
+    fn payload_carries_counts_and_the_preformatted_badge() {
+        let current = manifest_with_unit_tests(
+            vec![
+                model("model.shop.dim_orders", Some("select 1"), &[]),
+                model("model.shop.stg_orders", Some("select 1"), &[]),
+                data_test(
+                    "test.shop.not_null_dim_orders_id",
+                    Some("model.shop.dim_orders"),
+                    &["model.shop.dim_orders"],
+                    None,
+                ),
+                data_test(
+                    "test.shop.unique_dim_orders_id",
+                    Some("model.shop.dim_orders"),
+                    &["model.shop.dim_orders"],
+                    None,
+                ),
+            ],
+            vec![("unit_test.shop.dim_orders.a", unit_test_on("dim_orders"))],
+        );
+        let payload = build_lineage_payload(&current, &all_models(&current));
+        let by_name: StdHashMap<&str, &LineageNodePayload> =
+            payload.nodes.iter().map(|n| (n.name.as_str(), n)).collect();
+        let dim = by_name["dim_orders"];
+        assert_eq!((dim.data_tests, dim.unit_tests), (2, 1));
+        assert_eq!(
+            dim.badge, "2 data-tests · 1 unit-test",
+            "the badge is Rust-composed (pluralized) — the JS engine \
+             stays a pure renderer",
+        );
+        let stg = by_name["stg_orders"];
+        assert_eq!((stg.data_tests, stg.unit_tests), (0, 0));
+        assert_eq!(stg.badge, "0 data-tests · 0 unit-tests");
+        // The 0/0 badge is EXPLICIT in the carrier — the counts are
+        // never skip-serialized away.
+        let json = json_for_html_script(&payload).expect("serializes");
+        assert!(json.contains("\"data_tests\":0"), "{json}");
+        assert!(json.contains("\"unit_tests\":0"), "{json}");
+        assert!(json.contains("0 data-tests · 0 unit-tests"), "{json}");
     }
 
     #[test]
