@@ -1741,7 +1741,7 @@ fn find_source_import_node_id(
     if token.is_empty() {
         return None;
     }
-    find_import_node_id(graph, &token)
+    find_import_node_id(graph, token)
 }
 
 /// The leaf table identifier a resolved [`SourceNode`] is expected to
@@ -1749,8 +1749,10 @@ fn find_source_import_node_id(
 /// non-empty (quote-stripped), else the last dot-segment of
 /// `relation_name` (quote-stripped; naive split — a dot embedded in a
 /// quoted identifier is out of scope, the identifier-first chain makes
-/// this fallback rare), else the source's `name`.
-fn source_relation_token(source: &SourceNode) -> String {
+/// this fallback rare), else the source's `name`. Returns a borrowed
+/// slice of the [`SourceNode`]'s own fields — every branch is a
+/// quote-strip view, so no allocation is needed (Gemini PR 204).
+fn source_relation_token(source: &SourceNode) -> &str {
     let identifier = source
         .identifier()
         .map(strip_ident_quotes)
@@ -1765,7 +1767,6 @@ fn source_relation_token(source: &SourceNode) -> String {
     identifier
         .or_else(from_relation)
         .unwrap_or_else(|| strip_ident_quotes(source.name()))
-        .to_owned()
 }
 
 /// Strip the common SQL identifier quoting characters from both ends of
