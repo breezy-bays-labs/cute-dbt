@@ -132,6 +132,7 @@
   var SETTINGS_KEY = "cute-dbt.settings.v1";
   var settings = {
     contextLines:      3,    // mirrors diffFoldPad's historical default (#132).
+    expandStep:        20,   // lines revealed per gutter-fold click; 0 = all.
     normalizeEquality: true  // ON: hide format-only cell changes (default).
   };
 
@@ -151,6 +152,9 @@
     if (!parsed || typeof parsed !== "object") return;
     if (typeof parsed.contextLines === "number" && isFinite(parsed.contextLines)) {
       settings.contextLines = Math.max(0, Math.min(20, Math.round(parsed.contextLines)));
+    }
+    if (typeof parsed.expandStep === "number" && isFinite(parsed.expandStep)) {
+      settings.expandStep = Math.max(0, Math.min(500, Math.round(parsed.expandStep)));
     }
     if (typeof parsed.normalizeEquality === "boolean") {
       settings.normalizeEquality = parsed.normalizeEquality;
@@ -438,9 +442,39 @@
           .text("No unit test selected.")
       );
     }
-    // Fresh diffs render default-folded, so the global toggle resets to
-    // "Expand all" (cute-dbt#132). Null-safe in baseline mode.
-    resetExpandAllToggle();
+    // Fresh diffs render default-folded; the per-diff fold toggles
+    // (buildFoldToggleBtn) are rebuilt with their headers each render, so
+    // they reset to "Expand all" naturally (cute-dbt#199 — the old
+    // top-of-report strip and its diffAllExpanded global are retired).
+  }
+
+  // cute-dbt#199 — per-diff global fold toggle. Lives in each diff's
+  // code-surface header (the old top-of-report "Expand all" strip was
+  // removed; expand/collapse over a file's hunks belongs with that file's
+  // diff affordances). getRoot() returns the diff <pre> whose folds this
+  // button drives via the same setAllFolds symmetric DOM mirror the
+  // __cuteExpandAllFolds hooks use.
+  //
+  // STATELESS by design (Gemini, PR #213): the click derives its intent
+  // from the DOM at activation time — any hidden folded line left in this
+  // diff means "expand all", else "collapse all". A cached boolean would
+  // desync the moment a hunk is stepped individually or the __cute hooks
+  // move fold state. The label/aria-pressed are owned by syncFoldToggles
+  // (driven from updateFoldControl after EVERY fold mutation), reading the
+  // root accessor stored on the element.
+  function buildFoldToggleBtn(getRoot) {
+    var $b = $("<button>").attr("type", "button").addClass("diff-fold-toggle")
+      .attr("aria-pressed", "false").text("Expand all");
+    $b[0].__cuteFoldRoot = getRoot;
+    $b.on("click", function (e) {
+      e.preventDefault();
+      var root = getRoot();
+      var anyHidden = $(root).find(".diff-folded").filter(function () { return this.hidden; }).length > 0;
+      // setAllFolds funnels through updateFoldControl -> syncFoldToggles,
+      // which relabels this button from the resulting DOM truth.
+      setAllFolds(anyHidden, root);
+    });
+    return $b;
   }
 
   function renderTestDetails(t) {
@@ -528,14 +562,20 @@
           $diffPre.prop("hidden", view !== "diff");
           $authPre.prop("hidden", view !== "authored");
         });
+        // cute-dbt#199 — per-diff fold toggle + copy-icon button ride the
+        // code header: fold toggle left of the view toggle, copy far right.
+        $yamlHeader.append(buildFoldToggleBtn(function () { return $diffPre[0]; }));
         $yamlHeader.append($toggle);
+        $yamlHeader.append(copyIconBtn(function () { return t.authoring_yaml; }));
         $yamlWrap.append($yamlHeader).append($diffPre).append($authPre);
       } else {
         var $yamlPre = $("<pre>").addClass("sql-block").append(
           $("<code>").html(highlightLinesYaml(t.authoring_yaml))
         );
-        if (t.defined_in) $yamlWrap.append($yamlHeader);
-        $yamlWrap.append($yamlPre);
+        // The header is always emitted now (cute-dbt#199): it carries the
+        // copy-icon button even when there is no defined_in path to show.
+        $yamlHeader.append(copyIconBtn(function () { return t.authoring_yaml; }));
+        $yamlWrap.append($yamlHeader).append($yamlPre);
       }
       $yamlDet.append($yamlWrap);
       $body.append($yamlDet);
@@ -565,16 +605,9 @@
     $section.find(".model-sql-summary-hint").text(hasDiff ? "diff" : "raw, with Jinja");
     var $wrap = $section.find(".model-sql-wrap");
     // Rebuild the wrap body each model switch so a prior model's toggle/diff
-    // never leaks; the Copy button is re-created here too.
+    // never leaks. The copy affordance is the header's copy-icon button
+    // (cute-dbt#199) — the old absolutely-positioned text Copy is retired.
     $wrap.empty();
-    var $copy = $("<button>").attr("type", "button")
-      .addClass("sql-copy model-sql-copy").text("Copy");
-    $copy.on("click.cuteDbtModelSql", function (e) {
-      e.preventDefault();
-      e.stopPropagation();
-      copySql(raw, $(this));
-    });
-    $wrap.append($copy);
     // cute-dbt#178 — GitHub-style code-card header with the model's file
     // path. cute-dbt#179: the payload carries the full project-relative
     // `m.path` (`models/…/x.sql`); when the manifest had no
@@ -610,14 +643,62 @@
         $diffPre.prop("hidden", view !== "diff");
         $rawPre.prop("hidden", view !== "raw");
       });
+      // cute-dbt#199 — per-diff fold toggle + copy-icon button in the header.
+      // Copy always copies the raw SQL regardless of the active view.
+      $mHeader.append(buildFoldToggleBtn(function () { return $diffPre[0]; }));
       $mHeader.append($toggle);
+      $mHeader.append(copyIconBtn(function () { return raw; }));
       $wrap.append($mHeader).append($diffPre).append($rawPre);
     } else {
+      $mHeader.append(copyIconBtn(function () { return raw; }));
       var $pre = $("<pre>").addClass("sql-block model-sql-block").append(
         $("<code>").addClass("model-sql-code").html(highlightLinesSql(raw))
       );
       $wrap.append($mHeader).append($pre);
     }
+  }
+
+  // cute-dbt#199 — copy-to-clipboard icon button (preserves the icon — a
+  // class flash, not a text swap). Used in the Model SQL + Model YAML code
+  // headers, far right. Inline SVG only (the README §2.4 functional-SVG
+  // iconography rule): no icon font, nothing external, so the zero-egress
+  // gate is untouched. A real focusable <button> with an aria-label (the
+  // #146 lesson — never a hover-only affordance).
+  //
+  // Outcome is TRUTHFUL (Gemini, PR #213): success flashes `copied`,
+  // failure flashes `copy-failed` — a rejected write never claims Copied.
+  // title AND aria-label both carry the outcome (so AT users get the same
+  // signal) and reset to the rest state after the flash. The write strategy
+  // mirrors copySql: navigator.clipboard.writeText first, then the shared
+  // execCommand fallbackCopy (which reports its own success) on rejection
+  // or where the async API is unavailable.
+  var COPY_SVG = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">'
+    + '<rect x="9" y="9" width="11" height="11" rx="2"></rect>'
+    + '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+  function copyIconBtn(getText) {
+    var $b = $("<button>").attr("type", "button").addClass("code-copy-btn icon-btn")
+      .attr("aria-label", "Copy").attr("title", "Copy").html(COPY_SVG);
+    $b.on("click", function (e) {
+      e.preventDefault(); e.stopPropagation();
+      var done = function (ok) {
+        var msg = ok ? "Copied" : "Copy failed";
+        $b.addClass(ok ? "copied" : "copy-failed")
+          .attr("title", msg).attr("aria-label", msg);
+        setTimeout(function () {
+          $b.removeClass("copied copy-failed")
+            .attr("title", "Copy").attr("aria-label", "Copy");
+        }, 1200);
+      };
+      var text = getText();
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { done(true); }, function () {
+          fallbackCopy(text, done);
+        });
+      } else {
+        fallbackCopy(text, done);
+      }
+    });
+    return $b;
   }
 
   // cute-dbt#170 — the per-model coverage checklist panel ----------------
@@ -1047,24 +1128,33 @@
       renderTestSelector();
       renderForSelectedModel();
     });
-    // cute-dbt#132 — hunk-fold reveal. ONE delegated listener (diff blocks are
-    // .empty()'d and rebuilt on model/test switch, so delegate on `document`
-    // to survive re-renders). Reveal is PARENT-SCOPED: `$(this).parent()`
-    // isolates `.fold-<id>` to the SAME <code> block, so the call-local fold
-    // ids never collide across the YAML drawer vs the model-SQL block.
-    // Bidirectional toggle (#136): clicking a fold expands the hidden run AND
-    // keeps the control visible, relabeled to a "Hide N" collapse affordance;
-    // clicking again re-collapses just that hunk. Reveal stays PARENT-SCOPED to
-    // the enclosing <code> so duplicate call-local fold ids never cross-talk.
-    function toggleFold($ctrl) {
-      var id = $ctrl.attr("data-fold");
-      var willExpand = $ctrl.attr("aria-expanded") !== "true";
-      $ctrl.parent().find(".fold-" + id).prop("hidden", !willExpand);
-      $ctrl.attr("aria-expanded", willExpand ? "true" : "false");
-      $ctrl.find(".diff-fold-label").text(foldLabel(willExpand, $ctrl.attr("data-fold-count")));
-    }
-    $(document).on("click", ".diff-fold", function () {
-      toggleFold($(this));
+    // cute-dbt#132 / cute-dbt#199 — hunk-fold reveal. ONE delegated listener
+    // set (diff blocks are .empty()'d and rebuilt on model/test switch, so
+    // delegate on `document` to survive re-renders). Reveal is PARENT-SCOPED:
+    // closest("code, tbody") isolates `.fold-<id>` to the SAME unified <code>
+    // block or split <tbody>, so the call-local fold ids never collide across
+    // the YAML drawer vs the model-SQL block. Directional step-expansion
+    // (#199, supersedes the #136 click-toggles-all): activating the band (or
+    // the gutter `+` stepper) reveals settings.expandStep lines toward the
+    // hunk; `−` re-hides a step; the far-right "collapse all" restores the
+    // fully-folded state. Clicks originating on the explicit controls must
+    // not double-fire the band (the closest() guard).
+    $(document).on("click", ".diff-fold", function (e) {
+      // explicit controls (steppers / collapse-all) handle their own clicks.
+      if ($(e.target).closest(".fold-expand, .fold-contract, .fold-collapse-all").length) return;
+      expandFold($(this));   // clicking the band = expand by one step
+    });
+    $(document).on("click", ".fold-expand", function (e) {
+      e.stopPropagation();
+      expandFold($(this).closest(".diff-fold"));
+    });
+    $(document).on("click", ".fold-contract", function (e) {
+      e.stopPropagation();
+      contractFold($(this).closest(".diff-fold"));
+    });
+    $(document).on("click", ".fold-collapse-all", function (e) {
+      e.stopPropagation();
+      collapseFold($(this).closest(".diff-fold"));
     });
     // cute-dbt#170 — evidence pinning: select the cited construct's DAG
     // node (the same selection path a node click takes), smooth-scroll
@@ -1109,14 +1199,13 @@
       }
     });
     $(document).on("keydown", ".diff-fold", function (e) {
-      // Enter or Space activates (both directions); preventDefault on Space
-      // stops page scroll.
+      // Enter or Space activates the band (expand-by-step); preventDefault
+      // on Space stops page scroll.
       if (e.key === "Enter" || e.key === " " || e.key === "Spacebar") {
         e.preventDefault();
-        toggleFold($(this));
+        expandFold($(this));
       }
     });
-    bindDiffViewControls();
   }
 
   function renderLeftPanel() {
@@ -1859,20 +1948,12 @@
   //   FOLD_MIN_HIDDEN — only fold when >=2 lines would actually hide, so a
   //                     short YAML test block (a change + a couple context
   //                     lines) NEVER folds.
-  //   diffAllExpanded — global expand-all/collapse-all state. The toggle is a
-  //                     symmetric DOM mirror (setAllFolds), NOT a re-render, so
-  //                     it never disturbs the SQL File<->Diff view or mermaid.
+  // The expand-all/collapse-all ops (per-diff fold toggle + the
+  // __cuteExpandAllFolds hooks) are a symmetric DOM mirror (setAllFolds),
+  // NOT a re-render, so they never disturb the SQL File<->Diff view or
+  // mermaid (#136 invariant carried into the #199 step-expansion model).
   var diffFoldPad = 3;
   var FOLD_MIN_HIDDEN = 2;
-  var diffAllExpanded = false;
-
-  // The per-hunk fold control's label, shared by the per-hunk toggle and the
-  // global expand/collapse mirror so they never drift (#136). `count` is the
-  // `data-fold-count` string; expanded => a "Hide" (collapse) affordance.
-  function foldLabel(expanded, count) {
-    return (expanded ? "Hide " : "Show ") + count
-         + " unchanged line" + (count === "1" ? "" : "s");
-  }
 
   // Render a single DiffLine to its `.diff-line` span via the shared
   // tokenize + emphasis-overlay path. `extraClass` appends to the kind class
@@ -1960,22 +2041,30 @@
         }
       } else {
         var id = foldId++;
+        // Reveal direction (#199): a LEADING fold (no change above it, hunk
+        // below) expands UP — lines appear adjacent to the hunk and grow
+        // outward. Otherwise expand DOWN from the top (adjacent to the
+        // preceding hunk).
+        var foldDir = (head === 0 && tail > 0) ? "up" : "down";
         // head context lines (adjacent to the preceding change).
         for (var h = runStart; h < runStart + head; h++) {
           html += renderOneDiffLine(lines[h], tokenizeFn, "", false, nums[h]);
         }
-        // The fold control. Bidirectional (#136): it stays in the DOM and
-        // relabels Show<->Hide on toggle, so `data-fold-count` + a dedicated
-        // label span let toggleFold/setAllFolds rebuild the text without
-        // re-rendering. `aria-expanded` tracks the collapsed/expanded state.
+        // The fold control. It stays in the DOM across every state, so
+        // `data-fold-count` + a dedicated label span let updateFoldControl/
+        // setAllFolds rebuild the text without re-rendering. `aria-expanded`
+        // tracks fully-revealed vs (partially) collapsed. The gutter carries
+        // the +/− steppers (expand/contract by settings.expandStep); the
+        // far-right "collapse all" appears once anything is revealed.
         html += '<span class="diff-line diff-fold" data-fold="' + id + '"'
-              + ' data-fold-count="' + hidden + '"'
+              + ' data-fold-count="' + hidden + '" data-fold-dir="' + foldDir + '"'
               + ' role="button" tabindex="0" aria-expanded="false">'
-              + '<span class="diff-gutter diff-gutter-hunk" aria-hidden="true"></span>'
-              + '<span class="diff-sigil">⋯</span>'
+              + '<span class="diff-gutter diff-gutter-hunk"><span class="fold-steppers"><button type="button" class="fold-expand" aria-label="Show more">+</button><button type="button" class="fold-contract" aria-label="Show fewer">−</button></span></span>'
+              + '<span class="diff-sigil"></span>'
               + '<span class="diff-fold-label">'
               + 'Show ' + hidden + ' unchanged line' + (hidden === 1 ? "" : "s")
               + '</span>'
+              + '<button type="button" class="fold-collapse-all" hidden aria-label="Collapse this whole section">collapse all</button>'
               + '</span>';
         // The folded (hidden) middle lines.
         for (var m2 = runStart + head; m2 < j - tail; m2++) {
@@ -1997,15 +2086,18 @@
   window.__cuteRenderBlockDiff = renderBlockDiff;
   window.__cuteRenderYamlDiff = renderYamlDiff;
 
-  // cute-dbt#178 — SPLIT (side-by-side) diff. Old lines on the left, new on
-  // the right, paired index-wise within each change block; context appears on
-  // both sides. No folding in split mode (these blocks are short — showing
-  // every context line reads cleaner than wiring a second fold mechanism).
-  // Rendered as a fixed-layout table so the two halves stay aligned; each
-  // code cell soft-wraps. The CSS picks unified vs split per
-  // html[data-difflayout] (+ a responsive fallback), so BOTH are emitted and
-  // exactly one is shown. Consumes the same BlockDiff lines verbatim — the
-  // Rust diff engine is unchanged.
+  // cute-dbt#178 / cute-dbt#199 — SPLIT (side-by-side) diff. Old lines on
+  // the left, new on the right, paired index-wise within each change block;
+  // context appears on both sides. Long context runs fold with the SAME
+  // hunk model + fold control as the unified renderer (fold row with the
+  // gutter steppers + a colspan label cell), so setAllFolds and the per-diff
+  // fold toggle drive both layouts from one control set. Rendered as a
+  // fixed-layout table (the <colgroup> pins 3.8em number columns + auto code
+  // columns for a true 50/50) so the two halves stay aligned; each code cell
+  // soft-wraps. The CSS picks unified vs split per html[data-difflayout]
+  // (+ a responsive fallback), so BOTH are emitted and exactly one is shown.
+  // Consumes the same BlockDiff lines verbatim — the Rust diff engine is
+  // unchanged.
   function splitCell(side) {
     if (!side) {
       return '<td class="ds-num ds-empty"></td><td class="ds-code ds-empty"></td>';
@@ -2015,17 +2107,47 @@
          + '<span class="diff-sigil">' + side.sigil + '</span>'
          + '<span class="diff-code">' + side.body + '</span></div></td>';
   }
-  function renderSplitDiff(diff, tokenizeFn) {
+  function renderSplitDiff(diff, tokenizeFn, padOverride) {
+    var foldPad = (typeof padOverride === "number" && padOverride >= 0) ? padOverride : diffFoldPad;
     var lines = diff.lines, n = lines.length, nums = diffNumbers(lines);
-    var rows = "", i = 0;
+    var rows = "", i = 0, foldId = 0;
+    function ctxRow(idx, extraClass, hidden) {
+      var body = diffBody(lines[idx], tokenizeFn);
+      return '<tr class="ds-row' + (extraClass ? " " + extraClass : "") + '"' + (hidden ? " hidden" : "") + '>'
+        + splitCell({ cls: "context", num: nums[idx].o, sigil: " ", body: body })
+        + splitCell({ cls: "context", num: nums[idx].n, sigil: " ", body: body })
+        + '</tr>';
+    }
     while (i < n) {
       if (lines[i].kind === "context") {
-        var body = diffBody(lines[i], tokenizeFn);
-        rows += '<tr class="ds-row">'
-              + splitCell({ cls: "context", num: nums[i].o, sigil: " ", body: body })
-              + splitCell({ cls: "context", num: nums[i].n, sigil: " ", body: body })
-              + '</tr>';
-        i += 1;
+        // Fold long context runs just like the unified renderer (same run
+        // arithmetic, same control anatomy, same parent-scoped fold ids —
+        // here the <tbody> is the scope).
+        var runStart = i, j = i;
+        while (j < n && lines[j].kind === "context") j += 1;
+        var runLen = j - runStart;
+        var head = runStart > 0 ? foldPad : 0;
+        var tail = j < n ? foldPad : 0;
+        var hiddenN = runLen - head - tail;
+        if (hiddenN < FOLD_MIN_HIDDEN) {
+          for (var k = runStart; k < j; k++) rows += ctxRow(k, "", false);
+        } else {
+          var id = foldId++;
+          var foldDir = (head === 0 && tail > 0) ? "up" : "down";
+          for (var h = runStart; h < runStart + head; h++) rows += ctxRow(h, "", false);
+          rows += '<tr class="ds-row diff-fold" data-fold="' + id + '" data-fold-count="' + hiddenN + '" data-fold-dir="' + foldDir + '"'
+                + ' role="button" tabindex="0" aria-expanded="false">'
+                + '<td class="ds-fold-gutter"><span class="fold-steppers"><button type="button" class="fold-expand" aria-label="Show more">+</button><button type="button" class="fold-contract" aria-label="Show fewer">−</button></span></td>'
+                + '<td class="ds-fold-cell" colspan="3">'
+                + '<div class="ds-fold-inner">'
+                + '<span class="diff-fold-label">Show ' + hiddenN + ' unchanged line' + (hiddenN === 1 ? "" : "s") + '</span>'
+                + '<button type="button" class="fold-collapse-all" hidden aria-label="Collapse this whole section">collapse all</button>'
+                + '</div>'
+                + '</td></tr>';
+          for (var m2 = runStart + head; m2 < j - tail; m2++) rows += ctxRow(m2, "diff-folded fold-" + id, true);
+          for (var tIdx = j - tail; tIdx < j; tIdx++) rows += ctxRow(tIdx, "", false);
+        }
+        i = j;
         continue;
       }
       // Maximal change block; pair removed (left) with added (right).
@@ -2043,7 +2165,9 @@
         rows += '<tr class="ds-row">' + splitCell(L) + splitCell(R) + '</tr>';
       }
     }
-    return '<table class="diff-split"><tbody>' + rows + '</tbody></table>';
+    return '<table class="diff-split">'
+      + '<colgroup><col class="ds-c-num"><col class="ds-c-code"><col class="ds-c-num"><col class="ds-c-code"></colgroup>'
+      + '<tbody>' + rows + '</tbody></table>';
   }
 
   // Emit BOTH layouts into a diff <pre>: the unified <code> + the split
@@ -2056,80 +2180,145 @@
   }
   window.__cuteRenderSplitDiff = renderSplitDiff;
 
-  // cute-dbt#132 — global fold controls (configurable context lines +
-  // expand-all/collapse-all). setAllFolds is a SYMMETRIC DOM MIRROR over the
-  // already-rendered diff: expand reveals every folded middle line; collapse
-  // re-hides them — exactly reproducing renderBlockDiff's default-folded output
-  // WITHOUT a re-render, so the SQL File<->Diff toggle, mermaid, and scroll
-  // position are never disturbed. The per-hunk controls stay VISIBLE and
-  // relabel Show<->Hide (#136 bidirectional), so an individual hunk can still
-  // be toggled after a global op. `root` scopes the op (the report passes
-  // `document`; the headless tests pass a mounted node).
+  // cute-dbt#132 / cute-dbt#199 — global fold ops. setAllFolds is a
+  // SYMMETRIC DOM MIRROR over the already-rendered diff: expand reveals every
+  // folded middle line; collapse re-hides them — exactly reproducing the
+  // renderers' default-folded output WITHOUT a re-render, so the SQL
+  // File<->Diff toggle, mermaid, and scroll position are never disturbed.
+  // The per-hunk controls stay VISIBLE in every state (the #136 invariant)
+  // and updateFoldControl recomputes their full anatomy (label, aria-expanded,
+  // stepper disabled-states, collapse-all visibility, parked position), so an
+  // individual hunk can still be stepped after a global op. `root` scopes the
+  // op (the per-diff fold toggle passes its diff <pre>; the headless tests
+  // pass a mounted node). Drives BOTH layouts: unified `.fold-<id>` spans in
+  // a <code>, split fold rows in a <tbody>.
   function setAllFolds(expanded, root) {
     var scope = root || document;
-    var folded = scope.querySelectorAll(".diff-folded");
-    for (var i = 0; i < folded.length; i++) folded[i].hidden = !expanded;
-    var controls = scope.querySelectorAll(".diff-fold");
-    for (var k = 0; k < controls.length; k++) {
-      controls[k].setAttribute("aria-expanded", expanded ? "true" : "false");
-      var label = controls[k].querySelector(".diff-fold-label");
-      if (label) label.textContent = foldLabel(expanded, controls[k].getAttribute("data-fold-count"));
+    $(scope).find(".diff-fold").each(function () {
+      var $ctrl = $(this);
+      var id = $ctrl.attr("data-fold");
+      var $allFolded = $ctrl.closest("code, tbody").find(".fold-" + id);
+      $allFolded.prop("hidden", !expanded);
+      updateFoldControl($ctrl, $allFolded);
+    });
+  }
+  // Recompute a fold control's label / collapse affordance / stepper states /
+  // parked position from the current hidden-state of its lines. Shared by
+  // expand, contract, collapse, and the global expand/collapse-all mirror so
+  // they never drift.
+  function updateFoldControl($ctrl, $allFolded) {
+    var total = $allFolded.length;
+    var stillHidden = $allFolded.filter(function () { return this.hidden; }).length;
+    var revealed = total - stillHidden;
+    var fully = stillHidden <= 0;
+    $ctrl.attr("aria-expanded", fully ? "true" : "false");
+    $ctrl.toggleClass("is-fully-expanded", fully);
+    var $label = $ctrl.find(".diff-fold-label");
+    $label.text(fully ? "All " + total + " lines shown" : "Show " + stillHidden + " unchanged line" + (stillHidden === 1 ? "" : "s"));
+    // gutter steppers: + expands (disabled when nothing left to show), −
+    // contracts (disabled when nothing revealed yet).
+    $ctrl.find(".fold-expand").prop("disabled", fully);
+    $ctrl.find(".fold-contract").prop("disabled", revealed <= 0);
+    // far-right "collapse all" appears once anything in this hunk is revealed.
+    $ctrl.find(".fold-collapse-all").prop("hidden", revealed <= 0);
+    // park the control adjacent to what it acts on: just above the remaining
+    // hidden run while partial, or below the whole run once fully revealed.
+    if (fully) $ctrl.insertAfter($allFolded.last());
+    else $ctrl.insertBefore($allFolded.filter(function () { return this.hidden; }).first());
+    // Every fold mutation funnels through here — keep the per-diff fold
+    // toggles truthful too (Gemini, PR #213).
+    syncFoldToggles();
+  }
+  // Relabel every mounted per-diff fold toggle from ITS OWN diff's DOM
+  // truth: pressed ("Collapse all") iff the diff has folds and none remain
+  // hidden. Each button reads the root accessor buildFoldToggleBtn stored on
+  // it, so per-hunk steppers, the per-hunk collapse-all, AND the global
+  // __cuteExpandAllFolds/__cuteCollapseAllFolds hooks all keep the button
+  // honest — no cached state anywhere. (Per-root truth is deliberately
+  // stronger than relabeling "toggles in scope" to one shared state: a
+  // partial-scope op never lies about an untouched sibling diff.)
+  function syncFoldToggles() {
+    $(".diff-fold-toggle").each(function () {
+      var getRoot = this.__cuteFoldRoot;
+      if (!getRoot) return;
+      var $folded = $(getRoot()).find(".diff-folded");
+      if (!$folded.length) return; // fold-less diff: leave the rest label.
+      var anyHidden = $folded.filter(function () { return this.hidden; }).length > 0;
+      $(this).text(anyHidden ? "Expand all" : "Collapse all")
+        .attr("aria-pressed", anyHidden ? "false" : "true");
+    });
+  }
+  // Expand by one step. settings.expandStep is read live on every activation
+  // (0 = reveal all), so a settings change needs NO re-render. "up" folds
+  // (hunk below) reveal from the BOTTOM of the hidden run so the newly-shown
+  // lines sit next to the hunk and the gap grows outward.
+  function expandFold($ctrl) {
+    var id = $ctrl.attr("data-fold");
+    var $allFolded = $ctrl.closest("code, tbody").find(".fold-" + id);
+    var $hidden = $allFolded.filter(function () { return this.hidden; });
+    var remaining = $hidden.length;
+    if (remaining === 0) return;
+    var step = settings.expandStep;                 // 0 => all
+    var reveal = (step <= 0 || step >= remaining) ? remaining : step;
+    if ($ctrl.attr("data-fold-dir") === "up") {
+      $hidden.slice(remaining - reveal).prop("hidden", false);
+    } else {
+      $hidden.slice(0, reveal).prop("hidden", false);
     }
+    updateFoldControl($ctrl, $allFolded);
+  }
+  // Contract by one step — re-hide the most-recently-revealed lines (those
+  // farthest from the hunk), mirroring expandFold's direction.
+  function contractFold($ctrl) {
+    var id = $ctrl.attr("data-fold");
+    var $allFolded = $ctrl.closest("code, tbody").find(".fold-" + id);
+    var $visible = $allFolded.filter(function () { return !this.hidden; });
+    var shown = $visible.length;
+    if (shown === 0) return;
+    var step = settings.expandStep;                 // 0 => collapse all
+    var hide = (step <= 0 || step >= shown) ? shown : step;
+    if ($ctrl.attr("data-fold-dir") === "up") {
+      // revealed grew upward from the bottom => hide from the TOP of visible.
+      $visible.slice(0, hide).prop("hidden", true);
+    } else {
+      // revealed grew downward from the top => hide from the BOTTOM of visible.
+      $visible.slice(shown - hide).prop("hidden", true);
+    }
+    updateFoldControl($ctrl, $allFolded);
+  }
+  // Restore this hunk's fully-folded state (the far-right "collapse all").
+  function collapseFold($ctrl) {
+    var id = $ctrl.attr("data-fold");
+    var $allFolded = $ctrl.closest("code, tbody").find(".fold-" + id);
+    $allFolded.prop("hidden", true);
+    updateFoldControl($ctrl, $allFolded);
   }
   window.__cuteExpandAllFolds = function (root) { setAllFolds(true, root); };
   window.__cuteCollapseAllFolds = function (root) { setAllFolds(false, root); };
 
-  // Sync the global Expand/Collapse-all button label + aria-pressed to
-  // diffAllExpanded. Null-safe: the .diff-view-controls strip is is_pr_diff-
-  // gated and absent in baseline mode.
-  function renderExpandAllToggle() {
-    var $btn = $(".diff-expand-all");
-    if (!$btn.length) return;
-    $btn.text(diffAllExpanded ? "Collapse all" : "Expand all")
-        .attr("aria-pressed", diffAllExpanded ? "true" : "false");
-  }
-  // Any re-render emits freshly default-folded diffs, so the global toggle
-  // returns to "Expand all" (called at the tail of renderForSelectedModel).
-  function resetExpandAllToggle() {
-    diffAllExpanded = false;
-    renderExpandAllToggle();
-  }
-
-  // Wire the PR-diff-only diff-view controls strip. Idempotent-safe binding;
-  // returns early in baseline mode where the strip is not emitted. The
-  // configurable fold-context input now lives in the #139 settings panel; this
-  // strip retains only the global expand-all/collapse-all action.
-  function bindDiffViewControls() {
-    var $strip = $(".diff-view-controls");
-    if (!$strip.length) return;
-    // Global expand-all/collapse-all over every currently-mounted fold (the
-    // model SQL diff + the test YAML diff), per-hunk controls still work too.
-    $strip.find(".diff-expand-all").on("click", function () {
-      diffAllExpanded = !diffAllExpanded;
-      setAllFolds(diffAllExpanded, document);
-      renderExpandAllToggle();
-    });
-  }
-
   // cute-dbt#139 — wire the settings cog + panel. PR-diff mode only; returns
   // early in baseline mode where the cog is not emitted. The cog toggles a
   // non-blocking panel (Escape + outside-click close, focus returns to the
-  // cog). The two settings drive PURE presentation:
+  // cog). The settings drive PURE presentation:
   //   contextLines  -> diffFoldPad, then renderForSelectedModel() re-folds the
   //                    live diffs (the same re-render path #132's input used).
+  //   expandStep    -> lines revealed per gutter-fold activation (0 = all);
+  //                    read live by expandFold/contractFold, so NO re-render.
   //   normalize     -> flips the cell lens (cellChanged); a re-render re-tints
   //                    the cell-diff grids under the new lens.
-  // Both persist via saveSettings (localStorage where available; in-memory
+  // All persist via saveSettings (localStorage where available; in-memory
   // under file://). The controls hydrate to the loaded settings at bind time.
   function bindSettingsMenu() {
     var $cog = $(".settings-cog");
     if (!$cog.length) return;
     var $panel = $("#settings-panel");
     var $ctx = $("#settings-context-input");
+    var $expand = $("#settings-expand-step");
     var $norm = $("#settings-normalize-input");
 
     // Hydrate the controls from the (possibly persisted) settings.
     $ctx.val(settings.contextLines);
+    $expand.val(settings.expandStep);
     $norm.prop("checked", settings.normalizeEquality);
 
     function setOpen(open) {
@@ -2162,6 +2351,16 @@
       $(this).val(settings.contextLines);
       saveSettings();
       renderForSelectedModel();
+    });
+    // Expand-step: lines revealed per gutter-fold activation (0 = all). NO
+    // re-render — expandFold/contractFold read settings.expandStep live on
+    // each activation. NaN input restores the current value.
+    $expand.on("change", function () {
+      var v = parseInt($(this).val(), 10);
+      if (isNaN(v)) { $(this).val(settings.expandStep); return; }
+      settings.expandStep = Math.max(0, Math.min(500, v));
+      $(this).val(settings.expandStep);
+      saveSettings();
     });
     // Normalize-equality: flip the cell lens, re-render to re-tint, persist.
     $norm.on("change", function () {

@@ -112,8 +112,13 @@ fn render_selection_report(world: &mut World) {
             "checksum": { "name": "sha256", "checksum": "current" },
             "compiled_code": "select 1 as order_id",
             "raw_code": model.raw_sql.clone(),
+            // `table`, not `incremental`: the grain check is
+            // materialization-agnostic, and an incremental config would
+            // also trip incremental.branch-coverage (cute-dbt#164),
+            // breaking these scenarios' single-concern "no findings"
+            // assertions.
             "config": {
-                "materialized": "incremental",
+                "materialized": "table",
                 "unique_key": model.unique_key,
             },
         });

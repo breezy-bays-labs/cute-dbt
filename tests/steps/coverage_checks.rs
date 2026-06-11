@@ -23,9 +23,10 @@ use serde_json::{Value, json};
 use super::super::common;
 use super::World;
 use super::builders::{
-    empty_manifest, model_id, model_node, serialize_coverage_to_tmp, serialize_to_tmp, with_node,
+    empty_manifest, model_id, model_node, serialize_coverage_to_tmp, serialize_to_tmp,
+    unit_test_for, unit_test_key, with_node, with_unit_test,
 };
-use super::world::CoverageDataTest;
+use super::world::{CoverageDataTest, CoverageIncrementalModel};
 
 // --- Background -----------------------------------------------------
 
@@ -83,6 +84,48 @@ fn combo_data_test(world: &mut World, state: String, columns: String, target: St
         columns,
         enabled: state == "enabled",
     });
+}
+
+// cute-dbt#164 — incremental.branch-coverage Givens. The incremental
+// flag and the per-test override ride the WIRE shapes
+// (config.materialized / overrides.macros.is_incremental) injected by
+// the When, mirroring the cute-dbt#145 incremental_models.rs pattern.
+
+#[given(regex = r#"^the modified incremental coverage model "([^"]+)"$"#)]
+fn incremental_coverage_model(world: &mut World, bare: String) {
+    world
+        .coverage_plan
+        .incremental_models
+        .push(CoverageIncrementalModel {
+            bare,
+            microbatch: false,
+        });
+}
+
+#[given(regex = r#"^the modified microbatch coverage model "([^"]+)"$"#)]
+fn microbatch_coverage_model(world: &mut World, bare: String) {
+    world
+        .coverage_plan
+        .incremental_models
+        .push(CoverageIncrementalModel {
+            bare,
+            microbatch: true,
+        });
+}
+
+#[given(
+    regex = r#"^a unit test "([^"]+)" on "([^"]+)" overriding is_incremental to (true|false)$"#
+)]
+fn unit_test_with_override(world: &mut World, name: String, target: String, mode: String) {
+    world
+        .coverage_plan
+        .unit_tests
+        .push((name, target, Some(mode == "true")));
+}
+
+#[given(regex = r#"^a unit test "([^"]+)" on "([^"]+)" with no is_incremental override$"#)]
+fn unit_test_without_override(world: &mut World, name: String, target: String) {
+    world.coverage_plan.unit_tests.push((name, target, None));
 }
 
 // --- When -----------------------------------------------------------
@@ -143,27 +186,62 @@ fn render_coverage_report(world: &mut World) {
         current = with_node(current, model_node(bare, "current", Some(sql)));
         baseline = with_node(baseline, model_node(bare, "baseline", Some(sql)));
     }
+    for model in &plan.incremental_models {
+        current = with_node(
+            current,
+            model_node(&model.bare, "current", Some("select 1")),
+        );
+        baseline = with_node(
+            baseline,
+            model_node(&model.bare, "baseline", Some("select 1")),
+        );
+    }
+    for (name, target, _mode) in &plan.unit_tests {
+        current = with_unit_test(current, unit_test_for(name, target));
+    }
 
     // Wire-shape injection: flat config (materialized + unique_key as
-    // fusion serializes them) per model, plus the generic-test nodes.
-    let configs: Vec<(&str, Value)> = plan
+    // fusion serializes them) per model, plus the generic-test nodes,
+    // plus the cute-dbt#164 unit-test overrides. The unique-key models
+    // are `table` so the grain scenarios stay single-concern (an
+    // incremental materialization would also trip
+    // incremental.branch-coverage).
+    let mut configs: Vec<(&str, Value)> = plan
         .models
         .iter()
         .map(|(bare, key)| {
             let config = match key {
-                Value::Null => json!({ "materialized": "incremental" }),
-                key => json!({ "materialized": "incremental", "unique_key": key }),
+                Value::Null => json!({ "materialized": "table" }),
+                key => json!({ "materialized": "table", "unique_key": key }),
             };
             (bare.as_str(), config)
         })
         .collect();
+    for model in &plan.incremental_models {
+        let config = if model.microbatch {
+            json!({ "materialized": "incremental", "incremental_strategy": "microbatch" })
+        } else {
+            json!({ "materialized": "incremental" })
+        };
+        configs.push((model.bare.as_str(), config));
+    }
     let test_nodes: Vec<(String, Value)> = plan
         .tests
         .iter()
         .map(|test| (test_node_id(test), wire_test_node(test)))
         .collect();
-    let current_path =
-        serialize_coverage_to_tmp(&current, "coverage_current", &configs, &test_nodes);
+    let unit_test_overrides: Vec<(String, bool)> = plan
+        .unit_tests
+        .iter()
+        .filter_map(|(name, _target, mode)| mode.map(|m| (unit_test_key(name), m)))
+        .collect();
+    let current_path = serialize_coverage_to_tmp(
+        &current,
+        "coverage_current",
+        &configs,
+        &test_nodes,
+        &unit_test_overrides,
+    );
     let baseline_path = serialize_to_tmp(&baseline, "coverage_baseline");
 
     let out = common::tmp("coverage_report.html");
@@ -226,6 +304,69 @@ fn finding_attributes_coverage(world: &mut World, model: String, column: String)
         by,
         vec![expected.as_str()],
         "coverage attributed to exactly the satisfying test node"
+    );
+}
+
+// cute-dbt#164 — incremental.branch-coverage Thens.
+
+#[then(regex = r#"^the "([^"]+)" finding for "([^"]+)" classifies branch coverage as "([^"]+)"$"#)]
+fn finding_classifies_branch_coverage(
+    world: &mut World,
+    check: String,
+    model: String,
+    state: String,
+) {
+    let finding = find_finding(world, &check, &model);
+    let rollup = finding["evidence"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|e| e["label"].as_str() == Some("branch coverage"))
+        .unwrap_or_else(|| panic!("finding carries branch-coverage evidence: {finding}"));
+    let value = rollup["value"].as_str().unwrap_or_default();
+    assert!(
+        value.starts_with(&state),
+        "branch coverage classifies {state:?}; got {value:?}"
+    );
+}
+
+#[then(
+    regex = r#"^the "([^"]+)" finding for "([^"]+)" attributes coverage to unit tests "([^"]+)" and "([^"]+)"$"#
+)]
+fn finding_attributes_unit_tests(
+    world: &mut World,
+    check: String,
+    model: String,
+    first: String,
+    second: String,
+) {
+    let finding = find_finding(world, &check, &model);
+    let mut expected = vec![unit_test_key(&first), unit_test_key(&second)];
+    expected.sort();
+    let by: Vec<&str> = finding["verdict"]["by"]
+        .as_array()
+        .unwrap_or_else(|| panic!("covered verdict carries `by`: {finding}"))
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(
+        by, expected,
+        "BOTH attributes every unit test on the model, sorted"
+    );
+}
+
+#[then(
+    regex = r#"^the "([^"]+)" finding for "([^"]+)" suggests the is_incremental true override$"#
+)]
+fn finding_suggests_true_override(world: &mut World, check: String, model: String) {
+    let sketch = suggested_given(world, &check, &model);
+    assert!(
+        sketch.contains("is_incremental: true"),
+        "the missing-incremental-branch sketch carries the true override; got {sketch:?}"
+    );
+    assert!(
+        sketch.contains("input: this"),
+        "the incremental-run sketch mocks prior state via a `this` given; got {sketch:?}"
     );
 }
 

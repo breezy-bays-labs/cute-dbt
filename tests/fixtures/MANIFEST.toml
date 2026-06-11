@@ -277,7 +277,7 @@ test. Pure synthetic data only — the `sql_literal_demo` package, `dq_flags` / 
 path = "playground-baseline.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "28a5e969ba28141f4bd520d707e5d7528f5c6a608a1216a62cb56928c84f2dc3"
+sha256 = "c22282cec2fe32208382d461f2ced2991ce2b4b6482d1b98bc3d6d4b1b1cec01"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -303,6 +303,13 @@ pair for cute-dbt's richer example. Source: cmbays/dbt-playground#291 \
 (unit_test format coverage) + #292 (cute-dbt#73 — bracket-demo \
 comments added to each unit_test in marts/core + marts/analytics) + \
 #302 (cute-dbt#64 — cross-join model + source-given test). \
+Hand surgery (cute-dbt#153, applied identically to BOTH sides so the \
+conversion itself never reads as a baseline-vs-current change): the \
+cross-join test's csv given (`ref('stg_synthea__patients')`) is \
+converted to an EXTERNAL fixture — `rows: null` + the resolved \
+`fixture: tests/fixtures/mart_date_state_grid_patients.csv` path (the \
+cute-dbt#126 fusion wire shape); the row data lives in that committed \
+csv under playground-source. \
 Private repo; URL provided for provenance audit, not public \
 retrieval.\
 """
@@ -311,7 +318,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "074affe247a35f2f5786aa6b92a57c119838e7b99d6f2461e4ed72f7745f5e64"
+sha256 = "87ca4c9c678991ff57567db34080d9a0e985a5347da91301552ea20251c28da3"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -357,14 +364,17 @@ appears in raw_code AND compiled_code with a dbt-computed checksum), and \
 fct_clinical_events gains the same synthetic-body-mod comment idiom as \
 int_dq_quarantine__encounters (modified ⇒ in scope, surfacing the union \
 UNCOVERED verdict with its copyable given-row sketches + a covered grain \
-check).\
+check). cute-dbt#153's external-fixture conversion on the cross-join \
+test's csv given (see the baseline entry — applied identically to both \
+sides) keeps the external-fixture GRID visible in the playground golden \
+and feeds the diff-showcase's external old→new cell diff.\
 """
 
 [[fixture]]
 path = "playground-pr-diff.patch"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/134"
-sha256 = "474e4d32bfb0294271b3c2b5d767f48387ca75ec768501a14ed6b9d7d8788c62"
+sha256 = "13aa582eb6c4a689ccf2563372cf5e4487c1501c4aede480f75670c3cba87f5a"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"
@@ -382,7 +392,13 @@ the manifest raw_code (model) and the committed source YAML (unit test) so \
 the inline diffs reconstruct cleanly under the same-revision contract. \
 cute-dbt#64's fixture regen renumbered the YAML hunks (+58 lines — the \
 cross-join model block lands earlier in _analytics__models.yml); hunk \
-content is unchanged. No \
+content is unchanged. cute-dbt#153 appended an EDIT hunk for the \
+external csv fixture `tests/fixtures/mart_date_state_grid_patients.csv` \
+(a typo fix Connecticutt→Connecticut + a Vermont→empty(NULL) cell) so \
+the showcase renders the cute-dbt#126 external old→new cell diff — an \
+edit, which the all-added live dogfood structurally cannot show. The \
+csv hunk's `+` side is byte-aligned to the committed csv under \
+playground-source (same-revision contract). No \
 real data — a hypothetical PR against the synthetic Synthea playground.\
 """
 
@@ -438,7 +454,7 @@ provenance note).\
 path = "playground-source/models/marts/analytics/_analytics__models.yml"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "8c798e44f9debea0a8d75840839724f287fb0b38111a99d081b2858609bea836"
+sha256 = "0608635e0fb990e87ec91d3af51d9c32d783e814d40225e3a6418eefee783561"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -458,7 +474,13 @@ the verbatim upstream copy: the cute-dbt#125 `overrides:` block \
 (macros / vars / env_vars) on test 2 — a text-level pin for the YAML \
 drawer + the pr-diff showcase's override-edit hunk; the manifest itself \
 carries `overrides: null` for that test — re-applied verbatim at the \
-same position during the cute-dbt#64 refresh to c8270a4. Pure synthetic.\
+same position during the cute-dbt#64 refresh to c8270a4; and the \
+cute-dbt#153 external-fixture conversion: the cross-join test's csv \
+given is authored as `fixture: mart_date_state_grid_patients` (the dbt \
+bare-name authoring convention) instead of inline `rows:`, pairing the \
+manifests' resolved-path wire shape. The edit sits BELOW the dq-test \
+blocks, so the pr-diff showcase's YAML hunk line numbers are unshifted. \
+Pure synthetic.\
 """
 
 [[fixture]]
@@ -480,6 +502,29 @@ cute-dbt#57 wire shape. Same CI matrix wiring as the marts files above \
 YAML drawer slice the test's block via the manifest \
 `original_file_path`). Verbatim upstream copy at c8270a4 — no hand \
 surgery. Pure synthetic.\
+"""
+
+[[fixture]]
+path = "playground-source/tests/fixtures/mart_date_state_grid_patients.csv"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/153"
+sha256 = "e87b0927cb6bf5f15cd14a418c760d0ac6ce9e85a097c029f2df42f4359e3169"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+External unit-test fixture csv for the playground's cross-join test \
+(cute-dbt#153): `test_mart_date_state_grid_cross_joins_months_and_states`'s \
+`ref('stg_synthea__patients')` given sources its rows from this file via \
+`rows: null` + a resolved `fixture:` path (the cute-dbt#126 fusion wire \
+shape) instead of inline `rows:`. Same four synthetic Synthea-style patient \
+rows the given previously inlined (two Massachusetts, one Connecticut, one \
+empty/NULL state). The pr-diff showcase patch carries an EDIT hunk against \
+this file (Connecticutt→Connecticut typo fix + Vermont→empty(NULL)), so the \
+golden diff-showcase renders the external old→new cell diff. Resolved by \
+the ProjectFileReader under `--project-root tests/fixtures/playground-source` \
+(file lives at `<project-root>/tests/fixtures/...`, the dbt convention). \
+Pure synthetic data — fictitious patient ids, no real records.\
 """
 
 [[fixture]]

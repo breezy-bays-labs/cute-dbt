@@ -49,6 +49,12 @@ models:
         description: Order status.
 
 unit_tests:
+  # cute-dbt#164 dogfood — the pair below covers BOTH is_incremental()
+  # branches (one test with the true override, one with none), the
+  # incremental.branch-coverage check's covered/green case in the live
+  # PR-diff preview. customer_order_days above deliberately keeps ZERO
+  # unit tests — the same check's UNCOVERED ("none") gap fixture, the
+  # paired-fixture rule's other half.
   - name: test_order_events_incremental_only_new_rows
     description: |
       With is_incremental() true, the model filters to orders newer than the
@@ -82,6 +88,38 @@ unit_tests:
     expect:
       format: dict
       rows:
+        - order_id: 2
+          customer_id: 2
+          order_date: '2024-01-02'
+          status: 'placed'
+
+  - name: test_order_events_incremental_initial_full_build
+    description: |
+      cute-dbt#164 — the FULL-BUILD branch: no overrides block, so dbt
+      compiles is_incremental() as false (the unit-test default) and the
+      high-water-mark filter drops out of the compiled SQL. EXPECT is every
+      input row. Pairs with test_order_events_incremental_only_new_rows to
+      exercise BOTH is_incremental() branches.
+    model: order_events_incremental
+    given:
+      - input: ref('stg_orders')
+        format: dict
+        rows:
+          - order_id: 1
+            customer_id: 1
+            order_date: '2024-01-01'
+            status: 'completed'
+          - order_id: 2
+            customer_id: 2
+            order_date: '2024-01-02'
+            status: 'placed'
+    expect:
+      format: dict
+      rows:
+        - order_id: 1
+          customer_id: 1
+          order_date: '2024-01-01'
+          status: 'completed'
         - order_id: 2
           customer_id: 2
           order_date: '2024-01-02'

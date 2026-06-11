@@ -151,6 +151,17 @@ pub struct World {
     /// `findings` (presence, removal, and the `suppressed` mark).
     pub selection_plan: SelectionPlan,
 
+    /// cute-dbt#200: the data-contract scenario accumulator. Filled by
+    /// the `report_generation.feature` context Givens (described/tagged
+    /// models, a unit test with its `given.input`, and the grouped
+    /// overrides), then consumed by the self-contained `When I render
+    /// the context report …` step. Unlike the #145/#169 plans, NO wire
+    /// injection is needed: the domain serializes `description`/`tags`
+    /// (top-level on the node) and the grouped `overrides` in exactly
+    /// the wire shapes the reader consumes, so `serialize_to_tmp`'s
+    /// native round-trip exercises the real ingestion.
+    pub context_plan: ContextPlan,
+
     // --- Explore (explore_cli / explore_full_manifest, cute-dbt#100) -----
     /// The out directory the last `cute-dbt explore` invocation wrote
     /// into. Set by the explore `When` steps; the Thens read
@@ -172,6 +183,19 @@ pub struct World {
     /// `When I run cute-dbt explore on the synthetic manifest` step
     /// serializes and runs the real subprocess against.
     pub explore_plan: ExplorePlan,
+}
+
+/// A cute-dbt#200 data-contract scenario plan — described/tagged models,
+/// one unit test with a `ref(...)` given, and the grouped overrides.
+#[derive(Debug, Default, Clone)]
+pub struct ContextPlan {
+    /// `(bare model name, description, tags)` per model.
+    pub models: Vec<(String, String, Vec<String>)>,
+    /// The declared unit test: `(name, target bare name, given input)`.
+    pub test: Option<(String, String, String)>,
+    /// Grouped overrides for the declared test:
+    /// `(group, name, native JSON value)`.
+    pub overrides: Vec<(String, String, serde_json::Value)>,
 }
 
 /// A cute-dbt#100 explore scenario plan — the synthetic models the
@@ -242,6 +266,24 @@ pub struct CoveragePlan {
     pub sql_models: Vec<(String, String)>,
     /// Uniqueness data tests the scenario declares.
     pub tests: Vec<CoverageDataTest>,
+    /// Incremental models the cute-dbt#164 branch-rollup scenarios
+    /// declare (no unique_key: the grain check stays silent).
+    pub incremental_models: Vec<CoverageIncrementalModel>,
+    /// `(unit-test bare name, target bare model, is_incremental
+    /// override)` per declared unit test — `None` = no `overrides`
+    /// block (dbt's full-build default).
+    pub unit_tests: Vec<(String, String, Option<bool>)>,
+}
+
+/// One incremental model in a [`CoveragePlan`] (cute-dbt#164).
+#[derive(Debug, Clone)]
+pub struct CoverageIncrementalModel {
+    /// Bare model name.
+    pub bare: String,
+    /// `true` ⇒ the wire config carries
+    /// `incremental_strategy: "microbatch"` (the declared rule-#1
+    /// exclusion).
+    pub microbatch: bool,
 }
 
 /// One uniqueness data test in a [`CoveragePlan`].

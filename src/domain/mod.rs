@@ -82,7 +82,7 @@ pub use state::{
     MacrosModifier, ModelInScopeSet, ModifiedSet, ModifierKind, RelationModifier, StateComparator,
     StateModifier, resolve_target_model,
 };
-pub use unit_test::{UnitTest, UnitTestExpect, UnitTestGiven};
+pub use unit_test::{UnitTest, UnitTestExpect, UnitTestGiven, UnitTestOverrides};
 pub use unit_test_table::{
     Cell, CellValue, FixtureFormat, FixtureTable, TableRow, effective_fixture_format,
     external_fixture_table, normalize_fixture_file_text, parse_block_dict_rows, parse_csv_rows,

@@ -8,6 +8,13 @@ models:
       Cross / UnionAll / UnionDistinct) plus a comma cross-join
       (cute-dbt#40 heuristic). Built to exercise the CTE DAG + JoinType
       legend rendering.
+    # cute-dbt#200 dogfood — model tags so the report's manifest_nodes
+    # lookup (and the #201/#202 shelf/hover consumers) renders a
+    # non-empty tags row on the live PR-preview report. The compiled
+    # manifest's top-level `tags` (the deduplicated resolved list) is
+    # what cute-dbt ingests — never `config.tags`.
+    config:
+      tags: ['marts', 'dogfood']
     columns:
       - name: order_id
         description: Order identifier (may be null for full-outer non-matches).
