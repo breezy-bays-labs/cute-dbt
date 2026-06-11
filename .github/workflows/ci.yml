@@ -258,12 +258,19 @@ jobs:
 
   baseline-required-grep:
     # The locked policy decision: --baseline-manifest is a required CLI
-    # argument; omitting it is a clap usage error (NOT a PreflightError).
-    # This job makes that policy a structural CI invariant — every feature
-    # scenario invoking the CLI must pass exactly one scope source
-    # (--baseline-manifest OR --pr-diff, cute-dbt#85), except
-    # scenarios explicitly tagged @no-baseline-usage-error (the deliberate
-    # neither-source case that exercises the usage-error path itself).
+    # argument on the `report` verb; omitting it is a clap usage error
+    # (NOT a PreflightError). This job makes that policy a structural CI
+    # invariant — every feature scenario invoking `cute-dbt report` must
+    # pass exactly one scope source (--baseline-manifest OR --pr-diff,
+    # cute-dbt#85), except scenarios explicitly tagged
+    # @no-baseline-usage-error (the deliberate neither-source case that
+    # exercises the usage-error path itself). Since the cute-dbt#100 verb
+    # restructure the gate is VERB-AWARE: `cute-dbt explore` invocations
+    # are allowed through (the explorer takes no scope source by design),
+    # while bare verbless invocations and report-without-a-source are
+    # flagged. A ZERO-MATCH TRIPWIRE fails the gate loudly if the trigger
+    # prose ever matches nothing — the pre-#100 gate keyed on literal
+    # prose a verb rename would have silently broken.
     name: Baseline-required scenario invariant
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -271,7 +278,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
-      - name: Every .feature scenario must use --baseline-manifest
+      - name: Every report scenario must use a scope source
         run: |
           set -euo pipefail
           # Gherkin tag semantics: a tag line applies to the NEXT scenario.
@@ -282,15 +289,27 @@ jobs:
           if ! awk '
             /^[[:space:]]*@no-baseline-usage-error([[:space:]]|$)/ { pending_skip=1; next }
             /^[[:space:]]*Scenario(:|[[:space:]]+Outline)/ { skip=pending_skip; pending_skip=0; next }
-            /cute-dbt with --manifest/ && !skip {
-              if ($0 !~ /--baseline-manifest/ && $0 !~ /--pr-diff/) {
+            /cute-dbt( report| explore)? with --manifest/ {
+              matched++
+              # The explore verb takes no scope source by design (cute-dbt#100).
+              if ($0 ~ /cute-dbt explore with /) next
+              # Flags BOTH report-without-a-source and bare verbless
+              # invocations (the pre-#100 flat shape must not reappear).
+              if (!skip && $0 !~ /--baseline-manifest/ && $0 !~ /--pr-diff/) {
                 print FILENAME ":" NR ": " $0
                 found=1
               }
+              next
             }
-            END { exit (found ? 1 : 0) }
+            END {
+              if (matched == 0) {
+                print "TRIPWIRE: the CLI-invocation trigger matched ZERO feature lines — the invocation prose drifted; update this gate alongside it"
+                exit 1
+              }
+              exit (found ? 1 : 0)
+            }
           ' features/*.feature; then
-            echo "::error::baseline-required-grep: scenarios invoking the CLI without a scope source (--baseline-manifest or --pr-diff) must be tagged @no-baseline-usage-error"
+            echo "::error::baseline-required-grep: report scenarios without a scope source (--baseline-manifest or --pr-diff) must be tagged @no-baseline-usage-error — or the trigger matched nothing (tripwire)"
             exit 1
           fi
 
@@ -305,6 +324,7 @@ jobs:
     #   - 12 after incremental_models (cute-dbt#145)
     #   - 13 after coverage_checks (cute-dbt#169)
     #   - 14 after check_selection (cute-dbt#171)
+    #   - 16 after explore_cli + explore_full_manifest (cute-dbt#100)
     # The README is not a feature. The job name deliberately carries no
     # number (cute-dbt#68 — the old `==6` display label went stale across
     # several bumps): the enforced count lives ONLY in the `expected=`
@@ -322,7 +342,7 @@ jobs:
       - name: features/*.feature count matches expected
         run: |
           set -euo pipefail
-          expected=14
+          expected=16
           count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
           echo "feature-count: expected ${expected}, found ${count}"
           if [ "$count" != "$expected" ]; then
@@ -557,13 +577,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `mode: report` rows render a single --out file with the
+          # `report` verb; the `mode: explore` row renders the two-file
+          # --out-dir shape with the `explore` verb (cute-dbt#100).
           - name: jaffle-shop
+            mode: report
             current: tests/fixtures/jaffle-shop-current.json
             baseline: tests/fixtures/jaffle-shop-baseline.json
             pr_diff: ""
             output: examples/jaffle-shop-report.html
             project_root: ""
           - name: playground
+            mode: report
             current: tests/fixtures/playground-current.json
             baseline: tests/fixtures/playground-baseline.json
             pr_diff: ""
@@ -584,11 +609,25 @@ jobs:
           # NULL. `pr_diff` set + `baseline` empty selects the --pr-diff arm
           # in the run step below.
           - name: diff-showcase
+            mode: report
             current: tests/fixtures/playground-current.json
             baseline: ""
             pr_diff: tests/fixtures/playground-pr-diff.patch
             output: examples/diff-showcase-report.html
             project_root: tests/fixtures/playground-source
+          # cute-dbt#100 — the GOLDEN explore pages: the full synthetic
+          # playground manifest rendered to the two-file --out-dir shape
+          # (examples/explore/dag.html + tests.html), each independently
+          # covered by the headless zero-egress gate (page-aware liveness)
+          # and the resource-ref lint. No baseline, no project root —
+          # explore is full-manifest by design.
+          - name: explore
+            mode: explore
+            current: tests/fixtures/playground-current.json
+            baseline: ""
+            pr_diff: ""
+            output: examples/explore
+            project_root: ""
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -601,6 +640,7 @@ jobs:
           # user-controlled inputs — but passing through env: is the
           # official safe pattern for any `${{ }}` interpolation.
           EXAMPLE_NAME: ${{ matrix.name }}
+          MODE: ${{ matrix.mode }}
           CURRENT_MANIFEST: ${{ matrix.current }}
           BASELINE_MANIFEST: ${{ matrix.baseline }}
           PR_DIFF: ${{ matrix.pr_diff }}
@@ -609,6 +649,28 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/example-check
+          # --- explore arm (cute-dbt#100): the two-file --out-dir shape.
+          # Renders into a scratch dir and diffs EACH emitted page against
+          # its committed twin — never a single-file --out append.
+          if [ "$MODE" = "explore" ]; then
+            rendered_dir="target/example-check/$(basename "$OUTPUT_PATH")"
+            rm -rf "$rendered_dir"
+            cargo run --quiet --locked --bin cute-dbt -- explore \
+              --manifest "$CURRENT_MANIFEST" \
+              --out-dir "$rendered_dir"
+            fail=0
+            for page in dag.html tests.html; do
+              if ! diff -q "$rendered_dir/$page" "$OUTPUT_PATH/$page" >/dev/null; then
+                echo "::error::example-report-up-to-date: $OUTPUT_PATH/$page does not match the renderer output ($EXAMPLE_NAME). Regenerate with:"
+                echo "  cargo run --bin cute-dbt -- explore --manifest $CURRENT_MANIFEST --out-dir $OUTPUT_PATH"
+                echo "Sizes:"
+                ls -l "$rendered_dir/$page" "$OUTPUT_PATH/$page" || true
+                fail=1
+              fi
+            done
+            exit "$fail"
+          fi
+          # --- report arm: the single-file --out shape, `report` verb.
           rendered="target/example-check/$(basename "$OUTPUT_PATH")"
           # Build the optional --project-root arg only when the matrix
           # row sets one (jaffle-shop omits it; playground points at
@@ -638,14 +700,14 @@ jobs:
             scope_args=(--baseline-manifest "$BASELINE_MANIFEST")
             scope_hint=" --baseline-manifest $BASELINE_MANIFEST"
           fi
-          cargo run --quiet --locked --bin cute-dbt -- \
+          cargo run --quiet --locked --bin cute-dbt -- report \
             --manifest "$CURRENT_MANIFEST" \
             "${scope_args[@]}" \
             "${project_root_args[@]}" \
             --out "$rendered"
           if ! diff -q "$rendered" "$OUTPUT_PATH" >/dev/null; then
             echo "::error::example-report-up-to-date: $OUTPUT_PATH does not match the renderer output ($EXAMPLE_NAME). Regenerate with:"
-            echo "  cargo run --bin cute-dbt -- --manifest $CURRENT_MANIFEST$scope_hint$regen_hint --out $OUTPUT_PATH"
+            echo "  cargo run --bin cute-dbt -- report --manifest $CURRENT_MANIFEST$scope_hint$regen_hint --out $OUTPUT_PATH"
             echo "Sizes:"
             ls -l "$rendered" "$OUTPUT_PATH"
             exit 1
