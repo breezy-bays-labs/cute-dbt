@@ -4362,16 +4362,20 @@ fn select_test(tab: &Tab, test_id: &str) {
     );
 }
 
-/// Trimmed text of the `.this-badge` on the `given: - input: this` section,
-/// or `""` when absent. Iterates `.given-section` by `data-input-name` so the
-/// awkward `ref('orders')` attribute-selector quoting is avoided.
+/// Trimmed label text of the `.this-badge` on the `given: - input: this`
+/// section, or `""` when absent. Iterates `.given-section` by
+/// `data-input-name` so the awkward `ref('orders')` attribute-selector
+/// quoting is avoided. Reads the badge's FIRST TEXT NODE only — since
+/// cute-dbt#202 the badge nests its CSS tooltip bubble, so a bare
+/// `textContent` would concatenate the tip copy onto the label.
 fn this_given_badge_text(tab: &Tab) -> String {
     eval_string(
         tab,
         "(function(){\
            var s=Array.prototype.slice.call(document.querySelectorAll('.given-section'))\
              .filter(function(x){return x.getAttribute('data-input-name')==='this';})[0];\
-           var b=s?s.querySelector('.this-badge'):null;return b?b.textContent.trim():'';})()",
+           var b=s?s.querySelector('.this-badge'):null;\
+           return b&&b.firstChild?b.firstChild.nodeValue.trim():'';})()",
     )
 }
 
@@ -4387,7 +4391,13 @@ fn non_this_givens_unbadged(tab: &Tab) -> bool {
 }
 
 const MODE_BADGE: &str = "document.querySelector('.expected-panel .panel-header .mode-badge')";
-const TOOLTIP: &str = "document.querySelector('.expected-panel .panel-header .expect-tooltip')";
+// cute-dbt#202 (founder decision, epic #197) — the expect-semantics tooltip
+// is BADGE-BORNE: the mode badge itself is the focusable trigger and the
+// bubble nests inside it (the #146 CSS-bubble mechanism, pass-2 styling).
+// The separate ⓘ `.expect-tooltip` button is retired from the expected
+// panel (the static DAG hint keeps the class elsewhere).
+const MODE_TIP_TRIGGER: &str =
+    "document.querySelector('.expected-panel .panel-header .mode-badge.has-mode-tip')";
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
@@ -4403,8 +4413,8 @@ fn incremental_badges_modes_tooltip_and_this_given() {
     // table → the tooltip would be wrong-help). mode_off CARRIES a `this` given
     // precisely so its tooltip-absent assertion proves the gate keys off the
     // bool, not the proxy — and the mode_on → mode_off transition (no reload)
-    // exercises the idempotent `.mode-badge, .expect-tooltip` clear on the
-    // persistent `.panel-header`.
+    // exercises the idempotent `.mode-badge, .expected-model-badge` clear on
+    // the persistent `.panel-header` (the #202 clear-list).
     // dim_empty is a modified-but-untested model (no unit tests) — selecting it
     // drives currentTest() to null, the leak path for a stale mode badge /
     // tooltip (renderExpectedPanel, which clears them, runs ONLY in the `if (t)`
@@ -4465,8 +4475,11 @@ fn incremental_badges_modes_tooltip_and_this_given() {
 
     // ===== incremental-mode test (mode_on): badge + tooltip =====
     select_test(&tab, "unit_test.shop.dim_inc.mode_on");
+    // The badge's LABEL is its first text node — since cute-dbt#202 the
+    // badge nests its CSS bubble, so bare textContent would concatenate
+    // the tip copy onto the label.
     assert_eq!(
-        eval_string(&tab, &format!("{MODE_BADGE}.textContent.trim()")),
+        eval_string(&tab, &format!("{MODE_BADGE}.firstChild.nodeValue.trim()")),
         "incremental branch",
         "an incremental-mode test labels the Expected panel 'incremental branch'",
     );
@@ -4477,16 +4490,28 @@ fn incremental_badges_modes_tooltip_and_this_given() {
         ),
         "the incremental-branch badge carries the .mode-incremental class",
     );
+    // cute-dbt#202 — the badge ITSELF carries the expect-semantics tip (the
+    // founder-decided #146 CSS-bubble mechanism, badge-borne): it is a
+    // FOCUSABLE trigger (keyboard + touch reachable), never a hover-only
+    // native `title`.
     assert!(
-        eval_bool(&tab, &format!("{TOOLTIP} !== null")),
-        "an incremental-mode test shows the expect-semantics tooltip",
+        eval_bool(&tab, &format!("{MODE_TIP_TRIGGER} !== null")),
+        "an incremental-mode test's badge carries the expect-semantics tip",
     );
-    // cute-dbt#146 review — the tooltip is a FOCUSABLE button (keyboard + touch
-    // reachable), not a hover-only `<span title>`.
     assert_eq!(
-        eval_string(&tab, &format!("{TOOLTIP}.tagName")),
-        "BUTTON",
-        "the expect-tooltip is a focusable <button>, not a hover-only span",
+        eval_string(
+            &tab,
+            &format!("{MODE_TIP_TRIGGER}.getAttribute('tabindex')")
+        ),
+        "0",
+        "the tip-bearing badge is keyboard-focusable (tabindex=0)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.expected-panel .expect-tooltip') === null"
+        ),
+        "the separate ⓘ expect-tooltip button is retired from the expected panel (cute-dbt#202)",
     );
     // The dbt gotcha wording lives in the VISIBLE CSS bubble AND the aria-label.
     // Assert an ASCII substring — the tip contains em-dashes (U+2014), so a
@@ -4496,7 +4521,7 @@ fn incremental_badges_modes_tooltip_and_this_given() {
     // "merged or inserted" was wrong for insert_overwrite / microbatch.
     let bubble_text = eval_string(
         &tab,
-        &format!("{TOOLTIP}.querySelector('.expect-tooltip-bubble').textContent"),
+        &format!("{MODE_TIP_TRIGGER}.querySelector('.expect-tooltip-bubble').textContent"),
     );
     assert!(
         bubble_text.contains("incremental strategy will apply to the table"),
@@ -4506,10 +4531,13 @@ fn incremental_badges_modes_tooltip_and_this_given() {
         !bubble_text.contains("merged or inserted"),
         "the bubble must NOT carry the old merge/append-centric wording (cute-dbt#159), got {bubble_text:?}",
     );
-    let aria = eval_string(&tab, &format!("{TOOLTIP}.getAttribute('aria-label')"));
+    let aria = eval_string(
+        &tab,
+        &format!("{MODE_TIP_TRIGGER}.getAttribute('aria-label')"),
+    );
     assert!(
         aria.contains("incremental strategy will apply to the table"),
-        "the tooltip aria-label carries the same strategy-invariant wording (a11y parity), got {aria:?}",
+        "the badge aria-label carries the same strategy-invariant wording (a11y parity), got {aria:?}",
     );
     assert!(
         !aria.contains("merged or inserted"),
@@ -4518,20 +4546,18 @@ fn incremental_badges_modes_tooltip_and_this_given() {
     // cute-dbt#146 review — the regression guard for "hover shows nothing": the
     // bubble is hidden until hover/focus, and FOCUS reveals it (the keyboard
     // path; `:hover` shares the same CSS rule, so a visible-on-focus bubble
-    // proves the hover path paints too). Scoped to the expected panel:
-    // since cute-dbt#201 the DAG hint is a second `.expect-tooltip` on the
-    // page, so a bare first-match selector would read the WRONG bubble.
-    const BUBBLE_VIS: &str = "getComputedStyle(document.querySelector('.expected-panel .expect-tooltip .expect-tooltip-bubble')).visibility";
+    // proves the hover path paints too).
+    const BUBBLE_VIS: &str = "getComputedStyle(document.querySelector('.expected-panel .mode-badge .expect-tooltip-bubble')).visibility";
     assert_eq!(
         eval_string(&tab, BUBBLE_VIS),
         "hidden",
         "the tooltip bubble is hidden until hover/focus",
     );
-    let _ = eval(&tab, &format!("{TOOLTIP}.focus()"));
+    let _ = eval(&tab, &format!("{MODE_TIP_TRIGGER}.focus()"));
     assert_eq!(
         eval_string(&tab, BUBBLE_VIS),
         "visible",
-        "focusing the tooltip reveals the bubble (the keyboard path a native title never had)",
+        "focusing the badge reveals the bubble (the keyboard path a native title never had)",
     );
 
     // ===== the `this` given is prior-model-state; `ref(...)` is not =====
@@ -4543,6 +4569,52 @@ fn incremental_badges_modes_tooltip_and_this_given() {
     assert!(
         non_this_givens_unbadged(&tab),
         "a ref(...) given carries no prior-model-state badge",
+    );
+    // cute-dbt#202 — the this-badge carries its explanatory tip via the same
+    // badge-borne #146 CSS-bubble mechanism: focusable trigger, aria-label
+    // parity, bubble revealed on keyboard focus, hidden again on blur.
+    const THIS_TIP_TRIGGER: &str = "document.querySelector('.given-section[data-input-name=\"this\"] .this-badge.has-mode-tip')";
+    assert!(
+        eval_bool(&tab, &format!("{THIS_TIP_TRIGGER} !== null")),
+        "the this-badge carries the prior-model-state info tip",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{THIS_TIP_TRIGGER}.getAttribute('tabindex')")
+        ),
+        "0",
+        "the this-badge tip trigger is keyboard-focusable",
+    );
+    let this_aria = eval_string(
+        &tab,
+        &format!("{THIS_TIP_TRIGGER}.getAttribute('aria-label')"),
+    );
+    assert!(
+        this_aria.contains("BEFORE this run"),
+        "the this-badge aria-label explains the prior-model-state semantics, got {this_aria:?}",
+    );
+    assert!(
+        !this_aria.contains("merge/insert"),
+        "the this-badge copy stays strategy-invariant (the #159/#161 lesson), got {this_aria:?}",
+    );
+    const THIS_BUBBLE_VIS: &str = "getComputedStyle(document.querySelector('.given-section[data-input-name=\"this\"] .this-badge .expect-tooltip-bubble')).visibility";
+    assert_eq!(
+        eval_string(&tab, THIS_BUBBLE_VIS),
+        "hidden",
+        "the this-badge bubble is hidden until hover/focus",
+    );
+    let _ = eval(&tab, &format!("{THIS_TIP_TRIGGER}.focus()"));
+    assert_eq!(
+        eval_string(&tab, THIS_BUBBLE_VIS),
+        "visible",
+        "focusing the this-badge reveals its bubble",
+    );
+    let _ = eval(&tab, &format!("{THIS_TIP_TRIGGER}.blur()"));
+    assert_eq!(
+        eval_string(&tab, THIS_BUBBLE_VIS),
+        "hidden",
+        "blurring the this-badge hides its bubble again",
     );
 
     // ===== full-refresh-mode test (mode_off): the LOCKED proxy proof =====
@@ -4563,10 +4635,17 @@ fn incremental_badges_modes_tooltip_and_this_given() {
         "the full-refresh badge carries the .mode-full-refresh class",
     );
     assert!(
-        eval_bool(&tab, &format!("{TOOLTIP} === null")),
-        "LOCKED: no expect-semantics tooltip on a full-refresh test — even one \
+        eval_bool(&tab, &format!("{MODE_TIP_TRIGGER} === null")),
+        "LOCKED: no expect-semantics tip on a full-refresh test — even one \
          carrying a `this` given (the gate keys off is_incremental_mode, not the proxy); \
-         this also proves the mode_on tooltip was cleared idempotently",
+         this also proves the mode_on badge+tip was cleared idempotently",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{MODE_BADGE}.querySelector('.expect-tooltip-bubble') === null")
+        ),
+        "LOCKED: the full-refresh badge nests NO bubble (there `expect` IS the final table)",
     );
     // The this-badge still shows on mode_off's `this` given — it is gated on
     // is_this alone, independent of the test's incremental branch.
@@ -4593,30 +4672,36 @@ fn incremental_badges_modes_tooltip_and_this_given() {
         "a test on a non-incremental model carries no mode badge (cross-model clear)",
     );
     assert!(
-        eval_bool(&tab, &format!("{TOOLTIP} === null")),
-        "a test on a non-incremental model shows no expect-semantics tooltip",
+        eval_bool(&tab, &format!("{MODE_TIP_TRIGGER} === null")),
+        "a test on a non-incremental model shows no expect-semantics tip",
     );
 
     // ===== modified-but-untested model clears a LEAKED incremental tooltip =====
-    // Re-establish an incremental-mode tooltip, then select a model with no
+    // Re-establish an incremental-mode badge+tip, then select a model with no
     // tests (currentTest() === null → renderExpectedPanel, which clears the
-    // badge/tooltip, is NOT called). renderForSelectedModel must clear them
-    // unconditionally, else the prior test's badge + tooltip leak onto the
+    // badge/pill, is NOT called). renderForSelectedModel must clear them
+    // unconditionally, else the prior test's badge + tip leak onto the
     // persistent `.panel-header` (gemini review, PR #146).
     select_model(&tab, "dim_inc");
     select_test(&tab, "unit_test.shop.dim_inc.mode_on");
     assert!(
-        eval_bool(&tab, &format!("{TOOLTIP} !== null")),
-        "precondition: the incremental-mode tooltip is present before the switch",
+        eval_bool(&tab, &format!("{MODE_TIP_TRIGGER} !== null")),
+        "precondition: the incremental-mode badge+tip is present before the switch",
     );
     select_model(&tab, "dim_empty");
     assert!(
         eval_bool(&tab, &format!("{MODE_BADGE} === null")),
-        "selecting a modified-but-untested model clears the leaked mode badge",
+        "selecting a modified-but-untested model clears the leaked mode badge (its \
+         nested bubble goes with it)",
     );
+    // cute-dbt#202 — the #161 clear-list extends to .expected-model-badge:
+    // the model pill from the prior test must not leak either.
     assert!(
-        eval_bool(&tab, &format!("{TOOLTIP} === null")),
-        "selecting a modified-but-untested model clears the leaked expect-semantics tooltip",
+        eval_bool(
+            &tab,
+            "document.querySelector('.expected-panel .panel-header .expected-model-badge') === null"
+        ),
+        "selecting a modified-but-untested model clears the leaked expected model pill",
     );
 
     let _ = tab.close(true);
@@ -5661,6 +5746,11 @@ fn column_header_tooltips_th_trigger_hover_focus_and_skip_bare_columns() {
         keys, "accepted values|not null|relationships|unique",
         "every column test renders a .ct-key name (sorted by display name)",
     );
+    // cute-dbt#202 — detail strings render as ct-vals/ct-val chips too (the
+    // ct-detail run is retired): the shipped single-value forms (the
+    // relationships `m.f` here) stay ONE chip, so the chip list is the
+    // accepted_values args followed by the relationships detail (the tests
+    // render in sorted display-name order: accepted values … relationships).
     let chips = eval_string(
         &tab,
         &format!(
@@ -5669,16 +5759,16 @@ fn column_header_tooltips_th_trigger_hover_focus_and_skip_bare_columns() {
         ),
     );
     assert_eq!(
-        chips, "alpha|beta",
-        "accepted_values args render as distinct .ct-val chips",
+        chips, "alpha|beta|stg_src.src_id",
+        "accepted_values args render as distinct chips; the single-value \
+         relationships detail stays one chip",
     );
-    assert_eq!(
-        eval_string(
+    assert!(
+        eval_bool(
             &tab,
-            &format!("{BUBBLE}.querySelector('.ct-detail').textContent")
+            &format!("{BUBBLE}.querySelector('.ct-detail') === null")
         ),
-        "stg_src.src_id",
-        "relationships renders its model.field detail in muted mono",
+        "the ct-detail run is retired — detail renders as ct-val chips (cute-dbt#202)",
     );
 
     // Blur hides it again (focusout path).
@@ -5730,6 +5820,521 @@ fn column_header_tooltips_th_trigger_hover_focus_and_skip_bare_columns() {
         ),
         "Source key for stg_src",
         "the given bubble carries the INPUT model's description",
+    );
+
+    let _ = tab.close(true);
+}
+
+// ===== cute-dbt#202 — rich hover cards ===============================
+//
+// Model pills (the Given header `ref(` pill `)` + the Expected model
+// badge), the format badge's fixture reconstruction, and the
+// `overrides · N` badge — all served by the three body-appended singleton
+// tips (#model-tooltip / #fmt-tooltip / #ov-tooltip) on mouseenter AND
+// focusin (the #146 keyboard/touch-parity rule). The this-badge and the
+// incremental mode badge ride the badge-borne CSS bubble instead (founder
+// decision, epic #197) — guarded in
+// `incremental_badges_modes_tooltip_and_this_given` above.
+
+/// A model-LEVEL test node (`attached_node` set, `column_name` = None) —
+/// feeds `ManifestNodePayload::model_tests` (cute-dbt#200).
+fn model_test_node(id: &str, model_id: &str, tm: TestMetadata) -> Node {
+    Node::new(
+        NodeId::new(id),
+        "test",
+        Checksum::new("sha256", "ck"),
+        None,
+        None,
+        DependsOn::default(),
+        None,
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+    .with_test_attachment(None, Some(NodeId::new(model_id)), Some(tm))
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn rich_hover_cards_model_pill_format_badge_and_overrides() {
+    // One model (dim_x) with one test carrying:
+    //   given 0 — ref('stg_src'), dict rows. stg_src HAS a manifest_nodes
+    //             entry (description + tags + materialized + a model-level
+    //             test) → the pill is a #model-tooltip trigger.
+    //   given 1 — ref('ghost'), csv raw-string rows. `ghost` is NOT a
+    //             manifest model → the pill renders WITHOUT a trigger
+    //             (graceful absence).
+    //   overrides — three groups, native scalars (bool / float / string).
+    let mut ov = cute_dbt::domain::UnitTestOverrides::new();
+    ov.insert(
+        "macros".to_owned(),
+        BTreeMap::from([("is_incremental".to_owned(), serde_json::json!(true))]),
+    );
+    ov.insert(
+        "vars".to_owned(),
+        BTreeMap::from([("threshold".to_owned(), serde_json::json!(0.05))]),
+    );
+    ov.insert(
+        "env_vars".to_owned(),
+        BTreeMap::from([("DBT_ENV".to_owned(), serde_json::json!("ci"))]),
+    );
+    let ut = UnitTest::new(
+        "rich".to_owned(),
+        NodeId::new("dim_x"),
+        vec![
+            UnitTestGiven::new(
+                "ref('stg_src')".to_owned(),
+                serde_json::json!([{ "id": 1, "amount": 2.5 }, { "id": 2, "amount": 7 }]),
+                Some("dict".to_owned()),
+                None,
+            ),
+            UnitTestGiven::new(
+                "ref('ghost')".to_owned(),
+                serde_json::json!("id,amount\n1,10\n"),
+                Some("csv".to_owned()),
+                None,
+            ),
+        ],
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+    .with_overrides(Some(ov));
+
+    let url = render_to_file(
+        "headless_rich_hover_cards.html",
+        vec![
+            model_node("model.shop.dim_x")
+                .with_model_metadata(Some("Dimension of x".to_owned()), vec![]),
+            model_node_materialized("model.shop.stg_src", "view").with_model_metadata(
+                Some("Staged source rows".to_owned()),
+                vec!["staging".to_owned()],
+            ),
+            model_test_node(
+                "test.shop.unique_stg_src",
+                "model.shop.stg_src",
+                TestMetadata::new("unique", None, serde_json::Value::Null),
+            ),
+        ],
+        vec![("unit_test.shop.dim_x.rich", ut)],
+        &["model.shop.dim_x"],
+        &[], // 0 changed → auto-All mode → the test is selected with content
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    select_model(&tab, "dim_x");
+
+    // ===== given 0: the ref() pill renders + is a model-tip trigger =====
+    const PILL: &str =
+        "document.querySelectorAll('.given-section')[0].querySelector('.table-title .gt-model')";
+    assert_eq!(
+        eval_string(&tab, &format!("{PILL}.textContent")),
+        "stg_src",
+        "the given title's pill carries the bare ref() target",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "Array.from(document.querySelectorAll('.given-section')[0]\
+             .querySelectorAll('.table-title .gt-prefix'))\
+             .map(function(p){return p.textContent;}).join('')"
+        ),
+        "ref()",
+        "the title renders `ref(` + pill + `)` — the `given ·` prefix is dropped",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelectorAll('.given-section')[0].getAttribute('data-input-name')"
+        ),
+        "ref('stg_src')",
+        "data-input-name is retained on the section (the test seam)",
+    );
+    assert!(
+        eval_bool(&tab, &format!("{PILL}.classList.contains('has-model-tip')")),
+        "a manifest-known ref target makes the pill a model-tip trigger",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{PILL}.getAttribute('tabindex')")),
+        "0",
+        "the pill trigger is keyboard-focusable",
+    );
+
+    // ===== keyboard focus reveals the model card =====
+    const MODEL_TIP: &str = "document.getElementById('model-tooltip')";
+    let _ = eval(&tab, &format!("{PILL}.focus()"));
+    assert!(
+        !eval_bool(&tab, &format!("{MODEL_TIP}.hidden")),
+        "focusing the pill reveals the model tip (keyboard path)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{MODEL_TIP}.querySelector('.mt-mat').textContent")
+        ),
+        "view",
+        "the model tip leads with the materialization chip",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{MODEL_TIP}.querySelector('.mt-tag').textContent")
+        ),
+        "staging",
+        "the model tip shows the model's tags",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{MODEL_TIP}.querySelector('.ct-desc').textContent")
+        ),
+        "Staged source rows",
+        "the model tip carries the authored description",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{MODEL_TIP}.querySelector('.mt-mtests .dt-key').textContent")
+        ),
+        "unique",
+        "the model tip lists the model-level data tests",
+    );
+    // ===== focusout hides; hover reveals again (mouse path) =====
+    let _ = eval(&tab, &format!("{PILL}.blur()"));
+    assert!(
+        eval_bool(&tab, &format!("{MODEL_TIP}.hidden")),
+        "blurring the pill hides the model tip",
+    );
+    let _ = eval(
+        &tab,
+        &format!("{PILL}.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true}}))"),
+    );
+    assert!(
+        !eval_bool(&tab, &format!("{MODEL_TIP}.hidden")),
+        "hovering the pill reveals the model tip (mouse path)",
+    );
+    let _ = eval(
+        &tab,
+        &format!("{PILL}.dispatchEvent(new MouseEvent('mouseout', {{bubbles: true}}))"),
+    );
+    assert!(
+        eval_bool(&tab, &format!("{MODEL_TIP}.hidden")),
+        "leaving the pill hides the model tip",
+    );
+
+    // ===== given 1: an absent manifest entry ⇒ NO trigger class =====
+    const GHOST_PILL: &str =
+        "document.querySelectorAll('.given-section')[1].querySelector('.table-title .gt-model')";
+    assert_eq!(
+        eval_string(&tab, &format!("{GHOST_PILL}.textContent")),
+        "ghost",
+        "the unknown ref target still renders as a pill",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("!{GHOST_PILL}.classList.contains('has-model-tip')")
+        ),
+        "a ref target absent from manifest_nodes carries NO tip trigger (graceful)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{GHOST_PILL}.getAttribute('tabindex') === null")
+        ),
+        "the trigger-less pill is not focusable",
+    );
+
+    // ===== format badge: dict reconstructs as YAML =====
+    const DICT_BADGE: &str =
+        "document.querySelectorAll('.given-section')[0].querySelector('.format-badge')";
+    assert_eq!(
+        eval_string(&tab, &format!("{DICT_BADGE}.textContent")),
+        "format: dict",
+        "the dict format badge now shows (the pre-#202 suppression is retired)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{DICT_BADGE}.classList.contains('has-fmt-tip')")
+        ),
+        "the dict badge is a fmt-tip trigger",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{DICT_BADGE}.getAttribute('tabindex')")),
+        "0",
+        "the fmt-tip trigger is keyboard-focusable",
+    );
+    const FMT_TIP: &str = "document.getElementById('fmt-tooltip')";
+    let _ = eval(&tab, &format!("{DICT_BADGE}.focus()"));
+    assert!(
+        !eval_bool(&tab, &format!("{FMT_TIP}.hidden")),
+        "focusing the dict badge reveals the reconstruction tip",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{FMT_TIP}.querySelector('.code-filename').textContent")
+        ),
+        "format: dict",
+        "the tip frame is labeled with the format",
+    );
+    // Column order follows the FixtureTable POD (dict keys arrive through
+    // serde_json's sorted map, so `amount` precedes `id` — the same order
+    // the Current grid shows).
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!(
+                "Array.from({FMT_TIP}.querySelectorAll('.diff-code'))\
+                 .map(function(l){{return l.textContent;}}).join('\\n')"
+            ),
+        ),
+        "- amount: 2.5\n  id: 1\n- amount: 7\n  id: 2",
+        "the dict fixture reconstructs faithfully as a YAML row list",
+    );
+    let _ = eval(&tab, &format!("{DICT_BADGE}.blur()"));
+    assert!(
+        eval_bool(&tab, &format!("{FMT_TIP}.hidden")),
+        "blurring the dict badge hides the fmt tip",
+    );
+
+    // ===== format badge: csv reconstructs header + comma rows =====
+    const CSV_BADGE: &str =
+        "document.querySelectorAll('.given-section')[1].querySelector('.format-badge')";
+    assert_eq!(
+        eval_string(&tab, &format!("{CSV_BADGE}.textContent")),
+        "format: csv",
+        "the csv format badge renders",
+    );
+    let _ = eval(&tab, &format!("{CSV_BADGE}.focus()"));
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!(
+                "Array.from({FMT_TIP}.querySelectorAll('.diff-code'))\
+                 .map(function(l){{return l.textContent;}}).join('\\n')"
+            ),
+        ),
+        "id,amount\n1,10",
+        "the csv fixture reconstructs faithfully as header + comma rows",
+    );
+    let _ = eval(&tab, &format!("{CSV_BADGE}.blur()"));
+    assert!(
+        eval_bool(&tab, &format!("{FMT_TIP}.hidden")),
+        "blurring the csv badge hides the fmt tip",
+    );
+
+    // ===== overrides badge: count + grouped key = value rows =====
+    const OV_BADGE: &str = "document.querySelector('.test-badges .tb-overrides')";
+    assert_eq!(
+        eval_string(&tab, &format!("{OV_BADGE}.textContent")),
+        "overrides · 3",
+        "the badge counts TOTAL keys across groups",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{OV_BADGE}.getAttribute('tabindex')")),
+        "0",
+        "the overrides badge is keyboard-focusable",
+    );
+    const OV_TIP: &str = "document.getElementById('ov-tooltip')";
+    let _ = eval(&tab, &format!("{OV_BADGE}.focus()"));
+    assert!(
+        !eval_bool(&tab, &format!("{OV_TIP}.hidden")),
+        "focusing the overrides badge reveals the grouped tip",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!(
+                "Array.from({OV_TIP}.querySelectorAll('.ov-grp-name'))\
+                 .map(function(g){{return g.textContent;}}).join('|')"
+            ),
+        ),
+        "env_vars|macros|vars",
+        "the tip groups by macros/vars/env_vars (deterministic BTreeMap order)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!(
+                "Array.from({OV_TIP}.querySelectorAll('.ov-row'))\
+                 .map(function(r){{return r.querySelector('.ov-key').textContent\
+                 + '=' + r.querySelector('.ov-val').textContent;}}).join('|')"
+            ),
+        ),
+        "DBT_ENV=ci|is_incremental=true|threshold=0.05",
+        "key = value rows stringify the native scalars (bool/float/string)",
+    );
+    let _ = eval(&tab, &format!("{OV_BADGE}.blur()"));
+    assert!(
+        eval_bool(&tab, &format!("{OV_TIP}.hidden")),
+        "blurring the overrides badge hides the tip",
+    );
+
+    // ===== Expected: the model pill rides the header (no diff → no bar) =====
+    const EX_PILL: &str =
+        "document.querySelector('.expected-panel .panel-header .expected-model-badge')";
+    assert_eq!(
+        eval_string(&tab, &format!("{EX_PILL}.textContent")),
+        "dim_x",
+        "the Expected panel carries the target model's pill",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{EX_PILL}.classList.contains('has-model-tip')")
+        ),
+        "the expected pill is a model-tip trigger when manifest_nodes knows the model",
+    );
+    let _ = eval(&tab, &format!("{EX_PILL}.focus()"));
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{MODEL_TIP}.querySelector('.ct-desc').textContent")
+        ),
+        "Dimension of x",
+        "the expected pill's tip shows the TARGET model's description",
+    );
+    let _ = eval(&tab, &format!("{EX_PILL}.blur()"));
+
+    // ===== idempotent re-render: exactly one expected pill =====
+    select_test(&tab, "unit_test.shop.dim_x.rich");
+    select_test(&tab, "unit_test.shop.dim_x.rich");
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.expected-panel .expected-model-badge').length"
+        ),
+        1,
+        "re-renders never duplicate the expected model pill (the #161 clear-list)",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn expected_bar_orders_model_pill_mode_badge_rowcount_toggle_far_right() {
+    // cute-dbt#202 — when the expect side carries a cell diff, the
+    // fixture-view bar hosts the relocated meta in reading order
+    // [model pill] [mode badge] [row count] with the Diff/File toggle
+    // pushed to the FAR RIGHT (the #188/#161 ordering, ported to the
+    // pass-2 layout). The badge-borne expect-semantics bubble must still
+    // reveal from its relocated position (no clipping ancestor).
+    use cute_dbt::domain::{
+        Cell, CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, RowChange,
+        RowChangeKind,
+    };
+    let id = "unit_test.shop.dim_inc.t";
+    let ut = UnitTest::new(
+        "t".to_owned(),
+        NodeId::new("dim_inc"),
+        Vec::new(),
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+    .with_incremental_mode(Some(true));
+    let expect_diff = UnitTestDataDiff {
+        given: Vec::new(),
+        expect: Some(FixtureTableDiff {
+            columns: vec![DiffColumn {
+                name: "id".into(),
+                status: ColumnStatus::Present,
+            }],
+            rows: vec![RowChange {
+                kind: RowChangeKind::Modified,
+                cells: vec![CellChange {
+                    old: Cell::new(CellValue::Number("1".into())),
+                    new: Cell::new(CellValue::Number("2".into())),
+                    changed: true,
+                }],
+            }],
+        }),
+    };
+    let url = render_pr_diff_with_data_diffs(
+        "headless_expected_bar_order.html",
+        vec![model_node_materialized("model.shop.dim_inc", "incremental")],
+        vec![(id, ut)],
+        &["model.shop.dim_inc"],
+        &[id],
+        vec![(id, expect_diff)],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    const BAR: &str = "document.querySelector('.expected-panel .fixture-view-bar')";
+    assert!(
+        eval_bool(&tab, &format!("{BAR} !== null")),
+        "the expect cell diff renders the fixture-view bar",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!(
+                "Array.from({BAR}.children).map(function(c){{\
+                 return c.classList.contains('expected-model-badge') ? 'model'\
+                 : c.classList.contains('mode-badge') ? 'mode'\
+                 : c.classList.contains('expected-rowcount') ? 'rows'\
+                 : c.classList.contains('cell-diff-toggle') ? 'toggle' : '?';}}).join('|')"
+            ),
+        ),
+        "model|mode|rows|toggle",
+        "bar reading order is [model pill][mode badge][row count] … [Diff/File toggle]",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{BAR}.querySelector('.expected-rowcount').textContent")
+        ),
+        "1 row",
+        "the relocated row count rides the bar",
+    );
+    // The toggle sits visually to the RIGHT of the meta (margin-left:auto).
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "{BAR}.querySelector('.cell-diff-toggle').getBoundingClientRect().left \
+                 > {BAR}.querySelector('.expected-rowcount').getBoundingClientRect().right"
+            ),
+        ),
+        "the Diff/File toggle is pushed to the far right of the bar",
+    );
+    // The badge-borne tip still reveals from the relocated bar position.
+    const BAR_BADGE: &str =
+        "document.querySelector('.expected-panel .fixture-view-bar .mode-badge.has-mode-tip')";
+    const BAR_BUBBLE_VIS: &str = "getComputedStyle(document.querySelector('.expected-panel .fixture-view-bar .mode-badge .expect-tooltip-bubble')).visibility";
+    assert!(
+        eval_bool(&tab, &format!("{BAR_BADGE} !== null")),
+        "the relocated incremental badge keeps its tip trigger",
+    );
+    let _ = eval(&tab, &format!("{BAR_BADGE}.focus()"));
+    assert_eq!(
+        eval_string(&tab, BAR_BUBBLE_VIS),
+        "visible",
+        "the relocated badge's bubble reveals on keyboard focus (no clipping ancestor)",
     );
 
     let _ = tab.close(true);

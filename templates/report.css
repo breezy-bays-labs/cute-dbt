@@ -865,6 +865,9 @@ g.dag-node:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3p
 .test-badges { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
 .tb-badge { font-size: 0.72rem; line-height: 1.4; padding: 0.1rem 0.55rem; border-radius: 999px; border: var(--rule-w) solid transparent; white-space: nowrap; }
 .tb-tag { color: var(--accent-hover); background: var(--accent-tint); border-color: color-mix(in oklab, var(--accent) 35%, transparent); font-family: var(--font-mono); }
+/* cute-dbt#202 — the `overrides · N` badge (an #ov-tooltip trigger). */
+.tb-overrides { color: var(--accent-hover); background: var(--accent-tint); border-color: color-mix(in oklab, var(--accent) 35%, transparent); cursor: help; font-family: var(--font-mono); }
+.tb-overrides:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .tb-meta { color: var(--text-muted); background: var(--surface-2); border-color: var(--border); font-family: var(--font-mono); }
 .tb-muted { color: var(--text-faint); background: transparent; border-color: var(--border); }
 /* the always-open card's description — larger font (founder decision on
@@ -939,13 +942,50 @@ g.dag-node:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3p
   text-align: left; text-transform: none; letter-spacing: normal; white-space: normal; pointer-events: none;
 }
 .expect-tooltip:hover .expect-tooltip-bubble, .expect-tooltip:focus .expect-tooltip-bubble, .expect-tooltip:focus-visible .expect-tooltip-bubble { visibility: visible; opacity: 1; }
-/* The expected-panel ⓘ sits at the far-right of the meta row, so a centered
-   bubble overflows the panel/viewport edge. Right-anchor it to open leftward. */
-.expected-panel .expect-tooltip-bubble { left: auto; right: 0; transform: none; }
+
+/* cute-dbt#202 — badge-borne bubbles (incremental branch · prior model
+   state): the #146 focusable-trigger CSS-bubble mechanism with the pass-2
+   badge-borne visual styling (founder decision, epic #197 — the expected
+   panel's separate ⓘ button is retired; the static DAG-hint ⓘ keeps the
+   .expect-tooltip dress above). The badge itself is the focusable trigger;
+   the nested bubble reveals on hover AND keyboard focus; no ancestor of
+   either badge clips (the given .table-header and the expected header/bar
+   have no overflow rule). */
+.mode-badge.has-mode-tip, .this-badge.has-mode-tip { position: relative; cursor: help; }
+.mode-badge.has-mode-tip:focus-visible, .this-badge.has-mode-tip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mode-badge.has-mode-tip .expect-tooltip-bubble,
+.this-badge.has-mode-tip .expect-tooltip-bubble { left: 0; transform: none; z-index: 60; box-shadow: 0 6px 22px rgba(0,0,0,0.3); }
+.mode-badge.has-mode-tip:hover .expect-tooltip-bubble,
+.mode-badge.has-mode-tip:focus .expect-tooltip-bubble,
+.mode-badge.has-mode-tip:focus-visible .expect-tooltip-bubble,
+.this-badge.has-mode-tip:hover .expect-tooltip-bubble,
+.this-badge.has-mode-tip:focus .expect-tooltip-bubble,
+.this-badge.has-mode-tip:focus-visible .expect-tooltip-bubble { visibility: visible; opacity: 1; }
 
 .fixture-sql-block-wrap .sql-block { padding-top: 0.75rem; }
 .given-section + .given-section { margin-top: 1rem; }
 .table-header { display: flex; align-items: baseline; gap: 0.5rem; margin: 0.5rem 0 0.25rem; }
+
+/* --- given header ref() pill + tip triggers (cute-dbt#202) ------------- */
+.given-section .table-title { display: inline-flex; align-items: center; gap: 0; flex-wrap: wrap; font-family: var(--font-mono); font-size: 0.8rem; }
+.gt-prefix { color: var(--text-muted); font-weight: 400; }
+.gt-model {
+  font-weight: 700; color: var(--accent-hover); white-space: nowrap;
+  background: var(--accent-tint); border: var(--rule-w) solid color-mix(in oklab, var(--accent) 40%, transparent);
+  border-radius: var(--radius-sm); padding: 0.18rem 0.5em; margin: 0 0.1em; font-size: 0.82rem; line-height: 1.4;
+}
+.gt-model.has-model-tip { cursor: help; }
+.gt-model.has-model-tip:hover { border-color: var(--accent); }
+.gt-model.has-model-tip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.format-badge.has-fmt-tip { cursor: help; }
+.format-badge.has-fmt-tip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* expected model pill + header layout: the row count keeps the far-right
+   slot of the header fallback; pills/badges read left-to-right after the
+   panel title. */
+.expected-model-badge { cursor: default; }
+.expected-panel .panel-header { justify-content: flex-start; }
+.expected-panel .panel-header .expected-rowcount { margin-left: auto; }
 
 /* ---- tables ---------------------------------------------------------- */
 .table-fit { width: 100%; overflow-x: auto; }
@@ -958,12 +998,12 @@ table.given-table td, table.expected-table td { white-space: nowrap; color: var(
 
 /* ---- cell-level diff ------------------------------------------------- */
 .cell-diff-toggle { display: flex; margin: 0.5rem 0 0; }
-/* the Diff/File toggle row: toggle on the left, mode badge + row-count +
-   tooltip pushed to the right (matches the Inspect panel's header layout). */
+/* the Diff/File toggle row (cute-dbt#202 order): meta reads left-to-right —
+   [model pill] [mode badge] [row count] — with the toggle pushed to the
+   far right (matches the Given bars). */
 .fixture-view-bar { display: flex; align-items: center; gap: 0.45rem; flex-wrap: wrap; margin: 0.5rem 0 0.5rem; }
-.fixture-view-bar .cell-diff-toggle { margin: 0 auto 0 0; }
+.fixture-view-bar .cell-diff-toggle { margin: 0 0 0 auto; }
 .fixture-view-bar .mode-badge, .fixture-view-bar .row-count-badge { margin: 0; }
-.fixture-view-bar .expect-tooltip { margin-left: 0; }
 tr.row-added   td { background: var(--diff-add-row); }
 tr.row-removed td { background: var(--diff-remove-row); }
 tr.row-added   td:first-child { box-shadow: inset 3px 0 0 var(--diff-add-edge); }
@@ -1229,7 +1269,42 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
 .col-tooltip .ct-key { font-family: var(--font-mono); font-weight: 700; color: var(--accent); }
 .col-tooltip .ct-vals { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
 .col-tooltip .ct-val { background: rgba(255,255,255,0.14); border-radius: 4px; padding: 0.05rem 0.42rem; font-family: var(--font-mono); font-size: 0.9em; white-space: nowrap; }
-.col-tooltip .ct-detail { color: rgba(255,255,255,0.75); font-family: var(--font-mono); font-size: 0.95em; overflow-wrap: anywhere; }
+/* (cute-dbt#202 — the .ct-detail run is retired: detail strings now split
+   into the same ct-vals/ct-val chips the values branch uses.) */
+
+/* cute-dbt#202 — model-ref + overrides tips reuse the .col-tooltip shell
+   (body-appended #model-tooltip / #ov-tooltip singletons, position:fixed
+   via the shared class above; hardcoded whites follow the ct-val
+   precedent — the tooltip interior is dark in every theme). */
+.col-tooltip.ov-tooltip, .col-tooltip.model-tooltip { max-width: 32rem; }
+.model-tooltip .mt-chips { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-bottom: 0.45rem; }
+.model-tooltip .ct-desc { font-size: 1.3em; line-height: 1.5; }
+.model-tooltip .mt-mat { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: #f0c674; border: 1px solid currentColor; border-radius: 999px; padding: 0.02rem 0.5rem; }
+.model-tooltip .mt-tag { font-size: 0.72rem; color: rgba(255,255,255,0.82); background: rgba(255,255,255,0.12); border-radius: 999px; padding: 0.02rem 0.5rem; }
+/* model-level tests inside the model-ref tip (the dark-context dress for
+   the shelf card's .dt-* chips). */
+.model-tooltip .mt-mtests { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.3rem; }
+.model-tooltip .dt-key { color: color-mix(in oklab, var(--accent) 60%, white); }
+.model-tooltip .dt-val { background: rgba(255,255,255,0.14); color: rgba(255,255,255,0.92); }
+.ov-tooltip .ov-grp + .ov-grp { margin-top: 0.55rem; }
+.ov-tooltip .ov-grp-name { font-family: var(--font-mono); font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; margin-bottom: 0.25rem; }
+.ov-tooltip .ov-row { display: flex; gap: 0.5rem; align-items: baseline; padding-left: 0.45rem; white-space: nowrap; }
+.ov-tooltip .ov-key, .ov-tooltip .ov-row code { background: none; padding: 0; font-family: var(--font-mono); font-weight: 700; color: color-mix(in oklab, var(--accent) 50%, white); white-space: nowrap; }
+.ov-tooltip .ov-eq { opacity: 0.45; }
+.ov-tooltip .ov-val { font-family: var(--font-mono); color: rgba(255,255,255,0.9); white-space: nowrap; }
+
+/* cute-dbt#202 — the format-block tip (#fmt-tooltip): a mini framed code
+   surface (NOT the dark .col-tooltip shell — it reuses the code-card
+   chrome so the reconstruction reads like the drawers). */
+.fmt-tooltip {
+  position: fixed; z-index: 90; max-width: min(34rem, 92vw); max-height: 22rem; overflow: auto;
+  border: var(--rule-w) solid var(--border-strong); border-radius: var(--radius-pan);
+  box-shadow: 0 8px 26px rgba(0,0,0,0.34); background: var(--code-bg);
+  pointer-events: none;
+}
+.fmt-tooltip .code-header { font-size: 0.74rem; }
+.fmt-tooltip .sql-block { margin: 0; padding: 0.4rem 0; }
+.fmt-tooltip .code-line { padding-right: 1rem; }
 
 /* ============================================================================
    6. ENGINE-PR ADDITIONS (cute-dbt#178)
