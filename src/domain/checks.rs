@@ -94,7 +94,9 @@ use std::fmt::Write as _;
 use serde::{Serialize, Serializer};
 use serde_json::Value;
 
-use crate::domain::cte::{CteGraph, EdgeType, LeftJoinFact};
+use crate::domain::cte::{
+    CteGraph, EdgeType, JoinKeyPair, LeftJoinFact, SubqueryFact, SubqueryKind,
+};
 use crate::domain::grain::test_is_enabled;
 use crate::domain::manifest::{Manifest, Node, NodeConfig, NodeId};
 use crate::domain::state::resolve_target_model;
@@ -711,7 +713,9 @@ heuristics! {
         /// the more specific shape SUPERSEDES left-null-propagation and
         /// inverts the recommendation (cute-dbt#173, catalog C4
         /// refinement: rules must recognize the pattern, not force
-        /// suppression).
+        /// suppression). Since cute-dbt#196 the correlated NOT EXISTS
+        /// and single-column NOT IN forms detect too, fed by the
+        /// sibling cte-graph.subquery-facts evidence family.
         JoinAntiJoin {
             id: "join.anti-join",
             name: "Anti-join exclusion untested",
@@ -721,18 +725,24 @@ heuristics! {
             supersedes: [JoinLeftNullPropagation],
             evidence: [
                 "cte-graph.left-join-facts",
+                "cte-graph.subquery-facts",
                 "cte-graph.body-leaf-table-refs",
                 "manifest.unit-test-givens",
             ],
             conditions: [
                 "the model LEFT-JOINs a relation and filters `WHERE <right>.<key> IS NULL` in a top-level AND conjunct, where `<key>` is one of the join's ON equi-key right columns — the anti-join idiom: the join deliberately keeps the UNMATCHED left rows",
+                "OR the model filters `WHERE NOT EXISTS (SELECT … FROM <inner> WHERE …)` in a top-level AND conjunct, the inner being a single plain named relation whose WHERE carries a correlated reference to the outer query — the resolvable outer↔inner equi-conjuncts are the anti-join keys (cute-dbt#196)",
+                "OR the model filters `WHERE <col> NOT IN (SELECT <col> FROM <inner>)` in a top-level AND conjunct, the inner being a single plain named relation projecting exactly one column — the membership pair (outer column ↔ inner projected column) is the anti-join key (cute-dbt#196). SQL honesty note: a NULL in the inner column makes NOT IN yield NO rows at all; detection still treats the construct as the anti-join idiom (that is how it is authored), and the matched-row fixture this check recommends is exactly what surfaces the NULL trap",
                 "the recommendation INVERTS join.left-null-propagation's: the anti-join's risk is the matched class leaking through, so the missing fixture is a left row that DOES match a right row, with `expect` proving it is excluded",
-                "satisfaction: some unit test's literal givens carry a left row whose ON equi-key matches a right given row (both cells non-NULL, equal on the value-normalized key)",
-                "supersedes join.left-null-propagation on the same construct: NULL right-side columns are the anti-join's working mechanism, not an untested gap",
+                "satisfaction (all arms): some unit test's literal givens carry a left/outer row whose key matches an inner/right given row (both cells non-NULL, equal on the value-normalized key)",
+                "supersedes join.left-null-propagation on the same construct: NULL right-side columns are the anti-join's working mechanism, not an untested gap (the subquery constructs are never enumerated by left-null-propagation at all)",
                 "given binding follows the union.arm-coverage premise: only `given` entries carry statically-visible rows — an ungiven non-seed input is an empty mock; join sides bind directly by external leaf name or through a single-external simple-FROM closure",
             ],
             exclusions: [
-                "the NOT EXISTS / NOT IN anti-join equivalents are NOT detected in v1 — only the LEFT JOIN + IS NULL form is recognized (a declared gap: the construct is silent, never misclassified)",
+                "negated subqueries anywhere but a top-level AND conjunct of a SELECT's WHERE (OR branches, HAVING, JOIN ON, projections) are NOT detected — different semantics or position, silent, never misclassified",
+                "non-negated EXISTS / IN subqueries (semi-join and membership inclusion — future evidence consumers) and scalar subqueries are NOT detected",
+                "a NOT EXISTS / NOT IN whose inner is a derived table, joins or reads several relations, or carries its own WITH clause is NOT detected; an uncorrelated NOT EXISTS (zero outer references) is not a keyed anti-join — silent",
+                "expression (non-column) correlations and projections are not key material: a correlated NOT EXISTS with no resolvable equi pair, and a NOT IN whose outer column does not resolve to a single relation, degrade to UNKNOWN, never UNCOVERED",
                 "an IS NULL on a non-key right column is a data filter, not the anti-join idiom — join.left-null-propagation governs that construct",
                 "an IS NULL inside an OR branch has different semantics and is never treated as the anti-join filter",
                 "unrecoverable join keys, unresolvable side bindings, external `fixture:` files, non-literal `format: sql` givens, and ungiven seed inputs degrade to UNKNOWN, never UNCOVERED",
@@ -1345,6 +1355,45 @@ fn resolve_side_external(graph: &CteGraph, leaf: &str) -> Option<String> {
     }
 }
 
+/// The shared key-verdict inputs of one join-shaped construct — an
+/// internal view constructed from both [`LeftJoinFact`] and
+/// [`SubqueryFact`] (cute-dbt#196). [`bind_keys`] /
+/// [`key_match_verdict`] consume only (consumer, right-side leaf, equi
+/// keys) plus the LEFT-JOIN-only DISTINCT dedup signal, so both fact
+/// families inherit the same supersedes + covered/uncovered/UNKNOWN
+/// machinery — a view, never a POD change.
+struct KeyedJoinView<'a> {
+    consumer: &'a str,
+    right_leaf: &'a str,
+    equi_keys: &'a [JoinKeyPair],
+    /// The dedup-after-fan-out instrument-routing signal — carried by
+    /// LEFT JOIN facts only; always `false` for subquery facts (a
+    /// negated subquery never fans out).
+    select_is_distinct: bool,
+}
+
+impl<'a> From<&'a LeftJoinFact> for KeyedJoinView<'a> {
+    fn from(fact: &'a LeftJoinFact) -> Self {
+        Self {
+            consumer: fact.consumer(),
+            right_leaf: fact.right_leaf(),
+            equi_keys: fact.equi_keys(),
+            select_is_distinct: fact.select_is_distinct(),
+        }
+    }
+}
+
+impl<'a> From<&'a SubqueryFact> for KeyedJoinView<'a> {
+    fn from(fact: &'a SubqueryFact) -> Self {
+        Self {
+            consumer: fact.consumer(),
+            right_leaf: fact.inner_leaf(),
+            equi_keys: fact.equi_keys(),
+            select_is_distinct: false,
+        }
+    }
+}
+
 /// A LEFT JOIN site's equi keys bound to the external relations its
 /// unit-test givens mock — the statically-recoverable key-match inputs.
 struct BoundKeys {
@@ -1357,21 +1406,21 @@ struct BoundKeys {
 /// Bind a fact's equi keys, or `None` when not statically recoverable:
 /// no equi pairs, pairs spanning several left relations, or a side that
 /// does not resolve to a single mockable external relation.
-fn bind_keys(graph: &CteGraph, fact: &LeftJoinFact) -> Option<BoundKeys> {
+fn bind_keys(graph: &CteGraph, view: &KeyedJoinView<'_>) -> Option<BoundKeys> {
     let mut left_leaves: BTreeSet<&str> = BTreeSet::new();
-    for pair in fact.equi_keys() {
+    for pair in view.equi_keys {
         left_leaves.insert(pair.left_leaf()?);
     }
     if left_leaves.len() != 1 {
         return None;
     }
     let left_external = resolve_side_external(graph, left_leaves.iter().next()?)?;
-    let right_external = resolve_side_external(graph, fact.right_leaf())?;
+    let right_external = resolve_side_external(graph, view.right_leaf)?;
     Some(BoundKeys {
         left_external,
         right_external,
-        pairs: fact
-            .equi_keys()
+        pairs: view
+            .equi_keys
             .iter()
             .map(|pair| {
                 (
@@ -1634,22 +1683,23 @@ enum KeyDirection {
     Match,
 }
 
-/// Shared verdict computation for both join checks: bind the keys,
-/// score every unit test in `direction`, and aggregate per the honest
-/// tier order (covered → unknown → uncovered).
+/// Shared verdict computation for the join-shaped checks (LEFT JOIN
+/// sites and, since cute-dbt#196, negated-subquery sites): bind the
+/// keys, score every unit test in `direction`, and aggregate per the
+/// honest tier order (covered → unknown → uncovered).
 fn key_match_verdict(
     ctx: &CheckContext<'_>,
     graph: &CteGraph,
-    fact: &LeftJoinFact,
+    view: &KeyedJoinView<'_>,
     direction: KeyDirection,
     evidence: &mut Vec<Evidence>,
 ) -> Verdict {
-    let Some(bound) = bind_keys(graph, fact) else {
+    let Some(bound) = bind_keys(graph, view) else {
         evidence.push(Evidence::new(
             "unattributable join",
             format!(
                 "{} — join key or side binding not statically recoverable",
-                fact.consumer(),
+                view.consumer,
             ),
         ));
         return Verdict::Unknown;
@@ -1679,18 +1729,18 @@ fn key_match_verdict(
             "unattributable given",
             format!(
                 "{} — a unit test's rows are not statically countable (external fixture, non-literal sql, or ungiven seed input)",
-                fact.consumer(),
+                view.consumer,
             ),
         ));
         return Verdict::Unknown;
     }
     let sketch = match direction {
-        KeyDirection::NoMatch if fact.select_is_distinct() => {
+        KeyDirection::NoMatch if view.select_is_distinct => {
             evidence.push(Evidence::new(
                 "instrument routing",
                 format!(
                     "{} dedups the join output with DISTINCT — the data-test recommendation wins over a unit-test fixture (dedup after a fan-out join)",
-                    fact.consumer(),
+                    view.consumer,
                 ),
             ));
             Evidence::new("suggested data test", grain_data_test_sketch(&bound))
@@ -1722,8 +1772,13 @@ fn detect_join_left_null_propagation(ctx: &CheckContext<'_>) -> Vec<Finding<Heur
         .filter(|site| site.fact.projects_right_columns())
         .map(|site| {
             let mut evidence = vec![left_join_evidence(site.fact)];
-            let verdict =
-                key_match_verdict(ctx, graph, site.fact, KeyDirection::NoMatch, &mut evidence);
+            let verdict = key_match_verdict(
+                ctx,
+                graph,
+                &site.fact.into(),
+                KeyDirection::NoMatch,
+                &mut evidence,
+            );
             Finding::new(
                 HeuristicId::JoinLeftNullPropagation,
                 ctx.model.id().clone(),
@@ -1735,14 +1790,125 @@ fn detect_join_left_null_propagation(ctx: &CheckContext<'_>) -> Vec<Finding<Heur
         .collect()
 }
 
+/// One negated-subquery site (cute-dbt#196): the construct
+/// discriminator the anti-join check emits subquery-arm findings on.
+/// `join.left-null-propagation` never enumerates these sites (it
+/// consumes `left_join_facts` only), so supersedes resolution is
+/// trivially correct per construct.
+struct SubquerySite<'a> {
+    construct: String,
+    fact: &'a SubqueryFact,
+}
+
+/// Enumerate a graph's negated-subquery sites in source order,
+/// deduplicating repeated `(kind, consumer, inner_leaf)` triples with a
+/// `#<ordinal>` suffix (the [`left_join_sites`] discipline).
+fn subquery_sites(graph: &CteGraph) -> Vec<SubquerySite<'_>> {
+    let mut seen: BTreeMap<(&str, &str, &str), usize> = BTreeMap::new();
+    graph
+        .subquery_facts()
+        .iter()
+        .map(|fact| {
+            let kind = match fact.kind() {
+                SubqueryKind::NotExists => "not_exists",
+                SubqueryKind::NotIn => "not_in",
+            };
+            let ordinal = seen
+                .entry((kind, fact.consumer(), fact.inner_leaf()))
+                .and_modify(|n| *n += 1)
+                .or_insert(1);
+            let construct = if *ordinal == 1 {
+                format!("{kind}[{}:{}]", fact.consumer(), fact.inner_leaf())
+            } else {
+                format!(
+                    "{kind}[{}:{}#{}]",
+                    fact.consumer(),
+                    fact.inner_leaf(),
+                    ordinal
+                )
+            };
+            SubquerySite { construct, fact }
+        })
+        .collect()
+}
+
+/// The form-specific "anti-join" evidence naming a subquery construct
+/// (cute-dbt#196): the rendered shape of the `NOT EXISTS` correlation
+/// or the `NOT IN` membership pair, with the unrecoverable-key arm
+/// spelled out honestly.
+fn subquery_evidence(fact: &SubqueryFact) -> Evidence {
+    match fact.kind() {
+        SubqueryKind::NotExists => {
+            let correlation = if fact.equi_keys().is_empty() {
+                "<correlation keys not statically recoverable>".to_owned()
+            } else {
+                let pairs: Vec<String> = fact
+                    .equi_keys()
+                    .iter()
+                    .map(|pair| {
+                        format!(
+                            "{}.{} = {}.{}",
+                            fact.inner_leaf(),
+                            pair.right_column(),
+                            pair.left_leaf().unwrap_or("?"),
+                            pair.left_column(),
+                        )
+                    })
+                    .collect();
+                pairs.join(" AND ")
+            };
+            Evidence::new(
+                "anti-join (NOT EXISTS)",
+                format!(
+                    "{} — WHERE NOT EXISTS (SELECT … FROM {} WHERE {})",
+                    fact.consumer(),
+                    fact.inner_leaf(),
+                    correlation,
+                ),
+            )
+        }
+        SubqueryKind::NotIn => {
+            let membership = fact.equi_keys().first().map_or_else(
+                || {
+                    format!(
+                        "<membership column not statically resolvable> NOT IN (SELECT … FROM {})",
+                        fact.inner_leaf(),
+                    )
+                },
+                |pair| {
+                    format!(
+                        "{}.{} NOT IN (SELECT {} FROM {})",
+                        pair.left_leaf().unwrap_or("?"),
+                        pair.left_column(),
+                        pair.right_column(),
+                        fact.inner_leaf(),
+                    )
+                },
+            );
+            Evidence::new(
+                "anti-join (NOT IN)",
+                format!("{} — WHERE {membership}", fact.consumer()),
+            )
+        }
+    }
+}
+
 /// Detector for `join.anti-join` (cute-dbt#173, the agenda §4b
-/// refinement).
+/// refinement; subquery arms added by cute-dbt#196).
 ///
-/// Trigger: a LEFT JOIN site filtering `WHERE <right key> IS NULL` in a
-/// top-level AND conjunct, the IS NULL column being one of the ON
-/// equi-key right columns. Emits the INVERTED recommendation (a given
-/// row that DOES match, proving the matched class is excluded) and
-/// supersedes `join.left-null-propagation` on the same construct.
+/// Triggers, one finding per site:
+/// - a LEFT JOIN site filtering `WHERE <right key> IS NULL` in a
+///   top-level AND conjunct, the IS NULL column being one of the ON
+///   equi-key right columns;
+/// - a correlated `NOT EXISTS` / single-column `NOT IN` subquery site
+///   (cute-dbt#196 — the lifted v1 exclusions), whose extracted
+///   outer↔inner key pairs play the ON equi-key role.
+///
+/// All arms emit the INVERTED recommendation (a given row that DOES
+/// match, proving the matched class is excluded) through the same
+/// [`key_match_verdict`] machinery. The LEFT JOIN arm supersedes
+/// `join.left-null-propagation` on the same construct; the subquery
+/// constructs are never enumerated by left-null-propagation at all.
 fn detect_join_anti_join(ctx: &CheckContext<'_>) -> Vec<Finding<HeuristicId>> {
     if ctx.model.resource_type() != "model" {
         return Vec::new();
@@ -1750,7 +1916,7 @@ fn detect_join_anti_join(ctx: &CheckContext<'_>) -> Vec<Finding<HeuristicId>> {
     let Some(graph) = ctx.cte_graph else {
         return Vec::new();
     };
-    left_join_sites(graph)
+    let mut findings: Vec<Finding<HeuristicId>> = left_join_sites(graph)
         .into_iter()
         .filter(|site| !anti_join_null_keys(site.fact).is_empty())
         .map(|site| {
@@ -1760,8 +1926,13 @@ fn detect_join_anti_join(ctx: &CheckContext<'_>) -> Vec<Finding<HeuristicId>> {
                 "anti-join filter",
                 format!("WHERE {}.{} IS NULL", site.fact.right_leaf(), null_keys),
             ));
-            let verdict =
-                key_match_verdict(ctx, graph, site.fact, KeyDirection::Match, &mut evidence);
+            let verdict = key_match_verdict(
+                ctx,
+                graph,
+                &site.fact.into(),
+                KeyDirection::Match,
+                &mut evidence,
+            );
             Finding::new(
                 HeuristicId::JoinAntiJoin,
                 ctx.model.id().clone(),
@@ -1770,7 +1941,25 @@ fn detect_join_anti_join(ctx: &CheckContext<'_>) -> Vec<Finding<HeuristicId>> {
                 evidence,
             )
         })
-        .collect()
+        .collect();
+    findings.extend(subquery_sites(graph).into_iter().map(|site| {
+        let mut evidence = vec![subquery_evidence(site.fact)];
+        let verdict = key_match_verdict(
+            ctx,
+            graph,
+            &site.fact.into(),
+            KeyDirection::Match,
+            &mut evidence,
+        );
+        Finding::new(
+            HeuristicId::JoinAntiJoin,
+            ctx.model.id().clone(),
+            site.construct,
+            verdict,
+            evidence,
+        )
+    }));
+    findings
 }
 
 // ---------------------------------------------------------------------
@@ -4149,6 +4338,199 @@ mod tests {
         ]);
         let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
         assert_eq!(finding.verdict, Verdict::Uncovered);
+    }
+
+    // ----- join.anti-join subquery arms (cute-dbt#196) -----------------
+
+    use crate::domain::cte::{SubqueryFact, SubqueryKind};
+
+    /// The NOT EXISTS twin of [`orders_customers_fact`]: `stg_orders o
+    /// WHERE NOT EXISTS (SELECT 1 FROM stg_customers c WHERE
+    /// c.id = o.customer_id)` — same key vocabulary, inner relation in
+    /// the right-leaf role.
+    fn not_exists_fact(pairs: Vec<JoinKeyPair>) -> SubqueryFact {
+        SubqueryFact::new(
+            SubqueryKind::NotExists,
+            "(final select)",
+            "stg_customers",
+            pairs,
+        )
+    }
+
+    fn subquery_graph(fact: SubqueryFact) -> CteGraph {
+        CteGraph::new(vec![], vec![]).with_subquery_facts(vec![fact])
+    }
+
+    #[test]
+    fn not_exists_site_fires_anti_join_with_the_inverted_recommendation() {
+        let graph = subquery_graph(not_exists_fact(vec![key_pair(
+            "stg_orders",
+            "customer_id",
+            "id",
+        )]));
+        let manifest = manifest_of(vec![emails_model()]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(finding.check, HeuristicId::JoinAntiJoin);
+        assert_eq!(
+            finding.construct,
+            "not_exists[(final select):stg_customers]"
+        );
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+        let form = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "anti-join (NOT EXISTS)")
+            .expect("form-specific evidence present");
+        assert_eq!(
+            form.value,
+            "(final select) — WHERE NOT EXISTS (SELECT … FROM stg_customers WHERE stg_customers.id = stg_orders.customer_id)",
+        );
+        let sketch = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "suggested given")
+            .expect("inverted sketch present");
+        assert_eq!(
+            sketch.value,
+            "- input: ref('stg_orders')\n  rows:\n    - {customer_id: 1}   # matches the right row below\n- input: ref('stg_customers')\n  rows:\n    - {id: 1}\n# expect: rows WITHOUT the matched left row — the anti-join must exclude it",
+            "the SAME inverted sketch builder serves the subquery arm",
+        );
+    }
+
+    #[test]
+    fn not_in_site_fires_anti_join_with_the_membership_evidence() {
+        let graph = subquery_graph(SubqueryFact::new(
+            SubqueryKind::NotIn,
+            "(final select)",
+            "stg_refunds",
+            vec![key_pair("stg_orders", "order_id", "order_id")],
+        ));
+        let manifest = manifest_of(vec![emails_model()]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(finding.check, HeuristicId::JoinAntiJoin);
+        assert_eq!(finding.construct, "not_in[(final select):stg_refunds]");
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+        let form = finding
+            .evidence
+            .iter()
+            .find(|e| e.label == "anti-join (NOT IN)")
+            .expect("form-specific evidence present");
+        assert_eq!(
+            form.value,
+            "(final select) — WHERE stg_orders.order_id NOT IN (SELECT order_id FROM stg_refunds)",
+        );
+    }
+
+    #[test]
+    fn subquery_site_covered_by_a_matching_given_pair_with_attribution() {
+        // The satisfaction inversion carries over: the matching pair
+        // that proves the exclusion COVERS the subquery arm, attributed.
+        let graph = subquery_graph(not_exists_fact(vec![key_pair(
+            "stg_orders",
+            "customer_id",
+            "id",
+        )]));
+        let manifest = emails_manifest_with_test(vec![
+            given(
+                "ref('stg_orders')",
+                serde_json::json!([{ "customer_id": 1 }]),
+            ),
+            given("ref('stg_customers')", serde_json::json!([{ "id": 1 }])),
+        ]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(
+            finding.verdict,
+            Verdict::Covered {
+                by: vec![EMAILS_TEST.to_owned()],
+            },
+        );
+        assert!(finding.recommendation.is_none());
+    }
+
+    #[test]
+    fn subquery_site_with_empty_keys_is_unknown_never_uncovered() {
+        // The unrecoverable-key degrade mirrors the LEFT JOIN path:
+        // empty equi keys fail the bind — honest UNKNOWN.
+        let graph = subquery_graph(not_exists_fact(Vec::new()));
+        let manifest = manifest_of(vec![emails_model()]);
+        let finding = single_finding(run_with_graph(&manifest, EMAILS, Some(&graph)));
+        assert_eq!(finding.verdict, Verdict::Unknown);
+        assert!(finding.recommendation.is_none());
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .any(|e| e.label == "unattributable join"),
+        );
+    }
+
+    #[test]
+    fn left_null_never_fires_on_subquery_constructs() {
+        // join.left-null-propagation consumes left_join_facts ONLY — a
+        // graph carrying nothing but subquery facts can never trip it
+        // (verified, not assumed: the supersedes contract on subquery
+        // constructs is trivially correct because there is nothing to
+        // supersede).
+        let graph = subquery_graph(not_exists_fact(vec![key_pair(
+            "stg_orders",
+            "customer_id",
+            "id",
+        )]));
+        let manifest = manifest_of(vec![emails_model()]);
+        let findings = run_with_graph(&manifest, EMAILS, Some(&graph));
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.check != HeuristicId::JoinLeftNullPropagation),
+            "{findings:?}",
+        );
+    }
+
+    #[test]
+    fn repeated_subquery_sites_discriminate_by_ordinal() {
+        let graph = CteGraph::new(vec![], vec![]).with_subquery_facts(vec![
+            not_exists_fact(vec![key_pair("stg_orders", "customer_id", "id")]),
+            not_exists_fact(vec![key_pair("stg_orders", "customer_id", "id")]),
+        ]);
+        let manifest = manifest_of(vec![emails_model()]);
+        let findings = run_with_graph(&manifest, EMAILS, Some(&graph));
+        assert_eq!(findings.len(), 2);
+        assert_eq!(
+            findings[0].construct,
+            "not_exists[(final select):stg_customers]"
+        );
+        assert_eq!(
+            findings[1].construct,
+            "not_exists[(final select):stg_customers#2]"
+        );
+    }
+
+    #[test]
+    fn left_join_and_subquery_sites_coexist_on_one_graph() {
+        // A model can carry BOTH anti-join forms; each site gets its
+        // own finding under its own construct.
+        let graph = CteGraph::new(vec![], vec![])
+            .with_left_join_facts(vec![orders_customers_fact(false, &["id"], false)])
+            .with_subquery_facts(vec![SubqueryFact::new(
+                SubqueryKind::NotIn,
+                "(final select)",
+                "stg_refunds",
+                vec![key_pair("stg_orders", "order_id", "order_id")],
+            )]);
+        let manifest = manifest_of(vec![emails_model()]);
+        let findings = run_with_graph(&manifest, EMAILS, Some(&graph));
+        let constructs: Vec<&str> = findings
+            .iter()
+            .filter(|f| f.check == HeuristicId::JoinAntiJoin)
+            .map(|f| f.construct.as_str())
+            .collect();
+        assert_eq!(
+            constructs,
+            vec![
+                "left_join[(final select):stg_customers]",
+                "not_in[(final select):stg_refunds]",
+            ],
+        );
     }
 
     // ----- the supersedes showcase (production registry) ---------------

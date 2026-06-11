@@ -49,6 +49,24 @@ models:
           The right-side join key — always NULL on kept rows; projected so
           the general left-null check provably fires and is superseded.
 
+  # cute-dbt#196 dogfood — the NOT IN membership anti-join. Carries a
+  # unit test whose givens include a MATCHING outer↔inner pair, so the
+  # PR preview renders join.anti-join COVERED on the not_in construct
+  # (the satisfied twin of customers_with_no_orders' UNCOVERED arm).
+  - name: orders_never_refunded
+    description: >
+      Orders that were never refunded — the <col> NOT IN (SELECT …)
+      membership anti-join idiom (cute-dbt#196 subquery evidence family).
+    columns:
+      - name: order_id
+        description: Order identifier (natural key of the kept rows).
+      - name: customer_id
+        description: Customer who placed the order.
+      - name: order_date
+        description: Date the order was placed.
+      - name: status
+        description: Order status.
+
 unit_tests:
   # DICT format (given + expect). dict only compares listed columns, so
   # the derived `amount_share` / `distinct_status_count` are asserted while
@@ -174,6 +192,44 @@ unit_tests:
           last_name: 'Lovelace'
           number_of_orders: 1
           customer_lifetime_value: 10
+
+  # cute-dbt#196 dogfood — the anti-join SATISFACTION case: the givens
+  # carry a matching pair (order 1 IS refunded) and expect proves the
+  # matched row is excluded. This is exactly the inverted fixture the
+  # join.anti-join recommendation asks for, so the live preview shows
+  # the not_in construct COVERED with attribution to this test.
+  - name: test_orders_never_refunded_excludes_refunded_orders
+    description: |
+      orders_never_refunded keeps only orders absent from the refunded
+      set. Order 1 is refunded (its id appears in stg_refunds) and order
+      2 is clean, so the output carries order 2 alone — the matched row
+      is provably excluded (the anti-join's risk class, exercised).
+    model: orders_never_refunded
+    given:
+      - input: ref('stg_orders')
+        format: dict
+        rows:
+          - order_id: 1
+            customer_id: 1
+            order_date: '2024-01-01'
+            status: 'completed'
+          - order_id: 2
+            customer_id: 2
+            order_date: '2024-01-02'
+            status: 'completed'
+      - input: ref('stg_refunds')
+        format: dict
+        rows:
+          - refund_id: 1
+            order_id: 1
+            amount: -10
+    expect:
+      format: dict
+      rows:
+        - order_id: 2
+          customer_id: 2
+          order_date: '2024-01-02'
+          status: 'completed'
 
   # EXTERNAL FIXTURE format (cute-dbt#126). Same shape as
   # test_orders_sums_payment_methods, but the stg_payments GIVEN is sourced

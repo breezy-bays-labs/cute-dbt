@@ -393,6 +393,21 @@ pub struct CoveragePlan {
     /// override)` per declared unit test — `None` = no `overrides`
     /// block (dbt's full-build default).
     pub unit_tests: Vec<(String, String, Option<bool>)>,
+    /// Unit tests carrying literal given rows — the cute-dbt#196
+    /// subquery-satisfaction scenarios.
+    pub given_unit_tests: Vec<CoverageGivenUnitTest>,
+}
+
+/// One unit test with literal dict given rows in a [`CoveragePlan`]
+/// (cute-dbt#196).
+#[derive(Debug, Clone)]
+pub struct CoverageGivenUnitTest {
+    /// Bare unit-test name.
+    pub name: String,
+    /// Bare target model name.
+    pub target: String,
+    /// `(given input, dict rows)` per declared given.
+    pub givens: Vec<(String, serde_json::Value)>,
 }
 
 /// One incremental model in a [`CoveragePlan`] (cute-dbt#164).

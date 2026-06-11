@@ -22,7 +22,8 @@ use cute_dbt::adapters::render::build_payload_with_externals;
 use cute_dbt::domain::{
     CheckId, CheckPolicy, ChecksConfig, Checksum, DependsOn, Finding, HeuristicId, InScopeSet,
     Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId, SuppressRule,
-    SuppressionSource, Verdict, model_findings, resolve_check_policy,
+    SuppressionSource, UnitTest, UnitTestExpect, UnitTestGiven, Verdict, model_findings,
+    resolve_check_policy,
 };
 use cute_dbt::ports::ManifestSource;
 
@@ -639,30 +640,361 @@ fn anti_join_supersedes_left_null_through_the_real_engine() {
     );
 }
 
-#[test]
-fn not_exists_anti_join_is_silent_through_the_real_engine() {
-    // Paired negative test for the declared NOT EXISTS exclusion
-    // (cute-dbt#173 Discovery call): v1 detects the LEFT JOIN + IS NULL
-    // form ONLY — the NOT EXISTS equivalent emits no join finding at
-    // all (silent, never misclassified).
-    let sql = "select * from \"db\".\"main\".\"stg_customers\" c \
+/// The cute-dbt#196 NOT EXISTS anti-join showcase SQL: a correlated
+/// single-key NOT EXISTS over one plain named inner table.
+const NOT_EXISTS_SQL: &str = "select * from \"db\".\"main\".\"stg_customers\" c \
                where not exists (select 1 from \"db\".\"main\".\"stg_orders\" o \
                where o.customer_id = c.customer_id)";
-    let node = model_with_sql("model.shop.customers_with_no_orders_ne", sql);
+
+/// The cute-dbt#196 NOT IN membership showcase SQL: a single-column
+/// NOT IN over one plain named inner table.
+const NOT_IN_SQL: &str = "select o.order_id from \"db\".\"main\".\"stg_orders\" o \
+               where o.order_id not in \
+               (select r.order_id from \"db\".\"main\".\"stg_refunds\" r)";
+
+/// Build a one-model manifest around `sql`, with `tests` unit tests
+/// (each `(unit-test key, givens)`) targeting the model, and run the
+/// production pipeline over the REAL sqlparser engine.
+fn subquery_findings(
+    model_id: &str,
+    sql: &str,
+    tests: Vec<(&str, Vec<UnitTestGiven>)>,
+) -> Vec<Finding<HeuristicId>> {
+    let node = model_with_sql(model_id, sql);
+    let bare = model_id.rsplit('.').next().unwrap_or_default().to_owned();
+    let unit_tests: HashMap<String, UnitTest> = tests
+        .into_iter()
+        .map(|(key, givens)| {
+            (
+                key.to_owned(),
+                UnitTest::new(
+                    key.rsplit('.').next().unwrap_or_default(),
+                    NodeId::new(&bare),
+                    givens,
+                    UnitTestExpect::new(serde_json::json!([]), None, None),
+                    None,
+                    DependsOn::default(),
+                    None,
+                    None,
+                    None,
+                ),
+            )
+        })
+        .collect();
     let manifest = Manifest::new(
         ManifestMetadata::new("v12"),
         [(node.id().clone(), node)].into_iter().collect(),
-        HashMap::new(),
+        unit_tests,
         HashMap::new(),
     );
-    let model = manifest
-        .node(&NodeId::new("model.shop.customers_with_no_orders_ne"))
-        .expect("model exists");
-    let graph = parse_cte_graph(model.compiled_code().unwrap()).expect("NOT EXISTS SQL parses");
-    let findings = model_findings(&manifest, model, Some(&graph));
+    let model = manifest.node(&NodeId::new(model_id)).expect("model exists");
+    let graph = parse_cte_graph(model.compiled_code().unwrap()).expect("subquery SQL parses");
+    model_findings(&manifest, model, Some(&graph))
+}
+
+/// A literal dict-format given.
+fn dict_given(input: &str, rows: serde_json::Value) -> UnitTestGiven {
+    UnitTestGiven::new(input, rows, Some("dict".to_owned()), None)
+}
+
+#[test]
+fn not_exists_anti_join_fires_through_the_real_engine() {
+    // FLIPPED by cute-dbt#196 (was
+    // `not_exists_anti_join_is_silent_through_the_real_engine`, the
+    // cute-dbt#173 declared-exclusion pin): the correlated-subquery
+    // evidence family lifts the NOT EXISTS exclusion — the same SQL now
+    // fires join.anti-join on the not_exists construct, tier preserved,
+    // with the INVERTED recommendation. left-null-propagation never
+    // fires on subquery constructs (it consumes left_join_facts only),
+    // so supersedes is irrelevant here.
+    let findings = subquery_findings(
+        "model.shop.customers_with_no_orders_ne",
+        NOT_EXISTS_SQL,
+        vec![],
+    );
+    let join: Vec<&Finding<HeuristicId>> = findings
+        .iter()
+        .filter(|f| f.check.spec().group == "join")
+        .collect();
+    assert_eq!(join.len(), 1, "exactly one join finding: {findings:?}");
+    let finding = join[0];
+    assert_eq!(finding.check, HeuristicId::JoinAntiJoin);
+    assert_eq!(finding.check.spec().tier.as_str(), "high");
+    assert_eq!(finding.construct, "not_exists[(final select):stg_orders]");
+    assert_eq!(finding.verdict, Verdict::Uncovered);
+    let sketch = finding
+        .evidence
+        .iter()
+        .find(|e| e.label == "suggested given")
+        .expect("inverted sketch present");
     assert!(
-        findings.iter().all(|f| f.check.spec().group != "join"),
-        "the NOT EXISTS form is invisible to the v1 join pair: {findings:?}",
+        sketch.value.contains("# matches the right row below"),
+        "the recommendation is the INVERTED (matching) given: {}",
+        sketch.value,
+    );
+    assert!(
+        sketch.value.contains("ref('stg_customers')") && sketch.value.contains("ref('stg_orders')"),
+        "the sketch binds the outer and inner relations: {}",
+        sketch.value,
+    );
+}
+
+#[test]
+fn not_in_anti_join_fires_through_the_real_engine() {
+    // The cute-dbt#196 NOT IN positive twin (no specimen existed before
+    // this lane): the membership pair (outer col ↔ inner projected col)
+    // is the equi key, and the construct is not_in[…].
+    let findings = subquery_findings("model.shop.orders_never_refunded", NOT_IN_SQL, vec![]);
+    let join: Vec<&Finding<HeuristicId>> = findings
+        .iter()
+        .filter(|f| f.check.spec().group == "join")
+        .collect();
+    assert_eq!(join.len(), 1, "exactly one join finding: {findings:?}");
+    let finding = join[0];
+    assert_eq!(finding.check, HeuristicId::JoinAntiJoin);
+    assert_eq!(finding.construct, "not_in[(final select):stg_refunds]");
+    assert_eq!(finding.verdict, Verdict::Uncovered);
+    let sketch = finding
+        .evidence
+        .iter()
+        .find(|e| e.label == "suggested given")
+        .expect("inverted sketch present");
+    assert!(
+        sketch.value.contains("ref('stg_orders')") && sketch.value.contains("ref('stg_refunds')"),
+        "the sketch binds the outer and inner relations: {}",
+        sketch.value,
+    );
+}
+
+#[test]
+fn not_exists_anti_join_verdicts_through_the_real_engine() {
+    // The cute-dbt#196 satisfaction ladder on the NOT EXISTS arm,
+    // reusing the LEFT JOIN given-row semantics: a left (outer) given
+    // row matching an inner given row proves the exclusion (COVERED
+    // with attribution); only unmatched rows leave the matched class
+    // untested (UNCOVERED); a correlated-but-non-equi predicate leaves
+    // the key unbindable (UNKNOWN, never UNCOVERED).
+    const TEST_KEY: &str = "unit_test.shop.customers_with_no_orders_ne.test_exclusion";
+    let covered = subquery_findings(
+        "model.shop.customers_with_no_orders_ne",
+        NOT_EXISTS_SQL,
+        vec![(
+            TEST_KEY,
+            vec![
+                dict_given(
+                    "ref('stg_customers')",
+                    serde_json::json!([{ "customer_id": 1 }]),
+                ),
+                dict_given(
+                    "ref('stg_orders')",
+                    serde_json::json!([{ "customer_id": 1 }]),
+                ),
+            ],
+        )],
+    );
+    let finding = covered
+        .iter()
+        .find(|f| f.check == HeuristicId::JoinAntiJoin)
+        .expect("anti-join finding present");
+    assert_eq!(
+        finding.verdict,
+        Verdict::Covered {
+            by: vec![TEST_KEY.to_owned()],
+        },
+        "a matching outer↔inner given pair proves the exclusion",
+    );
+
+    let uncovered = subquery_findings(
+        "model.shop.customers_with_no_orders_ne",
+        NOT_EXISTS_SQL,
+        vec![(
+            TEST_KEY,
+            vec![
+                dict_given(
+                    "ref('stg_customers')",
+                    serde_json::json!([{ "customer_id": 404 }]),
+                ),
+                dict_given(
+                    "ref('stg_orders')",
+                    serde_json::json!([{ "customer_id": 1 }]),
+                ),
+            ],
+        )],
+    );
+    let finding = uncovered
+        .iter()
+        .find(|f| f.check == HeuristicId::JoinAntiJoin)
+        .expect("anti-join finding present");
+    assert_eq!(
+        finding.verdict,
+        Verdict::Uncovered,
+        "only unmatched rows prove the keep path, never the exclusion",
+    );
+
+    // Correlated but non-equi: the fact carries no resolvable equi pair
+    // — bind fails — honest UNKNOWN.
+    let unknown_sql = "select * from \"db\".\"main\".\"stg_customers\" c \
+               where not exists (select 1 from \"db\".\"main\".\"stg_orders\" o \
+               where o.order_date > c.signup_date)";
+    let unknown = subquery_findings(
+        "model.shop.customers_with_no_orders_ne",
+        unknown_sql,
+        vec![],
+    );
+    let finding = unknown
+        .iter()
+        .find(|f| f.check == HeuristicId::JoinAntiJoin)
+        .expect("anti-join finding present");
+    assert_eq!(
+        finding.verdict,
+        Verdict::Unknown,
+        "an unbindable correlation key degrades UNKNOWN, never UNCOVERED",
+    );
+    assert!(finding.recommendation.is_none());
+}
+
+#[test]
+fn not_in_anti_join_verdicts_through_the_real_engine() {
+    // The satisfaction ladder on the NOT IN arm: membership-pair match
+    // ⇒ COVERED; no match ⇒ UNCOVERED; an unresolvable outer column
+    // (two-table outer FROM, unqualified column) ⇒ UNKNOWN.
+    const TEST_KEY: &str = "unit_test.shop.orders_never_refunded.test_exclusion";
+    let covered = subquery_findings(
+        "model.shop.orders_never_refunded",
+        NOT_IN_SQL,
+        vec![(
+            TEST_KEY,
+            vec![
+                dict_given("ref('stg_orders')", serde_json::json!([{ "order_id": 1 }])),
+                dict_given("ref('stg_refunds')", serde_json::json!([{ "order_id": 1 }])),
+            ],
+        )],
+    );
+    let finding = covered
+        .iter()
+        .find(|f| f.check == HeuristicId::JoinAntiJoin)
+        .expect("anti-join finding present");
+    assert_eq!(
+        finding.verdict,
+        Verdict::Covered {
+            by: vec![TEST_KEY.to_owned()],
+        },
+    );
+
+    let uncovered = subquery_findings(
+        "model.shop.orders_never_refunded",
+        NOT_IN_SQL,
+        vec![(
+            TEST_KEY,
+            vec![
+                dict_given("ref('stg_orders')", serde_json::json!([{ "order_id": 2 }])),
+                dict_given("ref('stg_refunds')", serde_json::json!([{ "order_id": 1 }])),
+            ],
+        )],
+    );
+    let finding = uncovered
+        .iter()
+        .find(|f| f.check == HeuristicId::JoinAntiJoin)
+        .expect("anti-join finding present");
+    assert_eq!(finding.verdict, Verdict::Uncovered);
+
+    // Two outer tables + an unqualified NOT IN column: the outer side
+    // is present but unresolvable — fact with empty keys — UNKNOWN.
+    let unknown_sql = "select * from \"db\".\"main\".\"stg_orders\" o \
+               join \"db\".\"main\".\"stg_shipments\" s on o.order_id = s.order_id \
+               where order_id not in \
+               (select r.order_id from \"db\".\"main\".\"stg_refunds\" r)";
+    let unknown = subquery_findings("model.shop.orders_never_refunded", unknown_sql, vec![]);
+    let finding = unknown
+        .iter()
+        .find(|f| f.check == HeuristicId::JoinAntiJoin)
+        .expect("anti-join finding present");
+    assert_eq!(
+        finding.verdict,
+        Verdict::Unknown,
+        "an unresolvable outer membership column degrades UNKNOWN, never UNCOVERED",
+    );
+}
+
+#[test]
+fn residual_subquery_exclusions_stay_silent_through_the_real_engine() {
+    // Fresh negative pins for the cute-dbt#196 residual exclusions
+    // (replacing the lifted v1 NOT EXISTS/NOT IN exclusion line):
+    // an uncorrelated NOT EXISTS is not a keyed anti-join; non-negated
+    // EXISTS / IN are the semi-join / membership FUTURE consumers; a
+    // NOT EXISTS inside an OR branch has different semantics. Miss
+    // direction is silence, never misclassification.
+    for (name, sql) in [
+        (
+            "uncorrelated NOT EXISTS",
+            "select * from \"db\".\"main\".\"stg_customers\" c \
+             where not exists (select 1 from \"db\".\"main\".\"stg_orders\" o \
+             where o.status = 'void')",
+        ),
+        (
+            "non-negated EXISTS",
+            "select * from \"db\".\"main\".\"stg_customers\" c \
+             where exists (select 1 from \"db\".\"main\".\"stg_orders\" o \
+             where o.customer_id = c.customer_id)",
+        ),
+        (
+            "non-negated IN",
+            "select * from \"db\".\"main\".\"stg_orders\" o \
+             where o.order_id in (select r.order_id from \"db\".\"main\".\"stg_refunds\" r)",
+        ),
+        (
+            "OR-branch NOT EXISTS",
+            "select * from \"db\".\"main\".\"stg_customers\" c \
+             where c.is_active = true or not exists \
+             (select 1 from \"db\".\"main\".\"stg_orders\" o \
+             where o.customer_id = c.customer_id)",
+        ),
+    ] {
+        let findings = subquery_findings("model.shop.residual_exclusions", sql, vec![]);
+        assert!(
+            findings.iter().all(|f| f.check.spec().group != "join"),
+            "{name} must stay invisible to the join checks: {findings:?}",
+        );
+    }
+}
+
+#[test]
+fn playground_not_exists_anti_join_fires_uncovered_on_the_real_fixture() {
+    // cute-dbt#196 dogfood verification against the committed fixture:
+    // int_patients__never_admitted (a correlated NOT EXISTS over
+    // stg_synthea__encounters, no unit test) surfaces the not_exists
+    // construct UNCOVERED with the inverted sketch bound to the real
+    // staging relations.
+    let manifest = load("playground-current.json");
+    let findings = findings_for(
+        &manifest,
+        "model.healthcare_analytics.int_patients__never_admitted",
+    );
+    let anti = findings
+        .iter()
+        .find(|f| f.check == HeuristicId::JoinAntiJoin)
+        .expect("join.anti-join fires on int_patients__never_admitted");
+    assert_eq!(
+        anti.construct,
+        "not_exists[(final select):stg_synthea__encounters]"
+    );
+    assert_eq!(anti.verdict, Verdict::Uncovered);
+    let sketch = anti
+        .evidence
+        .iter()
+        .find(|e| e.label == "suggested given")
+        .expect("inverted sketch present");
+    assert!(
+        sketch.value.contains("ref('stg_synthea__patients')")
+            && sketch.value.contains("ref('stg_synthea__encounters')"),
+        "the sketch binds the real staging relations: {}",
+        sketch.value,
+    );
+    assert!(
+        findings
+            .iter()
+            .all(|f| f.check != HeuristicId::JoinLeftNullPropagation),
+        "left-null-propagation never fires on the subquery construct: {findings:?}",
     );
 }
 
