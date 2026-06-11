@@ -126,15 +126,13 @@ narrow.
   over-report relative to dbt's unrendered-config diff (it never
   under-reports), and dbt's `persisted_descriptions` sub-selector has no
   cute-dbt modifier yet.
-- **`source()` references are not bound to fixtures.** dbt resolves
-  `source('package', 'name')` to a relation name at `dbt compile`
-  time, so the compiled SQL the renderer sees no longer carries the
-  `source()` form — only the resolved relation. Binding a unit-test
-  `given: source(...)` to its import-CTE node requires reading the
-  manifest's `sources` block and re-resolving on the renderer side.
-  Tracked:
-  [`cute-dbt#57`](https://github.com/breezy-bays-labs/cute-dbt/issues/57)
-  → v0.2 sources widening.
+- **`source()` givens bind via the dominant authored form only.** The
+  given-input parsers accept dbt's serialized single-quoted positional
+  form (`source('a', 'b')`, `ref('name')`, whitespace/keyword-case
+  tolerant). The engine-valid but rare double-quoted and
+  `name=`/`table_name=` keyword-argument variants are deliberately not
+  parsed — an unparsed given simply stays unbound (the empty-state
+  copy), never an error.
 
 ## Import-CTE binding
 
@@ -164,6 +162,23 @@ case-insensitive:
      stacks every matching given as its own fixture card on that
      single CTE node. Tracked:
      [`cute-dbt#34`](https://github.com/breezy-bays-labs/cute-dbt/issues/34).
+
+A `given: source('a', 'b')` input takes one extra resolution hop before
+the same two-pass match
+([`cute-dbt#57`](https://github.com/breezy-bays-labs/cute-dbt/issues/57)):
+dbt resolves `{{ source('a', 'b') }}` to the physical relation at
+`dbt compile` time, so the compiled SQL never carries the literal
+`source(...)` form. cute-dbt therefore resolves the authored
+`(source_name, table)` pair against the manifest's top-level `sources`
+block, takes the entry's physical `identifier` (falling back to the
+last segment of `relation_name`, then to `name` — dbt's identifier
+default), strips identifier quoting, and feeds that token through the
+identical two-pass match above. The lookup runs on the YAML
+`source_name` + `name` (the authored arguments), never on `identifier`
+— an overridden identifier still binds. A pair missing from the
+`sources` block leaves the given unbound — fail-open, same as an
+unresolvable `ref()`; sources need no preflight (they are referenced by
+models, never analyzed themselves).
 
 When neither pass matches — and the node is an `Import` CTE — the
 node-detail panel surfaces *"no fixture provided — dbt treats
