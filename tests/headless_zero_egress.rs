@@ -62,8 +62,8 @@ use headless_chrome::protocol::cdp::{Network, Runtime};
 use cute_dbt::adapters::explore::render_explore;
 use cute_dbt::adapters::render::build_payload;
 use cute_dbt::domain::{
-    Checksum, DependsOn, InScopeSet, Manifest, ManifestMetadata, Node, NodeConfig, NodeId,
-    TestMetadata, all_models,
+    Checksum, DependsOn, InScopeSet, Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig,
+    NodeId, TestMetadata, all_models,
 };
 
 fn report_file_url(filename: &str) -> String {
@@ -492,10 +492,13 @@ fn explore_model(id: &str, deps: &[&str]) -> Node {
 /// Render the explore pages in-process (the headless fixture discipline:
 /// domain objects -> `render_explore`, no subprocess) and return the
 /// out directory. `unit_tests` is keyed by manifest unit-test id.
+/// `changed` is the optional cute-dbt#106 change context (`None` = the
+/// no-`--pr-diff` render).
 fn render_explore_pages(
     stem: &str,
     nodes: Vec<Node>,
     unit_tests: HashMap<String, cute_dbt::domain::UnitTest>,
+    changed: Option<&ModelInScopeSet>,
 ) -> PathBuf {
     let manifest = Manifest::new(
         ManifestMetadata::new("v12"),
@@ -516,14 +519,23 @@ fn render_explore_pages(
     );
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
     let _ = std::fs::remove_dir_all(&dir);
-    render_explore(&dir, &manifest, &models, &payload).expect("explore renders");
+    render_explore(&dir, &manifest, &models, changed, &payload).expect("explore renders");
     dir
 }
 
 /// Render an explore page in-process and return the `file://` URL of
 /// the emitted `dag.html`.
 fn render_explore_dag(stem: &str, nodes: Vec<Node>) -> String {
-    let dir = render_explore_pages(stem, nodes, HashMap::new());
+    let dir = render_explore_pages(stem, nodes, HashMap::new(), None);
+    let p = dir.join("dag.html");
+    format!("file://{}", p.to_str().expect("page path is valid UTF-8"))
+}
+
+/// Render an explore dag.html with cute-dbt#106 change context and
+/// return its `file://` URL. `changed_ids` are full model node ids.
+fn render_explore_dag_with_context(stem: &str, nodes: Vec<Node>, changed_ids: &[&str]) -> String {
+    let changed: ModelInScopeSet = changed_ids.iter().map(|id| NodeId::new(*id)).collect();
+    let dir = render_explore_pages(stem, nodes, HashMap::new(), Some(&changed));
     let p = dir.join("dag.html");
     format!("file://{}", p.to_str().expect("page path is valid UTF-8"))
 }
@@ -1035,6 +1047,7 @@ fn explore_dag_detail_card_renders_on_highlight_and_tooltip_never_steals_it() {
             ),
         ],
         HashMap::new(),
+        None,
     );
     let page = dir.join("dag.html");
     let url = format!("file://{}", page.to_str().expect("page path is UTF-8"));
@@ -1570,6 +1583,7 @@ fn explore_tests_viewer_renders_fixture_grids_offline() {
             explore_model("model.shop.stg_orders", &[]),
         ],
         unit_tests,
+        None,
     );
     let p = dir.join("tests.html");
     let url = format!("file://{}", p.to_str().expect("page path is valid UTF-8"));
@@ -2189,6 +2203,259 @@ fn explore_dag_host_bridge_dual_binds_the_commit_and_forward_hooks_never_echo() 
         serde_json::Value::String("model.shop.dim_orders".to_owned()),
         "standalone Space writes the attribute — the dual binding's \
          always-on half; zero behavior change without a host",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_dag_change_context_marks_changed_nodes_and_composes_with_highlight() {
+    // cute-dbt#106 — PR-diff change context on the live Cytoscape page.
+    // The proof points:
+    //   1. a NO-context render (no --pr-diff) carries ZERO changed
+    //      markings: no `[changed = 1]` nodes, no amber underlay, no
+    //      legend chip.
+    //   2. a contexted render marks EXACTLY the expected nodes: the
+    //      changed node carries data(changed)=1 + a visible underlay;
+    //      every other node carries neither. The full graph still
+    //      renders every model (context never narrows scope) and the
+    //      banner counts the changed models.
+    //   3. the changed treatment COMPOSES with highlight: highlighting
+    //      the changed node adds .sel (the magenta border channel)
+    //      while the underlay glow stays on — and the detail card shows
+    //      the "changed in this diff" chip. Highlighting a DIFFERENT
+    //      node dims the changed one (context never fights emphasis)
+    //      without dropping its data flag.
+    //   4. bridge/commit semantics are untouched: highlight alone never
+    //      writes data-selected-model; the deliberate Space commit
+    //      still writes it.
+    // Rider: the whole session emits zero console warnings/errors.
+    let nodes = || {
+        vec![
+            explore_model("model.shop.stg_orders", &[]),
+            explore_model("model.shop.dim_orders", &["model.shop.stg_orders"]),
+            explore_model("model.shop.mart_orders", &["model.shop.dim_orders"]),
+            // Disconnected — the dim-composition witness.
+            explore_model("model.shop.lonely", &[]),
+        ]
+    };
+
+    let browser = launch_browser();
+
+    // --- 1. the no-context render carries zero changed markings -----------
+    let plain_url = render_explore_dag("explore-change-context-plain", nodes());
+    let tab = browser.new_tab().expect("new tab (plain)");
+    tab.navigate_to(&plain_url).expect("navigate (plain)");
+    tab.wait_until_navigated()
+        .expect("await navigation (plain)");
+    tab.wait_for_element_with_custom_timeout(".lineage-canvas canvas", Duration::from_secs(15))
+        .expect("the Cytoscape canvas boots offline (plain)");
+    assert_eq!(
+        eval(
+            &tab,
+            "window.CuteExploreLineage.cyInstance().nodes('[changed = 1]').length"
+        ),
+        serde_json::Value::from(0),
+        "a no-context render marks no node changed",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelectorAll('.legend-chip.changed').length"
+        ),
+        serde_json::Value::from(0),
+        "no change-context legend chip without --pr-diff",
+    );
+    let _ = tab.close(true);
+
+    // --- 2.-4. the contexted render --------------------------------------
+    let url = render_explore_dag_with_context(
+        "explore-change-context",
+        nodes(),
+        &["model.shop.dim_orders"],
+    );
+    let tab = browser.new_tab().expect("new tab");
+
+    // Console recorder (warnings + errors), subscribed BEFORE navigate.
+    tab.call_method(Runtime::Enable(None))
+        .expect("enable Runtime domain");
+    tab.call_method(headless_chrome::protocol::cdp::Log::Enable(None))
+        .expect("enable Log domain");
+    let console_noise = Arc::new(Mutex::new(Vec::<String>::new()));
+    let console_recorder = console_noise.clone();
+    tab.add_event_listener(Arc::new(move |event: &Event| match event {
+        Event::RuntimeConsoleAPICalled(e) => {
+            use headless_chrome::protocol::cdp::Runtime::ConsoleAPICalledEventTypeOption as T;
+            if matches!(e.params.Type, T::Warning | T::Error) {
+                let text = e
+                    .params
+                    .args
+                    .first()
+                    .and_then(|a| {
+                        a.description
+                            .clone()
+                            .or_else(|| a.value.as_ref().map(ToString::to_string))
+                    })
+                    .unwrap_or_default();
+                console_recorder
+                    .lock()
+                    .unwrap()
+                    .push(format!("console.{:?}: {text}", e.params.Type));
+            }
+        }
+        Event::LogEntryAdded(e) => {
+            use headless_chrome::protocol::cdp::Log::LogEntryLevel as L;
+            if matches!(e.params.entry.level, L::Warning | L::Error) {
+                console_recorder.lock().unwrap().push(format!(
+                    "log.{:?}: {}",
+                    e.params.entry.level, e.params.entry.text
+                ));
+            }
+        }
+        _ => {}
+    }))
+    .expect("subscribe console events");
+
+    tab.navigate_to(&url).expect("navigate to file:// URL");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(".lineage-canvas canvas", Duration::from_secs(15))
+        .expect("the Cytoscape canvas boots offline");
+
+    // Exactly the expected node is marked; the full graph still renders.
+    assert_eq!(
+        eval(
+            &tab,
+            "window.CuteExploreLineage.cyInstance().nodes().length"
+        ),
+        serde_json::Value::from(4),
+        "change context never narrows scope — every model renders",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "window.CuteExploreLineage.cyInstance().nodes('[changed = 1]')\
+               .map(function (n) { return n.id(); }).join(',')"
+        ),
+        serde_json::Value::String("model.shop.dim_orders".to_owned()),
+        "exactly the expected node carries the changed mark",
+    );
+    assert!(
+        eval(
+            &tab,
+            "window.CuteExploreLineage.cyInstance()\
+               .getElementById('model.shop.dim_orders')\
+               .numericStyle('underlay-opacity')"
+        )
+        .as_f64()
+        .unwrap_or(0.0)
+            > 0.0,
+        "the changed node renders the amber underlay glow",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "window.CuteExploreLineage.cyInstance()\
+               .getElementById('model.shop.stg_orders')\
+               .numericStyle('underlay-opacity')"
+        )
+        .as_f64()
+        .unwrap_or(-1.0),
+        0.0,
+        "an unchanged node renders no underlay",
+    );
+    // The banner + legend chrome.
+    assert!(
+        eval(
+            &tab,
+            "document.querySelector('.explore-counts').textContent"
+        )
+        .as_str()
+        .unwrap_or("")
+        .contains("1 changed in this diff"),
+        "the header counts the changed models",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelectorAll('.legend-chip.changed').length"
+        ),
+        serde_json::Value::from(1),
+        "the legend explains the changed treatment",
+    );
+
+    // --- 3. composition with highlight ------------------------------------
+    assert_eq!(
+        eval(&tab, "window.focusModel('model.shop.dim_orders')"),
+        serde_json::Value::Bool(true),
+        "focusModel highlights the changed node",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "(function () { \
+               var n = window.CuteExploreLineage.cyInstance()\
+                 .getElementById('model.shop.dim_orders'); \
+               return n.hasClass('sel') && n.data('changed') === 1 \
+                 && n.numericStyle('underlay-opacity') > 0; \
+             })()"
+        ),
+        serde_json::Value::Bool(true),
+        "highlight (.sel border) and the changed underlay compose on one node",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelectorAll('.model-detail-card .detail-changed').length"
+        ),
+        serde_json::Value::from(1),
+        "the detail card carries the changed-in-this-diff chip",
+    );
+    // Highlighting a DIFFERENT lineage dims the changed node without
+    // dropping its data flag (context never fights emphasis).
+    assert_eq!(
+        eval(&tab, "window.focusModel('model.shop.lonely')"),
+        serde_json::Value::Bool(true),
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "(function () { \
+               var n = window.CuteExploreLineage.cyInstance()\
+                 .getElementById('model.shop.dim_orders'); \
+               return n.hasClass('dim') && n.data('changed') === 1; \
+             })()"
+        ),
+        serde_json::Value::Bool(true),
+        "a changed node outside the highlighted lineage dims with its glow",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelectorAll('.model-detail-card .detail-changed').length"
+        ),
+        serde_json::Value::from(0),
+        "an unchanged model's card carries no changed chip",
+    );
+
+    // --- 4. bridge/commit semantics untouched ------------------------------
+    assert_eq!(
+        eval(&tab, "'selectedModel' in document.body.dataset"),
+        serde_json::Value::Bool(false),
+        "highlight alone never writes the focus-commit attribute",
+    );
+    tab.press_key(" ").expect("press Space");
+    assert_eq!(
+        eval(&tab, "document.body.dataset.selectedModel"),
+        serde_json::Value::String("model.shop.lonely".to_owned()),
+        "the deliberate Space commit still writes the attribute",
+    );
+
+    let noise = console_noise.lock().unwrap().clone();
+    assert!(
+        noise.is_empty(),
+        "the contexted explore page must emit zero console warnings/errors; got:\n{}",
+        noise.join("\n"),
     );
 
     let _ = tab.close(true);

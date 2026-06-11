@@ -90,6 +90,39 @@ model renders as a "not compiled" node instead of aborting the run
 (the manifest itself must still be readable and schema v12+). Bare
 `cute-dbt` without a verb is a usage error listing both.
 
+### Change context: `explore --pr-diff`
+
+To see *your branch's footprint* on the graph, pass the optional
+`--pr-diff` — the same input shape as `report --pr-diff` (a raw
+`git diff --unified=0` patch via `@file`):
+
+```sh
+git diff --unified=0 origin/main...HEAD > /tmp/branch.diff
+
+cute-dbt explore \
+    --manifest target/manifest.json \
+    --out-dir  explore/ \
+    --pr-diff  @/tmp/branch.diff
+```
+
+The models whose files changed in the diff get an **amber "changed"
+glow** on `dag.html`, the header counts them ("N changed in this
+diff"), and the legend gains a `changed` chip. Change context **never
+narrows scope** — the full graph still renders every model; the diff
+only highlights what you touched. The treatment composes with the
+highlight/dim interaction: a changed node you highlight shows both,
+and the detail card + hover tooltip note "changed in this diff".
+
+Git renames are understood (a purely renamed model still marks as
+changed at its new path), and if your dbt project lives in a repo
+subdirectory, pass `--project-root <dir>` so the diff's repo-relative
+paths match the manifest's project-relative ones (the flag requires
+`--pr-diff` on this verb).
+
+The explorer takes **no baseline manifest, ever** — the
+developer-native diff signal is git, not environment manifests;
+baseline comparison stays a `report`-only concern.
+
 ## Producing the manifests
 
 cute-dbt expects compiled dbt manifests (i.e. produced by `dbt

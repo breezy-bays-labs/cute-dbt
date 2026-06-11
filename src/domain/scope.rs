@@ -29,7 +29,7 @@
 //! `+++` header and no hunks) still scopes the current node at its new
 //! path — no scope-level code is rename-aware.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use crate::domain::manifest::{Manifest, NodeId};
 use crate::domain::pr_diff::NormalizedDiffIndex;
@@ -153,6 +153,36 @@ pub fn all_models(current: &Manifest) -> ModelInScopeSet {
         .collect()
 }
 
+/// The models whose source files a PR diff changed — the `explore`
+/// verb's **change-context** seam (cute-dbt#106).
+///
+/// Matches each `model` node's `original_file_path` against the
+/// [`NormalizedDiffIndex`] changed-file keyset — the exact cute-dbt#81
+/// matching the report's `PrDiff` arm applies (the private
+/// `select_in_scope_pr_diff` consumes this same function, so the two
+/// verbs cannot disagree about which models a diff touched). Git renames
+/// (cute-dbt#80) are handled inside the index: both sides of every
+/// rename pair join the keyset, so a **pure** rename still marks the
+/// current node at its new path. Non-`model` resource types never mark
+/// (the cute-dbt#167 filter).
+///
+/// Change context **never narrows scope**: explore renders the full
+/// manifest regardless; this set only decorates the changed nodes with
+/// the "changed" context treatment.
+#[must_use]
+pub fn changed_models(current: &Manifest, index: &NormalizedDiffIndex) -> ModelInScopeSet {
+    current
+        .nodes()
+        .iter()
+        .filter(|(_, node)| node.resource_type() == "model")
+        .filter(|(_, node)| {
+            node.original_file_path()
+                .is_some_and(|ofp| index.contains_changed(ofp))
+        })
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
 // ---------------------------------------------------------------------
 // PrDiff arm
 // ---------------------------------------------------------------------
@@ -162,22 +192,10 @@ fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> S
     // `modified_set`. Only `model` nodes participate (other resource
     // types do not host unit tests in v0.1). The index owns the
     // changed-file keyset, so this consults it rather than normalizing
-    // paths here (single normalization authority).
-    let path_modified_models: HashSet<NodeId> = current
-        .nodes()
-        .iter()
-        .filter_map(|(id, node)| {
-            if node.resource_type() != "model" {
-                return None;
-            }
-            let ofp = node.original_file_path()?;
-            if index.contains_changed(ofp) {
-                Some(id.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
+    // paths here (single normalization authority). Shared with the
+    // explore verb's change context (cute-dbt#106) via [`changed_models`]
+    // — one matching authority for both verbs.
+    let path_modified_models = changed_models(current, index);
 
     // In-scope unit tests + the changed subset, in ONE traversal so
     // `changed ⊆ in_scope` holds by construction (cute-dbt#91). A test is
@@ -228,7 +246,7 @@ fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> S
             }
         }
     }
-    for model_id in &path_modified_models {
+    for model_id in path_modified_models.iter() {
         let has_tests = tests_per_model.get(model_id).copied().unwrap_or(0) > 0;
         if !has_tests {
             model_ids.insert(model_id.clone());
@@ -939,6 +957,152 @@ mod tests {
             !selection.changed.contains(ctx_id),
             "test_ctx is context (in scope via its model's SQL, YAML unchanged)",
         );
+    }
+
+    // ----- changed_models (cute-dbt#106 — explore change context) -----
+
+    #[test]
+    fn changed_models_marks_exactly_the_path_modified_models() {
+        let dim_payers = NodeId::new("model.shop.dim_payers");
+        let stg_customers = NodeId::new("model.shop.stg_customers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim_payers.clone(),
+            model_node_with_path(&dim_payers, "ck1", "models/marts/dim_payers.sql"),
+        );
+        nodes.insert(
+            stg_customers.clone(),
+            model_node_with_path(&stg_customers, "ck2", "models/staging/stg_customers.sql"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let index = NormalizedDiffIndex::new(
+            &prdiff_from_paths(&["models/marts/dim_payers.sql", "README.md"]),
+            None,
+        );
+        let changed = changed_models(&current, &index);
+
+        assert!(changed.contains(&dim_payers));
+        assert!(!changed.contains(&stg_customers));
+        assert_eq!(changed.len(), 1, "extraneous diff paths mark nothing");
+    }
+
+    #[test]
+    fn changed_models_excludes_non_model_nodes() {
+        // A generic test node whose declaring SQL is in the diff must not
+        // surface as a changed MODEL (the cute-dbt#167 filter, shared with
+        // select_in_scope_pr_diff so the two consumers cannot drift).
+        let generic_test = NodeId::new("test.shop.assert_positive_total");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            generic_test.clone(),
+            typed_node_with_path(
+                &generic_test,
+                "test",
+                "ck1",
+                "tests/assert_positive_total.sql",
+            ),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let index = NormalizedDiffIndex::new(
+            &prdiff_from_paths(&["tests/assert_positive_total.sql"]),
+            None,
+        );
+        assert!(changed_models(&current, &index).is_empty());
+    }
+
+    #[test]
+    fn changed_models_marks_a_purely_renamed_model_at_its_new_path() {
+        // The cute-dbt#80 rename lineage: a pure rename carries no `+++`
+        // header and no hunks — only the rename pair — and the current
+        // manifest holds the node at the NEW path. The index keyset
+        // carries both sides, so the model still marks as changed.
+        let dim_b = NodeId::new("model.shop.dim_b");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim_b.clone(),
+            model_node_with_path(&dim_b, "ck1", "models/marts/dim_b.sql"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let mut diff = prdiff_from_paths(&[]);
+        diff.renames = vec![crate::domain::pr_diff::RenamePair {
+            from: "models/marts/dim_a.sql".to_owned(),
+            to: "models/marts/dim_b.sql".to_owned(),
+        }];
+        let index = NormalizedDiffIndex::new(&diff, None);
+        let changed = changed_models(&current, &index);
+        assert!(
+            changed.contains(&dim_b),
+            "the renamed model marks changed under its NEW path",
+        );
+    }
+
+    #[test]
+    fn changed_models_honors_the_project_root_strip() {
+        let dim_payers = NodeId::new("model.shop.dim_payers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim_payers.clone(),
+            model_node_with_path(&dim_payers, "ck1", "models/marts/dim_payers.sql"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let index = NormalizedDiffIndex::new(
+            &prdiff_from_paths(&["dbt_project/models/marts/dim_payers.sql"]),
+            Some(Path::new("dbt_project")),
+        );
+        assert!(changed_models(&current, &index).contains(&dim_payers));
+    }
+
+    #[test]
+    fn changed_models_matches_the_pr_diff_arm_model_marking() {
+        // The reuse property: explore's changed set is EXACTLY the PrDiff
+        // arm's path-modified model marking (one matching authority — the
+        // two verbs cannot disagree about which models a diff touched).
+        let dim_payers = NodeId::new("model.shop.dim_payers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim_payers.clone(),
+            model_node_with_path(&dim_payers, "ck1", "models/marts/dim_payers.sql"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let index =
+            NormalizedDiffIndex::new(&prdiff_from_paths(&["models/marts/dim_payers.sql"]), None);
+        let changed = changed_models(&current, &index);
+        let selection = select_in_scope(
+            &current,
+            &ScopeInput::PrDiff {
+                index: index.clone(),
+            },
+        );
+        // dim_payers has zero unit tests, so the report arm surfaces it
+        // via arm 2 — the same membership changed_models reports.
+        assert_eq!(changed, selection.models_in_scope);
     }
 
     // ----- all_models (cute-dbt#100 — the explore verb's seam) -----

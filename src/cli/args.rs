@@ -177,6 +177,12 @@ pub struct ReportArgs {
 
 /// Arguments for `cute-dbt explore` (cute-dbt#100) — full-manifest,
 /// no baseline, two-page `--out-dir` output.
+///
+/// The explorer takes **no baseline manifest, ever** (the cute-dbt#106
+/// founder respec): the developer-native diff signal is git — the
+/// optional `--pr-diff` change context below — not environment
+/// manifests, which remain a `report`-only environment-comparison
+/// concern.
 #[derive(Debug, Args)]
 pub struct ExploreArgs {
     /// Path to the compiled dbt `manifest.json` to explore.
@@ -193,6 +199,32 @@ pub struct ExploreArgs {
     /// does not exist.
     #[arg(long, value_name = "DIR")]
     pub out_dir: PathBuf,
+
+    /// Optional PR-diff **change context** (cute-dbt#106): highlight the
+    /// models whose files changed on the developer's branch — on the
+    /// FULL graph.
+    ///
+    /// Accepts exactly the `report --pr-diff` input shape (the same
+    /// value-parser): a raw `git diff --unified=0` patch via `@file`,
+    /// or literal diff text. Change context **never narrows scope** —
+    /// every model still renders; the changed ones gain a visually
+    /// distinct "changed" treatment. A bad `@file` (missing /
+    /// non-UTF-8) or a value that is not a unified diff is a clap usage
+    /// error (exit 2), the same error class as on `report`.
+    #[arg(long, value_name = "@FILE", value_parser = crate::cli::pr_diff::parse_diff)]
+    pub pr_diff: Option<PrDiff>,
+
+    /// Optional dbt project root, stripped from the diff's
+    /// repo-relative paths so they match the manifest's
+    /// project-relative `original_file_path` entries (the same strip
+    /// `report --pr-diff` applies via its `--project-root`; needed when
+    /// the dbt project lives in a repo subdirectory).
+    ///
+    /// Only meaningful as the diff-side strip, so supplying it without
+    /// `--pr-diff` is a clap usage error (exit 2) rather than a
+    /// silently ignored no-op (the `--modified-selectors` precedent).
+    #[arg(long, value_name = "PATH", value_parser = parse_project_root, requires = "pr_diff")]
+    pub project_root: Option<PathBuf>,
 }
 
 /// One `--modified-selectors` token — the CLI-layer twin of the domain
@@ -426,9 +458,11 @@ mod tests {
 
     #[test]
     fn explore_rejects_a_baseline_manifest() {
-        // The explorer is full-manifest by design (epic #99): there is no
-        // baseline on this verb until the V7 cut line lands, so the flag
-        // must be rejected, not silently ignored.
+        // The explorer takes NO baseline manifest, ever (the cute-dbt#106
+        // founder respec, superseding the original V7 `--baseline` cut
+        // line): the developer-native diff signal is git (`--pr-diff`),
+        // not environment manifests. The flag must be rejected, not
+        // silently ignored.
         let err = parse(&[
             "cute-dbt",
             "explore",
@@ -440,6 +474,170 @@ mod tests {
             "b.json",
         ])
         .expect_err("explore takes no baseline");
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    // ----- explore --pr-diff change context (cute-dbt#106) -----
+
+    #[test]
+    fn explore_without_pr_diff_carries_no_change_context() {
+        let cli = parse(&[
+            "cute-dbt",
+            "explore",
+            "--manifest",
+            "m.json",
+            "--out-dir",
+            "d",
+        ])
+        .expect("explore without --pr-diff parses");
+        let Command::Explore(explore) = cli.command else {
+            panic!("expected the explore arm");
+        };
+        assert!(explore.pr_diff.is_none(), "--pr-diff is optional");
+        assert!(explore.project_root.is_none());
+    }
+
+    #[test]
+    fn explore_pr_diff_accepts_the_report_at_file_shape() {
+        // The cute-dbt#106 AC: `explore --pr-diff` accepts EXACTLY the
+        // `report --pr-diff` input shape (@file / literal) — the same
+        // value-parser, so the two verbs cannot drift.
+        let diff = write_fixture("explore-prdiff", VALID_DIFF);
+        let arg = format!("@{}", diff.display());
+        let cli = parse(&[
+            "cute-dbt",
+            "explore",
+            "--manifest",
+            "m.json",
+            "--out-dir",
+            "d",
+            "--pr-diff",
+            &arg,
+        ])
+        .expect("explore --pr-diff @file parses");
+        let Command::Explore(explore) = cli.command else {
+            panic!("expected the explore arm");
+        };
+        let parsed = explore.pr_diff.expect("pr_diff is Some");
+        assert_eq!(parsed.files.len(), 1);
+        assert_eq!(parsed.files[0].path, "models/marts/core/_core__models.yml");
+        let _ = std::fs::remove_file(&diff);
+    }
+
+    #[test]
+    fn explore_pr_diff_at_missing_file_is_a_value_validation_error() {
+        // The same error class report raises for a bad @file (reuse,
+        // never a new PreflightError variant — the enum stays at four).
+        let path = unique_temp_path("explore-missing-diff");
+        let arg = format!("@{}", path.display());
+        let err = parse(&[
+            "cute-dbt",
+            "explore",
+            "--manifest",
+            "m.json",
+            "--out-dir",
+            "d",
+            "--pr-diff",
+            &arg,
+        ])
+        .expect_err("a missing @file is a usage error on explore too");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        assert!(
+            err.to_string().contains("could not read"),
+            "error explains the read failure: {err}"
+        );
+    }
+
+    #[test]
+    fn explore_pr_diff_with_malformed_contents_is_a_value_validation_error() {
+        let path = write_fixture("explore-malformed", "this is not a unified diff\n");
+        let arg = format!("@{}", path.display());
+        let err = parse(&[
+            "cute-dbt",
+            "explore",
+            "--manifest",
+            "m.json",
+            "--out-dir",
+            "d",
+            "--pr-diff",
+            &arg,
+        ])
+        .expect_err("a non-diff @file is a usage error on explore too");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        assert!(
+            err.to_string()
+                .contains("could not be parsed as a unified diff"),
+            "error explains the parse failure: {err}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn explore_project_root_requires_pr_diff() {
+        // On explore the project root exists ONLY as the diff-side path
+        // strip; without --pr-diff it would be a silent no-op, so it is
+        // rejected at parse time (the --modified-selectors precedent).
+        let dir = unique_temp_dir("explore-root-alone");
+        let err = parse(&[
+            "cute-dbt",
+            "explore",
+            "--manifest",
+            "m.json",
+            "--out-dir",
+            "d",
+            "--project-root",
+            dir.to_str().expect("temp dir utf-8"),
+        ])
+        .expect_err("--project-root without --pr-diff is a usage error");
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+        assert!(
+            err.to_string().contains("--pr-diff"),
+            "the error names the missing companion flag: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explore_pr_diff_with_project_root_parses() {
+        let diff = write_fixture("explore-prdiff-root", VALID_DIFF);
+        let arg = format!("@{}", diff.display());
+        let dir = unique_temp_dir("explore-root");
+        let cli = parse(&[
+            "cute-dbt",
+            "explore",
+            "--manifest",
+            "m.json",
+            "--out-dir",
+            "d",
+            "--pr-diff",
+            &arg,
+            "--project-root",
+            dir.to_str().expect("temp dir utf-8"),
+        ])
+        .expect("explore --pr-diff with --project-root parses");
+        let Command::Explore(explore) = cli.command else {
+            panic!("expected the explore arm");
+        };
+        assert_eq!(explore.project_root, Some(dir.clone()));
+        let _ = std::fs::remove_file(&diff);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explore_rejects_modified_selectors() {
+        // state:modified sub-selectors are a baseline-arm concept; the
+        // explorer has no baseline, so the flag stays off this verb.
+        let err = parse(&[
+            "cute-dbt",
+            "explore",
+            "--manifest",
+            "m.json",
+            "--out-dir",
+            "d",
+            "--modified-selectors",
+            "configs",
+        ])
+        .expect_err("explore takes no state:modified sub-selectors");
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
 

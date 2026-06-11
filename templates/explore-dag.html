@@ -33,6 +33,12 @@ body { max-width: 72rem; }
 .lineage-legend { color: #555; font-size: 0.85rem; margin-top: 0.5rem; }
 .lineage-legend .legend-chip { display: inline-block; padding: 0 0.4rem; border: 1.5px solid #0072B2; border-radius: 4px; background: #e8f1f8; color: #1c1c1f; }
 .lineage-legend .legend-chip.notcompiled { border-color: #b07400; border-style: dashed; background: #f4f4f5; }
+/* cute-dbt#106 — the PR-diff change-context treatment: an amber halo
+   mirroring the canvas underlay glow. A separate visual channel from
+   the highlight vocabulary (border = selected, opacity = dim/trace)
+   and from the not-compiled dashed border, so all of them compose on
+   one node without conflicting. */
+.lineage-legend .legend-chip.changed { margin: 0 0.2rem; box-shadow: 0 0 0 3px rgba(230, 159, 0, 0.55); }
 /* cute-dbt#102 — the CTE ⇄ model view toggle + the CTE view host. */
 .view-toggle { display: inline-flex; border: 1px solid #c5c5cc; border-radius: 6px; overflow: hidden; }
 .view-toggle button { border: none; border-radius: 0; margin: 0; background: #fff; color: #1c1c1f; padding: 0.25rem 0.7rem; font-size: 0.85rem; cursor: pointer; }
@@ -77,6 +83,9 @@ body { max-width: 72rem; }
 .model-detail-card .detail-paths code { overflow-wrap: anywhere; }
 .model-detail-card .detail-path-fixtures { color: #555; }
 .model-detail-card .detail-notcompiled { display: inline-block; padding: 0 0.4rem; border: 1.5px dashed #b07400; border-radius: 4px; background: #f4f4f5; font-size: 0.8rem; }
+/* cute-dbt#106 — the detail card's "changed in this diff" chip (the
+   change-context twin of .detail-notcompiled; both can show at once). */
+.model-detail-card .detail-changed { display: inline-block; margin-left: 0.35rem; padding: 0 0.4rem; border: 1.5px solid #0072B2; border-radius: 4px; background: #e8f1f8; box-shadow: 0 0 0 2px rgba(230, 159, 0, 0.55); font-size: 0.8rem; }
 .model-detail-card .detail-section-title { margin: 0.5rem 0 0.15rem; font-size: 0.85rem; color: #555; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
 </style>
 </head>
@@ -89,7 +98,7 @@ body { max-width: 72rem; }
 <header class="explore-header">
   <div>
     <h1>Model lineage</h1>
-    <p class="explore-counts">full manifest — {{ model_count }} model{% if model_count != 1 %}s{% endif %}, {{ edge_count }} edge{% if edge_count != 1 %}s{% endif %}{% if not_compiled_count > 0 %}, {{ not_compiled_count }} not compiled{% endif %}</p>
+    <p class="explore-counts">full manifest — {{ model_count }} model{% if model_count != 1 %}s{% endif %}, {{ edge_count }} edge{% if edge_count != 1 %}s{% endif %}{% if not_compiled_count > 0 %}, {{ not_compiled_count }} not compiled{% endif %}{% if has_change_context %}, {{ changed_count }} changed in this diff{% endif %}</p>
   </div>
   <nav class="explore-nav" aria-label="Explore pages">
     <a href="tests.html">Unit tests &rarr;</a>
@@ -131,8 +140,9 @@ body { max-width: 72rem; }
   <p class="lineage-empty" hidden>No models in this manifest.</p>
   <div class="lineage-legend">
     <span class="legend-chip">model</span>
-    <span class="legend-chip notcompiled">not compiled</span>
-    &mdash; a dashed node has no compiled SQL in this manifest (<code>dbt parse</code>); run <code>dbt compile</code> to fill it in. The explorer renders it anyway (fail-open).
+    <span class="legend-chip notcompiled">not compiled</span>{% if has_change_context %}
+    <span class="legend-chip changed">changed</span>{% endif %}
+    &mdash; a dashed node has no compiled SQL in this manifest (<code>dbt parse</code>); run <code>dbt compile</code> to fill it in. The explorer renders it anyway (fail-open).{% if has_change_context %} An amber-glow node&rsquo;s file changed in this PR diff &mdash; change context only highlights; the full graph always renders every model.{% endif %}
   </div>
   </div>
   {# cute-dbt#102 — the CTE view host (hidden until the toggle opens it).

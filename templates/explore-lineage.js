@@ -188,7 +188,11 @@
         id: n.id,
         label: badge ? name + "\n" + badge : name,
         w: nodeWidth(name, badge),
-        notCompiled: n.not_compiled ? 1 : 0
+        notCompiled: n.not_compiled ? 1 : 0,
+        // cute-dbt#106 — PR-diff change context. The payload omits the
+        // key entirely on a no-context render, so `n.changed` is
+        // undefined there and every node maps to 0.
+        changed: n.changed ? 1 : 0
       }
     });
   });
@@ -226,6 +230,20 @@
       "background-color": "#f4f4f5",
       "border-color": "#b07400",
       "border-style": "dashed"
+    }},
+    // cute-dbt#106 — the "changed in this diff" context treatment: an
+    // amber UNDERLAY glow behind the node. A deliberately SEPARATE
+    // visual channel from the highlight vocabulary (border color/width
+    // = .sel, opacity = .dim/.trace) and from the not-compiled dashed
+    // border, so all of them compose on one node without conflicting —
+    // a changed node that is also highlighted shows both, and a changed
+    // node outside a highlighted lineage dims with its glow (context
+    // never fights emphasis).
+    { selector: "node[changed = 1]", style: {
+      "underlay-color": "#e69f00",
+      "underlay-opacity": 0.45,
+      "underlay-padding": 5,
+      "underlay-shape": "round-rectangle"
     }},
     { selector: "edge", style: {
       "curve-style": "bezier",
@@ -346,6 +364,11 @@
     if (n.not_compiled) {
       card.appendChild(el("span", "detail-notcompiled", "not compiled"));
     }
+    // cute-dbt#106 — change context on the card (composes with the
+    // not-compiled chip; both can show at once).
+    if (n.changed) {
+      card.appendChild(el("span", "detail-changed", "changed in this diff"));
+    }
     card.appendChild(d.description
       ? el("p", "detail-description", d.description)
       : el("p", "detail-description detail-empty", "no description"));
@@ -447,6 +470,11 @@
     tooltip.appendChild(el("span", "tooltip-fact", "grain: " + n.detail.grain.value));
     if (n.not_compiled) {
       tooltip.appendChild(el("span", "tooltip-fact", "not compiled"));
+    }
+    // cute-dbt#106 — change context is a key fact too (transient only;
+    // the tooltip still never touches highlight or commit state).
+    if (n.changed) {
+      tooltip.appendChild(el("span", "tooltip-fact", "changed in this diff"));
     }
     var rp = node.renderedPosition();
     tooltip.style.left = rp.x + "px";

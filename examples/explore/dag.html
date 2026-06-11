@@ -256,6 +256,12 @@ body { max-width: 72rem; }
 .lineage-legend { color: #555; font-size: 0.85rem; margin-top: 0.5rem; }
 .lineage-legend .legend-chip { display: inline-block; padding: 0 0.4rem; border: 1.5px solid #0072B2; border-radius: 4px; background: #e8f1f8; color: #1c1c1f; }
 .lineage-legend .legend-chip.notcompiled { border-color: #b07400; border-style: dashed; background: #f4f4f5; }
+/* cute-dbt#106 — the PR-diff change-context treatment: an amber halo
+   mirroring the canvas underlay glow. A separate visual channel from
+   the highlight vocabulary (border = selected, opacity = dim/trace)
+   and from the not-compiled dashed border, so all of them compose on
+   one node without conflicting. */
+.lineage-legend .legend-chip.changed { margin: 0 0.2rem; box-shadow: 0 0 0 3px rgba(230, 159, 0, 0.55); }
 /* cute-dbt#102 — the CTE ⇄ model view toggle + the CTE view host. */
 .view-toggle { display: inline-flex; border: 1px solid #c5c5cc; border-radius: 6px; overflow: hidden; }
 .view-toggle button { border: none; border-radius: 0; margin: 0; background: #fff; color: #1c1c1f; padding: 0.25rem 0.7rem; font-size: 0.85rem; cursor: pointer; }
@@ -300,6 +306,9 @@ body { max-width: 72rem; }
 .model-detail-card .detail-paths code { overflow-wrap: anywhere; }
 .model-detail-card .detail-path-fixtures { color: #555; }
 .model-detail-card .detail-notcompiled { display: inline-block; padding: 0 0.4rem; border: 1.5px dashed #b07400; border-radius: 4px; background: #f4f4f5; font-size: 0.8rem; }
+/* cute-dbt#106 — the detail card's "changed in this diff" chip (the
+   change-context twin of .detail-notcompiled; both can show at once). */
+.model-detail-card .detail-changed { display: inline-block; margin-left: 0.35rem; padding: 0 0.4rem; border: 1.5px solid #0072B2; border-radius: 4px; background: #e8f1f8; box-shadow: 0 0 0 2px rgba(230, 159, 0, 0.55); font-size: 0.8rem; }
 .model-detail-card .detail-section-title { margin: 0.5rem 0 0.15rem; font-size: 0.85rem; color: #555; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
 </style>
 </head>
@@ -602,7 +611,11 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
         id: n.id,
         label: badge ? name + "\n" + badge : name,
         w: nodeWidth(name, badge),
-        notCompiled: n.not_compiled ? 1 : 0
+        notCompiled: n.not_compiled ? 1 : 0,
+        // cute-dbt#106 — PR-diff change context. The payload omits the
+        // key entirely on a no-context render, so `n.changed` is
+        // undefined there and every node maps to 0.
+        changed: n.changed ? 1 : 0
       }
     });
   });
@@ -640,6 +653,20 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
       "background-color": "#f4f4f5",
       "border-color": "#b07400",
       "border-style": "dashed"
+    }},
+    // cute-dbt#106 — the "changed in this diff" context treatment: an
+    // amber UNDERLAY glow behind the node. A deliberately SEPARATE
+    // visual channel from the highlight vocabulary (border color/width
+    // = .sel, opacity = .dim/.trace) and from the not-compiled dashed
+    // border, so all of them compose on one node without conflicting —
+    // a changed node that is also highlighted shows both, and a changed
+    // node outside a highlighted lineage dims with its glow (context
+    // never fights emphasis).
+    { selector: "node[changed = 1]", style: {
+      "underlay-color": "#e69f00",
+      "underlay-opacity": 0.45,
+      "underlay-padding": 5,
+      "underlay-shape": "round-rectangle"
     }},
     { selector: "edge", style: {
       "curve-style": "bezier",
@@ -760,6 +787,11 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
     if (n.not_compiled) {
       card.appendChild(el("span", "detail-notcompiled", "not compiled"));
     }
+    // cute-dbt#106 — change context on the card (composes with the
+    // not-compiled chip; both can show at once).
+    if (n.changed) {
+      card.appendChild(el("span", "detail-changed", "changed in this diff"));
+    }
     card.appendChild(d.description
       ? el("p", "detail-description", d.description)
       : el("p", "detail-description detail-empty", "no description"));
@@ -861,6 +893,11 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
     tooltip.appendChild(el("span", "tooltip-fact", "grain: " + n.detail.grain.value));
     if (n.not_compiled) {
       tooltip.appendChild(el("span", "tooltip-fact", "not compiled"));
+    }
+    // cute-dbt#106 — change context is a key fact too (transient only;
+    // the tooltip still never touches highlight or commit state).
+    if (n.changed) {
+      tooltip.appendChild(el("span", "tooltip-fact", "changed in this diff"));
     }
     var rp = node.renderedPosition();
     tooltip.style.left = rp.x + "px";

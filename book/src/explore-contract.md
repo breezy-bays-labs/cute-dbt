@@ -138,10 +138,33 @@ Absence is explicit: `null` for a missing path, `[]` for no unit tests
 model-detail card's **files** section, so the contract surface is
 human-visible too.
 
+## Change context (`--pr-diff`): the `changed` node key
+
+When the page was rendered with `explore --pr-diff` (PR-diff change
+context), each lineage-payload node whose source file the diff touched
+carries an additional key:
+
+```json
+{ "id": "model.jaffle_shop.customers", "changed": true, "...": "..." }
+```
+
+This key is the **one deliberate exception** to the explicit-absence
+posture: it is serialized **only when `true`**. An unchanged node — and
+*every* node on a page rendered without `--pr-diff` — carries no
+`changed` key at all, so a no-context payload is byte-identical to the
+pre-context shape. Hosts should treat a missing key as "not changed /
+no context". The key is additive and informational; it is not one of
+the four versioned contract surfaces, and shipping it did not bump the
+contract version.
+
+Change context never narrows scope: the payload's `nodes` array spans
+the full manifest with or without a diff.
+
 ## What is deliberately *not* in the contract
 
 - Hover, click, and search are in-page exploration; they never fire
   the external signal in either binding.
 - `tests.html` is not a drivable surface (no hooks, no attribute).
-- The explorer takes no baseline manifest; change context arrives via
-  `--pr-diff` and is orthogonal to this contract.
+- The explorer takes no baseline manifest, ever — change context
+  arrives via `--pr-diff` (the git diff signal) and only decorates;
+  the commit event schema is unchanged by it.

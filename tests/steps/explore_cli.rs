@@ -27,13 +27,35 @@ fn fresh_out_dir(stem: &str) -> PathBuf {
 /// Run `cute-dbt explore` against `manifest`, capturing exit code,
 /// stderr, and (when written) both pages into the `World`.
 pub fn run_explore(world: &mut World, manifest: &Path, out_dir: PathBuf) {
-    let output = common::run_cli(&[
+    run_explore_with(world, manifest, out_dir, &[], None);
+}
+
+/// Run `cute-dbt explore` with extra arguments (the cute-dbt#106
+/// `--pr-diff` / `--project-root` change-context surface) and an
+/// optional working directory (a relative `--project-root` is
+/// existence-validated by clap, so its sub-dir must exist relative to
+/// the subprocess cwd — the `pr_diff_scoping` precedent). Captures
+/// exit code, stderr, and (when written) both pages into the `World`.
+pub fn run_explore_with(
+    world: &mut World,
+    manifest: &Path,
+    out_dir: PathBuf,
+    extra_args: &[String],
+    cwd: Option<&Path>,
+) {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
+    cmd.args([
         "explore",
         "--manifest",
         common::s(manifest),
         "--out-dir",
         common::s(&out_dir),
     ]);
+    cmd.args(extra_args);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let output = cmd.output().expect("the cute-dbt binary spawns");
     world.last_exit_code = output.status.code();
     world.last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     world.explore_dag_html = std::fs::read_to_string(out_dir.join("dag.html")).ok();

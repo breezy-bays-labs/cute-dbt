@@ -61,7 +61,7 @@ use crate::domain::{
     BlockDiff, CheckPolicy, DEFAULT_REPORT_TITLE, FixtureTableDiff, HeuristicId, InScopeSet,
     Manifest, ModelInScopeSet, NamedTableDiff, NormalizedDiffIndex, PreflightError, ScopeInput,
     ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock,
-    all_models, check_by_id, effective_fixture_format, external_fixture_table,
+    all_models, changed_models, check_by_id, effective_fixture_format, external_fixture_table,
     extract_unit_test_block, preflight_compiled, reconstruct_block_diffs,
     reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
     refine_changed_by_hunks, resolve_check_policy, scan_pragmas, select_in_scope,
@@ -283,7 +283,8 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
 }
 
 /// The named `explore` run loop (cute-dbt#100) — `load_current` →
-/// `all_models` → `build_payload` → `render_explore`.
+/// `all_models` → `resolve_change_context` → `build_payload` →
+/// `render_explore`.
 ///
 /// Stage-1 pre-flight is fail-CLOSED exactly like `report` (an
 /// unreadable or pre-v12 manifest aborts with remediation). Stage-2 is
@@ -294,9 +295,18 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
 /// [`all_models`] domain seam, and the payload reuses the existing
 /// engine-agnostic [`build_payload`] with an empty `changed` set and no
 /// diff artifacts.
+///
+/// The optional `--pr-diff` (cute-dbt#106) adds **change context**:
+/// [`changed_models`] marks the models whose files the diff touched and
+/// the renderer decorates exactly those nodes. Context **never narrows
+/// scope** — the payload below always spans the full `models` set, with
+/// or without a diff. The explorer takes no baseline manifest, ever
+/// (founder respec 2026-06-10): the developer-native diff signal is
+/// git, not environment manifests.
 fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
     let current = load_explore_manifest(args)?;
     let models = all_models(&current);
+    let changed = resolve_change_context(args, &current);
     // Stage-2 fail-OPEN: no preflight_compiled here, by design.
     let payload = build_payload(
         &current,
@@ -308,9 +318,26 @@ fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
         &HashMap::new(),
         "",
     );
-    render_explore(&args.out_dir, &current, &models, &payload)
+    render_explore(&args.out_dir, &current, &models, changed.as_ref(), &payload)
         .map_err(|err| RunError::output(&args.out_dir, err))?;
     Ok(())
+}
+
+/// The `resolve_change_context` stage (cute-dbt#106): map the optional
+/// `--pr-diff` onto the changed-model set.
+///
+/// `None` — no `--pr-diff` — means **no change context** (the renderer
+/// emits the unchanged no-context page shape), which is distinct from
+/// `Some(empty)` — a diff that touched no model files still renders the
+/// honest "0 changed in this diff" banner. The [`NormalizedDiffIndex`]
+/// is built exactly like the report arm's (`resolve_scope_input`):
+/// the `--project-root` strip rebases the diff's repo-relative paths
+/// onto the manifest's project-relative `original_file_path` entries.
+fn resolve_change_context(args: &ExploreArgs, current: &Manifest) -> Option<ModelInScopeSet> {
+    args.pr_diff.as_ref().map(|diff| {
+        let index = NormalizedDiffIndex::new(diff, args.project_root.as_deref());
+        changed_models(current, &index)
+    })
 }
 
 /// Stage-1 pre-flight for the `explore` verb: load `--manifest` through
