@@ -958,7 +958,7 @@ g.dag-node:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3p
 .mode-badge.has-mode-tip, .this-badge.has-mode-tip { position: relative; cursor: help; }
 .mode-badge.has-mode-tip:focus-visible, .this-badge.has-mode-tip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .mode-badge.has-mode-tip .expect-tooltip-bubble,
-.this-badge.has-mode-tip .expect-tooltip-bubble { left: 0; transform: none; z-index: 60; box-shadow: 0 6px 22px rgba(0,0,0,0.3); }
+.this-badge.has-mode-tip .expect-tooltip-bubble { left: 0; transform: none; z-index: 60; box-shadow: 0 6px 22px rgba(0,0,0,0.3); border-radius: var(--radius-sm); /* cute-dbt#233 (audit D6) — pass-2 rounds the badge-borne bubble at --radius-sm; the shared .expect-tooltip-bubble keeps --radius-pan */ }
 .mode-badge.has-mode-tip:hover .expect-tooltip-bubble,
 .mode-badge.has-mode-tip:focus .expect-tooltip-bubble,
 .mode-badge.has-mode-tip:focus-visible .expect-tooltip-bubble,
@@ -1286,8 +1286,20 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
 .col-tooltip .ct-desc { font-size: 1.12em; line-height: 1.5; opacity: 0.97; }
 .col-tooltip .ct-tests-label { margin-top: 0.6rem; font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.07em; opacity: 0.6; }
 .col-tooltip .ct-tests { display: flex; flex-direction: column; gap: 0.4rem; margin-top: 0.3rem; }
-.col-tooltip .ct-test { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.45rem; }
-.col-tooltip .ct-key { font-family: var(--font-mono); font-weight: 700; color: var(--accent); }
+.col-tooltip .ct-test { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.7rem; }
+/* cute-dbt#233 (audit D4) — the pass-2 readable-on-dark accent: raw
+   var(--accent) lands ≈3:1 against the always-dark tooltip fill on the
+   4 light themes (AA fail); the oklab mix toward white clears 4.5:1 on
+   all 8 themes (headless-pinned). */
+.col-tooltip .ct-key { font-family: var(--font-mono); font-weight: 700; color: color-mix(in oklab, var(--accent) 60%, white); }
+/* cute-dbt#233 — Latte ct-key AA: the spec's own 60% mix lands 3.37:1 on
+   latte's tooltip fill (#4c4f69 — the lightest of the 8; the spec tokens
+   carry the same value, so this is empirically the spec's gap, not ours).
+   The #198/#206/#227 pattern: a scoped stand-in only — the mix shifts
+   toward white for latte alone (≈5:1 measured); the verbatim latte theme
+   block and the other 7 themes' spec-literal mix stay pinned. Covers the
+   model tip too (it rides the .col-tooltip shell). */
+:root[data-theme="latte"] .col-tooltip .ct-key { color: color-mix(in oklab, var(--accent) 35%, white); }
 .col-tooltip .ct-vals { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
 .col-tooltip .ct-val { background: rgba(255,255,255,0.14); border-radius: 4px; padding: 0.05rem 0.42rem; font-family: var(--font-mono); font-size: 0.9em; white-space: nowrap; }
 /* (cute-dbt#202 — the .ct-detail run is retired: detail strings now split
