@@ -320,21 +320,27 @@ file.
   (proven empirically in the R1 spike); without it the report would emit
   a network request when opened in a browser with networking allowed.
 - **Cytoscape (cute-dbt#180):** pinned 3.30.2, the minified **UMD** core
-  bundle only — the opt-in second DAG engine behind the settings-panel
-  Mermaid ⇄ Cytoscape picker (Mermaid stays the static default). Init
-  contract: canvas-text node labels (XSS-safe by construction — hostile
-  manifest-derived names draw as glyphs, never parse as HTML; no
-  `cytoscape-node-html-label`, ever), an explicit non-webfont system
-  `fontFamily`, **no layout plugin** (no `cytoscape-dagre`, never the
-  EPL-licensed `cytoscape-elk` — node positions come from the
-  first-party longest-path preset layout in `templates/cyto-dag.js`),
-  no workers, and handlers bound from our own JS to rendered elements —
-  never click directives executing payload data. Per-click interaction
-  mutates classes in place; it never re-calls a render entry point.
-  Both engines pass the headless zero-egress gate independently (the
-  Cytoscape-selected arm flips the picker before asserting zero
-  requests). The carrying-both-engines posture is a conscious reversal
-  recorded in the ops ADR-4 amendment (2026-06-10).
+  bundle — the opt-in second DAG engine behind the report's
+  settings-panel Mermaid ⇄ Cytoscape picker (Mermaid stays the static
+  default) and, since cute-dbt#101, the engine of the explore page's
+  interactive model-lineage DAG. Init contract: canvas-text node labels
+  (XSS-safe by construction — hostile manifest-derived names draw as
+  glyphs, never parse as HTML; no `cytoscape-node-html-label`, ever), an
+  explicit non-webfont system `fontFamily`, no workers, and handlers
+  bound from our own JS to rendered elements — never click directives
+  executing payload data. Per-click interaction mutates classes in
+  place; it never re-calls a render entry point. Layout is per-page: the
+  **report** page loads **no layout plugin** (node positions come from
+  the first-party longest-path preset layout in
+  `templates/cyto-dag.js`); the **explore** page pairs the core with the
+  vendored **cytoscape-dagre** UMD extension (cute-dbt#101 — MIT, dagre
+  bundled internally, in-thread, `sourceMappingURL` trailer stripped at
+  vendoring) for its left-to-right lineage ranks. The EPL-licensed
+  `cytoscape-elk` is forbidden everywhere. Both report engines pass the
+  headless zero-egress gate independently (the Cytoscape-selected arm
+  flips the picker before asserting zero requests), and the explore
+  pages each pass it per-page. The carrying-both-engines posture is a
+  conscious reversal recorded in the ops ADR-4 amendment (2026-06-10).
 - **Favicon:** an empty `data:` URI favicon, emitted as
   `<link rel="icon" href="data:,">`, so the browser's automatic favicon
   request resolves in-document and never leaves it. Reinforces the
