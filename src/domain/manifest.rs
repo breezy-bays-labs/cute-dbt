@@ -590,6 +590,114 @@ impl Node {
     }
 }
 
+/// One entry of the manifest's top-level `sources` map — a dbt
+/// `source()` target (cute-dbt#57).
+///
+/// A **separate POD** from [`Node`], not a kind-variant: dbt itself keeps
+/// sources a distinct type end-to-end (fusion's `ManifestSource` /
+/// `DbtSource` and the dedicated top-level `sources` map in the v12
+/// wire, never merged into `nodes`), and source entries carry **no
+/// `checksum` key**, so reusing [`Node`] would force Option-ing a
+/// required field. Mirrors the `StateComparator` precedent the issue
+/// cites: additive widening, never a domain restructure.
+///
+/// Keyed in [`Manifest::sources`] by the wire map key
+/// (`source.<package>.<source_name>.<name>`); the adapter folds that key
+/// into [`Self::id`] (the [`Node`] identity precedent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceNode {
+    id: NodeId,
+    /// `source()`'s **first** argument — the YAML `sources:` block name.
+    source_name: String,
+    /// `source()`'s **second** argument — the table name within the block.
+    name: String,
+    /// Physical table identifier. dbt defaults it to `name`; users may
+    /// override it, and dbt preserves it **verbatim including embedded
+    /// quote characters** (the reserved-word `"GROUP"` case). `None` when
+    /// an engine omits the key (tolerant ingestion, cute-dbt#145 rule).
+    #[serde(default)]
+    identifier: Option<String>,
+    /// Resolved schema name (required by both engines' schemas).
+    schema: String,
+    /// Resolved database. `Option` — dbt-core emits an explicit `null`
+    /// on some adapters; fusion may emit an empty string.
+    #[serde(default)]
+    database: Option<String>,
+    /// dbt's fully-resolved relation (`"db"."schema"."identifier"`).
+    /// `Option` in **both** engines' schemas — parsed defensively even
+    /// though fusion always populates it.
+    #[serde(default)]
+    relation_name: Option<String>,
+}
+
+impl SourceNode {
+    /// Canonical constructor — every field is owned and explicit.
+    #[must_use]
+    pub fn new(
+        id: NodeId,
+        source_name: impl Into<String>,
+        name: impl Into<String>,
+        identifier: Option<String>,
+        schema: impl Into<String>,
+        database: Option<String>,
+        relation_name: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            source_name: source_name.into(),
+            name: name.into(),
+            identifier,
+            schema: schema.into(),
+            database,
+            relation_name,
+        }
+    }
+
+    /// Source id (`source.<package>.<source_name>.<name>`).
+    #[must_use]
+    pub fn id(&self) -> &NodeId {
+        &self.id
+    }
+
+    /// The YAML `sources:` block name — `source()`'s first argument.
+    #[must_use]
+    pub fn source_name(&self) -> &str {
+        &self.source_name
+    }
+
+    /// The table name within the block — `source()`'s second argument.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Physical table identifier (verbatim, may carry embedded quotes).
+    /// `None` when the engine omitted the key.
+    #[must_use]
+    pub fn identifier(&self) -> Option<&str> {
+        self.identifier.as_deref()
+    }
+
+    /// Resolved schema name.
+    #[must_use]
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    /// Resolved database, when the engine emitted one.
+    #[must_use]
+    pub fn database(&self) -> Option<&str> {
+        self.database.as_deref()
+    }
+
+    /// dbt's fully-resolved relation (`"db"."schema"."identifier"`),
+    /// when the engine emitted one.
+    #[must_use]
+    pub fn relation_name(&self) -> Option<&str> {
+        self.relation_name.as_deref()
+    }
+}
+
 /// `metadata` block — currently consumed only for the
 /// `dbt_schema_version` floor check (ADR-2 Stage-1, PR 4b).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -631,10 +739,20 @@ pub struct Manifest {
     unit_tests: HashMap<String, crate::domain::unit_test::UnitTest>,
     #[serde(default)]
     macros: HashMap<String, String>,
+    /// The manifest's top-level `sources` map (cute-dbt#57), keyed by
+    /// the wire map key (`source.<package>.<source_name>.<name>`).
+    /// Defaults to empty so pre-#57 serialized manifests (and synthetic
+    /// test fixtures without sources) still deserialize.
+    #[serde(default)]
+    sources: HashMap<NodeId, SourceNode>,
 }
 
 impl Manifest {
-    /// Canonical constructor — every field is owned.
+    /// Canonical constructor — every field is owned. `sources` starts
+    /// empty; attach a parsed sources map via [`Self::with_sources`]
+    /// (builder rather than a 5th positional param, the
+    /// [`Node::with_column_descriptions`] precedent — keeps the many
+    /// existing test constructors unchanged).
     #[must_use]
     pub fn new(
         metadata: ManifestMetadata,
@@ -647,7 +765,15 @@ impl Manifest {
             nodes,
             unit_tests,
             macros,
+            sources: HashMap::new(),
         }
+    }
+
+    /// Attach the manifest's parsed `sources` map (cute-dbt#57).
+    #[must_use]
+    pub fn with_sources(mut self, sources: HashMap<NodeId, SourceNode>) -> Self {
+        self.sources = sources;
+        self
     }
 
     /// `metadata` block.
@@ -685,6 +811,27 @@ impl Manifest {
     #[must_use]
     pub fn macros(&self) -> &HashMap<String, String> {
         &self.macros
+    }
+
+    /// All sources keyed by id (cute-dbt#57).
+    #[must_use]
+    pub fn sources(&self) -> &HashMap<NodeId, SourceNode> {
+        &self.sources
+    }
+
+    /// Look up a source by its `(source_name, name)` pair — the two
+    /// arguments of a `source('a', 'b')` given input (cute-dbt#57).
+    ///
+    /// Case-insensitive on both halves, keeping the contract symmetric
+    /// with the renderer's `ref(...)` binding (`eq_ignore_ascii_case`
+    /// throughout). Linear scan — manifests carry few sources and the
+    /// lookup runs once per `source(...)` given.
+    #[must_use]
+    pub fn source_by_name(&self, source_name: &str, name: &str) -> Option<&SourceNode> {
+        self.sources.values().find(|source| {
+            source.source_name().eq_ignore_ascii_case(source_name)
+                && source.name().eq_ignore_ascii_case(name)
+        })
     }
 }
 
@@ -1219,5 +1366,119 @@ mod tests {
         assert!(m.nodes().is_empty());
         assert!(m.unit_tests().is_empty());
         assert!(m.macros().is_empty());
+        assert!(m.sources().is_empty());
+    }
+
+    // ===== SourceNode (cute-dbt#57) =====
+
+    fn sample_source(id: &str, source_name: &str, name: &str) -> SourceNode {
+        SourceNode::new(
+            NodeId::new(id),
+            source_name,
+            name,
+            Some(name.to_owned()),
+            "main",
+            Some("memory".to_owned()),
+            Some(format!("\"memory\".\"main\".\"{name}\"")),
+        )
+    }
+
+    #[test]
+    fn source_node_constructor_and_accessors() {
+        let s = sample_source("source.shop.raw.patients", "raw", "patients");
+        assert_eq!(s.id().as_str(), "source.shop.raw.patients");
+        assert_eq!(s.source_name(), "raw");
+        assert_eq!(s.name(), "patients");
+        assert_eq!(s.identifier(), Some("patients"));
+        assert_eq!(s.schema(), "main");
+        assert_eq!(s.database(), Some("memory"));
+        assert_eq!(s.relation_name(), Some("\"memory\".\"main\".\"patients\""));
+    }
+
+    #[test]
+    fn source_node_serde_round_trips() {
+        let s = sample_source("source.shop.raw.patients", "raw", "patients");
+        let json = serde_json::to_string(&s).unwrap();
+        let back: SourceNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn source_node_optional_fields_round_trip_as_none() {
+        // The fusion-style minimal entry: identifier / database /
+        // relation_name keys absent (tolerant `#[serde(default)]`).
+        let json = r#"{
+            "id": "source.shop.raw.orders",
+            "source_name": "raw",
+            "name": "orders",
+            "schema": "main"
+        }"#;
+        let s: SourceNode = serde_json::from_str(json).unwrap();
+        assert_eq!(s.identifier(), None);
+        assert_eq!(s.database(), None);
+        assert_eq!(s.relation_name(), None);
+        let back: SourceNode = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn manifest_with_sources_round_trips_through_serde() {
+        let source = sample_source("source.shop.raw.patients", "raw", "patients");
+        let mut sources = HashMap::new();
+        sources.insert(source.id().clone(), source);
+        let m = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .with_sources(sources);
+        let back: Manifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(m, back);
+        assert_eq!(back.sources().len(), 1);
+    }
+
+    #[test]
+    fn source_by_name_resolves_the_given_pair_case_insensitively() {
+        let source = sample_source(
+            "source.shop.synthea_raw.patients",
+            "synthea_raw",
+            "patients",
+        );
+        let mut sources = HashMap::new();
+        sources.insert(source.id().clone(), source);
+        let m = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .with_sources(sources);
+        assert!(m.source_by_name("synthea_raw", "patients").is_some());
+        assert!(
+            m.source_by_name("SYNTHEA_RAW", "Patients").is_some(),
+            "lookup is case-insensitive on both halves (symmetric with the ref binding contract)",
+        );
+    }
+
+    #[test]
+    fn source_by_name_requires_both_halves_to_match() {
+        let source = sample_source(
+            "source.shop.synthea_raw.patients",
+            "synthea_raw",
+            "patients",
+        );
+        let mut sources = HashMap::new();
+        sources.insert(source.id().clone(), source);
+        let m = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .with_sources(sources);
+        assert!(m.source_by_name("synthea_raw", "encounters").is_none());
+        assert!(m.source_by_name("other_block", "patients").is_none());
+        assert!(m.source_by_name("", "").is_none());
     }
 }

@@ -68,9 +68,9 @@ use crate::adapters::asset_embed::{
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
     BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, CteGraph, EdgeType, Finding, FixtureTable,
-    HeuristicId, InScopeSet, Instrument, Manifest, ModelInScopeSet, Node, NodeId, TestMetadata,
-    Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestYamlBlock, apply_check_policy,
-    model_findings, resolve_target_model, table_from_manifest_rows,
+    HeuristicId, InScopeSet, Instrument, Manifest, ModelInScopeSet, Node, NodeId, SourceNode,
+    TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestYamlBlock,
+    apply_check_policy, model_findings, resolve_target_model, table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -140,6 +140,48 @@ pub fn parse_ref_name(input: &str) -> Option<&str> {
     let inner = inside.trim();
     let name = inner.strip_prefix('\'')?.strip_suffix('\'')?;
     if name.is_empty() { None } else { Some(name) }
+}
+
+/// Parse the `(source_name, table_name)` pair out of a unit-test
+/// `given[].input` string of the form `source('a', 'b')` (cute-dbt#57)
+/// — the exact sibling of [`parse_ref_name`].
+///
+/// Both engines serialize the given input **verbatim** from the authored
+/// YAML (fusion clones the string into the manifest node; core
+/// round-trips it byte-for-byte), and dbt's `source()` Jinja function
+/// takes exactly two arguments, so the manifest string is the literal
+/// authored call. The same tolerances as [`parse_ref_name`] apply:
+/// case-insensitive keyword (`source` / `SOURCE` / …), whitespace
+/// between the keyword and the parenthesis and around the arguments,
+/// single quotes only (dbt's documented/dominant serialized form —
+/// double-quoted and `name=`/`table_name=` kwargs variants are
+/// engine-valid but rare and deliberately deferred, exactly as the ref
+/// parser defers them).
+///
+/// Returns `None` when the input does not match the `source('…','…')`
+/// shape or when either name is empty. The caller treats `None` as "no
+/// import-CTE match" and surfaces the design's empty-state copy
+/// (fail-open, same as an unresolvable `ref`).
+#[must_use]
+pub fn parse_source_ref(input: &str) -> Option<(&str, &str)> {
+    let trimmed = input.trim();
+    let prefix = trimmed.get(..6)?;
+    if !prefix.eq_ignore_ascii_case("source") {
+        return None;
+    }
+    let after_keyword = trimmed[6..].trim_start();
+    let inside = after_keyword.strip_prefix('(')?.strip_suffix(')')?;
+    // Top-level comma split: a comma inside a quoted name would leave
+    // the first fragment with unbalanced quotes, fail the quote strip
+    // below, and fall through to `None` — fail-open by construction.
+    let (first, second) = inside.split_once(',')?;
+    let source_name = first.trim().strip_prefix('\'')?.strip_suffix('\'')?;
+    let table_name = second.trim().strip_prefix('\'')?.strip_suffix('\'')?;
+    if source_name.is_empty() || table_name.is_empty() {
+        None
+    } else {
+        Some((source_name, table_name))
+    }
 }
 
 /// Bind a unit test's `given[]` entries to a named import-CTE.
@@ -1491,8 +1533,19 @@ fn build_test_payload(
         .iter()
         .enumerate()
         .map(|(ordinal, g)| {
-            let bound_to_node =
-                parse_ref_name(g.input()).and_then(|ref_name| find_import_node_id(graph, ref_name));
+            // Bind the given to a leaf CTE: `ref(...)` matches directly
+            // by model name; `source(...)` resolves through the
+            // manifest's sources map first (cute-dbt#57) because dbt
+            // pre-resolves source refs at compile time. The two arms are
+            // disjoint by construction (an input parses as at most one
+            // shape), so `or_else` is chain order, not precedence.
+            let bound_to_node = parse_ref_name(g.input())
+                .and_then(|ref_name| find_import_node_id(graph, ref_name))
+                .or_else(|| {
+                    parse_source_ref(g.input()).and_then(|(source_name, table_name)| {
+                        find_source_import_node_id(current, graph, source_name, table_name)
+                    })
+                });
             let loaded = external.and_then(|e| e.given.get(&ordinal));
             let (rows, table, format) =
                 resolve_fixture_payload(g.rows(), g.format(), g.fixture(), loaded);
@@ -1647,6 +1700,87 @@ fn find_import_node_id(graph: &CteGraph, ref_name: &str) -> Option<String> {
     None
 }
 
+/// Locate the leaf CTE node that binds to a `source('a', 'b')` given
+/// (cute-dbt#57) — the source-side sibling of [`find_import_node_id`].
+///
+/// dbt compiles `{{ source('a', 'b') }}` into the resolved relation at
+/// `dbt compile` time, so the compiled SQL the CTE engine sees never
+/// carries the literal `source(...)` form — only the resolved relation
+/// (`"db"."schema"."table"`). Binding therefore walks the manifest's
+/// `sources` map:
+///
+/// 1. Resolve `(source_name, table_name)` — the two authored `source()`
+///    arguments — against [`Manifest::source_by_name`]. The lookup is on
+///    `source_name` + `name`, **not** `identifier` (the args are the
+///    YAML names; `identifier` may be overridden to differ).
+/// 2. Derive the match token from the hit: the physical `identifier`
+///    (quote-stripped — dbt preserves embedded quote characters
+///    verbatim, the reserved-word `"GROUP"` case), falling back to the
+///    last dot-segment of `relation_name`, falling back to `name`
+///    (dbt's own identifier default).
+/// 3. Feed the token through the existing two-pass
+///    [`find_import_node_id`]: the CTE engine already reduces every
+///    FROM/JOIN leaf to the lowercased, quote-stripped **last
+///    identifier** of the relation, and the compiled-SQL relation text
+///    and the manifest `relation_name` render from the same relation
+///    object in both engines — so the leaf token match is exactly the
+///    normalization the ref path already uses. No FQN machinery.
+///
+/// Returns `None` when the pair is missing from the sources map or no
+/// leaf CTE references the relation — the same fail-open empty-state as
+/// an unresolvable `ref` (sources need no preflight: they are referenced
+/// by models, never analyzed themselves).
+fn find_source_import_node_id(
+    manifest: &Manifest,
+    graph: &CteGraph,
+    source_name: &str,
+    table_name: &str,
+) -> Option<String> {
+    let source = manifest.source_by_name(source_name, table_name)?;
+    let token = source_relation_token(source);
+    if token.is_empty() {
+        return None;
+    }
+    find_import_node_id(graph, token)
+}
+
+/// The leaf table identifier a resolved [`SourceNode`] is expected to
+/// appear as inside a compiled CTE body: `identifier` when present and
+/// non-empty (quote-stripped), else the last dot-segment of
+/// `relation_name` (quote-stripped; naive split — a dot embedded in a
+/// quoted identifier is out of scope, the identifier-first chain makes
+/// this fallback rare), else the source's `name`. Returns a borrowed
+/// slice of the [`SourceNode`]'s own fields — every branch is a
+/// quote-strip view, so no allocation is needed (Gemini PR 204).
+fn source_relation_token(source: &SourceNode) -> &str {
+    let identifier = source
+        .identifier()
+        .map(strip_ident_quotes)
+        .filter(|ident| !ident.is_empty());
+    let from_relation = || {
+        source
+            .relation_name()
+            .and_then(|relation| relation.rsplit('.').next())
+            .map(strip_ident_quotes)
+            .filter(|segment| !segment.is_empty())
+    };
+    identifier
+        .or_else(from_relation)
+        .unwrap_or_else(|| strip_ident_quotes(source.name()))
+}
+
+/// Strip the common SQL identifier quoting characters from both ends of
+/// `s`: double quotes (ANSI / dbt `relation_name`), backticks (`BigQuery`
+/// / `MySQL`), and square brackets (T-SQL). Interior characters are kept
+/// verbatim; lowercasing is the caller's concern
+/// ([`find_import_node_id`] case-folds both sides).
+fn strip_ident_quotes(s: &str) -> &str {
+    s.trim()
+        .trim_matches(|c| c == '"' || c == '`')
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+}
+
 /// `true` when the node at `index` is a candidate for pass-2 binding —
 /// i.e. a leaf CTE that may carry engine-extracted body-leaf refs.
 ///
@@ -1778,6 +1912,135 @@ mod tests {
         assert_eq!(parse_ref_name("source('a', 'b')"), None);
         assert_eq!(parse_ref_name(""), None);
         assert_eq!(parse_ref_name("plain_table"), None);
+    }
+
+    // ===== parse_source_ref (cute-dbt#57) =====
+
+    #[test]
+    fn parse_source_ref_extracts_both_single_quoted_names() {
+        assert_eq!(
+            parse_source_ref("source('synthea_raw', 'patients')"),
+            Some(("synthea_raw", "patients")),
+        );
+    }
+
+    #[test]
+    fn parse_source_ref_tolerates_whitespace_variants() {
+        // Surrounding, keyword↔paren, and around-the-comma whitespace —
+        // mirrors parse_ref_name's Jinja-tolerance.
+        assert_eq!(parse_source_ref("  source('a', 'b')  "), Some(("a", "b")));
+        assert_eq!(parse_source_ref("source ('a','b')"), Some(("a", "b")));
+        assert_eq!(parse_source_ref("SOURCE\t('a' , 'b')"), Some(("a", "b")));
+        assert_eq!(parse_source_ref("source( 'a','b' )"), Some(("a", "b")));
+    }
+
+    #[test]
+    fn parse_source_ref_accepts_case_variant_keyword() {
+        assert_eq!(parse_source_ref("SOURCE('A', 'B')"), Some(("A", "B")));
+        assert_eq!(parse_source_ref("Source('a', 'b')"), Some(("a", "b")));
+        assert_eq!(parse_source_ref("sOuRcE('a', 'b')"), Some(("a", "b")));
+    }
+
+    #[test]
+    fn parse_source_ref_returns_none_on_missing_parens_or_arg() {
+        assert_eq!(parse_source_ref("source'a','b'"), None);
+        assert_eq!(
+            parse_source_ref("source('a')"),
+            None,
+            "one arg is not a source ref"
+        );
+        assert_eq!(parse_source_ref("source('a', 'b'"), None);
+    }
+
+    #[test]
+    fn parse_source_ref_returns_none_on_empty_names() {
+        assert_eq!(parse_source_ref("source('', 'b')"), None);
+        assert_eq!(parse_source_ref("source('a', '')"), None);
+        assert_eq!(parse_source_ref("source('', '')"), None);
+    }
+
+    #[test]
+    fn parse_source_ref_returns_none_on_double_quoted_names() {
+        // Same deliberate strictness as parse_ref_name: dbt manifests
+        // serialize the dominant single-quoted authored form.
+        assert_eq!(parse_source_ref("source(\"a\", \"b\")"), None);
+    }
+
+    #[test]
+    fn parse_source_ref_returns_none_on_unmatched_quotes() {
+        assert_eq!(parse_source_ref("source('a, 'b')"), None);
+        assert_eq!(parse_source_ref("source('a', b')"), None);
+    }
+
+    #[test]
+    fn parse_source_ref_returns_none_on_non_source_input() {
+        assert_eq!(parse_source_ref("ref('stg_orders')"), None);
+        assert_eq!(parse_source_ref("this"), None);
+        assert_eq!(parse_source_ref(""), None);
+        assert_eq!(parse_source_ref("plain_table"), None);
+    }
+
+    // ===== source_relation_token / strip_ident_quotes (cute-dbt#57) =====
+
+    fn source_node(
+        identifier: Option<&str>,
+        relation_name: Option<&str>,
+        name: &str,
+    ) -> SourceNode {
+        SourceNode::new(
+            NodeId::new(format!("source.shop.raw.{name}")),
+            "raw",
+            name,
+            identifier.map(str::to_owned),
+            "main",
+            Some("memory".to_owned()),
+            relation_name.map(str::to_owned),
+        )
+    }
+
+    #[test]
+    fn source_relation_token_prefers_the_identifier() {
+        let s = source_node(
+            Some("patients_v2"),
+            Some("\"memory\".\"main\".\"patients_v2\""),
+            "patients",
+        );
+        assert_eq!(source_relation_token(&s), "patients_v2");
+    }
+
+    #[test]
+    fn source_relation_token_strips_embedded_identifier_quotes() {
+        // dbt preserves a reserved-word identifier verbatim INCLUDING
+        // its quote characters (the zendesk `"GROUP"` case).
+        let s = source_node(Some("\"GROUP\""), None, "group");
+        assert_eq!(source_relation_token(&s), "GROUP");
+    }
+
+    #[test]
+    fn source_relation_token_falls_back_to_relation_name_last_segment() {
+        let s = source_node(
+            None,
+            Some("\"memory\".\"main\".\"patients\""),
+            "patients_yaml",
+        );
+        assert_eq!(source_relation_token(&s), "patients");
+    }
+
+    #[test]
+    fn source_relation_token_falls_back_to_the_source_name_field() {
+        // The fusion-minimal entry: no identifier, no relation_name —
+        // dbt defaults the physical identifier to `name`.
+        let s = source_node(None, None, "patients");
+        assert_eq!(source_relation_token(&s), "patients");
+    }
+
+    #[test]
+    fn strip_ident_quotes_handles_each_quoting_dialect() {
+        assert_eq!(strip_ident_quotes("\"orders\""), "orders");
+        assert_eq!(strip_ident_quotes("`orders`"), "orders");
+        assert_eq!(strip_ident_quotes("[orders]"), "orders");
+        assert_eq!(strip_ident_quotes("  orders  "), "orders");
+        assert_eq!(strip_ident_quotes("orders"), "orders");
     }
 
     // ===== bind_import_to_given =====
@@ -2031,6 +2294,15 @@ mod tests {
             tests.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
             HashMap::new(),
         )
+    }
+
+    fn manifest_with_sources(
+        nodes: Vec<Node>,
+        tests: Vec<(&str, UnitTest)>,
+        sources: Vec<SourceNode>,
+    ) -> Manifest {
+        manifest_for(nodes, tests)
+            .with_sources(sources.into_iter().map(|s| (s.id().clone(), s)).collect())
     }
 
     #[test]
@@ -3216,6 +3488,235 @@ mod tests {
         );
         let test = &payload.models[0].tests[0];
         assert!(test.given[0].bound_to_node.is_none());
+    }
+
+    // ===== source() given binding (cute-dbt#57) =====
+
+    /// The canonical staging-model shape: `with source as (select * from
+    /// {{ source('synthea_raw', 'patients') }})` compiles to a quoted
+    /// three-part relation inside an import CTE named `source`.
+    fn patients_source_model() -> Node {
+        let compiled = "with source as (\
+                          select * from \"memory\".\"main\".\"patients\"\
+                        ) select id, name from source";
+        model_node("model.shop.stg_patients", "body", Some(compiled))
+    }
+
+    fn source_given_unit_test(input: &str) -> UnitTest {
+        UnitTest::new(
+            "test_one",
+            NodeId::new("stg_patients"),
+            vec![UnitTestGiven::new(input, json!([]), None, None)],
+            UnitTestExpect::new(json!([]), None, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        )
+    }
+
+    fn bound_node_for(manifest: &Manifest) -> Option<String> {
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.stg_patients")]);
+        let payload = build_payload(
+            manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        payload.models[0].tests[0].given[0].bound_to_node.clone()
+    }
+
+    #[test]
+    fn build_payload_source_given_binds_via_resolved_relation_body_match() {
+        // The cute-dbt#57 vertical: `source('synthea_raw','patients')`
+        // resolves through the manifest sources map to the physical
+        // identifier `patients`, which pass-2 finds in the `source`
+        // CTE's body-leaf refs (the compiled relation and the manifest
+        // relation_name render from the same relation object).
+        let manifest = manifest_with_sources(
+            vec![patients_source_model()],
+            vec![(
+                "unit_test.shop.test_one",
+                source_given_unit_test("source('synthea_raw', 'patients')"),
+            )],
+            vec![SourceNode::new(
+                NodeId::new("source.shop.synthea_raw.patients"),
+                "synthea_raw",
+                "patients",
+                Some("patients".to_owned()),
+                "main",
+                Some("memory".to_owned()),
+                Some("\"memory\".\"main\".\"patients\"".to_owned()),
+            )],
+        );
+        assert_eq!(
+            bound_node_for(&manifest).as_deref(),
+            Some("source"),
+            "source('synthea_raw','patients') binds to the import CTE via the resolved relation",
+        );
+    }
+
+    #[test]
+    fn build_payload_source_given_binds_through_an_identifier_override() {
+        // The YAML `name` and the physical `identifier` differ — the
+        // lookup must run on (source_name, name) while the body match
+        // must run on `identifier`.
+        let compiled = "with src as (\
+                          select * from \"memory\".\"main\".\"patients_v2\"\
+                        ) select id from src";
+        let node = model_node("model.shop.stg_patients", "body", Some(compiled));
+        let manifest = manifest_with_sources(
+            vec![node],
+            vec![(
+                "unit_test.shop.test_one",
+                source_given_unit_test("source('synthea_raw', 'patients')"),
+            )],
+            vec![SourceNode::new(
+                NodeId::new("source.shop.synthea_raw.patients"),
+                "synthea_raw",
+                "patients",
+                Some("patients_v2".to_owned()),
+                "main",
+                Some("memory".to_owned()),
+                Some("\"memory\".\"main\".\"patients_v2\"".to_owned()),
+            )],
+        );
+        assert_eq!(bound_node_for(&manifest).as_deref(), Some("src"));
+    }
+
+    #[test]
+    fn build_payload_source_given_binds_with_a_fusion_minimal_source_entry() {
+        // Fusion-style entry: identifier and relation_name keys absent.
+        // The token falls back to the source's `name` (dbt's identifier
+        // default), which still matches the compiled body leaf.
+        let manifest = manifest_with_sources(
+            vec![patients_source_model()],
+            vec![(
+                "unit_test.shop.test_one",
+                source_given_unit_test("source('synthea_raw', 'patients')"),
+            )],
+            vec![SourceNode::new(
+                NodeId::new("source.shop.synthea_raw.patients"),
+                "synthea_raw",
+                "patients",
+                None,
+                "main",
+                None,
+                None,
+            )],
+        );
+        assert_eq!(bound_node_for(&manifest).as_deref(), Some("source"));
+    }
+
+    #[test]
+    fn build_payload_source_given_does_not_bind_when_pair_is_unresolvable() {
+        // No matching (source_name, name) in the sources map — the given
+        // stays unbound and the node-detail panel keeps its empty-state
+        // copy (fail-open, no PreflightError; sources need no preflight).
+        let manifest = manifest_with_sources(
+            vec![patients_source_model()],
+            vec![(
+                "unit_test.shop.test_one",
+                source_given_unit_test("source('other_block', 'patients')"),
+            )],
+            vec![SourceNode::new(
+                NodeId::new("source.shop.synthea_raw.patients"),
+                "synthea_raw",
+                "patients",
+                Some("patients".to_owned()),
+                "main",
+                Some("memory".to_owned()),
+                Some("\"memory\".\"main\".\"patients\"".to_owned()),
+            )],
+        );
+        assert!(bound_node_for(&manifest).is_none());
+    }
+
+    #[test]
+    fn build_payload_source_given_does_not_bind_without_a_sources_map() {
+        // Pre-#57 shape: the manifest carries no sources block at all.
+        let manifest = manifest_for(
+            vec![patients_source_model()],
+            vec![(
+                "unit_test.shop.test_one",
+                source_given_unit_test("source('synthea_raw', 'patients')"),
+            )],
+        );
+        assert!(bound_node_for(&manifest).is_none());
+    }
+
+    #[test]
+    fn build_payload_binds_a_ref_given_and_a_source_given_in_one_test() {
+        // The cute-dbt#57 AC shape: one model with BOTH a ref()-based
+        // import CTE and a source()-based import CTE; the unit test
+        // mocks both inputs and each given binds to its own CTE node.
+        let compiled = "with orders as (\
+                          select * from \"memory\".\"main\".\"raw_orders\"\
+                        ), patients as (\
+                          select * from \"memory\".\"raw\".\"patients\"\
+                        ) select o.id, p.name from orders o join patients p on p.id = o.pid";
+        let node = model_node("model.shop.mixed_inputs", "body", Some(compiled));
+        let ut = UnitTest::new(
+            "test_one",
+            NodeId::new("mixed_inputs"),
+            vec![
+                UnitTestGiven::new("ref('raw_orders')", json!([{"id": 1}]), None, None),
+                UnitTestGiven::new(
+                    "source('synthea_raw', 'patients')",
+                    json!([{"id": 1, "name": "x"}]),
+                    None,
+                    None,
+                ),
+            ],
+            UnitTestExpect::new(json!([]), None, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let manifest = manifest_with_sources(
+            vec![node],
+            vec![("unit_test.shop.test_one", ut)],
+            vec![SourceNode::new(
+                NodeId::new("source.shop.synthea_raw.patients"),
+                "synthea_raw",
+                "patients",
+                Some("patients".to_owned()),
+                "raw",
+                Some("memory".to_owned()),
+                Some("\"memory\".\"raw\".\"patients\"".to_owned()),
+            )],
+        );
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.mixed_inputs")]);
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let test = &payload.models[0].tests[0];
+        assert_eq!(
+            test.given[0].bound_to_node.as_deref(),
+            Some("orders"),
+            "the ref() given binds to the ref-based import CTE",
+        );
+        assert_eq!(
+            test.given[1].bound_to_node.as_deref(),
+            Some("patients"),
+            "the source() given binds to the source-based import CTE",
+        );
     }
 
     #[test]

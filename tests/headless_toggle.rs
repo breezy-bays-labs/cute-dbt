@@ -48,8 +48,9 @@ use cute_dbt::adapters::render::{
 use cute_dbt::domain::{
     BlockDiff, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, FileHunks, Hunk,
     InScopeSet, Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId,
-    NormalizedDiffIndex, PrDiff, TestMetadata, UnitTest, UnitTestDataDiff, UnitTestExpect,
-    UnitTestGiven, UnitTestYamlBlock, external_fixture_table, reconstruct_table_diffs,
+    NormalizedDiffIndex, PrDiff, SourceNode, TestMetadata, UnitTest, UnitTestDataDiff,
+    UnitTestExpect, UnitTestGiven, UnitTestYamlBlock, external_fixture_table,
+    reconstruct_table_diffs,
 };
 use cute_dbt::ports::ManifestSource;
 
@@ -4155,6 +4156,127 @@ fn self_named_import_cte_renders_distinct_dag_nodes_not_a_cycle() {
     assert!(
         !detail_sql.contains("from final"),
         "the import node SQL is not overwritten by the terminal's: {detail_sql}",
+    );
+
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#57: source() given binding in the Node-detail panel -----
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn source_given_fixture_card_renders_in_the_node_detail_panel() {
+    // cute-dbt#57 end-to-end DOM proof: a `given: source('synthea_raw',
+    // 'patients')` resolves through the manifest sources block to the
+    // physical identifier, binds to the `source` import CTE, and the
+    // Node-detail panel renders the given's fixture card (NOT the
+    // "no fixture provided" empty-state) when that node is clicked.
+    let model = model_node_with_compiled(
+        "model.shop.stg_patients",
+        "with source as (select * from \"memory\".\"main\".\"patients\") \
+         select id, name from source",
+    );
+    let ut = UnitTest::new(
+        "t".to_owned(),
+        NodeId::new("stg_patients"),
+        vec![UnitTestGiven::new(
+            "source('synthea_raw', 'patients')".to_owned(),
+            serde_json::json!([{"id": 1, "name": "Synthetic Sam"}]),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(serde_json::Value::Null, None, None),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+    let source = SourceNode::new(
+        NodeId::new("source.shop.synthea_raw.patients"),
+        "synthea_raw",
+        "patients",
+        Some("patients".to_owned()),
+        "main",
+        Some("memory".to_owned()),
+        Some("\"memory\".\"main\".\"patients\"".to_owned()),
+    );
+    let m = manifest(vec![model], vec![("unit_test.shop.stg_patients.t", ut)])
+        .with_sources(std::iter::once((source.id().clone(), source)).collect());
+    let in_scope: InScopeSet =
+        std::iter::once("unit_test.shop.stg_patients.t".to_owned()).collect();
+    let models: ModelInScopeSet = std::iter::once(NodeId::new("model.shop.stg_patients")).collect();
+    let out = tmp("headless_source_given_binding.html");
+    let _ = std::fs::remove_file(&out);
+    render_report(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "baseline.json",
+        ScopeSource::Baseline,
+        DEFAULT_REPORT_TITLE,
+        None,
+    )
+    .expect("render writes the report");
+    let url = format!(
+        "file://{}",
+        out.to_str().expect("report path is valid UTF-8")
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url)
+        .expect("navigate source-binding report");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-mermaid svg",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("Mermaid DAG SVG renders");
+
+    // Click the import CTE node (named `source` — dbt's unwrapper
+    // convention) and read its Node-detail panel.
+    let clicked = eval_bool(
+        &tab,
+        "(function(){var g=document.querySelector('.cte-dag-mermaid svg g.node[data-node-id=\"source\"]');\
+          if(!g){return false;}g.dispatchEvent(new MouseEvent('click',{bubbles:true}));return true;})()",
+    );
+    assert!(
+        clicked,
+        "the `source` import CTE node is present + clickable"
+    );
+
+    let card_input = eval_string(
+        &tab,
+        "(document.querySelector('.node-detail .given-section')||{getAttribute:function(){return ''}})\
+         .getAttribute('data-input-name')||''",
+    );
+    assert_eq!(
+        card_input, "source('synthea_raw', 'patients')",
+        "the bound source() given renders its fixture card in the Node-detail panel",
+    );
+    let has_empty_state = eval_bool(
+        &tab,
+        "!!document.querySelector('.node-detail .given-empty')",
+    );
+    assert!(
+        !has_empty_state,
+        "a bound source() given must not show the no-fixture empty-state copy",
+    );
+    // The fixture rows actually render in the card's grid.
+    let card_text = eval_string(
+        &tab,
+        "(document.querySelector('.node-detail .given-section')||{}).textContent||''",
+    );
+    assert!(
+        card_text.contains("Synthetic Sam"),
+        "the given's mocked rows render inside the fixture card: {card_text}",
     );
 
     let _ = tab.close(true);

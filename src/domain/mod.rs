@@ -67,8 +67,8 @@ pub use checks::{
 pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, Span};
 pub use manifest::{
-    Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, TestMetadata,
-    UniqueKey,
+    Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, SourceNode,
+    TestMetadata, UniqueKey,
 };
 pub use path::{match_changed_path, normalize_path};
 pub use pr_diff::{
