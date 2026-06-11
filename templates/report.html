@@ -36,14 +36,10 @@
      (never a scoping failure). The leading `{%-` trims the inter-tag
      whitespace so baseline-mode output stays byte-identical (#85 contract). #}
   <p class="zero-updated-affirm" data-testid="zero-updated-affirm" hidden>no unit-test definitions changed in this diff</p>
-  {# cute-dbt#132 — diff-view controls: the global expand/collapse action.
-     PR-diff mode only (inline diffs exist only here), so baseline output stays
-     byte-identical (#85). The configurable fold-context input moved into the
-     #139 settings panel (the cog, top-right); the Expand-all action stays here
-     as a per-view affordance. Wired in bindDiffViewControls. #}
-  <div class="diff-view-controls" aria-label="Diff view controls">
-    <button type="button" class="diff-expand-all" aria-pressed="false">Expand all</button>
-  </div>
+  {# The #132 top-of-report diff-view controls strip was retired by design
+     pass-2 (cute-dbt#199): expand/collapse over a file's hunks now lives
+     with that file's diff — the per-diff fold toggle in each code header
+     (buildFoldToggleBtn, interaction.js). #}
   {%- endif %}
 </section>
 
@@ -139,6 +135,17 @@
                min="0" max="20" step="1" value="3"
                aria-label="Unchanged context lines shown around each change">
       </div>
+      {# cute-dbt#199 — lines revealed per gutter-fold activation (0 = all).
+         Read live by expandFold/contractFold; no re-render. Static markup
+         per the #188 contract; wired + persisted in bindSettingsMenu. #}
+      <div class="settings-row">
+        <label for="settings-expand-step">Expand step
+          <span class="settings-hint">lines revealed per gutter click &mdash; 0 = all</span>
+        </label>
+        <input type="number" class="settings-context-input" id="settings-expand-step"
+               min="0" max="500" step="1" value="20"
+               aria-label="Lines revealed each time you expand a fold; 0 reveals all">
+      </div>
       <div class="settings-row">
         <label for="settings-normalize-input">Hide format-only changes
           <span class="settings-hint">treat reformatted-but-equal cells as unchanged</span>
@@ -199,8 +206,10 @@
 <section class="model-sql" aria-label="Model SQL">
   <details class="model-sql-details">
     <summary>Model SQL<span class="model-sql-summary-hint">raw, with Jinja</span></summary>
+    {# The wrap is rebuilt by renderModelSql on every model switch; the copy
+       affordance is the JS-built code-header copy-icon button (cute-dbt#199)
+       — no static Copy button (it would be dead, handler-less markup). #}
     <div class="sql-block-wrap model-sql-wrap">
-      <button type="button" class="sql-copy model-sql-copy">Copy</button>
       <pre class="sql-block model-sql-block"><code class="model-sql-code"></code></pre>
     </div>
   </details>
