@@ -640,7 +640,7 @@ fn correlated_equi_pair(
 
 /// Append every qualified column reference under `expr`, descending
 /// the predicate shapes correlated anti-join `WHERE`s realistically
-/// use (AND/OR trees, comparisons, IS [NOT] NULL, BETWEEN, IN lists,
+/// use (AND/OR trees, comparisons, IS \[NOT\] NULL, BETWEEN, IN lists,
 /// LIKE, CAST, parens, unary NOT). Unknown variants are deliberately
 /// not descended: a correlation reference hidden in an exotic shape
 /// yields no evidence, so the fact is not emitted — silence, never
