@@ -157,9 +157,20 @@
   // ---- HIGHLIGHT (click / search-select; in-place, never a commit) --------
   var highlighted = null;
 
+  // cute-dbt#102 — page-local highlight observer hook: the CTE-view
+  // engine (explore-cte.js) gates + retargets its view off this event.
+  // It is NOT the external-drive signal: data-selected-model stays
+  // Space-commit-only (the one write site below).
+  function notifyHighlight(id) {
+    document.dispatchEvent(
+      new CustomEvent("cute-explore-highlight", { detail: { id: id } })
+    );
+  }
+
   function clearHighlight() {
     cy.elements().removeClass("dim sel trace");
     highlighted = null;
+    notifyHighlight(null);
   }
 
   function highlightNode(node) {
@@ -171,6 +182,7 @@
       node.removeClass("dim").addClass("sel");
     });
     highlighted = node;
+    notifyHighlight(node.id());
   }
 
   // ---- FOCUS COMMIT (Space only — the one selectedModel write site) -------

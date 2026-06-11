@@ -433,7 +433,7 @@ fn check_spec_payload(id: HeuristicId) -> CheckSpecPayload {
 }
 
 /// One DAG node — stable id, display label, and role.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NodePayload {
     /// Stable node id — the key for the DAG (Mermaid node), the
     /// `compiled_sql` map, edge endpoints, and given→node binding. Always
@@ -456,7 +456,7 @@ pub struct NodePayload {
 }
 
 /// One DAG edge — `from` and `to` are the [`NodePayload::id`] strings.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EdgePayload {
     /// Source node id (the [`NodePayload::id`] the edge starts from).
     pub from: String,
@@ -469,7 +469,7 @@ pub struct EdgePayload {
 }
 
 /// The full DAG carried in a [`ModelPayload`].
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DagPayload {
     /// CTE nodes plus the terminal model node, in stable rendering
     /// order.
