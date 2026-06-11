@@ -788,6 +788,24 @@ fn yaml_diff_drawer_defaults_to_diff_and_toggles_to_authored() {
         eval_bool(&tab, "document.querySelector('.yaml-diff-toggle') !== null"),
         "the Authored↔Diff toggle is present",
     );
+    // cute-dbt#199 — the drawer's code header gains the per-diff fold toggle
+    // and the inline-SVG copy-icon button (the Model-YAML copy affordance).
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.authoring-yaml .code-header .diff-fold-toggle') !== null"
+        ),
+        "the Model-YAML diff header carries the per-diff fold toggle",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){var b=document.querySelector('.authoring-yaml .code-header .code-copy-btn');\
+               return !!b && b.tagName==='BUTTON' && b.getAttribute('aria-label')==='Copy'\
+                 && !!b.querySelector('svg.icon');})()"
+        ),
+        "the Model-YAML header carries the inline-SVG copy-icon button (aria-label Copy)",
+    );
     assert!(
         !eval_bool(&tab, "document.querySelector('.yaml-diff-view').hidden"),
         "the Diff view is the default (visible)",
@@ -1060,15 +1078,23 @@ fn ctx_lines_js(n: usize) -> String {
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
-    // cute-dbt#132 — hunk contraction. Drives the `__cuteRenderBlockDiff` JS
-    // seam with synthetic diffs (no manifest content needed) to verify:
+    // cute-dbt#132 / cute-dbt#199 — hunk contraction under the directional
+    // step-expansion model (supersedes the #136 click-toggles-all + "Hide N"
+    // relabel). Drives the `__cuteRenderBlockDiff` JS seam with synthetic
+    // diffs (no manifest content needed) to verify:
     //  (1) a long middle context run folds: a `.diff-fold` control with the
-    //      correct hidden count + `.diff-folded[hidden]` lines;
+    //      correct hidden count, a `data-fold-dir`, the gutter +/− steppers,
+    //      a (hidden-until-revealed) collapse-all + `.diff-folded[hidden]`
+    //      lines;
     //  (2) a SHORT block (change + 2 context) renders NO fold (small YAML
     //      test blocks must never fold);
-    //  (3) activating the control (click AND keyboard) reveals the folded
-    //      lines (they lose `hidden`), and reveal is PARENT-SCOPED: a second
-    //      block with the same local `fold-0` id stays hidden.
+    //  (3) activating the band (click AND keyboard) expands BY STEP — with
+    //      the default step (20) ≥ the hidden count (4) one activation still
+    //      reveals all, the control stays visible relabeled "All N lines
+    //      shown" (the "Hide N" relabel assertion is consciously superseded),
+    //      and its collapse-all restores the folded state. Reveal stays
+    //      PARENT-SCOPED: a second block with the same local `fold-0` id is
+    //      untouched.
     let url = render_pr_diff_to_file(
         "headless_fold_js.html",
         vec![model_node("model.shop.dim_a")],
@@ -1101,6 +1127,23 @@ fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
     assert!(
         folded_html.contains("diff-fold") && folded_html.contains("data-fold=\"0\""),
         "a fold control with a local id is emitted: {folded_html}",
+    );
+    // cute-dbt#199 — the new control anatomy: a reveal direction (this middle
+    // run has a hunk above, so it expands DOWN), the gutter steppers, and the
+    // initially-hidden per-hunk collapse-all.
+    assert!(
+        folded_html.contains("data-fold-dir=\"down\""),
+        "a middle run (hunk above) carries data-fold-dir=down: {folded_html}",
+    );
+    assert!(
+        folded_html.contains("fold-steppers")
+            && folded_html.contains("class=\"fold-expand\"")
+            && folded_html.contains("class=\"fold-contract\""),
+        "the gutter carries the +/− fold steppers: {folded_html}",
+    );
+    assert!(
+        folded_html.contains("fold-collapse-all"),
+        "the per-hunk collapse-all affordance is emitted: {folded_html}",
     );
     assert!(
         folded_html.contains("diff-folded fold-0")
@@ -1157,9 +1200,12 @@ fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
         "block B starts with 4 hidden folded lines",
     );
 
-    // CLICK the control in block A: A reveals (0 hidden); the control STAYS
-    // visible and relabels to a "Hide N" collapse affordance (#136
-    // bidirectional). B is untouched (still 4 hidden) — toggle is parent-scoped.
+    // CLICK the band in block A: activate = expand-by-step (#199); the
+    // default step (20) ≥ the 4 hidden lines, so ONE activation reveals all.
+    // The control STAYS visible (the #136 invariant), relabeled "All N lines
+    // shown" (supersedes the old "Hide N" relabel), its + stepper disables,
+    // and the collapse-all affordance appears. B is untouched (still 4
+    // hidden) — the reveal is parent-scoped.
     let _ = eval(
         &tab,
         "document.querySelector('#fold-block-a .diff-fold').click()",
@@ -1170,14 +1216,14 @@ fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
             "document.querySelectorAll('#fold-block-a .diff-folded[hidden]').length"
         ),
         0,
-        "clicking block A's control reveals its folded lines",
+        "clicking block A's band reveals its folded lines (step 20 >= hidden 4)",
     );
     assert!(
         !eval_bool(
             &tab,
             "document.querySelector('#fold-block-a .diff-fold').hidden"
         ),
-        "the activated control STAYS visible (bidirectional toggle, #136)",
+        "the activated control STAYS visible (#136 invariant under #199)",
     );
     assert_eq!(
         eval_string(
@@ -1185,15 +1231,29 @@ fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
             "document.querySelector('#fold-block-a .diff-fold').getAttribute('aria-expanded')"
         ),
         "true",
-        "the expanded control reports aria-expanded=true",
+        "the fully-expanded control reports aria-expanded=true",
     );
     assert!(
         eval_string(
             &tab,
             "document.querySelector('#fold-block-a .diff-fold-label').textContent"
         )
-        .contains("Hide 4 unchanged lines"),
-        "the expanded control relabels to 'Hide N unchanged lines'",
+        .contains("All 4 lines shown"),
+        "the fully-expanded control relabels to 'All N lines shown' (#199)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('#fold-block-a .fold-expand').disabled"
+        ),
+        "the + stepper disables once everything is revealed",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('#fold-block-a .fold-collapse-all').hidden"
+        ),
+        "the per-hunk collapse-all appears once anything is revealed",
     );
     assert_eq!(
         eval_i64(
@@ -1201,14 +1261,15 @@ fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
             "document.querySelectorAll('#fold-block-b .diff-folded[hidden]').length"
         ),
         4,
-        "block B stays folded — toggle is PARENT-SCOPED despite the shared fold-0 id",
+        "block B stays folded — the reveal is PARENT-SCOPED despite the shared fold-0 id",
     );
 
-    // CLICK A's control AGAIN: it re-collapses (4 hidden) and relabels to Show —
-    // the round-trip the old one-way reveal could not do (#136).
+    // CLICK A's collapse-all: the hunk re-collapses (4 hidden) and the
+    // control relabels to Show — the #199 restore path (the band itself only
+    // expands now; re-collapse moved to the explicit affordance).
     let _ = eval(
         &tab,
-        "document.querySelector('#fold-block-a .diff-fold').click()",
+        "document.querySelector('#fold-block-a .fold-collapse-all').click()",
     );
     assert_eq!(
         eval_i64(
@@ -1216,7 +1277,7 @@ fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
             "document.querySelectorAll('#fold-block-a .diff-folded[hidden]').length"
         ),
         4,
-        "clicking A's control again re-collapses its folded lines",
+        "the collapse-all re-collapses A's folded lines",
     );
     assert_eq!(
         eval_string(
@@ -1233,6 +1294,13 @@ fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
         )
         .contains("Show 4 unchanged lines"),
         "the re-collapsed control relabels back to 'Show N unchanged lines'",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('#fold-block-a .fold-collapse-all').hidden"
+        ),
+        "the collapse-all hides again once nothing is revealed",
     );
 
     // KEYBOARD activate block B's control (Enter): B reveals too.
@@ -1408,6 +1476,29 @@ fn model_sql_section_defaults_to_diff_and_toggles_to_raw() {
         "the diff renders the added SQL line",
     );
 
+    // cute-dbt#199 — the diff code header carries the per-diff fold toggle
+    // (replacing the top-of-report strip) and the copy-icon button
+    // (replacing the absolutely-positioned text Copy). Both are REAL
+    // focusable <button>s with an accessible name (the #146 rule).
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .diff-fold-toggle').textContent.trim()\
+             + '|' + document.querySelector('.model-sql .code-header .diff-fold-toggle').getAttribute('aria-pressed')"
+        ),
+        "Expand all|false",
+        "the model-SQL diff header carries the per-diff fold toggle, unpressed",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){var b=document.querySelector('.model-sql .code-header .code-copy-btn');\
+               return !!b && b.tagName==='BUTTON' && b.getAttribute('aria-label')==='Copy'\
+                 && !!b.querySelector('svg.icon');})()"
+        ),
+        "the model-SQL header carries the inline-SVG copy-icon button (aria-label Copy)",
+    );
+
     // Clicking "Raw" flips to the plain SQL view.
     let _ = eval(
         &tab,
@@ -1426,6 +1517,263 @@ fn model_sql_section_defaults_to_diff_and_toggles_to_raw() {
             "document.querySelector('.model-sql .sql-raw-view').hidden"
         ),
         "the Raw view shows after the toggle",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn per_diff_fold_toggle_drives_its_own_diffs_folds() {
+    // cute-dbt#199 — the per-diff Expand/Collapse-all button in a diff's code
+    // header drives THAT diff's folds through the same setAllFolds mirror the
+    // __cute hooks use: click => every fold in this diff reveals, the button
+    // relabels Collapse-all + aria-pressed=true; click again => exact
+    // restore. A long-context model-SQL diff guarantees a real fold exists.
+    let mut lines = vec![
+        dl(DiffLineKind::Removed, "select a", Some((7, 8))),
+        dl(DiffLineKind::Added, "select b", Some((7, 8))),
+    ];
+    for i in 0..10 {
+        lines.push(dl(DiffLineKind::Context, &format!("ctx{i}"), None));
+    }
+    lines.push(dl(DiffLineKind::Removed, "from t", Some((5, 6))));
+    lines.push(dl(DiffLineKind::Added, "from u", Some((5, 6))));
+    let url = render_pr_diff_with_sql_diffs(
+        "headless_per_diff_fold_toggle.html",
+        vec![model_node_with_raw("model.shop.dim_a", "select b\nfrom u")],
+        vec![("unit_test.shop.dim_a.t", unit_test("t", "dim_a"))],
+        &["model.shop.dim_a"],
+        vec![("model.shop.dim_a", BlockDiff { lines })],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // The 10-line context run folds (pad 3 => 4 hidden) inside the unified
+    // view of the model-SQL diff.
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.model-sql .sql-diff-view .diff-unified .diff-folded[hidden]').length"
+        ),
+        4,
+        "the model-SQL diff renders default-folded (4 hidden)",
+    );
+
+    // Click the header's fold toggle: every fold in THIS diff (both the
+    // unified <code> and the split <tbody>) reveals; the button flips.
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-sql .code-header .diff-fold-toggle').click()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.model-sql .sql-diff-view .diff-folded[hidden]').length"
+        ),
+        0,
+        "the per-diff toggle expands every fold in its diff (unified AND split)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .diff-fold-toggle').textContent.trim()\
+             + '|' + document.querySelector('.model-sql .code-header .diff-fold-toggle').getAttribute('aria-pressed')"
+        ),
+        "Collapse all|true",
+        "the pressed toggle relabels to Collapse all",
+    );
+
+    // Click again: exact restore (the symmetric DOM mirror).
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-sql .code-header .diff-fold-toggle').click()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.model-sql .sql-diff-view .diff-unified .diff-folded[hidden]').length"
+        ),
+        4,
+        "the toggle restores the default-folded state exactly",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .diff-fold-toggle').getAttribute('aria-pressed')"
+        ),
+        "false",
+        "the released toggle reports aria-pressed=false",
+    );
+
+    // --- Gemini PR #213 — the toggle's state is DERIVED, never cached -----
+    // (a) a global fold op through the __cute hooks keeps the per-diff
+    // toggle truthful (label + aria-pressed flip without the button being
+    // clicked).
+    let _ = eval(&tab, "window.__cuteExpandAllFolds(document)");
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .diff-fold-toggle').textContent.trim()\
+             + '|' + document.querySelector('.model-sql .code-header .diff-fold-toggle').getAttribute('aria-pressed')"
+        ),
+        "Collapse all|true",
+        "global expand-all flips the per-diff toggle's label + aria-pressed",
+    );
+    // ...and a click NOW acts on the DOM truth: nothing is hidden, so the
+    // click COLLAPSES (a cached boolean would have 'expanded' a no-op and
+    // relabeled into a lie).
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-sql .code-header .diff-fold-toggle').click()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.model-sql .sql-diff-view .diff-unified .diff-folded[hidden]').length"
+        ),
+        4,
+        "a toggle click after a global expand acts on DOM truth and collapses",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .diff-fold-toggle').textContent.trim()\
+             + '|' + document.querySelector('.model-sql .code-header .diff-fold-toggle').getAttribute('aria-pressed')"
+        ),
+        "Expand all|false",
+        "the toggle relabels from the resulting DOM state after the collapse",
+    );
+
+    // (b) stepping a fold to fully-revealed keeps the toggle truthful: the
+    // unified band-click (step 20) reveals the unified fold, but the diff as
+    // a whole still holds hidden rows (the split twin), so the toggle
+    // truthfully stays unpressed; clicking it then expands the remainder.
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-sql .sql-diff-view .diff-unified .diff-fold').click()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.model-sql .sql-diff-view .diff-unified .diff-folded[hidden]').length"
+        ),
+        0,
+        "the unified band-click fully reveals the unified fold",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .diff-fold-toggle').textContent.trim()\
+             + '|' + document.querySelector('.model-sql .code-header .diff-fold-toggle').getAttribute('aria-pressed')"
+        ),
+        "Expand all|false",
+        "the toggle stays truthful while the split twin still holds hidden rows",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-sql .code-header .diff-fold-toggle').click()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.model-sql .sql-diff-view .diff-folded[hidden]').length"
+        ),
+        0,
+        "the toggle click expands the remaining (split) folds from DOM-derived state",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.model-sql .code-header .diff-fold-toggle').textContent.trim()\
+             + '|' + document.querySelector('.model-sql .code-header .diff-fold-toggle').getAttribute('aria-pressed')"
+        ),
+        "Collapse all|true",
+        "the fully-revealed diff presses the toggle",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn copy_icon_button_signals_failure_truthfully() {
+    // Gemini PR #213 — a failed copy must NEVER flash "Copied". Both write
+    // paths are stubbed to fail in-page (writeText rejects; execCommand
+    // returns false), which deterministically drives the copy-failed branch:
+    // the button gains `.copy-failed` with title/aria-label "Copy failed"
+    // (asserted inside the 1.2s flash window via a bounded poll), never
+    // gains `.copied`, and resets to the rest "Copy" state afterwards.
+    let url = render_pr_diff_with_sql_diffs(
+        "headless_copy_failed.html",
+        vec![model_node_with_raw("model.shop.dim_a", "select id\nfrom t")],
+        vec![("unit_test.shop.dim_a.t", unit_test("t", "dim_a"))],
+        &["model.shop.dim_a"],
+        vec![],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    let _ = eval(
+        &tab,
+        "(function(){\
+           try{if(navigator.clipboard){\
+             navigator.clipboard.writeText=function(){return Promise.reject(new Error('denied'));};\
+           }}catch(e){}\
+           document.execCommand=function(){return false;};\
+         })()",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.model-sql .code-header .code-copy-btn').click()",
+    );
+    // The writeText rejection lands on a microtask; poll within the flash
+    // window for the failure state.
+    let mut state = String::new();
+    for _ in 0..20 {
+        state = eval_string(
+            &tab,
+            "(function(){var b=document.querySelector('.model-sql .code-header .code-copy-btn');\
+               return b.classList.contains('copy-failed')\
+                 ? b.getAttribute('aria-label')+'|'+b.getAttribute('title') : '';})()",
+        );
+        if !state.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(
+        state, "Copy failed|Copy failed",
+        "a failed copy flashes copy-failed with a truthful title + aria-label",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('.model-sql .code-header .code-copy-btn').classList.contains('copied')"
+        ),
+        "a failed copy never claims Copied",
+    );
+    // After the flash window the button returns to its rest state.
+    let mut rest = String::new();
+    for _ in 0..30 {
+        rest = eval_string(
+            &tab,
+            "(function(){var b=document.querySelector('.model-sql .code-header .code-copy-btn');\
+               return (!b.classList.contains('copy-failed') && !b.classList.contains('copied'))\
+                 ? b.getAttribute('aria-label')+'|'+b.getAttribute('title') : '';})()",
+        );
+        if !rest.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(
+        rest, "Copy|Copy",
+        "the button resets to the rest Copy state after the flash",
     );
 
     let _ = tab.close(true);
@@ -2720,12 +3068,14 @@ fn render_block_diff_honors_a_configurable_fold_pad() {
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn global_expand_collapse_mirrors_every_fold() {
     // The global expand-all/collapse-all is a SYMMETRIC DOM MIRROR (setAllFolds),
-    // NOT a re-render: expand reveals every folded middle line and relabels the
-    // (still-visible) per-hunk controls Show->Hide; collapse restores both
-    // EXACTLY (#136 bidirectional). A re-render would have reset the SQL
-    // File<->Diff view and re-flashed mermaid. Verified through the __cute* seams
-    // on a mounted folded block (the report's own diff is not guaranteed long
-    // enough to fold) plus the controls strip.
+    // NOT a re-render: expand reveals every folded middle line and recomputes
+    // the (still-visible) per-hunk controls' full anatomy — label,
+    // aria-expanded, stepper disabled-states, collapse-all visibility (#199);
+    // collapse restores everything EXACTLY (#136 bidirectional, carried onto
+    // the new control anatomy). A re-render would have reset the SQL
+    // File<->Diff view and re-flashed mermaid. Verified through the
+    // __cuteExpandAllFolds/__cuteCollapseAllFolds seams on a mounted folded
+    // block (the report's own diff is not guaranteed long enough to fold).
     let url = render_pr_diff_to_file(
         "headless_global_fold.html",
         vec![model_node("model.shop.dim_a")],
@@ -2738,16 +3088,17 @@ fn global_expand_collapse_mirrors_every_fold() {
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
 
-    // The controls strip renders in PR-diff mode (now Expand-all only; the
-    // configurable context-lines input moved into the #139 settings cog panel,
-    // where it still defaults to 3).
+    // cute-dbt#199 — the #132 top-of-report controls strip is RETIRED; the
+    // per-diff fold toggle (buildFoldToggleBtn, asserted in the code-header
+    // guards) replaced it. The configurable context-lines input stays in the
+    // #139 settings cog panel, defaulting to 3.
     assert_eq!(
         eval_string(
             &tab,
             "String(document.querySelectorAll('.diff-view-controls').length)"
         ),
-        "1",
-        "the diff-view controls strip renders in PR-diff mode",
+        "0",
+        "the top-of-report diff-view controls strip is retired (#199)",
     );
     assert_eq!(
         eval_string(
@@ -2822,6 +3173,27 @@ fn global_expand_collapse_mirrors_every_fold() {
         "true",
         "expand-all sets the per-hunk control to aria-expanded=true",
     );
+    // cute-dbt#199 — the mirror covers the FULL control anatomy, not just
+    // aria-expanded: label, stepper disabled-state, collapse-all visibility.
+    assert!(
+        eval_string(
+            &tab,
+            "document.querySelector('#gf .diff-fold-label').textContent"
+        )
+        .contains("All 4 lines shown"),
+        "expand-all relabels the per-hunk control to 'All N lines shown'",
+    );
+    assert!(
+        eval_bool(&tab, "document.querySelector('#gf .fold-expand').disabled"),
+        "expand-all disables the + stepper (nothing left to show)",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('#gf .fold-collapse-all').hidden"
+        ),
+        "expand-all reveals the per-hunk collapse-all affordance",
+    );
 
     // Collapse all -> back to 4 folded hidden + visible control (exact restore).
     let _ = eval(
@@ -2851,6 +3223,28 @@ fn global_expand_collapse_mirrors_every_fold() {
         ),
         "false",
         "collapse-all sets the per-hunk control back to aria-expanded=false",
+    );
+    assert!(
+        eval_string(
+            &tab,
+            "document.querySelector('#gf .diff-fold-label').textContent"
+        )
+        .contains("Show 4 unchanged lines"),
+        "collapse-all relabels the per-hunk control back to 'Show N unchanged lines'",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('#gf .fold-contract').disabled"
+        ),
+        "collapse-all disables the − stepper (nothing revealed yet)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('#gf .fold-collapse-all').hidden"
+        ),
+        "collapse-all hides the per-hunk collapse-all affordance again",
     );
 
     let _ = tab.close(true);
@@ -3019,6 +3413,9 @@ fn settings_context_lines_refolds_block_diffs_live() {
     // Verified through the __cuteRenderBlockDiff seam (the report's own diff is
     // not guaranteed long enough to fold): set the input to 1 and assert a
     // freshly-rendered 10-context block now hides 8 (head 1 + tail 1) lines.
+    // cute-dbt#199 — the expand-step setting, by contrast, needs NO re-render:
+    // expandFold reads settings.expandStep live on each activation, so a block
+    // mounted BEFORE the setting changed still steps by the new value.
     let browser = launch_browser();
     let tab = settings_fixture_tab(&browser, "headless_settings_context.html");
 
@@ -3053,6 +3450,44 @@ fn settings_context_lines_refolds_block_diffs_live() {
     assert!(
         pad1_html.contains("Show 8 unchanged lines"),
         "after setting context lines to 1, a fresh block hides 8: {pad1_html}",
+    );
+
+    // cute-dbt#199 — expand-step needs NO re-render. Mount a folded block
+    // NOW (8 hidden under pad 1), THEN change the expand-step setting; the
+    // already-mounted DOM is untouched by the change, and the next band
+    // activation reads the new step live (exactly 3 lines reveal).
+    let _ = eval(
+        &tab,
+        &format!(
+            "(function(){{var g=document.createElement('code');g.id='es-live';\
+               g.innerHTML=window.__cuteRenderBlockDiff({long_diff}, window.__cuteTokenizeSql);\
+               document.body.appendChild(g);}})()"
+        ),
+    );
+    let _ = eval(
+        &tab,
+        "(function(){var i=document.querySelector('#settings-expand-step');\
+           i.value='3';i.dispatchEvent(new Event('change'));})()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#es-live .diff-folded[hidden]').length"
+        ),
+        8,
+        "changing expand-step does NOT touch an already-mounted block (no re-render)",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('#es-live .diff-fold').click()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#es-live .diff-folded[hidden]').length"
+        ),
+        5,
+        "the next activation reads the new expand-step live (8 hidden − step 3 = 5)",
     );
 
     let _ = tab.close(true);
@@ -3200,6 +3635,251 @@ fn settings_persist_across_reload_where_supported() {
                 "document.querySelector('#settings-normalize-input').checked"
             ),
             "without storage, the in-memory toggle still reflects the live OFF state",
+        );
+    }
+
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#199: gutter fold steppers + the expand-step setting ---------
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn expand_step_steppers_reveal_contract_directionally_and_persist() {
+    // The cute-dbt#199 step-expansion contract, end to end:
+    //  (1) the static #settings-expand-step row defaults to 20 and clamps;
+    //  (2) the + stepper reveals exactly `step` lines toward the hunk
+    //      ("down" fold: from the TOP of the hidden run);
+    //  (3) the − stepper re-hides exactly `step` lines mirroring direction
+    //      (the most-recently-revealed lines, farthest from the hunk);
+    //  (4) the per-hunk collapse-all restores the fully-folded state;
+    //  (5) a LEADING fold (hunk below) carries data-fold-dir=up and reveals
+    //      from the BOTTOM of the hidden run (adjacent to the hunk);
+    //  (6) the setting persists in cute-dbt.settings.v1 across reload where
+    //      storage is available.
+    let browser = launch_browser();
+    let tab = settings_fixture_tab(&browser, "headless_expand_step.html");
+
+    // (1) static markup: the row is present, default 20, range 0..=500.
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('#settings-expand-step').value"
+        ),
+        "20",
+        "the expand-step input defaults to 20",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('#settings-expand-step').min + '-' + \
+             document.querySelector('#settings-expand-step').max"
+        ),
+        "0-500",
+        "the expand-step input advertises the 0..=500 range",
+    );
+
+    // Set the step to 2 through the panel.
+    let _ = eval(
+        &tab,
+        "(function(){var i=document.querySelector('#settings-expand-step');\
+           i.value='2';i.dispatchEvent(new Event('change'));})()",
+    );
+
+    // Mount a "down" fold: 1+1 change, 10 context (c0..c9), 1+1 change with
+    // the default pad 3 => head c0..c2, hidden c3..c6 (4), tail c7..c9.
+    let down_diff = format!(
+        "{{lines:[{{kind:'removed',text:'a',emphasis:null}},\
+         {{kind:'added',text:'b',emphasis:null}},{ctx},\
+         {{kind:'removed',text:'c',emphasis:null}},\
+         {{kind:'added',text:'d',emphasis:null}}]}}",
+        ctx = ctx_lines_js(10),
+    );
+    let _ = eval(
+        &tab,
+        &format!(
+            "(function(){{var g=document.createElement('code');g.id='st';\
+               g.innerHTML=window.__cuteRenderBlockDiff({down_diff}, window.__cuteTokenizeSql);\
+               document.body.appendChild(g);}})()"
+        ),
+    );
+
+    // (2) + stepper: exactly 2 reveal, from the TOP of the hidden run (c3,
+    // c4) — the side adjacent to the preceding hunk. The control re-parks
+    // just above the remaining hidden run and relabels to the remainder.
+    let _ = eval(&tab, "document.querySelector('#st .fold-expand').click()");
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#st .diff-folded[hidden]').length"
+        ),
+        2,
+        "the + stepper reveals exactly step=2 of the 4 hidden lines",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "Array.from(document.querySelectorAll('#st .fold-0:not([hidden]) .diff-code'))\
+               .map(function(n){return n.textContent;}).join(',')"
+        ),
+        "c3,c4",
+        "a down fold reveals from the TOP of the hidden run (adjacent to the hunk above)",
+    );
+    assert!(
+        eval_string(
+            &tab,
+            "document.querySelector('#st .diff-fold-label').textContent"
+        )
+        .contains("Show 2 unchanged lines"),
+        "the label tracks the remaining hidden count",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('#st .diff-fold').getAttribute('aria-expanded')"
+        ),
+        "false",
+        "a partially-revealed fold still reports aria-expanded=false",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('#st .fold-contract').disabled"
+        ),
+        "the − stepper enables once something is revealed",
+    );
+    // The control parked just above the remaining hidden run: the next
+    // element after it is the first still-hidden folded line (c5).
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('#st .diff-fold').nextElementSibling\
+               .querySelector('.diff-code').textContent"
+        ),
+        "c5",
+        "the control re-parks adjacent to the remaining hidden run",
+    );
+
+    // (3) − stepper: re-hides exactly 2, mirroring direction (the same c3,
+    // c4 that were revealed go back under the fold).
+    let _ = eval(&tab, "document.querySelector('#st .fold-contract').click()");
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#st .diff-folded[hidden]').length"
+        ),
+        4,
+        "the − stepper re-hides exactly step=2 lines (back to fully folded)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('#st .fold-contract').disabled"
+        ),
+        "the − stepper disables again at the fully-folded bound",
+    );
+
+    // (4) collapse-all restores the folded state after stepping out twice
+    // (2 + 2 = fully revealed => "All 4 lines shown", + disabled, parked
+    // below the run).
+    let _ = eval(&tab, "document.querySelector('#st .fold-expand').click()");
+    let _ = eval(&tab, "document.querySelector('#st .fold-expand').click()");
+    assert!(
+        eval_string(
+            &tab,
+            "document.querySelector('#st .diff-fold-label').textContent"
+        )
+        .contains("All 4 lines shown"),
+        "two step-2 expansions fully reveal the 4-line run",
+    );
+    assert!(
+        eval_bool(&tab, "document.querySelector('#st .fold-expand').disabled"),
+        "the + stepper disables at the fully-revealed bound",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('#st .fold-collapse-all').click()",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#st .diff-folded[hidden]').length"
+        ),
+        4,
+        "collapse-all restores the fully-folded hunk",
+    );
+
+    // (5) a LEADING fold (context run first, hunk below): dir=up, reveal
+    // from the BOTTOM of the hidden run (the lines adjacent to the hunk).
+    // 10 context then a change, pad 3 => head 0, hidden c0..c6 (7), tail
+    // c7..c9.
+    let up_diff = format!(
+        "{{lines:[{ctx},\
+         {{kind:'removed',text:'c',emphasis:null}},\
+         {{kind:'added',text:'d',emphasis:null}}]}}",
+        ctx = ctx_lines_js(10),
+    );
+    let _ = eval(
+        &tab,
+        &format!(
+            "(function(){{var g=document.createElement('code');g.id='su';\
+               g.innerHTML=window.__cuteRenderBlockDiff({up_diff}, window.__cuteTokenizeSql);\
+               document.body.appendChild(g);}})()"
+        ),
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('#su .diff-fold').getAttribute('data-fold-dir')"
+        ),
+        "up",
+        "a leading fold (hunk below) carries data-fold-dir=up",
+    );
+    let _ = eval(&tab, "document.querySelector('#su .fold-expand').click()");
+    assert_eq!(
+        eval_string(
+            &tab,
+            "Array.from(document.querySelectorAll('#su .fold-0:not([hidden]) .diff-code'))\
+               .map(function(n){return n.textContent;}).join(',')"
+        ),
+        "c5,c6",
+        "an up fold reveals from the BOTTOM of the hidden run (adjacent to the hunk below)",
+    );
+
+    // (6) persistence: the changed step rides cute-dbt.settings.v1 and
+    // hydrates after a reload (where this origin supports storage).
+    let storage_ok = eval_bool(
+        &tab,
+        "(function(){try{if(!window.localStorage)return false;\
+           window.localStorage.setItem('__probe','1');\
+           window.localStorage.removeItem('__probe');return true;}\
+           catch(e){return false;}})()",
+    );
+    if storage_ok {
+        let raw = eval_string(
+            &tab,
+            "window.localStorage.getItem('cute-dbt.settings.v1') || ''",
+        );
+        assert!(
+            raw.contains("\"expandStep\":2"),
+            "the expand-step setting persisted to localStorage: {raw}",
+        );
+        tab.reload(false, None).expect("reload");
+        tab.wait_until_navigated().expect("await reload");
+        let mut step_val = String::new();
+        for _ in 0..50 {
+            step_val = eval_string(
+                &tab,
+                "(document.querySelector('#settings-expand-step')||{}).value||''",
+            );
+            if step_val == "2" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(
+            step_val, "2",
+            "expand-step hydrates from localStorage after reload",
         );
     }
 
@@ -3469,10 +4149,14 @@ fn appearance_settings_flip_theme_density_diff_layout_and_persist() {
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn split_diff_renders_the_same_block_diff_as_unified() {
-    // cute-dbt#178 — the split renderer consumes the SAME BlockDiff lines
-    // (kind/text/emphasis) verbatim: removed pairs left, added right,
-    // context on both sides, word-level <strong> emphasis preserved, and the
-    // unified renderer's two-column gutter numbers the same way.
+    // cute-dbt#178 / cute-dbt#199 — the split renderer consumes the SAME
+    // BlockDiff lines (kind/text/emphasis) verbatim: removed pairs left,
+    // added right, context on both sides, word-level <strong> emphasis
+    // preserved, and the unified renderer's two-column gutter numbers the
+    // same way. Since #199 the parity extends to FOLDS: long context runs
+    // fold in split mode too, with the same hunk model + control anatomy
+    // (steppers + label + collapse-all) so one control set drives both
+    // layouts.
     let url = render_pr_diff_to_file(
         "headless_split_diff_js.html",
         vec![model_node("model.shop.dim_a")],
@@ -3523,6 +4207,89 @@ fn split_diff_renders_the_same_block_diff_as_unified() {
     assert!(
         split.matches("ds-context").count() >= 4,
         "the context line renders on both sides (2 num + 2 code cells): {split}",
+    );
+    // cute-dbt#199 — the split table pins its 50/50 geometry via a colgroup
+    // (3.8em number cols / auto code cols), fold rows must not skew it.
+    assert!(
+        split.contains("<colgroup>") && split.contains("ds-c-num") && split.contains("ds-c-code"),
+        "the split table carries the ds-c-num/ds-c-code colgroup: {split}",
+    );
+
+    // cute-dbt#199 — split folds: a long context run folds in split mode with
+    // the SAME control anatomy as unified (fold row + gutter steppers +
+    // colspan label cell + collapse-all), the same hidden count, and the
+    // same parent-scoped `.fold-<id>` class on the hidden rows.
+    let long_diff = format!(
+        "{{lines:[{{kind:'removed',text:'a',emphasis:null}},\
+         {{kind:'added',text:'b',emphasis:null}},{ctx},\
+         {{kind:'removed',text:'c',emphasis:null}},\
+         {{kind:'added',text:'d',emphasis:null}}]}}",
+        ctx = ctx_lines_js(10),
+    );
+    let split_folded = eval_string(
+        &tab,
+        &format!("window.__cuteRenderSplitDiff({long_diff}, window.__cuteTokenizeSql)"),
+    );
+    assert!(
+        split_folded.contains("diff-fold")
+            && split_folded.contains("data-fold=\"0\"")
+            && split_folded.contains("data-fold-dir=\"down\""),
+        "the split renderer emits the same directional fold control: {split_folded}",
+    );
+    assert!(
+        split_folded.contains("Show 4 unchanged lines"),
+        "the split fold hides the same 4-line middle as unified (pad 3): {split_folded}",
+    );
+    assert!(
+        split_folded.contains("ds-fold-gutter")
+            && split_folded.contains("fold-steppers")
+            && split_folded.contains("colspan=\"3\"")
+            && split_folded.contains("fold-collapse-all"),
+        "the split fold row carries the stepper gutter + colspan label cell: {split_folded}",
+    );
+    assert!(
+        split_folded.contains("diff-folded fold-0\" hidden>"),
+        "the split folded rows carry `diff-folded fold-0` and the hidden attribute: {split_folded}",
+    );
+
+    // Mounted, the split fold answers the same control set: the band click
+    // expands by step (default 20 => all 4), setAllFolds mirrors it back.
+    let _ = eval(
+        &tab,
+        &format!(
+            "(function(){{var d=document.createElement('div');d.id='sf';\
+               d.innerHTML=window.__cuteRenderSplitDiff({long_diff}, window.__cuteTokenizeSql);\
+               document.body.appendChild(d);}})()"
+        ),
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#sf .diff-folded[hidden]').length"
+        ),
+        4,
+        "the mounted split block starts with 4 hidden folded rows",
+    );
+    let _ = eval(&tab, "document.querySelector('#sf .diff-fold').click()");
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#sf .diff-folded[hidden]').length"
+        ),
+        0,
+        "activating the split fold band reveals its rows (step 20 >= hidden 4)",
+    );
+    let _ = eval(
+        &tab,
+        "window.__cuteCollapseAllFolds(document.getElementById('sf'))",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('#sf .diff-folded[hidden]').length"
+        ),
+        4,
+        "collapse-all drives the split layout through the same setAllFolds mirror",
     );
 
     let _ = tab.close(true);
