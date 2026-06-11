@@ -2930,9 +2930,15 @@
   function decorateColHeader($th, name, meta, owner) {
     var m = meta || {};
     var tests = m.tests || [];
-    var hasMeta = Boolean(m.description || tests.length);
+    // PR #244 review — trim ONCE here (the single writer of
+    // data-col-desc): a whitespace-only authored description must not
+    // count as metadata, or it would suppress the truthful fallback and
+    // open an effectively-empty bubble on a description-only column —
+    // exactly the never-empty-bubble contract this fix exists to keep.
+    var desc = (m.description || "").trim();
+    var hasMeta = Boolean(desc || tests.length);
     var parts = ["Column " + name];
-    if (m.description) parts.push(m.description);
+    if (desc) parts.push(desc);
     if (tests.length) parts.push("column tests: " + tests.map(colTestSummary).join("; "));
     if (!hasMeta) {
       parts.push("no description or data tests declared"
@@ -2944,7 +2950,7 @@
       .attr("tabindex", "0")
       .attr("aria-label", parts.join(" — "))
       .attr("data-col-name", name)
-      .attr("data-col-desc", m.description || "")
+      .attr("data-col-desc", desc)
       .attr("data-col-owner", owner || "")
       .attr("data-col-tests", JSON.stringify(tests));
   }
@@ -3006,6 +3012,12 @@
     if (left < 8) left = 8;
     var top = r.bottom + 6;
     if (top + th > vh - 8) top = r.top - 6 - th; // flip above
+    // PR #244 review / cute-dbt#246 — post-flip top clamp: at pathological
+    // viewport heights the flipped position (trigger top − bubble height)
+    // goes negative, pushing the bubble above the screen. Clamp to the
+    // 8px gutter (mirrors the horizontal clamp; the bubble may then
+    // overlap the trigger — contained beats clipped).
+    if (top < 8) top = 8;
     el.style.left = Math.round(left) + "px";
     el.style.top = Math.round(top) + "px";
   }

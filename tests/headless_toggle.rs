@@ -9386,14 +9386,16 @@ fn ov_tip_long_value_contained_in_bubble_and_viewport_at_right_edge() {
         "the overrides tip CONTAINS its content (the long value wraps \
          inside the painted background instead of painting past it)",
     );
-    // Pin 2 — viewport containment at the right-edge trigger.
+    // Pin 2 — viewport containment at the right-edge trigger. The top
+    // bound also pins the PR #244-review post-flip top clamp (the full
+    // pathological-viewport-height pin rides cute-dbt#246).
     assert!(
         eval_bool(
             &tab,
             &format!(
                 "(function(){{var r={TIP}.getBoundingClientRect();\
                  var vw=document.documentElement.clientWidth;\
-                 return r.left >= 0 && r.right <= vw + 1;}})()"
+                 return r.top >= 0 && r.left >= 0 && r.right <= vw + 1;}})()"
             ),
         ),
         "the overrides bubble's box lies fully within the visible viewport \
@@ -9811,6 +9813,82 @@ fn given_owner_label_accepts_double_quoted_ref_and_source() {
     assert!(
         src_fallback.contains("No description or data tests declared on raw.patients"),
         "a double-quoted source given's fallback names source.table, got {src_fallback:?}",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn whitespace_only_description_degrades_to_truthful_fallback() {
+    // cute-dbt#240 (PR #244 review) — a whitespace-only authored
+    // description ("   ") must NOT count as column metadata: untrimmed it
+    // passed the hasMeta gate, suppressed the truthful fallback, and the
+    // bubble led with an escaped-whitespace .ct-desc — effectively an
+    // empty bubble on a description-only column, the exact state the
+    // never-empty-bubble contract forbids. The trim happens once in
+    // decorateColHeader (the single writer of data-col-desc).
+    let mut ws_desc = BTreeMap::new();
+    ws_desc.insert("id".to_owned(), "   ".to_owned());
+    let ut = UnitTest::new(
+        "ws".to_owned(),
+        NodeId::new("dim_ws"),
+        Vec::new(),
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+    let url = render_to_file(
+        "headless_240_ws_desc_fallback.html",
+        vec![model_node("model.shop.dim_ws").with_column_descriptions(ws_desc)],
+        vec![("unit_test.shop.dim_ws.ws", ut)],
+        &["model.shop.dim_ws"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    select_model(&tab, "dim_ws");
+
+    const TH: &str = "document.querySelector('.expected-panel th[data-col-name=\"id\"]')";
+    assert!(
+        eval_bool(&tab, &format!("{TH}.classList.contains('col-meta-empty')"),),
+        "a whitespace-only description does not count as metadata — the \
+         header carries the fallback marker",
+    );
+    let _ = eval(
+        &tab,
+        &format!("{TH}.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true}}))"),
+    );
+    const BUBBLE: &str = "document.getElementById('col-tooltip')";
+    assert!(
+        !eval_bool(&tab, &format!("{BUBBLE}.hidden")),
+        "hovering the whitespace-described header reveals the bubble",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{BUBBLE}.querySelector('.ct-desc').textContent")
+        ),
+        "id",
+        "the bubble leads with the column NAME, never the whitespace run",
+    );
+    let fallback = eval_string(
+        &tab,
+        &format!("{BUBBLE}.querySelector('.ct-empty').textContent"),
+    );
+    assert!(
+        fallback.contains("No description or data tests declared on dim_ws"),
+        "the truthful fallback renders for the whitespace-described column, \
+         got {fallback:?}",
     );
 
     let _ = tab.close(true);
