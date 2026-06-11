@@ -989,15 +989,12 @@ fn override_only_edit_shows_text_diff_and_no_spurious_cell_diff() {
         "an override-only edit must NOT render a cell-diff grid",
     );
 
-    // (3) Same on the given side — the All-inputs view builds the given grid
-    // lazily; switch to it and confirm it renders Current-only (no cell diff).
-    let _ = eval(
-        &tab,
-        "document.querySelector('.panel-toggle [data-mode=\"inputs\"]').click()",
-    );
+    // (3) Same on the given side — the Given panel always renders every
+    // input (cute-dbt#201 retired the Inspect/All-inputs toggle); confirm
+    // it renders Current-only (no cell diff).
     assert!(
         eval_bool(&tab, "document.querySelector('.given-table') !== null"),
-        "the given fixture's Current grid renders in the All-inputs view",
+        "the given fixture's Current grid renders in the Given panel",
     );
     assert!(
         !eval_bool(&tab, "document.querySelector('.cell-diff-table') !== null"),
@@ -2177,16 +2174,9 @@ fn render_pr_diff_with_data_diffs(
     format!("file://{p}")
 }
 
-/// Switch the left panel to "All inputs" mode so the given grid (and its
-/// cell-diff toggle) is on-screen regardless of DAG-node selection — the
-/// Node-detail panel only shows a given once its import-CTE node is clicked,
-/// but the All-inputs panel renders every given unconditionally.
-fn show_all_inputs(tab: &Tab) {
-    let _ = eval(
-        tab,
-        "document.querySelector('.panel-toggle [data-mode=\"inputs\"]').click()",
-    );
-}
+// (The old `show_all_inputs` helper is retired with the Inspect/All-inputs
+// panel toggle — cute-dbt#201: the Given panel always renders every given
+// input unconditionally, so the given grids are on-screen at load.)
 
 /// `data_diff` for a single given input: one row, one Modified cell whose
 /// `id` value goes 1 → 2 (the synthetic toggle fixture).
@@ -2352,7 +2342,6 @@ fn same_ref_givens_each_render_their_own_cell_diff() {
     let tab = browser.new_tab().expect("new tab");
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
-    show_all_inputs(&tab);
 
     // Two given-sections (both for `ref('a')`), in source order.
     assert_eq!(
@@ -2424,7 +2413,6 @@ fn changed_cell_distinguishes_a_real_null_from_a_string_null() {
     let tab = browser.new_tab().expect("new tab");
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
-    show_all_inputs(&tab);
 
     // A real null on the new side -> `.cell-null` "NULL", italic.
     assert!(
@@ -2497,7 +2485,6 @@ fn cell_diff_toggle_defaults_to_diff_and_shows_exactly_one_view() {
 
     // The All-inputs panel renders the given grid unconditionally (no DAG
     // node click needed). The cell-diff toggle is then in the DOM.
-    show_all_inputs(&tab);
 
     assert!(
         eval_bool(&tab, "document.querySelector('.cell-diff-toggle') !== null"),
@@ -2720,7 +2707,6 @@ fn fusion_csv_format_only_shows_no_diff_cell_but_value_change_shows_old_to_new()
         .expect("navigate format-only");
     tab.wait_until_navigated()
         .expect("await format-only navigation");
-    show_all_inputs(&tab);
     // The given grid renders (the fusion csv parses to a real table)…
     assert!(
         visible(&tab, ".given-section table.given-table"),
@@ -2778,7 +2764,6 @@ fn fusion_csv_format_only_shows_no_diff_cell_but_value_change_shows_old_to_new()
     tab.wait_until_navigated()
         .expect("await value-change navigation");
     wait_for_document_ready(&tab);
-    show_all_inputs(&tab);
     assert!(
         eval_bool(&tab, "document.querySelector('.cell-diff-toggle') !== null"),
         "a genuine value change renders the Current↔Diff cell-diff toggle",
@@ -2867,7 +2852,6 @@ fn literal_sql_given_renders_as_table_non_literal_falls_back_to_code_block() {
     let tab = browser.new_tab().expect("new tab");
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
-    show_all_inputs(&tab);
 
     // Exactly two given sections render (the two sql givens). The `'` in the
     // `ref('…')` input names can't go through `querySelector('…')`'s
@@ -3325,7 +3309,6 @@ fn settings_fixture_tab(browser: &Browser, filename: &str) -> std::sync::Arc<Tab
     let tab = browser.new_tab().expect("new tab");
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
-    show_all_inputs(&tab);
     tab
 }
 
@@ -4535,8 +4518,10 @@ fn incremental_badges_modes_tooltip_and_this_given() {
     // cute-dbt#146 review — the regression guard for "hover shows nothing": the
     // bubble is hidden until hover/focus, and FOCUS reveals it (the keyboard
     // path; `:hover` shares the same CSS rule, so a visible-on-focus bubble
-    // proves the hover path paints too).
-    const BUBBLE_VIS: &str = "getComputedStyle(document.querySelector('.expect-tooltip .expect-tooltip-bubble')).visibility";
+    // proves the hover path paints too). Scoped to the expected panel:
+    // since cute-dbt#201 the DAG hint is a second `.expect-tooltip` on the
+    // page, so a bare first-match selector would read the WRONG bubble.
+    const BUBBLE_VIS: &str = "getComputedStyle(document.querySelector('.expected-panel .expect-tooltip .expect-tooltip-bubble')).visibility";
     assert_eq!(
         eval_string(&tab, BUBBLE_VIS),
         "hidden",
@@ -4550,7 +4535,6 @@ fn incremental_badges_modes_tooltip_and_this_given() {
     );
 
     // ===== the `this` given is prior-model-state; `ref(...)` is not =====
-    show_all_inputs(&tab);
     assert_eq!(
         this_given_badge_text(&tab),
         "prior model state",
@@ -4586,7 +4570,6 @@ fn incremental_badges_modes_tooltip_and_this_given() {
     );
     // The this-badge still shows on mode_off's `this` given — it is gated on
     // is_this alone, independent of the test's incremental branch.
-    show_all_inputs(&tab);
     assert_eq!(
         this_given_badge_text(&tab),
         "prior model state",
@@ -4742,7 +4725,6 @@ fn external_csv_fixture_renders_grid_with_provenance_and_no_affordance() {
     let tab = browser.new_tab().expect("new tab");
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
-    show_all_inputs(&tab);
 
     assert!(
         visible(&tab, ".given-section table.given-table"),
@@ -4797,7 +4779,6 @@ fn unreadable_external_fixture_shows_affordance_not_grid() {
     let tab = browser.new_tab().expect("new tab");
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
-    show_all_inputs(&tab);
 
     assert!(
         visible(&tab, ".given-section .external-fixture-note"),
@@ -4941,12 +4922,15 @@ fn self_named_import_cte_renders_distinct_dag_nodes_not_a_cycle() {
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
-fn source_given_fixture_card_renders_in_the_node_detail_panel() {
-    // cute-dbt#57 end-to-end DOM proof: a `given: source('synthea_raw',
-    // 'patients')` resolves through the manifest sources block to the
-    // physical identifier, binds to the `source` import CTE, and the
-    // Node-detail panel renders the given's fixture card (NOT the
-    // "no fixture provided" empty-state) when that node is clicked.
+fn source_given_fixture_card_renders_in_the_given_panel_not_the_shelf() {
+    // cute-dbt#57 end-to-end DOM proof, re-homed by cute-dbt#201: a
+    // `given: source('synthea_raw', 'patients')` resolves through the
+    // manifest sources block to the physical identifier and renders its
+    // fixture card in the Given panel (which always shows every input).
+    // Clicking the bound `source` import CTE opens the node-detail SHELF
+    // with the node's compiled SQL — and deliberately NO fixture card
+    // there (the shelf's no-fixtures rule: givens live in the Given panel,
+    // never duplicated in node detail).
     let model = model_node_with_compiled(
         "model.shop.stg_patients",
         "with source as (select * from \"memory\".\"main\".\"patients\") \
@@ -5016,8 +5000,27 @@ fn source_given_fixture_card_renders_in_the_node_detail_panel() {
     )
     .expect("Mermaid DAG SVG renders");
 
-    // Click the import CTE node (named `source` — dbt's unwrapper
-    // convention) and read its Node-detail panel.
+    // ===== the Given panel renders the source() given unconditionally ====
+    let card_input = eval_string(
+        &tab,
+        "(document.querySelector('.left-panel-body .given-section')||{getAttribute:function(){return ''}})\
+         .getAttribute('data-input-name')||''",
+    );
+    assert_eq!(
+        card_input, "source('synthea_raw', 'patients')",
+        "the source() given renders its fixture card in the Given panel",
+    );
+    // The fixture rows actually render in the card's grid.
+    let card_text = eval_string(
+        &tab,
+        "(document.querySelector('.left-panel-body .given-section')||{}).textContent||''",
+    );
+    assert!(
+        card_text.contains("Synthetic Sam"),
+        "the given's mocked rows render inside the fixture card: {card_text}",
+    );
+
+    // ===== clicking the bound import CTE opens the shelf, fixture-free ====
     let clicked = eval_bool(
         &tab,
         "(function(){var g=document.querySelector('.cte-dag-mermaid svg g.node[data-node-id=\"source\"]');\
@@ -5027,32 +5030,255 @@ fn source_given_fixture_card_renders_in_the_node_detail_panel() {
         clicked,
         "the `source` import CTE node is present + clickable"
     );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "(document.querySelector('.dag-shelf-body .node-detail')||{getAttribute:function(){return ''}})\
+             .getAttribute('data-node-id')||''",
+        ),
+        "source",
+        "clicking the import CTE opens the node-detail shelf for that node",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.dag-shelf-body .node-detail .sql-block') !== null",
+        ),
+        "the shelf shows the node's compiled SQL",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('.dag-shelf-body .given-section') !== null",
+        ),
+        "the shelf renders NO fixture card — givens live in the Given panel only \
+         (the cute-dbt#201 no-fixtures rule)",
+    );
 
-    let card_input = eval_string(
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#201: the DAG node-detail shelf ---------------------------
+
+/// Poll until `expr` evaluates true (the Mermaid re-render after a node
+/// click is async — the fresh SVG arrives on the render promise).
+fn wait_until_true(tab: &Tab, expr: &str, what: &str) {
+    for _ in 0..60 {
+        if eval_bool(tab, expr) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("timed out waiting for: {what}");
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn dag_node_click_opens_shelf_with_model_card_and_close_clears_selection() {
+    // cute-dbt#201 — the node-detail shelf contract:
+    //  - a DAG-node click opens the shelf with that node's compiled SQL;
+    //  - the final-select node maps to THIS model, so the model-detail
+    //    card renders from the #200 manifest_nodes entry (description +
+    //    tags here);
+    //  - a node with NO manifest mapping omits the card but still shows
+    //    its compiled SQL;
+    //  - ✕ closes the shelf, clears the body, and clears the baked
+    //    Mermaid selection (the DAG re-centers);
+    //  - a fresh test selection closes the shelf.
+    let model = model_node_with_compiled(
+        "model.shop.dim_shelf",
+        "with src_ext as (select * from \"memory\".\"main\".\"widgets\") \
+         select * from src_ext",
+    )
+    .with_model_metadata(
+        Some("Shelf detail model (synthetic).".to_owned()),
+        vec!["mart".to_owned()],
+    );
+    let url = render_to_file(
+        "headless_node_shelf.html",
+        vec![model],
+        vec![
+            ("unit_test.shop.dim_shelf.t1", unit_test("t1", "dim_shelf")),
+            ("unit_test.shop.dim_shelf.t2", unit_test("t2", "dim_shelf")),
+        ],
+        &["model.shop.dim_shelf"],
+        &["unit_test.shop.dim_shelf.t1", "unit_test.shop.dim_shelf.t2"],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-mermaid svg",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("Mermaid DAG SVG renders");
+
+    // ===== closed at load =====
+    assert!(
+        eval_bool(&tab, "document.querySelector('.dag-shelf').hidden"),
+        "the shelf starts hidden",
+    );
+
+    // ===== the DAG hint is the #146-contract ⓘ bubble button ============
+    // A focusable <button> whose bubble paints on keyboard focus (`:hover`
+    // shares the same CSS rule, so visible-on-focus proves hover too).
+    assert_eq!(
+        eval_string(&tab, "document.querySelector('.cte-dag-hint').tagName"),
+        "BUTTON",
+        "the DAG hint is a focusable <button>, not a hover-only subtitle",
+    );
+    const HINT_BUBBLE_VIS: &str = "getComputedStyle(document.querySelector('.cte-dag-hint .expect-tooltip-bubble')).visibility";
+    assert_eq!(
+        eval_string(&tab, HINT_BUBBLE_VIS),
+        "hidden",
+        "the DAG-hint bubble is hidden until hover/focus",
+    );
+    let _ = eval(&tab, "document.querySelector('.cte-dag-hint').focus()");
+    assert_eq!(
+        eval_string(&tab, HINT_BUBBLE_VIS),
+        "visible",
+        "focusing the DAG hint reveals its bubble (the #146 keyboard path)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.cte-dag-hint').getAttribute('aria-label')\
+             .indexOf('Click a node') === 0",
+        ),
+        "the DAG hint carries the hint text as its aria-label (AT parity)",
+    );
+
+    // ===== final-select click -> shelf with model card + compiled SQL ====
+    let clicked = eval_bool(
         &tab,
-        "(document.querySelector('.node-detail .given-section')||{getAttribute:function(){return ''}})\
-         .getAttribute('data-input-name')||''",
+        "(function(){var g=document.querySelector('.cte-dag-mermaid svg g.node[data-node-id=\"(final select)\"]');\
+          if(!g){return false;}g.dispatchEvent(new MouseEvent('click',{bubbles:true}));return true;})()",
+    );
+    assert!(clicked, "the final-select node is present + clickable");
+    assert!(
+        !eval_bool(&tab, "document.querySelector('.dag-shelf').hidden"),
+        "clicking a DAG node opens the shelf",
     );
     assert_eq!(
-        card_input, "source('synthea_raw', 'patients')",
-        "the bound source() given renders its fixture card in the Node-detail panel",
-    );
-    let has_empty_state = eval_bool(
-        &tab,
-        "!!document.querySelector('.node-detail .given-empty')",
-    );
-    assert!(
-        !has_empty_state,
-        "a bound source() given must not show the no-fixture empty-state copy",
-    );
-    // The fixture rows actually render in the card's grid.
-    let card_text = eval_string(
-        &tab,
-        "(document.querySelector('.node-detail .given-section')||{}).textContent||''",
+        eval_string(
+            &tab,
+            "document.querySelector('.dag-shelf-body .node-detail').getAttribute('data-node-id')",
+        ),
+        "(final select)",
+        "the shelf renders the clicked node's detail",
     );
     assert!(
-        card_text.contains("Synthetic Sam"),
-        "the given's mocked rows render inside the fixture card: {card_text}",
+        eval_bool(
+            &tab,
+            "document.querySelector('.dag-shelf-body .node-detail .compiled-sql .sql-block') !== null",
+        ),
+        "the shelf shows the node's compiled SQL",
+    );
+    // role badge rides the Compiled SQL summary row.
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.dag-shelf-body .compiled-sql > summary .node-role-badge.role-final') !== null",
+        ),
+        "the role badge rides the Compiled SQL summary row",
+    );
+    // the final node maps to THIS model -> the manifest_nodes card.
+    assert_eq!(
+        eval_string(
+            &tab,
+            "(document.querySelector('.dag-shelf-body .model-detail-card .mdc-name')||{textContent:''}).textContent",
+        ),
+        "dim_shelf",
+        "the final-select node's model card names this model",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "(document.querySelector('.dag-shelf-body .mdc-desc')||{textContent:''})\
+             .textContent.indexOf('Shelf detail model') === 0",
+        ),
+        "the model card carries the manifest_nodes description",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "(document.querySelector('.dag-shelf-body .mdc-tag')||{textContent:''}).textContent",
+        ),
+        "mart",
+        "the model card carries the manifest_nodes tags",
+    );
+
+    // ===== unmapped node: card omitted, compiled SQL still shows =========
+    // (the click re-rendered the SVG async — wait for the fresh nodes).
+    wait_until_true(
+        &tab,
+        "document.querySelector('.cte-dag-mermaid svg g.node[data-node-id=\"src_ext\"]') !== null",
+        "the re-rendered DAG exposes the src_ext node",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.cte-dag-mermaid svg g.node[data-node-id=\"src_ext\"]')\
+         .dispatchEvent(new MouseEvent('click',{bubbles:true}))",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.dag-shelf-body .node-detail').getAttribute('data-node-id')",
+        ),
+        "src_ext",
+        "re-clicking another node re-renders the shelf in place",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.dag-shelf-body .model-detail-card') === null",
+        ),
+        "a node with no manifest mapping omits the model card",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.dag-shelf-body .compiled-sql .sql-block') !== null",
+        ),
+        "…but its compiled SQL still shows",
+    );
+
+    // ===== ✕ closes, clears the body, and clears the selection ===========
+    let _ = eval(&tab, "document.querySelector('.dag-shelf-close').click()");
+    assert!(
+        eval_bool(&tab, "document.querySelector('.dag-shelf').hidden"),
+        "✕ hides the shelf",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.dag-shelf-body').children.length === 0",
+        ),
+        "✕ clears the shelf body",
+    );
+    // the close re-renders the DAG without the baked `selected` class.
+    wait_until_true(
+        &tab,
+        "document.querySelector('.cte-dag-mermaid svg') !== null \
+         && document.querySelector('.cte-dag-mermaid g.selected') === null",
+        "the re-rendered DAG carries no selected node after ✕",
+    );
+
+    // ===== a fresh test selection closes the shelf =======================
+    let _ = eval(
+        &tab,
+        "document.querySelector('.cte-dag-mermaid svg g.node[data-node-id=\"(final select)\"]')\
+         .dispatchEvent(new MouseEvent('click',{bubbles:true}))",
+    );
+    assert!(
+        !eval_bool(&tab, "document.querySelector('.dag-shelf').hidden"),
+        "the shelf re-opens on a fresh node click",
+    );
+    select_test(&tab, "unit_test.shop.dim_shelf.t2");
+    assert!(
+        eval_bool(&tab, "document.querySelector('.dag-shelf').hidden"),
+        "a fresh test selection closes the shelf (the DAG re-centers)",
     );
 
     let _ = tab.close(true);
@@ -5143,14 +5369,13 @@ fn stacked_panel_does_not_blow_out_viewport_at_375px() {
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
 
-    // The expected panel populates on the auto-selected test; ALSO switch the
-    // left panel to "All inputs" so the wide given table renders there too —
+    // Both panels populate on the auto-selected test: the expected panel
+    // renders the expect fixture and the Given panel always renders every
+    // given input (cute-dbt#201 retired the Inspect/All-inputs toggle) —
     // both panels populated exercises the stacked path robustly (an
-    // empty-panel fixture would not trip the toggle).
-    let _ = eval(
-        &tab,
-        "document.querySelector('.panel-toggle [data-mode=\"inputs\"]').click()",
-    );
+    // empty-panel fixture would not trip the toggle). Re-verified on the
+    // #201 layout: the .dag-stage flex row (DAG canvas + shelf) wraps below
+    // on narrow viewports and must not widen the page either.
 
     // The reflow helper runs inside requestAnimationFrame after each
     // DataTables init and on resize, and is closure-scoped (not a `window.__*`
@@ -5482,7 +5707,6 @@ fn column_header_tooltips_th_trigger_hover_focus_and_skip_bare_columns() {
     );
 
     // ===== given table: the INPUT model's metadata, filtered the same =====
-    show_all_inputs(&tab);
     const GIVEN_TH: &str = "document.querySelector('.given-section th.has-col-meta')";
     assert_eq!(
         eval(
@@ -5764,13 +5988,17 @@ fn cytoscape_hover_card_appears_and_tap_highlights_lineage_in_place() {
         "the tap mutates classes on the SAME cy instance — no rebuild, \
          pan/zoom state survives (the no-renderDag-per-click rule)",
     );
+    // cute-dbt#201 — DELIBERATE re-target: __cuteSelectNode now opens the
+    // DAG node-detail shelf (.dag-shelf-body), not the retired left-panel
+    // Node-detail mode. The seam (one global fn) survives — only the
+    // destination moved.
     assert_eq!(
         eval_string(
             &tab,
-            "document.querySelector('.left-panel-body .node-detail').getAttribute('data-node-id')"
+            "document.querySelector('.dag-shelf-body .node-detail').getAttribute('data-node-id')"
         ),
         "src_a",
-        "the tap drives the Inspect panel through __cuteSelectNode",
+        "the tap drives the node-detail shelf through __cuteSelectNode",
     );
 
     // ===== background tap clears =====
@@ -5994,13 +6222,16 @@ fn findings_panel_renders_checklist_tiers_sketch_rationale_and_pin() {
         &tab,
         "document.querySelector('.finding-pin[data-pin=\"unioned\"]').click()",
     );
+    // cute-dbt#201 — DELIBERATE re-target: the pin routes through
+    // __cuteSelectNode, which now opens the DAG node-detail shelf
+    // (.dag-shelf-body) instead of the retired left-panel Node-detail mode.
     assert_eq!(
         eval_string(
             &tab,
-            "document.querySelector('.left-panel-body .node-detail').getAttribute('data-node-id')",
+            "document.querySelector('.dag-shelf-body .node-detail').getAttribute('data-node-id')",
         ),
         "unioned",
-        "the pin selects the cited construct (Inspect follows)",
+        "the pin selects the cited construct (the node-detail shelf follows)",
     );
     assert!(
         eval_bool(

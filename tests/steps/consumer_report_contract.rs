@@ -157,48 +157,46 @@ fn then_drawer_contains_substring(world: &mut World, substring: String) {
     );
 }
 
-/// cute-dbt#74: pin the structural ordering of the relocated description
-/// banner. The byte-identity insta snapshot also catches a regression,
-/// but snapshots get rebaselined reflexively; this scenario fails loudly
-/// with a load-bearing message if the description drifts back to the top
-/// of the page.
-#[then(
-    "the rendered HTML places the test-description section between the cte-dag section and the panel-row"
-)]
-fn then_description_between_dag_and_panels(world: &mut World) {
+/// cute-dbt#74 (re-homed by cute-dbt#201): pin the structural ordering of
+/// the test section — the always-open test card hosting the unit-test
+/// selector, badge row, and description — between the CTE DAG and the
+/// given/expected panels. The byte-identity insta snapshot also catches a
+/// regression, but snapshots get rebaselined reflexively; this scenario
+/// fails loudly with a load-bearing message if the test context drifts
+/// back to the top of the page.
+#[then("the rendered HTML places the test section between the cte-dag section and the panel-row")]
+fn then_test_section_between_dag_and_panels(world: &mut World) {
     let html = world
         .report_html
         .as_ref()
         .expect("report.html was written by the subprocess");
     // Match the class attribute substring (no trailing `"`) so the
-    // assertion is robust to additional classes on the element (the
-    // test-description-section gains `is-hidden` via JS, but the BDD
-    // is asserting structural DOM order, not the empty-state class).
+    // assertion is robust to additional classes on the element — the BDD
+    // is asserting structural DOM order only.
     let dag_pos = html
         .find(r#"<section class="cte-dag"#)
         .expect("rendered HTML must include <section class=\"cte-dag\">");
-    let desc_pos = html
-        .find(r#"<section class="test-description-section"#)
-        .expect(
-            "rendered HTML must include <section class=\"test-description-section\"> \
-         (cute-dbt#74 relocated the description banner there)",
-        );
+    let test_pos = html.find(r#"<section class="test-section"#).expect(
+        "rendered HTML must include <section class=\"test-section\"> \
+         (cute-dbt#201 relocated the test card — selector, badges, \
+         description — there)",
+    );
     let panel_pos = html
         .find(r#"<div class="panel-row"#)
         .expect("rendered HTML must include <div class=\"panel-row\">");
     assert!(
-        dag_pos < desc_pos,
-        "test-description-section should appear AFTER cte-dag section in DOM order; \
-         cte-dag at byte {dag_pos}, test-description-section at byte {desc_pos}. \
-         cute-dbt#74's relocation invariant is broken — the description banner moved \
-         back above the CTE DAG.",
+        dag_pos < test_pos,
+        "test-section should appear AFTER the cte-dag section in DOM order; \
+         cte-dag at byte {dag_pos}, test-section at byte {test_pos}. \
+         The cute-dbt#74/#201 relocation invariant is broken — the test \
+         context moved back above the CTE DAG.",
     );
     assert!(
-        desc_pos < panel_pos,
-        "test-description-section should appear BEFORE panel-row in DOM order; \
-         test-description-section at byte {desc_pos}, panel-row at byte {panel_pos}. \
-         cute-dbt#74's relocation invariant is broken — the description banner moved \
-         below the inspect/expected panels.",
+        test_pos < panel_pos,
+        "test-section should appear BEFORE panel-row in DOM order; \
+         test-section at byte {test_pos}, panel-row at byte {panel_pos}. \
+         The cute-dbt#74/#201 relocation invariant is broken — the test \
+         context moved below the given/expected panels.",
     );
 }
 
