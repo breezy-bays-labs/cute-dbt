@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-87624546.js";
+            window.path_to_searchindex_js = "searchindex-24c0a6a2.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-f6d2c74b.js"></script>
@@ -916,14 +916,19 @@ TOML file.</p>
 <h2 id="conditions-3"><a class="header" href="#conditions-3">Conditions</a></h2>
 <ul>
 <li>the model LEFT-JOINs a relation and filters <code>WHERE &lt;right&gt;.&lt;key&gt; IS NULL</code> in a top-level AND conjunct, where <code>&lt;key&gt;</code> is one of the join’s ON equi-key right columns — the anti-join idiom: the join deliberately keeps the UNMATCHED left rows</li>
+<li>OR the model filters <code>WHERE NOT EXISTS (SELECT … FROM &lt;inner&gt; WHERE …)</code> in a top-level AND conjunct, the inner being a single plain named relation whose WHERE carries a correlated reference to the outer query — the resolvable outer↔inner equi-conjuncts are the anti-join keys (cute-dbt#196)</li>
+<li>OR the model filters <code>WHERE &lt;col&gt; NOT IN (SELECT &lt;col&gt; FROM &lt;inner&gt;)</code> in a top-level AND conjunct, the inner being a single plain named relation projecting exactly one column — the membership pair (outer column ↔ inner projected column) is the anti-join key (cute-dbt#196). SQL honesty note: a NULL in the inner column makes NOT IN yield NO rows at all; detection still treats the construct as the anti-join idiom (that is how it is authored), and the matched-row fixture this check recommends is exactly what surfaces the NULL trap</li>
 <li>the recommendation INVERTS join.left-null-propagation’s: the anti-join’s risk is the matched class leaking through, so the missing fixture is a left row that DOES match a right row, with <code>expect</code> proving it is excluded</li>
-<li>satisfaction: some unit test’s literal givens carry a left row whose ON equi-key matches a right given row (both cells non-NULL, equal on the value-normalized key)</li>
-<li>supersedes join.left-null-propagation on the same construct: NULL right-side columns are the anti-join’s working mechanism, not an untested gap</li>
+<li>satisfaction (all arms): some unit test’s literal givens carry a left/outer row whose key matches an inner/right given row (both cells non-NULL, equal on the value-normalized key)</li>
+<li>supersedes join.left-null-propagation on the same construct: NULL right-side columns are the anti-join’s working mechanism, not an untested gap (the subquery constructs are never enumerated by left-null-propagation at all)</li>
 <li>given binding follows the union.arm-coverage premise: only <code>given</code> entries carry statically-visible rows — an ungiven non-seed input is an empty mock; join sides bind directly by external leaf name or through a single-external simple-FROM closure</li>
 </ul>
 <h2 id="exclusions-3"><a class="header" href="#exclusions-3">Exclusions</a></h2>
 <ul>
-<li>the NOT EXISTS / NOT IN anti-join equivalents are NOT detected in v1 — only the LEFT JOIN + IS NULL form is recognized (a declared gap: the construct is silent, never misclassified)</li>
+<li>negated subqueries anywhere but a top-level AND conjunct of a SELECT’s WHERE (OR branches, HAVING, JOIN ON, projections) are NOT detected — different semantics or position, silent, never misclassified</li>
+<li>non-negated EXISTS / IN subqueries (semi-join and membership inclusion — future evidence consumers) and scalar subqueries are NOT detected</li>
+<li>a NOT EXISTS / NOT IN whose inner is a derived table, joins or reads several relations, or carries its own WITH clause is NOT detected; an uncorrelated NOT EXISTS (zero outer references) is not a keyed anti-join — silent</li>
+<li>expression (non-column) correlations and projections are not key material: a correlated NOT EXISTS with no resolvable equi pair, and a NOT IN whose outer column does not resolve to a single relation, degrade to UNKNOWN, never UNCOVERED</li>
 <li>an IS NULL on a non-key right column is a data filter, not the anti-join idiom — join.left-null-propagation governs that construct</li>
 <li>an IS NULL inside an OR branch has different semantics and is never treated as the anti-join filter</li>
 <li>unrecoverable join keys, unresolvable side bindings, external <code>fixture:</code> files, non-literal <code>format: sql</code> givens, and ungiven seed inputs degrade to UNKNOWN, never UNCOVERED</li>
