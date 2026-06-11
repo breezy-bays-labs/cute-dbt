@@ -13,16 +13,16 @@ diff --git a/models/marts/analytics/fct_provider_metrics.sql b/models/marts/anal
 diff --git a/models/marts/analytics/_analytics__models.yml b/models/marts/analytics/_analytics__models.yml
 --- a/models/marts/analytics/_analytics__models.yml
 +++ b/models/marts/analytics/_analytics__models.yml
-@@ -1388,2 +1388,2 @@
+@@ -1446,2 +1446,2 @@
 -          quarantined_count: null
 -          total_count: 2
 +          quarantined_count: 0
 +          total_count: 1
-@@ -1392,2 +1392,2 @@
+@@ -1450,2 +1450,2 @@
 -          quarantined_count: 1
 -          total_count: 2
 +          quarantined_count: 0
 +          total_count: 1
-@@ -1399 +1399 @@
+@@ -1457 +1457 @@
 -        dq_quarantine_threshold: 10
 +        dq_quarantine_threshold: 5
