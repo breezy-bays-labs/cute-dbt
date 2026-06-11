@@ -69,8 +69,9 @@ use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
     BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, CteGraph, EdgeType, Finding, FixtureTable,
     HeuristicId, InScopeSet, Instrument, Manifest, ModelInScopeSet, Node, NodeId, SourceNode,
-    TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestYamlBlock,
-    apply_check_policy, model_findings, resolve_target_model, table_from_manifest_rows,
+    TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
+    UnitTestYamlBlock, apply_check_policy, model_findings, resolve_target_model,
+    table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -244,6 +245,14 @@ pub struct ModelPayload {
     /// synthesized `<name>.sql` (the cute-dbt#155 terminal label).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// Authored model description (cute-dbt#200) — the model node's
+    /// top-level `description`, surfaced as the in-card model context
+    /// (handoff README §2.5). `None` (key omitted — pre-#200 payloads
+    /// and undescribed models stay byte-stable) when the manifest
+    /// carries no prose (the adapter drops dbt-core's empty-string
+    /// unset shape).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// DAG nodes + edges, keyed for the design's JS.
     pub dag: DagPayload,
     /// Per-node compiled SQL, keyed by node id (CTE name or model name
@@ -520,6 +529,82 @@ pub struct ColumnTestPayload {
     pub detail: Option<String>,
 }
 
+/// One entry of the report-level `manifest_nodes` lookup (cute-dbt#200,
+/// handoff README §2.5–2.6): the model context the node-detail shelf
+/// (cute-dbt#201) and the model-ref / expected-model hover cards
+/// (cute-dbt#202) render — keyed by BARE model name in
+/// [`ReportPayload::manifest_nodes`]. A model absent from the lookup is
+/// the graceful no-hover (the JS contract); a present entry always has
+/// at least one non-empty field (`build_manifest_nodes` skips
+/// all-empty entries so bare synthetic fixtures stay byte-stable).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ManifestNodePayload {
+    /// Authored model description ([`Node::description`] — the adapter
+    /// already dropped dbt-core's empty-string unset shape).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// `config.materialized` (`"view"` / `"table"` / `"incremental"` /
+    /// …) — the already-ingested cute-dbt#145 accessor, re-plumbed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialized: Option<String>,
+    /// Resolved model tags ([`Node::tags`] — the deduplicated top-level
+    /// wire list).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// The model's declared columns with their per-column context, in
+    /// deterministic name order. Empty (key omitted) for models without
+    /// a columns block.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<ManifestColumnPayload>,
+    /// MODEL-LEVEL data tests (cute-dbt#200): ingested test nodes with
+    /// `attached_node` = this model and `column_name` = `None`, mapped
+    /// through the same §2.2 display vocabulary as column tests. A
+    /// SECOND, model-scoped projection — the per-table
+    /// `given/expected.column_meta` th-tooltips (#165/#166) are
+    /// untouched.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub model_tests: Vec<ModelTestPayload>,
+}
+
+/// One declared column in a [`ManifestNodePayload`] — name, authored
+/// description, declared `data_type`, and the column-scoped data tests
+/// in the SHIPPED [`ColumnTestPayload`] display shape (cute-dbt#166/#189
+/// — reused, never a parallel type).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ManifestColumnPayload {
+    /// Column name as declared in the model's `columns` map.
+    pub name: String,
+    /// Authored column description (the #165 ingestion; empty-string
+    /// unset shapes already dropped).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Declared `data_type` from the already-ingested [`Node::columns`]
+    /// map (`None` — key omitted — for untyped columns).
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub column_type: Option<String>,
+    /// Column-scoped data tests, the §2.2 display mapping (same entries
+    /// the per-table `column_meta` carries for this column).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tests: Vec<ColumnTestPayload>,
+}
+
+/// One MODEL-LEVEL data test in display shape (cute-dbt#200): the
+/// [`column_test_payload`] §2.2 mapping reduced to `name` + `detail`
+/// (known built-ins keep their prose names + detail; unknown tests carry
+/// the package-qualified raw name with no detail — their open-ended arg
+/// vocabularies stay uninterpreted, the v1 stance).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ModelTestPayload {
+    /// Display name (the §2.2 vocabulary or the package-qualified raw
+    /// test name).
+    pub name: String,
+    /// Muted mono detail when the test carries an interpretable one
+    /// (`relationships` target / range bound). `None` — key omitted —
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// Structured display mapping of a column-scoped generic test
 /// (cute-dbt#165 → restructured for cute-dbt#178 per the handoff README
 /// §2.2 table):
@@ -703,6 +788,129 @@ fn column_meta_for_table(
         .collect()
 }
 
+/// Build one model's [`ManifestNodePayload`] (cute-dbt#200): the
+/// authored description + tags (#200 ingestion), the #145 `materialized`
+/// accessor, every DECLARED column (the [`Node::columns`] map — name
+/// order, deterministic) decorated with its #165 description and
+/// column-scoped tests, and the model-level test grouping. Mostly
+/// re-plumbing of already-ingested data — the genuinely new computation
+/// is the model-level grouping in [`model_tests_for_model`].
+fn manifest_node_payload(current: &Manifest, model: &Node) -> ManifestNodePayload {
+    let meta = column_meta_for_model(current, model);
+    // Declared columns drive the list; a meta-only key (a column-scoped
+    // test whose column the model does not declare — possible only on
+    // hand-built manifests) is appended via the BTreeMap union so no
+    // ingested test silently disappears.
+    let mut columns: BTreeMap<&String, ManifestColumnPayload> = model
+        .columns()
+        .iter()
+        .map(|(name, data_type)| {
+            (
+                name,
+                ManifestColumnPayload {
+                    name: name.clone(),
+                    description: None,
+                    column_type: data_type.clone(),
+                    tests: Vec::new(),
+                },
+            )
+        })
+        .collect();
+    for (name, m) in &meta {
+        let entry = columns
+            .entry(name)
+            .or_insert_with(|| ManifestColumnPayload {
+                name: name.clone(),
+                ..ManifestColumnPayload::default()
+            });
+        entry.description.clone_from(&m.description);
+        entry.tests.clone_from(&m.tests);
+    }
+    ManifestNodePayload {
+        description: model.description().map(str::to_owned),
+        materialized: model.config().materialized().map(str::to_owned),
+        tags: model.tags().to_vec(),
+        columns: columns.into_values().collect(),
+        model_tests: model_tests_for_model(current, model),
+    }
+}
+
+/// The MODEL-LEVEL data tests attached to `model` (cute-dbt#200):
+/// ingested generic-test nodes with `attached_node == model` AND
+/// `column_name == None` (dbt's model-`data_tests:` shape — a
+/// column-scoped test carries `column_name` and belongs to the per-column
+/// projection instead). Singular (SQL-file) tests carry no
+/// `test_metadata` — and on real manifests no `attached_node` either —
+/// so they are out of v1 scope, exactly like the #165 column path.
+/// Mapped through [`column_test_payload`] and reduced to `name` +
+/// `detail` ([`ModelTestPayload`]); sorted by (name, detail, test node
+/// id) — `Manifest::nodes` is a `HashMap` with no inherent order.
+fn model_tests_for_model(current: &Manifest, model: &Node) -> Vec<ModelTestPayload> {
+    let mut tests: Vec<(ModelTestPayload, &str)> = current
+        .nodes()
+        .iter()
+        .filter_map(|(id, node)| {
+            if node.resource_type() != "test"
+                || node.attached_node() != Some(model.id())
+                || node.column_name().is_some()
+            {
+                return None;
+            }
+            let tm = node.test_metadata()?;
+            let mapped = column_test_payload(tm);
+            Some((
+                ModelTestPayload {
+                    name: mapped.name,
+                    detail: mapped.detail,
+                },
+                id.as_str(),
+            ))
+        })
+        .collect();
+    tests.sort_by(|a, b| (&a.0.name, &a.0.detail, a.1).cmp(&(&b.0.name, &b.0.detail, b.1)));
+    tests.into_iter().map(|(t, _)| t).collect()
+}
+
+/// Build the report-level `manifest_nodes` lookup (cute-dbt#200), keyed
+/// by BARE model name. Scope is deliberately narrow: the in-scope models
+/// plus every model referenced by a rendered test's `given.input`
+/// `ref()` — never the whole project graph. A `this` given resolves to
+/// the in-scope target model (already present); `source(...)` inputs and
+/// unresolvable refs contribute nothing (manifest `sources` are not
+/// model nodes — the pill renders without a hover card, the graceful JS
+/// contract). All-empty entries are skipped so bare synthetic manifests
+/// keep the `manifest_nodes` key off the wire entirely.
+fn build_manifest_nodes(
+    current: &Manifest,
+    models_in_scope: &ModelInScopeSet,
+    model_tests: &HashMap<NodeId, Vec<(&str, &UnitTest)>>,
+) -> BTreeMap<String, ManifestNodePayload> {
+    let mut referenced: BTreeMap<String, &Node> = BTreeMap::new();
+    for model_id in models_in_scope.iter() {
+        let Some(model) = current.node(model_id) else {
+            continue;
+        };
+        referenced.insert(leaf_segment(model.id().as_str()).to_owned(), model);
+        for (_, unit_test) in model_tests.get(model_id).into_iter().flatten() {
+            for given in unit_test.given() {
+                let Some(upstream) = parse_ref_name(given.input())
+                    .and_then(|ref_name| resolve_target_model(current, &NodeId::new(ref_name)))
+                else {
+                    continue;
+                };
+                referenced.insert(leaf_segment(upstream.id().as_str()).to_owned(), upstream);
+            }
+        }
+    }
+    referenced
+        .into_iter()
+        .filter_map(|(name, node)| {
+            let payload = manifest_node_payload(current, node);
+            (payload != ManifestNodePayload::default()).then_some((name, payload))
+        })
+        .collect()
+}
+
 /// One `given[i]` entry from a unit test, lifted into payload shape.
 ///
 /// `bound_to_node` ties the given to an import-CTE node id when a match
@@ -845,6 +1053,18 @@ pub struct TestPayload {
     /// the authoritative bool (`=== true`), never the `this`-given proxy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_incremental_mode: Option<bool>,
+    /// The FULL dbt `overrides` blob (cute-dbt#200): group (`"macros"` /
+    /// `"vars"` / `"env_vars"`) → name → **native** value (serde `Value`
+    /// passthrough — `true` / `7` / `0.05` stay bool/number on the wire,
+    /// the cute-dbt#197 founder decision; never stringified). Drives the
+    /// `overrides · N` badge + hover tooltip (cute-dbt#202; handoff
+    /// README §2.6). `None` (key omitted — pre-#200 payloads stay
+    /// byte-stable) when the test declares no effective override; the
+    /// adapter already dropped null/empty groups. ADDITIVE context next
+    /// to the lifted [`Self::is_incremental_mode`] flag (#145) and the
+    /// #125 YAML-slice text diffs — both stay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overrides: Option<UnitTestOverrides>,
     /// Ordered list of fixture inputs for the test (`given[…]`).
     pub given: Vec<GivenPayload>,
     /// Expected result block (`expect`).
@@ -895,6 +1115,15 @@ pub struct ReportPayload {
     /// One entry per model in `models_in_scope` (deterministic
     /// `BTreeSet` ordering inherited from the comparator).
     pub models: Vec<ModelPayload>,
+    /// Report-level model-context lookup (cute-dbt#200), keyed by BARE
+    /// model name: the in-scope models plus every model referenced by a
+    /// rendered test's `given.input` `ref()` — NEVER the whole project
+    /// graph. `source(...)` inputs and unresolvable refs contribute
+    /// nothing; an absent entry is the graceful no-hover (the JS
+    /// contract). Omitted from JSON when empty (all-empty entries are
+    /// skipped too) so bare synthetic payloads stay byte-stable.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub manifest_nodes: BTreeMap<String, ManifestNodePayload>,
     /// Spec catalog for every check that appears in any model's
     /// `findings` (cute-dbt#170), keyed by dotted check id — the
     /// rationale drawer, tier vocabulary, and book link render from
@@ -1001,14 +1230,18 @@ struct ReportTemplate<'a> {
 /// break out of the JSON carrier.
 ///
 /// Escape `<` to its `<` Unicode form whenever it is followed by
-/// `/`, `!`, `?`, or an ASCII letter — every tag-opening shape. `</`
-/// and `<!--` are the sequences that matter under HTML5's script-data
-/// state machine; the `<letter` / `<?` forms are inert in a real
-/// browser but read as markup to non-HTML5 tag scanners (cute-dbt#170:
-/// the check-spec catalog put prose like `WHERE <right>.<key> IS NULL`
-/// on the wire, which the `tl`-based test extractors parsed as a tag,
-/// corrupting payload extraction). A bare `<` followed by a space or
-/// digit (compiled-SQL comparisons) stays raw. The `\uXXXX` form is a
+/// `/`, `!`, `?`, `=`, or an ASCII letter — every tag-opening shape
+/// plus the scanner-hostile `<=`. `</` and `<!--` are the sequences
+/// that matter under HTML5's script-data state machine; the `<letter` /
+/// `<?` forms are inert in a real browser but read as markup to
+/// non-HTML5 tag scanners (cute-dbt#170: the check-spec catalog put
+/// prose like `WHERE <right>.<key> IS NULL` on the wire, which the
+/// `tl`-based test extractors parsed as a tag, corrupting payload
+/// extraction). `<=` joined the set at cute-dbt#200: authored model /
+/// column descriptions carry SQL-ish prose like `encounter_start_at <=
+/// current_timestamp` (the committed playground fixture), which `tl`
+/// also mis-scans. A bare `<` followed by a space or digit
+/// (compiled-SQL comparisons) stays raw. The `\uXXXX` form is a
 /// documented JSON escape (RFC 8259 §7) so the output remains a valid
 /// JSON document that `JSON.parse(...)` decodes back to the original
 /// characters.
@@ -1024,7 +1257,10 @@ fn payload_json_for_html_script(payload: &ReportPayload) -> Result<String, serde
     let mut out = String::with_capacity(json.len() + 16);
     let mut chars = json.chars().peekable();
     while let Some(c) = chars.next() {
-        let tag_opener = matches!(chars.peek(), Some('/' | '!' | '?' | 'a'..='z' | 'A'..='Z'));
+        let tag_opener = matches!(
+            chars.peek(),
+            Some('/' | '!' | '?' | '=' | 'a'..='z' | 'A'..='Z')
+        );
         if c == '<' && tag_opener {
             out.push_str("\\u003c");
         } else {
@@ -1160,6 +1396,10 @@ pub fn build_payload_with_externals(
     ReportPayload {
         baseline: baseline_label.to_owned(),
         models,
+        // cute-dbt#200 — the model-context lookup for the shelf/hover
+        // cards, scoped to the in-scope models + their tests' ref()-ed
+        // upstreams.
+        manifest_nodes: build_manifest_nodes(current, models_in_scope, &model_tests),
         check_specs,
     }
 }
@@ -1344,6 +1584,10 @@ fn build_model_payload(
         // Model-SQL code-card header (None on synthetic manifests; the
         // template JS falls back to `<name>.sql`).
         path: model.original_file_path().map(str::to_owned),
+        // cute-dbt#200 — the authored model description (None — key
+        // omitted — for undescribed models, so pre-#200 payloads stay
+        // byte-stable).
+        description: model.description().map(str::to_owned),
         dag: DagPayload { nodes, edges },
         compiled_sql,
         raw_sql,
@@ -1598,6 +1842,9 @@ fn build_test_payload(
         yaml_diff: yaml_diff.cloned(),
         data_diff: data_diff.cloned(),
         is_incremental_mode: unit_test.is_incremental_mode(),
+        // cute-dbt#200 — the full grouped overrides blob, native scalar
+        // values preserved (the adapter already dropped empty groups).
+        overrides: unit_test.overrides().cloned(),
         given,
         expected: ExpectedPayload {
             table: expect_table,
@@ -3933,6 +4180,7 @@ mod tests {
         let payload = ReportPayload {
             baseline: "</script><script>alert(1)</script>".to_owned(),
             models: vec![],
+            manifest_nodes: BTreeMap::new(),
             check_specs: BTreeMap::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
@@ -3951,6 +4199,7 @@ mod tests {
         let payload = ReportPayload {
             baseline: "x<!--hostile-->y".to_owned(),
             models: vec![],
+            manifest_nodes: BTreeMap::new(),
             check_specs: BTreeMap::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
@@ -3971,10 +4220,40 @@ mod tests {
         let payload = ReportPayload {
             baseline: "a < b".to_owned(),
             models: vec![],
+            manifest_nodes: BTreeMap::new(),
             check_specs: BTreeMap::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(serialized.contains("a < b"), "bare `<` is preserved");
+    }
+
+    #[test]
+    fn payload_json_escapes_le_comparisons_for_sloppy_scanners() {
+        // cute-dbt#200 — authored model/column descriptions carry SQL-ish
+        // prose like `encounter_start_at <= current_timestamp` (the
+        // committed playground fixture); `tl`-based extractors mis-scan a
+        // raw `<=`, so it joins the #170 escape set. Round-trips intact.
+        let payload = ReportPayload {
+            baseline: "encounter_start_at <= current_timestamp".to_owned(),
+            models: vec![],
+            manifest_nodes: BTreeMap::new(),
+            check_specs: BTreeMap::new(),
+        };
+        let serialized = payload_json_for_html_script(&payload).unwrap();
+        assert!(
+            !serialized.contains("<="),
+            "no raw <= survives: {serialized}"
+        );
+        assert!(
+            serialized.contains("\\u003c="),
+            "`<=` escapes to `\\u003c=`: {serialized}"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serialized).expect("escaped output is valid JSON");
+        assert_eq!(
+            parsed["baseline"],
+            serde_json::Value::String("encounter_start_at <= current_timestamp".to_owned()),
+        );
     }
 
     #[test]
@@ -3986,6 +4265,7 @@ mod tests {
         let payload = ReportPayload {
             baseline: "filters WHERE <right>.<key> IS NULL <?".to_owned(),
             models: vec![],
+            manifest_nodes: BTreeMap::new(),
             check_specs: BTreeMap::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
@@ -4012,6 +4292,7 @@ mod tests {
         let original = ReportPayload {
             baseline: "</script><!--end".to_owned(),
             models: vec![],
+            manifest_nodes: BTreeMap::new(),
             check_specs: BTreeMap::new(),
         };
         let serialized = payload_json_for_html_script(&original).unwrap();
@@ -5166,6 +5447,345 @@ mod tests {
         assert!(
             !expect_json.contains("fixture"),
             "inline expect omits the fixture key; got {expect_json}",
+        );
+    }
+
+    // ===== cute-dbt#200 — manifest_nodes + overrides + description =====
+
+    /// A model-level (no `column_name`) generic-test node attached to
+    /// `model_id`.
+    fn model_test_node(id: &str, model_id: &str, tm: TestMetadata) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "test",
+            checksum("t"),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_test_attachment(None, Some(NodeId::new(model_id)), Some(tm))
+    }
+
+    /// A described + tagged + typed-columns model node for the
+    /// `manifest_nodes` tests.
+    fn context_rich_model(id: &str) -> Node {
+        let mut config = BTreeMap::new();
+        config.insert("materialized".to_owned(), Value::from("incremental"));
+        let mut columns = BTreeMap::new();
+        columns.insert("id".to_owned(), Some("bigint".to_owned()));
+        columns.insert("status".to_owned(), None);
+        let mut descriptions = BTreeMap::new();
+        descriptions.insert("id".to_owned(), "Primary key".to_owned());
+        Node::new(
+            NodeId::new(id),
+            "model",
+            checksum("body"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(config, false),
+            None,
+            columns,
+        )
+        .with_column_descriptions(descriptions)
+        .with_model_metadata(
+            Some("One row per payer.".to_owned()),
+            vec!["marts".to_owned(), "finance".to_owned()],
+        )
+    }
+
+    /// The demo-payload-shaped grouped overrides (native scalars).
+    fn grouped_overrides() -> crate::domain::UnitTestOverrides {
+        let mut overrides = crate::domain::UnitTestOverrides::new();
+        overrides.insert(
+            "macros".to_owned(),
+            [("is_incremental".to_owned(), json!(true))].into(),
+        );
+        overrides.insert(
+            "vars".to_owned(),
+            [
+                ("encounter_lookback_days".to_owned(), json!(7)),
+                ("dq_quarantine_threshold".to_owned(), json!(0.05)),
+            ]
+            .into(),
+        );
+        overrides
+    }
+
+    #[test]
+    fn manifest_nodes_entry_carries_the_full_model_context() {
+        let model = context_rich_model("model.shop.dim_payers");
+        let manifest = manifest_for(
+            vec![
+                model,
+                column_test_node(
+                    "test.shop.unique_dim_payers_id",
+                    "model.shop.dim_payers",
+                    "id",
+                    TestMetadata::new("unique", None, Value::Null),
+                ),
+                // Known built-in at MODEL level → §2.2 prose name + detail.
+                model_test_node(
+                    "test.shop.relationships_dim_payers",
+                    "model.shop.dim_payers",
+                    TestMetadata::new(
+                        "relationships",
+                        None,
+                        json!({ "to": "ref('stg_payers')", "field": "payer_id" }),
+                    ),
+                ),
+                // Unknown package test at MODEL level → package-qualified
+                // raw name, no detail (open-ended kwargs uninterpreted).
+                model_test_node(
+                    "test.shop.unique_combo_dim_payers",
+                    "model.shop.dim_payers",
+                    TestMetadata::new(
+                        "unique_combination_of_columns",
+                        Some("dbt_utils".to_owned()),
+                        json!({ "combination_of_columns": ["id", "status"] }),
+                    ),
+                ),
+            ],
+            vec![],
+        );
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.dim_payers")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let entry = payload
+            .manifest_nodes
+            .get("dim_payers")
+            .expect("in-scope model keyed by BARE name");
+        assert_eq!(entry.description.as_deref(), Some("One row per payer."));
+        assert_eq!(entry.materialized.as_deref(), Some("incremental"));
+        assert_eq!(entry.tags, ["marts".to_owned(), "finance".to_owned()]);
+        assert_eq!(
+            entry.columns,
+            vec![
+                ManifestColumnPayload {
+                    name: "id".to_owned(),
+                    description: Some("Primary key".to_owned()),
+                    column_type: Some("bigint".to_owned()),
+                    tests: vec![bare_test("unique")],
+                },
+                ManifestColumnPayload {
+                    name: "status".to_owned(),
+                    description: None,
+                    column_type: None,
+                    tests: vec![],
+                },
+            ],
+            "declared columns in name order, decorated with #165 meta"
+        );
+        assert_eq!(
+            entry.model_tests,
+            vec![
+                ModelTestPayload {
+                    name: "dbt_utils.unique_combination_of_columns".to_owned(),
+                    detail: None,
+                },
+                ModelTestPayload {
+                    name: "relationships".to_owned(),
+                    detail: Some("stg_payers.payer_id".to_owned()),
+                },
+            ],
+            "model-level tests via the §2.2 mapping, sorted by name"
+        );
+    }
+
+    #[test]
+    fn manifest_nodes_include_ref_ed_upstreams_and_exclude_unrelated_models() {
+        let target = model_node("model.shop.dim_x", "x", Some("select 1"));
+        let upstream = model_node("model.shop.stg_src", "s", Some("select 1"))
+            .with_model_metadata(Some("Staged source.".to_owned()), Vec::new());
+        // Described but neither in scope nor ref()-ed → must NOT appear
+        // (never the whole project graph).
+        let unrelated = model_node("model.shop.dim_unrelated", "u", Some("select 1"))
+            .with_model_metadata(Some("Unrelated.".to_owned()), Vec::new());
+        let ut = UnitTest::new(
+            "t",
+            NodeId::new("dim_x"),
+            vec![
+                UnitTestGiven::new("ref('stg_src')", json!([]), None, None),
+                // `this` resolves to the (already-present) target model.
+                UnitTestGiven::new("this", json!([]), None, None),
+                // source(...) inputs contribute nothing (not model nodes).
+                UnitTestGiven::new("source('raw', 'orders')", json!([]), None, None),
+                // An unresolvable ref contributes nothing (graceful).
+                UnitTestGiven::new("ref('not_a_model')", json!([]), None, None),
+            ],
+            UnitTestExpect::new(json!([]), None, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let manifest = manifest_for(
+            vec![target, upstream, unrelated],
+            vec![("unit_test.shop.t", ut)],
+        );
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.dim_x")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        assert_eq!(
+            payload.manifest_nodes.keys().collect::<Vec<_>>(),
+            ["stg_src"],
+            "the ref()-ed upstream appears; the unrelated model does not \
+             (dim_x itself is all-empty context → skipped)"
+        );
+        assert_eq!(
+            payload.manifest_nodes["stg_src"].description.as_deref(),
+            Some("Staged source.")
+        );
+    }
+
+    #[test]
+    fn manifest_nodes_key_is_omitted_when_every_entry_is_empty() {
+        // Bare synthetic models (no description/tags/materialized/columns/
+        // attached tests) must keep the manifest_nodes key OFF the wire —
+        // the pre-#200 byte-stability contract.
+        let node = model_node("model.shop.m", "body", Some("select 1"));
+        let ut = simple_unit_test("m", "test_one");
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.m")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        assert!(
+            payload.manifest_nodes.is_empty(),
+            "all-empty entries are skipped"
+        );
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(
+            !json.contains("manifest_nodes"),
+            "empty lookup omits the key entirely: {json}"
+        );
+    }
+
+    #[test]
+    fn test_payload_overrides_round_trip_groups_and_native_scalar_types() {
+        // The cute-dbt#197 founder decision, asserted at the WIRE level:
+        // the serialized payload carries JSON bool/number/string scalars —
+        // never their stringified forms.
+        let node = model_node("model.shop.m", "body", Some("select 1"));
+        let ut = simple_unit_test("m", "test_one").with_overrides(Some(grouped_overrides()));
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.m")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let test = &payload.models[0].tests[0];
+        assert_eq!(test.overrides.as_ref(), Some(&grouped_overrides()));
+        let json = serde_json::to_string(test).unwrap();
+        assert!(
+            json.contains(r#""overrides":{"macros":{"is_incremental":true},"vars":{"dq_quarantine_threshold":0.05,"encounter_lookback_days":7}}"#),
+            "grouped map with native scalars (bool/float/int), deterministic order: {json}"
+        );
+        assert!(
+            !json.contains(r#""is_incremental":"true""#),
+            "never stringified: {json}"
+        );
+    }
+
+    #[test]
+    fn test_payload_omits_the_overrides_key_when_none() {
+        let node = model_node("model.shop.m", "body", Some("select 1"));
+        let ut = simple_unit_test("m", "test_one");
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.m")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let json = serde_json::to_string(&payload.models[0].tests[0]).unwrap();
+        assert!(
+            !json.contains("overrides"),
+            "no-override tests stay byte-stable: {json}"
+        );
+    }
+
+    #[test]
+    fn model_payload_threads_the_model_description() {
+        let node = model_node("model.shop.m", "body", Some("select 1"))
+            .with_model_metadata(Some("One row per order.".to_owned()), Vec::new());
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.m")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        assert_eq!(
+            payload.models[0].description.as_deref(),
+            Some("One row per order.")
+        );
+    }
+
+    #[test]
+    fn model_payload_omits_the_description_key_when_none() {
+        let node = model_node("model.shop.m", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.m")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let json = serde_json::to_string(&payload.models[0]).unwrap();
+        assert!(
+            !json.contains("description"),
+            "undescribed models stay byte-stable: {json}"
         );
     }
 }
