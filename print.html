@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-08e6ab1c.js";
+            window.path_to_searchindex_js = "searchindex-be99764a.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-db4d1b28.js"></script>
+        <script src="toc-f6d2c74b.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -1109,6 +1109,140 @@ controls you can expand <strong>and re-collapse</strong>, per-hunk or all at onc
 fixtures (so it stays committable + zero-egress), and it’s byte-identity-gated
 in CI like the others.</p>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="explorer-external-drive-contract"><a class="header" href="#explorer-external-drive-contract">Explorer external-drive contract</a></h1>
+<p>The explorer’s <code>dag.html</code> is not just a page you click around — it is a
+surface other tools can <strong>drive</strong> and <strong>observe</strong>. An IDE extension, a
+terminal browser pane, or any embedding host can push focus into the
+lineage view and react when <em>you</em> deliberately select a model. This
+page documents that contract; the in-tree VS Code extension consumes
+exactly this surface.</p>
+<p>Everything here holds the <a href="#zero-egress--the-privacy-property">zero-egress property</a>:
+<code>postMessage</code> to an embedding host is in-process message passing, never
+a network request, and on plain <code>file://</code> the bridge half is completely
+inert — zero behavior change.</p>
+<h2 id="contract-version"><a class="header" href="#contract-version">Contract version</a></h2>
+<p>The current contract version is <strong><code>1</code></strong>. It is readable two ways:</p>
+<ul>
+<li>
+<p><strong>DOM attribute</strong> (no JS execution needed — for attribute-only
+observers): <code>&lt;body data-cute-dbt-contract="1"&gt;</code> on <code>dag.html</code>.</p>
+</li>
+<li>
+<p><strong>JS global</strong>: <code>window.cuteDbtContract</code> —</p>
+<pre><code class="language-js">{
+  version: "1",
+  commitEventType: "cute-dbt/commit",
+  attribute: "data-selected-model",
+  hooks: ["focusModel", "setView"],
+  views: ["lineage", "cte"]
+}
+</code></pre>
+</li>
+</ul>
+<p>The attribute is the single source; the global reads it back, so the
+two can never disagree. The version covers the four named surfaces
+below — the forward hooks, the commit event schema, the DOM attribute,
+and the payload-paths shape — and bumps <strong>only</strong> on a breaking change
+to any of them. Versioning is folded into the
+<a href="#release-discipline">release discipline</a>: a contract bump is a
+v0.x <strong>minor</strong> (v1.0+ <strong>major</strong>) event, exactly like a CLI-surface
+break. There is no separate versioning system.</p>
+<h2 id="forward-hooks-host--page"><a class="header" href="#forward-hooks-host--page">Forward hooks (host → page)</a></h2>
+<h3 id="windowfocusmodelid"><a class="header" href="#windowfocusmodelid"><code>window.focusModel(id)</code></a></h3>
+<p>Highlights the model (emphasize its full upstream + downstream lineage,
+dim the rest, open the detail card) and centers it. <code>id</code> is the full
+manifest node id (<code>model.&lt;package&gt;.&lt;name&gt;</code>). Returns <code>true</code>, or <code>false</code>
+for an unknown id (a fail-open no-op).</p>
+<p><strong>The no-echo rule:</strong> <code>focusModel</code> never writes <code>data-selected-model</code>
+and never posts a commit event. A host pushing editor-sync focus must
+not hear its own push back as a selection — otherwise host and page
+chase each other in a feedback loop.</p>
+<h3 id="windowsetviewkind"><a class="header" href="#windowsetviewkind"><code>window.setView(kind)</code></a></h3>
+<p>Switches the active view programmatically: <code>"lineage"</code> or <code>"cte"</code> (the
+same vocabulary the on-page toggle uses). The CTE arm requires a
+highlighted model (highlight one with <code>focusModel</code> first); switching
+without one is a fail-open no-op. Returns <code>true</code> when the requested
+view is active afterwards, <code>false</code> otherwise.</p>
+<p>Both hooks exist on every rendered page (inert on an empty manifest) —
+calling them never throws.</p>
+<h2 id="the-commit-signal-page--host-dual-bound"><a class="header" href="#the-commit-signal-page--host-dual-bound">The commit signal (page → host), dual-bound</a></h2>
+<p>A selection becomes a <strong>commit</strong> only on the deliberate
+<kbd>Space</kbd> keypress — never on hover, click, search-select, or
+<code>focusModel</code>. One commit, two bindings:</p>
+<ol>
+<li>
+<p><strong>DOM attribute</strong> (always): <code>document.body.dataset.selectedModel</code>
+is set to the committed model’s full node id. This is the
+standalone-<code>file://</code> binding — a terminal/browser host observes the
+attribute (e.g. via <code>MutationObserver</code> or polling).</p>
+</li>
+<li>
+<p><strong>Host bridge</strong> (when registered): a versioned commit event via
+<code>postMessage</code>:</p>
+<pre><code class="language-js">{
+  type: "cute-dbt/commit",
+  contractVersion: "1",
+  modelId: "model.jaffle_shop.customers",
+  view: "lineage",            // the active view at commit time
+  paths: { /* the committed node's paths block, see below */ }
+}
+</code></pre>
+</li>
+</ol>
+<h3 id="host-bridge-registration"><a class="header" href="#host-bridge-registration">Host-bridge registration</a></h3>
+<p>Detection-based, at page boot, presence checks only:</p>
+<ul>
+<li>a VS Code webview exposes <code>acquireVsCodeApi</code> — it is called once and
+the returned API’s <code>postMessage</code> is used;</li>
+<li>any other host may inject <code>window.cuteDbtHostBridge</code> (an object with
+a <code>postMessage</code> function) <strong>before</strong> the page’s scripts run.</li>
+</ul>
+<p>If neither exists the bridge stays unregistered and the page behaves
+exactly as before — the attribute binding alone.</p>
+<h2 id="payload-file-paths"><a class="header" href="#payload-file-paths">Payload file paths</a></h2>
+<p>Every node in the <code>explore-dag-data</code> lineage payload carries a <code>paths</code>
+block so hosts can open files. All values are <strong>project-relative</strong>
+manifest facts (dbt emits <code>original_file_path</code> / <code>patch_path</code> relative
+by design — never an absolute path):</p>
+<pre><code class="language-json">{
+  "sql": "models/marts/core/dim_payers.sql",
+  "schema_yaml": "models/marts/core/_core__models.yml",
+  "unit_tests": [
+    {
+      "name": "test_dim_payers_injects_unknown_sentinel",
+      "yaml": "models/marts/core/_core__models.yml",
+      "fixtures": ["tests/fixtures/payers_given.csv"]
+    }
+  ]
+}
+</code></pre>
+<ul>
+<li><code>sql</code> — the model’s source file (<code>nodes.&lt;id&gt;.original_file_path</code>).</li>
+<li><code>schema_yaml</code> — the schema-properties YAML that patches the model
+(<code>nodes.&lt;id&gt;.patch_path</code>; both engines serialize it as a
+<code>&lt;package&gt;://path</code> package URI, which cute-dbt strips on ingestion).</li>
+<li><code>unit_tests[].yaml</code> — the declaring YAML, from the unit-test node’s
+own <code>original_file_path</code>.</li>
+<li><code>unit_tests[].fixtures</code> — external <code>fixture:</code> file references, in
+given order then the expect’s, <strong>verbatim</strong> as the manifest emits
+them. dbt-fusion resolves them to project-relative paths
+(<code>tests/fixtures/&lt;name&gt;.csv</code>); dbt-core may emit a bare fixture name,
+which hosts resolve via the same <code>tests/fixtures/&lt;name&gt;.csv</code>
+convention cute-dbt’s own renderer applies.</li>
+</ul>
+<p>Absence is explicit: <code>null</code> for a missing path, <code>[]</code> for no unit tests
+— keys are never omitted. The same paths render read-only in the
+model-detail card’s <strong>files</strong> section, so the contract surface is
+human-visible too.</p>
+<h2 id="what-is-deliberately-not-in-the-contract"><a class="header" href="#what-is-deliberately-not-in-the-contract">What is deliberately <em>not</em> in the contract</a></h2>
+<ul>
+<li>Hover, click, and search are in-page exploration; they never fire
+the external signal in either binding.</li>
+<li><code>tests.html</code> is not a drivable surface (no hooks, no attribute).</li>
+<li>The explorer takes no baseline manifest; change context arrives via
+<code>--pr-diff</code> and is orthogonal to this contract.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="release-discipline"><a class="header" href="#release-discipline">Release discipline</a></h1>
 <p>cute-dbt is published to crates.io from <strong><code>v0.1.0</code>+</strong> via
 <a href="https://release-plz.dev/"><code>release-plz</code></a> with OIDC trusted publishing —
@@ -1127,10 +1261,17 @@ commitment.</li>
 <li><strong>Yanks</strong> happen only for security or licensing issues; cute-dbt never
 amends a published version, it ships the next one.</li>
 </ul>
-<p>The contract SemVer covers at <code>v1.0</code>+ is the <strong>CLI surface</strong> (<code>cute-dbt --help</code>), the <strong>exit-code mapping</strong>, and the <strong>zero-egress property</strong> — not
-the Rust library, which stays internal during v0.x. Contributor-facing
-release mechanics (conventional-commit version inference, tag policy) live
-in
+<p>The contract SemVer covers at <code>v1.0</code>+ is the <strong>CLI surface</strong> (<code>cute-dbt --help</code>), the <strong>exit-code mapping</strong>, the <strong>zero-egress property</strong>, and the
+<strong>explorer’s external-drive JS contract</strong> (the
+<a href="#explorer-external-drive-contract"><code>window.focusModel</code>/<code>window.setView</code> hooks, the dual-bound commit signal,
+and the payload-paths shape</a>) — not the Rust
+library, which stays internal during v0.x. The external-drive contract
+carries its own readable version string (<code>data-cute-dbt-contract</code> /
+<code>window.cuteDbtContract.version</code>) so embedding hosts can feature-detect,
+but it is governed <strong>here</strong>, not by a separate versioning system: a
+contract-breaking change is a v0.x minor (v1.0+ major) event, exactly
+like a CLI flag rename. Contributor-facing release mechanics
+(conventional-commit version inference, tag policy) live in
 <a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/AGENTS.md#release-discipline"><code>AGENTS.md</code></a>.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback"><a class="header" href="#ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback">CI recipe: GitHub Actions PR review (Pages preview + artifact fallback)</a></h1>
