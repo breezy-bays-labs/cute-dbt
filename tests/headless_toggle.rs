@@ -5562,13 +5562,17 @@ fn column_test_node(id: &str, model_id: &str, column: &str, tm: TestMetadata) ->
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
-fn column_header_tooltips_th_trigger_hover_focus_and_skip_bare_columns() {
+fn column_header_tooltips_th_trigger_hover_focus_and_bare_column_fallback() {
     // cute-dbt#165 → cute-dbt#178 (the handoff spec): the WHOLE header cell
     // is the tooltip trigger — NO per-column icon/button in the DOM. dim_x's
     // `id` column is described AND carries unique / not_null /
     // accepted_values / relationships column tests; its `status` column has
-    // neither (the no-empty-bubbles negative path). The stg_src given
-    // verifies a given table resolves ITS OWN input model's metadata.
+    // neither. cute-dbt#240 (defect B, third report) REVERSES the old
+    // "no metadata ⇒ no affordance" arm: a bare column is decorated too and
+    // reveals the truthful no-metadata fallback naming the owning node —
+    // hover always answers, and the no-EMPTY-bubble honesty invariant is
+    // preserved (the fallback bubble always carries content). The stg_src
+    // given verifies a given table resolves ITS OWN input model's metadata.
     //
     // A11y (#166 carried onto the th): tabindex makes the th keyboard-
     // focusable; aria-label is the AT surface; the singleton #col-tooltip
@@ -5651,15 +5655,26 @@ fn column_header_tooltips_th_trigger_hover_focus_and_skip_bare_columns() {
     tab.wait_until_navigated().expect("await navigation");
     select_model(&tab, "dim_x");
 
-    // ===== expected table: exactly one decorated th, on `id` =====
+    // ===== expected table: EVERY th decorated (cute-dbt#240) =====
+    // `id` carries the rich metadata bubble; `status` carries the truthful
+    // no-metadata fallback — no header is hover-dead.
     assert_eq!(
         eval(
             &tab,
             "document.querySelectorAll('.expected-panel th.has-col-meta').length"
         )
         .as_u64(),
+        Some(2),
+        "every expect header is a tooltip trigger (id rich, status fallback)",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelectorAll('.expected-panel th.has-col-meta.col-meta-empty').length"
+        )
+        .as_u64(),
         Some(1),
-        "exactly one decorated header in the expect thead (id yes, status no)",
+        "exactly the metadata-less `status` header carries the fallback marker",
     );
     // The spec's no-icon contract: NO tooltip trigger element inside any th
     // (the th itself is the trigger), and no legacy info button anywhere.
@@ -5682,26 +5697,41 @@ fn column_header_tooltips_th_trigger_hover_focus_and_skip_bare_columns() {
         "0",
         "the decorated th carries tabindex=0 (keyboard users can reach the tip)",
     );
-    // The native title is REMOVED from decorated headers (it would
-    // double-show over the bubble); undecorated headers keep theirs.
+    // The native title is REMOVED from every header (it would double-show
+    // over the bubble — cute-dbt#240 decorates ALL of them now).
     assert!(
         eval_bool(&tab, &format!("{TH}.getAttribute('title') === null")),
         "a decorated th sheds the native title attribute",
     );
+    const BARE_TH: &str = "document.querySelector('.expected-panel th[data-col-name=\"status\"]')";
     assert!(
-        eval_bool(
-            &tab,
-            "document.querySelector('.expected-panel th[title=\"status\"]') !== null"
-        ),
-        "the metadata-less column keeps its plain th (title intact, no decoration)",
+        eval_bool(&tab, &format!("{BARE_TH}.getAttribute('title') === null")),
+        "the fallback-decorated th sheds the native title too (cute-dbt#240)",
+    );
+    // cute-dbt#240 — the metadata-less header reveals the truthful fallback
+    // bubble naming the owning node (the target model for the expect table).
+    let _ = eval(&tab, &format!("{BARE_TH}.focus()"));
+    assert!(
+        !eval_bool(&tab, "document.getElementById('col-tooltip').hidden"),
+        "focusing the metadata-less header reveals the fallback bubble",
+    );
+    let empty_line = eval_string(
+        &tab,
+        "document.querySelector('#col-tooltip .ct-empty').textContent",
     );
     assert!(
-        eval_bool(
-            &tab,
-            "document.querySelector('.expected-panel th[title=\"status\"].has-col-meta') === null"
-        ),
-        "a column with no description and no tests gets no tooltip affordance",
+        empty_line.contains("No description or data tests declared on dim_x"),
+        "the fallback bubble names the owning node truthfully, got {empty_line:?}",
     );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('#col-tooltip .ct-desc').textContent"
+        ),
+        "status",
+        "the fallback bubble leads with the column name",
+    );
+    let _ = eval(&tab, &format!("{BARE_TH}.blur()"));
 
     // ===== aria parity on the trigger =====
     let aria = eval_string(&tab, &format!("{TH}.getAttribute('aria-label')"));
@@ -5806,20 +5836,42 @@ fn column_header_tooltips_th_trigger_hover_focus_and_skip_bare_columns() {
     );
 
     // ===== given table: the INPUT model's metadata, filtered the same =====
-    const GIVEN_TH: &str = "document.querySelector('.given-section th.has-col-meta')";
+    // cute-dbt#240 — both given headers are triggers now: src_id rich (the
+    // input model's description), bare_col the no-metadata fallback naming
+    // the input model.
+    const GIVEN_TH: &str = "document.querySelector('.given-section th[data-col-name=\"src_id\"]')";
     assert_eq!(
         eval(
             &tab,
             "document.querySelectorAll('.given-section th.has-col-meta').length"
         )
         .as_u64(),
-        Some(1),
-        "exactly one decorated header in the given thead (src_id yes, bare_col no)",
+        Some(2),
+        "every given header is a tooltip trigger (src_id rich, bare_col fallback)",
     );
-    assert_eq!(
-        eval_string(&tab, &format!("{GIVEN_TH}.getAttribute('data-col-name')")),
-        "src_id",
-        "the given trigger rides the input model's described column",
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.given-section th[data-col-name=\"bare_col\"]')\
+             .classList.contains('col-meta-empty')"
+        ),
+        "the metadata-less given header carries the fallback marker",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.given-section th[data-col-name=\"bare_col\"]').focus()",
+    );
+    let given_empty = eval_string(
+        &tab,
+        "document.querySelector('#col-tooltip .ct-empty').textContent",
+    );
+    assert!(
+        given_empty.contains("No description or data tests declared on stg_src"),
+        "the given fallback bubble names the INPUT model, got {given_empty:?}",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.given-section th[data-col-name=\"bare_col\"]').blur()",
     );
     let _ = eval(&tab, &format!("{GIVEN_TH}.focus()"));
     assert_eq!(
@@ -8378,6 +8430,8 @@ fn given_header_tooltips_resolve_seed_and_source_metadata() {
     select_model(&tab, "dim_x");
 
     // ===== given 0 (seed ref): the described+tested column decorates =====
+    // cute-dbt#240 — BOTH headers are triggers (customer_id rich,
+    // undocumented the truthful fallback); exactly one is rich.
     const SEED_SEC: &str = "document.querySelectorAll('.given-section')[0]";
     assert_eq!(
         eval(
@@ -8385,12 +8439,20 @@ fn given_header_tooltips_resolve_seed_and_source_metadata() {
             &format!("{SEED_SEC}.querySelectorAll('th.has-col-meta').length")
         )
         .as_u64(),
-        Some(1),
-        "the seed-ref given decorates exactly its described column \
-         (customer_id yes, undocumented no)",
+        Some(2),
+        "every seed-given header is a trigger (customer_id rich, undocumented fallback)",
     );
-    const SEED_TH: &str =
-        "document.querySelectorAll('.given-section')[0].querySelector('th.has-col-meta')";
+    assert_eq!(
+        eval(
+            &tab,
+            &format!("{SEED_SEC}.querySelectorAll('th.has-col-meta:not(.col-meta-empty)').length")
+        )
+        .as_u64(),
+        Some(1),
+        "exactly the described seed column is rich (customer_id)",
+    );
+    const SEED_TH: &str = "document.querySelectorAll('.given-section')[0]\
+         .querySelector('th[data-col-name=\"customer_id\"]')";
     assert_eq!(
         eval_string(&tab, &format!("{SEED_TH}.getAttribute('data-col-name')")),
         "customer_id",
@@ -8438,6 +8500,7 @@ fn given_header_tooltips_resolve_seed_and_source_metadata() {
     );
 
     // ===== given 1 (source): the described source column decorates =====
+    // cute-dbt#240 — both headers are triggers; exactly `Id` is rich.
     const SRC_SEC: &str = "document.querySelectorAll('.given-section')[1]";
     assert_eq!(
         eval(
@@ -8445,11 +8508,20 @@ fn given_header_tooltips_resolve_seed_and_source_metadata() {
             &format!("{SRC_SEC}.querySelectorAll('th.has-col-meta').length")
         )
         .as_u64(),
-        Some(1),
-        "the source given decorates exactly its described column (Id yes, FIRST no)",
+        Some(2),
+        "every source-given header is a trigger (Id rich, FIRST fallback)",
     );
-    const SRC_TH: &str =
-        "document.querySelectorAll('.given-section')[1].querySelector('th.has-col-meta')";
+    assert_eq!(
+        eval(
+            &tab,
+            &format!("{SRC_SEC}.querySelectorAll('th.has-col-meta:not(.col-meta-empty)').length")
+        )
+        .as_u64(),
+        Some(1),
+        "exactly the described source column is rich (Id)",
+    );
+    const SRC_TH: &str = "document.querySelectorAll('.given-section')[1]\
+         .querySelector('th[data-col-name=\"Id\"]')";
     assert_eq!(
         eval_string(&tab, &format!("{SRC_TH}.getAttribute('data-col-name')")),
         "Id",
@@ -8477,36 +8549,44 @@ fn given_header_tooltips_resolve_seed_and_source_metadata() {
     );
     let _ = eval(&tab, &format!("{SRC_TH}.blur()"));
 
-    // ===== honest degrade: metadata-less columns are NOT triggers =====
-    // The seed given's `undocumented` column and the source given's
-    // `FIRST` column have no description and no tests: no trigger class,
-    // and a hover on them must never open an empty bubble. (No tabindex
-    // assertion: DataTables gives every orderable header keyboard focus
-    // for SORTING — the honest-degrade contract is no tooltip trigger +
-    // no empty bubble, not non-focusability.)
+    // ===== cute-dbt#240 honest fallback: metadata-less columns ARE =====
+    // ===== triggers and reveal a truthful, NEVER-empty bubble.      =====
+    // The old contract ("no metadata ⇒ no affordance") made these headers
+    // silently hover-dead — the founder's thrice-reported defect B. The
+    // honesty invariant survives strengthened: hover always answers, and
+    // the bubble always carries content (never empty).
     assert!(
         eval_bool(
             &tab,
             &format!(
-                "{SEED_SEC}.querySelector('th[title=\"undocumented\"]')\
-                 .classList.contains('has-col-meta') === false"
+                "{SEED_SEC}.querySelector('th[data-col-name=\"undocumented\"]')\
+                 .classList.contains('col-meta-empty')"
             ),
         ),
-        "a given column without metadata gets no tooltip affordance",
+        "a given column without metadata is a fallback trigger (cute-dbt#240)",
     );
     let _ = eval(
         &tab,
         &format!(
-            "{SEED_SEC}.querySelector('th[title=\"undocumented\"]')\
+            "{SEED_SEC}.querySelector('th[data-col-name=\"undocumented\"]')\
              .dispatchEvent(new MouseEvent('mouseover', {{bubbles: true}}))"
         ),
     );
     assert!(
-        eval_bool(
-            &tab,
-            &format!("(function(){{var el={BUBBLE}; return el === null || el.hidden;}})()"),
-        ),
-        "hovering a metadata-less given header never opens an empty bubble",
+        !eval_bool(&tab, &format!("{BUBBLE}.hidden")),
+        "hovering a metadata-less given header reveals the fallback bubble",
+    );
+    assert!(
+        eval_bool(&tab, &format!("{BUBBLE}.textContent.trim().length > 0"),),
+        "the fallback bubble is never empty (the preserved honesty invariant)",
+    );
+    let seed_fallback = eval_string(
+        &tab,
+        &format!("{BUBBLE}.querySelector('.ct-empty').textContent"),
+    );
+    assert!(
+        seed_fallback.contains("No description or data tests declared on raw_customers"),
+        "the fallback names the owning seed, got {seed_fallback:?}",
     );
 
     let _ = tab.close(true);
@@ -8514,11 +8594,16 @@ fn given_header_tooltips_resolve_seed_and_source_metadata() {
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
-fn given_header_honest_degrade_metadata_less_given_has_no_triggers() {
-    // cute-dbt#235 (issue Discovery) — a given whose source genuinely
-    // lacks per-column metadata (here a seed with NO declared columns,
-    // the committed jaffle-shop `raw_customers` shape) must render a
-    // plain grid: zero tooltip triggers, and no empty bubble on hover.
+fn given_header_metadataless_columns_reveal_truthful_fallback() {
+    // cute-dbt#240 (defect B, third report) — DELIBERATE contract reversal
+    // of the #235-era "metadata-less given has no triggers" pin. A given
+    // whose source genuinely lacks per-column metadata (here a seed with NO
+    // declared columns, the committed jaffle-shop `raw_customers` shape)
+    // was the founder's exact hover-dead surface: every header showed
+    // nothing while the expected table answered. Every header is a trigger
+    // now; metadata-less ones reveal the truthful fallback naming the
+    // owning node. The honesty invariant survives strengthened: never an
+    // empty bubble — and no dead headers either.
     let ut = UnitTest::new(
         "bare".to_owned(),
         NodeId::new("dim_x"),
@@ -8559,11 +8644,12 @@ fn given_header_honest_degrade_metadata_less_given_has_no_triggers() {
     assert_eq!(
         eval(
             &tab,
-            "document.querySelectorAll('.given-section th.has-col-meta').length"
+            "document.querySelectorAll('.given-section th.has-col-meta.col-meta-empty').length"
         )
         .as_u64(),
-        Some(0),
-        "a metadata-less given renders ZERO tooltip triggers",
+        Some(2),
+        "a metadata-less given decorates EVERY header as a fallback trigger \
+         (cute-dbt#240 — no hover-dead headers)",
     );
     let _ = eval(
         &tab,
@@ -8571,12 +8657,23 @@ fn given_header_honest_degrade_metadata_less_given_has_no_triggers() {
          .dispatchEvent(new MouseEvent('mouseover', {bubbles: true}))",
     );
     assert!(
+        !eval_bool(&tab, "document.getElementById('col-tooltip').hidden"),
+        "hovering a metadata-less given header reveals the fallback bubble",
+    );
+    assert!(
         eval_bool(
             &tab,
-            "(function(){var el=document.getElementById('col-tooltip');\
-             return el === null || el.hidden;})()"
+            "document.getElementById('col-tooltip').textContent.trim().length > 0"
         ),
-        "no empty bubble ever opens over a metadata-less given header",
+        "the bubble is never empty (the preserved honesty invariant)",
+    );
+    let fallback = eval_string(
+        &tab,
+        "document.querySelector('#col-tooltip .ct-empty').textContent",
+    );
+    assert!(
+        fallback.contains("No description or data tests declared on bare_seed"),
+        "the fallback names the owning seed, got {fallback:?}",
     );
 
     let _ = tab.close(true);
@@ -8891,6 +8988,694 @@ fn normal_row_construct_chip_meets_aa_contrast_on_every_theme() {
         aa_failures.is_empty(),
         "normal-row construct chips below the WCAG AA 4.5:1 floor \
          (cute-dbt#231): {aa_failures:#?}",
+    );
+
+    let _ = tab.close(true);
+}
+
+// ===== cute-dbt#240 — founder review-2 render defects =================
+//
+// Five defects found reviewing the PR #239 sticky-comment reports. The
+// guards below encode the REAL interaction sequences the prior (#166 /
+// #236) validations never exercised — that meta-gap is why those fixes
+// passed while the founder's experience stayed broken:
+//
+//  - defect B guards quantified EXISTENTIALLY ("this column known to
+//    carry metadata reveals a bubble") — true before and after every
+//    prior fix — while the founder hovered columns the manifest never
+//    declared (hover-dead by design). The #240 guard quantifies
+//    UNIVERSALLY: across EVERY given/expected header, in the Diff AND
+//    File views, after a real view toggle and a real column sort, a
+//    hover must reveal a non-empty bubble. The dead-header state no
+//    longer exists, so the regression class cannot recur silently.
+//  - defects A/D pin geometric CONTAINMENT (content inside the painted
+//    bubble, bubble inside the viewport) rather than mere visibility.
+//  - defects C/E extend the #206/#227/#231/#233 AA family (effective-
+//    backdrop methodology) to the covered-by ids and the baseline path.
+
+/// The universal hover sweep, evaluated in-page: for every VISIBLE
+/// given/expected header, dispatch a real mouseover, assert the singleton
+/// bubble reveals with non-empty text, then mouseout. Returns a JSON
+/// array of failure strings (empty = pass).
+const UNIVERSAL_HEADER_HOVER_SWEEP_JS: &str = r#"(function () {
+  var fails = [];
+  var ths = document.querySelectorAll('.given-section th, .expected-panel th');
+  if (!ths.length) return JSON.stringify(["no fixture headers found"]);
+  for (var i = 0; i < ths.length; i++) {
+    var th = ths[i];
+    if (th.offsetParent === null) continue; /* hidden view's twin table */
+    var name = th.getAttribute('data-col-name') || th.textContent;
+    if (!th.classList.contains('has-col-meta')) {
+      fails.push('no-trigger: ' + name);
+      continue;
+    }
+    th.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+    var b = document.getElementById('col-tooltip');
+    if (!b || b.hidden) {
+      fails.push('hover-dead: ' + name);
+    } else if (!b.textContent.trim()) {
+      fails.push('empty-bubble: ' + name);
+    }
+    th.dispatchEvent(new MouseEvent('mouseout', {bubbles: true}));
+  }
+  return JSON.stringify(fails);
+})()"#;
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn fixture_header_tooltips_universal_after_view_toggle_and_sort() {
+    // cute-dbt#240 (defect B) — the guard-methodology fix. The fixture
+    // mirrors the founder's real surface: an input model that declares
+    // only ONE of its two given columns (real projects under-declare
+    // staging models) and a target model that declares only one expected
+    // column. The given carries a cell diff so the Diff↔File toggle is
+    // live — the prior probes hovered only the initial render.
+    use cute_dbt::domain::{
+        Cell, CellChange, CellValue, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff,
+        RowChange, RowChangeKind,
+    };
+    let mut src_desc = BTreeMap::new();
+    src_desc.insert("described_col".to_owned(), "Input described".to_owned());
+    let mut target_desc = BTreeMap::new();
+    target_desc.insert("id".to_owned(), "Target id".to_owned());
+    let ut = UnitTest::new(
+        "tog".to_owned(),
+        NodeId::new("dim_t"),
+        vec![UnitTestGiven::new(
+            "ref('src')".to_owned(),
+            serde_json::json!([{ "described_col": 1, "undescribed_col": 2 }]),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1, "extra": 2 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+    let data_diff = UnitTestDataDiff {
+        given: vec![NamedTableDiff {
+            ordinal: 0,
+            input: "ref('src')".to_owned(),
+            diff: FixtureTableDiff {
+                columns: vec![
+                    DiffColumn {
+                        name: "described_col".into(),
+                        status: ColumnStatus::Present,
+                    },
+                    DiffColumn {
+                        name: "undescribed_col".into(),
+                        status: ColumnStatus::Present,
+                    },
+                ],
+                rows: vec![RowChange {
+                    kind: RowChangeKind::Modified,
+                    cells: vec![
+                        CellChange {
+                            old: Cell::new(CellValue::Number("1".into())),
+                            new: Cell::new(CellValue::Number("9".into())),
+                            changed: true,
+                        },
+                        CellChange {
+                            old: Cell::new(CellValue::Number("2".into())),
+                            new: Cell::new(CellValue::Number("2".into())),
+                            changed: false,
+                        },
+                    ],
+                }],
+            },
+        }],
+        expect: None,
+    };
+    let url = render_pr_diff_with_data_diffs(
+        "headless_240_universal_header_hover.html",
+        vec![
+            model_node("model.shop.dim_t").with_column_descriptions(target_desc),
+            model_node("model.shop.src").with_column_descriptions(src_desc),
+        ],
+        vec![("unit_test.shop.dim_t.tog", ut)],
+        &["model.shop.dim_t"],
+        &["unit_test.shop.dim_t.tog"],
+        vec![("unit_test.shop.dim_t.tog", data_diff)],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    select_model(&tab, "dim_t");
+
+    // ===== 1. initial render (the given defaults to the Diff view) =====
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.given-section .cell-diff-toggle') !== null",
+        ),
+        "precondition: the given carries a live Diff↔File toggle",
+    );
+    let initial = eval_string(&tab, UNIVERSAL_HEADER_HOVER_SWEEP_JS);
+    assert_eq!(
+        initial, "[]",
+        "EVERY visible fixture header reveals a non-empty bubble on hover \
+         (initial render): {initial}",
+    );
+
+    // ===== 2. after a REAL view toggle (Diff → File) =====
+    let _ = eval(
+        &tab,
+        "document.querySelector('.given-section .cell-diff-toggle \
+         [data-view=\"current\"]').click()",
+    );
+    let after_toggle = eval_string(&tab, UNIVERSAL_HEADER_HOVER_SWEEP_JS);
+    assert_eq!(
+        after_toggle, "[]",
+        "EVERY visible fixture header reveals a non-empty bubble on hover \
+         AFTER the Diff→File toggle (the #145/#146 wipe class): {after_toggle}",
+    );
+
+    // ===== 3. after a REAL column sort (DataTables redraw) =====
+    let _ = eval(
+        &tab,
+        "(function(){var ths=document.querySelectorAll('.given-section th');\
+          for (var i=0;i<ths.length;i++){\
+            if (ths[i].offsetParent !== null){ ths[i].click(); return; }}})()",
+    );
+    let after_sort = eval_string(&tab, UNIVERSAL_HEADER_HOVER_SWEEP_JS);
+    assert_eq!(
+        after_sort, "[]",
+        "EVERY visible fixture header reveals a non-empty bubble on hover \
+         AFTER a column sort: {after_sort}",
+    );
+
+    // ===== 4. and back to the Diff view again =====
+    let _ = eval(
+        &tab,
+        "document.querySelector('.given-section .cell-diff-toggle \
+         [data-view=\"diff\"]').click()",
+    );
+    let round_trip = eval_string(&tab, UNIVERSAL_HEADER_HOVER_SWEEP_JS);
+    assert_eq!(
+        round_trip, "[]",
+        "EVERY visible fixture header reveals a non-empty bubble on hover \
+         after the File→Diff round-trip: {round_trip}",
+    );
+
+    // ===== fallback truthfulness on the undeclared given column =====
+    let _ = eval(
+        &tab,
+        "(function(){var ths=document.querySelectorAll(\
+          '.given-section th[data-col-name=\"undescribed_col\"]');\
+          for (var i=0;i<ths.length;i++){\
+            if (ths[i].offsetParent !== null){\
+              ths[i].dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));\
+              return; }}})()",
+    );
+    let fallback = eval_string(
+        &tab,
+        "document.querySelector('#col-tooltip .ct-empty').textContent",
+    );
+    assert!(
+        fallback.contains("No description or data tests declared on src"),
+        "the undeclared given column's bubble names the input model, got {fallback:?}",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn model_tip_long_test_name_wraps_inside_bubble() {
+    // cute-dbt#240 (defect A) — the founder's exact overflow: the model
+    // badge tip's MODEL TESTS row carried the unbreakable mono token
+    // `dbt_expectations.expect_table_row_count_to_be_between` (383px)
+    // inside the 32rem-capped bubble — it painted 55px past the painted
+    // background. RED pre-fix; the wrap rules contain it.
+    let ut = UnitTest::new(
+        "wrap".to_owned(),
+        NodeId::new("dim_x"),
+        vec![UnitTestGiven::new(
+            "ref('stg_src')".to_owned(),
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+    let url = render_to_file(
+        "headless_240_model_tip_wrap.html",
+        vec![
+            model_node("model.shop.dim_x"),
+            model_node("model.shop.stg_src").with_model_metadata(
+                Some("Staging model for prescribed medications.".to_owned()),
+                vec![],
+            ),
+            model_test_node(
+                "test.shop.dbt_expectations_row_count_stg_src",
+                "model.shop.stg_src",
+                TestMetadata::new(
+                    "dbt_expectations.expect_table_row_count_to_be_between",
+                    None,
+                    serde_json::Value::Null,
+                ),
+            ),
+        ],
+        vec![("unit_test.shop.dim_x.wrap", ut)],
+        &["model.shop.dim_x"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    select_model(&tab, "dim_x");
+
+    const PILL: &str = "document.querySelector('.given-section .gt-model.has-model-tip')";
+    let _ = eval(
+        &tab,
+        &format!("{PILL}.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true}}))"),
+    );
+    const TIP: &str = "document.getElementById('model-tooltip')";
+    assert!(
+        !eval_bool(&tab, &format!("{TIP}.hidden")),
+        "hovering the model pill reveals the model tip",
+    );
+    let key = eval_string(&tab, &format!("{TIP}.querySelector('.ct-key').textContent"));
+    assert!(
+        key.contains("expect_table_row_count_to_be_between"),
+        "precondition: the long mono test name rides the tip, got {key:?}",
+    );
+    // The containment pin (1px tolerance, the repo convention): the
+    // bubble's content never paints past its own painted background.
+    assert!(
+        eval_bool(&tab, &format!("{TIP}.scrollWidth <= {TIP}.clientWidth + 1"),),
+        "the model tip CONTAINS its content (no horizontal overflow past \
+         the painted background)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{var t={TIP};var tr=t.getBoundingClientRect();\
+                 var els=t.querySelectorAll('*');\
+                 for (var i=0;i<els.length;i++){{\
+                   if (els[i].getBoundingClientRect().right > tr.right + 1) return false;}}\
+                 return true;}})()"
+            ),
+        ),
+        "no tip descendant paints past the bubble's right edge",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn ov_tip_long_value_contained_in_bubble_and_viewport_at_right_edge() {
+    // cute-dbt#240 (defect D) — the `overrides · N` badge tip near the
+    // right viewport edge. Two pins:
+    //  1. content containment: a long override value (the nowrap rows
+    //     painted it past the bubble background and past the screen edge)
+    //     must wrap inside the painted bubble — RED pre-fix;
+    //  2. viewport containment at a REAL right-edge trigger geometry:
+    //     the bubble box stays fully inside the visible viewport (the
+    //     positionTipNear clamp, now scrollbar-safe via clientWidth).
+    let mut ov = cute_dbt::domain::UnitTestOverrides::new();
+    ov.insert(
+        "env_vars".to_owned(),
+        BTreeMap::from([(
+            "DBT_DEPLOY_TARGET_URL".to_owned(),
+            serde_json::json!(
+                "https://very-long-subdomain.example-warehouse-host.internal/projects/analytics/deployments/segment"
+            ),
+        )]),
+    );
+    let ut = UnitTest::new(
+        "ovclip".to_owned(),
+        NodeId::new("dim_x"),
+        vec![UnitTestGiven::new(
+            "ref('src')".to_owned(),
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+    .with_overrides(Some(ov));
+    let url = render_to_file(
+        "headless_240_ov_tip_clip.html",
+        vec![model_node("model.shop.dim_x"), model_node("model.shop.src")],
+        vec![("unit_test.shop.dim_x.ovclip", ut)],
+        &["model.shop.dim_x"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    select_model(&tab, "dim_x");
+
+    const BADGE: &str = "document.querySelector('.tb-overrides.has-ov-tip')";
+    assert!(
+        eval_bool(&tab, &format!("{BADGE} !== null")),
+        "precondition: the overrides badge renders",
+    );
+    // Park the trigger at a REAL right-edge geometry (the tier-chip
+    // sweep's in-page-mutation precedent): the singleton positions off the
+    // trigger's live rect, so this exercises the exact founder geometry.
+    let _ = eval(
+        &tab,
+        &format!(
+            "(function(){{var b={BADGE};b.style.position='fixed';\
+             b.style.right='2px';b.style.left='auto';b.style.top='60px';}})()"
+        ),
+    );
+    let _ = eval(
+        &tab,
+        &format!("{BADGE}.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true}}))"),
+    );
+    const TIP: &str = "document.getElementById('ov-tooltip')";
+    assert!(
+        !eval_bool(&tab, &format!("{TIP}.hidden")),
+        "hovering the right-edge overrides badge reveals the tip",
+    );
+    // Pin 1 — content containment (RED pre-fix: nowrap rows overflowed).
+    assert!(
+        eval_bool(&tab, &format!("{TIP}.scrollWidth <= {TIP}.clientWidth + 1"),),
+        "the overrides tip CONTAINS its content (the long value wraps \
+         inside the painted background instead of painting past it)",
+    );
+    // Pin 2 — viewport containment at the right-edge trigger.
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{var r={TIP}.getBoundingClientRect();\
+                 var vw=document.documentElement.clientWidth;\
+                 return r.left >= 0 && r.right <= vw + 1;}})()"
+            ),
+        ),
+        "the overrides bubble's box lies fully within the visible viewport \
+         at a right-edge trigger",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{var t={TIP};var tr=t.getBoundingClientRect();\
+                 var vw=document.documentElement.clientWidth;\
+                 var els=t.querySelectorAll('*');\
+                 for (var i=0;i<els.length;i++){{\
+                   var r=els[i].getBoundingClientRect();\
+                   if (r.right > tr.right + 1 || r.right > vw + 1) return false;}}\
+                 return true;}})()"
+            ),
+        ),
+        "no overrides-tip descendant paints past the bubble or the viewport",
+    );
+
+    let _ = tab.close(true);
+}
+
+/// cute-dbt#240 (defect C) — `.finding-covered-by code` AA sweep across
+/// all 8 themes. Sakura's `code {{ background:#f1f1f1 }}` paired with the
+/// near-white dark-theme `--text` at ≈1.2:1 (the founder's "near-white
+/// pills"). Effective-backdrop methodology: measure against the code
+/// chip's OWN resolved fill composited over its ancestors — never an
+/// assumed token (the #206/#227 lesson).
+const COVERED_BY_CONTRAST_SWEEP_JS: &str = r#"(function () {
+  var THEMES = ["light", "solarized", "latte", "rosepine",
+                "dark", "tokyo", "gruvbox", "dracula"];
+  var DARK = { dark: true, tokyo: true, gruvbox: true, dracula: true };
+  function parseRgb(s) {
+    var m = /rgba?\(([^)]+)\)/.exec(s || "");
+    if (!m) return null;
+    var p = m[1].split(",");
+    return { r: parseFloat(p[0]), g: parseFloat(p[1]), b: parseFloat(p[2]),
+             a: p.length > 3 ? parseFloat(p[3]) : 1 };
+  }
+  function chan(v) {
+    v = v / 255;
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  function lum(c) {
+    return 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
+  }
+  function ratio(f, b) {
+    var lf = lum(f), lb = lum(b);
+    var hi = Math.max(lf, lb), lo = Math.min(lf, lb);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+  function backdropOf(el) {
+    for (var n = el; n; n = n.parentElement) {
+      var c = parseRgb(getComputedStyle(n).backgroundColor);
+      if (c && c.a === 1) return c;
+    }
+    return null;
+  }
+  var codes = document.querySelectorAll(".finding-covered-by code");
+  if (!codes.length) return JSON.stringify([]);
+  var root = document.documentElement;
+  var out = [];
+  for (var i = 0; i < THEMES.length; i++) {
+    root.setAttribute("data-theme", THEMES[i]);
+    root.classList.toggle("dark", !!DARK[THEMES[i]]);
+    for (var j = 0; j < codes.length; j++) {
+      var cs = getComputedStyle(codes[j]);
+      var fg = parseRgb(cs.color);
+      var own = parseRgb(cs.backgroundColor);
+      var bg = own && own.a === 1 ? own : backdropOf(codes[j].parentElement);
+      out.push({
+        theme: THEMES[i], idx: j,
+        ratio: fg && bg ? ratio(fg, bg) : -1,
+        fg: cs.color,
+        bg: bg ? "rgb(" + bg.r + ", " + bg.g + ", " + bg.b + ")" : "none"
+      });
+    }
+  }
+  return JSON.stringify(out);
+})()"#;
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn covered_by_test_ids_meet_aa_contrast_on_every_theme() {
+    // A COVERED union finding through the real check path: dim_both's two
+    // union arms (src_a, src_b) are each fed rows by the unit test's
+    // givens, so the union check lands Verdict::Covered and the panel
+    // renders the "Covered by <ids>" row whose code chips defect C reads.
+    let ut = UnitTest::new(
+        "feeds".to_owned(),
+        NodeId::new("dim_both"),
+        vec![
+            UnitTestGiven::new(
+                "ref('src_a')".to_owned(),
+                serde_json::json!([{ "id": 1 }]),
+                Some("dict".to_owned()),
+                None,
+            ),
+            UnitTestGiven::new(
+                "ref('src_b')".to_owned(),
+                serde_json::json!([{ "id": 2 }]),
+                Some("dict".to_owned()),
+                None,
+            ),
+        ],
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+    let url = render_to_file(
+        "headless_240_covered_by_contrast.html",
+        vec![
+            findings_model("model.shop.dim_both"),
+            model_node("model.shop.src_a"),
+            model_node("model.shop.src_b"),
+        ],
+        vec![("unit_test.shop.dim_both.feeds", ut)],
+        &["model.shop.dim_both"],
+        &["unit_test.shop.dim_both.feeds"],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    select_model(&tab, "dim_both");
+
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.finding-covered-by code') !== null",
+        ),
+        "precondition: a COVERED finding renders its covered-by test ids \
+         (both union arms are fed by the test's givens)",
+    );
+    let raw = eval_string(&tab, COVERED_BY_CONTRAST_SWEEP_JS);
+    let measured: Vec<serde_json::Value> =
+        serde_json::from_str(&raw).expect("the contrast sweep returns valid JSON");
+    assert!(
+        measured.len() >= 8,
+        "at least one covered-by code chip measured on each of the 8 themes, got: {raw}",
+    );
+    let mut failures = Vec::new();
+    for m in &measured {
+        let theme = m["theme"].as_str().expect("theme is a string");
+        let idx = m["idx"].as_u64().unwrap_or(0);
+        let ratio = m["ratio"].as_f64().expect("ratio is a number");
+        let fg = m["fg"].as_str().unwrap_or("?");
+        let bg = m["bg"].as_str().unwrap_or("?");
+        assert!(
+            ratio > 0.0,
+            "the {theme}/code[{idx}] chip resolved no opaque backdrop — the \
+             backdrop walk must end on a painted surface",
+        );
+        eprintln!("covered-by contrast {theme:>9} / code[{idx}] = {ratio:.2}  ({fg} on {bg})");
+        if ratio < 4.5 {
+            failures.push(format!("{theme}/code[{idx}] = {ratio:.2} ({fg} on {bg})"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "covered-by test ids below the WCAG AA 4.5:1 floor (cute-dbt#240 \
+         defect C): {failures:#?}",
+    );
+
+    let _ = tab.close(true);
+}
+
+/// cute-dbt#240 (defect E) — the baseline-manifest path in the scope
+/// banner (`code.diff-scope-baseline`), same Sakura-light-code-bg root
+/// cause as defect C, same effective-backdrop sweep, all 8 themes.
+const BASELINE_PATH_CONTRAST_SWEEP_JS: &str = r#"(function () {
+  var THEMES = ["light", "solarized", "latte", "rosepine",
+                "dark", "tokyo", "gruvbox", "dracula"];
+  var DARK = { dark: true, tokyo: true, gruvbox: true, dracula: true };
+  function parseRgb(s) {
+    var m = /rgba?\(([^)]+)\)/.exec(s || "");
+    if (!m) return null;
+    var p = m[1].split(",");
+    return { r: parseFloat(p[0]), g: parseFloat(p[1]), b: parseFloat(p[2]),
+             a: p.length > 3 ? parseFloat(p[3]) : 1 };
+  }
+  function chan(v) {
+    v = v / 255;
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  function lum(c) {
+    return 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
+  }
+  function ratio(f, b) {
+    var lf = lum(f), lb = lum(b);
+    var hi = Math.max(lf, lb), lo = Math.min(lf, lb);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+  function backdropOf(el) {
+    for (var n = el; n; n = n.parentElement) {
+      var c = parseRgb(getComputedStyle(n).backgroundColor);
+      if (c && c.a === 1) return c;
+    }
+    return null;
+  }
+  var code = document.querySelector("code.diff-scope-baseline");
+  if (!code) return JSON.stringify([]);
+  var root = document.documentElement;
+  var out = [];
+  for (var i = 0; i < THEMES.length; i++) {
+    root.setAttribute("data-theme", THEMES[i]);
+    root.classList.toggle("dark", !!DARK[THEMES[i]]);
+    var cs = getComputedStyle(code);
+    var fg = parseRgb(cs.color);
+    var own = parseRgb(cs.backgroundColor);
+    var bg = own && own.a === 1 ? own : backdropOf(code.parentElement);
+    out.push({
+      theme: THEMES[i],
+      ratio: fg && bg ? ratio(fg, bg) : -1,
+      fg: cs.color,
+      bg: bg ? "rgb(" + bg.r + ", " + bg.g + ", " + bg.b + ")" : "none"
+    });
+  }
+  return JSON.stringify(out);
+})()"#;
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn baseline_banner_path_meets_aa_contrast_on_every_theme() {
+    let url = render_to_file(
+        "headless_240_baseline_banner_contrast.html",
+        vec![model_node("model.shop.dim_x")],
+        vec![("unit_test.shop.dim_x.t", unit_test("t", "dim_x"))],
+        &["model.shop.dim_x"],
+        &["unit_test.shop.dim_x.t"],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('code.diff-scope-baseline') !== null",
+        ),
+        "precondition: the baseline-mode banner names the baseline manifest",
+    );
+    let raw = eval_string(&tab, BASELINE_PATH_CONTRAST_SWEEP_JS);
+    let measured: Vec<serde_json::Value> =
+        serde_json::from_str(&raw).expect("the contrast sweep returns valid JSON");
+    assert_eq!(
+        measured.len(),
+        8,
+        "the baseline path chip measured on each of the 8 themes, got: {raw}",
+    );
+    let mut failures = Vec::new();
+    for m in &measured {
+        let theme = m["theme"].as_str().expect("theme is a string");
+        let ratio = m["ratio"].as_f64().expect("ratio is a number");
+        let fg = m["fg"].as_str().unwrap_or("?");
+        let bg = m["bg"].as_str().unwrap_or("?");
+        assert!(
+            ratio > 0.0,
+            "the {theme} baseline path resolved no opaque backdrop — the \
+             backdrop walk must end on a painted surface",
+        );
+        eprintln!("baseline-path contrast {theme:>9} = {ratio:.2}  ({fg} on {bg})");
+        if ratio < 4.5 {
+            failures.push(format!("{theme} = {ratio:.2} ({fg} on {bg})"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "the baseline-manifest path below the WCAG AA 4.5:1 floor \
+         (cute-dbt#240 defect E): {failures:#?}",
     );
 
     let _ = tab.close(true);
