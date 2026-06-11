@@ -30,3 +30,8 @@ lcov.info
 .vscode/
 .idea/
 *.swp
+
+# Agent/browser scratch — never at repo root (screenshots go to /tmp)
+.playwright-mcp/
+/scratch/
+*.tmp
