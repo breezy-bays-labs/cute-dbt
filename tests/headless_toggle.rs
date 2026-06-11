@@ -8724,3 +8724,174 @@ fn model_badge_tooltip_rides_column_tooltip_chip_anatomy() {
 
     let _ = tab.close(true);
 }
+
+// ===== cute-dbt#231 — normal-row construct chip AA contrast across every
+// theme =====================================================================
+//
+// Pre-existing, found during #227's empirical 8-theme sweep: the construct
+// code chip on NON-suppressed finding rows renders `--text-muted` on its
+// own `--bg-alt` fill, and nothing gated that pairing per theme. Three
+// light themes shipped under the 4.5:1 AA floor on that exact pairing —
+// latte 4.06:1, rosepine 4.37:1, and solarized 4.497:1 (the same
+// hair-under-floor pairing #227 deepened on suppressed rows; the issue
+// named only latte+rosepine, but the verbatim solarized tokens
+// #5e6e73-on-#f3ecd6 sit at 4.497 on normal rows too — hex resolves to
+// exact integer RGB, so the browser paints the same ratio the token math
+// gives). #227 fixed only the suppressed-row surfaces; this guard pins
+// the NORMAL-row chip the same way.
+//
+// Same shape as the #206 tier-chip guard: for EVERY [data-theme] pack the
+// chassis ships, every normal-row `.f-construct` chip must reach AA on its
+// true backdrop (a 9th theme cannot silently regress). The chip's own
+// `--bg-alt` fill is opaque, so the effective backdrop is the chip fill
+// itself — the sweep still composites via the own-background-then-ancestor
+// walk rather than assuming it (the #206/#227 lesson: assumed backdrops
+// produce wrong reference numbers). The #227 mechanism pin rides along:
+// no self-or-ancestor computed opacity < 1, so token math IS the painted
+// contrast.
+
+/// The normal-row construct-chip sweep, evaluated in-page. Returns a JSON
+/// array of `{theme, idx, ratio, fg, bg, dimmed}` — one entry per
+/// (theme, non-suppressed-row `.f-construct` chip); `dimmed` lists any
+/// self-or-ancestor node whose computed opacity is below 1.
+const NORMAL_ROW_CONSTRUCT_CONTRAST_SWEEP_JS: &str = r#"(function () {
+  var THEMES = ["light", "solarized", "latte", "rosepine",
+                "dark", "tokyo", "gruvbox", "dracula"];
+  var DARK = { dark: true, tokyo: true, gruvbox: true, dracula: true };
+  function parseRgb(s) {
+    var m = /rgba?\(([^)]+)\)/.exec(s || "");
+    if (!m) return null;
+    var p = m[1].split(",");
+    return { r: parseFloat(p[0]), g: parseFloat(p[1]), b: parseFloat(p[2]),
+             a: p.length > 3 ? parseFloat(p[3]) : 1 };
+  }
+  function chan(v) {
+    v = v / 255;
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  function lum(c) {
+    return 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
+  }
+  function ratio(f, b) {
+    var lf = lum(f), lb = lum(b);
+    var hi = Math.max(lf, lb), lo = Math.min(lf, lb);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+  function backdropOf(el) {
+    for (var n = el; n; n = n.parentElement) {
+      var c = parseRgb(getComputedStyle(n).backgroundColor);
+      if (c && c.a === 1) return c;
+    }
+    return null; /* no opaque ancestor — surfaced as ratio -1 */
+  }
+  function dimmedChain(el) {
+    var out = [];
+    for (var n = el; n; n = n.parentElement) {
+      if (parseFloat(getComputedStyle(n).opacity) < 1) {
+        out.push(n.tagName.toLowerCase()
+          + (n.className ? "." + String(n.className).trim().split(/\s+/).join(".") : ""));
+      }
+    }
+    return out;
+  }
+  /* measurement hygiene: body backgrounds transition over 120ms, so a
+     just-switched theme would otherwise be read mid-interpolation */
+  var kill = document.createElement("style");
+  kill.textContent = "* { transition: none !important; animation: none !important; }";
+  document.head.appendChild(kill);
+  var chips = document.querySelectorAll(
+    ".finding-row:not(.is-suppressed) .f-construct");
+  if (!chips.length) {
+    throw new Error("normal-row construct sweep: no .f-construct chip on a "
+      + "non-suppressed .finding-row in the DOM");
+  }
+  var root = document.documentElement;
+  var out = [];
+  for (var i = 0; i < THEMES.length; i++) {
+    /* exactly theme.js applyTheme: set data-theme + sync html.dark */
+    root.setAttribute("data-theme", THEMES[i]);
+    root.classList.toggle("dark", !!DARK[THEMES[i]]);
+    for (var j = 0; j < chips.length; j++) {
+      var cs = getComputedStyle(chips[j]);
+      var fg = parseRgb(cs.color);
+      var own = parseRgb(cs.backgroundColor);
+      var bg = own && own.a === 1 ? own : backdropOf(chips[j].parentElement);
+      out.push({
+        theme: THEMES[i], idx: j,
+        ratio: fg && bg ? ratio(fg, bg) : -1,
+        fg: cs.color,
+        bg: bg ? "rgb(" + bg.r + ", " + bg.g + ", " + bg.b + ")" : "none",
+        dimmed: dimmedChain(chips[j])
+      });
+    }
+  }
+  return JSON.stringify(out);
+})()"#;
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn normal_row_construct_chip_meets_aa_contrast_on_every_theme() {
+    // The same findings fixture as the #206 tier-chip guard: dim_both
+    // trips grain + union — two NORMAL (non-suppressed) finding rows,
+    // each carrying its construct code chip. No suppression policy, so
+    // every row stays on the normal-row token path.
+    let url = render_to_file(
+        "headless_231_construct_chip_contrast.html",
+        vec![findings_model("model.shop.dim_both")],
+        vec![("unit_test.shop.dim_both.t1", unit_test("t1", "dim_both"))],
+        &["model.shop.dim_both"],
+        &["unit_test.shop.dim_both.t1"],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    let raw = eval_string(&tab, NORMAL_ROW_CONSTRUCT_CONTRAST_SWEEP_JS);
+    let measured: Vec<serde_json::Value> =
+        serde_json::from_str(&raw).expect("the construct-chip sweep returns valid JSON");
+    assert_eq!(
+        measured.len(),
+        16,
+        "8 themes x 2 normal-row construct chips (grain + union findings) \
+         measured, got: {raw}",
+    );
+
+    let mut dim_failures = Vec::new();
+    let mut aa_failures = Vec::new();
+    for m in &measured {
+        let theme = m["theme"].as_str().expect("theme is a string");
+        let idx = m["idx"].as_u64().expect("idx is a number");
+        let ratio = m["ratio"].as_f64().expect("ratio is a number");
+        let fg = m["fg"].as_str().unwrap_or("?");
+        let bg = m["bg"].as_str().unwrap_or("?");
+        let dimmed = m["dimmed"].as_array().expect("dimmed is an array");
+        assert!(
+            ratio > 0.0,
+            "the {theme}/chip[{idx}] text resolved no opaque backdrop — the \
+             backdrop walk must end on a painted surface",
+        );
+        eprintln!(
+            "normal-row construct contrast {theme:>9} / chip[{idx}] = {ratio:.2}  ({fg} on {bg})"
+        );
+        if !dimmed.is_empty() {
+            dim_failures.push(format!("{theme}/chip[{idx}] dimmed by {dimmed:?}"));
+        }
+        if ratio < 4.5 {
+            aa_failures.push(format!("{theme}/chip[{idx}] = {ratio:.2} ({fg} on {bg})"));
+        }
+    }
+    assert!(
+        dim_failures.is_empty(),
+        "normal-row construct chip sits under an opacity-dimmed ancestor — \
+         token math no longer equals effective contrast: {dim_failures:#?}",
+    );
+    assert!(
+        aa_failures.is_empty(),
+        "normal-row construct chips below the WCAG AA 4.5:1 floor \
+         (cute-dbt#231): {aa_failures:#?}",
+    );
+
+    let _ = tab.close(true);
+}
