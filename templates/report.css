@@ -1,8 +1,10 @@
 /* ============================================================================
    cute-dbt report chassis CSS v1 (cute-dbt#177)
    ----------------------------------------------------------------------------
-   Claude Design Phase-1 integration, PR-1: semantic token layer + 5 AA-pinned
-   themes + 4 style packs + density layer + the tokenized component rules.
+   Claude Design Phase-1 integration, PR-1: semantic token layer + 8 AA-pinned
+   themes (5 from pass-1 + Dracula / Catppuccin Latte / Rosé Pine Dawn from
+   pass-2, cute-dbt#198) + 4 style packs + density layer + the tokenized
+   component rules.
    FIRST-PARTY asset — authored for cute-dbt, embedded via `include_str!`
    (`asset_embed::REPORT_CSS`) and interpolated into the report template's
    custom <style> block. Deliberately NOT listed in `assets/MANIFEST.toml`:
@@ -11,7 +13,7 @@
    banner-pin + comment-balance tests in `src/adapters/asset_embed.rs`.
 
    Merge of the design handoff's engine files, in this cascade order:
-     1. tokens.css  — :root semantic tokens + five [data-theme] blocks
+     1. tokens.css  — :root semantic tokens + eight [data-theme] blocks
      2. styles.css  — the four html[data-style] direction packs
      3. chrome.css  — settings panel, pickers, Cytoscape host chrome
      4. base.css    — tokenized component layer
@@ -29,17 +31,21 @@
    AA pins — do not re-brighten
    ----------------------------------------------------------------------------
    Every theme passes WCAG-AA (>= 4.5:1) on the load-bearing diff add/remove
-   pair (handoff §2.3). These contrast ratios are verified and LOAD-BEARING;
-   do not re-brighten any theme's add/remove colors. Re-run the WCAG math on
-   the diff add/remove pair for every theme if any code-surface color changes.
+   pair (pass-2 handoff §2.3, re-pinned for 8 themes at cute-dbt#198). These
+   contrast ratios are verified and LOAD-BEARING; do not re-brighten any
+   theme's add/remove colors. Re-run the WCAG math on the diff add/remove
+   pair for every theme if any code-surface color changes.
 
    | theme     | add-fg on surface | remove-fg on surface | white on add-chip | white on remove-chip |
    |-----------|-------------------|----------------------|-------------------|----------------------|
    | Light     | 5.02              | 4.83                 | 5.02              | 4.83                 |
+   | Solarized | 6.10              | 5.68                 | 4.81              | 5.41                 |
+   | Latte     | 5.42              | 5.63                 | 4.98              | 6.01                 |
+   | Rosé Pine | 5.37              | 6.24                 | 5.31              | 6.36                 |
    | Dark      | 9.65              | 7.52                 | 5.02              | 4.58                 |
    | Tokyo     | 8.81              | 6.08                 | 5.22              | 4.99                 |
-   | Solarized | 4.62              | 5.01                 | 4.81              | 5.41                 |
    | Gruvbox   | 6.74              | 4.85                 | 4.86              | 5.47                 |
+   | Dracula   | 9.83              | 4.95                 | 4.96              | 5.03                 |
    ========================================================================== */
 
 /* ============================================================================
@@ -47,11 +53,15 @@
    ----------------------------------------------------------------------------
    Semantic design tokens (the ~50 hardcoded report hexes collapsed to ~24
    themeable tokens) + a density layer (set by the *direction* stylesheet, not
-   the theme) + five [data-theme] blocks.
+   the theme) + eight [data-theme] blocks.
 
    TWO ORTHOGONAL AXES
-     · THEME  (data-theme on <html>): colour identity. 5 of them.
+     · THEME  (data-theme on <html>): colour identity. 8 of them.
      · DIRECTION (a separate stylesheet): density + feel. 4 of them.
+
+   Theme families (kept in lockstep with the settings-panel theme grid):
+     · light : Light, Solarized, Catppuccin Latte, Rosé Pine Dawn
+     · dark  : Dark, Tokyo Night, Gruvbox, Dracula
 
    FIXED-ACROSS-THEMES (intentionally NOT overridden per theme):
      · the DAG role/edge palette (Okabe-Ito, colourblind-safe) — handoff §5.
@@ -231,7 +241,7 @@
   --border:#ddd6c1; --border-strong:#c6bfa8;
   --accent:#268bd2; --accent-hover:#1d6fa8; --accent-tint:#e3eedd; --accent-on:#ffffff;
   --control-bg:#eee8d5; --control-active-bg:#586e75; --control-active-fg:#fdf6e3;
-  --diff-add-fg:#4a6600; --diff-remove-fg:#c5341c;
+  --diff-add-fg:#4a6600; --diff-remove-fg:#b82d18;
   --diff-add-row:rgba(133,153,0,0.12); --diff-remove-row:rgba(220,50,47,0.10);
   --diff-add-edge:rgba(110,130,0,0.85); --diff-remove-edge:rgba(220,50,47,0.85);
   --diff-add-chip:#5a7d04; --diff-remove-chip:#c5341c;
@@ -273,7 +283,88 @@
   --code-add-bg:rgba(184,187,38,0.15); --code-add-gutter:rgba(184,187,38,0.28); --code-add-word:rgba(184,187,38,0.40);
   --code-rem-bg:rgba(251,73,52,0.15); --code-rem-gutter:rgba(251,73,52,0.28); --code-rem-word:rgba(251,73,52,0.40);
   --code-hunk-bg:rgba(131,165,152,0.18); --code-hunk-fg:#83a598;
-  --code-add-sigil:#b8bb26; --code-rem-sigil:#fb4934;
+  --code-add-sigil:#b8bb26; --code-rem-sigil:#fb6a5d;
+}
+
+/* ==========================================================================
+   THEME · DRACULA  — vivid purple-on-charcoal (dark family)
+   ========================================================================== */
+:root[data-theme="dracula"] {
+  --bg:#282a36; --bg-alt:#21222c; --surface:#2b2e3b; --surface-2:#343746;
+  --text:#f8f8f2; --text-muted:#a9adc4; --text-faint:#6272a4;
+  --border:#44475a; --border-strong:#565a73;
+  --accent:#bd93f9; --accent-hover:#d6bbfb; --accent-tint:#352b50; --accent-on:#21222c;
+  --control-bg:#343746; --control-active-bg:#bd93f9; --control-active-fg:#21222c;
+  --diff-add-fg:#50fa7b; --diff-remove-fg:#ff6e6e;
+  --diff-add-row:rgba(80,250,123,0.10); --diff-remove-row:rgba(255,85,85,0.12);
+  --diff-add-edge:rgba(80,250,123,0.85); --diff-remove-edge:rgba(255,110,110,0.85);
+  --diff-add-chip:#25803f; --diff-remove-chip:#c93b3b;
+  --col-add-chip:#25803f; --col-add-on:#eafff1; --col-remove-chip:#b3344e; --col-remove-on:#ffe9f1;
+  --badge-amber:#ffb86c; --badge-amber-bg:#2e2616; --badge-amber-edge:#ffb86c;
+  --syntax-keyword:#ff79c6; --syntax-string:#f1fa8c; --syntax-comment:#6272a4; --syntax-jinja:#ffb86c;
+  --syntax-fold:#ff79c6; --syntax-fold-bg:rgba(255,121,198,0.10);
+  --warn:#ffb86c; --error:#ff5555; --error-bg:#3a1a1f;
+  --tooltip-bg:#21222c; --tooltip-fg:#f8f8f2;
+  --code-bg:#282a36; --code-header-bg:#21222c; --code-gutter-bg:#282a36; --code-gutter-fg:#6272a4;
+  --code-line-hover:rgba(255,255,255,0.04);
+  --code-add-bg:rgba(80,250,123,0.12); --code-add-gutter:rgba(80,250,123,0.26); --code-add-word:rgba(80,250,123,0.38);
+  --code-rem-bg:rgba(255,85,85,0.13); --code-rem-gutter:rgba(255,85,85,0.28); --code-rem-word:rgba(255,85,85,0.40);
+  --code-hunk-bg:rgba(189,147,249,0.16); --code-hunk-fg:#bd93f9;
+  --code-add-sigil:#50fa7b; --code-rem-sigil:#ff6e6e;
+}
+
+/* ==========================================================================
+   THEME · CATPPUCCIN LATTE  — soft pastel cream (light family)
+   ========================================================================== */
+:root[data-theme="latte"] {
+  --bg:#eff1f5; --bg-alt:#e6e9ef; --surface:#eff1f5; --surface-2:#e6e9ef;
+  --text:#4c4f69; --text-muted:#6c6f85; --text-faint:#9ca0b0;
+  --border:#ccd0da; --border-strong:#acb0be;
+  --accent:#1e66f5; --accent-hover:#7287fd; --accent-tint:#dce4fb; --accent-on:#ffffff;
+  --control-bg:#e6e9ef; --control-active-bg:#1e66f5; --control-active-fg:#ffffff;
+  --diff-add-fg:#2a7016; --diff-remove-fg:#bd1331;
+  --diff-add-row:#e3f0db; --diff-remove-row:#f6dde0;
+  --diff-add-edge:#40a02b; --diff-remove-edge:#d20f39;
+  --diff-add-chip:#2a8026; --diff-remove-chip:#c4123a;
+  --col-add-chip:#cfe6c0; --col-add-on:#234d12; --col-remove-chip:#f4c4cb; --col-remove-on:#6e0a1f;
+  --badge-amber:#a36608; --badge-amber-bg:#faefd6; --badge-amber-edge:#df8e1d;
+  --syntax-keyword:#8839ef; --syntax-string:#40a02b; --syntax-comment:#8c8fa1; --syntax-jinja:#ea76cb;
+  --syntax-fold:#8839ef; --syntax-fold-bg:rgba(136,57,239,0.08);
+  --warn:#a36608; --error:#d20f39; --error-bg:#f7d8de;
+  --tooltip-bg:#4c4f69; --tooltip-fg:#eff1f5;
+  --code-bg:#eff1f5; --code-header-bg:#e6e9ef; --code-gutter-bg:#eff1f5; --code-gutter-fg:#9ca0b0;
+  --code-line-hover:rgba(76,79,105,0.04);
+  --code-add-bg:#e3f0db; --code-add-gutter:#cfe6c0; --code-add-word:#bfe0a8;
+  --code-rem-bg:#f6dde0; --code-rem-gutter:#efc3c8; --code-rem-word:#e8a9b0;
+  --code-hunk-bg:#dce4fb; --code-hunk-fg:#5c5f77;
+  --code-add-sigil:#2a7016; --code-rem-sigil:#bd1331;
+}
+
+/* ==========================================================================
+   THEME · ROSÉ PINE DAWN  — muted rose / warm low-contrast (light family)
+   ========================================================================== */
+:root[data-theme="rosepine"] {
+  --bg:#e6d9c9; --bg-alt:#f7f1ea; --surface:#fbf6ef; --surface-2:#ece0d3;
+  --text:#544f74; --text-muted:#726d8d; --text-faint:#938ea1;
+  --border:#cdbfb1; --border-strong:#b3a596;
+  --accent:#286983; --accent-hover:#56949f; --accent-tint:#dde7ea; --accent-on:#ffffff;
+  --control-bg:#f2e9e1; --control-active-bg:#286983; --control-active-fg:#ffffff;
+  --diff-add-fg:#45700f; --diff-remove-fg:#b01b43;
+  --diff-add-row:#e6ebdd; --diff-remove-row:#f6dde1;
+  --diff-add-edge:#56743a; --diff-remove-edge:#b4254a;
+  --diff-add-chip:#56743a; --diff-remove-chip:#b4254a;
+  --col-add-chip:#d3ddbd; --col-add-on:#2c4410; --col-remove-chip:#f1c6cf; --col-remove-on:#67132f;
+  --badge-amber:#996515; --badge-amber-bg:#f7ebd5; --badge-amber-edge:#ea9d34;
+  --syntax-keyword:#907aa9; --syntax-string:#286983; --syntax-comment:#9893a5; --syntax-jinja:#d7827e;
+  --syntax-fold:#907aa9; --syntax-fold-bg:rgba(144,122,169,0.10);
+  --warn:#996515; --error:#b4254a; --error-bg:#f3dde2;
+  --tooltip-bg:#232136; --tooltip-fg:#e0def4;
+  --code-bg:#faf4ed; --code-header-bg:#f2e9e1; --code-gutter-bg:#faf4ed; --code-gutter-fg:#9893a5;
+  --code-line-hover:rgba(87,82,121,0.04);
+  --code-add-bg:#e6ebdd; --code-add-gutter:#d3ddbd; --code-add-word:#c2d3a0;
+  --code-rem-bg:#f6dde1; --code-rem-gutter:#eec3cb; --code-rem-word:#e3a7b2;
+  --code-hunk-bg:#dde7ea; --code-hunk-fg:#575279;
+  --code-add-sigil:#45700f; --code-rem-sigil:#b01b43;
 }
 
 /* ============================================================================
@@ -454,7 +545,7 @@ html[data-style="soft"] .report-header h1 { letter-spacing: -0.01em; }
 .settings-cog[aria-expanded="true"] { background: var(--control-active-bg); color: var(--control-active-fg); border-color: var(--control-active-bg); }
 
 .settings-panel {
-  position: absolute; top: 2.6rem; right: 0; width: 21rem; max-width: 86vw;
+  position: absolute; top: 2.6rem; right: 0; width: 28rem; max-width: 92vw; box-sizing: border-box;
   background: var(--surface); border: var(--rule-w) solid var(--border); border-radius: var(--radius-pan);
   box-shadow: 0 6px 24px rgba(0,0,0,0.22); padding: 0.85rem 1rem 1rem;
   font-size: 0.85em; color: var(--text);
@@ -491,7 +582,7 @@ html[data-style="soft"] .report-header h1 { letter-spacing: -0.01em; }
 .accent-swatch[aria-pressed="true"] { border-color: var(--text); box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--text); }
 .accent-swatch[data-accent="theme"] { background: linear-gradient(135deg, var(--accent) 50%, var(--text-muted) 50%); }
 
-/* segmented radio (density, diff-style) */
+/* segmented radio (density, diff-layout, DAG engine) */
 .seg-radio { display: inline-flex; border: var(--rule-w) solid var(--control-border); border-radius: var(--radius-sm); overflow: hidden; }
 .seg-radio button { font: inherit; font-size: 0.9em; padding: 0.25rem 0.6rem; border: none; background: var(--control-bg); color: var(--text-muted); cursor: pointer; }
 .seg-radio button + button { border-left: var(--rule-w) solid var(--control-border); }
@@ -524,15 +615,18 @@ html[data-style="soft"] .report-header h1 { letter-spacing: -0.01em; }
 .cyto-hint { position: absolute; left: 0.6rem; bottom: 0.5rem; font-size: 0.75em; color: var(--text-faint); pointer-events: none; }
 
 .cyto-node-card {
-  position: absolute; z-index: 20; min-width: 12rem; max-width: 18rem;
+  position: absolute; z-index: 20; min-width: 12rem; max-width: 18rem; width: max-content;
   background: var(--surface); border: var(--rule-w) solid var(--border-strong); border-radius: var(--radius-pan);
   box-shadow: 0 6px 20px rgba(0,0,0,0.22); padding: 0.55rem 0.7rem; font-size: 0.8em; color: var(--text);
   pointer-events: none; opacity: 0; transition: opacity 100ms ease;
 }
 .cyto-node-card.is-visible { opacity: 1; }
-.cyto-node-card .nc-id { font-family: var(--font-mono); font-weight: 700; word-break: break-all; display: block; margin-bottom: 0.25rem; }
-.cyto-node-card .nc-row { display: flex; gap: 0.5rem; color: var(--text-muted); }
-.cyto-node-card .nc-row b { color: var(--text); font-weight: 600; }
+/* wrap fixes (design pass-2, cute-dbt#198): long node ids and long
+   role/degree values break instead of pushing the card past its host */
+.cyto-node-card .nc-id { font-family: var(--font-mono); font-weight: 700; word-break: break-all; overflow-wrap: anywhere; display: block; margin-bottom: 0.25rem; }
+.cyto-node-card .nc-row { display: flex; gap: 0.5rem; color: var(--text-muted); flex-wrap: wrap; }
+.cyto-node-card .nc-row b { color: var(--text); font-weight: 600; flex: 0 0 auto; }
+.cyto-node-card .nc-row > span { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 
 /* engine picker lives in settings; reuse .seg-radio */
 
@@ -544,7 +638,9 @@ html[data-style="soft"] .report-header h1 { letter-spacing: -0.01em; }
      past the viewport. Same fix as .panel-row.is-stacked below. */
   .panel-row { grid-template-columns: minmax(0, 1fr); }
   .expected-panel { position: static; }
-  .settings-panel { width: min(21rem, 92vw); }
+  /* max-width must widen with the fallback: the base rule's 92vw cap would
+     otherwise clip min(28rem, 94vw) and the 8-chip grid wraps early. */
+  .settings-panel { width: min(28rem, 94vw); max-width: 94vw; }
   .report-header { flex-wrap: wrap; gap: 0.25rem; }
   .selector-field { min-width: 0; width: 100%; }
   .test-selector-row { gap: 0.4rem; }
@@ -689,9 +785,18 @@ g.dag-node:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3p
 .legend-item.role-transform { color: var(--dag-transform-stroke); }
 .legend-item.role-transform .legend-swatch { background: var(--dag-transform-fill); }
 .legend-item.role-final     { color: var(--dag-final-stroke); }
+/* Two-layer hexagon (design pass-2, cute-dbt#198): a color-mix-darkened
+   edge layer with a ::before fill inset — matches the darker #b07400
+   role_final stroke both DAG engines now draw. */
 .legend-item.role-final     .legend-swatch {
+  position: relative;
+  background: color-mix(in oklab, var(--dag-final-stroke) 62%, black);
+  clip-path: polygon(15% 0, 85% 0, 100% 50%, 85% 100%, 15% 100%, 0 50%); border: 0; filter: none;
+}
+.legend-item.role-final     .legend-swatch::before {
+  content: ""; position: absolute; inset: 1.5px;
   background: var(--dag-final-fill);
-  clip-path: polygon(15% 0, 85% 0, 100% 50%, 85% 100%, 15% 100%, 0 50%); border: 0;
+  clip-path: polygon(15% 0, 85% 0, 100% 50%, 85% 100%, 15% 100%, 0 50%);
 }
 .legend-edge { display: inline-block; width: 28px; height: 3px; border-radius: 2px; }
 
@@ -799,12 +904,8 @@ th.col-removed { text-decoration: line-through; text-decoration-color: var(--dif
 .cell-new { color: var(--diff-add-fg); font-weight: 700; }
 .cell-arrow { color: var(--diff-arrow); margin: 0 0.3ch; }
 
-/* alt diff encoding (Tweak): symbol prefix + underline instead of pure colour */
-:root[data-diffstyle="marks"] .cell-old { text-decoration: line-through; text-decoration-thickness: 1px; }
-:root[data-diffstyle="marks"] .cell-old::before { content: "− "; font-weight: 700; }
-:root[data-diffstyle="marks"] .cell-new::before { content: "+ "; font-weight: 700; }
-:root[data-diffstyle="marks"] tr.row-added   td:first-child::after { content: " +"; color: var(--diff-add-fg); font-weight: 700; }
-:root[data-diffstyle="marks"] tr.row-removed td:first-child::after { content: " −"; color: var(--diff-remove-fg); font-weight: 700; }
+/* The #188 [data-diffstyle] "marks" alt encoding was retired by design
+   pass-2 (cute-dbt#198): diff cells always render in colour. */
 
 /* ---- SQL / YAML drawers + syntax ------------------------------------- */
 .compiled-sql > summary, .authoring-yaml > summary, .model-sql > details > summary { cursor: pointer; }
@@ -1045,7 +1146,7 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
    7. COVERAGE-CHECKS PANEL (cute-dbt#170)
    ----------------------------------------------------------------------------
    The per-model findings surface. Token-native: every colour rides the
-   semantic layer so all five themes + four style packs apply. Trust-model
+   semantic layer so all eight themes + four style packs apply. Trust-model
    rules made visual: the three verdicts are a CHECKLIST (mark + word, never
    colour-only); the three tiers are LABELED chips with distinct emphasis
    (filled / outlined / muted — never blended, no score, no percentage);
@@ -1104,6 +1205,13 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
 .tier-chip.tier-high     { background: transparent; color: var(--accent); border-color: var(--accent); }
 .tier-chip.tier-advisory { background: transparent; color: var(--text-muted); border-color: var(--border-strong); text-transform: none; }
 .tier-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* cute-dbt#198 discovery — Latte chip AA: the verbatim latte accent
+   (#1e66f5, 4.34:1) and text-muted (#6c6f85, 4.37:1) sit a hair under AA
+   on the latte surface at the chips' 0.68em size. Deepened stand-ins are
+   scoped to the chips per theme (accent -> one-step-darker latte blue,
+   5.13:1; muted -> Catppuccin subtext1, 5.53:1) — a token override only;
+   the chip rules/markup and the verbatim latte theme block stay pinned. */
+:root[data-theme="latte"] .tier-chip { --accent: #1a5cdd; --text-muted: #5c5f77; }
 html[data-style="terminal"] .tier-chip,
 html[data-style="terminal"] .suppress-chip,
 html[data-style="swiss"] .tier-chip,

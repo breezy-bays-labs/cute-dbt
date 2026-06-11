@@ -276,24 +276,33 @@ test. Pure synthetic data only — the `sql_literal_demo` package, `dq_flags` / 
 [[fixture]]
 path = "playground-baseline.json"
 origin = "dbt-playground"
-origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"
-sha256 = "f2e92fda02cd3b5b6a1e69be91b95147926c81cc830d851055b9a84501f6f9c4"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
+sha256 = "28a5e969ba28141f4bd520d707e5d7528f5c6a608a1216a62cb56928c84f2dc3"
 synthetic_only = true
 license = "MIT"
 description = """
 Compiled dbt-core 1.11.11 manifest (schema v12) for cmbays/dbt-playground \
-at main HEAD (post-#292). Pristine model bodies + 3 unit_tests re-authored \
-to exercise all three dbt fixture formats (dict, csv, sql) for cute-dbt's \
-format-coverage rendering: \
+at main c8270a4 (post-#302 — the cute-dbt#64 cross-join demo). Pristine \
+model bodies + 5 unit_tests exercising every dbt fixture format AND both \
+input kinds: \
 test_dim_payers_injects_unknown_sentinel uses dict given + dict expect; \
 test_mart_dq_summary_combines_encounter_and_medication_metrics uses csv \
 given + csv expect; test_mart_dq_summary_zero_quarantined_when_all_valid \
-uses sql given + dict expect. Synthetic Synthea healthcare data only — \
+uses sql given + dict expect; \
+test_mart_date_state_grid_cross_joins_months_and_states MIXES dict + csv \
+givens in one test (cute-dbt#64); \
+test_stg_synthea__patients_renames_and_hashes_source_columns mocks a \
+source() input rather than a ref() (cute-dbt#57 wire shape). Also carries \
+two hand-spliced synthetic data-test nodes (unique/not_null on \
+fct_encounters_incremental.encounter_id — the cute-dbt#165 column-tooltip \
+dogfood), preserved verbatim from the prior pair and identical in baseline \
+and current. Synthetic Synthea healthcare data only — \
 the playground is itself synthetic (Synthea is a deterministic patient- \
 generator with no real PHI). Acts as the BASELINE of the diff-scoping \
 pair for cute-dbt's richer example. Source: cmbays/dbt-playground#291 \
 (unit_test format coverage) + #292 (cute-dbt#73 — bracket-demo \
-comments added to each unit_test in marts/core + marts/analytics). \
+comments added to each unit_test in marts/core + marts/analytics) + \
+#302 (cute-dbt#64 — cross-join model + source-given test). \
 Private repo; URL provided for provenance audit, not public \
 retrieval.\
 """
@@ -301,51 +310,61 @@ retrieval.\
 [[fixture]]
 path = "playground-current.json"
 origin = "dbt-playground"
-origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"
-sha256 = "8b36e99a43df4a9a90402ccdd7f2480f4981eb449db19ba7169f04f1f970de10"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
+sha256 = "074affe247a35f2f5786aa6b92a57c119838e7b99d6f2461e4ed72f7745f5e64"
 synthetic_only = true
 license = "MIT"
 description = """
-Same playground state as the baseline plus three synthetic local-only \
-single-line comment additions to mart_dq_summary.sql, dim_payers.sql, \
-and int_dq_quarantine__encounters.sql — enough to trip the model \
-checksum on each. Together with playground-baseline.json this pair \
-demonstrates cute-dbt's full diff-scoping surface: multi-model in-scope \
-(3 modified models), multi-test-per-model (2 tests on mart_dq_summary), \
-UNION-arm rendering (both mart_dq_summary + dim_payers use UNION ALL), \
-fixture-format coverage (dict + csv + sql), and the modified-no-tests \
-empty-state card (int_dq_quarantine__encounters is modified but carries \
-no unit_tests). The comment-only modifications are NOT committed to the \
-playground — they exist only in this committed manifest snapshot as the \
-right-hand side of cute-dbt's hypothetical PR diff. Source: \
-cmbays/dbt-playground#291 (format coverage) + #292 (cute-dbt#73 — \
-bracket-demo YAML comments). cute-dbt#145 then hand-added ONE synthetic \
+Same playground state as the baseline plus six synthetic local-only \
+single-line comment additions — mart_dq_summary.sql, dim_payers.sql, \
+int_dq_quarantine__encounters.sql, fct_clinical_events.sql, \
+mart_date_state_grid.sql (cute-dbt#64), and stg_synthea__patients.sql \
+(cute-dbt#64 — puts the source()-given unit test in scope) — enough to \
+trip the model checksum on each. Together with playground-baseline.json \
+this pair demonstrates cute-dbt's full diff-scoping surface: multi-model \
+in-scope (7 model cards), multi-test-per-model (2 tests on \
+mart_dq_summary), UNION-arm rendering (both mart_dq_summary + dim_payers \
+use UNION ALL), CROSS-JOIN CTE-edge rendering (mart_date_state_grid's \
+months x states grid CTE, cute-dbt#64), fixture-format coverage (dict + \
+csv + sql + a mixed dict/csv-given test), source()-given binding \
+(stg_synthea__patients, cute-dbt#57 wire shape), and the \
+modified-no-tests empty-state card (int_dq_quarantine__encounters is \
+modified but carries no unit_tests). The comment-only modifications are \
+NOT committed to the playground — they exist only in this committed \
+manifest snapshot as the right-hand side of cute-dbt's hypothetical PR \
+diff. Source: cmbays/dbt-playground#291 (format coverage) + #292 \
+(cute-dbt#73 — bracket-demo YAML comments) + #302 (cute-dbt#64 — \
+cross-join model + source-given test). Hand surgery preserved verbatim \
+across the cute-dbt#64 regen: cute-dbt#145's synthetic \
 incremental model node (model.healthcare_analytics.fct_encounters_incremental, \
 config.materialized = "incremental") + its unit test \
 (overrides.macros.is_incremental = true, given `input: this` + a `ref`) — \
 new-in-current ⇒ modified ⇒ in scope, absent from the baseline — so the \
 example surfaces the incremental-model affordances (model badge, \
 incremental-branch mode badge + expect-semantics tooltip, this-given \
-"prior model state" badge). This pair of nodes is hand-authored synthetic \
-JSON spliced into the fusion output, NOT fusion-emitted. cute-dbt#170 \
-then made three more synthetic local-only edits so the findings surface \
-dogfoods in the committed goldens: mart_dq_summary's config gains \
-unique_key = "entity_type" (its meta already declares grain: entity_type; \
-no uniqueness test exists ⇒ grain.unique-key-unbacked UNCOVERED with its \
-recommendation), dim_payers' raw_code gains an inline \
+"prior model state" badge); this pair of nodes is hand-authored synthetic \
+JSON spliced into the dbt-core output, NOT engine-emitted. cute-dbt#165's \
+two data-test nodes (see the baseline entry) are spliced into BOTH sides. \
+cute-dbt#170's findings-surface edits are replayed: mart_dq_summary's \
+config gains unique_key = "entity_type" (its meta already declares \
+grain: entity_type; no uniqueness test exists ⇒ grain.unique-key-unbacked \
+UNCOVERED with its recommendation, applied as a JSON-level config edit), \
+dim_payers gains an inline \
 `-- cute-dbt: ignore(union.arm-coverage, ...)` pragma (⇒ the sentinel-arm \
-UNKNOWN renders suppressed-with-reason, the visible-but-quiet reveal), and \
+UNKNOWN renders suppressed-with-reason, the visible-but-quiet reveal; \
+since the #64 regen the pragma rides in the .sql edit pre-compile, so it \
+appears in raw_code AND compiled_code with a dbt-computed checksum), and \
 fct_clinical_events gains the same synthetic-body-mod comment idiom as \
-int_dq_quarantine__encounters (raw_code comment + recomputed checksum ⇒ \
-modified ⇒ in scope, surfacing the union UNCOVERED verdict with its \
-copyable given-row sketches + a covered grain check).\
+int_dq_quarantine__encounters (modified ⇒ in scope, surfacing the union \
+UNCOVERED verdict with its copyable given-row sketches + a covered grain \
+check).\
 """
 
 [[fixture]]
 path = "playground-pr-diff.patch"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/134"
-sha256 = "2b25da4e8d2108f2e253f54379ebc02041ddb6f65f70da4eddba071eab04761e"
+sha256 = "474e4d32bfb0294271b3c2b5d767f48387ca75ec768501a14ed6b9d7d8788c62"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"
@@ -360,7 +379,10 @@ fold), a YAML block diff, and a cell-level data diff across BOTH expect rows \
 with a real NULL (test 2's encounters quarantined_count null->0 + total_count \
 2->1, medications 1->0 + 2->1). The `+` sides are aligned byte-for-byte to \
 the manifest raw_code (model) and the committed source YAML (unit test) so \
-the inline diffs reconstruct cleanly under the same-revision contract. No \
+the inline diffs reconstruct cleanly under the same-revision contract. \
+cute-dbt#64's fixture regen renumbered the YAML hunks (+58 lines — the \
+cross-join model block lands earlier in _analytics__models.yml); hunk \
+content is unchanged. No \
 real data — a hypothetical PR against the synthetic Synthea playground.\
 """
 
@@ -383,7 +405,7 @@ design.\
 [[fixture]]
 path = "playground-source/models/marts/core/_core__models.yml"
 origin = "dbt-playground"
-origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
 sha256 = "a4a595c29c72fddf08857e1fa3d106c0edc9a247956b9b34b1daebd048db6098"
 synthetic_only = true
 license = "MIT"
@@ -404,7 +426,10 @@ unit test — `test_fct_encounters_incremental_appends_new_encounters` — \
 the authoring-YAML source for the spliced incremental node in \
 `playground-current.json`; it pairs the `overrides.macros.is_incremental` \
 flag with a `given: - input: this` so the Authoring YAML drawer renders \
-the incremental-mode test alongside the new node's badges. Synthetic \
+the incremental-mode test alongside the new node's badges. cute-dbt#165 \
+added hand-authored column docs + unique/not_null data tests on \
+fct_encounters_incremental's merge key for the column-tooltip dogfood. \
+Upstream portion unchanged at c8270a4. Synthetic \
 Synthea-only — pure synthetic data (see playground-current.json's \
 provenance note).\
 """
@@ -412,20 +437,49 @@ provenance note).\
 [[fixture]]
 path = "playground-source/models/marts/analytics/_analytics__models.yml"
 origin = "dbt-playground"
-origin_url = "https://github.com/cmbays/dbt-playground/commit/757fe9d"
-sha256 = "63a82ecad11fc1b4aafc3ed0d1d25d2ee94a598b53fdd176ca03a93bef0280de"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
+sha256 = "8c798e44f9debea0a8d75840839724f287fb0b38111a99d081b2858609bea836"
 synthetic_only = true
 license = "MIT"
 description = """
 Source YAML for the playground `analytics` mart — paired source for \
 the two `mart_dq_summary` unit_tests (`test_mart_dq_summary_combines_\
 encounter_and_medication_metrics` csv format, \
-`test_mart_dq_summary_zero_quarantined_when_all_valid` sql format). \
-Same provenance + CI matrix wiring as the core file above. \
+`test_mart_dq_summary_zero_quarantined_when_all_valid` sql format) and \
+the cross-join demo test \
+(`test_mart_date_state_grid_cross_joins_months_and_states`, mixed \
+dict + csv givens — added upstream in cmbays/dbt-playground#302 for \
+cute-dbt#64). Same provenance + CI matrix wiring as the core file above. \
 cmbays/dbt-playground#292 added contiguous `#`-comment lines around \
-both unit_tests in three bracket positions (leading + inside + \
+the unit_tests in three bracket positions (leading + inside + \
 trailing), separated by a blank line to demonstrate the slicer's \
-per-test bracket termination rule (cute-dbt#73). Pure synthetic.\
+per-test bracket termination rule (cute-dbt#73). Hand surgery on top of \
+the verbatim upstream copy: the cute-dbt#125 `overrides:` block \
+(macros / vars / env_vars) on test 2 — a text-level pin for the YAML \
+drawer + the pr-diff showcase's override-edit hunk; the manifest itself \
+carries `overrides: null` for that test — re-applied verbatim at the \
+same position during the cute-dbt#64 refresh to c8270a4. Pure synthetic.\
+"""
+
+[[fixture]]
+path = "playground-source/models/staging/synthea/_synthea__models.yml"
+origin = "dbt-playground"
+origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
+sha256 = "a63ee732b779ae6f1fe606883f7f275e0bdad3077e3716fecd65e5efd63c2ed8"
+synthetic_only = true
+license = "MIT"
+description = """
+Source YAML for the playground `synthea` staging models — paired source \
+for the source()-given unit test \
+(`test_stg_synthea__patients_renames_and_hashes_source_columns`, added \
+upstream in cmbays/dbt-playground#302): the only unit test in the \
+project whose `given` mocks a dbt SOURCE \
+(`source('synthea_raw', 'patients')`) rather than a ref() — the real \
+cute-dbt#57 wire shape. Same CI matrix wiring as the marts files above \
+(`--project-root tests/fixtures/playground-source` lets the Authoring \
+YAML drawer slice the test's block via the manifest \
+`original_file_path`). Verbatim upstream copy at c8270a4 — no hand \
+surgery. Pure synthetic.\
 """
 
 [[fixture]]

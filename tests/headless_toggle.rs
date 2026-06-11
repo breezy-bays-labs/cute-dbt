@@ -267,6 +267,62 @@ fn eval_bool(tab: &Tab, expr: &str) -> bool {
     })
 }
 
+/// Condition-based document-readiness wait after a reload / re-navigation
+/// (cute-dbt#208). Call it after every `tab.reload(..)` or same-tab
+/// `tab.navigate_to(..)` + `wait_until_navigated()` pair, BEFORE the next
+/// eval.
+///
+/// `wait_until_navigated` resolves on the CDP navigation event, which can
+/// fire while the new document is still being swapped in —
+/// `document.documentElement` is briefly null mid-swap, so any eval touching
+/// it throws (`TypeError: Cannot read properties of null`; lost on PR #205's
+/// and #207's CI under load). Poll `document.readyState` on a 50ms interval
+/// until it reports `complete`; a protocol error or a thrown eval mid-swap
+/// counts as "not ready yet — keep polling", never as a failure. The 10s cap
+/// is a guardrail against a wedged tab, not the wait mechanism (no bare
+/// sleeps as the wait).
+fn wait_for_document_ready(tab: &Tab) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        // Raw Runtime::Evaluate, deliberately NOT the fail-loud `eval`
+        // helper: mid-swap the evaluation may error or throw, and readiness
+        // polling must treat both as "not yet" — while `eval` (correctly,
+        // cute-dbt#109) panics on a thrown exception.
+        let ready = tab
+            .call_method(Runtime::Evaluate {
+                expression: "document.readyState".to_string(),
+                object_group: None,
+                include_command_line_api: None,
+                silent: Some(true),
+                context_id: None,
+                return_by_value: Some(true),
+                generate_preview: None,
+                user_gesture: None,
+                await_promise: Some(false),
+                throw_on_side_effect: None,
+                timeout: None,
+                disable_breaks: None,
+                repl_mode: None,
+                allow_unsafe_eval_blocked_by_csp: None,
+                unique_context_id: None,
+                serialization_options: None,
+            })
+            .ok()
+            .filter(|r| r.exception_details.is_none())
+            .and_then(|r| r.result.value)
+            .is_some_and(|v| v.as_str() == Some("complete"));
+        if ready {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "document never reached readyState 'complete' within 10s of the \
+             reload/navigation (cute-dbt#208)"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// `|`-joined option labels of a `<select>`, trimmed per option.
 fn options_of(tab: &Tab, select_id: &str) -> String {
     eval_string(
@@ -508,6 +564,7 @@ fn updated_toggle_drives_visibility_counts_hint_and_auto_all() {
     // ===== P2 (auto-All landing) =====
     tab.navigate_to(&p2).expect("navigate P2");
     tab.wait_until_navigated().expect("await P2 navigation");
+    wait_for_document_ready(&tab);
 
     // totalUpdated === 0 → the report auto-opens in All-tests mode and
     // lands on a REAL selected test (not the empty 0-updated view).
@@ -596,6 +653,7 @@ fn pr_diff_zero_updated_affirms_block_precision() {
     tab.navigate_to(&pr_updated).expect("navigate pr_updated");
     tab.wait_until_navigated()
         .expect("await pr_updated navigation");
+    wait_for_document_ready(&tab);
     assert!(
         affirm_present(&tab),
         "the element is server-rendered on the PR-diff path regardless of count",
@@ -610,6 +668,7 @@ fn pr_diff_zero_updated_affirms_block_precision() {
         .expect("navigate baseline_zero");
     tab.wait_until_navigated()
         .expect("await baseline_zero navigation");
+    wait_for_document_ready(&tab);
     assert!(
         !affirm_present(&tab),
         "baseline mode never renders the PR-diff-specific affirmation",
@@ -2370,6 +2429,7 @@ fn fusion_csv_format_only_shows_no_diff_cell_but_value_change_shows_old_to_new()
         .expect("navigate value-change");
     tab.wait_until_navigated()
         .expect("await value-change navigation");
+    wait_for_document_ready(&tab);
     show_all_inputs(&tab);
     assert!(
         eval_bool(&tab, "document.querySelector('.cell-diff-toggle') !== null"),
@@ -3108,6 +3168,7 @@ fn settings_persist_across_reload_where_supported() {
         // poll the hydrated input value with a bounded retry.
         tab.reload(false, None).expect("reload");
         tab.wait_until_navigated().expect("await reload");
+        wait_for_document_ready(&tab);
         let mut ctx_val = String::new();
         for _ in 0..50 {
             ctx_val = eval_string(
@@ -3214,6 +3275,44 @@ fn appearance_settings_flip_theme_density_diff_layout_and_persist() {
         !eval_bool(&tab, &format!("{ROOT}.classList.contains('dark')")),
         "no html.dark class on the light theme",
     );
+    // ===== cute-dbt#198 — the pass-2 themes ride the same contract =====
+    // One NEW light-family id (latte) and one NEW dark-family id (dracula):
+    // the chip flips [data-theme] and the html.dark DataTables sync follows
+    // the theme's family.
+    let _ = eval(
+        &tab,
+        "document.querySelector('.theme-chip[data-theme-id=\"latte\"]').click()",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{ROOT}.getAttribute('data-theme')")),
+        "latte",
+        "clicking the Catppuccin Latte chip sets html[data-theme=latte]",
+    );
+    assert!(
+        !eval_bool(&tab, &format!("{ROOT}.classList.contains('dark')")),
+        "latte is light-family — no html.dark class",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.theme-chip[data-theme-id=\"dracula\"]').click()",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{ROOT}.getAttribute('data-theme')")),
+        "dracula",
+        "clicking the Dracula chip sets html[data-theme=dracula]",
+    );
+    assert!(
+        eval_bool(&tab, &format!("{ROOT}.classList.contains('dark')")),
+        "dracula is dark-family — html.dark toggles on (DataTables sync)",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.theme-grid .theme-chip').length"
+        ),
+        8,
+        "the settings theme grid lists all 8 themes",
+    );
     let _ = eval(
         &tab,
         "document.querySelector('.theme-chip[data-theme-id=\"dark\"]').click()",
@@ -3291,6 +3390,18 @@ fn appearance_settings_flip_theme_density_diff_layout_and_persist() {
         "Split layout (wide viewport) shows the split table",
     );
 
+    // ===== cute-dbt#198 — the #188 diff-cells colour/marks control is =====
+    // retired (design pass-2): no control markup, no [data-diffstyle] hook.
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.diff-seg, [data-diffstyle]').length"
+        ),
+        0,
+        "the diff-cells colour/marks control is retired — no .diff-seg \
+         markup and no data-diffstyle attribute anywhere",
+    );
+
     // ===== persistence: the appearance blob (where storage is usable) =====
     let storage_ok = eval_bool(
         &tab,
@@ -3309,6 +3420,37 @@ fn appearance_settings_flip_theme_density_diff_layout_and_persist() {
                 && raw.contains("\"density\":\"compact\"")
                 && raw.contains("\"difflayout\":\"split\""),
             "the appearance state persisted under cute-dbt.appearance.v1: {raw}",
+        );
+
+        // cute-dbt#198 — a LEGACY persisted `diffstyle` key (written by the
+        // retired #188 control) is ignored gracefully: boot copies only the
+        // live keys, sets no data-diffstyle attribute, and the surviving
+        // appearance keys still hydrate. Poll the hydrated theme — boot runs
+        // after DOMContentLoaded, which wait_until_navigated alone races.
+        let _ = eval(
+            &tab,
+            "window.localStorage.setItem('cute-dbt.appearance.v1', \
+             JSON.stringify({theme:'dark',density:'compact',\
+             difflayout:'split',diffstyle:'marks'}))",
+        );
+        tab.reload(false, None).expect("reload");
+        tab.wait_until_navigated().expect("await reload");
+        wait_for_document_ready(&tab);
+        let mut theme = String::new();
+        for _ in 0..50 {
+            theme = eval_string(&tab, &format!("{ROOT}.getAttribute('data-theme') || ''"));
+            if theme == "dark" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(
+            theme, "dark",
+            "the live appearance keys still hydrate alongside a legacy diffstyle key",
+        );
+        assert!(
+            !eval_bool(&tab, &format!("{ROOT}.hasAttribute('data-diffstyle')")),
+            "a legacy persisted diffstyle key leaves no data-diffstyle attribute",
         );
     }
 

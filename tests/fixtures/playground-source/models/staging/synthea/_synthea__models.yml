@@ -1,0 +1,903 @@
+version: 2
+
+models:
+  # ============================================================================
+  # DIMENSION TABLES
+  # ============================================================================
+
+  - name: stg_synthea__patients
+    description: >
+      Staging model for patient demographics and identifiers.
+      One row per patient with personal information, location, and financial data.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 900
+          config:
+            severity: warn
+    columns:
+      - name: patient_id
+        description: Unique patient identifier (UUID)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: first_name
+        description: Patient's first name
+        data_tests:
+          - not_null
+
+      - name: last_name
+        description: Patient's last name
+        data_tests:
+          - not_null
+
+      - name: name_prefix
+        description: Name prefix (Mr., Mrs., Ms., etc.)
+
+      - name: name_suffix
+        description: Name suffix (Jr., Sr., III, etc.)
+
+      - name: maiden_name
+        description: Maiden name (if applicable)
+
+      - name: gender
+        description: Patient gender (M or F)
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['M', 'F']
+          # String pattern validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_match_regex:
+              regex: "^[MF]$"
+              config:
+                severity: warn
+
+      - name: race
+        description: Patient race
+
+      - name: ethnicity
+        description: Patient ethnicity (hispanic or nonhispanic)
+
+      - name: marital_status
+        description: Marital status (M=Married, S=Single, or blank)
+
+      - name: birth_date
+        description: Patient date of birth
+        data_tests:
+          - not_null
+          # Date range validation (v0.8 - dbt_expectations)
+          # Note: Uses year extraction to avoid date type casting issues with DuckDB
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::date"
+              max_value: "current_date"
+              config:
+                severity: warn
+
+      - name: death_date
+        description: Patient date of death (null if alive)
+        data_tests:
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::date"
+              max_value: "current_date"
+              row_condition: "death_date is not null"
+              config:
+                severity: warn
+
+      - name: ssn_hash
+        description: MD5 hash of Social Security Number (masked for privacy)
+
+      - name: drivers_license
+        description: Driver's license number
+
+      - name: passport_number
+        description: Passport number
+
+      - name: birth_place
+        description: Place of birth
+
+      - name: address
+        description: Street address
+
+      - name: city
+        description: City of residence
+
+      - name: state
+        description: State of residence (full state name, e.g., Massachusetts)
+
+      - name: county
+        description: County of residence
+
+      - name: zip_code
+        description: ZIP code
+        data_tests:
+          # String pattern validation (v0.8 - dbt_expectations)
+          # ZIP code format: 5 digits or 5+4 format
+          - dbt_expectations.expect_column_values_to_match_regex:
+              regex: "^\\d{5}(-\\d{4})?$"
+              row_condition: "zip_code is not null"
+              config:
+                severity: warn
+
+      - name: latitude
+        description: Latitude coordinate of residence
+
+      - name: longitude
+        description: Longitude coordinate of residence
+
+      - name: healthcare_expenses
+        description: Total healthcare expenses incurred
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "healthcare_expenses is not null"
+              config:
+                severity: warn
+
+      - name: healthcare_coverage
+        description: Total healthcare coverage received
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "healthcare_coverage is not null"
+              config:
+                severity: warn
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded into staging
+
+  - name: stg_synthea__payers
+    description: >
+      Staging model for insurance payers.
+      One row per payer with contact information and aggregate metrics.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 5
+          config:
+            severity: warn
+    columns:
+      - name: payer_id
+        description: Unique payer identifier (UUID)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: payer_name
+        description: Name of the insurance payer
+        data_tests:
+          - not_null
+
+      - name: address
+        description: Street address
+
+      - name: city
+        description: City
+
+      - name: state
+        description: State where headquartered
+
+      - name: zip_code
+        description: ZIP code (stored as numeric, 5 digits)
+
+      - name: phone
+        description: Phone number
+
+      - name: amount_covered
+        description: Total amount covered by payer
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "amount_covered is not null"
+              config:
+                severity: warn
+
+      - name: amount_uncovered
+        description: Total amount not covered by payer
+
+      - name: revenue
+        description: Total revenue collected
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "revenue is not null"
+              config:
+                severity: warn
+
+      - name: covered_encounters
+        description: Number of encounters covered
+
+      - name: uncovered_encounters
+        description: Number of encounters not covered
+
+      - name: covered_medications
+        description: Number of medications covered
+
+      - name: uncovered_medications
+        description: Number of medications not covered
+
+      - name: covered_procedures
+        description: Number of procedures covered
+
+      - name: uncovered_procedures
+        description: Number of procedures not covered
+
+      - name: covered_immunizations
+        description: Number of immunizations covered
+
+      - name: uncovered_immunizations
+        description: Number of immunizations not covered
+
+      - name: unique_customers
+        description: Number of unique customers
+
+      - name: average_quality_of_life_score
+        description: Average quality of life score for members
+
+      - name: member_months
+        description: Total member months
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded into staging
+
+  - name: stg_synthea__organizations
+    description: >
+      Staging model for healthcare organizations/facilities.
+      One row per organization with location and performance metrics.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 800
+          config:
+            severity: warn
+    columns:
+      - name: organization_id
+        description: Unique organization identifier (UUID)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: organization_name
+        description: Name of the healthcare organization
+        data_tests:
+          - not_null
+
+      - name: address
+        description: Street address
+
+      - name: city
+        description: City
+
+      - name: state
+        description: State (full state name)
+
+      - name: zip_code
+        description: ZIP code
+        data_tests:
+          # String pattern validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_match_regex:
+              regex: "^\\d{5}(-\\d{4})?$"
+              row_condition: "zip_code is not null"
+              config:
+                severity: warn
+
+      - name: phone
+        description: Phone number
+
+      - name: latitude
+        description: Latitude coordinate
+
+      - name: longitude
+        description: Longitude coordinate
+
+      - name: revenue
+        description: Total revenue
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "revenue is not null"
+              config:
+                severity: warn
+
+      - name: utilization
+        description: Total utilization count
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "utilization is not null"
+              config:
+                severity: warn
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded into staging
+
+  - name: stg_synthea__providers
+    description: >
+      Staging model for healthcare providers (doctors, nurses, etc.).
+      One row per provider with specialization and affiliated organization.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 4000
+          config:
+            severity: warn
+    columns:
+      - name: provider_id
+        description: Unique provider identifier (UUID)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: organization_id
+        description: Foreign key to the provider's organization
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__organizations')
+              field: organization_id
+
+      - name: provider_name
+        description: Full name of the provider
+        data_tests:
+          - not_null
+
+      - name: gender
+        description: Provider gender (M or F)
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['M', 'F']
+          # String pattern validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_match_regex:
+              regex: "^[MF]$"
+              config:
+                severity: warn
+
+      - name: specialty
+        description: Medical specialty
+
+      - name: address
+        description: Street address
+
+      - name: city
+        description: City
+
+      - name: state
+        description: State (full state name)
+
+      - name: zip_code
+        description: ZIP code
+        data_tests:
+          # String pattern validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_match_regex:
+              regex: "^\\d{5}(-\\d{4})?$"
+              row_condition: "zip_code is not null"
+              config:
+                severity: warn
+
+      - name: latitude
+        description: Latitude coordinate
+
+      - name: longitude
+        description: Longitude coordinate
+
+      - name: utilization
+        description: Total utilization count
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "utilization is not null"
+              config:
+                severity: warn
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded into staging
+
+  # ============================================================================
+  # FACT TABLES
+  # ============================================================================
+
+  - name: stg_synthea__encounters
+    description: >
+      Staging model for healthcare encounters/visits.
+      One row per encounter with patient, provider, organization, and payer relationships.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 40000
+          config:
+            severity: warn
+    columns:
+      - name: encounter_id
+        description: Unique encounter identifier (UUID)
+        data_tests:
+          - unique
+          - not_null
+
+      - name: patient_id
+        description: Foreign key to the patient
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__patients')
+              field: patient_id
+
+      - name: organization_id
+        description: Foreign key to the organization
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__organizations')
+              field: organization_id
+
+      - name: provider_id
+        description: Foreign key to the provider
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__providers')
+              field: provider_id
+
+      - name: payer_id
+        description: Foreign key to the payer
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__payers')
+              field: payer_id
+
+      - name: encounter_start_at
+        description: Start timestamp of the encounter
+        data_tests:
+          - not_null
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::timestamp"
+              max_value: "current_timestamp"
+              config:
+                severity: warn
+
+      - name: encounter_end_at
+        description: End timestamp of the encounter
+        data_tests:
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::timestamp"
+              max_value: "current_timestamp"
+              row_condition: "encounter_end_at is not null"
+              config:
+                severity: warn
+
+      - name: encounter_class
+        description: Type of encounter (ambulatory, wellness, emergency, etc.)
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['ambulatory', 'wellness', 'emergency', 'urgentcare', 'outpatient', 'inpatient']
+
+      - name: encounter_code
+        description: SNOMED CT code for the encounter type
+
+      - name: encounter_description
+        description: Description of the encounter type
+
+      - name: base_encounter_cost
+        description: Base cost of the encounter
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "base_encounter_cost is not null"
+              config:
+                severity: warn
+
+      - name: total_claim_cost
+        description: Total claim cost
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "total_claim_cost is not null"
+              config:
+                severity: warn
+
+      - name: payer_coverage
+        description: Amount covered by payer
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "payer_coverage is not null"
+              config:
+                severity: warn
+
+      - name: reason_code
+        description: SNOMED CT code for the reason of visit
+
+      - name: reason_description
+        description: Description of the reason for visit
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded into staging
+
+  - name: stg_synthea__conditions
+    description: >
+      Staging model for patient conditions/diagnoses.
+      One row per condition instance with surrogate key.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 6000
+          config:
+            severity: warn
+    columns:
+      - name: condition_id
+        description: Surrogate key for the condition record
+        data_tests:
+          - unique
+          - not_null
+
+      - name: patient_id
+        description: Foreign key to the patient
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__patients')
+              field: patient_id
+
+      - name: encounter_id
+        description: Foreign key to the encounter
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__encounters')
+              field: encounter_id
+
+      - name: condition_start_date
+        description: Date when condition was diagnosed
+        data_tests:
+          - not_null
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::date"
+              max_value: "current_date"
+              config:
+                severity: warn
+
+      - name: condition_end_date
+        description: Date when condition resolved (null if ongoing)
+        data_tests:
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::date"
+              max_value: "current_date"
+              row_condition: "condition_end_date is not null"
+              config:
+                severity: warn
+
+      - name: condition_code
+        description: SNOMED CT code for the condition
+        data_tests:
+          - not_null
+
+      - name: condition_description
+        description: Description of the condition
+        data_tests:
+          - not_null
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded into staging
+
+  - name: stg_synthea__procedures
+    description: >
+      Staging model for medical procedures performed.
+      One row per procedure instance with surrogate key.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 25000
+          config:
+            severity: warn
+    columns:
+      - name: procedure_id
+        description: Surrogate key for the procedure record
+        data_tests:
+          - unique
+          - not_null
+
+      - name: patient_id
+        description: Foreign key to the patient
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__patients')
+              field: patient_id
+
+      - name: encounter_id
+        description: Foreign key to the encounter
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__encounters')
+              field: encounter_id
+
+      - name: procedure_at
+        description: Timestamp when the procedure was performed
+        data_tests:
+          - not_null
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::timestamp"
+              max_value: "current_timestamp"
+              config:
+                severity: warn
+
+      - name: procedure_code
+        description: SNOMED CT code for the procedure
+        data_tests:
+          - not_null
+
+      - name: procedure_description
+        description: Description of the procedure
+        data_tests:
+          - not_null
+
+      - name: base_cost
+        description: Base cost of the procedure
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "base_cost is not null"
+              config:
+                severity: warn
+
+      - name: reason_code
+        description: SNOMED CT code for the reason of the procedure
+
+      - name: reason_description
+        description: Description of the reason for the procedure
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded into staging
+
+  - name: stg_synthea__medications
+    description: >
+      Staging model for prescribed medications.
+      One row per medication prescription with surrogate key.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 30000
+          config:
+            severity: warn
+    columns:
+      - name: medication_id
+        description: Surrogate key for the medication record
+        data_tests:
+          - unique
+          - not_null
+
+      - name: patient_id
+        description: Foreign key to the patient
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__patients')
+              field: patient_id
+
+      - name: payer_id
+        description: Foreign key to the payer
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__payers')
+              field: payer_id
+
+      - name: encounter_id
+        description: Foreign key to the encounter
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__encounters')
+              field: encounter_id
+
+      - name: medication_start_at
+        description: Timestamp when medication was prescribed
+        data_tests:
+          - not_null
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::timestamp"
+              max_value: "current_timestamp"
+              config:
+                severity: warn
+
+      - name: medication_end_at
+        description: Timestamp when medication ended (null if ongoing)
+        data_tests:
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::timestamp"
+              max_value: "current_timestamp"
+              row_condition: "medication_end_at is not null"
+              config:
+                severity: warn
+
+      - name: medication_code
+        description: RxNorm code for the medication
+        data_tests:
+          - not_null
+
+      - name: medication_description
+        description: Description of the medication
+        data_tests:
+          - not_null
+
+      - name: base_cost
+        description: Base cost per dispense
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "base_cost is not null"
+              config:
+                severity: warn
+
+      - name: payer_coverage
+        description: Amount covered by payer
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "payer_coverage is not null"
+              config:
+                severity: warn
+
+      - name: dispenses
+        description: Number of times medication was dispensed
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1
+              row_condition: "dispenses is not null"
+              config:
+                severity: warn
+
+      - name: total_cost
+        description: Total cost of all dispenses
+        data_tests:
+          # Value range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              row_condition: "total_cost is not null"
+              config:
+                severity: warn
+
+      - name: reason_code
+        description: SNOMED CT code for the reason of medication
+
+      - name: reason_description
+        description: Description of the reason for medication
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded into staging
+
+  - name: stg_synthea__observations
+    description: >
+      Staging model for clinical observations (vital signs, lab results).
+      One row per observation with surrogate key.
+    data_tests:
+      # Row count validation (v0.8 - dbt_expectations)
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 200000
+          config:
+            severity: warn
+    columns:
+      - name: observation_id
+        description: Surrogate key for the observation record
+        data_tests:
+          - unique
+          - not_null
+
+      - name: patient_id
+        description: Foreign key to the patient
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_synthea__patients')
+              field: patient_id
+
+      - name: encounter_id
+        description: >
+          Foreign key to the encounter. Note: ~10% of observations have null
+          encounter_id (from external sources or historical data imports).
+        data_tests:
+          - relationships:
+              to: ref('stg_synthea__encounters')
+              field: encounter_id
+              config:
+                where: "encounter_id is not null"
+
+      - name: observation_at
+        description: Timestamp when observation was recorded
+        data_tests:
+          - not_null
+          # Date range validation (v0.8 - dbt_expectations)
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: "'1900-01-01'::timestamp"
+              max_value: "current_timestamp"
+              config:
+                severity: warn
+
+      - name: observation_code
+        description: LOINC code for the observation
+        data_tests:
+          - not_null
+
+      - name: observation_description
+        description: Description of the observation
+        data_tests:
+          - not_null
+
+      - name: observation_value
+        description: Value of the observation (stored as string)
+
+      - name: units
+        description: Units of measurement
+
+      - name: observation_type
+        description: Type of observation (numeric, text, etc.)
+
+      - name: _loaded_at
+        description: Timestamp when record was loaded into staging
+
+
+# ============================================================================
+# UNIT TESTS
+# ============================================================================
+# Source-given fixture (cute-dbt#57): unlike the ref()-given unit_tests
+# in the marts YAML files, this test mocks a dbt SOURCE input —
+# `source('synthea_raw', 'patients')` — giving cute-dbt a real
+# wire-shape fixture for source() given binding.
+
+unit_tests:
+  - name: test_stg_synthea__patients_renames_and_hashes_source_columns
+    description: |
+      stg_synthea__patients renames the raw Synthea UPPERCASE columns to
+      snake_case and hashes the SSN with md5. The given mocks the
+      synthea_raw.patients SOURCE directly (inline dict rows) — the only
+      unit test in this project whose input is a source() rather than a
+      ref() (cute-dbt#57). Dict expect compares listed columns only, so
+      the non-deterministic _loaded_at (current_timestamp) is excluded
+      from assertion automatically.
+    model: stg_synthea__patients
+    given:
+      - input: source('synthea_raw', 'patients')
+        format: dict
+        rows:
+          - Id: 'c0000000-0000-0000-0000-000000000001'
+            FIRST: 'Ada'
+            LAST: 'Lovelace'
+            GENDER: 'F'
+            CITY: 'Boston'
+            STATE: 'Massachusetts'
+            SSN: '999-99-9999'
+    expect:
+      format: dict
+      rows:
+        - patient_id: 'c0000000-0000-0000-0000-000000000001'
+          first_name: 'Ada'
+          last_name: 'Lovelace'
+          gender: 'F'
+          city: 'Boston'
+          state: 'Massachusetts'
+          ssn_hash: '257cf696294931925796925d89aa0afb'
