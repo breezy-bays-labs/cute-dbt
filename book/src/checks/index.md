@@ -8,3 +8,5 @@ The coverage-intelligence check registry. Each check pairs a construct trigger w
 |---|---|---|---|
 | [`grain.unique-key-unbacked`](./grain.unique-key-unbacked.md) | Unique key without a uniqueness test | `total` | `data-test` |
 | [`union.arm-coverage`](./union.arm-coverage.md) | Unexercised UNION arm | `high` | `unit-test` |
+| [`join.left-null-propagation`](./join.left-null-propagation.md) | LEFT JOIN null propagation untested | `high` | `both` |
+| [`join.anti-join`](./join.anti-join.md) | Anti-join exclusion untested | `high` | `unit-test` |
