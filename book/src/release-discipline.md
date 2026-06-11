@@ -19,8 +19,15 @@ What you need to know as a user:
   amends a published version, it ships the next one.
 
 The contract SemVer covers at `v1.0`+ is the **CLI surface** (`cute-dbt
---help`), the **exit-code mapping**, and the **zero-egress property** — not
-the Rust library, which stays internal during v0.x. Contributor-facing
-release mechanics (conventional-commit version inference, tag policy) live
-in
+--help`), the **exit-code mapping**, the **zero-egress property**, and the
+**explorer's external-drive JS contract** (the
+[`window.focusModel`/`window.setView` hooks, the dual-bound commit signal,
+and the payload-paths shape](./explore-contract.md)) — not the Rust
+library, which stays internal during v0.x. The external-drive contract
+carries its own readable version string (`data-cute-dbt-contract` /
+`window.cuteDbtContract.version`) so embedding hosts can feature-detect,
+but it is governed **here**, not by a separate versioning system: a
+contract-breaking change is a v0.x minor (v1.0+ major) event, exactly
+like a CLI flag rename. Contributor-facing release mechanics
+(conventional-commit version inference, tag policy) live in
 [`AGENTS.md`](https://github.com/breezy-bays-labs/cute-dbt/blob/main/AGENTS.md#release-discipline).

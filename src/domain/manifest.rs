@@ -436,6 +436,20 @@ pub struct Node {
     /// read. Empty for untagged nodes and every pre-#200 fixture.
     #[serde(default)]
     tags: Vec<String>,
+    /// Path of the schema-properties `.yml` file that patches this node
+    /// (cute-dbt#105) — the `models:` block carrying its description /
+    /// columns / tests. Stored **package-relative, scheme-stripped**:
+    /// both engines serialize the wire `patch_path` as a package URI
+    /// (`<package>://models/schema.yml` — fusion
+    /// `normalize_manifest_patch_path` / `package_uri_path`,
+    /// `dbt-schemas` `manifest/manifest.rs` @ `9977b6cb…`, mirroring
+    /// dbt-core), and the manifest adapter strips the scheme on
+    /// ingestion so the domain carries a plain relative path (for
+    /// root-project nodes this is project-relative — the
+    /// `original_file_path` shape). `None` for nodes without a schema
+    /// patch and every pre-#105 fixture.
+    #[serde(default)]
+    patch_path: Option<String>,
 }
 
 impl Node {
@@ -471,7 +485,19 @@ impl Node {
             test_metadata: None,
             description: None,
             tags: Vec::new(),
+            patch_path: None,
         }
+    }
+
+    /// Attach the schema-properties YAML path (cute-dbt#105) — the
+    /// package-relative, scheme-stripped `patch_path` (the adapter
+    /// strips the `<package>://` URI scheme on ingestion). Builder for
+    /// the same reason as [`Self::with_column_descriptions`] — no
+    /// constructor churn across the many existing test call sites.
+    #[must_use]
+    pub fn with_patch_path(mut self, patch_path: Option<String>) -> Self {
+        self.patch_path = patch_path;
+        self
     }
 
     /// Attach authored per-column descriptions (cute-dbt#165). A builder
@@ -635,6 +661,15 @@ impl Node {
     #[must_use]
     pub fn tags(&self) -> &[String] {
         &self.tags
+    }
+
+    /// Path of the schema-properties `.yml` file that patches this node
+    /// (cute-dbt#105) — package-relative, scheme-stripped (the adapter
+    /// drops the wire's `<package>://` URI prefix). `None` for nodes
+    /// without a schema patch.
+    #[must_use]
+    pub fn patch_path(&self) -> Option<&str> {
+        self.patch_path.as_deref()
     }
 }
 

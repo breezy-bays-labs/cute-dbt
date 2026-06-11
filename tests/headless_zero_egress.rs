@@ -1820,3 +1820,376 @@ fn every_committed_example_stays_zero_egress_with_the_cytoscape_engine_selected(
         failures.join("\n"),
     );
 }
+
+// ===== cute-dbt#105 — the external-drive contract: host bridge      =====
+// ===== (postMessage + DOM attr dual binding), focusModel/setView,   =====
+// ===== payload file paths                                           =====
+
+/// A compiled model node with the full path complement (SQL source +
+/// schema YAML patch) — the commit event's `paths` witness.
+fn pathed_explore_model(id: &str, sql: &str, schema_yaml: &str) -> Node {
+    Node::new(
+        NodeId::new(id),
+        "model",
+        Checksum::new("sha256", "ck"),
+        Some("select 1".to_owned()),
+        None,
+        DependsOn::default(),
+        Some(sql.to_owned()),
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+    .with_patch_path(Some(schema_yaml.to_owned()))
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_dag_host_bridge_dual_binds_the_commit_and_forward_hooks_never_echo() {
+    // cute-dbt#105 — the external-drive contract, driven end to end with
+    // an INJECTED fake host bridge (window.cuteDbtHostBridge, planted via
+    // Page.addScriptToEvaluateOnNewDocument so it exists BEFORE the page
+    // scripts parse — the detection-at-boot contract). The proof points:
+    //   1. the contract surface: <body data-cute-dbt-contract> is
+    //      server-rendered, window.cuteDbtContract mirrors it (the
+    //      attribute is the single source), both hooks are callable.
+    //   2. focusModel(id) highlights + centers and NOTHING else — no
+    //      data-selected-model write, ZERO bridge events (the NO-ECHO
+    //      rule: host-pushed editor sync never bounces back as a
+    //      commit). An unknown id returns false (fail-open).
+    //   3. setView(kind) switches lineage ⇄ cte with the V3 vocabulary;
+    //      a bogus kind returns false.
+    //   4. search-select and a real pointer click highlight WITHOUT a
+    //      single bridge event.
+    //   5. Space commits DUAL-BOUND: the attribute writes AND exactly
+    //      one versioned commit event arrives — type, contractVersion,
+    //      modelId, the active view, and the committed node's
+    //      project-relative paths.
+    //   6. a second commit from the CTE view carries view: "cte".
+    // Rider: the whole session emits zero console warnings/errors.
+    let url = render_explore_dag(
+        "explore-host-bridge",
+        vec![
+            pathed_explore_model(
+                "model.shop.stg_orders",
+                "models/staging/stg_orders.sql",
+                "models/staging/_staging__models.yml",
+            ),
+            explore_model("model.shop.dim_orders", &["model.shop.stg_orders"]),
+            explore_model("model.shop.lonely", &[]),
+        ],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+
+    // The fake host bridge, injected BEFORE any page script parses —
+    // the same seam a VS Code webview or cmux host uses. Pure recorder:
+    // no network-adjacent calls.
+    tab.call_method(
+        headless_chrome::protocol::cdp::Page::AddScriptToEvaluateOnNewDocument {
+            source: "window.__cuteBridgeEvents = []; \
+                     window.cuteDbtHostBridge = { postMessage: function (m) { \
+                       window.__cuteBridgeEvents.push(m); } };"
+                .to_owned(),
+            world_name: None,
+            include_command_line_api: None,
+            run_immediately: None,
+        },
+    )
+    .expect("inject the fake host bridge");
+
+    // Console recorder (warnings + errors), subscribed BEFORE navigate.
+    tab.call_method(Runtime::Enable(None))
+        .expect("enable Runtime domain");
+    tab.call_method(headless_chrome::protocol::cdp::Log::Enable(None))
+        .expect("enable Log domain");
+    let console_noise = Arc::new(Mutex::new(Vec::<String>::new()));
+    let console_recorder = console_noise.clone();
+    tab.add_event_listener(Arc::new(move |event: &Event| match event {
+        Event::RuntimeConsoleAPICalled(e) => {
+            use headless_chrome::protocol::cdp::Runtime::ConsoleAPICalledEventTypeOption as T;
+            if matches!(e.params.Type, T::Warning | T::Error) {
+                let text = e
+                    .params
+                    .args
+                    .first()
+                    .and_then(|a| {
+                        a.description
+                            .clone()
+                            .or_else(|| a.value.as_ref().map(ToString::to_string))
+                    })
+                    .unwrap_or_default();
+                console_recorder
+                    .lock()
+                    .unwrap()
+                    .push(format!("console.{:?}: {text}", e.params.Type));
+            }
+        }
+        Event::LogEntryAdded(e) => {
+            use headless_chrome::protocol::cdp::Log::LogEntryLevel as L;
+            if matches!(e.params.entry.level, L::Warning | L::Error) {
+                console_recorder.lock().unwrap().push(format!(
+                    "log.{:?}: {}",
+                    e.params.entry.level, e.params.entry.text
+                ));
+            }
+        }
+        _ => {}
+    }))
+    .expect("subscribe console events");
+
+    tab.navigate_to(&url).expect("navigate to file:// URL");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(".lineage-canvas canvas", Duration::from_secs(15))
+        .expect("the Cytoscape canvas boots offline");
+
+    // --- 1. the contract surface ---------------------------------------------
+    assert_eq!(
+        eval(&tab, "document.body.dataset.cuteDbtContract"),
+        serde_json::Value::String("1".to_owned()),
+        "the contract version is server-rendered on <body>",
+    );
+    assert_eq!(
+        eval(&tab, "window.cuteDbtContract.version"),
+        serde_json::Value::String("1".to_owned()),
+        "the JS global mirrors the attribute (the single source)",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "typeof window.focusModel === 'function' && typeof window.setView === 'function'"
+        ),
+        serde_json::Value::Bool(true),
+        "both forward hooks are callable",
+    );
+
+    // --- 2. focusModel: highlight + center, NO echo ---------------------------
+    assert_eq!(
+        eval(&tab, "window.focusModel('model.shop.stg_orders')"),
+        serde_json::Value::Bool(true),
+        "focusModel resolves a known id",
+    );
+    assert_eq!(
+        eval(&tab, "window.CuteExploreLineage.highlightedId()"),
+        serde_json::Value::String("model.shop.stg_orders".to_owned()),
+        "focusModel highlights the model",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "window.CuteExploreLineage.cyInstance()\
+               .getElementById('model.shop.lonely').hasClass('dim')"
+        ),
+        serde_json::Value::Bool(true),
+        "focusModel dims the complement (the same highlight a click drives)",
+    );
+    assert_eq!(
+        eval(&tab, "'selectedModel' in document.body.dataset"),
+        serde_json::Value::Bool(false),
+        "focusModel must NOT write data-selected-model (the no-echo rule)",
+    );
+    assert_eq!(
+        eval(&tab, "window.__cuteBridgeEvents.length"),
+        serde_json::Value::Number(0.into()),
+        "focusModel must NOT post a bridge event (the no-echo rule)",
+    );
+    assert_eq!(
+        eval(&tab, "window.focusModel('model.shop.no_such_model')"),
+        serde_json::Value::Bool(false),
+        "an unknown id is a fail-open no-op returning false",
+    );
+
+    // --- 3. setView: programmatic view switch ---------------------------------
+    assert_eq!(
+        eval(&tab, "window.setView('cte')"),
+        serde_json::Value::Bool(true),
+        "setView('cte') succeeds while a model is highlighted",
+    );
+    assert_eq!(
+        eval(&tab, "window.CuteExploreCte.activeView()"),
+        serde_json::Value::String("cte".to_owned()),
+        "the CTE view is active",
+    );
+    assert_eq!(
+        eval(&tab, "window.setView('lineage')"),
+        serde_json::Value::Bool(true),
+        "setView('lineage') switches back",
+    );
+    assert_eq!(
+        eval(&tab, "window.CuteExploreCte.activeView()"),
+        serde_json::Value::String("lineage".to_owned()),
+        "the lineage view is active again",
+    );
+    assert_eq!(
+        eval(&tab, "window.setView('bogus')"),
+        serde_json::Value::Bool(false),
+        "an unknown view kind is rejected with false",
+    );
+
+    // --- 4. search-select + pointer click: zero bridge events -----------------
+    let _ = eval(
+        &tab,
+        "document.querySelector('.lineage-search-input').focus()",
+    );
+    tab.type_str("stg").expect("type the query");
+    tab.press_key("Enter").expect("select the top match");
+    assert_eq!(
+        eval(&tab, "window.CuteExploreLineage.highlightedId()"),
+        serde_json::Value::String("model.shop.stg_orders".to_owned()),
+        "search-select highlights",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.lineage-canvas').scrollIntoView({block:'center'})",
+    );
+    // The earlier focusModel/center calls panned the viewport — re-fit
+    // so every node's rendered position is inside the canvas before
+    // computing the click point.
+    let _ = eval(
+        &tab,
+        "(function () { window.CuteExploreLineage.cyInstance().fit(); return true; })()",
+    );
+    let coords = eval(
+        &tab,
+        "(function () { \
+           var cy = window.CuteExploreLineage.cyInstance(); \
+           var n = cy.getElementById('model.shop.dim_orders'); \
+           var rp = n.renderedPosition(); \
+           var r = cy.container().getBoundingClientRect(); \
+           return JSON.stringify({x: r.left + rp.x, y: r.top + rp.y}); \
+         })()",
+    );
+    let coords: serde_json::Value =
+        serde_json::from_str(coords.as_str().expect("coords JSON")).expect("coords parse");
+    tab.click_point(Point {
+        x: coords["x"].as_f64().expect("x"),
+        y: coords["y"].as_f64().expect("y"),
+    })
+    .expect("real pointer click on the node");
+    assert_eq!(
+        eval(&tab, "window.CuteExploreLineage.highlightedId()"),
+        serde_json::Value::String("model.shop.dim_orders".to_owned()),
+        "the pointer click highlights",
+    );
+    assert_eq!(
+        eval(&tab, "window.__cuteBridgeEvents.length"),
+        serde_json::Value::Number(0.into()),
+        "neither search-select nor click posts a bridge event",
+    );
+    assert_eq!(
+        eval(&tab, "'selectedModel' in document.body.dataset"),
+        serde_json::Value::Bool(false),
+        "neither search-select nor click writes the attribute",
+    );
+
+    // --- 5. Space commits dual-bound -------------------------------------------
+    // Re-target the pathed model so the event's paths block is the
+    // witness; the search-select hands focus to the canvas host.
+    let _ = eval(
+        &tab,
+        "document.querySelector('.lineage-search-input').focus()",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.lineage-search-input').value = ''",
+    );
+    tab.type_str("stg").expect("re-type the query");
+    tab.press_key("Enter").expect("re-select stg_orders");
+    tab.press_key(" ").expect("press Space");
+    assert_eq!(
+        eval(&tab, "document.body.dataset.selectedModel"),
+        serde_json::Value::String("model.shop.stg_orders".to_owned()),
+        "the Space commit writes the attribute (binding one)",
+    );
+    let events = eval(&tab, "JSON.stringify(window.__cuteBridgeEvents)");
+    let events: serde_json::Value =
+        serde_json::from_str(events.as_str().expect("events JSON")).expect("events parse");
+    let events = events.as_array().expect("events array");
+    assert_eq!(events.len(), 1, "exactly one commit event: {events:?}");
+    let event = &events[0];
+    assert_eq!(event["type"], "cute-dbt/commit", "{event}");
+    assert_eq!(event["contractVersion"], "1", "{event}");
+    assert_eq!(event["modelId"], "model.shop.stg_orders", "{event}");
+    assert_eq!(event["view"], "lineage", "{event}");
+    assert_eq!(
+        event["paths"]["sql"], "models/staging/stg_orders.sql",
+        "the committed node's project-relative SQL path rides the event: {event}",
+    );
+    assert_eq!(
+        event["paths"]["schema_yaml"], "models/staging/_staging__models.yml",
+        "{event}",
+    );
+    assert!(
+        event["paths"]["unit_tests"].is_array(),
+        "the paths shape is complete: {event}",
+    );
+
+    // --- 6. a CTE-view commit carries view: "cte" -------------------------------
+    assert_eq!(
+        eval(&tab, "window.setView('cte')"),
+        serde_json::Value::Bool(true),
+        "switch to the CTE view for the second commit",
+    );
+    tab.press_key(" ").expect("press Space in the CTE view");
+    let second = eval(
+        &tab,
+        "JSON.stringify(window.__cuteBridgeEvents[window.__cuteBridgeEvents.length - 1])",
+    );
+    let second: serde_json::Value =
+        serde_json::from_str(second.as_str().expect("event JSON")).expect("event parse");
+    assert_eq!(
+        second["view"], "cte",
+        "the commit event carries the ACTIVE view: {second}",
+    );
+
+    // The whole session stayed console-clean.
+    let noise = console_noise.lock().unwrap().clone();
+    assert!(
+        noise.is_empty(),
+        "the host-bridge session must emit zero console warnings/errors; got:\n{}",
+        noise.join("\n"),
+    );
+
+    let _ = tab.close(true);
+
+    // --- standalone (no bridge): the attribute is the only binding -------------
+    // A SECOND tab without the injected bridge: detection finds nothing,
+    // the page behaves exactly as before — Space writes the attribute,
+    // the contract surface still reads, no bridge global materializes.
+    let tab = browser.new_tab().expect("standalone tab");
+    tab.navigate_to(&url).expect("navigate to file:// URL");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(".lineage-canvas canvas", Duration::from_secs(15))
+        .expect("the Cytoscape canvas boots offline (standalone)");
+    assert_eq!(
+        eval(
+            &tab,
+            "typeof window.cuteDbtHostBridge === 'undefined' \
+             && typeof window.acquireVsCodeApi === 'undefined'"
+        ),
+        serde_json::Value::Bool(true),
+        "standalone file:// has no host bridge to detect",
+    );
+    assert_eq!(
+        eval(&tab, "window.cuteDbtContract.version"),
+        serde_json::Value::String("1".to_owned()),
+        "the contract surface still reads standalone",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.lineage-search-input').focus()",
+    );
+    tab.type_str("dim").expect("type the query (standalone)");
+    tab.press_key("Enter")
+        .expect("select the match (standalone)");
+    tab.press_key(" ").expect("press Space (standalone)");
+    assert_eq!(
+        eval(&tab, "document.body.dataset.selectedModel"),
+        serde_json::Value::String("model.shop.dim_orders".to_owned()),
+        "standalone Space writes the attribute — the dual binding's \
+         always-on half; zero behavior change without a host",
+    );
+
+    let _ = tab.close(true);
+}

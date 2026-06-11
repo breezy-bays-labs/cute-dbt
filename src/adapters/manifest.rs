@@ -149,6 +149,33 @@ struct WireNode {
     /// `Option` (not a bare `Vec`) for the #145 null-fill tolerance.
     #[serde(default)]
     tags: Option<Vec<String>>,
+    /// Schema-properties YAML path (cute-dbt#105) — a top-level wire
+    /// field both engines serialize as a **package URI**
+    /// (`<package>://models/schema.yml`): fusion's
+    /// `normalize_manifest_patch_path` / `package_uri_path`
+    /// (`dbt-schemas` `manifest/manifest.rs` @ `9977b6cb…`) mirrors
+    /// dbt-core's emission, verified on both committed fixtures
+    /// (jaffle-shop = dbt-core 1.11, playground = fusion). The
+    /// translation strips the scheme ([`strip_package_uri_scheme`]) so
+    /// the domain carries a plain relative path. ADR-5-tolerant:
+    /// dbt-core null-fills unpatched nodes (`"patch_path": null`),
+    /// fusion omits the key — `#[serde(default)]` + `Option` covers
+    /// both.
+    #[serde(default)]
+    patch_path: Option<String>,
+}
+
+/// Strip the `<package>://` URI scheme off a wire `patch_path`,
+/// yielding the package-relative file path (`jaffle_shop://models/
+/// schema.yml` → `models/schema.yml`). A path without a scheme (a
+/// synthetic fixture or a domain round-trip) passes through verbatim —
+/// the inverse of fusion's `package_uri_path`, which likewise leaves
+/// already-schemed paths alone.
+fn strip_package_uri_scheme(path: String) -> String {
+    match path.split_once("://") {
+        Some((_, rest)) => rest.to_owned(),
+        None => path,
+    }
 }
 
 /// Tolerant wire projection of a node's `config` sub-object.
@@ -454,7 +481,10 @@ impl WireManifest {
                 .with_model_metadata(
                     wire.description.filter(|d| !d.is_empty()),
                     wire.tags.unwrap_or_default(),
-                );
+                )
+                // cute-dbt#105 — the schema-properties YAML path, with
+                // the wire's `<package>://` URI scheme stripped.
+                .with_patch_path(wire.patch_path.map(strip_package_uri_scheme));
                 (id, node)
             })
             .collect();
@@ -1734,5 +1764,64 @@ mod tests {
             assert!(n.description().is_none(), "unset description on {id}");
             assert!(n.tags().is_empty(), "unset tags on {id}");
         }
+    }
+
+    /// cute-dbt#105: the schema-properties `patch_path` ingests from the
+    /// node's top-level wire field with the `<package>://` URI scheme
+    /// stripped (both engines emit the package-URI shape — fusion
+    /// `normalize_manifest_patch_path`, `dbt-schemas`
+    /// `manifest/manifest.rs` @ `9977b6cb…`, mirroring dbt-core).
+    /// dbt-core null-fills unpatched nodes; fusion omits the key; a
+    /// scheme-less path (a synthetic fixture or a domain round-trip)
+    /// passes through verbatim.
+    #[test]
+    fn parse_manifest_extracts_patch_path_with_the_package_uri_scheme_stripped() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.patched": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "aa" }},
+                  "patch_path": "shop://models/marts/_core__models.yml"
+                }},
+                "model.shop.null_filled": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "bb" }},
+                  "patch_path": null
+                }},
+                "model.shop.fusion_unset": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "cc" }}
+                }},
+                "model.shop.schemeless": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "dd" }},
+                  "patch_path": "models/schema.yml"
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        let node = |id: &str| manifest.node(&NodeId::new(id)).expect("node present");
+
+        assert_eq!(
+            node("model.shop.patched").patch_path(),
+            Some("models/marts/_core__models.yml"),
+            "the package-URI scheme is stripped to the relative path",
+        );
+        assert!(
+            node("model.shop.null_filled").patch_path().is_none(),
+            "dbt-core's explicit null tolerates to None",
+        );
+        assert!(
+            node("model.shop.fusion_unset").patch_path().is_none(),
+            "fusion's omitted key defaults to None",
+        );
+        assert_eq!(
+            node("model.shop.schemeless").patch_path(),
+            Some("models/schema.yml"),
+            "a scheme-less path passes through verbatim",
+        );
     }
 }

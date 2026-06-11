@@ -54,6 +54,28 @@ use crate::domain::{
     GrainKind, Manifest, ModelInScopeSet, Node, NodeId, model_grain_signals, resolve_target_model,
 };
 
+/// The explorer's external-drive contract version (cute-dbt#105).
+///
+/// One readable string covering the page's whole host-facing surface:
+///
+/// - the two forward hooks (`window.focusModel(id)` /
+///   `window.setView(kind)`),
+/// - the dual-bound commit (the Space-only `data-selected-model` DOM
+///   attribute AND the host-bridge `postMessage` commit event:
+///   `{ type: "cute-dbt/commit", contractVersion, modelId, view,
+///   paths }`),
+/// - the [`NodePathsPayload`] shape carried per lineage node.
+///
+/// Server-rendered as the `data-cute-dbt-contract` attribute on
+/// `dag.html`'s `<body>` (readable by attribute-only observers without
+/// executing JS) and mirrored by the in-page `window.cuteDbtContract`
+/// global, which reads the attribute back — the attribute is the single
+/// source, so the two surfaces cannot drift. Bumps ONLY on a breaking
+/// change to the named surface, governed by the release-discipline
+/// CLI-surface `SemVer` policy (a bump is a v0.x minor / v1.0+ major
+/// event) — no separate versioning system.
+pub const EXPLORE_CONTRACT_VERSION: &str = "1";
+
 /// One model node in the lineage graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineageNode {
@@ -209,6 +231,55 @@ pub struct LineageNodePayload {
     /// the hover tooltip's data, all manifest-derived and pre-rendered
     /// in Rust (the engine stays a pure renderer).
     pub detail: ModelDetailPayload,
+    /// Per-node file paths (cute-dbt#105) — the external-drive
+    /// contract's "open the file" surface. Always serialized (absence
+    /// is `null`/`[]`, never an omitted key — the explicit-0/0
+    /// posture).
+    pub paths: NodePathsPayload,
+}
+
+/// Per-node file paths (cute-dbt#105) — everything a host needs to open
+/// this model's files, straight off the manifest. All paths are
+/// **project-relative** as dbt emits them (`original_file_path` /
+/// `patch_path` are relative by design — never an absolute path, the
+/// `root_path` leak class).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct NodePathsPayload {
+    /// The model's SQL source (`nodes.<id>.original_file_path`, e.g.
+    /// `models/marts/core/dim_payers.sql`) — the cute-dbt#189
+    /// precedent. `null` when the manifest omits it (synthetic /
+    /// pre-1.8 inputs).
+    pub sql: Option<String>,
+    /// The schema-properties YAML that patches this model
+    /// (`nodes.<id>.patch_path`, ingested with its `<package>://` URI
+    /// scheme stripped). `null` for an unpatched model.
+    pub schema_yaml: Option<String>,
+    /// One entry per unit test targeting this model, name-ordered
+    /// (deterministic render). Empty for an untested model.
+    pub unit_tests: Vec<UnitTestPathsPayload>,
+}
+
+/// One unit test's file paths (cute-dbt#105).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnitTestPathsPayload {
+    /// User-facing unit-test name.
+    pub name: String,
+    /// The declaring `.yml` file (`unit_tests.<id>.original_file_path`
+    /// — the unit-test node's OWN top-level path field, the cute-dbt#69
+    /// plumbing; fusion serializes no `patch_path` on unit-test entries,
+    /// verified on the committed playground fixture). `null` when the
+    /// manifest omits it.
+    pub yaml: Option<String>,
+    /// External fixture file references (`given[i].fixture` in given
+    /// order, then `expect.fixture` — the cute-dbt#126 plumbing),
+    /// carried **verbatim** as the manifest emits them: fusion resolves
+    /// them to project-relative paths (`tests/fixtures/<name>.csv`,
+    /// verified on the committed playground fixture); dbt-core MAY emit
+    /// a bare fixture name, which hosts resolve via the documented
+    /// `tests/fixtures/<name>.csv` convention (the same fallback the
+    /// report's external-fixture reader applies). Empty for
+    /// inline-rows-only tests.
+    pub fixtures: Vec<String>,
 }
 
 /// Per-model detail facts for the highlight card + hover tooltip
@@ -386,6 +457,54 @@ fn model_detail(current: &Manifest, node: Option<&Node>) -> ModelDetailPayload {
     }
 }
 
+/// Collect each model's unit-test file paths (cute-dbt#105), keyed by
+/// resolved target model: each `unit_tests` entry stores the BARE model
+/// name, bridged by [`resolve_target_model`] (the [`unit_test_counts`]
+/// twin — the badge count and the paths list cannot disagree on a
+/// test's target). Entries are name-ordered per model (the manifest
+/// `unit_tests` map iterates non-deterministically). An unresolvable
+/// `model:` reference contributes nothing (the explore fail-open
+/// posture).
+fn unit_test_paths_by_model(current: &Manifest) -> HashMap<NodeId, Vec<UnitTestPathsPayload>> {
+    let mut by_model: HashMap<NodeId, Vec<UnitTestPathsPayload>> = HashMap::new();
+    for unit_test in current.unit_tests().values() {
+        let Some(model) = resolve_target_model(current, unit_test.model()) else {
+            continue;
+        };
+        // given-order fixture refs, then the expect's — verbatim off
+        // the manifest (see [`UnitTestPathsPayload::fixtures`]).
+        let mut fixtures: Vec<String> = unit_test
+            .given()
+            .iter()
+            .filter_map(|g| g.fixture().map(str::to_owned))
+            .collect();
+        if let Some(f) = unit_test.expect().fixture() {
+            fixtures.push(f.to_owned());
+        }
+        by_model
+            .entry(model.id().clone())
+            .or_default()
+            .push(UnitTestPathsPayload {
+                name: unit_test.name().to_owned(),
+                yaml: unit_test.original_file_path().map(str::to_owned),
+                fixtures,
+            });
+    }
+    for tests in by_model.values_mut() {
+        tests.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    by_model
+}
+
+/// Assemble the cute-dbt#105 per-node file paths for one model node.
+fn node_paths(node: Option<&Node>, unit_tests: Vec<UnitTestPathsPayload>) -> NodePathsPayload {
+    NodePathsPayload {
+        sql: node.and_then(|n| n.original_file_path().map(str::to_owned)),
+        schema_yaml: node.and_then(|n| n.patch_path().map(str::to_owned)),
+        unit_tests,
+    }
+}
+
 /// One dependency edge in the serialized lineage payload, by node id.
 ///
 /// Edges are **forward only** — upstream (`from`) → downstream (`to`),
@@ -441,6 +560,7 @@ pub fn build_lineage_payload(current: &Manifest, models: &ModelInScopeSet) -> Li
     // `lineage.nodes` mirrors `models` one-to-one and in the same order
     // (build_lineage maps the same set), so the zip rebinds each node to
     // its manifest entry for the cute-dbt#104 detail assembly.
+    let mut test_paths = unit_test_paths_by_model(current);
     let nodes = lineage
         .nodes
         .into_iter()
@@ -453,6 +573,7 @@ pub fn build_lineage_payload(current: &Manifest, models: &ModelInScopeSet) -> Li
             unit_tests: n.unit_tests,
             badge: test_badge(n.data_tests, n.unit_tests),
             detail: model_detail(current, current.node(id)),
+            paths: node_paths(current.node(id), test_paths.remove(id).unwrap_or_default()),
         })
         .collect();
     LineagePayload {
@@ -565,6 +686,10 @@ struct ExploreDagTemplate<'a> {
     model_count: usize,
     edge_count: usize,
     not_compiled_count: usize,
+    /// The external-drive contract version (cute-dbt#105) — rendered as
+    /// the `data-cute-dbt-contract` attribute on `<body>`, the single
+    /// source the in-page `window.cuteDbtContract` global reads back.
+    contract_version: &'a str,
 }
 
 /// askama binding for `templates/explore-tests.html`.
@@ -695,6 +820,7 @@ pub fn render_explore(
         model_count: lineage.nodes.len(),
         edge_count: lineage.edges.len(),
         not_compiled_count,
+        contract_version: EXPLORE_CONTRACT_VERSION,
     }
     .render()
     .map_err(|err| io::Error::other(format!("render dag.html: {err}")))?;
@@ -1566,6 +1692,183 @@ mod tests {
         let json = json_for_html_script(&payload).expect("serializes");
         assert!(json.contains("\"value\":\"unknown\""), "{json}");
         assert!(json.contains("\"known\":false"), "{json}");
+    }
+
+    // ----- per-node file paths + contract version (cute-dbt#105) --------
+
+    /// A model with the full path complement: SQL source + schema YAML.
+    fn pathed_model(id: &str) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "model",
+            Checksum::new("sha256", "ck"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            Some("models/marts/dim_orders.sql".to_owned()),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_patch_path(Some("models/marts/_core__models.yml".to_owned()))
+    }
+
+    /// A unit test on `target_bare` with a declaring YAML path and
+    /// external fixture refs on its givens/expect.
+    fn pathed_unit_test(
+        name: &str,
+        target_bare: &str,
+        yaml: Option<&str>,
+        given_fixtures: &[&str],
+        expect_fixture: Option<&str>,
+    ) -> crate::domain::UnitTest {
+        let given = given_fixtures
+            .iter()
+            .map(|f| {
+                crate::domain::UnitTestGiven::new(
+                    "ref('stg_orders')",
+                    serde_json::Value::Null,
+                    Some("csv".to_owned()),
+                    Some((*f).to_owned()),
+                )
+            })
+            .collect();
+        crate::domain::UnitTest::new(
+            name,
+            NodeId::new(target_bare),
+            given,
+            crate::domain::UnitTestExpect::new(
+                serde_json::Value::Null,
+                None,
+                expect_fixture.map(str::to_owned),
+            ),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            yaml.map(str::to_owned),
+        )
+    }
+
+    #[test]
+    fn payload_carries_the_per_node_file_paths() {
+        let current = manifest_with_unit_tests(
+            vec![pathed_model("model.shop.dim_orders")],
+            vec![
+                (
+                    "unit_test.shop.dim_orders.b_second",
+                    pathed_unit_test(
+                        "b_second",
+                        "dim_orders",
+                        Some("models/marts/_core__models.yml"),
+                        &[],
+                        None,
+                    ),
+                ),
+                (
+                    "unit_test.shop.dim_orders.a_first",
+                    pathed_unit_test(
+                        "a_first",
+                        "dim_orders",
+                        Some("models/marts/_core__models.yml"),
+                        &["tests/fixtures/orders_given.csv", "bare_name_fixture"],
+                        Some("tests/fixtures/orders_expected.csv"),
+                    ),
+                ),
+            ],
+        );
+        let payload = build_lineage_payload(&current, &all_models(&current));
+        let paths = &payload.nodes[0].paths;
+        assert_eq!(paths.sql.as_deref(), Some("models/marts/dim_orders.sql"));
+        assert_eq!(
+            paths.schema_yaml.as_deref(),
+            Some("models/marts/_core__models.yml"),
+        );
+        // Name-ordered (the manifest map iterates non-deterministically).
+        assert_eq!(
+            paths
+                .unit_tests
+                .iter()
+                .map(|t| t.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a_first", "b_second"],
+        );
+        let first = &paths.unit_tests[0];
+        assert_eq!(
+            first.yaml.as_deref(),
+            Some("models/marts/_core__models.yml")
+        );
+        // given-order, then expect; VERBATIM off the manifest (a bare
+        // dbt-core fixture name is carried as-is — hosts apply the
+        // documented tests/fixtures/<name>.csv convention).
+        assert_eq!(
+            first.fixtures,
+            vec![
+                "tests/fixtures/orders_given.csv",
+                "bare_name_fixture",
+                "tests/fixtures/orders_expected.csv",
+            ],
+        );
+        assert!(paths.unit_tests[1].fixtures.is_empty());
+    }
+
+    #[test]
+    fn pathless_model_paths_are_explicit_nulls_never_omitted_keys() {
+        let current = three_model_manifest();
+        let payload = build_lineage_payload(&current, &all_models(&current));
+        for node in &payload.nodes {
+            assert!(node.paths.sql.is_none(), "{}", node.name);
+            assert!(node.paths.schema_yaml.is_none(), "{}", node.name);
+            assert!(node.paths.unit_tests.is_empty(), "{}", node.name);
+        }
+        // The explicit-absence posture in the carrier: null/[] keys,
+        // never omitted.
+        let json = json_for_html_script(&payload).expect("serializes");
+        assert!(json.contains("\"paths\":{"), "{json}");
+        assert!(json.contains("\"sql\":null"), "{json}");
+        assert!(json.contains("\"schema_yaml\":null"), "{json}");
+        assert!(json.contains("\"unit_tests\":[]"), "{json}");
+    }
+
+    #[test]
+    fn unresolvable_unit_test_target_contributes_no_paths_entry() {
+        let current = manifest_with_unit_tests(
+            vec![pathed_model("model.shop.dim_orders")],
+            vec![(
+                "unit_test.shop.ghost.g",
+                pathed_unit_test("g", "ghost_model", Some("models/g.yml"), &[], None),
+            )],
+        );
+        let payload = build_lineage_payload(&current, &all_models(&current));
+        assert!(
+            payload.nodes[0].paths.unit_tests.is_empty(),
+            "an unresolvable model: reference is skipped, not failed (fail-open)",
+        );
+    }
+
+    #[test]
+    fn render_explore_dag_carries_the_contract_version_attribute() {
+        let current = three_model_manifest();
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let dir = tmp_dir("contract-version");
+        render_explore(&dir, &current, &models, &payload).expect("explore renders");
+        let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
+        assert!(
+            dag.contains(&format!(
+                "<body data-cute-dbt-contract=\"{EXPLORE_CONTRACT_VERSION}\">"
+            )),
+            "the contract version is server-rendered on <body> \
+             (attribute-only observers read it without executing JS)",
+        );
+        // tests.html is NOT a contract surface — the attribute is
+        // dag.html's (the drivable page).
+        let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html");
+        assert!(
+            !tests.contains("data-cute-dbt-contract"),
+            "tests.html carries no contract attribute",
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

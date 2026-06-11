@@ -263,6 +263,19 @@
   btnLineage.addEventListener("click", function () { setView("lineage"); });
   btnCte.addEventListener("click", function () { setView("cte"); });
 
+  // ---- forward hook: window.setView(kind) (cute-dbt#105) -------------------
+  // Programmatic view switch for embedding hosts — the SAME internal
+  // transition the toggle buttons drive, with the V3 vocabulary
+  // ("lineage" | "cte") and the same gates (the CTE arm needs a
+  // highlight; fail-open no-op otherwise). Rebinds the inert default
+  // explore-lineage.js declared. Never a commit: this file still never
+  // writes data-selected-model and never posts a bridge event.
+  window.setView = function (kind) {
+    if (kind !== "lineage" && kind !== "cte") return false;
+    setView(kind);
+    return view === kind;
+  };
+
   // Public seam: the headless suites drive + observe the toggle through
   // this (the window.CuteExploreLineage precedent).
   window.CuteExploreCte = {
