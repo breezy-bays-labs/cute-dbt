@@ -7,7 +7,8 @@ cute-dbt `--pr-diff` on the PR's *own* git diff — making every PrDiff
 diff feature (cute-dbt #91/#96/#111/#98) validatable from one CI artifact.
 This directory is the **live self-dogfood source** for those PR preview
 reports: the sticky comment's `dbt-project` row renders only on PRs that
-touch files under `dbt-project/`.
+touch files under `dbt-project/` — including docs-only touches like this
+one (cute-dbt #240 validates its tooltip/contrast fixes on that row).
 
 This directory holds **dbt project source only** — models, tests, seeds,
 config. The compiled `target/manifest.json` is **gitignored build output**:
