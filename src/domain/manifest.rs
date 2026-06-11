@@ -711,6 +711,15 @@ pub struct SourceNode {
     /// though fusion always populates it.
     #[serde(default)]
     relation_name: Option<String>,
+    /// Authored per-column descriptions (cute-dbt#235) — only columns
+    /// with a non-empty description appear, mirroring
+    /// [`Node::column_descriptions`] (the cute-dbt#165 ingestion rule).
+    /// Both engines serialize source `columns` like node columns
+    /// (fusion `ManifestSource.columns` via `serialize_dbt_columns`,
+    /// `dbt-schemas` `manifest_nodes.rs` @ `9977b6cb…`). Feeds the
+    /// given-table column-header tooltips for `source(...)` inputs.
+    #[serde(default)]
+    column_descriptions: BTreeMap<String, String>,
 }
 
 impl SourceNode {
@@ -733,7 +742,20 @@ impl SourceNode {
             schema: schema.into(),
             database,
             relation_name,
+            column_descriptions: BTreeMap::new(),
         }
+    }
+
+    /// Attach authored per-column descriptions (cute-dbt#235) — the
+    /// [`Node::with_column_descriptions`] builder precedent. The adapter
+    /// passes only non-empty prose (empty-string unset shapes dropped).
+    #[must_use]
+    pub fn with_column_descriptions(
+        mut self,
+        column_descriptions: BTreeMap<String, String>,
+    ) -> Self {
+        self.column_descriptions = column_descriptions;
+        self
     }
 
     /// Source id (`source.<package>.<source_name>.<name>`).
@@ -778,6 +800,15 @@ impl SourceNode {
     #[must_use]
     pub fn relation_name(&self) -> Option<&str> {
         self.relation_name.as_deref()
+    }
+
+    /// Authored per-column descriptions (cute-dbt#235) — only columns
+    /// with a non-empty description appear. Empty for sources without a
+    /// columns block (and for every pre-#235 serialization — tolerant
+    /// `#[serde(default)]`).
+    #[must_use]
+    pub fn column_descriptions(&self) -> &BTreeMap<String, String> {
+        &self.column_descriptions
     }
 }
 
@@ -1573,6 +1604,39 @@ mod tests {
         let s = sample_source("source.shop.raw.patients", "raw", "patients");
         let json = serde_json::to_string(&s).unwrap();
         let back: SourceNode = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn source_node_defaults_column_descriptions_empty_and_builder_attaches() {
+        // cute-dbt#235 — constructor leaves the map empty; the builder
+        // attaches descriptions (the Node::with_column_descriptions
+        // precedent for source(...)-given column tooltips).
+        let s = sample_source("source.shop.raw.patients", "raw", "patients");
+        assert!(s.column_descriptions().is_empty());
+        let mut descs = BTreeMap::new();
+        descs.insert("Id".to_owned(), "Unique patient identifier".to_owned());
+        let s = s.with_column_descriptions(descs.clone());
+        assert_eq!(s.column_descriptions(), &descs);
+    }
+
+    #[test]
+    fn source_node_column_descriptions_round_trip_and_tolerate_absence() {
+        // cute-dbt#235 — a pre-#235 serialization (key absent) must still
+        // deserialize (tolerant `#[serde(default)]`), and a populated map
+        // must survive the round trip.
+        let json = r#"{
+            "id": "source.shop.raw.orders",
+            "source_name": "raw",
+            "name": "orders",
+            "schema": "main"
+        }"#;
+        let s: SourceNode = serde_json::from_str(json).unwrap();
+        assert!(s.column_descriptions().is_empty());
+        let mut descs = BTreeMap::new();
+        descs.insert("order_id".to_owned(), "Raw order key".to_owned());
+        let s = s.with_column_descriptions(descs);
+        let back: SourceNode = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(s, back);
     }
 

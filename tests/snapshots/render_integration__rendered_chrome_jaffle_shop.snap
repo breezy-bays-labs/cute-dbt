@@ -1319,11 +1319,16 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
 .model-tooltip .ct-desc { font-size: 1.3em; line-height: 1.5; }
 .model-tooltip .mt-mat { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: #f0c674; border: 1px solid currentColor; border-radius: 999px; padding: 0.02rem 0.5rem; }
 .model-tooltip .mt-tag { font-size: 0.72rem; color: rgba(255,255,255,0.82); background: rgba(255,255,255,0.12); border-radius: 999px; padding: 0.02rem 0.5rem; }
-/* model-level tests inside the model-ref tip (the dark-context dress for
-   the shelf card's .dt-* chips). */
-.model-tooltip .mt-mtests { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.3rem; }
-.model-tooltip .dt-key { color: color-mix(in oklab, var(--accent) 60%, white); }
-.model-tooltip .dt-val { background: rgba(255,255,255,0.14); color: rgba(255,255,255,0.92); }
+/* cute-dbt#235 — model-level tests inside the model-ref tip ride the
+   COLUMN tooltip's own .ct-test/.ct-key/.ct-vals anatomy (the shared
+   ctTestHtml builder — never a parallel chip system; the .mt-mtests/
+   .dt-* dress is retired here, the shelf card keeps its light-surface
+   .dt-* chips). Test names keep the readable-on-dark accent treatment
+   the retired .model-tooltip .dt-key carried; the value chips inherit
+   .col-tooltip .ct-val verbatim. The base .col-tooltip .ct-key color
+   is cute-dbt#233's lane — only this model-scoped override lives here
+   (same specificity, later in file, so it wins inside the model tip). */
+.model-tooltip .ct-key { color: color-mix(in oklab, var(--accent) 60%, white); }
 .ov-tooltip .ov-grp + .ov-grp { margin-top: 0.55rem; }
 .ov-tooltip .ov-grp-name { font-family: var(--font-mono); font-size: 0.78em; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; margin-bottom: 0.25rem; }
 .ov-tooltip .ov-row { display: flex; gap: 0.5rem; align-items: baseline; padding-left: 0.45rem; white-space: nowrap; }
@@ -3367,13 +3372,13 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
       h += "</div>";
     }
     if (info.description) h += '<div class="ct-desc">' + escapeHtml(info.description) + "</div>";
+    // cute-dbt#235 — model tests ride the column tooltip's own
+    // .ct-test/.ct-key/.ct-vals anatomy (the shared ctTestHtml builder),
+    // so the model tip and the column tip stay visually consistent.
+    // The shelf card keeps its light-surface .dt-* chips (testChipsHtml).
     if (info.model_tests && info.model_tests.length) {
       h += '<div class="ct-tests-label">Model tests</div>';
-      h += '<div class="mt-mtests">';
-      info.model_tests.forEach(function (tt) {
-        h += '<div class="dt-row">' + testChipsHtml(tt) + "</div>";
-      });
-      h += "</div>";
+      h += '<div class="ct-tests">' + info.model_tests.map(ctTestHtml).join("") + "</div>";
     }
     el.innerHTML = h;
     el.hidden = false;
@@ -4647,6 +4652,31 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
               : t.detail ? " " + t.detail : "";
     return t.name + extra;
   }
+  // One test row in the shared tooltip anatomy: accent `.ct-key` name +
+  // one `.ct-val` chip per argument. cute-dbt#202 — a multi-arg detail
+  // splits into one chip per argument (the ct-vals/ct-val dress the
+  // values branch uses; the ct-detail run is retired); the shipped
+  // single-value detail forms — relationships `m.f`, accepted_range
+  // `0–100` — carry no comma, so they stay one chip. cute-dbt#235 —
+  // shared by the column tooltip AND the model-ref tip's model-test
+  // rows, so the two bubbles cannot drift apart visually. Every
+  // interpolation passes through escapeHtml (payload strings never
+  // parse as HTML).
+  function ctTestHtml(t) {
+    var inner = '<span class="ct-key">' + escapeHtml(t.name) + "</span>";
+    if (t.values && t.values.length) {
+      inner += '<span class="ct-vals">'
+        + t.values.map(function (v) { return '<span class="ct-val">' + escapeHtml(String(v)) + "</span>"; }).join("")
+        + "</span>";
+    } else if (t.detail) {
+      inner += '<span class="ct-vals">'
+        + String(t.detail).split(/,\s*/).map(function (a) {
+            return '<span class="ct-val">' + escapeHtml(a) + "</span>";
+          }).join("")
+        + "</span>";
+    }
+    return '<div class="ct-test">' + inner + "</div>";
+  }
   function decorateColHeader($th, name, meta) {
     if (!meta || (!meta.description && !(meta.tests && meta.tests.length))) return;
     var tests = meta.tests || [];
@@ -4682,26 +4712,7 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     var h = '<div class="ct-desc">' + escapeHtml(desc || name) + "</div>";
     if (tests.length) {
       h += '<div class="ct-tests-label">Data tests</div><div class="ct-tests">'
-         + tests.map(function (t) {
-             var inner = '<span class="ct-key">' + escapeHtml(t.name) + "</span>";
-             if (t.values && t.values.length) {
-               inner += '<span class="ct-vals">'
-                 + t.values.map(function (v) { return '<span class="ct-val">' + escapeHtml(String(v)) + "</span>"; }).join("")
-                 + "</span>";
-             } else if (t.detail) {
-               // cute-dbt#202 — a multi-arg detail splits into one chip per
-               // argument (the ct-vals/ct-val dress the values branch uses;
-               // the ct-detail run is retired). The shipped detail forms —
-               // relationships `m.f`, accepted_range `0–100` — carry no
-               // comma, so a single-value detail stays one chip.
-               inner += '<span class="ct-vals">'
-                 + String(t.detail).split(/,\s*/).map(function (a) {
-                     return '<span class="ct-val">' + escapeHtml(a) + "</span>";
-                   }).join("")
-                 + "</span>";
-             }
-             return '<div class="ct-test">' + inner + "</div>";
-           }).join("")
+         + tests.map(ctTestHtml).join("")
          + "</div>";
     }
     el.innerHTML = h;

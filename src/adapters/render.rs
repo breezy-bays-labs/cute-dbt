@@ -743,11 +743,27 @@ pub fn column_meta_for_model(
     for (column, description) in model.column_descriptions() {
         meta.entry(column.clone()).or_default().description = Some(description.clone());
     }
+    for (column, test) in attached_column_tests(current, model.id()) {
+        meta.entry(column.to_owned()).or_default().tests.push(test);
+    }
+    meta
+}
+
+/// The column-scoped data tests attached to the node `attached` —
+/// shared by the model/seed arm ([`column_meta_for_model`]) and the
+/// source arm ([`column_meta_for_source`]) of the cute-dbt#165/#235
+/// column-header tooltips. Deterministic: sorted by (column, name,
+/// values, detail, test node id) — `Manifest::nodes` is a `HashMap`
+/// with no inherent order.
+fn attached_column_tests<'m>(
+    current: &'m Manifest,
+    attached: &NodeId,
+) -> Vec<(&'m str, ColumnTestPayload)> {
     let mut tests: Vec<(&str, ColumnTestPayload, &str)> = current
         .nodes()
         .iter()
         .filter_map(|(id, node)| {
-            if node.resource_type() != "test" || node.attached_node() != Some(model.id()) {
+            if node.resource_type() != "test" || node.attached_node() != Some(attached) {
                 return None;
             }
             let column = node.column_name()?;
@@ -764,10 +780,51 @@ pub fn column_meta_for_model(
             b.2,
         ))
     });
-    for (column, test, _) in tests {
+    tests
+        .into_iter()
+        .map(|(column, test, _)| (column, test))
+        .collect()
+}
+
+/// A SOURCE's column-metadata map (cute-dbt#235) — the
+/// [`column_meta_for_model`] twin for `source('a','b')` given inputs:
+/// authored column descriptions from the ingested source `columns`
+/// block, merged with column-scoped data tests whose `attached_node` is
+/// the source. Only columns with a description and/or ≥1 test appear,
+/// so a metadata-less source contributes nothing (honest degrade — the
+/// JS renders no trigger, never an empty bubble).
+fn column_meta_for_source(
+    current: &Manifest,
+    source: &SourceNode,
+) -> BTreeMap<String, ColumnMetaPayload> {
+    let mut meta: BTreeMap<String, ColumnMetaPayload> = BTreeMap::new();
+    for (column, description) in source.column_descriptions() {
+        meta.entry(column.clone()).or_default().description = Some(description.clone());
+    }
+    for (column, test) in attached_column_tests(current, source.id()) {
         meta.entry(column.to_owned()).or_default().tests.push(test);
     }
     meta
+}
+
+/// Resolve a unit-test GIVEN's `ref(...)` to its manifest node
+/// (cute-dbt#235). Unlike [`resolve_target_model`] (a unit test's
+/// `model:` target is always a model), a given's ref resolves over
+/// dbt's full refable set — models, seeds, and snapshots (the committed
+/// jaffle-shop fixture's `ref('raw_customers')` seed given is the real
+/// wire shape; fusion validates given inputs as any ref/source/this,
+/// `dbt-parser` `resolve_unit_tests.rs` @ `9977b6cb…`). Deterministic
+/// under a leaf-name collision: the lexicographically smallest node id
+/// wins (`model.*` sorts before `seed.*`/`snapshot.*`).
+fn resolve_given_ref_node<'m>(current: &'m Manifest, ref_name: &str) -> Option<&'m Node> {
+    const REFABLE: [&str; 3] = ["model", "seed", "snapshot"];
+    current
+        .nodes()
+        .values()
+        .filter(|node| {
+            REFABLE.contains(&node.resource_type()) && leaf_segment(node.id().as_str()) == ref_name
+        })
+        .min_by(|a, b| a.id().cmp(b.id()))
 }
 
 /// Filter a model's full column-metadata map down to the columns that
@@ -1794,21 +1851,32 @@ fn build_test_payload(
             let (rows, table, format) =
                 resolve_fixture_payload(g.rows(), g.format(), g.fixture(), loaded);
             let is_this = g.input() == "this";
-            // cute-dbt#165 — the model that OWNS this given's columns: the
-            // target model for `this` (prior model state), else the
-            // resolved `ref(...)` input model. `source(...)` inputs and
-            // unresolvable refs contribute nothing (empty map → key
-            // omitted).
+            // cute-dbt#165/#235 — the node that OWNS this given's
+            // columns: the target model for `this` (prior model state),
+            // the resolved refable node (model / seed / snapshot) for a
+            // `ref(...)` input, or the manifest source for a
+            // `source(...)` input. Unresolvable inputs contribute
+            // nothing (empty map → key omitted → no trigger, never an
+            // empty bubble).
             let column_meta = if is_this {
                 column_meta_for_table(target_column_meta, table.as_ref())
-            } else {
-                parse_ref_name(g.input())
-                    .and_then(|ref_name| resolve_target_model(current, &NodeId::new(ref_name)))
-                    .map(|input_model| {
-                        let meta = column_meta_for_model(current, input_model);
+            } else if let Some(ref_name) = parse_ref_name(g.input()) {
+                resolve_given_ref_node(current, ref_name)
+                    .map(|input_node| {
+                        let meta = column_meta_for_model(current, input_node);
                         column_meta_for_table(&meta, table.as_ref())
                     })
                     .unwrap_or_default()
+            } else if let Some((source_name, table_name)) = parse_source_ref(g.input()) {
+                current
+                    .source_by_name(source_name, table_name)
+                    .map(|source| {
+                        let meta = column_meta_for_source(current, source);
+                        column_meta_for_table(&meta, table.as_ref())
+                    })
+                    .unwrap_or_default()
+            } else {
+                BTreeMap::new()
             };
             GivenPayload {
                 input: g.input().to_owned(),
@@ -5364,6 +5432,222 @@ mod tests {
                 .and_then(|m| m.description.as_deref()),
             Some("Primary key"),
             "a `this` given is the model's own prior state — target meta applies",
+        );
+    }
+
+    #[test]
+    fn build_test_payload_attaches_seed_column_meta_for_a_seed_ref_given() {
+        // cute-dbt#235 — dbt's ref() resolves over the refable set
+        // (models, seeds, snapshots), and a unit-test given may ref a
+        // seed (the committed jaffle-shop fixture's
+        // `ref('raw_customers')` is exactly this shape). The given's
+        // column tooltips must ride the SEED's declared metadata the
+        // same way a model-ref given rides its input model's.
+        let mut seed_desc = BTreeMap::new();
+        seed_desc.insert("customer_id".to_owned(), "Seed primary key".to_owned());
+        let seed = Node::new(
+            NodeId::new("seed.shop.raw_customers"),
+            "seed",
+            checksum("seed"),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_column_descriptions(seed_desc);
+        let target = model_node("model.shop.dim_x", "x", Some("select 1"));
+        let manifest = manifest_for(
+            vec![
+                target,
+                seed,
+                column_test_node(
+                    "test.shop.unique_raw_customers_customer_id",
+                    "seed.shop.raw_customers",
+                    "customer_id",
+                    TestMetadata::new("unique", None, Value::Null),
+                ),
+            ],
+            vec![],
+        );
+        let ut = UnitTest::new(
+            "t",
+            NodeId::new("dim_x"),
+            vec![UnitTestGiven::new(
+                "ref('raw_customers')",
+                json!([{ "customer_id": 1, "undocumented": 2 }]),
+                Some("dict".to_owned()),
+                None,
+            )],
+            UnitTestExpect::new(json!([{ "id": 1 }]), Some("dict".to_owned()), None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let payload = build_test_payload(
+            "unit_test.shop.t",
+            &ut,
+            &CteGraph::default(),
+            &InScopeSet::new(),
+            None,
+            None,
+            None,
+            None,
+            &manifest,
+            &BTreeMap::new(),
+        );
+        let given_meta = &payload.given[0].column_meta;
+        assert_eq!(
+            given_meta
+                .get("customer_id")
+                .and_then(|m| m.description.as_deref()),
+            Some("Seed primary key"),
+            "a seed-ref given resolves the seed's column descriptions",
+        );
+        assert_eq!(
+            given_meta.get("customer_id").map(|m| m.tests.as_slice()),
+            Some(&[bare_test("unique")][..]),
+            "column-scoped tests attached to the seed ride along",
+        );
+        assert!(
+            !given_meta.contains_key("undocumented"),
+            "honest degrade: an undeclared fixture column carries no meta",
+        );
+    }
+
+    #[test]
+    fn build_test_payload_attaches_source_column_meta_for_a_source_given() {
+        // cute-dbt#235 — a `source('a','b')` given resolves the SOURCE's
+        // declared column descriptions (fusion `ManifestSource.columns`,
+        // verified on the committed playground fixture's
+        // `synthea_raw.patients.Id`) plus any column-scoped data tests
+        // attached to the source node.
+        let mut src_desc = BTreeMap::new();
+        src_desc.insert("Id".to_owned(), "Unique patient identifier".to_owned());
+        let source = SourceNode::new(
+            NodeId::new("source.shop.raw.patients"),
+            "raw",
+            "patients",
+            None,
+            "main",
+            None,
+            None,
+        )
+        .with_column_descriptions(src_desc);
+        let target = model_node("model.shop.dim_x", "x", Some("select 1"));
+        let manifest = manifest_with_sources(
+            vec![
+                target,
+                column_test_node(
+                    "test.shop.not_null_raw_patients_Id",
+                    "source.shop.raw.patients",
+                    "Id",
+                    TestMetadata::new("not_null", None, Value::Null),
+                ),
+            ],
+            vec![],
+            vec![source],
+        );
+        let ut = UnitTest::new(
+            "t",
+            NodeId::new("dim_x"),
+            vec![UnitTestGiven::new(
+                "source('raw', 'patients')",
+                json!([{ "Id": "a-1", "FIRST": "Ada" }]),
+                Some("dict".to_owned()),
+                None,
+            )],
+            UnitTestExpect::new(json!([{ "id": 1 }]), Some("dict".to_owned()), None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let payload = build_test_payload(
+            "unit_test.shop.t",
+            &ut,
+            &CteGraph::default(),
+            &InScopeSet::new(),
+            None,
+            None,
+            None,
+            None,
+            &manifest,
+            &BTreeMap::new(),
+        );
+        let given_meta = &payload.given[0].column_meta;
+        assert_eq!(
+            given_meta.get("Id").and_then(|m| m.description.as_deref()),
+            Some("Unique patient identifier"),
+            "a source given resolves the source's column descriptions",
+        );
+        assert_eq!(
+            given_meta.get("Id").map(|m| m.tests.as_slice()),
+            Some(&[bare_test("not null")][..]),
+            "column-scoped tests attached to the source ride along",
+        );
+        assert!(
+            !given_meta.contains_key("FIRST"),
+            "honest degrade: an undescribed source column carries no meta",
+        );
+    }
+
+    #[test]
+    fn source_given_with_no_declared_columns_keeps_column_meta_empty() {
+        // cute-dbt#235 honest degrade at the payload level: a source
+        // with no declared columns contributes NOTHING — the empty map
+        // is omitted from the wire and the JS renders no trigger
+        // (never an empty bubble).
+        let source = SourceNode::new(
+            NodeId::new("source.shop.raw.events"),
+            "raw",
+            "events",
+            None,
+            "main",
+            None,
+            None,
+        );
+        let manifest = manifest_with_sources(
+            vec![model_node("model.shop.dim_x", "x", Some("select 1"))],
+            vec![],
+            vec![source],
+        );
+        let ut = UnitTest::new(
+            "t",
+            NodeId::new("dim_x"),
+            vec![UnitTestGiven::new(
+                "source('raw', 'events')",
+                json!([{ "event_id": 1 }]),
+                Some("dict".to_owned()),
+                None,
+            )],
+            UnitTestExpect::new(json!([{ "id": 1 }]), Some("dict".to_owned()), None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        );
+        let payload = build_test_payload(
+            "unit_test.shop.t",
+            &ut,
+            &CteGraph::default(),
+            &InScopeSet::new(),
+            None,
+            None,
+            None,
+            None,
+            &manifest,
+            &BTreeMap::new(),
+        );
+        assert!(
+            payload.given[0].column_meta.is_empty(),
+            "no declared source columns → empty (omitted) column_meta",
         );
     }
 

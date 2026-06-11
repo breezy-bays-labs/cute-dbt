@@ -6008,13 +6008,16 @@ fn rich_hover_cards_model_pill_format_badge_and_overrides() {
         "Staged source rows",
         "the model tip carries the authored description",
     );
+    // cute-dbt#235 — the model tip's test rows ride the COLUMN tooltip's
+    // .ct-tests/.ct-test/.ct-key anatomy (the shared ctTestHtml builder;
+    // the .mt-mtests/.dt-* dress is retired in the tip).
     assert_eq!(
         eval_string(
             &tab,
-            &format!("{MODEL_TIP}.querySelector('.mt-mtests .dt-key').textContent")
+            &format!("{MODEL_TIP}.querySelector('.ct-tests .ct-key').textContent")
         ),
         "unique",
-        "the model tip lists the model-level data tests",
+        "the model tip lists the model-level data tests in ct-key anatomy",
     );
     // ===== focusout hides; hover reveals again (mouse path) =====
     let _ = eval(&tab, &format!("{PILL}.blur()"));
@@ -7946,6 +7949,503 @@ fn expected_meta_row_reads_left_without_an_expect_diff() {
         ),
         "H2",
         "the header's only child is the panel title",
+    );
+
+    let _ = tab.close(true);
+}
+
+// ===== cute-dbt#235 — given column-header tooltips for seed/source =====
+//
+// The #165 given-side column tooltips only ever resolved `ref(...)`-to-
+// MODEL and `this` inputs; a seed-ref given (the committed jaffle-shop
+// fixture's `ref('raw_customers')` shape) and a `source('a','b')` given
+// carried NO column metadata, so their headers offered no tooltip while
+// the expected table's did. These guards pin the widened payload
+// (models | seeds | snapshots via the refable resolver; sources via the
+// manifest `sources` map) + the honest degrade (a metadata-less column
+// renders NO trigger — never an empty bubble).
+
+/// Baseline-mode render whose manifest also carries `sources` entries —
+/// the `render_to_file` twin for `source(...)`-given tests.
+fn render_with_sources_to_file(
+    filename: &str,
+    nodes: Vec<Node>,
+    sources: Vec<SourceNode>,
+    tests: Vec<(&str, UnitTest)>,
+    model_ids: &[&str],
+    changed_ids: &[&str],
+) -> String {
+    let all_ids: Vec<String> = tests.iter().map(|(id, _)| (*id).to_owned()).collect();
+    let m = manifest(nodes, tests)
+        .with_sources(sources.into_iter().map(|s| (s.id().clone(), s)).collect());
+    let in_scope: InScopeSet = all_ids.into_iter().collect();
+    let models: ModelInScopeSet = model_ids.iter().map(|id| NodeId::new(*id)).collect();
+    let changed: InScopeSet = changed_ids.iter().map(|s| (*s).to_owned()).collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &changed,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "baseline.json",
+        ScopeSource::Baseline,
+        DEFAULT_REPORT_TITLE,
+        None,
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    format!("file://{p}")
+}
+
+/// A `seed` node (resource_type "seed") — dbt's ref() resolves over the
+/// refable set (models, seeds, snapshots), so a given may ref it.
+fn seed_node(full_id: &str) -> Node {
+    Node::new(
+        NodeId::new(full_id),
+        "seed",
+        Checksum::new("sha256", "ck"),
+        None,
+        None,
+        DependsOn::default(),
+        None,
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn given_header_tooltips_resolve_seed_and_source_metadata() {
+    // RED on pre-#235 main: both givens rendered 0 decorated headers
+    // (the seed/source arms contributed no column_meta) while the
+    // expected table's headers tooltipped — the regression Christopher
+    // hit reviewing PR #230. Hover AND keyboard focus must both reveal
+    // (the #146/#161 contract the th trigger carries since #166).
+    let mut seed_desc = BTreeMap::new();
+    seed_desc.insert("customer_id".to_owned(), "Seed primary key".to_owned());
+    let seed = seed_node("seed.shop.raw_customers").with_column_descriptions(seed_desc);
+    let mut src_desc = BTreeMap::new();
+    src_desc.insert("Id".to_owned(), "Unique patient identifier".to_owned());
+    let source = SourceNode::new(
+        NodeId::new("source.shop.raw.patients"),
+        "raw",
+        "patients",
+        None,
+        "main",
+        None,
+        None,
+    )
+    .with_column_descriptions(src_desc);
+
+    let ut = UnitTest::new(
+        "seed_source_cols".to_owned(),
+        NodeId::new("dim_x"),
+        vec![
+            UnitTestGiven::new(
+                "ref('raw_customers')".to_owned(),
+                serde_json::json!([{ "customer_id": 1, "undocumented": 2 }]),
+                Some("dict".to_owned()),
+                None,
+            ),
+            UnitTestGiven::new(
+                "source('raw', 'patients')".to_owned(),
+                serde_json::json!([{ "Id": "a-1", "FIRST": "Ada" }]),
+                Some("dict".to_owned()),
+                None,
+            ),
+        ],
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+
+    let url = render_with_sources_to_file(
+        "headless_seed_source_col_tooltips.html",
+        vec![
+            model_node("model.shop.dim_x"),
+            seed,
+            column_test_node(
+                "test.shop.unique_raw_customers_customer_id",
+                "seed.shop.raw_customers",
+                "customer_id",
+                TestMetadata::new("unique", None, serde_json::Value::Null),
+            ),
+            column_test_node(
+                "test.shop.not_null_raw_patients_Id",
+                "source.shop.raw.patients",
+                "Id",
+                TestMetadata::new("not_null", None, serde_json::Value::Null),
+            ),
+        ],
+        vec![source],
+        vec![("unit_test.shop.dim_x.seed_source_cols", ut)],
+        &["model.shop.dim_x"],
+        &[], // 0 changed → auto-All mode → the test is selected with content
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    select_model(&tab, "dim_x");
+
+    // ===== given 0 (seed ref): the described+tested column decorates =====
+    const SEED_SEC: &str = "document.querySelectorAll('.given-section')[0]";
+    assert_eq!(
+        eval(
+            &tab,
+            &format!("{SEED_SEC}.querySelectorAll('th.has-col-meta').length")
+        )
+        .as_u64(),
+        Some(1),
+        "the seed-ref given decorates exactly its described column \
+         (customer_id yes, undocumented no)",
+    );
+    const SEED_TH: &str =
+        "document.querySelectorAll('.given-section')[0].querySelector('th.has-col-meta')";
+    assert_eq!(
+        eval_string(&tab, &format!("{SEED_TH}.getAttribute('data-col-name')")),
+        "customer_id",
+        "the decorated seed-given header is the seed's described column",
+    );
+    // Keyboard path (the #146/#161 contract): focus reveals the bubble.
+    let _ = eval(&tab, &format!("{SEED_TH}.focus()"));
+    const BUBBLE: &str = "document.getElementById('col-tooltip')";
+    assert!(
+        !eval_bool(&tab, &format!("{BUBBLE}.hidden")),
+        "focusing the seed-given header reveals the bubble",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{BUBBLE}.querySelector('.ct-desc').textContent")
+        ),
+        "Seed primary key",
+        "the bubble carries the SEED's authored column description",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!(
+                "Array.from({BUBBLE}.querySelectorAll('.ct-key'))\
+                 .map(function(k){{return k.textContent;}}).join('|')"
+            ),
+        ),
+        "unique",
+        "the column-scoped test attached to the seed rides the bubble",
+    );
+    let _ = eval(&tab, &format!("{SEED_TH}.blur()"));
+    // Mouse path: hover reveals too.
+    let _ = eval(
+        &tab,
+        &format!("{SEED_TH}.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true}}))"),
+    );
+    assert!(
+        !eval_bool(&tab, &format!("{BUBBLE}.hidden")),
+        "hovering the seed-given header reveals the bubble",
+    );
+    let _ = eval(
+        &tab,
+        &format!("{SEED_TH}.dispatchEvent(new MouseEvent('mouseout', {{bubbles: true}}))"),
+    );
+
+    // ===== given 1 (source): the described source column decorates =====
+    const SRC_SEC: &str = "document.querySelectorAll('.given-section')[1]";
+    assert_eq!(
+        eval(
+            &tab,
+            &format!("{SRC_SEC}.querySelectorAll('th.has-col-meta').length")
+        )
+        .as_u64(),
+        Some(1),
+        "the source given decorates exactly its described column (Id yes, FIRST no)",
+    );
+    const SRC_TH: &str =
+        "document.querySelectorAll('.given-section')[1].querySelector('th.has-col-meta')";
+    assert_eq!(
+        eval_string(&tab, &format!("{SRC_TH}.getAttribute('data-col-name')")),
+        "Id",
+        "the decorated source-given header is the source's described column",
+    );
+    let _ = eval(&tab, &format!("{SRC_TH}.focus()"));
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{BUBBLE}.querySelector('.ct-desc').textContent")
+        ),
+        "Unique patient identifier",
+        "the bubble carries the SOURCE's authored column description",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!(
+                "Array.from({BUBBLE}.querySelectorAll('.ct-key'))\
+                 .map(function(k){{return k.textContent;}}).join('|')"
+            ),
+        ),
+        "not null",
+        "the column-scoped test attached to the source rides the bubble",
+    );
+    let _ = eval(&tab, &format!("{SRC_TH}.blur()"));
+
+    // ===== honest degrade: metadata-less columns are NOT triggers =====
+    // The seed given's `undocumented` column and the source given's
+    // `FIRST` column have no description and no tests: no trigger class,
+    // and a hover on them must never open an empty bubble. (No tabindex
+    // assertion: DataTables gives every orderable header keyboard focus
+    // for SORTING — the honest-degrade contract is no tooltip trigger +
+    // no empty bubble, not non-focusability.)
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "{SEED_SEC}.querySelector('th[title=\"undocumented\"]')\
+                 .classList.contains('has-col-meta') === false"
+            ),
+        ),
+        "a given column without metadata gets no tooltip affordance",
+    );
+    let _ = eval(
+        &tab,
+        &format!(
+            "{SEED_SEC}.querySelector('th[title=\"undocumented\"]')\
+             .dispatchEvent(new MouseEvent('mouseover', {{bubbles: true}}))"
+        ),
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("(function(){{var el={BUBBLE}; return el === null || el.hidden;}})()"),
+        ),
+        "hovering a metadata-less given header never opens an empty bubble",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn given_header_honest_degrade_metadata_less_given_has_no_triggers() {
+    // cute-dbt#235 (issue Discovery) — a given whose source genuinely
+    // lacks per-column metadata (here a seed with NO declared columns,
+    // the committed jaffle-shop `raw_customers` shape) must render a
+    // plain grid: zero tooltip triggers, and no empty bubble on hover.
+    let ut = UnitTest::new(
+        "bare".to_owned(),
+        NodeId::new("dim_x"),
+        vec![UnitTestGiven::new(
+            "ref('bare_seed')".to_owned(),
+            serde_json::json!([{ "a": 1, "b": 2 }]),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+    let url = render_to_file(
+        "headless_bare_given_no_triggers.html",
+        vec![
+            model_node("model.shop.dim_x"),
+            seed_node("seed.shop.bare_seed"),
+        ],
+        vec![("unit_test.shop.dim_x.bare", ut)],
+        &["model.shop.dim_x"],
+        &[],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    select_model(&tab, "dim_x");
+
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelectorAll('.given-section th.has-col-meta').length"
+        )
+        .as_u64(),
+        Some(0),
+        "a metadata-less given renders ZERO tooltip triggers",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.given-section th')\
+         .dispatchEvent(new MouseEvent('mouseover', {bubbles: true}))",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){var el=document.getElementById('col-tooltip');\
+             return el === null || el.hidden;})()"
+        ),
+        "no empty bubble ever opens over a metadata-less given header",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn model_badge_tooltip_rides_column_tooltip_chip_anatomy() {
+    // cute-dbt#235 concern 2 — the model-ref tip's test rows must use
+    // the COLUMN tooltip's own anatomy: .ct-tests container, .ct-test
+    // rows, accent .ct-key names (the readable-on-dark color-mix form),
+    // .ct-vals/.ct-val chips for key→value arguments. RED on pre-#235
+    // main: the rows rendered the shelf card's .dt-row/.dt-key/.dt-val
+    // dress instead (flat divergent styling).
+    let ut = UnitTest::new(
+        "anatomy".to_owned(),
+        NodeId::new("dim_x"),
+        vec![UnitTestGiven::new(
+            "ref('stg_src')".to_owned(),
+            serde_json::json!([{ "x": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+    let url = render_to_file(
+        "headless_model_tip_anatomy.html",
+        vec![
+            model_node("model.shop.dim_x"),
+            model_node("model.shop.stg_src")
+                .with_model_metadata(Some("Staged source rows".to_owned()), vec![]),
+            // A detail-bearing model-level test (accepted_range → the
+            // "0–100" chip) + a bare one (name-only row, no chips).
+            model_test_node(
+                "test.shop.range_stg_src",
+                "model.shop.stg_src",
+                TestMetadata::new(
+                    "accepted_range",
+                    None,
+                    serde_json::json!({ "min_value": 0, "max_value": 100 }),
+                ),
+            ),
+            model_test_node(
+                "test.shop.unique_stg_src",
+                "model.shop.stg_src",
+                TestMetadata::new("unique", None, serde_json::Value::Null),
+            ),
+        ],
+        vec![("unit_test.shop.dim_x.anatomy", ut)],
+        &["model.shop.dim_x"],
+        &[],
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    select_model(&tab, "dim_x");
+
+    const PILL: &str =
+        "document.querySelectorAll('.given-section')[0].querySelector('.table-title .gt-model')";
+    let _ = eval(&tab, &format!("{PILL}.focus()"));
+    const MODEL_TIP: &str = "document.getElementById('model-tooltip')";
+    assert!(
+        !eval_bool(&tab, &format!("{MODEL_TIP}.hidden")),
+        "focusing the pill reveals the model tip",
+    );
+
+    // The shared anatomy: a .ct-tests container with one .ct-test row
+    // per model test, sorted by display name.
+    assert_eq!(
+        eval(
+            &tab,
+            &format!("{MODEL_TIP}.querySelectorAll('.ct-tests .ct-test').length")
+        )
+        .as_u64(),
+        Some(2),
+        "each model test renders one .ct-test row inside .ct-tests",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!(
+                "Array.from({MODEL_TIP}.querySelectorAll('.ct-key'))\
+                 .map(function(k){{return k.textContent;}}).join('|')"
+            ),
+        ),
+        "accepted range|unique",
+        "test names render as .ct-key elements (sorted display names)",
+    );
+    // Key→value pairs: the accepted_range arguments render as the
+    // column tooltip's .ct-val chips (never a parallel chip system).
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!(
+                "Array.from({MODEL_TIP}.querySelectorAll('.ct-vals .ct-val'))\
+                 .map(function(v){{return v.textContent;}}).join('|')"
+            ),
+        ),
+        "0\u{2013}100",
+        "the detail argument renders as a .ct-val chip",
+    );
+    // Accent treatment: the model tip's .ct-key computes to the
+    // readable-on-dark color-mix form (compared against an in-page
+    // reference element so no oklab numbers are hardcoded).
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{\
+                 var ref = document.createElement('span');\
+                 ref.style.color = 'color-mix(in oklab, var(--accent) 60%, white)';\
+                 document.body.appendChild(ref);\
+                 var got = getComputedStyle({MODEL_TIP}.querySelector('.ct-key')).color;\
+                 var want = getComputedStyle(ref).color;\
+                 ref.remove();\
+                 return got === want;}})()"
+            ),
+        ),
+        "the model tip's test names carry the color-mix accent treatment",
+    );
+    // The retired dress must be gone from the tip (the shelf card keeps
+    // its light-surface .dt-* chips — out of this tip's scope).
+    assert_eq!(
+        eval(
+            &tab,
+            &format!(
+                "{MODEL_TIP}.querySelectorAll('.dt-row, .dt-key, .dt-val, .mt-mtests').length"
+            )
+        )
+        .as_u64(),
+        Some(0),
+        "no .dt-*/.mt-mtests remnants inside the model tip",
     );
 
     let _ = tab.close(true);
