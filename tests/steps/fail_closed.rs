@@ -111,7 +111,7 @@ fn given_compiled_code_null_for(_world: &mut World, _node_id: String) {
 // --- When -----------------------------------------------------------
 
 #[when(
-    regex = r#"^I run cute-dbt with --manifest parsed\.json --baseline-manifest baseline\.json --out report\.html$"#
+    regex = r#"^I run cute-dbt report with --manifest parsed\.json --baseline-manifest baseline\.json --out report\.html$"#
 )]
 fn when_run_parse_only(world: &mut World) {
     run_subprocess(
@@ -123,7 +123,7 @@ fn when_run_parse_only(world: &mut World) {
 }
 
 #[when(
-    regex = r#"^I run cute-dbt with --manifest old\.json --baseline-manifest baseline\.json --out report\.html$"#
+    regex = r#"^I run cute-dbt report with --manifest old\.json --baseline-manifest baseline\.json --out report\.html$"#
 )]
 fn when_run_pre_18(world: &mut World) {
     let manifest = world
@@ -139,7 +139,7 @@ fn when_run_pre_18(world: &mut World) {
 }
 
 #[when(
-    regex = r#"^I run cute-dbt with --manifest broken\.json --baseline-manifest baseline\.json --out report\.html$"#
+    regex = r#"^I run cute-dbt report with --manifest broken\.json --baseline-manifest baseline\.json --out report\.html$"#
 )]
 fn when_run_invalid_json(world: &mut World) {
     let manifest = world
@@ -155,7 +155,7 @@ fn when_run_invalid_json(world: &mut World) {
 }
 
 #[when(
-    regex = r#"^I run cute-dbt with --manifest current\.json --baseline-manifest missing-baseline\.json --out report\.html$"#
+    regex = r#"^I run cute-dbt report with --manifest current\.json --baseline-manifest missing-baseline\.json --out report\.html$"#
 )]
 fn when_run_missing_baseline_path(world: &mut World) {
     let missing = world
@@ -170,7 +170,7 @@ fn when_run_missing_baseline_path(world: &mut World) {
     );
 }
 
-// The "I run cute-dbt with --manifest current.json --baseline-manifest
+// The "I run cute-dbt report with --manifest current.json --baseline-manifest
 // baseline.json --out report.html" When step lives in
 // `report_generation.rs` (the canonical location); it dispatches via
 // `world.fixture_choice`, which the per-scenario Givens above set.
@@ -184,6 +184,7 @@ fn run_subprocess(
     let out = common::tmp(out_name);
     common::clear(&out);
     let output = common::run_cli(&[
+        "report",
         "--manifest",
         common::s(&manifest),
         "--baseline-manifest",

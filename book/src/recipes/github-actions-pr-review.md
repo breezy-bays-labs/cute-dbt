@@ -85,7 +85,7 @@ git diff --unified=0 --find-renames \
   "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
   > diff.patch
 
-cute-dbt \
+cute-dbt report \
   --manifest dbt_project/target/manifest.json \
   --pr-diff @diff.patch \
   --project-root dbt_project \
@@ -244,7 +244,7 @@ jobs:
           git diff --unified=0 --find-renames \
             "${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}" \
             > diff.patch
-          cute-dbt \
+          cute-dbt report \
             --manifest dbt_project/target/manifest.json \
             --pr-diff @diff.patch \
             --project-root dbt_project \

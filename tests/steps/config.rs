@@ -38,7 +38,7 @@ fn given_config_fixture(_world: &mut World, _name: String) {
 // filename keeps the matching unambiguous.
 
 #[when(
-    regex = r#"^I run cute-dbt with --manifest current\.json --baseline-manifest baseline\.json --out report\.html --config ([^ ]+)$"#
+    regex = r#"^I run cute-dbt report with --manifest current\.json --baseline-manifest baseline\.json --out report\.html --config ([^ ]+)$"#
 )]
 fn when_run_cute_dbt_with_config(world: &mut World, config_name: String) {
     let manifest = common::fixture("jaffle-shop-current.json");
@@ -57,6 +57,7 @@ fn when_run_cute_dbt_with_config(world: &mut World, config_name: String) {
     };
 
     let output = common::run_cli(&[
+        "report",
         "--manifest",
         common::s(&manifest),
         "--baseline-manifest",

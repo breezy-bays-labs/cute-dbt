@@ -9,7 +9,7 @@ Feature: Generate a self-contained report from a compiled dbt manifest
     And a baseline manifest "baseline.json"
 
   Scenario: A diff-scoped report is produced
-    When I run cute-dbt with --manifest current.json --baseline-manifest baseline.json --out report.html
+    When I run cute-dbt report with --manifest current.json --baseline-manifest baseline.json --out report.html
     Then the exit code is 0
     And the file "report.html" exists
     And "report.html" is a single self-contained file with no external resource references
@@ -18,7 +18,7 @@ Feature: Generate a self-contained report from a compiled dbt manifest
   Scenario: Each in-scope unit test renders its full block
     Given the model "stg_orders" was modified relative to the baseline
     And "stg_orders" has a unit test "test_stg_orders_dedup"
-    When I run cute-dbt with --manifest current.json --baseline-manifest baseline.json --out report.html
+    When I run cute-dbt report with --manifest current.json --baseline-manifest baseline.json --out report.html
     Then "report.html" contains a section for "test_stg_orders_dedup"
     And that section shows the unit test header and target model "stg_orders"
     And that section shows a Given data panel and an Expected data panel
@@ -27,7 +27,7 @@ Feature: Generate a self-contained report from a compiled dbt manifest
 
   Scenario: A change touching no models yields an empty but valid report
     Given every model has the same body checksum as the baseline
-    When I run cute-dbt with --manifest current.json --baseline-manifest baseline.json --out report.html
+    When I run cute-dbt report with --manifest current.json --baseline-manifest baseline.json --out report.html
     Then the exit code is 0
     And the file "report.html" exists
     And the diff-scope banner states "0 unit tests in scope"
@@ -43,7 +43,7 @@ Feature: Generate a self-contained report from a compiled dbt manifest
   Scenario: Expected-table columns carry their column-level data tests in the payload
     Given the model "stg_orders" was modified relative to the baseline
     And "stg_orders" has a unit test "test_stg_orders_dedup"
-    When I run cute-dbt with --manifest current.json --baseline-manifest baseline.json --out report.html
+    When I run cute-dbt report with --manifest current.json --baseline-manifest baseline.json --out report.html
     Then the report payload lists column tests "unique" and "not null" for the expected column "customer_id"
     And the report payload carries no column-header metadata for the expected column "first_name"
 
@@ -55,7 +55,7 @@ Feature: Generate a self-contained report from a compiled dbt manifest
   # tests/headless_toggle.rs).
   Scenario: The report payload carries the in-scope model's full source path
     Given the model "stg_orders" was modified relative to the baseline
-    When I run cute-dbt with --manifest current.json --baseline-manifest baseline.json --out report.html
+    When I run cute-dbt report with --manifest current.json --baseline-manifest baseline.json --out report.html
     Then the report payload carries the model source path "models/staging/stg_customers.sql"
 
   # cute-dbt#200 — the design-2 data contracts, asserted through the real
@@ -85,7 +85,7 @@ Feature: Generate a self-contained report from a compiled dbt manifest
   # exception that the baseline-required-grep CI job tolerates.
   @no-baseline-usage-error
   Scenario: A missing --baseline-manifest is a usage error before parsing
-    When I run cute-dbt with --manifest current.json --out report.html
+    When I run cute-dbt report with --manifest current.json --out report.html
     Then the exit code is non-zero
     And no file "report.html" is written
     And stderr names the missing "--baseline-manifest" argument

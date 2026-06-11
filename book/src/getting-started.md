@@ -22,8 +22,8 @@ cute-dbt --help
 
 ## Generate a report
 
-cute-dbt always reads a **current** `manifest.json`, plus exactly one
-**scope source** telling it what changed:
+`cute-dbt report` always reads a **current** `manifest.json`, plus
+exactly one **scope source** telling it what changed:
 
 - **Local dev** (this page): a `--baseline-manifest` to diff against.
 - **CI / PR review**: `--pr-diff` with the PR's unified diff (`git diff
@@ -34,7 +34,7 @@ cute-dbt always reads a **current** `manifest.json`, plus exactly one
 The local flow below uses a baseline manifest.
 
 ```sh
-cute-dbt \
+cute-dbt report \
     --manifest         target/manifest.json \
     --baseline-manifest path/to/baseline-manifest.json \
     --out              report.html
@@ -48,7 +48,7 @@ sub-selector vocabulary and compose alongside the always-on body
 checksum (baseline mode only; the flag conflicts with `--pr-diff`):
 
 ```sh
-cute-dbt \
+cute-dbt report \
     --manifest          target/manifest.json \
     --baseline-manifest path/to/baseline-manifest.json \
     --modified-selectors configs,relation,macros,contract \
@@ -67,6 +67,24 @@ xdg-open report.html
 
 The HTML opens via `file://`. No server. No outbound requests. Your
 data does not leave your machine.
+
+## Explore the full project
+
+Where `report` is diff-scoped, the **`explore`** verb renders the
+**full manifest** — no baseline, no scope source:
+
+```sh
+cute-dbt explore \
+    --manifest target/manifest.json \
+    --out-dir  explore/
+```
+
+It writes two self-contained pages under `explore/`: `dag.html` (the
+model-lineage DAG) and `tests.html` (the per-model unit-test index).
+Explore is **fail-open** on uncompiled models — a `dbt parse`-only
+model renders as a "not compiled" node instead of aborting the run
+(the manifest itself must still be readable and schema v12+). Bare
+`cute-dbt` without a verb is a usage error listing both.
 
 ## Producing the manifests
 
@@ -91,7 +109,7 @@ git checkout -    # back to your branch
 git stash pop
 
 # Render the report
-cute-dbt \
+cute-dbt report \
     --manifest          target/manifest.json \
     --baseline-manifest /tmp/baseline-manifest.json \
     --out               report.html

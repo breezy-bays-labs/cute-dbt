@@ -122,7 +122,7 @@ jobs:
           else
             scope_args=(--baseline-manifest "$BASELINE")
           fi
-          cargo run --quiet --locked --bin cute-dbt -- \
+          cargo run --quiet --locked --bin cute-dbt -- report \
             --manifest "$CURRENT" \
             "${scope_args[@]}" \
             "${project_root_args[@]}" \
@@ -268,7 +268,7 @@ jobs:
         # `@`-prefix tells cute-dbt to read the diff from the file.
         run: |
           set -euo pipefail
-          cargo run --quiet --locked --bin cute-dbt -- \
+          cargo run --quiet --locked --bin cute-dbt -- report \
             --manifest dbt-project/target/manifest.json \
             --pr-diff @target/report-preview/prdiff.patch \
             --project-root dbt-project \

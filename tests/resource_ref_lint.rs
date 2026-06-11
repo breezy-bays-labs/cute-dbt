@@ -46,7 +46,13 @@ fn scan_violations(html: &str) -> Vec<Violation> {
 #[test]
 fn committed_examples_have_no_external_resource_refs() {
     let mut failures: Vec<String> = Vec::new();
-    for filename in common::COMMITTED_EXAMPLES {
+    // The lint is uniform across report and explore pages (cute-dbt#100):
+    // the zero-egress structural property does not vary by page kind —
+    // only the headless LIVENESS oracle is page-aware.
+    for filename in common::COMMITTED_EXAMPLES
+        .iter()
+        .chain(common::COMMITTED_EXPLORE_PAGES)
+    {
         let path = common::example_path(filename);
         let html = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));

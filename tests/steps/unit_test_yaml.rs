@@ -36,6 +36,7 @@ fn run_against_source_yaml(world: &mut World, extra_args: &[&str], out_name: &st
     common::clear(&out);
 
     let mut args = vec![
+        "report",
         "--manifest",
         common::s(&manifest),
         "--baseline-manifest",

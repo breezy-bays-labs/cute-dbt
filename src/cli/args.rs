@@ -1,8 +1,19 @@
 //! The clap command-line surface.
 //!
-//! Three required arguments. Baseline-required is the locked v0.1 policy
-//! (ADR-2): a missing `--baseline-manifest` is a clap usage error raised
-//! before any manifest is read — never a `PreflightError`.
+//! Since cute-dbt#100 the CLI is verb-structured: `cute-dbt report`
+//! (the PR-review report — baseline-required, changed-scope,
+//! fail-closed) and `cute-dbt explore` (the local-dev explorer —
+//! full-manifest, no baseline, fail-open on uncompiled models). Bare
+//! `cute-dbt` with no subcommand is a clap usage error
+//! ([`clap::error::ErrorKind::MissingSubcommand`], exit 2) listing both
+//! verbs — `subcommand_required` is set deliberately so the
+//! help-on-missing default (which can exit 0) can never swallow the
+//! error.
+//!
+//! `report` carries the pre-#100 flat surface verbatim. Three required
+//! arguments; baseline-required is the locked v0.1 policy (ADR-2): a
+//! missing `--baseline-manifest` is a clap usage error raised before
+//! any manifest is read — never a `PreflightError`.
 //!
 //! One optional argument: `--config <PATH>` (PR 14, #24). The clap
 //! value-parser opens + parses the TOML eagerly; a bad / unreadable
@@ -11,15 +22,51 @@
 
 use std::path::{Path, PathBuf};
 
-use clap::{ArgGroup, Parser, ValueEnum};
+use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 use crate::adapters::config_reader::load_config;
 use crate::domain::{AnalysisConfig, ModifierKind, PrDiff};
 
-/// cute-dbt — render a diff-scoped, self-contained HTML report of a dbt
-/// project's unit tests.
+/// cute-dbt — zero-compute dbt unit-test and lineage HTML visualizer.
 #[derive(Debug, Parser)]
-#[command(name = "cute-dbt", version, about)]
+// `subcommand_required` is explicit and `arg_required_else_help` is
+// explicitly OFF: the clap derive would otherwise turn a bare
+// invocation into its help-on-missing display
+// (`DisplayHelpOnMissingArgumentOrSubcommand`) instead of the genuine
+// `MissingSubcommand` usage error this surface pins (cute-dbt#100).
+#[command(
+    name = "cute-dbt",
+    version,
+    about,
+    subcommand_required = true,
+    arg_required_else_help = false
+)]
+pub struct Cli {
+    /// The selected verb: `report` (PR review) or `explore` (local dev).
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+/// The two cute-dbt verbs (cute-dbt#100).
+// large_enum_variant: deliberately NOT boxed — clap's derive requires
+// the variant field to implement `Args` (Box<ReportArgs> does not), and
+// exactly one `Command` exists per process, so the size asymmetry
+// between the report surface and explore's two paths is irrelevant.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Render a diff-scoped, self-contained HTML report of a dbt
+    /// project's unit tests (PR review; baseline-required, fail-closed).
+    Report(ReportArgs),
+    /// Render the full manifest to a self-contained two-page explorer:
+    /// dag.html (model lineage) + tests.html (unit tests). No baseline;
+    /// uncompiled models render as "not compiled" instead of failing.
+    Explore(ExploreArgs),
+}
+
+/// Arguments for `cute-dbt report` — the pre-#100 flat surface,
+/// carried verbatim.
+#[derive(Debug, Args)]
 // Exactly one scope source is required: `--baseline-manifest` (dbt
 // `state:modified`) XOR `--pr-diff` (a raw `git diff --unified=0` patch).
 // `required(true)` + `multiple(false)` makes "neither" a
@@ -31,7 +78,7 @@ use crate::domain::{AnalysisConfig, ModifierKind, PrDiff};
     .required(true)
     .multiple(false)
     .args(["baseline_manifest", "pr_diff"]))]
-pub struct Cli {
+pub struct ReportArgs {
     /// Path to the compiled dbt `manifest.json` to visualise.
     #[arg(long, value_name = "PATH")]
     pub manifest: PathBuf,
@@ -40,10 +87,11 @@ pub struct Cli {
     /// `state:modified` scope source).
     ///
     /// One of the two mutually-exclusive scope sources (the other is
-    /// `--scope-from-pr-diff`); exactly one must be supplied. cute-dbt
+    /// `--pr-diff`); exactly one must be supplied. cute-dbt
     /// v0.1 is PR-review-first, so the report is scoped to the unit
     /// tests whose model changed relative to this baseline. For a
-    /// full-manifest report, diff against an empty or genesis baseline.
+    /// full-manifest report, diff against an empty or genesis baseline
+    /// (or use `cute-dbt explore`).
     #[arg(long, value_name = "PATH")]
     pub baseline_manifest: Option<PathBuf>,
 
@@ -127,6 +175,26 @@ pub struct Cli {
     pub modified_selectors: Vec<ModifiedSelector>,
 }
 
+/// Arguments for `cute-dbt explore` (cute-dbt#100) — full-manifest,
+/// no baseline, two-page `--out-dir` output.
+#[derive(Debug, Args)]
+pub struct ExploreArgs {
+    /// Path to the compiled dbt `manifest.json` to explore.
+    ///
+    /// Stage-1 pre-flight still fails CLOSED here (unreadable /
+    /// pre-v12 manifests are rejected with a remediation hint), but
+    /// Stage-2 fails OPEN: an uncompiled model renders as a
+    /// "not compiled" node instead of aborting the run.
+    #[arg(long, value_name = "PATH")]
+    pub manifest: PathBuf,
+
+    /// Directory the explorer pages are written into: `dag.html`
+    /// (model lineage) and `tests.html` (unit tests). Created if it
+    /// does not exist.
+    #[arg(long, value_name = "DIR")]
+    pub out_dir: PathBuf,
+}
+
 /// One `--modified-selectors` token — the CLI-layer twin of the domain
 /// [`ModifierKind`] (the domain stays clap-free; ADR-1).
 ///
@@ -172,7 +240,7 @@ impl ModifiedSelector {
 /// clap value-parser: read + deserialize the TOML at `--config <PATH>`.
 ///
 /// Errors are stringified for clap's usage-error path. The resolved
-/// [`AnalysisConfig`] is stored in [`Cli::config`].
+/// [`AnalysisConfig`] is stored in [`ReportArgs::config`].
 fn parse_config_file(s: &str) -> Result<AnalysisConfig, String> {
     load_config(Path::new(s)).map_err(|err| err.to_string())
 }
@@ -268,10 +336,120 @@ mod tests {
         Cli::try_parse_from(args)
     }
 
+    /// Parse and unwrap the `report` arm (panics on any other arm — the
+    /// report-focused tests below always pass the `report` verb).
+    fn parse_report(args: &[&str]) -> Result<ReportArgs, clap::Error> {
+        parse(args).map(|cli| match cli.command {
+            Command::Report(report) => report,
+            Command::Explore(_) => panic!("expected the report arm"),
+        })
+    }
+
+    // ----- subcommand restructure (cute-dbt#100) -----
+
     #[test]
-    fn all_three_arguments_parse_into_their_paths() {
+    fn bare_invocation_is_a_missing_subcommand_usage_error_listing_both_verbs() {
+        // The locked CLI-restructure contract: bare `cute-dbt` (no
+        // subcommand) is a usage error — `subcommand_required` is set
+        // deliberately, never clap's help-on-missing default (which can
+        // exit 0). `use_stderr` must hold so cli::run maps it to exit 2.
+        let err = parse(&["cute-dbt"]).expect_err("a subcommand is required");
+        assert_eq!(err.kind(), ErrorKind::MissingSubcommand);
+        assert!(err.use_stderr(), "a missing subcommand is a usage error");
+        let msg = err.to_string();
+        assert!(msg.contains("report"), "lists the report verb: {msg}");
+        assert!(msg.contains("explore"), "lists the explore verb: {msg}");
+    }
+
+    #[test]
+    fn an_unknown_subcommand_is_a_usage_error() {
+        let err = parse(&["cute-dbt", "frobnicate"]).expect_err("unknown verb");
+        assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
+    fn flat_pre_verb_invocation_is_a_usage_error() {
+        // The pre-#100 flat surface (no verb, flags directly) must not
+        // silently keep working — the verb restructure is a deliberate
+        // v0.x break surfaced as a usage error.
+        let err = parse(&[
+            "cute-dbt",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+        ])
+        .expect_err("flat invocation has no subcommand");
+        assert!(
+            err.use_stderr(),
+            "the flat shape is rejected as a usage error: {err}"
+        );
+    }
+
+    #[test]
+    fn explore_parses_manifest_and_out_dir() {
         let cli = parse(&[
             "cute-dbt",
+            "explore",
+            "--manifest",
+            "target/manifest.json",
+            "--out-dir",
+            "explore-out",
+        ])
+        .expect("a complete explore argument set parses");
+        let Command::Explore(explore) = cli.command else {
+            panic!("expected the explore arm");
+        };
+        assert_eq!(explore.manifest, PathBuf::from("target/manifest.json"));
+        assert_eq!(explore.out_dir, PathBuf::from("explore-out"));
+    }
+
+    #[test]
+    fn explore_requires_out_dir() {
+        let err = parse(&["cute-dbt", "explore", "--manifest", "m.json"])
+            .expect_err("--out-dir is required");
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+        assert!(
+            err.to_string().contains("--out-dir"),
+            "names the missing argument: {err}"
+        );
+    }
+
+    #[test]
+    fn explore_requires_manifest() {
+        let err =
+            parse(&["cute-dbt", "explore", "--out-dir", "d"]).expect_err("--manifest is required");
+        assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn explore_rejects_a_baseline_manifest() {
+        // The explorer is full-manifest by design (epic #99): there is no
+        // baseline on this verb until the V7 cut line lands, so the flag
+        // must be rejected, not silently ignored.
+        let err = parse(&[
+            "cute-dbt",
+            "explore",
+            "--manifest",
+            "m.json",
+            "--out-dir",
+            "d",
+            "--baseline-manifest",
+            "b.json",
+        ])
+        .expect_err("explore takes no baseline");
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    // ----- report arm (the pre-#100 surface, carried verbatim) -----
+
+    #[test]
+    fn all_three_arguments_parse_into_their_paths() {
+        let report = parse_report(&[
+            "cute-dbt",
+            "report",
             "--manifest",
             "current.json",
             "--baseline-manifest",
@@ -280,13 +458,16 @@ mod tests {
             "report.html",
         ])
         .expect("a complete argument set parses");
-        assert_eq!(cli.manifest, PathBuf::from("current.json"));
-        assert_eq!(cli.baseline_manifest, Some(PathBuf::from("baseline.json")));
-        assert_eq!(cli.out, PathBuf::from("report.html"));
+        assert_eq!(report.manifest, PathBuf::from("current.json"));
+        assert_eq!(
+            report.baseline_manifest,
+            Some(PathBuf::from("baseline.json"))
+        );
+        assert_eq!(report.out, PathBuf::from("report.html"));
         // --config absent: the field is None.
-        assert!(cli.config.is_none());
+        assert!(report.config.is_none());
         // --pr-diff absent: the field is None (baseline path).
-        assert!(cli.pr_diff.is_none());
+        assert!(report.pr_diff.is_none());
     }
 
     /// A minimal valid `git diff --unified=0` patch for the @file-form
@@ -302,10 +483,17 @@ mod tests {
     fn a_missing_baseline_manifest_is_a_usage_error() {
         // Passing NEITHER scope source: the `scope_source` ArgGroup is
         // required, so omitting both --baseline-manifest and
-        // --scope-from-pr-diff is a clap usage error, never a
+        // --pr-diff is a clap usage error, never a
         // PreflightError (cute-dbt#85).
-        let err = parse(&["cute-dbt", "--manifest", "m.json", "--out", "o.html"])
-            .expect_err("a scope source is required");
+        let err = parse_report(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--out",
+            "o.html",
+        ])
+        .expect_err("a scope source is required");
         assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
         assert!(
             err.to_string().contains("--baseline-manifest"),
@@ -321,8 +509,9 @@ mod tests {
         // validation), so it points at a valid diff @file.
         let diff = write_fixture("both-conflict", VALID_DIFF);
         let arg = format!("@{}", diff.display());
-        let err = parse(&[
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "current.json",
             "--baseline-manifest",
@@ -341,8 +530,9 @@ mod tests {
     fn pr_diff_alone_parses_without_a_baseline() {
         let diff = write_fixture("alone", VALID_DIFF);
         let arg = format!("@{}", diff.display());
-        let cli = parse(&[
+        let report = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "current.json",
             "--pr-diff",
@@ -351,8 +541,8 @@ mod tests {
             "report.html",
         ])
         .expect("pr-diff-only is a complete argument set");
-        assert!(cli.baseline_manifest.is_none());
-        let parsed = cli.pr_diff.expect("pr_diff is Some");
+        assert!(report.baseline_manifest.is_none());
+        let parsed = report.pr_diff.expect("pr_diff is Some");
         assert_eq!(parsed.files.len(), 1);
         assert_eq!(parsed.files[0].path, "models/marts/core/_core__models.yml");
         let _ = std::fs::remove_file(&diff);
@@ -363,8 +553,9 @@ mod tests {
         let path = unique_temp_path("missing-diff");
         // Deliberately do NOT create the file.
         let arg = format!("@{}", path.display());
-        let err = parse(&[
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "current.json",
             "--pr-diff",
@@ -384,8 +575,9 @@ mod tests {
     fn pr_diff_with_malformed_contents_is_a_value_validation_error() {
         let path = write_fixture("malformed", "this is not a unified diff\n");
         let arg = format!("@{}", path.display());
-        let err = parse(&[
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "current.json",
             "--pr-diff",
@@ -405,8 +597,9 @@ mod tests {
 
     #[test]
     fn a_missing_manifest_is_a_usage_error() {
-        let err = parse(&[
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--baseline-manifest",
             "b.json",
             "--out",
@@ -418,8 +611,9 @@ mod tests {
 
     #[test]
     fn a_missing_out_is_a_usage_error() {
-        let err = parse(&[
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -437,11 +631,12 @@ mod tests {
 
     #[test]
     fn an_unknown_argument_is_a_usage_error() {
-        // clap rejects any flag not on the v0.1 surface. PR 14 (cute-dbt#24)
-        // added --config to the surface, so the test now uses a different
-        // genuinely-unknown flag to pin clap's unknown-arg behavior.
-        let err = parse(&[
+        // clap rejects any flag not on the report surface. PR 14
+        // (cute-dbt#24) added --config to the surface, so the test uses a
+        // different genuinely-unknown flag to pin clap's behavior.
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -465,8 +660,9 @@ title = "Q3 review"
 subtitle = "PR 1234"
 "#,
         );
-        let cli = parse(&[
+        let report = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -477,7 +673,7 @@ subtitle = "PR 1234"
             path.to_str().expect("temp path utf-8"),
         ])
         .expect("a valid config parses");
-        let cfg = cli.config.expect("config is Some");
+        let cfg = report.config.expect("config is Some");
         assert_eq!(cfg.report.title.as_deref(), Some("Q3 review"));
         assert_eq!(cfg.report.subtitle.as_deref(), Some("PR 1234"));
         let _ = std::fs::remove_file(&path);
@@ -487,8 +683,9 @@ subtitle = "PR 1234"
     fn a_missing_config_file_is_a_value_validation_error() {
         let path = unique_temp_path("does-not-exist");
         // Deliberately do NOT create the file.
-        let err = parse(&[
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -509,8 +706,9 @@ subtitle = "PR 1234"
     #[test]
     fn an_invalid_toml_config_is_a_value_validation_error() {
         let path = write_fixture("broken", "not valid toml { = =");
-        let err = parse(&[
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -540,8 +738,9 @@ subtitle = "PR 1234"
 tilte = "typo'd"
 "#,
         );
-        let err = parse(&[
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -570,8 +769,9 @@ tilte = "typo'd"
 
     #[test]
     fn project_root_is_optional_when_omitted() {
-        let cli = parse(&[
+        let report = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -580,14 +780,15 @@ tilte = "typo'd"
             "o.html",
         ])
         .expect("no --project-root parses");
-        assert!(cli.project_root.is_none());
+        assert!(report.project_root.is_none());
     }
 
     #[test]
     fn explicit_project_root_is_validated_to_exist_and_be_a_dir() {
         let dir = unique_temp_dir("valid-root");
-        let cli = parse(&[
+        let report = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -598,7 +799,7 @@ tilte = "typo'd"
             dir.to_str().expect("temp dir utf-8"),
         ])
         .expect("an existing directory parses");
-        assert_eq!(cli.project_root, Some(dir.clone()));
+        assert_eq!(report.project_root, Some(dir.clone()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -606,8 +807,9 @@ tilte = "typo'd"
     fn a_missing_project_root_directory_is_a_usage_error() {
         let path = unique_temp_path("missing-root");
         // Deliberately do NOT create the directory.
-        let err = parse(&[
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -630,8 +832,9 @@ tilte = "typo'd"
         // A non-directory path that DOES exist (a file) is still
         // wrong — the project root must be a directory.
         let file = write_fixture("not-a-dir", "irrelevant");
-        let err = parse(&[
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -654,8 +857,9 @@ tilte = "typo'd"
 
     #[test]
     fn modified_selectors_defaults_to_empty() {
-        let cli = parse(&[
+        let report = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -665,15 +869,16 @@ tilte = "typo'd"
         ])
         .expect("no --modified-selectors parses");
         assert!(
-            cli.modified_selectors.is_empty(),
+            report.modified_selectors.is_empty(),
             "the default is the body-only scope — no opt-in selectors",
         );
     }
 
     #[test]
     fn modified_selectors_parses_comma_separated_tokens() {
-        let cli = parse(&[
+        let report = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -685,7 +890,7 @@ tilte = "typo'd"
         ])
         .expect("comma-separated selectors parse");
         assert_eq!(
-            cli.modified_selectors,
+            report.modified_selectors,
             vec![ModifiedSelector::Configs, ModifiedSelector::Relation],
         );
     }
@@ -695,8 +900,9 @@ tilte = "typo'd"
         // The token set mirrors dbt's state:modified.<sub> vocabulary
         // (fusion `StateModifiedSubType::from_str` @ 9977b6c), `body`
         // included — minus the unimplemented `persisted_descriptions`.
-        let cli = parse(&[
+        let report = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -707,7 +913,7 @@ tilte = "typo'd"
             "body,configs,relation,macros,contract",
         ])
         .expect("every implemented dbt sub-selector token parses");
-        assert_eq!(cli.modified_selectors.len(), 5);
+        assert_eq!(report.modified_selectors.len(), 5);
     }
 
     #[test]
@@ -727,8 +933,9 @@ tilte = "typo'd"
 
     #[test]
     fn modified_selectors_repeated_flag_accumulates() {
-        let cli = parse(&[
+        let report = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -742,15 +949,16 @@ tilte = "typo'd"
         ])
         .expect("a repeated flag accumulates values");
         assert_eq!(
-            cli.modified_selectors,
+            report.modified_selectors,
             vec![ModifiedSelector::Configs, ModifiedSelector::Macros],
         );
     }
 
     #[test]
     fn an_unknown_modified_selector_is_a_usage_error_naming_the_vocabulary() {
-        let err = parse(&[
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -776,8 +984,9 @@ tilte = "typo'd"
         // fusion's sixth sub-selector token; cute-dbt has no modifier
         // for it, so it must fail with the same possible-values
         // remediation — never silently parse as a no-op.
-        let err = parse(&[
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--baseline-manifest",
@@ -798,8 +1007,9 @@ tilte = "typo'd"
         // it is rejected at parse time instead.
         let diff = write_fixture("selectors-prdiff-conflict", VALID_DIFF);
         let arg = format!("@{}", diff.display());
-        let err = parse(&[
+        let err = parse_report(&[
             "cute-dbt",
+            "report",
             "--manifest",
             "m.json",
             "--pr-diff",

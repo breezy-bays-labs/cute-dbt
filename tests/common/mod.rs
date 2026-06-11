@@ -22,14 +22,28 @@ pub fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Every committed example HTML under `examples/`. Adding a new
+/// Every committed example REPORT HTML under `examples/`. Adding a new
 /// `examples/<name>-report.html` requires appending its filename here
 /// so the zero-egress gates (`tests/headless_zero_egress.rs` and
 /// `tests/resource_ref_lint.rs`) AND the `.github/workflows/ci.yml`
 /// `example-report-check` matrix both pick it up. Single source of
 /// truth — duplicating this list across test files is the kind of
 /// silent gap an audit gate catches months too late.
+///
+/// Report pages only: the headless gate applies the report's
+/// Mermaid + DataTables liveness oracle to every entry. The explore
+/// pages live in [`COMMITTED_EXPLORE_PAGES`] with page-aware oracles.
 pub const COMMITTED_EXAMPLES: &[&str] = &["jaffle-shop-report.html", "playground-report.html"];
+
+/// The committed `cute-dbt explore` example pages under `examples/`
+/// (cute-dbt#100), rendered from the synthetic playground fixture by
+/// the `example-report-check` explore matrix row. Both gates scan
+/// them: the resource-ref lint uniformly, the headless gate with a
+/// **page-aware liveness oracle** (`dag.html` waits for the Mermaid
+/// lineage SVG; `tests.html` is a static server-rendered page asserted
+/// on DOM facts — it carries no Mermaid and no DataTables, so the
+/// report's liveness probes must never be applied to it).
+pub const COMMITTED_EXPLORE_PAGES: &[&str] = &["explore/dag.html", "explore/tests.html"];
 
 /// Absolute path to a committed example HTML under `examples/`.
 pub fn example_path(filename: &str) -> PathBuf {

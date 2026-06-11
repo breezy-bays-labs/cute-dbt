@@ -136,6 +136,7 @@ fn render_selection_report(world: &mut World) {
     let out = common::tmp("selection_report.html");
     common::clear(&out);
     let mut args: Vec<String> = vec![
+        "report".into(),
         "--manifest".into(),
         current_path.display().to_string(),
         "--baseline-manifest".into(),
