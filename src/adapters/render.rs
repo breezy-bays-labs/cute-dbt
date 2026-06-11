@@ -178,7 +178,8 @@ fn strip_matching_quotes(s: &str) -> Option<&str> {
 /// deliberately deferred).
 ///
 /// Returns `None` when the input does not match the `source('…','…')`
-/// shape or when either name is empty. The caller treats `None` as "no
+/// shape — including a call with more than two top-level arguments —
+/// or when either name is empty. The caller treats `None` as "no
 /// import-CTE match" and surfaces the design's empty-state copy
 /// (fail-open, same as an unresolvable `ref`).
 #[must_use]
@@ -190,11 +191,21 @@ pub fn parse_source_ref(input: &str) -> Option<(&str, &str)> {
     }
     let after_keyword = trimmed[6..].trim_start();
     let inside = after_keyword.strip_prefix('(')?.strip_suffix(')')?;
-    // Top-level comma split: a comma inside a quoted name (either
-    // style) would leave the first fragment with an unbalanced or
-    // mismatched quote pair, fail the matching-quote strip below, and
-    // fall through to `None` — fail-open by construction.
-    let (first, second) = inside.split_once(',')?;
+    // Top-level comma split into AT MOST two parts: dbt's source()
+    // takes exactly two arguments, so a third comma-separated part —
+    // a malformed 3-arg call, or a comma inside a quoted name pushing
+    // the split past two fragments — rejects the call outright rather
+    // than stripping the tail to a garbage pair (CodeRabbit PR #248).
+    // A comma inside a quoted name that still yields exactly two parts
+    // leaves a fragment with an unbalanced or mismatched quote pair,
+    // which the matching-quote strip below rejects. Both paths fall
+    // through to `None` — fail-open by construction.
+    let mut parts = inside.splitn(3, ',');
+    let first = parts.next()?;
+    let second = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
     let source_name = strip_matching_quotes(first.trim())?;
     let table_name = strip_matching_quotes(second.trim())?;
     if source_name.is_empty() || table_name.is_empty() {
@@ -2454,6 +2465,19 @@ mod tests {
         // string literal, so the two args may use different styles.
         assert_eq!(parse_source_ref("source(\"a\", 'b')"), Some(("a", "b")));
         assert_eq!(parse_source_ref("source('a', \"b\")"), Some(("a", "b")));
+    }
+
+    #[test]
+    fn parse_source_ref_returns_none_on_three_argument_calls() {
+        // dbt's source() takes exactly two arguments — a malformed
+        // 3-arg call must reject outright, never strip the second
+        // fragment to a garbage pair like ("a", "b','c") (CodeRabbit
+        // PR #248). Pinned for BOTH quote styles.
+        assert_eq!(parse_source_ref("source('a','b','c')"), None);
+        assert_eq!(parse_source_ref("source(\"a\",\"b\",\"c\")"), None);
+        assert_eq!(parse_source_ref("source('a', 'b', 'c')"), None);
+        // Trailing comma = an empty third part — same rejection.
+        assert_eq!(parse_source_ref("source('a','b',)"), None);
     }
 
     #[test]
