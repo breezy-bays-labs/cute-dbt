@@ -3541,14 +3541,20 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   // given's columns, for the metadata-less fallback bubble: the bare model
   // name for ref('x'), `source.table` for source('source','table'), the
   // target model for `this`. Unparseable inputs fall back to the raw input
-  // string (still truthful, never empty).
+  // string (still truthful, never empty). Both quote styles match (PR #244
+  // review): dbt-fusion ships the AUTHORED input string verbatim — a
+  // `ref("stg_payments")` given compiles onto the manifest wire
+  // double-quoted, unnormalized (verified against a real fusion
+  // 2.0-preview.177 compile) — so ref("x") / source("a", "b") reach this
+  // parser exactly as written. The backreference pins matching open/close
+  // quotes (a mixed-quote token stays unparsed → raw-input fallback).
   function givenOwnerLabel(given, targetModel) {
     if (given.is_this) return targetModel || "this";
     var input = given.input || "";
-    var ref = /^ref\(\s*'([^']+)'\s*\)$/.exec(input);
-    if (ref) return ref[1];
-    var src = /^source\(\s*'([^']+)'\s*,\s*'([^']+)'\s*\)$/.exec(input);
-    if (src) return src[1] + "." + src[2];
+    var ref = /^ref\(\s*(['"])([^'"]+)\1\s*\)$/.exec(input);
+    if (ref) return ref[2];
+    var src = /^source\(\s*(['"])([^'"]+)\1\s*,\s*(['"])([^'"]+)\3\s*\)$/.exec(input);
+    if (src) return src[2] + "." + src[4];
     return input;
   }
 

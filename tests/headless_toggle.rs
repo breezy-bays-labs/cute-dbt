@@ -9680,3 +9680,107 @@ fn baseline_banner_path_meets_aa_contrast_on_every_theme() {
 
     let _ = tab.close(true);
 }
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn given_owner_label_accepts_double_quoted_ref_and_source() {
+    // cute-dbt#240 (PR #244 review) — dbt accepts BOTH quote styles in a
+    // given's `input:`, and dbt-fusion ships the authored string verbatim
+    // (a `ref("stg_payments")` given compiles onto the manifest wire
+    // double-quoted, unnormalized — verified against a real fusion
+    // 2.0-preview.177 compile). The owner-label parser behind the
+    // metadata-less fallback bubble must therefore name the node for
+    // double-quoted ref(...) and source(...) inputs too, not degrade to
+    // echoing the raw input string.
+    let source = SourceNode::new(
+        NodeId::new("source.shop.raw.patients"),
+        "raw",
+        "patients",
+        None,
+        "main",
+        None,
+        None,
+    );
+    let ut = UnitTest::new(
+        "dq".to_owned(),
+        NodeId::new("dim_x"),
+        vec![
+            UnitTestGiven::new(
+                "ref(\"bare_seed\")".to_owned(),
+                serde_json::json!([{ "a": 1 }]),
+                Some("dict".to_owned()),
+                None,
+            ),
+            UnitTestGiven::new(
+                "source(\"raw\", \"patients\")".to_owned(),
+                serde_json::json!([{ "Id": "x-1" }]),
+                Some("dict".to_owned()),
+                None,
+            ),
+        ],
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+    let url = render_with_sources_to_file(
+        "headless_240_double_quoted_owner.html",
+        vec![
+            model_node("model.shop.dim_x"),
+            seed_node("seed.shop.bare_seed"),
+        ],
+        vec![source],
+        vec![("unit_test.shop.dim_x.dq", ut)],
+        &["model.shop.dim_x"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    select_model(&tab, "dim_x");
+
+    // Given 0 — ref("bare_seed"): the fallback names the bare node, not
+    // the raw `ref("bare_seed")` string.
+    let _ = eval(
+        &tab,
+        "document.querySelectorAll('.given-section')[0].querySelector('th')\
+         .dispatchEvent(new MouseEvent('mouseover', {bubbles: true}))",
+    );
+    let ref_fallback = eval_string(
+        &tab,
+        "document.querySelector('#col-tooltip .ct-empty').textContent",
+    );
+    assert!(
+        ref_fallback.contains("No description or data tests declared on bare_seed"),
+        "a double-quoted ref given's fallback names the bare node, got {ref_fallback:?}",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelectorAll('.given-section')[0].querySelector('th')\
+         .dispatchEvent(new MouseEvent('mouseout', {bubbles: true}))",
+    );
+
+    // Given 1 — source("raw", "patients"): the fallback names source.table.
+    let _ = eval(
+        &tab,
+        "document.querySelectorAll('.given-section')[1].querySelector('th')\
+         .dispatchEvent(new MouseEvent('mouseover', {bubbles: true}))",
+    );
+    let src_fallback = eval_string(
+        &tab,
+        "document.querySelector('#col-tooltip .ct-empty').textContent",
+    );
+    assert!(
+        src_fallback.contains("No description or data tests declared on raw.patients"),
+        "a double-quoted source given's fallback names source.table, got {src_fallback:?}",
+    );
+
+    let _ = tab.close(true);
+}
