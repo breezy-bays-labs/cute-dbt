@@ -4982,6 +4982,39 @@ fn findings_panel_renders_checklist_tiers_sketch_rationale_and_pin() {
     );
     click_mode(&tab, "updated");
 
+    // --- pin under the Cytoscape engine: in-place, never a rebuild -----
+    // (the cute-dbt#180 per-click contract; the pin emits a tap on the
+    // SAME cy instance instead of re-calling renderDag).
+    click_engine(&tab, "cytoscape");
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-cyto canvas",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("the Cytoscape engine renders after the flip");
+    let _ = eval(
+        &tab,
+        "void (window.__cutePinCyRef = window.CuteCyto.cyInstance())",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('.finding-pin[data-pin=\"(final select)\"]').click()",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "window.CuteCyto.cyInstance() === window.__cutePinCyRef",
+        ),
+        "a pin click in Cytoscape mode mutates the SAME cy instance (no rebuild)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "window.CuteCyto.cyInstance().getElementById('(final select)').hasClass('sel')",
+        ),
+        "the pin selects the cited node in place",
+    );
+    click_engine(&tab, "mermaid");
+
     // --- quiet empty state on a findings-free, test-free model ---------
     select_model(&tab, "dim_quiet");
     assert!(
