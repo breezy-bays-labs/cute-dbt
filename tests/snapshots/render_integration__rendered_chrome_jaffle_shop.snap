@@ -562,7 +562,7 @@ html[data-style="soft"] .report-header h1 { letter-spacing: -0.01em; }
 .settings-cog[aria-expanded="true"] { background: var(--control-active-bg); color: var(--control-active-fg); border-color: var(--control-active-bg); }
 
 .settings-panel {
-  position: absolute; top: 2.6rem; right: 0; width: 21rem; max-width: 86vw;
+  position: absolute; top: 2.6rem; right: 0; width: 28rem; max-width: 92vw; box-sizing: border-box;
   background: var(--surface); border: var(--rule-w) solid var(--border); border-radius: var(--radius-pan);
   box-shadow: 0 6px 24px rgba(0,0,0,0.22); padding: 0.85rem 1rem 1rem;
   font-size: 0.85em; color: var(--text);
@@ -632,15 +632,18 @@ html[data-style="soft"] .report-header h1 { letter-spacing: -0.01em; }
 .cyto-hint { position: absolute; left: 0.6rem; bottom: 0.5rem; font-size: 0.75em; color: var(--text-faint); pointer-events: none; }
 
 .cyto-node-card {
-  position: absolute; z-index: 20; min-width: 12rem; max-width: 18rem;
+  position: absolute; z-index: 20; min-width: 12rem; max-width: 18rem; width: max-content;
   background: var(--surface); border: var(--rule-w) solid var(--border-strong); border-radius: var(--radius-pan);
   box-shadow: 0 6px 20px rgba(0,0,0,0.22); padding: 0.55rem 0.7rem; font-size: 0.8em; color: var(--text);
   pointer-events: none; opacity: 0; transition: opacity 100ms ease;
 }
 .cyto-node-card.is-visible { opacity: 1; }
-.cyto-node-card .nc-id { font-family: var(--font-mono); font-weight: 700; word-break: break-all; display: block; margin-bottom: 0.25rem; }
-.cyto-node-card .nc-row { display: flex; gap: 0.5rem; color: var(--text-muted); }
-.cyto-node-card .nc-row b { color: var(--text); font-weight: 600; }
+/* wrap fixes (design pass-2, cute-dbt#198): long node ids and long
+   role/degree values break instead of pushing the card past its host */
+.cyto-node-card .nc-id { font-family: var(--font-mono); font-weight: 700; word-break: break-all; overflow-wrap: anywhere; display: block; margin-bottom: 0.25rem; }
+.cyto-node-card .nc-row { display: flex; gap: 0.5rem; color: var(--text-muted); flex-wrap: wrap; }
+.cyto-node-card .nc-row b { color: var(--text); font-weight: 600; flex: 0 0 auto; }
+.cyto-node-card .nc-row > span { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 
 /* engine picker lives in settings; reuse .seg-radio */
 
@@ -652,7 +655,7 @@ html[data-style="soft"] .report-header h1 { letter-spacing: -0.01em; }
      past the viewport. Same fix as .panel-row.is-stacked below. */
   .panel-row { grid-template-columns: minmax(0, 1fr); }
   .expected-panel { position: static; }
-  .settings-panel { width: min(21rem, 92vw); }
+  .settings-panel { width: min(28rem, 94vw); }
   .report-header { flex-wrap: wrap; gap: 0.25rem; }
   .selector-field { min-width: 0; width: 100%; }
   .test-selector-row { gap: 0.4rem; }
@@ -797,9 +800,18 @@ g.dag-node:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3p
 .legend-item.role-transform { color: var(--dag-transform-stroke); }
 .legend-item.role-transform .legend-swatch { background: var(--dag-transform-fill); }
 .legend-item.role-final     { color: var(--dag-final-stroke); }
+/* Two-layer hexagon (design pass-2, cute-dbt#198): a color-mix-darkened
+   edge layer with a ::before fill inset — matches the darker #b07400
+   role_final stroke both DAG engines now draw. */
 .legend-item.role-final     .legend-swatch {
+  position: relative;
+  background: color-mix(in oklab, var(--dag-final-stroke) 62%, black);
+  clip-path: polygon(15% 0, 85% 0, 100% 50%, 85% 100%, 15% 100%, 0 50%); border: 0; filter: none;
+}
+.legend-item.role-final     .legend-swatch::before {
+  content: ""; position: absolute; inset: 1.5px;
   background: var(--dag-final-fill);
-  clip-path: polygon(15% 0, 85% 0, 100% 50%, 85% 100%, 15% 100%, 0 50%); border: 0;
+  clip-path: polygon(15% 0, 85% 0, 100% 50%, 85% 100%, 15% 100%, 0 50%);
 }
 .legend-edge { display: inline-block; width: 28px; height: 3px; border-radius: 2px; }
 
@@ -1564,10 +1576,14 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   // (role_import / role_transform / role_final). Node fills stay LIGHT in
   // every theme (light fill + dark label reads high-contrast on any bg) —
   // only the edges/anchor carry the dark-bg variant, exactly like Mermaid.
+  // The final stroke is #b07400 (design pass-2, cute-dbt#198): the pass-1
+  // #E69F00 failed AA against the light #fdf2dc fill; #b07400 is the same
+  // amber family at AA depth. The legend's two-layer swatch (report.css)
+  // mirrors it via color-mix on --dag-final-stroke.
   var ROLE_FILLS = {
     import:    { fill: "#e8f1f8", stroke: "#0072B2" },
     transform: { fill: "#f4f4f5", stroke: "#8a8a90" },
-    final:     { fill: "#fdf2dc", stroke: "#E69F00" }
+    final:     { fill: "#fdf2dc", stroke: "#b07400" }
   };
 
   // cute-dbt#180 — the single palette source for BOTH DAG engines.
@@ -2374,7 +2390,7 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
 
     lines.push("    classDef role_import fill:#e8f1f8,stroke:#0072B2,stroke-width:1.5px,color:#1c1c1f;");
     lines.push("    classDef role_transform fill:#f4f4f5,stroke:#8a8a90,stroke-width:1.5px,color:#1c1c1f;");
-    lines.push("    classDef role_final fill:#fdf2dc,stroke:#E69F00,stroke-width:2px,color:#1c1c1f;");
+    lines.push("    classDef role_final fill:#fdf2dc,stroke:#b07400,stroke-width:2px,color:#1c1c1f;");
     lines.push("    classDef selected stroke:#E91E63,stroke-width:4px;");
 
     dag.edges.forEach(function (e, i) {
