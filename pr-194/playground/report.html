@@ -5733,7 +5733,9 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
     var counts = { covered: 0, uncovered: 0, unknown: 0 };
     active.forEach(function (f) {
       var s = f.verdict && f.verdict.status;
-      if (counts[s] !== undefined) counts[s] += 1;
+      // Own-property guard: a prototype name (`toString`, …) can never
+      // count — only the three verdict keys above tally.
+      if (Object.prototype.hasOwnProperty.call(counts, s)) counts[s] += 1;
     });
     var parts = [];
     ["covered", "uncovered", "unknown"].forEach(function (s) {
@@ -6148,20 +6150,39 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
     $(document).on("click", ".finding-pin", function () {
       var id = $(this).attr("data-pin");
       if (!id || !currentModel()) return;
-      state.selectedNodeId = id;
-      if (state.leftPanelMode !== "node") {
-        state.leftPanelMode = "node";
-        renderSegmentedToggle();
+      // cute-dbt#180 contract: per-click Cytoscape interaction mutates
+      // classes IN PLACE — never a renderDag() rebuild (which would
+      // reset pan/zoom). Emitting a tap on the node runs the exact
+      // bound click path (lineage highlight + __cuteSelectNode →
+      // Inspect). Mermaid keeps its render-driven selection.
+      var cyto = dagEngine === "cytoscape" && window.CuteCyto
+        ? window.CuteCyto.cyInstance()
+        : null;
+      var cyEle = cyto ? cyto.getElementById(String(id)) : null;
+      if (cyEle && cyEle.length) {
+        cyEle.emit("tap");
+      } else {
+        state.selectedNodeId = id;
+        if (state.leftPanelMode !== "node") {
+          state.leftPanelMode = "node";
+          renderSegmentedToggle();
+        }
+        renderLeftPanel();
+        renderDag();
       }
-      renderLeftPanel();
-      renderDag();
       var dag = document.querySelector(".cte-dag");
       if (dag) {
         if (dag.scrollIntoView) dag.scrollIntoView({ behavior: "smooth", block: "start" });
+        // One flash at a time: a rapid re-pin clears the pending
+        // removal so an old timer can't cut the new animation short.
+        if (dag.__cutePinFlashTimer) clearTimeout(dag.__cutePinFlashTimer);
         dag.classList.remove("pin-flash");
         void dag.offsetWidth; // restart the CSS flash animation
         dag.classList.add("pin-flash");
-        setTimeout(function () { dag.classList.remove("pin-flash"); }, 1600);
+        dag.__cutePinFlashTimer = setTimeout(function () {
+          dag.classList.remove("pin-flash");
+          dag.__cutePinFlashTimer = null;
+        }, 1600);
       }
     });
     $(document).on("keydown", ".diff-fold", function (e) {
