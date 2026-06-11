@@ -14,6 +14,7 @@ artifact on the sticky PR comment, not committed here.)
 | [`jaffle-shop-report.html`](jaffle-shop-report.html) | [`tests/fixtures/jaffle-shop-current.json`](../tests/fixtures/jaffle-shop-current.json) + [`jaffle-shop-baseline.json`](../tests/fixtures/jaffle-shop-baseline.json) | One in-scope model (`stg_customers`) with 1 unit test carrying populated `tags` / `meta` / `original_file_path`. Three-node CTE DAG (`source` → `renamed` → `stg_customers`) demonstrating the import / transform / final role classification + edge coloring + click-to-inspect. |
 | [`playground-report.html`](playground-report.html) | [`tests/fixtures/playground-current.json`](../tests/fixtures/playground-current.json) + [`playground-baseline.json`](../tests/fixtures/playground-baseline.json) | The richer example. Models from [`cmbays/dbt-playground`](https://github.com/cmbays/dbt-playground): `mart_dq_summary` (UNION-ALL of encounter + medication DQ metrics, 2 unit tests), `dim_payers` (UNION-ALL with unknown-sentinel, 1 unit test), `int_dq_quarantine__encounters` (modified-no-tests → empty-state card), `fct_encounters_incremental` — an **incremental** model whose unit test surfaces the incremental-mode badge, the expect-semantics tooltip, and the `prior model state` (`given: - input: this`) badge (cute-dbt#145) — `fct_clinical_events` (modified-no-tests, 5-arm UNION), `mart_date_state_grid` (an explicit **CROSS JOIN** CTE — the `cross` edge + legend entry — with a unit test mixing **dict + csv givens** in one test, cute-dbt#64), and `stg_synthea__patients` (the **`source()`-given** unit test — `given: - input: source('synthea_raw', 'patients')`, cute-dbt#57). Exercises multi-model in-scope, multi-test-per-model, UNION arms, the cross-join edge, the empty-state card, fixture-format diversity (`sql` given + mixed `dict` / `csv` expect + a mixed dict/csv-given test), incremental-model semantics, AND the full **coverage-checks panel** (cute-dbt#170): covered / uncovered / unknown checklist rows, TOTAL + HIGH tier chips, an uncovered UNION finding with copyable given-row YAML sketches (`fct_clinical_events`), an uncovered grain finding (`mart_dq_summary`), and a pragma-suppressed finding revealed with its reason (`dim_payers`). Rendered with `--project-root` so the Authoring-YAML drawer populates. |
 | [`diff-showcase-report.html`](diff-showcase-report.html) | [`tests/fixtures/playground-current.json`](../tests/fixtures/playground-current.json) + [`tests/fixtures/playground-pr-diff.patch`](../tests/fixtures/playground-pr-diff.patch) (`--pr-diff`, no baseline) | The **diff-view showcase** — the `--pr-diff` feature set rendered against a synthetic hand-crafted patch: foldable inline SQL diffs, YAML block diffs, and cell-level data diffs with NULL-aware cells. Stays synthetic so no `root_path` leaks into the committed HTML. |
+| [`explore/dag.html`](explore/dag.html) + [`explore/tests.html`](explore/tests.html) | [`tests/fixtures/playground-current.json`](../tests/fixtures/playground-current.json) (`cute-dbt explore`, no baseline) | The **`explore` verb's two-page output** (cute-dbt#100, epic #99 V1): `dag.html` is the full-manifest model-lineage DAG (static Mermaid in V1 — the conscious throwaway V2 replaces with interactive Cytoscape); `tests.html` is the per-model unit-test index with the engine-agnostic payload embedded. Full manifest, fail-open: an uncompiled model renders as a "not compiled" node. Each page passes the headless zero-egress gate independently. |
 
 Open any file directly (`open examples/jaffle-shop-report.html` on macOS,
 `xdg-open` on Linux, or drag into a browser). Every page makes **zero**
@@ -28,24 +29,29 @@ report slices Authoring YAML from committed source.
 
 ```bash
 # jaffle-shop
-cargo run --bin cute-dbt -- \
+cargo run --bin cute-dbt -- report \
   --manifest tests/fixtures/jaffle-shop-current.json \
   --baseline-manifest tests/fixtures/jaffle-shop-baseline.json \
   --out examples/jaffle-shop-report.html
 
 # playground
-cargo run --bin cute-dbt -- \
+cargo run --bin cute-dbt -- report \
   --manifest tests/fixtures/playground-current.json \
   --baseline-manifest tests/fixtures/playground-baseline.json \
   --project-root tests/fixtures/playground-source \
   --out examples/playground-report.html
 
 # diff-showcase (--pr-diff against the synthetic patch, no baseline)
-cargo run --bin cute-dbt -- \
+cargo run --bin cute-dbt -- report \
   --manifest tests/fixtures/playground-current.json \
   --pr-diff @tests/fixtures/playground-pr-diff.patch \
   --project-root tests/fixtures/playground-source \
   --out examples/diff-showcase-report.html
+
+# explore (two-page --out-dir shape: dag.html + tests.html, no baseline)
+cargo run --bin cute-dbt -- explore \
+  --manifest tests/fixtures/playground-current.json \
+  --out-dir examples/explore
 ```
 
 CI verifies every committed example stays in sync with the renderer —
