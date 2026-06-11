@@ -1531,6 +1531,15 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
 .finding-body { padding: 0.45rem 0.7rem 0.6rem; border-top: var(--rule-w) solid var(--border); font-size: 0.88em; }
 .finding-body p { margin: 0.3rem 0; }
 .f-label { color: var(--text-muted); }
+/* cute-dbt#240 (defect C residual, PR #244 verification) — the
+   "Covered by " prefix label rides the verbatim muted on the finding
+   row's --surface fill and sits sub-AA on latte alone: #6c6f85 on
+   #eff1f5 = 4.37:1 (11.88px weight-400, so the 4.5 floor applies;
+   rosepine measures 4.56 and stays verbatim). The established #227/#231
+   deepened stand-in extends to this label (latte Catppuccin subtext1
+   #5c5f77 ≈ 5.5:1 on the row fill, re-measured empirically) — token
+   override only; the verbatim latte theme block stays pinned. */
+:root[data-theme="latte"] .finding-covered-by .f-label { --text-muted: #5c5f77; }
 .finding-covered-by code, .finding-suppress-reason code { font-size: 0.92em; }
 .finding-evidence { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.15rem; }
 .finding-evidence li { line-height: 1.45; }

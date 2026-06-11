@@ -9454,26 +9454,41 @@ const COVERED_BY_CONTRAST_SWEEP_JS: &str = r#"(function () {
     }
     return null;
   }
-  var codes = document.querySelectorAll(".finding-covered-by code");
-  if (!codes.length) return JSON.stringify([]);
+  /* PR #244 verification — the body carries `transition: background
+     120ms ease, color 120ms ease`, so an instant setAttribute +
+     getComputedStyle sweep can read MID-TRANSITION values (false
+     readings observed by the independent verifier). Kill every
+     transition for the duration of the sweep so each theme flip
+     resolves to its final painted colors synchronously. */
+  var kill = document.createElement("style");
+  kill.textContent = "* { transition: none !important; }";
+  document.head.appendChild(kill);
+  /* EVERY text run in the quoted line (the existential-vs-universal
+     lesson applies to AA sweeps too): the code pills AND the
+     "Covered by " prefix label. */
+  var els = document.querySelectorAll(
+    ".finding-covered-by code, .finding-covered-by .f-label");
+  if (!els.length) { kill.remove(); return JSON.stringify([]); }
   var root = document.documentElement;
   var out = [];
   for (var i = 0; i < THEMES.length; i++) {
     root.setAttribute("data-theme", THEMES[i]);
     root.classList.toggle("dark", !!DARK[THEMES[i]]);
-    for (var j = 0; j < codes.length; j++) {
-      var cs = getComputedStyle(codes[j]);
+    for (var j = 0; j < els.length; j++) {
+      var cs = getComputedStyle(els[j]);
       var fg = parseRgb(cs.color);
       var own = parseRgb(cs.backgroundColor);
-      var bg = own && own.a === 1 ? own : backdropOf(codes[j].parentElement);
+      var bg = own && own.a === 1 ? own : backdropOf(els[j].parentElement);
       out.push({
         theme: THEMES[i], idx: j,
+        el: els[j].tagName === "CODE" ? "code" : "f-label",
         ratio: fg && bg ? ratio(fg, bg) : -1,
         fg: cs.color,
         bg: bg ? "rgb(" + bg.r + ", " + bg.g + ", " + bg.b + ")" : "none"
       });
     }
   }
+  kill.remove();
   return JSON.stringify(out);
 })()"#;
 
@@ -9541,30 +9556,39 @@ fn covered_by_test_ids_meet_aa_contrast_on_every_theme() {
     let raw = eval_string(&tab, COVERED_BY_CONTRAST_SWEEP_JS);
     let measured: Vec<serde_json::Value> =
         serde_json::from_str(&raw).expect("the contrast sweep returns valid JSON");
+    // 8 themes × (≥2 code pills + 1 "Covered by " f-label) — EVERY text
+    // run in the quoted line is measured (PR #244 verification residual:
+    // the latte f-label sat at 4.37:1 while the pills passed).
     assert!(
-        measured.len() >= 8,
-        "at least one covered-by code chip measured on each of the 8 themes, got: {raw}",
+        measured.len() >= 16,
+        "every covered-by text run (code pills + the f-label prefix) \
+         measured on each of the 8 themes, got: {raw}",
+    );
+    assert!(
+        measured.iter().any(|m| m["el"].as_str() == Some("f-label")),
+        "the sweep covers the 'Covered by ' prefix label run, got: {raw}",
     );
     let mut failures = Vec::new();
     for m in &measured {
         let theme = m["theme"].as_str().expect("theme is a string");
         let idx = m["idx"].as_u64().unwrap_or(0);
+        let el = m["el"].as_str().unwrap_or("?");
         let ratio = m["ratio"].as_f64().expect("ratio is a number");
         let fg = m["fg"].as_str().unwrap_or("?");
         let bg = m["bg"].as_str().unwrap_or("?");
         assert!(
             ratio > 0.0,
-            "the {theme}/code[{idx}] chip resolved no opaque backdrop — the \
+            "the {theme}/{el}[{idx}] run resolved no opaque backdrop — the \
              backdrop walk must end on a painted surface",
         );
-        eprintln!("covered-by contrast {theme:>9} / code[{idx}] = {ratio:.2}  ({fg} on {bg})");
+        eprintln!("covered-by contrast {theme:>9} / {el}[{idx}] = {ratio:.2}  ({fg} on {bg})");
         if ratio < 4.5 {
-            failures.push(format!("{theme}/code[{idx}] = {ratio:.2} ({fg} on {bg})"));
+            failures.push(format!("{theme}/{el}[{idx}] = {ratio:.2} ({fg} on {bg})"));
         }
     }
     assert!(
         failures.is_empty(),
-        "covered-by test ids below the WCAG AA 4.5:1 floor (cute-dbt#240 \
+        "covered-by line text below the WCAG AA 4.5:1 floor (cute-dbt#240 \
          defect C): {failures:#?}",
     );
 
@@ -9604,8 +9628,14 @@ const BASELINE_PATH_CONTRAST_SWEEP_JS: &str = r#"(function () {
     }
     return null;
   }
+  /* PR #244 verification — kill transitions for the sweep's duration:
+     body transitions background/color over 120ms, so an instant
+     setAttribute + getComputedStyle read can land mid-transition. */
+  var kill = document.createElement("style");
+  kill.textContent = "* { transition: none !important; }";
+  document.head.appendChild(kill);
   var code = document.querySelector("code.diff-scope-baseline");
-  if (!code) return JSON.stringify([]);
+  if (!code) { kill.remove(); return JSON.stringify([]); }
   var root = document.documentElement;
   var out = [];
   for (var i = 0; i < THEMES.length; i++) {
@@ -9622,6 +9652,7 @@ const BASELINE_PATH_CONTRAST_SWEEP_JS: &str = r#"(function () {
       bg: bg ? "rgb(" + bg.r + ", " + bg.g + ", " + bg.b + ")" : "none"
     });
   }
+  kill.remove();
   return JSON.stringify(out);
 })()"#;
 
