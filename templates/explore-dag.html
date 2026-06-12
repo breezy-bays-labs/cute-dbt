@@ -55,6 +55,16 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
 .lineage-legend { color: var(--text-muted); font-size: 0.85rem; margin-top: 0.5rem; }
 .lineage-legend .legend-chip { display: inline-block; padding: 0 0.4rem; border: 1.5px solid var(--dag-import-stroke); border-radius: 4px; background: var(--dag-import-fill); color: var(--dag-node-text); }
 .lineage-legend .legend-chip.notcompiled { border-color: #b07400; border-style: dashed; background: var(--dag-transform-fill); }
+/* cute-dbt#253 — the typed-node vocabulary. Canvas-paired chips: these
+   exact fills/strokes are what explore-lineage.js draws per node type
+   (redundant shape+color coding on canvas; the chips mirror the colors
+   and approximate the shapes via border-radius). Shared by the legend
+   and the detail card's type chip. */
+.legend-chip.type-model, .detail-type.type-model { border-color: #0072B2; background: #e8f1f8; }
+.legend-chip.type-snapshot, .detail-type.type-snapshot { border-color: #7b5ea7; background: #f1ecf9; border-radius: 2px; }
+.legend-chip.type-seed, .detail-type.type-seed { border-color: #00756d; background: #e6f4f2; border-radius: 10px; }
+.legend-chip.type-source, .detail-type.type-source { border-color: #1f8a5b; background: #eef7ee; border-radius: 999px; }
+.legend-chip.type-exposure, .detail-type.type-exposure { border-color: #6b6b76; background: #f4f4f5; border-radius: 4px 12px 12px 4px; }
 /* cute-dbt#106 — the PR-diff change-context treatment: an amber halo
    mirroring the canvas underlay glow. A separate visual channel from
    the highlight vocabulary (border = selected, opacity = dim/trace)
@@ -110,6 +120,9 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
 /* canvas-paired status chips (fixed across themes; dark fixed text on the
    fixed light fills stays readable on every theme by construction) */
 .model-detail-card .detail-notcompiled { display: inline-block; padding: 0 0.4rem; border: 1.5px dashed #b07400; border-radius: 4px; background: var(--dag-transform-fill); color: var(--dag-node-text); font-size: 0.8rem; }
+/* cute-dbt#253 — the detail card's node-type chip (non-model nodes only;
+   per-type colors above). */
+.model-detail-card .detail-type { display: inline-block; margin-right: 0.35rem; padding: 0 0.4rem; border: 1.5px solid var(--dag-import-stroke); border-radius: 4px; color: var(--dag-node-text); font-size: 0.8rem; }
 /* cute-dbt#106 — the detail card's "changed in this diff" chip (the
    change-context twin of .detail-notcompiled; both can show at once). */
 .model-detail-card .detail-changed { display: inline-block; margin-left: 0.35rem; padding: 0 0.4rem; border: 1.5px solid var(--dag-import-stroke); border-radius: 4px; background: var(--dag-import-fill); color: var(--dag-node-text); box-shadow: 0 0 0 2px rgba(230, 159, 0, 0.55); font-size: 0.8rem; }
@@ -125,7 +138,9 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
 <header class="explore-header">
   <div>
     <h1>Model lineage</h1>
-    <p class="explore-counts">full manifest — {{ model_count }} model{% if model_count != 1 %}s{% endif %}, {{ edge_count }} edge{% if edge_count != 1 %}s{% endif %}{% if not_compiled_count > 0 %}, {{ not_compiled_count }} not compiled{% endif %}{% if has_change_context %}, {{ changed_count }} changed in this diff{% endif %}</p>
+    {# cute-dbt#253 — typed counts: the non-model segments render only
+       when present, so a models-only manifest keeps the pre-#253 line. #}
+    <p class="explore-counts">full manifest — {{ model_count }} model{% if model_count != 1 %}s{% endif %}{% if snapshot_count > 0 %}, {{ snapshot_count }} snapshot{% if snapshot_count != 1 %}s{% endif %}{% endif %}{% if seed_count > 0 %}, {{ seed_count }} seed{% if seed_count != 1 %}s{% endif %}{% endif %}{% if source_count > 0 %}, {{ source_count }} source{% if source_count != 1 %}s{% endif %}{% endif %}{% if exposure_count > 0 %}, {{ exposure_count }} exposure{% if exposure_count != 1 %}s{% endif %}{% endif %}, {{ edge_count }} edge{% if edge_count != 1 %}s{% endif %}{% if not_compiled_count > 0 %}, {{ not_compiled_count }} not compiled{% endif %}{% if has_change_context %}, {{ changed_count }} changed in this diff{% endif %}</p>
   </div>
   <nav class="explore-nav" aria-label="Explore pages">
     <a href="tests.html">Unit tests &rarr;</a>
@@ -135,11 +150,11 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
 <section class="lineage" aria-label="Model lineage DAG">
   <div class="lineage-toolbar">
     <div class="lineage-search">
-      <input type="search" class="lineage-search-input" placeholder="Search models&hellip;"
-             aria-label="Search models" role="combobox" aria-expanded="false"
+      <input type="search" class="lineage-search-input" placeholder="Search nodes&hellip;"
+             aria-label="Search lineage nodes" role="combobox" aria-expanded="false"
              aria-controls="lineage-search-results" autocomplete="off" spellcheck="false">
       <ul class="lineage-search-results" id="lineage-search-results" role="listbox"
-          aria-label="Matching models" hidden></ul>
+          aria-label="Matching nodes" hidden></ul>
     </div>
     {# cute-dbt#102 — the CTE ⇄ model view toggle. The CTE arm is gated
        on a highlight (disabled at render time; explore-cte.js enables it
@@ -165,8 +180,17 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
      attribute. The engine fills it with createElement/textContent only. #}
   <div class="lineage-tooltip" role="tooltip" aria-hidden="true" hidden></div>
   <p class="lineage-empty" hidden>No models in this manifest.</p>
+  {# cute-dbt#253 — typed-node chips render only for types present in
+     this manifest (the model chip always); the chip colors are
+     canvas-paired with the engine's per-type styles. The template
+     SOURCE carries every wire key's chip — the node-vocab completeness
+     guard greps this file. #}
   <div class="lineage-legend">
-    <span class="legend-chip">model</span>
+    <span class="legend-chip type-model">model</span>{% if snapshot_count > 0 %}
+    <span class="legend-chip type-snapshot">snapshot</span>{% endif %}{% if seed_count > 0 %}
+    <span class="legend-chip type-seed">seed</span>{% endif %}{% if source_count > 0 %}
+    <span class="legend-chip type-source">source</span>{% endif %}{% if exposure_count > 0 %}
+    <span class="legend-chip type-exposure">exposure</span>{% endif %}
     <span class="legend-chip notcompiled">not compiled</span>{% if has_change_context %}
     <span class="legend-chip changed">changed</span>{% endif %}
     &mdash; a dashed node has no compiled SQL in this manifest (<code>dbt parse</code>); run <code>dbt compile</code> to fill it in. The explorer renders it anyway (fail-open).{% if has_change_context %} An amber-glow node&rsquo;s file changed in this PR diff &mdash; change context only highlights; the full graph always renders every model.{% endif %}

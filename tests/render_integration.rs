@@ -490,3 +490,189 @@ fn source_given_binds_against_the_real_playground_fixture() {
          `source` import CTE via the sources-block resolution",
     );
 }
+
+// ===== cute-dbt#253 — typed lineage nodes, proven on the REAL fixtures =====
+//
+// The explorer lineage must render snapshots/seeds/sources/exposures as
+// typed DAG nodes: the pre-#253 model-only filter severed
+// `stg → snapshot → downstream` into two components and faked the
+// downstream model (and every source-fed staging model) as a root.
+// These tests are the fixture-proven halves of the cute-dbt#253 ACs:
+// the committed playground manifest carries a real mid-chain snapshot +
+// 16 sources + 1 exposure; the committed jaffle-shop manifest carries 3
+// seeds.
+
+/// Every manifest entry the typed lineage renders, with its expected
+/// type — models/snapshots/seeds from the `nodes` map plus the
+/// `sources`/`exposures` maps.
+fn renderable_ids(
+    manifest: &Manifest,
+) -> std::collections::HashMap<String, cute_dbt::adapters::explore::LineageNodeType> {
+    use cute_dbt::adapters::explore::LineageNodeType;
+    let mut ids = std::collections::HashMap::new();
+    for (id, node) in manifest.nodes() {
+        let node_type = match node.resource_type() {
+            "model" => LineageNodeType::Model,
+            "snapshot" => LineageNodeType::Snapshot,
+            "seed" => LineageNodeType::Seed,
+            _ => continue,
+        };
+        ids.insert(id.as_str().to_owned(), node_type);
+    }
+    for id in manifest.sources().keys() {
+        ids.insert(
+            id.as_str().to_owned(),
+            cute_dbt::adapters::explore::LineageNodeType::Source,
+        );
+    }
+    for id in manifest.exposures().keys() {
+        ids.insert(
+            id.as_str().to_owned(),
+            cute_dbt::adapters::explore::LineageNodeType::Exposure,
+        );
+    }
+    ids
+}
+
+/// Assert the lineage payload over `manifest` renders every renderable
+/// manifest entry, typed, with every dependency edge between renderable
+/// ids present (no severing ⇒ no false roots), and return the payload.
+fn assert_lineage_complete(manifest: &Manifest) -> cute_dbt::adapters::explore::LineagePayload {
+    use cute_dbt::adapters::explore::build_lineage_payload;
+    use cute_dbt::domain::all_models;
+    let expected = renderable_ids(manifest);
+    let payload = build_lineage_payload(manifest, &all_models(manifest), None);
+    // (1) node-set completeness + typing.
+    let rendered: std::collections::HashMap<&str, _> = payload
+        .nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n.node_type))
+        .collect();
+    for (id, node_type) in &expected {
+        assert_eq!(
+            rendered.get(id.as_str()),
+            Some(node_type),
+            "{id} must render as a typed lineage node",
+        );
+    }
+    assert_eq!(
+        rendered.len(),
+        expected.len(),
+        "the lineage renders exactly the renderable manifest entries",
+    );
+    // (2) edge completeness: every manifest dependency between two
+    // renderable ids is a payload edge — the no-severing invariant
+    // (a missing edge is what manufactured the false roots).
+    let edges: std::collections::HashSet<(&str, &str)> = payload
+        .edges
+        .iter()
+        .map(|e| (e.from.as_str(), e.to.as_str()))
+        .collect();
+    let mut checked = 0usize;
+    let require_edge = |from: &str, to: &str| {
+        assert!(
+            edges.contains(&(from, to)),
+            "manifest dependency {from} -> {to} must be a lineage edge",
+        );
+    };
+    for (id, node) in manifest.nodes() {
+        if !expected.contains_key(id.as_str()) {
+            continue;
+        }
+        for dep in node.depends_on().nodes() {
+            if expected.contains_key(dep.as_str()) {
+                require_edge(dep.as_str(), id.as_str());
+                checked += 1;
+            }
+        }
+    }
+    for (id, exposure) in manifest.exposures() {
+        for dep in exposure.depends_on().nodes() {
+            if expected.contains_key(dep.as_str()) {
+                require_edge(dep.as_str(), id.as_str());
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "the fixture must exercise at least one edge");
+    payload
+}
+
+#[test]
+fn playground_lineage_renders_the_snapshot_mid_chain_with_no_false_roots() {
+    let current = load("playground-current.json");
+    let payload = assert_lineage_complete(&current);
+    // The cute-dbt#253 discovery chain, by id: the snapshot sits
+    // MID-CHAIN and both its edges survive.
+    let edges: std::collections::HashSet<(&str, &str)> = payload
+        .edges
+        .iter()
+        .map(|e| (e.from.as_str(), e.to.as_str()))
+        .collect();
+    assert!(edges.contains(&(
+        "model.healthcare_analytics.stg_synthea__patients",
+        "snapshot.healthcare_analytics.snp_patients",
+    )));
+    assert!(edges.contains(&(
+        "snapshot.healthcare_analytics.snp_patients",
+        "model.healthcare_analytics.dim_patients",
+    )));
+    // dim_patients is fed by the snapshot — NOT a false root.
+    assert!(
+        payload
+            .edges
+            .iter()
+            .any(|e| e.to == "model.healthcare_analytics.dim_patients"),
+        "dim_patients must have an incoming edge (the severed-chain defect)",
+    );
+    // The 16 sources render as roots; the exposure as a sink.
+    let sources = payload
+        .nodes
+        .iter()
+        .filter(|n| n.node_type == cute_dbt::adapters::explore::LineageNodeType::Source)
+        .count();
+    assert_eq!(sources, 16, "every playground source renders");
+    let exposure_id = "exposure.healthcare_analytics.provider_quality_dashboard";
+    assert!(
+        payload.edges.iter().any(|e| e.to == exposure_id),
+        "the exposure terminates a lineage chain",
+    );
+    assert!(
+        !payload.edges.iter().any(|e| e.from == exposure_id),
+        "an exposure is a sink",
+    );
+}
+
+#[test]
+fn jaffle_shop_lineage_renders_seeds_as_typed_roots() {
+    use cute_dbt::adapters::explore::LineageNodeType;
+    let current = load("jaffle-shop-current.json");
+    let payload = assert_lineage_complete(&current);
+    let seeds: Vec<&str> = payload
+        .nodes
+        .iter()
+        .filter(|n| n.node_type == LineageNodeType::Seed)
+        .map(|n| n.id.as_str())
+        .collect();
+    assert_eq!(seeds.len(), 3, "the jaffle-shop fixture carries 3 seeds");
+    for seed in seeds {
+        assert!(
+            payload.edges.iter().any(|e| e.from == seed),
+            "{seed} feeds at least one staging model",
+        );
+        assert!(
+            !payload.edges.iter().any(|e| e.to == seed),
+            "{seed} is a root (no incoming edges)",
+        );
+        assert!(
+            !payload
+                .nodes
+                .iter()
+                .find(|n| n.id == seed)
+                .expect("seed node present")
+                .not_compiled,
+            "{seed} never renders dbt-parse-dashed (fusion null-fills \
+             seed compiled_code unconditionally)",
+        );
+    }
+}
