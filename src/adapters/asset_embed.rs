@@ -76,12 +76,18 @@ pub const CYTOSCAPE_JS: &str = include_str!("../../assets/cytoscape-3.30.2.min.j
 /// `assets/cytoscape-dagre-4.0.0.min.js`.
 pub const CYTOSCAPE_DAGRE_JS: &str = include_str!("../../assets/cytoscape-dagre-4.0.0.min.js");
 
-/// The report's first-party chassis CSS (cute-dbt#177) — semantic token
-/// layer, the five `[data-theme]` blocks, the four `html[data-style]`
-/// direction packs, the density layer and the tokenized component rules,
-/// merged from the Claude Design Phase-1 handoff in its prescribed
-/// cascade order (tokens → styles → chrome → base) plus the cute-dbt
-/// reconciliation + PR-1 bridge layers.
+/// The report-specific remainder of the first-party chassis CSS
+/// (cute-dbt#177, re-layered at cute-dbt#242) — the four
+/// `html[data-style]` direction packs, the settings/chrome layer, the
+/// tokenized component layer, the density overrides and the
+/// reconciliation + coverage layers. The design-system ROOT (the
+/// semantic token layer + all eight `[data-theme]` blocks) and the
+/// minimal cross-family page chassis were extracted at cute-dbt#242 to
+/// `templates/partials/tokens.css` / `templates/partials/base.css`,
+/// which every page family pulls in via askama `include` — those
+/// partials reach the output through the template compiler, so they
+/// carry no constant here (their integrity gates live in this module's
+/// test block via test-only `include_str!`).
 ///
 /// First-party, NOT vendored: it lives at `templates/report.css` (beside
 /// the template it styles), deliberately outside `assets/` so the
@@ -94,6 +100,23 @@ pub const CYTOSCAPE_DAGRE_JS: &str = include_str!("../../assets/cytoscape-dagre-
 /// a rule) in this module's test block.
 pub const REPORT_CSS: &str = include_str!("../../templates/report.css");
 
+/// The SHARED appearance engine (cute-dbt#242) — reads the persisted
+/// appearance (`localStorage` key `cute-dbt.appearance.v1`, in-memory
+/// fallback), resolves the prefers-color-scheme default and applies the
+/// html-level hooks the shared token partial keys on (`[data-theme]` +
+/// the `html.dark` `DataTables` sync, `[data-style]`, `[data-density]`,
+/// `[data-difflayout]`, `[data-coverage]`, accent custom properties).
+/// Embedded into BOTH page families: the report (where [`THEME_JS`]
+/// layers the settings UI on top through `window.CuteAppearance`) and
+/// the explore pages (read-only application — the explore-side settings
+/// affordance is cute-dbt#219).
+///
+/// First-party, NOT vendored: lives at `templates/appearance.js`.
+/// Integrity gates: the banner-pin + end-of-file sentinel test in this
+/// module, plus the `cute-dbt.appearance.v1` key pin (the stable
+/// consumer contract, cute-dbt#178 AC3).
+pub const APPEARANCE_JS: &str = include_str!("../../templates/appearance.js");
+
 /// The report's first-party interaction engine (cute-dbt#178) — model/test
 /// selectors, the Mermaid DAG, the unified + split diff renderers with
 /// word-level emphasis and hunk folds, the fixture grids, copy buttons,
@@ -105,10 +128,13 @@ pub const REPORT_CSS: &str = include_str!("../../templates/report.css");
 /// gates: the banner-pin + end-of-file sentinel test in this module.
 pub const INTERACTION_JS: &str = include_str!("../../templates/interaction.js");
 
-/// The report's first-party appearance engine (cute-dbt#178) — theme /
-/// style / accent / density / diff-style / diff-layout wiring with
-/// `localStorage` persistence (key `cute-dbt.appearance.v1`) and the
-/// `DataTables` dark-mode sync (`html.dark`).
+/// The report-only appearance settings UI (cute-dbt#178, re-layered at
+/// cute-dbt#242) — wires the settings panel's theme / style / accent /
+/// density / diff-layout / DAG-engine / coverage controls, syncs their
+/// visual state, reflows `DataTables` and dispatches the DAG-engine
+/// pick. The load/apply/persist core moved to the shared
+/// [`APPEARANCE_JS`] engine, which this file drives through
+/// `window.CuteAppearance`.
 ///
 /// First-party, NOT vendored: lives at `templates/theme.js`. Integrity
 /// gates: the banner-pin + end-of-file sentinel test in this module.
@@ -396,20 +422,56 @@ mod tests {
     #[test]
     fn the_theme_js_carries_its_banner_and_is_not_truncated() {
         assert!(
-            THEME_JS.contains("cute-dbt appearance engine v1"),
+            THEME_JS.contains("cute-dbt report appearance settings v1"),
             "theme.js head banner",
         );
         assert!(
             THEME_JS
                 .trim_end()
-                .ends_with("/* end of cute-dbt appearance engine v1 (cute-dbt#178) */"),
+                .ends_with("/* end of cute-dbt report appearance settings v1 (cute-dbt#178) */"),
             "theme.js end-of-file sentinel (truncation guard)",
         );
-        // The appearance persistence key is a stable consumer contract
-        // (AC3, cute-dbt#178) — pin it here so a rename is a conscious act.
+        // Since cute-dbt#242 the settings UI drives the SHARED engine —
+        // it must bind window.CuteAppearance, and it must NOT carry its
+        // own copy of the storage key (one persistence site only; the
+        // key pin lives on APPEARANCE_JS below).
         assert!(
-            THEME_JS.contains("\"cute-dbt.appearance.v1\""),
-            "theme.js persists under the cute-dbt.appearance.v1 key",
+            THEME_JS.contains("window.CuteAppearance"),
+            "theme.js drives the shared appearance engine",
+        );
+        assert!(
+            !THEME_JS.contains("\"cute-dbt.appearance.v1\""),
+            "theme.js must not duplicate the storage-key literal — the shared \
+             appearance engine (appearance.js) is the one persistence site \
+             (prose mentions in comments are fine; the quoted literal is the \
+             persistence-site signature)",
+        );
+    }
+
+    #[test]
+    fn the_appearance_js_carries_its_banner_and_is_not_truncated() {
+        assert!(
+            APPEARANCE_JS.contains("cute-dbt shared appearance engine v1"),
+            "appearance.js head banner",
+        );
+        assert!(
+            APPEARANCE_JS
+                .trim_end()
+                .ends_with("/* end of cute-dbt shared appearance engine v1 (cute-dbt#242) */"),
+            "appearance.js end-of-file sentinel (truncation guard)",
+        );
+        // The appearance persistence key is a stable consumer contract
+        // (AC3, cute-dbt#178; cross-page since cute-dbt#242) — pin it here
+        // so a rename is a conscious act.
+        assert!(
+            APPEARANCE_JS.contains("\"cute-dbt.appearance.v1\""),
+            "appearance.js persists under the cute-dbt.appearance.v1 key",
+        );
+        // The page-facing seam theme.js (and the future explore settings
+        // UI, cute-dbt#219) drives.
+        assert!(
+            APPEARANCE_JS.contains("window.CuteAppearance ="),
+            "appearance.js exposes the window.CuteAppearance seam",
         );
     }
 
@@ -440,30 +502,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_report_css_comments_are_balanced_and_keep_the_hidden_rule() {
-        // The handoff's documented porting bug (its §2.1): a `*`
-        // immediately followed by `/` INSIDE a CSS comment body closes
-        // the comment early and silently eats the next rule — it once
-        // ate `[hidden]{display:none!important}` and broke every
-        // Diff/File toggle and diff fold. Two structural guards:
-        //
-        // 1. Comment delimiters balance. The bug's signature is an
-        //    orphaned closer (`/* --fs-* / --pad-* /` written without
-        //    the inner spaces yields one opener, two closers).
-        let openers = REPORT_CSS.matches("/*").count();
-        let closers = REPORT_CSS.matches("*/").count();
-        assert_eq!(
-            openers, closers,
-            "CSS comment delimiters must balance — an excess `*/` means \
-             a comment body contains the closer sequence and has eaten \
-             the rules between (handoff §2.1 porting bug)",
-        );
-        // 2. The load-bearing rule the original bug ate survives
-        //    comment-stripping — i.e. it is live CSS, not swallowed
-        //    comment text.
-        let mut stripped = String::with_capacity(REPORT_CSS.len());
-        let mut rest = REPORT_CSS;
+    // The shared CSS partials reach the generated pages through askama
+    // `include` (templates/partials/), so no production constant exists —
+    // these test-only embeds give the integrity gates the exact bytes the
+    // template compiler inlines.
+    const TOKENS_CSS: &str = include_str!("../../templates/partials/tokens.css");
+    const BASE_CSS: &str = include_str!("../../templates/partials/base.css");
+
+    /// Strip `/* ... */` comments, then drop all whitespace — the
+    /// comment-eats-rule porting-bug oracle shared by the CSS gates.
+    fn stripped_css(css: &str) -> String {
+        let mut stripped = String::with_capacity(css.len());
+        let mut rest = css;
         while let Some(open) = rest.find("/*") {
             stripped.push_str(&rest[..open]);
             let Some(close) = rest[open + 2..].find("*/") else {
@@ -473,10 +523,127 @@ mod tests {
             rest = &rest[open + 2 + close + 2..];
         }
         stripped.push_str(rest);
-        let normalized: String = stripped.chars().filter(|c| !c.is_whitespace()).collect();
+        stripped.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// Comment delimiters balance. The handoff's documented porting bug
+    /// (its §2.1): a `*` immediately followed by `/` INSIDE a CSS comment
+    /// body closes the comment early and silently eats the next rule —
+    /// the bug's signature is an orphaned closer.
+    fn assert_balanced_comments(label: &str, css: &str) {
+        let openers = css.matches("/*").count();
+        let closers = css.matches("*/").count();
+        assert_eq!(
+            openers, closers,
+            "{label}: CSS comment delimiters must balance — an excess `*/` \
+             means a comment body contains the closer sequence and has eaten \
+             the rules between (handoff §2.1 porting bug)",
+        );
+    }
+
+    #[test]
+    fn the_css_layers_keep_balanced_comments_and_the_hidden_rule() {
+        // All three first-party CSS layers (cute-dbt#242 re-layering):
+        // the shared token partial, the shared base chassis partial and
+        // the report-specific remainder.
+        assert_balanced_comments("partials/tokens.css", TOKENS_CSS);
+        assert_balanced_comments("partials/base.css", BASE_CSS);
+        assert_balanced_comments("report.css", REPORT_CSS);
+        // The load-bearing rule the original porting bug ate survives
+        // comment-stripping — i.e. it is live CSS, not swallowed comment
+        // text. It lives in the SHARED base chassis since cute-dbt#242
+        // (both page families toggle visibility via `hidden`).
         assert!(
-            normalized.contains("[hidden]{display:none!important;}"),
-            "the [hidden] override (cute-dbt#121) must survive comment-stripping",
+            stripped_css(BASE_CSS).contains("[hidden]{display:none!important;}"),
+            "the [hidden] override (cute-dbt#121) must survive comment-stripping \
+             in partials/base.css",
+        );
+    }
+
+    #[test]
+    fn the_tokens_partial_carries_the_banner_and_all_eight_theme_blocks() {
+        assert!(
+            TOKENS_CSS.contains("cute-dbt design tokens v1"),
+            "tokens.css head banner",
+        );
+        assert!(
+            TOKENS_CSS
+                .trim_end()
+                .ends_with("/* end of cute-dbt design tokens v1 (cute-dbt#242) */"),
+            "tokens.css end-of-file sentinel (truncation guard)",
+        );
+        // The design-system root carries ALL EIGHT theme blocks — exactly
+        // one block per non-default theme (light is the bare :root) and
+        // none anywhere else's job to define (report.css keeps only
+        // surface-scoped, theme-conditional AA overrides).
+        let live = stripped_css(TOKENS_CSS);
+        for theme in [
+            "dark",
+            "tokyo",
+            "solarized",
+            "gruvbox",
+            "dracula",
+            "latte",
+            "rosepine",
+        ] {
+            assert_eq!(
+                live.matches(&format!(":root[data-theme=\"{theme}\"]{{"))
+                    .count(),
+                1,
+                "tokens.css carries exactly one [data-theme={theme}] block",
+            );
+        }
+        assert!(
+            live.contains(":root{"),
+            "tokens.css carries the :root semantic-token (light default) block",
+        );
+        // No theme BLOCK may remain in the report remainder — only
+        // surface-scoped overrides (`:root[data-theme=..] .selector`),
+        // whose stripped form is never followed directly by `{`.
+        let report_live = stripped_css(REPORT_CSS);
+        for theme in [
+            "dark",
+            "tokyo",
+            "solarized",
+            "gruvbox",
+            "dracula",
+            "latte",
+            "rosepine",
+        ] {
+            assert_eq!(
+                report_live
+                    .matches(&format!(":root[data-theme=\"{theme}\"]{{"))
+                    .count(),
+                0,
+                "report.css must not re-grow a bare [data-theme={theme}] theme \
+                 block — the token partial is the one design-system root",
+            );
+        }
+    }
+
+    #[test]
+    fn the_base_partial_carries_the_banner_and_the_shared_chassis() {
+        assert!(
+            BASE_CSS.contains("cute-dbt base chassis v1"),
+            "base.css head banner",
+        );
+        assert!(
+            BASE_CSS
+                .trim_end()
+                .ends_with("/* end of cute-dbt base chassis v1 (cute-dbt#242) */"),
+            "base.css end-of-file sentinel (truncation guard)",
+        );
+        // The body token skin lives here; the body GEOMETRY must NOT (it
+        // is cascade-order-sensitive against the report's 720px media
+        // query and stays in report.css — see the base.css banner).
+        let live = stripped_css(BASE_CSS);
+        assert!(
+            live.contains("html{background:var(--bg);}"),
+            "base.css skins <html> with the --bg token",
+        );
+        assert!(
+            !live.contains("max-width") && !live.contains("font-size"),
+            "base.css must carry no body geometry (order-sensitive; report.css's lane)",
         );
     }
 }

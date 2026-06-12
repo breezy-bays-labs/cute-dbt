@@ -9,54 +9,76 @@
 {{ sakura_css|safe }}
 </style>
 <style>
+{# cute-dbt#242 — the SHARED design system: the semantic token layer + all
+   eight [data-theme] blocks (partials/tokens.css — the design-system root,
+   extracted from report.css, identical bytes to the report's include) and
+   the minimal cross-family page chassis (partials/base.css). The page
+   styles below key on these tokens; the shared appearance engine
+   (appearance.js, end of body) applies the saved cute-dbt.appearance.v1
+   attributes the token layer reacts to. #}
+{% include "partials/tokens.css" %}
+{% include "partials/base.css" %}
+</style>
+<style>
 {# cute-dbt#100 — first-party explore-page chrome. Since cute-dbt#102
    the page carries the unit-test VIEWER (the shared test-card partial +
    the explore-tests.js engine) above the server-rendered per-model
    index; it still embeds no Mermaid, no DataTables, no jQuery and no
-   graph engine. #}
+   graph engine. Re-expressed on the shared semantic tokens at
+   cute-dbt#242 (values mapped, not redesigned) so all eight themes
+   apply; the not-compiled chip keeps the cross-page fixed status
+   vocabulary (the dag page's canvas-paired dashed amber). #}
 body { max-width: 72rem; }
+/* generic code/kbd surfaces re-skin with theme tokens (the report's
+   .td-defined-in idiom, cute-dbt#240): Sakura's constant #f1f1f1 fill is
+   illegible under the dark themes' near-white --text. */
+code, kbd { background: var(--bg-alt); color: var(--text); }
 .explore-header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
 .explore-header h1 { margin-bottom: 0.25rem; }
 .explore-nav a { font-size: 0.95rem; }
-.explore-counts { color: #555; font-size: 0.9rem; }
-.explore-model { border-top: 1px solid #ddd; padding-top: 0.75rem; margin-top: 0.75rem; }
+.explore-counts { color: var(--text-muted); font-size: 0.9rem; }
+.explore-model { border-top: 1px solid var(--border); padding-top: 0.75rem; margin-top: 0.75rem; }
 .explore-model h2 { margin-bottom: 0.2rem; }
-.model-path { color: #555; font-size: 0.85rem; margin: 0 0 0.4rem; }
-.not-compiled-badge { font-size: 0.7em; vertical-align: middle; padding: 0.1rem 0.45rem; border: 1.5px dashed #b07400; border-radius: 4px; background: #f4f4f5; color: #1c1c1f; }
+.model-path { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 0.4rem; }
+.not-compiled-badge { font-size: 0.7em; vertical-align: middle; padding: 0.1rem 0.45rem; border: 1.5px dashed #b07400; border-radius: 4px; background: var(--dag-transform-fill); color: var(--dag-node-text); }
 .explore-tests { margin-bottom: 0.5rem; }
-.explore-test .test-shape { color: #555; font-size: 0.85rem; }
-.explore-test .test-description { color: #555; font-size: 0.9rem; margin: 0.1rem 0 0; }
-.no-tests { color: #555; font-style: italic; }
-.explore-empty { color: #555; font-style: italic; }
+.explore-test .test-shape { color: var(--text-muted); font-size: 0.85rem; }
+.explore-test .test-description { color: var(--text-muted); font-size: 0.9rem; margin: 0.1rem 0 0; }
+.no-tests { color: var(--text-muted); font-style: italic; }
+.explore-empty { color: var(--text-muted); font-style: italic; }
 /* cute-dbt#102 — explore-local styling for the SHARED test-card partial
-   (report.html styles the same markup through its chassis CSS, which
-   this light page deliberately does not embed). */
-.explore-viewer { border-top: 1px solid #ddd; padding-top: 0.75rem; margin-top: 0.75rem; }
+   (report.html styles the same markup through its report-specific chassis
+   remainder, which this light page deliberately does not embed — only the
+   shared tokens + base partials above). */
+.explore-viewer { border-top: 1px solid var(--border); padding-top: 0.75rem; margin-top: 0.75rem; }
 .explore-viewer > h2 { margin-bottom: 0.4rem; }
-.test-card { border: 1px solid #c5c5cc; border-radius: 6px; padding: 0.75rem 1rem; background: #fcfcfd; }
+.test-card { border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem 1rem; background: var(--surface); }
 .test-card-head { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
 .test-select-field label { font-weight: 600; margin-right: 0.4rem; }
 /* Explore is full-manifest by design: there is no updated/context split,
    so the partial's scope toggle is inert chrome here — hidden, not
    forked out of the shared markup. */
 .test-mode-toggle { display: none; }
-.test-badges .tag-badge { display: inline-block; font-size: 0.75rem; color: #1c1c1f; border: 1px solid #c5c5cc; border-radius: 4px; padding: 0 0.35rem; background: #f4f4f5; margin-right: 0.25rem; }
-.test-description { color: #333; margin: 0.5rem 0 0; }
-.test-defined-in { color: #555; font-size: 0.85rem; margin: 0.3rem 0 0; }
+.test-badges .tag-badge { display: inline-block; font-size: 0.75rem; color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.35rem; background: var(--surface-2); margin-right: 0.25rem; }
+.test-description { color: var(--text); margin: 0.5rem 0 0; }
+.test-defined-in { color: var(--text-muted); font-size: 0.85rem; margin: 0.3rem 0 0; }
 .panel-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.75rem; }
-.panel { flex: 1 1 22rem; min-width: 0; border: 1px solid #c5c5cc; border-radius: 6px; padding: 0.6rem 0.8rem; background: #fcfcfd; }
+.panel { flex: 1 1 22rem; min-width: 0; border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.8rem; background: var(--surface); }
 .panel-header { display: flex; align-items: baseline; gap: 0.6rem; }
 .panel-header h2 { font-size: 1.1rem; margin: 0 0 0.4rem; }
 .table-header { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
 .table-title { margin: 0.4rem 0 0.2rem; font-size: 0.95rem; }
-.row-count-badge, .format-badge, .this-badge { font-size: 0.75rem; color: #555; border: 1px solid #c5c5cc; border-radius: 4px; padding: 0 0.35rem; background: #f4f4f5; }
-.fixture-provenance { font-size: 0.8rem; color: #555; }
+.row-count-badge, .format-badge, .this-badge { font-size: 0.75rem; color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.35rem; background: var(--surface-2); }
+.fixture-provenance { font-size: 0.8rem; color: var(--text-muted); }
 table.given-table, table.expected-table { font-size: 0.85rem; margin: 0.3rem 0 0.6rem; }
-.cell-null { color: #888; font-style: italic; }
-.empty-hint, .given-empty { color: #555; font-style: italic; }
-.sql-block { font-size: 0.85rem; }
-.test-jump { background: none; border: none; padding: 0; color: #1d7484; font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
-.test-jump:hover, .test-jump:focus { color: #144f5a; }
+/* Sakura's constant #f1f1f1 hairline flares against the dark themes */
+table.given-table th, table.given-table td,
+table.expected-table th, table.expected-table td { border-color: var(--border); }
+.cell-null { color: var(--text-muted); font-style: italic; }
+.empty-hint, .given-empty { color: var(--text-muted); font-style: italic; }
+.sql-block { font-size: 0.85rem; background: var(--code-bg); color: var(--text); }
+.test-jump { background: none; border: none; padding: 0; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
+.test-jump:hover, .test-jump:focus { color: var(--accent-hover); }
 </style>
 </head>
 <body>
@@ -109,6 +131,14 @@ table.given-table, table.expected-table { font-size: 0.85rem; margin: 0.3rem 0 0
    carrier id so payload-consuming tooling reads both surfaces the same
    way; the V3 unit-test viewer renders from it. #}
 <script type="application/json" id="cute-dbt-data">{{ payload_json|safe }}</script>
+<script>
+{# cute-dbt#242 — the SHARED appearance engine: reads the saved
+   cute-dbt.appearance.v1 appearance and applies the html-level attributes
+   the shared token partial keys on, so this page honors the same saved
+   theme as the report. Read-only here — the explore-side settings
+   affordance is cute-dbt#219's lane. #}
+{{ appearance_js|safe }}
+</script>
 <script>
 {# cute-dbt#102 — the first-party explore tests viewer (selector
    population, given/expected fixture grids off the Rust FixtureTable

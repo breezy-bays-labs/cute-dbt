@@ -10,11 +10,17 @@
 {{ datatables_css|safe }}
 </style>
 <style>
-{# cute-dbt#177 — the first-party report chassis (semantic tokens, five
-   [data-theme] blocks, four html[data-style] packs, density layer, and
-   the tokenized component rules). Embedded from templates/report.css via
-   asset_embed::REPORT_CSS; banner-pin + comment-balance tests guard the
-   include. Vendored Sakura + DataTables stay in the block above. #}
+{# cute-dbt#177 / cute-dbt#242 — the first-party design system, re-layered
+   into shared askama partials: partials/tokens.css (the semantic token
+   layer + all eight [data-theme] blocks — the design-system ROOT, shared
+   verbatim with the explore pages) and partials/base.css (the minimal
+   cross-family page chassis), followed by the report-specific remainder
+   (style packs, chrome, components, reconciliation + coverage layers)
+   embedded from templates/report.css via asset_embed::REPORT_CSS.
+   Banner-pin + comment-balance tests guard all three. Vendored Sakura +
+   DataTables stay in the block above. #}
+{% include "partials/tokens.css" %}
+{% include "partials/base.css" %}
 {{ report_css|safe }}
 </style>
 </head>
@@ -378,11 +384,23 @@
 {{ cyto_dag_js|safe }}
 </script>
 <script>
-{# cute-dbt#178 — the appearance engine (theme / style / accent / density /
-   diff-style / diff-layout + localStorage persistence + DataTables dark
-   sync), embedded from templates/theme.js via asset_embed::THEME_JS. Runs
-   after the interaction engine so its boot can re-tint the DAG through the
-   __cuteRerenderDag hook. #}
+{# cute-dbt#242 — the SHARED appearance engine: reads cute-dbt.appearance.v1
+   (localStorage, in-memory fallback) and applies the html-level appearance
+   attributes the token partial keys on. Shared verbatim with the explore
+   pages, so every page family honors the same saved appearance. Embedded
+   from templates/appearance.js via asset_embed::APPEARANCE_JS; parses
+   BEFORE theme.js (the report-only settings UI), which drives it through
+   window.CuteAppearance. #}
+{{ appearance_js|safe }}
+</script>
+<script>
+{# cute-dbt#178 / cute-dbt#242 — the report-only appearance settings UI
+   (the settings panel's theme / style / accent / density / diff-layout /
+   engine / coverage controls + DataTables reflow + the DAG-engine
+   dispatch), embedded from templates/theme.js via asset_embed::THEME_JS.
+   The load/apply/persist core moved to the shared appearance engine above
+   (cute-dbt#242). Runs after the interaction engine so its boot can
+   re-tint the DAG through the __cuteRerenderDag hook. #}
 {{ theme_js|safe }}
 </script>
 </body>
