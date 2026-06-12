@@ -500,6 +500,43 @@ pub struct Node {
     /// wire string (fusion `Option<String>`). `None` when undeclared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     deprecation_date: Option<String>,
+    /// The node's fully-qualified name path (cute-dbt#257) —
+    /// `[package, ...folder components..., name(.vN)]`, built by the
+    /// engine from the package name + the resource-path-stripped file
+    /// path (fusion `get_node_fqn`, `dbt-parser` `utils.rs:132-159` @
+    /// `9977b6cb…`). The config-tree prefix-matcher input (#262 C2):
+    /// a `dbt_project.yml` `models: <pkg>: <folder>: +config` path is
+    /// exactly an fqn prefix. Populated on every node of both committed
+    /// real fixtures; empty for pre-#257 synthetic fixtures.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    fqn: Vec<String>,
+    /// Model-level declared constraints (cute-dbt#257) — the static-ERD
+    /// edge input (FK `to`/`to_columns`) and the contract surface. Both
+    /// engines emit `[]` when none are declared.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    constraints: Vec<Constraint>,
+    /// The engine-INFERRED primary-key column set (cute-dbt#257) —
+    /// fusion `ManifestModel.primary_key: Option<Vec<String>>`
+    /// (`manifest_nodes.rs:782+` @ `9977b6cb…`). Derived by the engine
+    /// from PK constraints and `unique`+`not_null` tests; POPULATED on real
+    /// wire for most models (both committed fixtures carry e.g.
+    /// `["payer_key"]`) — the grain-intelligence sibling of
+    /// `config.unique_key`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    primary_key: Vec<String>,
+    /// The contracted schema's checksum from the node's TOP-LEVEL
+    /// `contract` block (cute-dbt#257), hoisted flat (the
+    /// `config.contract.enforced` precedent). dbt-core emits a hex
+    /// string when the contract is enforced and `null` otherwise;
+    /// fusion 2.0-preview omits the key even when enforced
+    /// (live-verified) — `None` covers both unset shapes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    contract_checksum: Option<String>,
+    /// Per-column facts beyond `data_type`/description (cute-dbt#257):
+    /// meta / tags / `policy_tags` / constraints. Only columns with at
+    /// least one fact appear (the `column_descriptions` precedent).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    column_facts: BTreeMap<String, ColumnFacts>,
 }
 
 impl Node {
@@ -543,7 +580,45 @@ impl Node {
             version: None,
             latest_version: None,
             deprecation_date: None,
+            fqn: Vec::new(),
+            constraints: Vec::new(),
+            primary_key: Vec::new(),
+            contract_checksum: None,
+            column_facts: BTreeMap::new(),
         }
+    }
+
+    /// Attach the node's fully-qualified name path (cute-dbt#257).
+    /// Builder for the same reason as
+    /// [`Self::with_column_descriptions`] — no constructor churn.
+    #[must_use]
+    pub fn with_fqn(mut self, fqn: Vec<String>) -> Self {
+        self.fqn = fqn;
+        self
+    }
+
+    /// Attach the contract family (cute-dbt#257): model-level declared
+    /// `constraints`, the engine-inferred `primary_key`, and the
+    /// contracted schema's `contract_checksum`.
+    #[must_use]
+    pub fn with_contract_facts(
+        mut self,
+        constraints: Vec<Constraint>,
+        primary_key: Vec<String>,
+        contract_checksum: Option<String>,
+    ) -> Self {
+        self.constraints = constraints;
+        self.primary_key = primary_key;
+        self.contract_checksum = contract_checksum;
+        self
+    }
+
+    /// Attach the per-column facts map (cute-dbt#257) — the adapter
+    /// passes only columns with at least one fact.
+    #[must_use]
+    pub fn with_column_facts(mut self, column_facts: BTreeMap<String, ColumnFacts>) -> Self {
+        self.column_facts = column_facts;
+        self
     }
 
     /// Attach the node's identity fields (cute-dbt#256): the authored
@@ -813,6 +888,41 @@ impl Node {
     #[must_use]
     pub fn deprecation_date(&self) -> Option<&str> {
         self.deprecation_date.as_deref()
+    }
+
+    /// The node's fully-qualified name path (cute-dbt#257) —
+    /// `[package, ...folders..., name]`. Empty for pre-#257 fixtures.
+    #[must_use]
+    pub fn fqn(&self) -> &[String] {
+        &self.fqn
+    }
+
+    /// Model-level declared constraints (cute-dbt#257).
+    #[must_use]
+    pub fn constraints(&self) -> &[Constraint] {
+        &self.constraints
+    }
+
+    /// The engine-inferred primary-key column set (cute-dbt#257).
+    /// Empty when the engine could not infer one.
+    #[must_use]
+    pub fn primary_key(&self) -> &[String] {
+        &self.primary_key
+    }
+
+    /// The contracted schema's checksum (cute-dbt#257) — `None` for
+    /// unenforced contracts, every fusion 2.0-preview manifest
+    /// (live-verified omission), and pre-#257 fixtures.
+    #[must_use]
+    pub fn contract_checksum(&self) -> Option<&str> {
+        self.contract_checksum.as_deref()
+    }
+
+    /// Per-column facts beyond `data_type`/description (cute-dbt#257) —
+    /// only columns with at least one fact appear.
+    #[must_use]
+    pub fn column_facts(&self) -> &BTreeMap<String, ColumnFacts> {
+        &self.column_facts
     }
 
     /// The node's bare name for `ref(...)` / `models:`-entry / display
@@ -1209,6 +1319,235 @@ impl Group {
     #[must_use]
     pub fn owner(&self) -> Option<&Owner> {
         self.owner.as_ref()
+    }
+}
+
+/// A declared dbt constraint (cute-dbt#257) — model-level or
+/// column-level. The static-ERD edge input (FK `to`/`to_columns` +
+/// `relationships` tests) and the contract-intelligence surface.
+///
+/// One POD for both levels, mirroring the wire: fusion splits
+/// `ModelConstraint` (`dbt-schemas` `properties/model_properties.rs:31-51`
+/// @ `9977b6cb…`, with `columns`) from the column `Constraint`
+/// (`common.rs:888-906`, without) but the shapes are otherwise
+/// identical — here `columns` simply stays empty on column-level
+/// entries. Deserializes the wire verbatim (the `Checksum`/`DependsOn`
+/// reuse precedent — no `Wire*` twin): every field defaults, unknown
+/// siblings (`warn_unenforced`/`warn_unsupported`) are ignored, and a
+/// missing `type` degrades to the [`ConstraintKind::Other`] arm rather
+/// than failing the parse (ADR-5).
+///
+/// **Engine divergence on FK `to` (live-verified 2026-06-11):**
+/// dbt-core 1.11 RESOLVES it to the quoted relation
+/// (`"db"."schema"."dim_payers"`), fusion 2.0-preview keeps the
+/// AUTHORED `ref('dim_payers')`. Stored verbatim — the ERD consumer
+/// owns the normalization.
+// `constraint_type` (clippy::struct_field_names: starts with the
+// struct's name) — the wire key is `type`, a Rust keyword;
+// `constraint_type` keeps the field and its accessor self-describing.
+// The Exposure `exposure_type` allow precedent.
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Constraint {
+    /// The wire `type` string, verbatim ([`Self::kind`] types it).
+    #[serde(rename = "type", default, skip_serializing_if = "String::is_empty")]
+    constraint_type: String,
+    /// Constrained columns — model-level constraints only (a
+    /// column-level constraint's column is its map key).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    columns: Vec<String>,
+    /// `check`/`custom` constraint expression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expression: Option<String>,
+    /// Optional constraint name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// FK target relation — engine-divergent shape, verbatim (see type
+    /// docs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    to: Option<String>,
+    /// FK target columns. Both engines emit `[]` when unset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    to_columns: Vec<String>,
+}
+
+/// The typed dbt constraint vocabulary (cute-dbt#257) — the six wire
+/// kinds plus the unknown-tolerant [`Self::Other`] arm (fusion
+/// `ConstraintType`, `dbt-schemas` `common.rs:917-925` @ `9977b6cb…`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstraintKind {
+    /// `primary_key`
+    PrimaryKey,
+    /// `foreign_key` — carries [`Constraint::to`]/[`Constraint::to_columns`].
+    ForeignKey,
+    /// `unique`
+    Unique,
+    /// `not_null`
+    NotNull,
+    /// `check` — carries [`Constraint::expression`].
+    Check,
+    /// `custom`
+    Custom,
+    /// Anything outside the dbt vocabulary (or a missing `type`) —
+    /// present but not statically typed, never an error (ADR-5).
+    Other,
+}
+
+impl Constraint {
+    /// Canonical constructor — every field is owned and explicit.
+    #[must_use]
+    pub fn new(
+        constraint_type: impl Into<String>,
+        columns: Vec<String>,
+        expression: Option<String>,
+        name: Option<String>,
+        to: Option<String>,
+        to_columns: Vec<String>,
+    ) -> Self {
+        Self {
+            constraint_type: constraint_type.into(),
+            columns,
+            expression,
+            name,
+            to,
+            to_columns,
+        }
+    }
+
+    /// The wire `type` string, verbatim.
+    #[must_use]
+    pub fn constraint_type(&self) -> &str {
+        &self.constraint_type
+    }
+
+    /// The typed constraint vocabulary — unknown-tolerant.
+    #[must_use]
+    pub fn kind(&self) -> ConstraintKind {
+        match self.constraint_type.as_str() {
+            "primary_key" => ConstraintKind::PrimaryKey,
+            "foreign_key" => ConstraintKind::ForeignKey,
+            "unique" => ConstraintKind::Unique,
+            "not_null" => ConstraintKind::NotNull,
+            "check" => ConstraintKind::Check,
+            "custom" => ConstraintKind::Custom,
+            _ => ConstraintKind::Other,
+        }
+    }
+
+    /// Constrained columns (model-level constraints only).
+    #[must_use]
+    pub fn columns(&self) -> &[String] {
+        &self.columns
+    }
+
+    /// `check`/`custom` expression, when declared.
+    #[must_use]
+    pub fn expression(&self) -> Option<&str> {
+        self.expression.as_deref()
+    }
+
+    /// Constraint name, when declared.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// FK target relation, verbatim (engine-divergent shape — see type
+    /// docs).
+    #[must_use]
+    pub fn to(&self) -> Option<&str> {
+        self.to.as_deref()
+    }
+
+    /// FK target columns.
+    #[must_use]
+    pub fn to_columns(&self) -> &[String] {
+        &self.to_columns
+    }
+}
+
+/// The cute-dbt#257 column-level extension — the per-column facts
+/// beyond the already-ingested `data_type` ([`Node::columns`]) and
+/// `description` ([`Node::column_descriptions`]): authored `meta`,
+/// resolved `tags`, `BigQuery` `policy_tags`, and declared `constraints`
+/// (fusion `DbtColumn`, `dbt-schemas` `dbt_column.rs:38-60` @
+/// `9977b6cb…`). Grouped in one POD (rather than four more parallel
+/// maps) since the whole family arrived together; only columns with at
+/// least one fact appear in [`Node::column_facts`] (the
+/// `column_descriptions` drop-empty precedent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnFacts {
+    /// Authored column `meta`, untyped passthrough (the `config.meta`
+    /// precedent). dbt-core emits `{}` when unset — dropped to `None`
+    /// by the adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    meta: Option<Value>,
+    /// Resolved column tags. fusion authoring requires column
+    /// `meta`/`tags` under the column's `config:` (top-level is a
+    /// dbt1060 error, live-verified) while dbt-core accepts top-level —
+    /// both engines SERIALIZE the merged result top-level on the wire,
+    /// which is what the adapter reads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    /// `BigQuery` policy tags — a first-class fusion `DbtColumn` field
+    /// (column governance that escapes `meta`); dbt-core 1.11 does not
+    /// serialize the key at all (live-verified).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    policy_tags: Vec<String>,
+    /// Declared column-level constraints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    constraints: Vec<Constraint>,
+}
+
+impl ColumnFacts {
+    /// Canonical constructor — every field is owned and explicit.
+    #[must_use]
+    pub fn new(
+        meta: Option<Value>,
+        tags: Vec<String>,
+        policy_tags: Vec<String>,
+        constraints: Vec<Constraint>,
+    ) -> Self {
+        Self {
+            meta,
+            tags,
+            policy_tags,
+            constraints,
+        }
+    }
+
+    /// Authored column `meta`, when non-empty.
+    #[must_use]
+    pub fn meta(&self) -> Option<&Value> {
+        self.meta.as_ref()
+    }
+
+    /// Resolved column tags.
+    #[must_use]
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+
+    /// `BigQuery` policy tags (fusion first-class field).
+    #[must_use]
+    pub fn policy_tags(&self) -> &[String] {
+        &self.policy_tags
+    }
+
+    /// Declared column-level constraints.
+    #[must_use]
+    pub fn constraints(&self) -> &[Constraint] {
+        &self.constraints
+    }
+
+    /// `true` when the entry carries no fact at all — the adapter never
+    /// stores an empty one.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.meta.is_none()
+            && self.tags.is_empty()
+            && self.policy_tags.is_empty()
+            && self.constraints.is_empty()
     }
 }
 
@@ -2398,6 +2737,267 @@ mod tests {
         .with_groups(groups);
         assert!(m.group_by_name("finance").is_some());
         assert!(m.group_by_name("marketing").is_none());
+    }
+
+    // ===== cute-dbt#257 — contract + column + structure wire family =====
+
+    #[test]
+    fn constraint_constructor_accessors_and_kind_vocabulary() {
+        let fk = Constraint::new(
+            "foreign_key",
+            vec!["payer_key".to_owned()],
+            None,
+            Some("fk_payer".to_owned()),
+            Some("ref('dim_payers')".to_owned()),
+            vec!["payer_key".to_owned()],
+        );
+        assert_eq!(fk.constraint_type(), "foreign_key");
+        assert_eq!(fk.kind(), ConstraintKind::ForeignKey);
+        assert_eq!(fk.columns(), ["payer_key".to_owned()]);
+        assert_eq!(fk.name(), Some("fk_payer"));
+        assert_eq!(fk.to(), Some("ref('dim_payers')"));
+        assert_eq!(fk.to_columns(), ["payer_key".to_owned()]);
+        assert_eq!(fk.expression(), None);
+
+        // The full dbt vocabulary maps; anything else is Other —
+        // unknown-tolerant, never an error (exhaustive over the set,
+        // the StateComparator test posture).
+        for (raw, kind) in [
+            ("primary_key", ConstraintKind::PrimaryKey),
+            ("foreign_key", ConstraintKind::ForeignKey),
+            ("unique", ConstraintKind::Unique),
+            ("not_null", ConstraintKind::NotNull),
+            ("check", ConstraintKind::Check),
+            ("custom", ConstraintKind::Custom),
+            ("exotic_future_kind", ConstraintKind::Other),
+            ("", ConstraintKind::Other),
+        ] {
+            let c = Constraint::new(raw, Vec::new(), None, None, None, Vec::new());
+            assert_eq!(c.kind(), kind, "raw = {raw:?}");
+        }
+    }
+
+    #[test]
+    fn constraint_deserializes_both_engine_wire_shapes() {
+        // dbt-core 1.11 dialect (live-probed): every key present, nulls
+        // for unset, `to` RESOLVED to the quoted relation, and the
+        // unconsumed warn_* siblings present.
+        let core = r#"{
+            "type": "foreign_key",
+            "name": null,
+            "expression": null,
+            "warn_unenforced": true,
+            "warn_unsupported": true,
+            "to": "\"memory\".\"main_marts\".\"dim_payers\"",
+            "to_columns": ["payer_key"],
+            "columns": ["payer_key"]
+        }"#;
+        let c: Constraint = serde_json::from_str(core).unwrap();
+        assert_eq!(c.kind(), ConstraintKind::ForeignKey);
+        assert_eq!(c.to(), Some("\"memory\".\"main_marts\".\"dim_payers\""));
+        assert_eq!(c.columns(), ["payer_key".to_owned()]);
+
+        // fusion 2.0-preview dialect (live-probed): `to` stays the
+        // AUTHORED ref expression; warn_* are null.
+        let fusion = r#"{
+            "type": "foreign_key",
+            "expression": null,
+            "name": null,
+            "to": "ref('orders')",
+            "to_columns": ["customer_id"],
+            "columns": ["customer_id"],
+            "warn_unsupported": null,
+            "warn_unenforced": null
+        }"#;
+        let c: Constraint = serde_json::from_str(fusion).unwrap();
+        assert_eq!(c.to(), Some("ref('orders')"));
+
+        // Column-level shape: no `columns` key at all (the fusion
+        // Constraint vs ModelConstraint type split) + a bare minimum
+        // entry tolerates every absent key.
+        let column_level = r#"{ "type": "not_null" }"#;
+        let c: Constraint = serde_json::from_str(column_level).unwrap();
+        assert_eq!(c.kind(), ConstraintKind::NotNull);
+        assert!(c.columns().is_empty());
+        assert!(c.to().is_none());
+        assert!(c.to_columns().is_empty());
+
+        // A missing `type` degrades to Other (tolerant), not an error.
+        let degenerate = "{}";
+        let c: Constraint = serde_json::from_str(degenerate).unwrap();
+        assert_eq!(c.kind(), ConstraintKind::Other);
+    }
+
+    #[test]
+    fn constraint_serde_round_trips_and_omits_empty_fields() {
+        let c = Constraint::new(
+            "primary_key",
+            vec!["encounter_key".to_owned()],
+            None,
+            None,
+            None,
+            Vec::new(),
+        );
+        let json = serde_json::to_value(&c).unwrap();
+        let obj = json.as_object().unwrap();
+        assert_eq!(obj["type"], "primary_key");
+        for key in ["expression", "name", "to", "to_columns"] {
+            assert!(!obj.contains_key(key), "unset `{key}` must be omitted");
+        }
+        let back: Constraint = serde_json::from_value(json).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn column_facts_constructor_accessors_and_emptiness() {
+        let facts = ColumnFacts::new(
+            Some(serde_json::json!({ "pii": false, "owner": "clinical-quality" })),
+            vec!["dimension_key".to_owned()],
+            Vec::new(),
+            vec![Constraint::new(
+                "not_null",
+                Vec::new(),
+                None,
+                None,
+                None,
+                Vec::new(),
+            )],
+        );
+        assert_eq!(
+            facts.meta().and_then(|m| m.get("owner")),
+            Some(&serde_json::json!("clinical-quality"))
+        );
+        assert_eq!(facts.tags(), ["dimension_key".to_owned()]);
+        assert!(facts.policy_tags().is_empty());
+        assert_eq!(facts.constraints().len(), 1);
+        assert!(!facts.is_empty());
+        assert!(
+            ColumnFacts::new(None, Vec::new(), Vec::new(), Vec::new()).is_empty(),
+            "a fact-free entry is empty — the adapter never stores one"
+        );
+    }
+
+    #[test]
+    fn column_facts_serde_round_trips() {
+        let facts = ColumnFacts::new(
+            Some(serde_json::json!({ "pii": true })),
+            vec!["governed".to_owned()],
+            vec!["projects/example/locations/us/taxonomies/1/policyTags/2".to_owned()],
+            vec![Constraint::new(
+                "unique",
+                Vec::new(),
+                None,
+                None,
+                None,
+                Vec::new(),
+            )],
+        );
+        let back: ColumnFacts =
+            serde_json::from_str(&serde_json::to_string(&facts).unwrap()).unwrap();
+        assert_eq!(back, facts);
+    }
+
+    #[test]
+    fn node_new_defaults_structure_and_contract_fields_empty() {
+        let n = bare_node("model.shop.bare");
+        assert!(n.fqn().is_empty());
+        assert!(n.constraints().is_empty());
+        assert!(n.primary_key().is_empty());
+        assert!(n.contract_checksum().is_none());
+        assert!(n.column_facts().is_empty());
+    }
+
+    #[test]
+    fn node_structure_and_contract_builders_set_fields() {
+        let mut facts = BTreeMap::new();
+        facts.insert(
+            "payer_key".to_owned(),
+            ColumnFacts::new(
+                None,
+                vec!["dimension_key".to_owned()],
+                Vec::new(),
+                Vec::new(),
+            ),
+        );
+        let n = bare_node("model.shop.fct_encounters")
+            .with_fqn(vec![
+                "shop".to_owned(),
+                "marts".to_owned(),
+                "fct_encounters".to_owned(),
+            ])
+            .with_contract_facts(
+                vec![Constraint::new(
+                    "primary_key",
+                    vec!["encounter_key".to_owned()],
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                )],
+                vec!["encounter_key".to_owned()],
+                Some("0cb79927".to_owned()),
+            )
+            .with_column_facts(facts);
+        assert_eq!(n.fqn().len(), 3);
+        assert_eq!(n.fqn()[1], "marts");
+        assert_eq!(n.constraints()[0].kind(), ConstraintKind::PrimaryKey);
+        assert_eq!(n.primary_key(), ["encounter_key".to_owned()]);
+        assert_eq!(n.contract_checksum(), Some("0cb79927"));
+        assert_eq!(
+            n.column_facts()["payer_key"].tags(),
+            ["dimension_key".to_owned()]
+        );
+    }
+
+    #[test]
+    fn node_structure_fields_round_trip_through_serde() {
+        let n = bare_node("model.shop.x")
+            .with_fqn(vec!["shop".to_owned(), "x".to_owned()])
+            .with_contract_facts(
+                vec![Constraint::new(
+                    "check",
+                    Vec::new(),
+                    Some("id > 0".to_owned()),
+                    None,
+                    None,
+                    Vec::new(),
+                )],
+                vec!["id".to_owned()],
+                None,
+            );
+        let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
+        assert_eq!(back, n);
+        assert_eq!(back.constraints()[0].expression(), Some("id > 0"));
+    }
+
+    #[test]
+    fn node_serialization_omits_unset_257_fields_for_payload_byte_stability() {
+        let value = serde_json::to_value(bare_node("model.shop.x")).unwrap();
+        let obj = value.as_object().unwrap();
+        for key in [
+            "fqn",
+            "constraints",
+            "primary_key",
+            "contract_checksum",
+            "column_facts",
+        ] {
+            assert!(!obj.contains_key(key), "unset `{key}` must be omitted");
+        }
+    }
+
+    #[test]
+    fn node_without_257_fields_deserializes_from_pre_257_json() {
+        let json = r#"{
+            "id": "model.shop.x",
+            "resource_type": "model",
+            "checksum": { "name": "sha256", "checksum": "deadbeef" }
+        }"#;
+        let n: Node = serde_json::from_str(json).unwrap();
+        assert!(n.fqn().is_empty());
+        assert!(n.constraints().is_empty());
+        assert!(n.primary_key().is_empty());
+        assert!(n.contract_checksum().is_none());
+        assert!(n.column_facts().is_empty());
     }
 
     #[test]

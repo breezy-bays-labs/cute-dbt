@@ -323,7 +323,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "591d996f76b26271a5367aa945dabff13d34a5db5aa976f98e947742bcf348e6"
+sha256 = "2bf23e49cbb92fa6e7b19f32c0ed1ff1235aeed38d1bb77b4d981d753bae8545"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -402,7 +402,24 @@ added (synthetic example.com owner contact), entries copied byte-for- \
 byte, never committed to the playground repo — so the committed fixture \
 proves the real engine wire shape for the cute-dbt#256 \
 exposures/groups/per-node-group ingestion (the only #256 field families \
-absent from every committed fixture).\
+absent from every committed fixture). \
+cute-dbt#257's contract+column splice (current side only, same \
+throwaway-compile method — VERBATIM dbt-core 1.11.2 output): \
+fct_encounters' model-level `"constraints": []` gains a primary_key \
+entry (columns [encounter_key]) + a foreign_key entry with the \
+core-RESOLVED `to` relation ("memory"."main_marts"."dim_payers") and \
+to_columns [payer_key] — the live-verified core dialect (fusion keeps \
+the authored ref() instead); dim_payers' payer_key column object is \
+replaced wholesale with the engine-emitted one carrying meta \
+(pii/owner), tags [dimension_key], a not_null column constraint, and \
+the core-mirrored config copy. data_type stays null and the \
+description byte-identical, so no rendered surface moves. These are \
+the populated specimens for the cute-dbt#257 constraints/column-facts \
+ingestion (empty `[]`/`{}` everywhere else in the fixture is the real \
+unset shape; contract checksums stay the real `null` — an \
+enforced-contract specimen lives only in the PR's probe evidence, \
+since splicing one would pair implausibly with unenforced \
+config.contract).\
 """
 
 [[fixture]]
