@@ -20,16 +20,19 @@ handoff zips as historical input, not as the current contract.
 
 | Concern | Lives in | Consumed by |
 |---|---|---|
-| Design system: semantic tokens, all 8 `[data-theme]` blocks, style packs, density layer | `templates/report.css` | report page only (today — see "Planned change") |
+| **Design-system ROOT**: semantic tokens + all 8 `[data-theme]` blocks | `templates/partials/tokens.css` (askama `{% include %}`) | **both** page families (extracted from `report.css` at #242 — exact values, zero changes) |
+| Shared page chassis: `[hidden]`, html/body token skin, links, form controls | `templates/partials/base.css` (askama `{% include %}`) | **both** page families |
+| Report-specific design layers: style packs, settings chrome, tokenized components, density overrides, reconciliation + coverage layers (incl. the per-theme surface-scoped AA overrides) | `templates/report.css` | report page |
 | Report page shell | `templates/report.html` (askama) | `cute-dbt` report output (single self-contained HTML) |
 | Report interactivity (selectors, DAG views, diff renderers, fixture grids, settings panel) | `templates/interaction.js` | report page |
-| Theme engine: applies/persists appearance via localStorage key `cute-dbt.appearance.v1` | `templates/theme.js` | report page only (today) |
+| Shared appearance engine: reads/applies `cute-dbt.appearance.v1` (theme/style/density/accent/coverage attributes on `<html>`) | `templates/appearance.js` (`window.CuteAppearance`) | **both** page families |
+| Report-only appearance settings UI (settings-panel controls, DataTables reflow, DAG-engine dispatch) — drives the shared engine | `templates/theme.js` | report page |
 | Report-page Cytoscape preset layout (first-party, no layout plugin) | `templates/cyto-dag.js` | report page |
-| Explore pages | `templates/explore-dag.html`, `templates/explore-tests.html` + `templates/explore-lineage.js`, `templates/explore-cte.js`, `templates/explore-tests.js` | `cute-dbt explore` two-page output |
+| Explore pages (page styles re-expressed on the shared tokens at #242) | `templates/explore-dag.html`, `templates/explore-tests.html` + `templates/explore-lineage.js`, `templates/explore-cte.js`, `templates/explore-tests.js` | `cute-dbt explore` two-page output |
 | Shared markup partial (test card: given/expected fixture grids) | `templates/partials/test-card.html` (askama `{% include %}`) | **both** report and explore-tests |
 | Vendored frontend bundles + provenance (pin, SHA-256, SPDX) | `assets/` + `assets/MANIFEST.toml` | both page families |
 | Rendered, committed reference artifacts | `examples/*.html` (report: jaffle-shop, playground, diff-showcase) and `examples/explore/{dag,tests}.html` | what you should open and look at — these are byte-identity-gated in CI and regenerate on every change |
-| Design-system regression guards | `tests/headless_toggle.rs` (real-Chromium: theme application, WCAG contrast pins per surface per theme, tooltip behavior, layout containment) | CI |
+| Design-system regression guards | `tests/headless_toggle.rs` (real-Chromium: theme application, WCAG contrast pins per surface per theme, tooltip behavior, layout containment — report AND explore since #242) | CI |
 
 The 8 themes: `light` (default `:root`), `dark`, `solarized`, `latte`
 (Catppuccin), `rosepine` (Rosé Pine Dawn), `tokyo` (Tokyo Night),
@@ -101,30 +104,39 @@ These shipped after the pass-2 handoff and are **intentional**; do not
    at runtime. "Sharing" happens at the askama template layer
    (`{% include %}` partials), not via HTTP.
 
-## Current explore-page state (known gaps — design opportunity)
+## Current explore-page state
 
-The explore pages (`explore-dag.html`, `explore-tests.html`) shipped as
-functional V1 surfaces and **have not adopted the design system**:
+**The #242 extraction landed**: `templates/report.css` was re-layered
+into askama partials — `partials/tokens.css` (the 8 theme blocks +
+semantic tokens, exact current values, zero changes) and
+`partials/base.css` (the minimal shared page chassis) — included by
+**both** page families, plus a minimal shared appearance engine
+(`templates/appearance.js`, `window.CuteAppearance`) so the explore
+pages honor the saved `cute-dbt.appearance.v1` appearance and theme on
+all 8 themes. The explore inline `<style>` blocks now re-express on the
+shared tokens (values mapped, not redesigned); headless guards pin
+per-theme application + AA on key explore surfaces. **Design sessions
+must treat `templates/partials/tokens.css` as the design-system root.**
 
-- They embed Sakura plus small inline `<style>` blocks of hardcoded
-  light-mode values — no `[data-theme]` support, permanently light.
-- They do not load the theme engine and do not read
-  `cute-dbt.appearance.v1`, so they ignore the user's saved appearance.
-- The shared test-card markup renders identically to the report but is
-  styled divergently (tokenized/theme-aware in the report, hardcoded in
-  explore).
-- The lineage hover tooltip (`.lineage-tooltip`) is a one-off hardcoded
-  bubble that predates — and does not honor — the tooltip contract.
+One deliberate exception: legend/status chips paired to canvas-drawn
+colors (the lineage/CTE legend chips, the not-compiled / changed chips)
+keep the **fixed** canvas palette — the report's fixed-DAG-palette
+posture — so the legend can never desync from what the Cytoscape engines
+actually draw; fills/strokes with an exact token twin use the fixed
+`--dag-*` tokens, the rest keep their canvas literals.
+
+Remaining gaps (design opportunity):
+
+- The lineage hover tooltip (`.lineage-tooltip`) is a one-off bubble
+  that predates — and does not honor — the tooltip contract (its colors
+  are tokenized since #242; the contract retrofit is #241 design-pass
+  work).
 - No settings affordance (theme/density/style-pack picker) exists on
-  explore pages.
-
-**Planned change (tracked in issue #242):** `templates/report.css` is
-being re-layered into askama partials — a `tokens.css` partial (the 8
-theme blocks + semantic tokens, exact current values) plus base and
-page-specific layers — included by **both** page families, with a minimal
-shared appearance engine so explore honors the saved theme. After that
-lands, this file's source-of-truth map will be updated; design sessions
-should then treat the tokens partial as the design-system root.
+  explore pages — the saved appearance applies read-only. The
+  explore-side settings/coverage affordance is issue #219.
+- The report's style packs (`html[data-style]`) and density overrides
+  are report-only layers; the explore pages apply the attributes (one
+  cross-page attribute contract) but ship no rules keyed on them yet.
 
 ## What a returned design spec should look like
 
