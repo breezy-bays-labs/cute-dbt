@@ -534,9 +534,11 @@ fn gather_model_yaml_with_reader(
         };
         let outcome = match reader.read(path) {
             Ok(contents) => {
-                // The `models:` entry is keyed by the model's name — the
-                // final id segment (`model.<package>.<name>`).
-                let name = model_id.as_str().rsplit('.').next().unwrap_or_default();
+                // The `models:` entry is keyed by the model's AUTHORED
+                // name — the ingested wire `name` with the final-id-
+                // segment fallback (cute-dbt#256: a versioned model's
+                // leaf segment is the `.vN` suffix, never the name).
+                let name = node.bare_name();
                 match extract_model_block(&contents, name) {
                     Some(block) => ModelYamlOutcome::Found {
                         path: path.to_owned(),
@@ -1034,7 +1036,7 @@ fn resolve_scope_input(args: &ReportArgs) -> Result<ScopeInput, RunError> {
             .map(|selector| selector.kind())
             .collect();
         Ok(ScopeInput::Baseline {
-            manifest: baseline,
+            manifest: Box::new(baseline),
             sub_selectors,
         })
     } else if let Some(diff) = args.pr_diff.as_ref() {
@@ -1503,6 +1505,36 @@ mod tests {
                 assert!(diff.is_none(), "the gather never attaches a diff");
             }
             other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gather_model_yaml_resolves_a_versioned_model_by_ingested_name() {
+        // cute-dbt#256 (the #254 handoff): a versioned model's id leaf
+        // is the `.vN` version suffix — the schema file's `models:`
+        // entry is keyed by the AUTHORED name. The ingested wire `name`
+        // (Node::bare_name) is the lookup key; pre-#256 the slicer
+        // searched for `- name: v2` and degraded to EntryNotFound.
+        let model_id = "model.shop.dim_users.v2";
+        let manifest = manifest_with_models(vec![
+            model_node_with_patch(model_id, Some("models/schema.yml"))
+                .with_identity(Some("dim_users".to_owned()), Some("shop".to_owned())),
+        ]);
+        let mut entries = StdHashMap::new();
+        entries.insert(
+            "models/schema.yml".to_owned(),
+            StubResult::Ok("models:\n  - name: dim_users\n    description: a model\n".to_owned()),
+        );
+        let reader = StubReader { entries };
+
+        let result =
+            gather_model_yaml_with_reader(&reader, &manifest, &models_in_scope_of(&[model_id]));
+
+        match result.get(model_id).expect("outcome stored under model id") {
+            ModelYamlOutcome::Found { block, .. } => {
+                assert!(block.raw.contains("- name: dim_users"));
+            }
+            other => panic!("expected Found via the ingested name, got {other:?}"),
         }
     }
 

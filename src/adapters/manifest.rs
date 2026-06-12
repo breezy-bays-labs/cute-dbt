@@ -43,8 +43,9 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::domain::{
-    Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, PreflightError,
-    SourceNode, TestMetadata, UnitTest, UnitTestExpect, UnitTestGiven, UnitTestOverrides,
+    Checksum, DependsOn, Exposure, Group, Manifest, ManifestMetadata, Node, NodeConfig, NodeId,
+    Owner, PreflightError, SourceNode, TestMetadata, UnitTest, UnitTestExpect, UnitTestGiven,
+    UnitTestOverrides,
 };
 use crate::ports::ManifestSource;
 use serde_json::Value;
@@ -80,6 +81,10 @@ struct WireManifest {
     macros: HashMap<String, WireMacro>,
     #[serde(default)]
     sources: HashMap<String, WireSource>,
+    #[serde(default)]
+    exposures: HashMap<String, WireExposure>,
+    #[serde(default)]
+    groups: HashMap<String, WireGroup>,
 }
 
 /// Wire projection of one `nodes` entry.
@@ -103,7 +108,14 @@ struct WireManifest {
 #[derive(Debug, Deserialize)]
 struct WireNode {
     resource_type: String,
-    checksum: Checksum,
+    /// `Option<WireChecksum>` since cute-dbt#256 — the checksum-cliff
+    /// hardening. A required [`Checksum`] struct made one checksum-less
+    /// (or bare-string-checksum) node fail the WHOLE manifest parse, the
+    /// exact ADR-5 violation the issue names. Every shape now degrades
+    /// per node via [`fold_checksum`]; the dbt-faithful sentinel and the
+    /// comparison semantics are documented there.
+    #[serde(default)]
+    checksum: Option<WireChecksum>,
     #[serde(default)]
     compiled_code: Option<String>,
     #[serde(default)]
@@ -163,6 +175,41 @@ struct WireNode {
     /// both.
     #[serde(default)]
     patch_path: Option<String>,
+    /// Identity (cute-dbt#256): the node's authored bare name + owning
+    /// package (fusion `ManifestCommonAttributes.name`/`package_name`,
+    /// `dbt-schemas` `manifest/manifest_nodes.rs:84-88` @ `9977b6cb…`).
+    /// Always populated on both engines' real wire (verified on the
+    /// committed jaffle-shop + playground fixtures); empty strings are
+    /// dropped in translation so [`Node::bare_name`]'s leaf fallback
+    /// stays sound.
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    package_name: Option<String>,
+    /// Governance (cute-dbt#256): the model's group NAME + access level
+    /// (fusion `ManifestModel.group: Option<String>` / `access:
+    /// Option<Access>`, `manifest_nodes.rs:782+` @ `9977b6cb…`). Both
+    /// committed real fixtures emit `"group": null` + `"access":
+    /// "protected"` on every model (the null-fill shape); a live fusion
+    /// 2.0-preview.177 compile emits populated values and omits an
+    /// unset `group` entirely. `access` stays a tolerant string —
+    /// unknown future levels must never fail ingestion (ADR-5).
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    access: Option<String>,
+    /// Versioning (cute-dbt#256, deferred from #254): fusion
+    /// `StringOrInteger` on the wire (`dbt-schemas` `serde.rs:419-422`
+    /// @ `9977b6cb…`) — a live fusion compile emits the bare integer
+    /// `2`, so the untyped [`Value`] is normalized by
+    /// [`version_string`]. Both committed fixtures null-fill all three
+    /// on every (unversioned) model.
+    #[serde(default)]
+    version: Option<Value>,
+    #[serde(default)]
+    latest_version: Option<Value>,
+    #[serde(default)]
+    deprecation_date: Option<String>,
 }
 
 /// Strip the `<package>://` URI scheme off a wire `patch_path`,
@@ -175,6 +222,179 @@ fn strip_package_uri_scheme(path: String) -> String {
     match path.split_once("://") {
         Some((_, rest)) => rest.to_owned(),
         None => path,
+    }
+}
+
+/// Tolerant wire projection of a node's `checksum` (cute-dbt#256).
+///
+/// Mirrors fusion's `DbtChecksum` untagged enum (`dbt-schemas`
+/// `common.rs:929+` @ `9977b6cb…`): the wire value is the familiar
+/// `{name, checksum}` object **or** a bare hash string. The trailing
+/// [`Self::Other`] arm absorbs any other shape so one malformed checksum
+/// can never fail the whole manifest parse (ADR-5) — it degrades per
+/// node to the sentinel in [`fold_checksum`]. The object arm's fields
+/// default so a partial object keeps whatever it carried.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum WireChecksum {
+    Object {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        checksum: String,
+    },
+    Bare(String),
+    /// Catch-all: any other JSON shape is accepted and discarded
+    /// ([`serde::de::IgnoredAny`] — the payload is never read; the fold
+    /// substitutes the sentinel).
+    Other(serde::de::IgnoredAny),
+}
+
+/// Fold the tolerant wire checksum into the domain [`Checksum`]
+/// (cute-dbt#256 checksum-cliff hardening).
+///
+/// Absent / null / unrecognizable shapes become dbt's own no-checksum
+/// sentinel — `FileHash.empty()` = `{name: "none", checksum: ""}`
+/// (fusion `DbtChecksum::default`; the REAL wire value on every
+/// generic-test node in both committed fixtures). A bare string keeps
+/// the hex with no algorithm name (fusion's `DbtChecksum::String` arm).
+///
+/// Comparison semantics stay verbatim in `BodyChecksumModifier`,
+/// matching dbt exactly (fusion `check_modified_content`: identical
+/// checksums ⇒ unchanged): sentinel == sentinel deliberately compares
+/// EQUAL (fusion documents that a divergent sentinel name made every
+/// generic test appear state:modified on every run), while sentinel vs
+/// real DIFFERS — a unit-test target model whose checksum vanishes from
+/// one side is conservatively modified ⇒ in scope (fail-closed for
+/// in-scope unit-test targets, tolerant passthrough for everything
+/// else).
+fn fold_checksum(wire: Option<WireChecksum>) -> Checksum {
+    match wire {
+        Some(WireChecksum::Object { name, checksum }) => Checksum::new(name, checksum),
+        Some(WireChecksum::Bare(hex)) => Checksum::new("", hex),
+        Some(WireChecksum::Other(_)) | None => Checksum::new("none", ""),
+    }
+}
+
+/// Normalize a wire `version` / `latest_version` value (cute-dbt#256).
+///
+/// The wire is fusion `StringOrInteger` (`dbt-schemas` `serde.rs:419-422`
+/// @ `9977b6cb…`): a live fusion 2.0-preview compile emits the bare
+/// integer `2`, an authored string version passes verbatim. Integers
+/// render in decimal; fusion's empty-string default and every other
+/// shape (float, bool, object — not versions) degrade to `None`, never
+/// an error (ADR-5).
+fn version_string(value: Option<Value>) -> Option<String> {
+    match value? {
+        Value::String(s) if !s.is_empty() => Some(s),
+        Value::Number(n) if n.is_i64() || n.is_u64() => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Tolerant wire projection of a `DbtOwner` block (cute-dbt#256) —
+/// carried by groups and exposures. `email` is fusion
+/// `Option<StringOrArrayOfStrings>` (`dbt-schemas`
+/// `manifest/common.rs:39-44` @ `9977b6cb…`; dbt-core emits a single
+/// string), kept untyped here and normalized in [`Self::into_domain`].
+/// fusion `#[serialize_always]`s `name`, so `{"name": null}` is a real
+/// wire shape.
+#[derive(Debug, Default, Deserialize)]
+struct WireOwner {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    email: Option<Value>,
+}
+
+impl WireOwner {
+    /// Normalize into the domain [`Owner`]: a string email becomes a
+    /// one-element list, an array keeps its string elements, empty
+    /// strings drop everywhere, and an owner with no remaining content
+    /// collapses to `None` (the `WireUnitTestOverrides::into_grouped`
+    /// no-effective-content precedent).
+    fn into_domain(self) -> Option<Owner> {
+        let email: Vec<String> = match self.email {
+            Some(Value::String(s)) if !s.is_empty() => vec![s],
+            Some(Value::Array(items)) => items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Value::String(s) if !s.is_empty() => Some(s),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let name = self.name.filter(|n| !n.is_empty());
+        (name.is_some() || !email.is_empty()).then(|| Owner::new(name, email))
+    }
+}
+
+/// Wire projection of one top-level `exposures` entry (cute-dbt#256).
+///
+/// Like [`WireNode`]/[`WireSource`], no id field — the map key
+/// (`exposure.<package>.<name>`) is folded into the domain
+/// [`Exposure::id`]. Only the consumed subset is projected (fusion
+/// `ManifestExposure`, `dbt-schemas` `manifest/manifest_nodes.rs:1526+`
+/// @ `9977b6cb…`); `label` / `maturity` / `config` / `refs` and the
+/// `depends_on.nodes_with_ref_location` sibling pass through untouched
+/// (no `deny_unknown_fields`, ADR-5). Every field defaults — one
+/// malformed exposure entry must never fail the manifest.
+#[derive(Debug, Deserialize)]
+struct WireExposure {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default, rename = "type")]
+    exposure_type: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    owner: Option<WireOwner>,
+    #[serde(default)]
+    depends_on: DependsOn,
+}
+
+impl WireExposure {
+    /// Translate into the domain [`Exposure`], folding the authoritative
+    /// map `key` into the id (the [`WireNode`] precedent). A missing
+    /// `name` degrades to `""` — fail-open, the [`WireSource`] posture.
+    fn into_domain(self, key: String) -> Exposure {
+        Exposure::new(
+            NodeId::new(key),
+            self.name.unwrap_or_default(),
+            self.exposure_type,
+            self.url,
+            self.owner.and_then(WireOwner::into_domain),
+            self.depends_on,
+        )
+    }
+}
+
+/// Wire projection of one top-level `groups` entry (cute-dbt#256).
+///
+/// fusion requires `owner:` at parse on an authored group
+/// (`GroupProperties.owner: DbtOwner`, no default — `dbt-schemas`
+/// `properties/properties.rs:120-125` @ `9977b6cb…`; live-verified on
+/// 2.0-preview.177: `dbt1013 missing field 'owner'`), so real fusion
+/// manifests always carry an owner OBJECT — but both of its fields are
+/// optional, so the content may still be empty. cute-dbt tolerates
+/// every shape (ADR-5) and collapses a content-free owner to `None`.
+#[derive(Debug, Deserialize)]
+struct WireGroup {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    owner: Option<WireOwner>,
+}
+
+impl WireGroup {
+    /// Translate into the domain [`Group`]. A missing `name` degrades to
+    /// `""` — it can never match a node's `group` reference (fail-open).
+    fn into_domain(self) -> Group {
+        Group::new(
+            self.name.unwrap_or_default(),
+            self.owner.and_then(WireOwner::into_domain),
+        )
     }
 }
 
@@ -504,7 +724,10 @@ impl WireManifest {
                 let node = Node::new(
                     id.clone(),
                     wire.resource_type,
-                    wire.checksum,
+                    // cute-dbt#256 — per-node checksum degrade (the
+                    // dbt FileHash.empty() sentinel), never a
+                    // whole-manifest parse failure.
+                    fold_checksum(wire.checksum),
                     wire.compiled_code,
                     wire.raw_code,
                     wire.depends_on,
@@ -524,7 +747,21 @@ impl WireManifest {
                 )
                 // cute-dbt#105 — the schema-properties YAML path, with
                 // the wire's `<package>://` URI scheme stripped.
-                .with_patch_path(wire.patch_path.map(strip_package_uri_scheme));
+                .with_patch_path(wire.patch_path.map(strip_package_uri_scheme))
+                // cute-dbt#256 — identity (empty-string unset shapes
+                // dropped so bare_name's leaf fallback stays sound),
+                // governance, and the StringOrInteger-normalized
+                // version fields.
+                .with_identity(
+                    wire.name.filter(|n| !n.is_empty()),
+                    wire.package_name.filter(|p| !p.is_empty()),
+                )
+                .with_governance(wire.group, wire.access)
+                .with_versions(
+                    version_string(wire.version),
+                    version_string(wire.latest_version),
+                    wire.deprecation_date,
+                );
                 (id, node)
             })
             .collect();
@@ -543,7 +780,23 @@ impl WireManifest {
             .into_iter()
             .map(|(key, wire)| (NodeId::new(key.clone()), wire.into_domain(key)))
             .collect();
-        Manifest::new(self.metadata, nodes, unit_tests, macros).with_sources(sources)
+        // cute-dbt#256 — exposures keyed by the wire map key folded
+        // into the id (the sources precedent); groups keyed by the wire
+        // map key, joined from nodes by NAME via `group_by_name`.
+        let exposures = self
+            .exposures
+            .into_iter()
+            .map(|(key, wire)| (NodeId::new(key.clone()), wire.into_domain(key)))
+            .collect();
+        let groups = self
+            .groups
+            .into_iter()
+            .map(|(key, wire)| (key, wire.into_domain()))
+            .collect();
+        Manifest::new(self.metadata, nodes, unit_tests, macros)
+            .with_sources(sources)
+            .with_exposures(exposures)
+            .with_groups(groups)
     }
 }
 
@@ -1918,6 +2171,460 @@ mod tests {
             assert!(n.description().is_none(), "unset description on {id}");
             assert!(n.tags().is_empty(), "unset tags on {id}");
         }
+    }
+
+    // ===== cute-dbt#256 — governance + identity wire family ==========
+
+    /// cute-dbt#256: `metadata.project_name` ingests verbatim (both
+    /// committed real fixtures populate it — jaffle-shop = dbt-core
+    /// 1.11, playground = fusion 2.0-preview); fusion's empty-string
+    /// unset default and an absent key both read back as `None` via the
+    /// accessor's drop-empty rule.
+    #[test]
+    fn parse_manifest_extracts_metadata_project_name() {
+        let json = format!(
+            r#"{{ "metadata": {{ "dbt_schema_version": "{V12_URL}", "project_name": "jaffle_shop" }} }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        assert_eq!(manifest.metadata().project_name(), Some("jaffle_shop"));
+
+        for tail in ["", r#", "project_name": """#, r#", "project_name": null"#] {
+            let json =
+                format!(r#"{{ "metadata": {{ "dbt_schema_version": "{V12_URL}"{tail} }} }}"#);
+            let manifest = parse_manifest(&json).expect("valid manifest");
+            assert_eq!(manifest.metadata().project_name(), None, "tail = {tail:?}");
+        }
+    }
+
+    /// cute-dbt#256: per-node identity (`name` + `package_name`) ingests
+    /// from the top-level wire fields. Both engines always populate them
+    /// on real wire; absence / explicit null / empty string all degrade
+    /// to `None` so [`Node::bare_name`] keeps its leaf fallback.
+    #[test]
+    fn parse_manifest_extracts_node_identity() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.dim_customers.v2": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "aa" }},
+                  "name": "dim_customers",
+                  "package_name": "shop"
+                }},
+                "model.shop.unset": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "bb" }}
+                }},
+                "model.shop.null_filled": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "cc" }},
+                  "name": null,
+                  "package_name": null
+                }},
+                "model.shop.empty": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "dd" }},
+                  "name": "",
+                  "package_name": ""
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        let node = |id: &str| manifest.node(&NodeId::new(id)).expect("node present");
+
+        let versioned = node("model.shop.dim_customers.v2");
+        assert_eq!(versioned.name(), Some("dim_customers"));
+        assert_eq!(versioned.package_name(), Some("shop"));
+        assert_eq!(
+            versioned.bare_name(),
+            "dim_customers",
+            "the ingested name wins over the .v2 leaf segment"
+        );
+
+        for id in [
+            "model.shop.unset",
+            "model.shop.null_filled",
+            "model.shop.empty",
+        ] {
+            let n = node(id);
+            assert!(n.name().is_none(), "unset name on {id}");
+            assert!(n.package_name().is_none(), "unset package_name on {id}");
+        }
+    }
+
+    /// cute-dbt#256: governance fields (`group` + `access`) ingest
+    /// verbatim. The committed fixtures' real shapes: dbt-core 1.11 AND
+    /// fusion 2.0-preview both emit `"group": null` + `"access":
+    /// "protected"` on ungrouped models; a live fusion 2.0-preview.177
+    /// compile emits populated `"group": "finance"` / `"access":
+    /// "private"` and may OMIT `group` entirely.
+    #[test]
+    fn parse_manifest_extracts_node_governance() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.customers": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "aa" }},
+                  "group": "finance",
+                  "access": "private"
+                }},
+                "model.shop.orders": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "bb" }},
+                  "group": null,
+                  "access": "protected"
+                }},
+                "model.shop.fusion_omits": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "cc" }}
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        let node = |id: &str| manifest.node(&NodeId::new(id)).expect("node present");
+
+        assert_eq!(node("model.shop.customers").group(), Some("finance"));
+        assert_eq!(node("model.shop.customers").access(), Some("private"));
+        assert_eq!(node("model.shop.orders").group(), None);
+        assert_eq!(node("model.shop.orders").access(), Some("protected"));
+        assert_eq!(node("model.shop.fusion_omits").group(), None);
+        assert_eq!(node("model.shop.fusion_omits").access(), None);
+    }
+
+    /// cute-dbt#256: `version` / `latest_version` are fusion
+    /// `StringOrInteger` on the wire (`dbt-schemas` `serde.rs:419-422` @
+    /// `9977b6cb…`) — a live fusion compile emits the bare integer `2`.
+    /// Integers normalize to decimal strings; strings pass verbatim;
+    /// every other shape (incl. fusion's empty-string default, floats,
+    /// bools) degrades to `None`, never an error (ADR-5).
+    /// `deprecation_date` is a verbatim optional string.
+    #[test]
+    fn parse_manifest_normalizes_model_versions() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.versioned_demo.v2": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "aa" }},
+                  "version": 2,
+                  "latest_version": 3,
+                  "deprecation_date": "2027-01-01"
+                }},
+                "model.shop.string_version.vfinal": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "bb" }},
+                  "version": "final",
+                  "latest_version": "final"
+                }},
+                "model.shop.unversioned": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "cc" }},
+                  "version": null,
+                  "latest_version": null,
+                  "deprecation_date": null
+                }},
+                "model.shop.odd_shapes": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "dd" }},
+                  "version": 2.5,
+                  "latest_version": ""
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        let node = |id: &str| manifest.node(&NodeId::new(id)).expect("node present");
+
+        let v2 = node("model.shop.versioned_demo.v2");
+        assert_eq!(v2.version(), Some("2"), "wire integer → decimal string");
+        assert_eq!(v2.latest_version(), Some("3"));
+        assert_eq!(v2.deprecation_date(), Some("2027-01-01"));
+
+        let vfinal = node("model.shop.string_version.vfinal");
+        assert_eq!(vfinal.version(), Some("final"));
+        assert_eq!(vfinal.latest_version(), Some("final"));
+
+        let unversioned = node("model.shop.unversioned");
+        assert_eq!(unversioned.version(), None);
+        assert_eq!(unversioned.latest_version(), None);
+        assert_eq!(unversioned.deprecation_date(), None);
+
+        let odd = node("model.shop.odd_shapes");
+        assert_eq!(odd.version(), None, "a float is not a version");
+        assert_eq!(odd.latest_version(), None, "empty string is unset");
+    }
+
+    // ----- exposures ---------------------------------------------------
+
+    /// cute-dbt#256: a fusion-emitted exposure (shape captured from a
+    /// live fusion 2.0-preview.177 compile — owner email as a single
+    /// string, `depends_on` carrying the fusion-only
+    /// `nodes_with_ref_location` sibling, label/maturity/config extras)
+    /// translates to the domain [`Exposure`] with the map key folded
+    /// into the id.
+    #[test]
+    fn parse_manifest_translates_a_fusion_style_exposure() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "exposures": {{
+                "exposure.shop.weekly_revenue_dashboard": {{
+                  "unique_id": "exposure.shop.weekly_revenue_dashboard",
+                  "name": "weekly_revenue_dashboard",
+                  "package_name": "shop",
+                  "fqn": ["shop", "weekly_revenue_dashboard"],
+                  "path": "models/schema.yml",
+                  "original_file_path": "models/schema.yml",
+                  "description": "Weekly revenue rollup.",
+                  "tags": [],
+                  "meta": {{}},
+                  "depends_on": {{
+                    "macros": [],
+                    "nodes": ["model.shop.orders"],
+                    "nodes_with_ref_location": [["model.shop.orders", {{"line": 1, "col": 1}}]]
+                  }},
+                  "refs": [{{"name": "orders", "package": null, "version": null}}],
+                  "sources": [],
+                  "unrendered_config": {{}},
+                  "metrics": [],
+                  "owner": {{ "email": "data@example.com", "name": "Data Team" }},
+                  "label": "Weekly Revenue Dashboard",
+                  "maturity": "high",
+                  "type": "dashboard",
+                  "url": "https://bi.example.com/dashboards/revenue",
+                  "config": {{ "enabled": true, "meta": {{}}, "tags": [] }},
+                  "resource_type": "exposure"
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("fusion exposure parses");
+        assert_eq!(manifest.exposures().len(), 1);
+        let exposure = manifest
+            .exposures()
+            .get(&NodeId::new("exposure.shop.weekly_revenue_dashboard"))
+            .expect("keyed by the wire map key");
+        assert_eq!(exposure.name(), "weekly_revenue_dashboard");
+        assert_eq!(exposure.exposure_type(), Some("dashboard"));
+        assert_eq!(
+            exposure.url(),
+            Some("https://bi.example.com/dashboards/revenue")
+        );
+        let owner = exposure.owner().expect("owner present");
+        assert_eq!(owner.name(), Some("Data Team"));
+        assert_eq!(
+            owner.email(),
+            ["data@example.com".to_owned()],
+            "a wire string email normalizes to a one-element list"
+        );
+        assert_eq!(
+            exposure.depends_on().nodes(),
+            &[NodeId::new("model.shop.orders")]
+        );
+    }
+
+    /// cute-dbt#256: the dbt-core dialect (explicit nulls for unset
+    /// fields) and fusion's widened `email` array
+    /// (`StringOrArrayOfStrings`) both tolerate; an owner whose every
+    /// channel is null/empty collapses to `None` (the
+    /// `WireUnitTestOverrides::into_grouped` precedent).
+    #[test]
+    fn parse_manifest_tolerates_exposure_owner_shapes() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "exposures": {{
+                "exposure.shop.core_nulls": {{
+                  "name": "core_nulls",
+                  "type": "notebook",
+                  "url": null,
+                  "owner": {{ "name": null, "email": null }},
+                  "depends_on": {{ "macros": [], "nodes": [] }}
+                }},
+                "exposure.shop.email_array": {{
+                  "name": "email_array",
+                  "type": "ml",
+                  "owner": {{ "email": ["a@example.com", "b@example.com"] }}
+                }},
+                "exposure.shop.degenerate": {{}}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("tolerant parse");
+        let exposure = |id: &str| {
+            manifest
+                .exposures()
+                .get(&NodeId::new(id))
+                .expect("exposure present")
+        };
+
+        let core = exposure("exposure.shop.core_nulls");
+        assert_eq!(core.url(), None);
+        assert!(
+            core.owner().is_none(),
+            "an all-null owner (fusion serialize_always emits name: null) collapses to None"
+        );
+
+        let array = exposure("exposure.shop.email_array");
+        let owner = array.owner().expect("owner with email list");
+        assert_eq!(owner.name(), None);
+        assert_eq!(
+            owner.email(),
+            ["a@example.com".to_owned(), "b@example.com".to_owned()]
+        );
+
+        let degenerate = exposure("exposure.shop.degenerate");
+        assert_eq!(
+            degenerate.name(),
+            "",
+            "fail-open empty name (the WireSource precedent)"
+        );
+        assert!(degenerate.exposure_type().is_none());
+        assert!(degenerate.owner().is_none());
+        assert!(degenerate.depends_on().nodes().is_empty());
+    }
+
+    // ----- groups ------------------------------------------------------
+
+    /// cute-dbt#256: a fusion-emitted group (shape captured from a live
+    /// fusion 2.0-preview.177 compile) translates with its owner; the
+    /// map key stays the lookup key while nodes join by NAME.
+    ///
+    /// Discovery (the issue's #145-pattern risk): fusion REQUIRES
+    /// `owner:` at parse on an authored group (`GroupProperties.owner:
+    /// DbtOwner`, no default — `dbt-schemas` `properties/properties.rs
+    /// :120-125` @ `9977b6cb…`; live-verified: compile fails `dbt1013
+    /// missing field 'owner'`), so real fusion manifests always carry an
+    /// owner OBJECT — but its content may be empty (`DbtOwner` fields
+    /// are both optional). cute-dbt stays tolerant on every shape.
+    #[test]
+    fn parse_manifest_translates_groups() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "groups": {{
+                "group.shop.finance": {{
+                  "name": "finance",
+                  "description": "",
+                  "package_name": "shop",
+                  "path": "models/schema.yml",
+                  "original_file_path": "models/schema.yml",
+                  "unique_id": "group.shop.finance",
+                  "owner": {{ "email": "finance@example.com", "name": "Finance Team" }},
+                  "resource_type": "group"
+                }},
+                "group.shop.ownerless": {{ "name": "ownerless" }},
+                "group.shop.empty_owner": {{ "name": "empty_owner", "owner": {{ "name": null }} }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("groups parse");
+        assert_eq!(manifest.groups().len(), 3);
+
+        let finance = manifest.group_by_name("finance").expect("finance group");
+        let owner = finance.owner().expect("owner present");
+        assert_eq!(owner.name(), Some("Finance Team"));
+        assert_eq!(owner.email(), ["finance@example.com".to_owned()]);
+
+        assert!(
+            manifest
+                .group_by_name("ownerless")
+                .expect("ownerless group")
+                .owner()
+                .is_none(),
+            "a group without owner still parses (ADR-5, despite fusion's strictness)"
+        );
+        assert!(
+            manifest
+                .group_by_name("empty_owner")
+                .expect("empty_owner group")
+                .owner()
+                .is_none(),
+            "a content-free owner collapses to None"
+        );
+    }
+
+    // ----- checksum-cliff hardening -------------------------------------
+
+    /// cute-dbt#256: a checksum-less (or otherwise malformed-checksum)
+    /// node degrades PER NODE to dbt's own no-checksum sentinel —
+    /// `FileHash.empty()` = `{name: "none", checksum: ""}` (fusion
+    /// `DbtChecksum::default`, `dbt-schemas` `common.rs:929+` @
+    /// `9977b6cb…`; the REAL wire shape on every generic-test node in
+    /// both committed fixtures) — never a whole-manifest parse failure.
+    ///
+    /// Comparison semantics follow dbt verbatim (fusion
+    /// `check_modified_content` fast path: identical checksums ⇒
+    /// unchanged): two sentinel checksums compare EQUAL (deliberate —
+    /// generic tests must not show as state:modified on every run),
+    /// while sentinel-vs-real DIFFER, so a unit-test target model that
+    /// loses its checksum in only one manifest is conservatively
+    /// modified ⇒ in scope (the fail-closed direction).
+    #[test]
+    fn parse_manifest_degrades_checksum_shapes_per_node() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.good": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "deadbeef" }}
+                }},
+                "model.shop.absent": {{ "resource_type": "model" }},
+                "model.shop.null": {{ "resource_type": "model", "checksum": null }},
+                "model.shop.bare_string": {{
+                  "resource_type": "model",
+                  "checksum": "cafebabe"
+                }},
+                "model.shop.name_only": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256" }}
+                }},
+                "model.shop.garbage": {{ "resource_type": "model", "checksum": 42 }}
+              }}
+            }}"#
+        );
+        let manifest =
+            parse_manifest(&json).expect("no checksum shape may fail the whole manifest");
+        let checksum = |id: &str| {
+            manifest
+                .node(&NodeId::new(id))
+                .expect("node present")
+                .checksum()
+                .clone()
+        };
+
+        assert_eq!(
+            checksum("model.shop.good"),
+            Checksum::new("sha256", "deadbeef")
+        );
+        assert_eq!(
+            checksum("model.shop.absent"),
+            Checksum::new("none", ""),
+            "absent → the dbt FileHash.empty() sentinel"
+        );
+        assert_eq!(checksum("model.shop.null"), Checksum::new("none", ""));
+        assert_eq!(
+            checksum("model.shop.bare_string"),
+            Checksum::new("", "cafebabe"),
+            "fusion's DbtChecksum::String arm keeps the hex, no algorithm name"
+        );
+        assert_eq!(
+            checksum("model.shop.name_only"),
+            Checksum::new("sha256", ""),
+            "a partial object keeps what it carried"
+        );
+        assert_eq!(
+            checksum("model.shop.garbage"),
+            Checksum::new("none", ""),
+            "an unrecognizable shape degrades to the sentinel"
+        );
     }
 
     /// cute-dbt#105: the schema-properties `patch_path` ingests from the

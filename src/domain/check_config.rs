@@ -562,9 +562,35 @@ fn parse_pragma(comment: &str) -> Option<CheckPragma> {
 // ---------------------------------------------------------------------
 
 /// `true` when a suppression rule's `model` names the finding's model:
-/// the full node id verbatim, or the bare (leaf) model name.
+/// the full node id verbatim, the bare (leaf) model name, or — for a
+/// VERSIONED node id, whose leaf is the `.vN` version suffix
+/// (`model.<pkg>.<name>.v<N>`, the wire grammar both engines emit;
+/// cute-dbt#256) — the authored model name before the suffix, so one
+/// rule reaches every version. Purely additive over the pre-#256
+/// matches; a model genuinely named `v2` (a 3-segment id) still matches
+/// only by its own leaf.
 fn model_matches(rule_model: &str, model_id: &str) -> bool {
-    model_id == rule_model || model_id.rsplit('.').next().unwrap_or(model_id) == rule_model
+    if model_id == rule_model {
+        return true;
+    }
+    let mut segments = model_id.rsplit('.');
+    let leaf = segments.next().unwrap_or(model_id);
+    if leaf == rule_model {
+        return true;
+    }
+    // The versioned-id arm applies only to ≥4-segment ids
+    // (resource.package.name.vN): `segments` must still hold the
+    // package + resource segments after taking the candidate name.
+    is_version_suffix(leaf)
+        && segments.clone().count() >= 3
+        && segments.next().is_some_and(|name| name == rule_model)
+}
+
+/// `true` for a `v<digits>` id segment — dbt's version-suffix shape.
+fn is_version_suffix(segment: &str) -> bool {
+    segment
+        .strip_prefix('v')
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Stage 3 with a config surface (cute-dbt#171) — apply the resolved
@@ -1225,6 +1251,36 @@ reason = "   "
             applied.iter().all(|f| f.suppressed.is_none()),
             "neither a different model nor a different check matches: {applied:?}"
         );
+    }
+
+    #[test]
+    fn bare_model_name_matches_a_versioned_node_id() {
+        // cute-dbt#256 (the #254 handoff): a versioned model's id leaf
+        // is the `.vN` version suffix (`model.<pkg>.<name>.v<N>` — the
+        // wire grammar both engines emit; live-verified
+        // `model.jaffle_shop.versioned_demo.v2`). A suppression naming
+        // the authored model must reach every version of it.
+        assert!(model_matches(
+            "dim_customers",
+            "model.shop.dim_customers.v2"
+        ));
+        // The pre-#256 behaviors stay additive: the literal leaf and the
+        // full id still match.
+        assert!(model_matches("v2", "model.shop.dim_customers.v2"));
+        assert!(model_matches(
+            "model.shop.dim_customers.v2",
+            "model.shop.dim_customers.v2"
+        ));
+        // A version-suffix-LOOKING leaf on a 3-segment id is a model
+        // genuinely named v2 — its package segment must not match.
+        assert!(model_matches("v2", "model.shop.v2"));
+        assert!(!model_matches("shop", "model.shop.v2"));
+        // Non-version leaves never expose the prior segment.
+        assert!(!model_matches("dim_customers", "model.shop.other"));
+        assert!(!model_matches(
+            "dim_customers",
+            "model.shop.dim_customers.final"
+        ));
     }
 
     #[test]

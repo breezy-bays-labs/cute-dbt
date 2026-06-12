@@ -316,6 +316,83 @@ fn real_fixtures_carry_scheme_stripped_patch_paths_on_both_engines() {
 }
 
 #[test]
+fn real_fixtures_carry_the_governance_identity_wire_family() {
+    // cute-dbt#256 verified against BOTH committed real fixtures
+    // (jaffle-shop = dbt-core 1.11.9; playground = dbt-core 1.11.11
+    // with the #256 governance splice — verbatim dbt-core 1.11.2
+    // compile output, see tests/fixtures/MANIFEST.toml).
+
+    // --- identity: project_name + per-node name/package_name are
+    // populated on real wire; access carries the engine default.
+    let jaffle = FileManifestSource
+        .load(&fixture("jaffle-shop-current.json"))
+        .expect("the current fixture is a valid compiled v12 manifest");
+    assert_eq!(jaffle.metadata().project_name(), Some("jaffle_shop"));
+    let customers = jaffle
+        .node(&NodeId::new("model.jaffle_shop.customers"))
+        .expect("customers model present");
+    assert_eq!(customers.name(), Some("customers"));
+    assert_eq!(customers.package_name(), Some("jaffle_shop"));
+    assert_eq!(customers.access(), Some("protected"));
+    // The real null-fill shape (the cute-dbt#145 risk): every
+    // unversioned/ungrouped model emits explicit nulls for these.
+    assert_eq!(customers.group(), None);
+    assert_eq!(customers.version(), None);
+    assert_eq!(customers.latest_version(), None);
+    assert_eq!(customers.deprecation_date(), None);
+
+    // --- governance: the spliced engine-emitted exposures/groups
+    // entries + the grouped model, joined by NAME.
+    let playground = FileManifestSource
+        .load(&fixture("playground-current.json"))
+        .expect("the playground fixture is a valid compiled v12 manifest");
+    assert_eq!(
+        playground.metadata().project_name(),
+        Some("healthcare_analytics")
+    );
+
+    let exposure = playground
+        .exposures()
+        .get(&NodeId::new(
+            "exposure.healthcare_analytics.provider_quality_dashboard",
+        ))
+        .expect("the spliced exposure ingests under its wire map key");
+    assert_eq!(exposure.name(), "provider_quality_dashboard");
+    assert_eq!(exposure.exposure_type(), Some("dashboard"));
+    assert_eq!(
+        exposure.url(),
+        Some("https://bi.example.com/dashboards/provider-quality")
+    );
+    assert_eq!(
+        exposure.depends_on().nodes(),
+        &[NodeId::new(
+            "model.healthcare_analytics.fct_provider_metrics"
+        )]
+    );
+    let exposure_owner = exposure.owner().expect("exposure owner present");
+    assert_eq!(exposure_owner.name(), Some("Clinical Quality Team"));
+    assert_eq!(
+        exposure_owner.email(),
+        ["clinical-quality@example.com".to_owned()],
+        "the dbt-core single-string email normalizes to a one-element list",
+    );
+
+    let dim_payers = playground
+        .node(&NodeId::new("model.healthcare_analytics.dim_payers"))
+        .expect("dim_payers present");
+    assert_eq!(dim_payers.group(), Some("clinical_quality"));
+    let group = playground
+        .group_by_name("clinical_quality")
+        .expect("the node's group NAME joins the spliced groups entry");
+    let group_owner = group.owner().expect("group owner present");
+    assert_eq!(group_owner.name(), Some("Clinical Quality Team"));
+    assert_eq!(
+        group_owner.email(),
+        ["clinical-quality@example.com".to_owned()]
+    );
+}
+
+#[test]
 fn baseline_and_current_form_the_modified_stg_customers_diff_pair() {
     // PR 5's StateComparator diffs node body checksums; PR 4b must carry
     // that signal through translation intact. The fixtures are a pair:

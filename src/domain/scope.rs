@@ -45,8 +45,12 @@ pub enum ScopeInput {
     /// ADR-3 semantics unchanged.
     Baseline {
         /// Already-parsed baseline manifest (Stage-1 pre-flight ran in
-        /// the adapter).
-        manifest: Manifest,
+        /// the adapter). Boxed (`clippy::large_enum_variant`): a parsed
+        /// `Manifest` is hundreds of bytes inline and grows with every
+        /// ingestion wave (cute-dbt#256 added exposures/groups maps);
+        /// the `PrDiff` arm is ~48 bytes — boxing keeps the enum small
+        /// where it is moved through the run loop.
+        manifest: Box<Manifest>,
         /// Opt-in `state:modified` sub-selector kinds composed alongside
         /// the always-on body checksum (cute-dbt#160 — the CLI
         /// `--modified-selectors` wiring). Empty is the body-only v0.1
@@ -349,7 +353,7 @@ mod tests {
         );
 
         let input = ScopeInput::Baseline {
-            manifest: baseline,
+            manifest: Box::new(baseline),
             sub_selectors: Vec::new(),
         };
         let ScopeSelection {
@@ -370,7 +374,7 @@ mod tests {
         // out of scope, exactly as before the flag existed.
         let (current, baseline) = config_only_pair();
         let input = ScopeInput::Baseline {
-            manifest: baseline,
+            manifest: Box::new(baseline),
             sub_selectors: Vec::new(),
         };
         let selection = select_in_scope(&current, &input);
@@ -384,7 +388,7 @@ mod tests {
         // is in scope once `.configs` is composed into the comparator.
         let (current, baseline) = config_only_pair();
         let input = ScopeInput::Baseline {
-            manifest: baseline,
+            manifest: Box::new(baseline),
             sub_selectors: vec![ModifierKind::Configs],
         };
         let selection = select_in_scope(&current, &input);
@@ -479,7 +483,7 @@ mod tests {
         );
 
         let input = ScopeInput::Baseline {
-            manifest: baseline,
+            manifest: Box::new(baseline),
             sub_selectors: Vec::new(),
         };
         let ScopeSelection {
