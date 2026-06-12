@@ -8139,6 +8139,219 @@ fn col_tooltip_ct_key_meets_aa_contrast_on_every_theme() {
     let _ = tab.close(true);
 }
 
+// ===== cute-dbt#238 — the ov-tooltip key: the ACCENT family's dark-fill
+// surface the #273 token matrix never measured ===============================
+//
+// `.ov-tooltip .ov-key` ships `color-mix(in oklab, var(--accent) 50%,
+// white)` for ALL themes (report.css — the #202 overrides tip), inside the
+// always-dark `--tooltip-bg` fill. Latte's fill (#4c4f69) is the lightest
+// of the 8 and its accent the darkest of the light themes' (deepened
+// further by #273 for light-PAGE surfaces — correct there, marginally
+// worse here), so the 50% mix lands 3.69:1 on latte — an AA failure for
+// the 12px bold mono override keys. The repair is the symmetric twin of
+// #233 D4's `.ct-key` latte stand-in: a latte-scoped 35% mix (measured
+// 4.76 PASS; 40% still fails at 4.38), the other 7 themes' spec-literal
+// 50% mix stays pinned.
+//
+// Methodology: the #233 sweep's canvas-normalized color-mix fg + the #273
+// matrix's alpha-composited effective backdrop, transition kill, and
+// checkVisibility hygiene — through the REAL showOvTip reveal path
+// (focusing the `overrides · N` badge, the #146 keyboard-parity rule).
+
+/// The `.ov-tooltip .ov-key` WCAG sweep, evaluated in-page. Returns a
+/// JSON array of `{theme, ratio, fg, bg, tipbg}` — one entry per theme;
+/// `tipbg` is the bubble's own resolved background (the methodology pin).
+const OV_TOOLTIP_OV_KEY_CONTRAST_SWEEP_JS: &str = r##"(function () {
+  var THEMES = ["light", "solarized", "latte", "rosepine",
+                "dark", "tokyo", "gruvbox", "dracula"];
+  var DARK = { dark: true, tokyo: true, gruvbox: true, dracula: true };
+  function parseRgb(s) {
+    var m = /rgba?\(([^)]+)\)/.exec(s || "");
+    if (!m) return null;
+    var p = m[1].split(",");
+    return { r: parseFloat(p[0]), g: parseFloat(p[1]), b: parseFloat(p[2]),
+             a: p.length > 3 ? parseFloat(p[3]) : 1 };
+  }
+  function chan(v) {
+    v = v / 255;
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  function lum(c) {
+    return 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
+  }
+  function ratio(f, b) {
+    var lf = lum(f), lb = lum(b);
+    var hi = Math.max(lf, lb), lo = Math.min(lf, lb);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+  /* the #273 matrix's EFFECTIVE composited backdrop: collect every painted
+     fill from the element itself up to the first OPAQUE one, then
+     alpha-composite top-down — an opaque-only walk would skip rgba tints. */
+  function effectiveBackdrop(el) {
+    var layers = [];
+    for (var n = el; n; n = n.parentElement) {
+      var c = parseRgb(getComputedStyle(n).backgroundColor);
+      if (c && c.a > 0) {
+        layers.push(c);
+        if (c.a === 1) {
+          var acc = layers.pop();
+          while (layers.length) {
+            var top = layers.pop();
+            acc = { r: top.a * top.r + (1 - top.a) * acc.r,
+                    g: top.a * top.g + (1 - top.a) * acc.g,
+                    b: top.a * top.b + (1 - top.a) * acc.b, a: 1 };
+          }
+          return acc;
+        }
+      }
+    }
+    return null;
+  }
+  /* the #233 canvas normalization: the color-mix(in oklab, ...) fg
+     computes to a non-rgb() string in Chrome (oklab()/color()), which the
+     regex parse can't read. An unparseable string falls back to
+     canvas-black, which lands a ~1:1 ratio on the dark tooltip fill — a
+     loud failure, never a silent pass. */
+  function cssToRgb(s) {
+    var cv = document.createElement("canvas");
+    cv.width = cv.height = 1;
+    var cx = cv.getContext("2d");
+    cx.fillStyle = s;
+    cx.fillRect(0, 0, 1, 1);
+    var d = cx.getImageData(0, 0, 1, 1).data;
+    return { r: d[0], g: d[1], b: d[2], a: d[3] / 255 };
+  }
+  /* measurement hygiene: kill transitions before any read */
+  var kill = document.createElement("style");
+  kill.textContent = "* { transition: none !important; animation: none !important; }";
+  document.head.appendChild(kill);
+  var tip = document.getElementById("ov-tooltip");
+  if (!tip || tip.hidden) { throw new Error("ov-key sweep: #ov-tooltip is not revealed"); }
+  var key = tip.querySelector(".ov-key");
+  if (!key) { throw new Error("ov-key sweep: no .ov-key row in the revealed tip"); }
+  /* checkVisibility, never rect>0 — a hidden tip would measure vacuously */
+  if (!key.checkVisibility()) {
+    throw new Error("ov-key sweep: .ov-key is not visible");
+  }
+  var root = document.documentElement;
+  var out = [];
+  for (var i = 0; i < THEMES.length; i++) {
+    /* exactly theme.js applyTheme: set data-theme + sync html.dark */
+    root.setAttribute("data-theme", THEMES[i]);
+    root.classList.toggle("dark", !!DARK[THEMES[i]]);
+    var cs = getComputedStyle(key);
+    var fg = cssToRgb(cs.color);
+    var bg = effectiveBackdrop(key);
+    out.push({
+      theme: THEMES[i],
+      ratio: fg && bg ? ratio(fg, bg) : -1,
+      fg: cs.color,
+      bg: bg ? "rgb(" + bg.r + ", " + bg.g + ", " + bg.b + ")" : "none",
+      tipbg: getComputedStyle(tip).backgroundColor
+    });
+  }
+  return JSON.stringify(out);
+})()"##;
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn ov_tooltip_ov_key_meets_aa_contrast_on_every_theme() {
+    // The rich-fixture overrides shape: three groups, native scalars —
+    // materializes the `overrides · 3` badge whose focus runs the REAL
+    // showOvTip path into the #ov-tooltip singleton.
+    let mut ov = cute_dbt::domain::UnitTestOverrides::new();
+    ov.insert(
+        "macros".to_owned(),
+        BTreeMap::from([("is_incremental".to_owned(), serde_json::json!(true))]),
+    );
+    ov.insert(
+        "vars".to_owned(),
+        BTreeMap::from([("threshold".to_owned(), serde_json::json!(0.05))]),
+    );
+    ov.insert(
+        "env_vars".to_owned(),
+        BTreeMap::from([("DBT_ENV".to_owned(), serde_json::json!("ci"))]),
+    );
+    let ut = UnitTest::new(
+        "aa".to_owned(),
+        NodeId::new("dim_ov"),
+        Vec::new(),
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+    .with_overrides(Some(ov));
+    let url = render_to_file(
+        "headless_238_ov_key_contrast.html",
+        vec![model_node("model.shop.dim_ov")],
+        vec![("unit_test.shop.dim_ov.aa", ut)],
+        &["model.shop.dim_ov"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    select_model(&tab, "dim_ov");
+    select_test(&tab, "unit_test.shop.dim_ov.aa");
+
+    const OV_BADGE: &str = "document.querySelector('.test-badges .tb-overrides')";
+    let _ = eval(&tab, &format!("{OV_BADGE}.focus()"));
+    assert!(
+        !eval_bool(&tab, "document.getElementById('ov-tooltip').hidden"),
+        "precondition: focusing the overrides badge reveals the grouped tip \
+         (the real showOvTip path)",
+    );
+
+    // cute-dbt#238 — the full 8-theme AA sweep.
+    let raw = eval_string(&tab, OV_TOOLTIP_OV_KEY_CONTRAST_SWEEP_JS);
+    let measured: Vec<serde_json::Value> =
+        serde_json::from_str(&raw).expect("the ov-key contrast sweep returns valid JSON");
+    assert_eq!(measured.len(), 8, "all 8 themes measured, got: {raw}");
+
+    let mut failures = Vec::new();
+    for m in &measured {
+        let theme = m["theme"].as_str().expect("theme is a string");
+        let ratio = m["ratio"].as_f64().expect("ratio is a number");
+        let fg = m["fg"].as_str().unwrap_or("?");
+        let bg = m["bg"].as_str().unwrap_or("?");
+        let tipbg = m["tipbg"].as_str().unwrap_or("?");
+        assert!(
+            ratio > 0.0,
+            "the {theme} .ov-key resolved no opaque backdrop — the composite \
+             walk must end on a painted surface",
+        );
+        // The methodology pin: the effective backdrop IS the tooltip
+        // bubble's own --tooltip-bg fill (no .ov-grp/.ov-row layer paints,
+        // so a diverging composite means the walk escaped the bubble).
+        assert_eq!(
+            bg, tipbg,
+            "the {theme} backdrop walk must land on the tooltip's own \
+             --tooltip-bg fill (got {bg}, the bubble paints {tipbg})",
+        );
+        eprintln!("ov-tooltip .ov-key contrast {theme:>9} = {ratio:.2}  ({fg} on {bg})");
+        if ratio < 4.5 {
+            failures.push(format!("{theme} = {ratio:.2} ({fg} on {bg})"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        ".ov-tooltip .ov-key below the WCAG AA 4.5:1 floor (cute-dbt#238 — \
+         the all-theme 50% accent mix lands 3.69:1 on latte's #4c4f69 \
+         fill): {failures:#?}",
+    );
+
+    let _ = tab.close(true);
+}
+
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn badge_tip_bubble_rounds_at_small_radius() {
