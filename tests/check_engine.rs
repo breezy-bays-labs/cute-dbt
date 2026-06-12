@@ -167,6 +167,114 @@ fn playground_non_incremental_models_carry_no_incremental_findings() {
 }
 
 #[test]
+fn playground_warn_severity_unique_test_attributes_as_degraded_backing() {
+    // cute-dbt#259 real-fixture verification: dim_payers' grain
+    // (payer_key) is covered SOLELY by the warn-severity unique test —
+    // the attribution stays, with the severity cause enumerated as
+    // degraded backing (never a silent full-strength claim, never a
+    // fourth verdict).
+    let manifest = load("playground-current.json");
+    let findings = findings_for(&manifest, "model.healthcare_analytics.dim_payers");
+    let grain = findings
+        .iter()
+        .find(|f| f.check == HeuristicId::GrainUniqueKeyUnbacked)
+        .expect("grain finding fires on dim_payers");
+    assert_eq!(
+        grain.verdict,
+        Verdict::Covered {
+            by: vec!["test.healthcare_analytics.unique_dim_payers_payer_key.953b1f5fd2".to_owned(),],
+        },
+    );
+    assert_eq!(grain.degraded.len(), 1);
+    assert_eq!(
+        grain.degraded[0].by,
+        "test.healthcare_analytics.unique_dim_payers_payer_key.953b1f5fd2",
+    );
+    assert!(
+        grain.degraded[0].causes[0].starts_with("severity: warn"),
+        "the warn cause is enumerated: {:?}",
+        grain.degraded[0].causes,
+    );
+}
+
+#[test]
+fn playground_where_and_limit_enumerate_as_degraded_causes() {
+    // cute-dbt#259: fct_provider_metrics' sole covering unique test is
+    // where-filtered AND limit-capped — both causes ride one entry.
+    let manifest = load("playground-current.json");
+    let findings = findings_for(&manifest, "model.healthcare_analytics.fct_provider_metrics");
+    let grain = findings
+        .iter()
+        .find(|f| f.check == HeuristicId::GrainUniqueKeyUnbacked)
+        .expect("grain finding fires on fct_provider_metrics");
+    assert!(matches!(grain.verdict, Verdict::Covered { .. }));
+    assert_eq!(grain.degraded.len(), 1);
+    let causes = &grain.degraded[0].causes;
+    assert_eq!(causes.len(), 2, "{causes:?}");
+    assert!(causes[0].contains("year_actual >= 2024"), "{causes:?}");
+    assert!(causes[1].starts_with("limit: 100"), "{causes:?}");
+}
+
+#[test]
+fn playground_disabled_unique_test_surfaces_exists_but_disabled() {
+    // cute-dbt#259: mart_dq_summary's grain (entity_type) stays
+    // UNCOVERED — the disabled-map unique test on exactly that column
+    // never counts as coverage — but its existence surfaces, distinct
+    // from absent.
+    let manifest = load("playground-current.json");
+    let findings = findings_for(&manifest, "model.healthcare_analytics.mart_dq_summary");
+    let grain = findings
+        .iter()
+        .find(|f| f.check == HeuristicId::GrainUniqueKeyUnbacked)
+        .expect("grain finding fires on mart_dq_summary");
+    assert_eq!(grain.verdict, Verdict::Uncovered);
+    assert!(grain.recommendation.is_some());
+    assert!(
+        grain
+            .evidence
+            .iter()
+            .any(|e| e.label == "exists but disabled"
+                && e.value.contains(
+                    "test.healthcare_analytics.unique_mart_dq_summary_entity_type.4f2a9c7d10"
+                )),
+        "the disabled-map specimen surfaces by id: {:?}",
+        grain.evidence,
+    );
+}
+
+#[test]
+fn playground_singular_only_backing_is_unknown_never_uncovered() {
+    // cute-dbt#259: int_patients__never_admitted declares unique_key
+    // = "patient_id" with NO generic uniqueness test, but the singular
+    // assert_never_admitted_patients_distinct references it via
+    // depends_on — honest UNKNOWN with the singular test enumerated,
+    // never a false Uncovered nag (and no recommendation).
+    let manifest = load("playground-current.json");
+    let findings = findings_for(
+        &manifest,
+        "model.healthcare_analytics.int_patients__never_admitted",
+    );
+    let grain = findings
+        .iter()
+        .find(|f| f.check == HeuristicId::GrainUniqueKeyUnbacked)
+        .expect("grain finding fires on int_patients__never_admitted");
+    assert_eq!(grain.verdict, Verdict::Unknown);
+    assert!(grain.recommendation.is_none());
+    assert!(
+        grain.evidence.iter().any(|e| e.label == "generic backing"),
+        "the evidence states what WAS checked: {:?}",
+        grain.evidence,
+    );
+    assert!(
+        grain.evidence.iter().any(|e| e.label == "singular test"
+            && e.value
+                .contains("test.healthcare_analytics.assert_never_admitted_patients_distinct")),
+        "the singular test is enumerated: {:?}",
+        grain.evidence,
+    );
+}
+
+#[test]
 fn playground_combination_test_stays_composite_on_real_data() {
     // fct_patient_summary: unique_key = "patient_summary_key". The
     // fixture ALSO carries a dbt_utils.unique_combination_of_columns

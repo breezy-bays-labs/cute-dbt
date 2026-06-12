@@ -7077,6 +7077,254 @@ fn incremental_branch_gap_renders_in_the_findings_panel() {
     let _ = tab.close(true);
 }
 
+/// A `model` node declaring `config.unique_key = "k"` (no union SQL —
+/// the grain check is the only finding) — cute-dbt#259.
+fn unique_key_model(full_id: &str) -> Node {
+    let mut config = BTreeMap::new();
+    config.insert("unique_key".to_owned(), serde_json::json!("k"));
+    Node::new(
+        NodeId::new(full_id),
+        "model",
+        Checksum::new("sha256", "ck"),
+        Some("select 1".to_owned()),
+        None,
+        DependsOn::default(),
+        None,
+        NodeConfig::new(config, false),
+        None,
+        BTreeMap::new(),
+    )
+}
+
+/// A generic `unique` test node on column `k` of `attached`, carrying
+/// the given flat config entries — cute-dbt#259.
+fn unique_k_test(full_id: &str, attached: &str, config: &[(&str, serde_json::Value)]) -> Node {
+    let map: BTreeMap<String, serde_json::Value> = config
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), v.clone()))
+        .collect();
+    Node::new(
+        NodeId::new(full_id),
+        "test",
+        Checksum::new("none", ""),
+        None,
+        None,
+        DependsOn::default(),
+        None,
+        NodeConfig::new(map, false),
+        None,
+        BTreeMap::new(),
+    )
+    .with_test_attachment(
+        Some("k".to_owned()),
+        Some(NodeId::new(attached)),
+        Some(TestMetadata::new(
+            "unique",
+            None,
+            serde_json::json!({ "column_name": "k" }),
+        )),
+    )
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn degraded_disabled_and_singular_truthfulness_render_in_the_findings_panel() {
+    // cute-dbt#259 — the coverage-truthfulness surface: a fully degraded
+    // attribution renders the summary chip (the #146/#188 tooltip
+    // contract) + the per-test cause list; a partially degraded one
+    // keeps the summary quiet but still enumerates causes; the
+    // exists-but-disabled evidence renders distinct from absent; a
+    // singular-only backing renders honest UNKNOWN, never a nag.
+    let singular = Node::new(
+        NodeId::new("test.shop.assert_dim_singular_ok"),
+        "test",
+        Checksum::new("sha256", "s"),
+        Some("select 1".to_owned()),
+        None,
+        DependsOn::new(Vec::new(), vec![NodeId::new("model.shop.dim_singular")]),
+        None,
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    );
+    let url = render_to_file(
+        "headless_truthfulness_panel.html",
+        vec![
+            unique_key_model("model.shop.dim_degraded"),
+            unique_key_model("model.shop.dim_partial"),
+            unique_key_model("model.shop.dim_singular"),
+            // dim_degraded: ONE covering test, warn-severity + filtered.
+            unique_k_test(
+                "test.shop.unique_dim_degraded_k",
+                "model.shop.dim_degraded",
+                &[
+                    ("severity", serde_json::json!("warn")),
+                    ("where", serde_json::json!("k > 0")),
+                ],
+            ),
+            // … plus a disabled twin (exists-but-disabled, in-row).
+            unique_k_test(
+                "test.shop.unique_dim_degraded_k_off",
+                "model.shop.dim_degraded",
+                &[("enabled", serde_json::json!(false))],
+            ),
+            // dim_partial: one clean + one degraded covering test.
+            unique_k_test(
+                "test.shop.a_unique_dim_partial_k",
+                "model.shop.dim_partial",
+                &[],
+            ),
+            unique_k_test(
+                "test.shop.b_unique_dim_partial_k",
+                "model.shop.dim_partial",
+                &[("severity", serde_json::json!("warn"))],
+            ),
+            singular,
+        ],
+        vec![(
+            "unit_test.shop.dim_degraded.t1",
+            unit_test("t1", "dim_degraded"),
+        )],
+        &[
+            "model.shop.dim_degraded",
+            "model.shop.dim_partial",
+            "model.shop.dim_singular",
+        ],
+        &["unit_test.shop.dim_degraded.t1"],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    const ROW: &str =
+        "document.querySelector('.finding-row[data-check=\"grain.unique-key-unbacked\"]')";
+
+    // --- dim_degraded: covered, fully degraded, disabled twin surfaced --
+    select_model(&tab, "dim_degraded");
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{ROW}.classList.contains('verdict-covered')")
+        ),
+        "a degraded backing still attributes — covered, never dropped",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{ROW}.querySelector('.degraded-chip') !== null")
+        ),
+        "every attributing test is weakened — the summary chip shows",
+    );
+    // The #146/#188 tooltip contract on the new chip: focusable trigger,
+    // aria-label for AT, no native title, focus reveals the bubble.
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{\
+                   var c = {ROW}.querySelector('.degraded-chip');\
+                   return c.getAttribute('tabindex') === '0' \
+                       && !c.hasAttribute('title') \
+                       && (c.getAttribute('aria-label') || '').indexOf('Degraded backing') === 0;\
+                 }})()"
+            ),
+        ),
+        "the degraded chip is a focusable, aria-labelled trigger with no native title",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{\
+                   {ROW}.querySelector('.degraded-chip').focus();\
+                   var t = document.getElementById('col-tooltip');\
+                   return !!t && !t.hidden && t.textContent.indexOf('Degraded backing') === 0;\
+                 }})()"
+            ),
+        ),
+        "keyboard focus reveals the degraded-backing bubble",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{\
+                   var deg = {ROW}.querySelector('.finding-degraded');\
+                   return !!deg \
+                       && deg.textContent.indexOf('test.shop.unique_dim_degraded_k') >= 0 \
+                       && deg.textContent.indexOf('severity: warn') >= 0 \
+                       && deg.textContent.indexOf('where-filtered') >= 0;\
+                 }})()"
+            ),
+        ),
+        "the per-test causes are enumerated in-row beside the attribution",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "{ROW}.querySelector('.finding-evidence').textContent\
+                 .indexOf('exists but disabled') >= 0"
+            ),
+        ),
+        "the disabled twin surfaces as exists-but-disabled, distinct from absent",
+    );
+
+    // --- dim_partial: clean backing exists — quiet summary, causes stay --
+    select_model(&tab, "dim_partial");
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{ROW}.querySelector('.degraded-chip') === null")
+        ),
+        "a clean covering test keeps the summary chip quiet (no false alarm)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{\
+                   var deg = {ROW}.querySelector('.finding-degraded');\
+                   return !!deg \
+                       && deg.textContent.indexOf('test.shop.b_unique_dim_partial_k') >= 0 \
+                       && deg.textContent.indexOf('test.shop.a_unique_dim_partial_k') === -1;\
+                 }})()"
+            ),
+        ),
+        "only the weakened test carries causes — the clean one stays unmarked",
+    );
+
+    // --- dim_singular: honest UNKNOWN, never a nag ----------------------
+    select_model(&tab, "dim_singular");
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{ROW}.classList.contains('verdict-unknown')")
+        ),
+        "singular-only backing is UNKNOWN, never a false Uncovered nag",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "{ROW}.textContent.indexOf('assert_dim_singular_ok') >= 0 \
+                 && {ROW}.textContent.indexOf('singular') >= 0"
+            ),
+        ),
+        "the singular tests are enumerated in the row's evidence",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{ROW}.querySelector('.finding-recommendation') === null"),
+        ),
+        "an UNKNOWN verdict carries no recommendation nag",
+    );
+
+    let _ = tab.close(true);
+}
+
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {

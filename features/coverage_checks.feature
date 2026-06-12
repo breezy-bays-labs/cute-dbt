@@ -56,6 +56,42 @@ Feature: cute-dbt surfaces unique-key coverage findings at the payload level
     When I render the coverage report
     Then the payload carries a "grain.unique-key-unbacked" finding for "orders" with verdict "uncovered"
 
+  # cute-dbt#259 — coverage truthfulness: a weakening test config
+  # (severity: warn / where / limit) still attributes but is marked as
+  # DEGRADED backing with enumerated causes (in-row honesty — never a
+  # fourth verdict, never a silent downgrade); a disabled test surfaces
+  # as exists-but-disabled, distinct from absent; a singular (SQL-file)
+  # test linked through depends_on degrades an unbacked key to honest
+  # UNKNOWN instead of a false Uncovered nag.
+  Scenario: A warn-severity unique test attributes as degraded backing
+    Given the modified coverage model "orders" declares unique_key "order_id"
+    And an enabled unique data test on column "order_id" of "orders" with severity "warn"
+    When I render the coverage report
+    Then the payload carries a "grain.unique-key-unbacked" finding for "orders" with verdict "covered"
+    And the finding for "orders" attributes coverage to the unique data test on "order_id"
+    And the finding for "orders" marks the unique data test on "order_id" as degraded by "severity: warn"
+
+  Scenario: A where-filtered unique test attributes as degraded backing
+    Given the modified coverage model "orders" declares unique_key "order_id"
+    And an enabled unique data test on column "order_id" of "orders" filtered by where "order_date >= '2024-01-01'"
+    When I render the coverage report
+    Then the payload carries a "grain.unique-key-unbacked" finding for "orders" with verdict "covered"
+    And the finding for "orders" marks the unique data test on "order_id" as degraded by "where-filtered"
+
+  Scenario: A disabled-map unique test surfaces as exists-but-disabled, distinct from absent
+    Given the modified coverage model "orders" declares unique_key "order_id"
+    And the manifest disables a unique test "unique_orders_order_id_off" on column "order_id" of "orders"
+    When I render the coverage report
+    Then the payload carries a "grain.unique-key-unbacked" finding for "orders" with verdict "uncovered"
+    And the finding for "orders" carries exists-but-disabled evidence naming "unique_orders_order_id_off"
+
+  Scenario: A singular test degrades an unbacked key to unknown, never uncovered
+    Given the modified coverage model "orders" declares unique_key "order_id"
+    And an enabled singular test "assert_orders_consistent" depending on "orders"
+    When I render the coverage report
+    Then the payload carries a "grain.unique-key-unbacked" finding for "orders" with verdict "unknown"
+    And the finding for "orders" enumerates singular test "assert_orders_consistent" in evidence
+
   Scenario: A model without a unique key carries no findings
     Given the modified coverage model "plain_model" declares no unique_key
     When I render the coverage report
