@@ -1218,8 +1218,28 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
    deepened stand-in extends to this label (latte Catppuccin subtext1
    #5c5f77 ≈ 5.5:1 on the row fill, re-measured empirically) — token
    override only; the verbatim latte theme block stays pinned. */
-:root[data-theme="latte"] .finding-covered-by .f-label { --text-muted: #5c5f77; }
+:root[data-theme="latte"] .finding-covered-by .f-label,
+:root[data-theme="latte"] .finding-degraded-label .f-label { --text-muted: #5c5f77; }
 .finding-covered-by code, .finding-suppress-reason code { font-size: 0.92em; }
+/* cute-dbt#259 — degraded backing: the summary chip (shown only when
+   EVERY attributing test is weakened — no full-strength backing at all)
+   and the per-test cause list beside the attribution. The chip pairs
+   the always-AA --text with the amber edge token (non-text), so no
+   per-theme stand-in is needed; the cause copy is body --text. */
+.degraded-chip {
+  font-size: 0.68em; padding: 0.12rem 0.55rem; border-radius: 999px;
+  font-family: var(--font-ui); white-space: nowrap; flex: 0 0 auto;
+  color: var(--text); border: var(--rule-w) solid var(--badge-amber-edge);
+  cursor: help;
+}
+.degraded-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+html[data-style="terminal"] .degraded-chip,
+html[data-style="swiss"] .degraded-chip { border-radius: 0; }
+.finding-degraded-label { margin-bottom: 0.1rem; }
+.finding-degraded { list-style: none; margin: 0.2rem 0 0.3rem; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+.finding-degraded-test { line-height: 1.45; }
+.finding-degraded-test code { font-size: 0.92em; }
+.f-degraded-cause { color: var(--text); font-size: 0.92em; margin-top: 0.1rem; }
 .finding-evidence { list-style: none; margin: 0.3rem 0; padding: 0; display: flex; flex-direction: column; gap: 0.15rem; }
 .finding-evidence li { line-height: 1.45; }
 .f-ev-label { color: var(--text-muted); font-size: 0.92em; }
