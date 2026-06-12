@@ -1027,6 +1027,16 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
    owns the ov-tooltip palette). */
 .ov-tooltip .ov-row { display: flex; flex-wrap: wrap; gap: 0.15rem 0.5rem; align-items: baseline; padding-left: 0.45rem; }
 .ov-tooltip .ov-key, .ov-tooltip .ov-row code { background: none; padding: 0; font-family: var(--font-mono); font-weight: 700; color: color-mix(in oklab, var(--accent) 50%, white); overflow-wrap: anywhere; }
+/* cute-dbt#238 — Latte ov-key AA: the all-theme 50% accent mix lands
+   3.69:1 on latte's tooltip fill (#4c4f69 — the lightest of the 8; #273's
+   light-page accent deepening made this dark-fill surface marginally
+   worse). The symmetric twin of #233 D4's .ct-key latte stand-in at the
+   same 35% mix (measured 4.76 PASS; 40% still fails at 4.38); the other
+   7 themes' 50% mix above stays pinned. */
+:root[data-theme="latte"] .ov-tooltip .ov-key,
+:root[data-theme="latte"] .ov-tooltip .ov-row code {
+  color: color-mix(in oklab, var(--accent) 35%, white);
+}
 .ov-tooltip .ov-eq { opacity: 0.45; }
 .ov-tooltip .ov-val { font-family: var(--font-mono); color: rgba(255,255,255,0.9); overflow-wrap: anywhere; min-width: 0; }
 
