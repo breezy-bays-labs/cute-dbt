@@ -195,8 +195,10 @@ impl ConfigLeafPath {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectChangeCategory {
-    /// A `vars:` entry changed (blast radius not attributed in this
-    /// slice — the panel row states so plainly).
+    /// A `vars:` entry changed. Since cute-dbt#268 the row carries
+    /// precedence-resolved per-var attribution
+    /// ([`ProjectChange::vars`]); blast radius is stated at honest
+    /// tiers, never widened into scope.
     Vars,
     /// A config-tree path changed (`models:`/`seeds:`/… `+key` values).
     ConfigTree,
@@ -247,6 +249,14 @@ pub struct ProjectChange {
     /// byte-stable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree: Option<ConfigLeafPath>,
+    /// Vars-row enrichment (cute-dbt#268) — `Some` exactly on `Vars`
+    /// rows after [`crate::domain::vars::attach_var_facts`]: the
+    /// precedence-resolved per-var entries with tiered affected-model
+    /// lists, package masking, and the override-pin subtraction. `None`
+    /// on every other category (and on pre-#268 payloads — additive,
+    /// ADR-5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vars: Option<crate::domain::vars::VarChangeFacts>,
 }
 
 /// One manifest `operation.*` node backing a project hook entry
@@ -393,6 +403,16 @@ pub struct ProjectFacts {
     /// chips, and the panel's affected-models listings.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub config_attributions: BTreeMap<String, Vec<ConfigAttribution>>,
+    /// Per-model var-reference chips (cute-dbt#268) — node-id → the
+    /// edited vars the model references, tiered
+    /// ([`crate::domain::vars::attribute_var_changes`]). Non-empty only
+    /// when the panel is [`ProjectChangePanel::Categorized`] on the
+    /// pr-diff arm AND the diff edits `vars:`. **Never** a scope input
+    /// (contextualize-don't-widen — the founder's v3 frame): the render
+    /// layer decorates in-scope models with chips; the in-scope set is
+    /// untouched.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub var_references: BTreeMap<String, Vec<crate::domain::vars::VarReference>>,
 }
 
 /// Structurally diff two parsed project definitions into categorized
@@ -467,6 +487,7 @@ pub fn diff_project_definitions(
                 new: (!n.is_empty()).then(|| Value::Array(n.clone())),
                 hook: None,
                 tree: None,
+                vars: None,
             });
         }
     }
@@ -512,6 +533,7 @@ fn push_if_changed(
             new,
             hook: None,
             tree: None,
+            vars: None,
         });
     }
 }
@@ -568,6 +590,7 @@ fn diff_config_tree(
                 new: new_v,
                 hook: None,
                 tree: Some(tree),
+                vars: None,
             });
         }
     }
@@ -991,6 +1014,7 @@ mod tests {
                 new: Some(json!("VT")),
                 hook: None,
                 tree: None,
+                vars: None,
             }],
         };
         let fallback = ProjectChangePanel::Fallback {
@@ -1072,6 +1096,7 @@ mod tests {
                 new: Some(json!("VT")),
                 hook: None,
                 tree: None,
+                vars: None,
             }],
         );
     }
@@ -1093,6 +1118,7 @@ mod tests {
                 new: Some(json!(true)),
                 hook: None,
                 tree: None,
+                vars: None,
             },
         );
         assert_eq!(
@@ -1104,6 +1130,7 @@ mod tests {
                 new: None,
                 hook: None,
                 tree: None,
+                vars: None,
             },
         );
     }
@@ -1139,6 +1166,7 @@ mod tests {
                     segments: vec!["playground".to_owned(), "marts".to_owned()],
                     key: "materialized".to_owned(),
                 }),
+                vars: None,
             }],
         );
     }
@@ -1187,6 +1215,7 @@ mod tests {
                     segments: Vec::new(),
                     key: "quote_columns".to_owned(),
                 }),
+                vars: None,
             }],
         );
     }
@@ -1449,6 +1478,7 @@ mod tests {
             new,
             hook: None,
             tree: None,
+            vars: None,
         }
     }
 
@@ -1680,6 +1710,7 @@ mod tests {
             new: Some(json!(5)),
             hook: None,
             tree: None,
+            vars: None,
         }];
         attach_hook_facts(&mut changes, &ops);
         assert_eq!(changes[0].hook, None);
@@ -1756,6 +1787,7 @@ mod tests {
                     path: "models.shop".to_owned(),
                 }],
             )]),
+            var_references: BTreeMap::new(),
         };
         let json = serde_json::to_string(&facts).expect("serialize");
         let back: ProjectFacts = serde_json::from_str(&json).expect("deserialize");

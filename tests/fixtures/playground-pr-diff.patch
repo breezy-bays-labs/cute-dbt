@@ -43,6 +43,9 @@ diff --git a/dbt_project.yml b/dbt_project.yml
 @@ -11 +11 @@
 -  dq_quarantine_threshold: 10
 +  dq_quarantine_threshold: 5
+@@ -12 +12 @@
+-  default_state_grid_density: weekly
++  default_state_grid_density: monthly
 @@ -18 +18 @@
 -      +materialized: view
 +      +materialized: table

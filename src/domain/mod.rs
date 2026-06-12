@@ -52,6 +52,7 @@ pub mod state;
 pub mod unit_test;
 pub mod unit_test_table;
 pub mod unit_test_yaml;
+pub mod vars;
 
 pub use cell_diff::{
     CellChange, ColumnStatus, DiffColumn, FixtureTableDiff, NamedTableDiff, RowChange,
@@ -114,3 +115,8 @@ pub use unit_test_table::{
     type_cell_value, type_csv_token,
 };
 pub use unit_test_yaml::{UnitTestYamlBlock, extract_model_block, extract_unit_test_block};
+pub use vars::{
+    MacroVarHit, VarAnalysis, VarAttribution, VarChangeFacts, VarEdit, VarPrecedence, VarReference,
+    VarScanFootprint, VarTier, attach_var_facts, attribute_var_changes, changed_vars,
+    resolve_project_var,
+};

@@ -18,7 +18,8 @@ use serde_json::Value;
 use super::super::common;
 use super::World;
 use super::builders::{
-    empty_manifest, model_node_with_fqn, serialize_to_tmp, unit_test_for, with_node, with_unit_test,
+    empty_manifest, model_id, model_node, model_node_with_fqn, model_node_with_raw_code,
+    serialize_to_tmp, serialize_with_wire_macros_to_tmp, unit_test_for, with_node, with_unit_test,
 };
 
 /// The canonical working-tree dbt_project.yml every happy-path scenario
@@ -196,6 +197,112 @@ fn diff_edits_project_level_config(world: &mut World, old: String, new: String) 
     );
 }
 
+// ---------------------------------------------------------------------
+// Given — cute-dbt#268 vars attribution tiers
+// ---------------------------------------------------------------------
+
+/// cute-dbt#268 — one model per evidence tier for `dq_threshold`:
+/// a DIRECT `raw_code` reader, a CONFIG-driven node
+/// (`unrendered_config` carries the authored Jinja), and a
+/// MACRO-mediated reader whose macro body rides [`World::wire_macros`]
+/// into the serialized JSON (wire macros are objects, not the domain's
+/// bare body strings).
+#[given("the current manifest carries models referencing the project var at every tier")]
+fn manifest_with_var_tier_models(world: &mut World) {
+    use std::collections::BTreeMap;
+
+    use cute_dbt::domain::{Checksum, DependsOn, Node, NodeConfig};
+
+    let mut manifest = empty_manifest();
+    manifest = with_node(
+        manifest,
+        model_node_with_raw_code(
+            "mart_dq",
+            "ck-direct",
+            Some("select 1"),
+            "models/mart_dq.sql",
+            "select {{ var('dq_threshold') }} as cap",
+        ),
+    );
+    manifest = with_node(
+        manifest,
+        model_node("grid_model", "ck-config", Some("select 1")).with_unrendered_config(
+            BTreeMap::from([(
+                "enabled".to_owned(),
+                serde_json::json!("{{ var('dq_threshold') > 0 }}"),
+            )]),
+        ),
+    );
+    manifest = with_node(
+        manifest,
+        Node::new(
+            model_id("stg_enc"),
+            "model",
+            Checksum::new("sha256", "ck-macro"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::new(
+                vec!["macro.bdd_project.add_dq_flags".to_owned()],
+                Vec::new(),
+            ),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        ),
+    );
+    world.current_manifest = Some(manifest);
+    world.wire_macros = vec![(
+        "macro.bdd_project.add_dq_flags".to_owned(),
+        "{% macro add_dq_flags() %}{{ var('dq_threshold') }}{% endmacro %}".to_owned(),
+    )];
+}
+
+#[given(regex = r#"^the manifest unit test "([^"]+)" pins the var "([^"]+)" in overrides$"#)]
+fn unit_test_pins_var(world: &mut World, test_name: String, var_name: String) {
+    use std::collections::BTreeMap;
+
+    use cute_dbt::domain::UnitTestOverrides;
+
+    let mut overrides = UnitTestOverrides::new();
+    overrides.insert(
+        "vars".to_owned(),
+        BTreeMap::from([(var_name, serde_json::json!(5))]),
+    );
+    let manifest = world
+        .current_manifest
+        .take()
+        .expect("a Given built the manifest");
+    world.current_manifest = Some(with_unit_test(
+        manifest,
+        unit_test_for(&test_name, "mart_dq").with_overrides(Some(overrides)),
+    ));
+}
+
+#[given(
+    regex = r#"^the PR diff edits the project var "([^"]+)" from (\d+) to (\d+) and the direct reader's SQL$"#
+)]
+fn diff_edits_var_and_model_sql(world: &mut World, var: String, old: String, new: String) {
+    // Two file sections: canonical line 5 (the var) and the model's
+    // single-line SQL (the `+` side byte-matches the manifest raw_code,
+    // the same-revision contract).
+    let patch = format!(
+        "diff --git a/dbt_project.yml b/dbt_project.yml\n\
+         --- a/dbt_project.yml\n\
+         +++ b/dbt_project.yml\n\
+         @@ -5 +5 @@\n\
+         -  {var}: {old}\n\
+         +  {var}: {new}\n\
+         diff --git a/models/mart_dq.sql b/models/mart_dq.sql\n\
+         --- a/models/mart_dq.sql\n\
+         +++ b/models/mart_dq.sql\n\
+         @@ -1 +1 @@\n\
+         -select 1 as cap\n\
+         +select {{{{ var('dq_threshold') }}}} as cap\n"
+    );
+    write_patch(world, &patch);
+}
+
 #[given("the PR diff claims a dbt_project.yml line that does not match the working tree")]
 fn diff_is_stale(world: &mut World) {
     // The `+` body disagrees with working-tree line 5 — the reverse-apply
@@ -219,7 +326,14 @@ fn run_pr_diff_arm(world: &mut World) {
         .current_manifest
         .take()
         .expect("the Background built a manifest");
-    let manifest_path = serialize_to_tmp(&manifest, "project_def_current");
+    // cute-dbt#268: wire macros (when a Given declared them) are
+    // injected at serialization — the domain shape stores bare body
+    // strings the wire reader does not accept.
+    let manifest_path = if world.wire_macros.is_empty() {
+        serialize_to_tmp(&manifest, "project_def_current")
+    } else {
+        serialize_with_wire_macros_to_tmp(&manifest, "project_def_current", &world.wire_macros)
+    };
     world.current_manifest = Some(manifest);
 
     let workdir = project_workdir(world);
@@ -537,6 +651,54 @@ fn panel_config_tree_row_states(world: &mut World, sentence: String) {
     assert!(
         html.contains(&sentence),
         "the affected listing must state {sentence:?}",
+    );
+}
+
+// ---------------------------------------------------------------------
+// Then — cute-dbt#268 vars attribution tiers
+// ---------------------------------------------------------------------
+
+#[then(regex = r#"^the panel's vars row lists "([^"]+)"$"#)]
+fn panel_vars_row_lists(world: &mut World, sentence: String) {
+    let html = html(world);
+    assert!(
+        html.contains(r#"data-testid="project-def-var-tier""#),
+        "the vars row must carry tiered attribution lines; stderr={}",
+        world.last_stderr,
+    );
+    assert!(
+        html.contains(&sentence),
+        "a tier line must state {sentence:?}",
+    );
+}
+
+#[then(regex = r#"^the vars row notes "([^"]+)"$"#)]
+fn vars_row_note_states(world: &mut World, fragment: String) {
+    let html = html(world);
+    assert!(
+        html.contains(r#"class="project-def-var-note""#),
+        "the vars row must carry per-entry note lines",
+    );
+    assert!(
+        html.contains(&fragment),
+        "a var-entry note must state {fragment:?}",
+    );
+}
+
+#[then(
+    regex = r#"^the payload model "([^"]+)" carries the var reference "([^"]+)" at tier "([^"]+)"$"#
+)]
+fn payload_model_carries_var_reference(world: &mut World, name: String, var: String, tier: String) {
+    let payload = payload(world);
+    let model = payload_model(&payload, &name).expect("the model is in scope");
+    let references = model["var_references"]
+        .as_array()
+        .unwrap_or_else(|| panic!("model {name:?} carries var_references; got {model}"));
+    assert!(
+        references.iter().any(|r| {
+            r["name"].as_str() == Some(var.as_str()) && r["tier"].as_str() == Some(tier.as_str())
+        }),
+        "model {name:?} must carry the {var:?} reference at tier {tier:?}; got {references:?}",
     );
 }
 

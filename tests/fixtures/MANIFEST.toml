@@ -323,7 +323,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "e84ca39aa23a2d508728eeca68b255d9b472a7c407e9a1ff5067f2b1250ccbac"
+sha256 = "4ce442d5c07fbdb3ce6ccf0b9ad3b964be892c50d2114bdc889c748204cbc98b"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -471,7 +471,7 @@ no committed fixture carried any operation node before this.\
 path = "playground-pr-diff.patch"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/134"
-sha256 = "8bd15de475b4875d06df3b1f214a98f300bfbdefe3965fe7e99806ada7485744"
+sha256 = "0dd17d61b9ac656f262b37580fbb87b51c3684487d32291e1b2004c34ba5079b"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"

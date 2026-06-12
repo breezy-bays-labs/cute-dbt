@@ -64,10 +64,11 @@ use crate::domain::{
     InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex,
     PreflightError, ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ScopeInput,
     ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock,
-    all_models, attach_hook_facts, attach_model_yaml_diffs, attribute_config_tree_changes,
-    changed_models, check_by_id, diff_project_definitions, effective_fixture_format,
-    external_fixture_table, extract_model_block, extract_unit_test_block, hook_operations,
-    preflight_compiled, raw_hunk_lines, reconstruct_block_diffs, reconstruct_external_fixture_diff,
+    VarReference, all_models, attach_hook_facts, attach_model_yaml_diffs, attach_var_facts,
+    attribute_config_tree_changes, attribute_var_changes, changed_models, check_by_id,
+    diff_project_definitions, effective_fixture_format, external_fixture_table,
+    extract_model_block, extract_unit_test_block, hook_operations, preflight_compiled,
+    raw_hunk_lines, reconstruct_block_diffs, reconstruct_external_fixture_diff,
     reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks,
     resolve_check_policy, reverse_apply, scan_pragmas, select_in_scope,
     widen_with_config_attributions,
@@ -756,6 +757,7 @@ fn gather_project_facts(
             definition: None,
             panel: project_panel_without_file(index),
             config_attributions: BTreeMap::new(),
+            var_references: BTreeMap::new(),
         };
     };
     let reader = FsProjectFileReader::new(project_root);
@@ -815,6 +817,7 @@ fn gather_project_facts_with_reader(
             definition: None,
             panel: project_panel_without_file(index),
             config_attributions: BTreeMap::new(),
+            var_references: BTreeMap::new(),
         };
     };
     let definition = match parse_project_definition(&new_text) {
@@ -827,17 +830,18 @@ fn gather_project_facts_with_reader(
             None
         }
     };
-    let (panel, config_attributions) = index
+    let (panel, config_attributions, var_references) = index
         .filter(|index| index.contains_changed(DBT_PROJECT_YML))
-        .map_or((None, BTreeMap::new()), |index| {
-            let (panel, attributions) =
+        .map_or((None, BTreeMap::new(), BTreeMap::new()), |index| {
+            let (panel, attributions, var_references) =
                 project_change_panel(&new_text, definition.as_ref(), current, index);
-            (Some(panel), attributions)
+            (Some(panel), attributions, var_references)
         });
     ProjectFacts {
         definition,
         panel,
         config_attributions,
+        var_references,
     }
 }
 
@@ -847,18 +851,33 @@ fn gather_project_facts_with_reader(
 /// [`gather_project_facts_with_reader`] for the arm map; every fallback
 /// arm attributes nothing (no parsed pair ⇒ never a guessed widening).
 ///
+/// The diff-gated panel build's output (cute-dbt#268): the panel
+/// itself, the cute-dbt#267 per-model config-tree attributions, and the
+/// cute-dbt#268 per-model var-reference chips.
+type PanelFacts = (
+    ProjectChangePanel,
+    BTreeMap<String, Vec<ConfigAttribution>>,
+    BTreeMap<String, Vec<VarReference>>,
+);
+
 /// Hooks rows are enriched from the manifest's `operation.*` nodes
 /// (cute-dbt#269): the project name comes from the parsed file's own
 /// `name:` (the file IS the root project definition — no wire field
 /// needed; operation node names are built from exactly this name), and
 /// [`attach_hook_facts`] adds the inline SQL diff + the manifest-side
 /// presence verdict to each `Hooks` change.
+///
+/// Vars rows are enriched by [`attribute_var_changes`] +
+/// [`attach_var_facts`] (cute-dbt#268): precedence-resolved per-var
+/// entries with tiered affected-model lists ride the rows, and the
+/// per-model [`VarReference`] chips ride [`ProjectFacts`] — context
+/// only, never a scope input (contextualize-don't-widen).
 fn project_change_panel(
     new_text: &str,
     definition: Option<&crate::domain::ProjectDefinition>,
     current: &Manifest,
     index: &NormalizedDiffIndex,
-) -> (ProjectChangePanel, BTreeMap<String, Vec<ConfigAttribution>>) {
+) -> PanelFacts {
     let hunks = index.hunks_for(DBT_PROJECT_YML);
     let fallback = |reason: ProjectFallbackReason| {
         (
@@ -866,6 +885,7 @@ fn project_change_panel(
                 reason,
                 raw: raw_hunk_lines(hunks),
             },
+            BTreeMap::new(),
             BTreeMap::new(),
         )
     };
@@ -883,8 +903,14 @@ fn project_change_panel(
     let mut changes = diff_project_definitions(&old_def, new_def);
     let ops = hook_operations(current, new_def.name.as_deref().unwrap_or_default());
     attach_hook_facts(&mut changes, &ops);
+    let var_analysis = attribute_var_changes(current, &old_def, new_def);
+    attach_var_facts(&mut changes, &var_analysis);
     let attributions = attribute_config_tree_changes(current, &old_def, new_def, &changes);
-    (ProjectChangePanel::Categorized { changes }, attributions)
+    (
+        ProjectChangePanel::Categorized { changes },
+        attributions,
+        var_analysis.references,
+    )
 }
 
 /// Merge external fixture FILE cell diffs (cute-dbt#126 AC#3) into the
@@ -2347,6 +2373,50 @@ mod tests {
                 panic!("expected categorized panel, got fallback: {reason:?}")
             }
         }
+    }
+
+    #[test]
+    fn project_facts_vars_edit_attaches_tiered_facts_and_reference_chips() {
+        // cute-dbt#268: the categorized vars row carries the tiered
+        // attribution and ProjectFacts carries the per-model reference
+        // chips — context only (scope selection reads neither).
+        let reader_id = NodeId::new("model.shop.reads_state");
+        let reader_node = Node::new(
+            reader_id.clone(),
+            "model",
+            Checksum::new("sha256", "ck"),
+            Some("select 1".to_owned()),
+            Some("select '{{ var('default_state') }}' as state".to_owned()),
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            StdBTreeMap::new(),
+        );
+        let current = manifest_with_models(vec![reader_node]);
+        let index = project_diff_index(vec![replacement_hunk(
+            3,
+            "  default_state: CT",
+            "  default_state: VT",
+        )]);
+        let facts =
+            gather_project_facts_with_reader(&project_reader(PROJECT_NEW), &current, Some(&index));
+        let ProjectChangePanel::Categorized { changes } = facts.panel.expect("panel present")
+        else {
+            panic!("expected categorized panel");
+        };
+        let var_facts = changes[0].vars.as_ref().expect("vars facts attached");
+        assert_eq!(var_facts.entries.len(), 1);
+        assert_eq!(var_facts.entries[0].name, "default_state");
+        assert_eq!(
+            var_facts.entries[0].direct,
+            vec![reader_id.as_str().to_owned()],
+        );
+        assert_eq!(var_facts.footprint.models_scanned, 1);
+        let chips = &facts.var_references[reader_id.as_str()];
+        assert_eq!(chips.len(), 1);
+        assert_eq!(chips[0].name, "default_state");
+        assert_eq!(chips[0].tier, crate::domain::VarTier::Direct);
     }
 
     #[test]

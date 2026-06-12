@@ -362,6 +362,37 @@ pub fn serialize_to_tmp(manifest: &Manifest, name: &str) -> PathBuf {
 }
 
 /// Serialize a synthetic `Manifest` like [`serialize_to_tmp`], but
+/// injecting wire-shaped `macros` entries (cute-dbt#268).
+///
+/// The domain `Manifest` stores macros as `id -> body string`, while the
+/// wire shape is `id -> { macro_sql, depends_on }` — a plain
+/// domain→JSON round-trip would hand the adapter a string where it
+/// expects an object (the cute-dbt#160 wire-config divergence,
+/// macros edition). Each `(id, macro_sql)` entry is written in the real
+/// wire shape with an empty `depends_on.macros` (the leaf-macro shape).
+#[must_use]
+pub fn serialize_with_wire_macros_to_tmp(
+    manifest: &Manifest,
+    name: &str,
+    macros: &[(String, String)],
+) -> PathBuf {
+    let mut value: Value = serde_json::to_value(manifest).expect("manifest serializes to Value");
+    for (id, sql) in macros {
+        value["macros"][id] = serde_json::json!({
+            "macro_sql": sql,
+            "depends_on": { "macros": [] },
+        });
+    }
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.json"));
+    std::fs::write(
+        &path,
+        serde_json::to_string(&value).expect("injected manifest serializes"),
+    )
+    .expect("write synthetic manifest to temp file");
+    path
+}
+
+/// Serialize a synthetic `Manifest` like [`serialize_to_tmp`], but
 /// rewriting each node's `config` to dbt's FLAT wire dict (cute-dbt#160).
 ///
 /// The cute-dbt#145 wire-shape divergence applies: the domain serializes

@@ -72,8 +72,9 @@ use crate::domain::{
     HookManifestPresence, InScopeSet, Instrument, Manifest, ModelInScopeSet, ModelYamlOutcome,
     Node, NodeId, ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition,
     ProjectFacts, ProjectFallbackReason, SourceNode, TestMetadata, Tier, UnitTest,
-    UnitTestDataDiff, UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock, apply_check_policy,
-    model_findings, resolve_target_model, resolve_tested_model, table_from_manifest_rows,
+    UnitTestDataDiff, UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock, VarAttribution,
+    VarChangeFacts, VarReference, VarScanFootprint, apply_check_policy, model_findings,
+    resolve_target_model, resolve_tested_model, table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -357,6 +358,15 @@ pub struct ModelPayload {
     /// every pre-#267 payload stays byte-stable).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub config_attributions: Vec<ConfigAttribution>,
+    /// Var-reference chips (cute-dbt#268): the edited `dbt_project.yml`
+    /// vars this model references, tiered (DIRECT / CONFIG / MACRO).
+    /// Context only — a var edit never widens scope, so chips appear
+    /// exactly on models that are in scope for some OTHER reason. The
+    /// JS renders one chip per entry
+    /// (`reads var 'dq_threshold' · direct`). Omitted from JSON when
+    /// empty (baseline mode + every pre-#268 payload stays byte-stable).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub var_references: Vec<VarReference>,
 }
 
 /// The Model-YAML section's render shape (cute-dbt#247): the model's
@@ -1426,6 +1436,43 @@ struct ProjectPanelRowView {
     /// `true` ⇒ the row emits the `data-hook-slot` container the report
     /// JS fills with the #111-rendered hook SQL diff (cute-dbt#269).
     hook_slot: bool,
+    /// Per-var attribution entries (cute-dbt#268) — non-empty exactly on
+    /// vars rows whose [`VarChangeFacts`] were attached. When non-empty
+    /// the row's `detail` is empty (each entry carries its own resolved
+    /// old→new) and `note` carries the honest-UNKNOWN residual copy.
+    var_entries: Vec<ProjectVarEntryView>,
+}
+
+/// One precedence-resolved var edit inside a vars panel row
+/// (cute-dbt#268).
+struct ProjectVarEntryView {
+    /// The var's bare name.
+    name: String,
+    /// `package-scoped: {pkg}` for a `vars.{pkg}.{name}` edit; empty for
+    /// a global entry.
+    scope: String,
+    /// `old → new` / `added: v` / `removed: v`, compact JSON.
+    detail: String,
+    /// One line per non-empty tier, strongest first.
+    tier_lines: Vec<VarTierLineView>,
+    /// Masked-package / insulated-test / dynamic-bucket / zero-hit
+    /// statements, one per line.
+    notes: Vec<String>,
+}
+
+/// One tier's affected-models line inside a var entry (cute-dbt#268).
+struct VarTierLineView {
+    /// `direct` / `config` / `macro` — the tier-chip CSS hook.
+    tier_key: &'static str,
+    /// `DIRECT` / `CONFIG` / `MACRO` — the chip text.
+    tier_label: &'static str,
+    /// The "at least N models …" sentence (names inline up to the R1b
+    /// cap).
+    text: String,
+    /// R1b overflow: the full name list when the count exceeds the cap
+    /// (rendered inside a collapsed `<details>` — "listed, not
+    /// individually rendered").
+    overflow: Vec<String>,
 }
 
 /// One raw diff line of the panel's Shape-A fallback row.
@@ -1472,8 +1519,11 @@ fn project_category_strings(
         ProjectChangeCategory::Vars => (
             "vars",
             "vars",
-            // Locked interim copy (shaping #262 v3): plain statement,
-            // never "coming soon".
+            // Defensive fallback only: since cute-dbt#268 every
+            // categorized vars row carries VarChangeFacts and
+            // project_panel_row swaps this note for the honest-UNKNOWN
+            // residual copy (vars_row_note). A facts-less row keeps the
+            // locked interim statement (plain, never "coming soon").
             "blast radius not attributed",
         ),
         ProjectChangeCategory::ConfigTree => ("config_tree", "config tree", ""),
@@ -1523,13 +1573,7 @@ fn hook_row_note(facts: &HookChangeFacts) -> String {
 /// A change's `detail` string: both sides present → `old → new`;
 /// one-sided → `added:` / `removed:`. Values render as compact JSON.
 fn project_change_detail(change: &ProjectChange) -> String {
-    let compact = |v: &Value| serde_json::to_string(v).unwrap_or_else(|_| "null".to_owned());
-    match (&change.old, &change.new) {
-        (Some(old), Some(new)) => format!("{} \u{2192} {}", compact(old), compact(new)),
-        (None, Some(new)) => format!("added: {}", compact(new)),
-        (Some(old), None) => format!("removed: {}", compact(old)),
-        (None, None) => String::new(), // unreachable by construction
-    }
+    side_detail(change.old.as_ref(), change.new.as_ref())
 }
 
 /// The fallback arm's explicit copy — "could not categorize" /
@@ -1636,6 +1680,237 @@ fn affected_models_strings(ids: &BTreeSet<String>) -> (String, Vec<String>) {
     }
 }
 
+// ---------------------------------------------------------------------
+// Vars-row attribution presentation (cute-dbt#268)
+// ---------------------------------------------------------------------
+
+/// Inline-vs-overflow split for one affected list (the R1b cap, shared
+/// with the cute-dbt#267 config-tree rows): up to [`CONFIG_AFFECTED_CAP`]
+/// names ride inline; past it the names collapse into the row's
+/// `<details>` and the sentence states the count only.
+fn capped_names(names: Vec<String>) -> (String, Vec<String>) {
+    if names.len() <= CONFIG_AFFECTED_CAP {
+        (names.join(", "), Vec::new())
+    } else {
+        (String::new(), names)
+    }
+}
+
+/// One tier's sentence: "at least N model(s) {claim}: a, b" — or, past
+/// the R1b cap, "at least N models {claim} — listed, not individually
+/// rendered" with the names in the overflow `<details>`. The claim
+/// arrives in both verb agreements (`reads` / `read`).
+fn var_tier_line(
+    tier_key: &'static str,
+    tier_label: &'static str,
+    claim_one: &str,
+    claim_many: &str,
+    names: Vec<String>,
+) -> Option<VarTierLineView> {
+    if names.is_empty() {
+        return None;
+    }
+    let count = names.len();
+    let (noun, claim) = if count == 1 {
+        ("model", claim_one)
+    } else {
+        ("models", claim_many)
+    };
+    let (inline, overflow) = capped_names(names);
+    let text = if overflow.is_empty() {
+        format!("at least {count} {noun} {claim}: {inline}")
+    } else {
+        format!("at least {count} {noun} {claim} \u{2014} listed, not individually rendered")
+    };
+    Some(VarTierLineView {
+        tier_key,
+        tier_label,
+        text,
+        overflow,
+    })
+}
+
+/// Sorted display names (bare unless ambiguous) for a node-id list.
+fn var_display_names(ids: &[String]) -> Vec<String> {
+    affected_display_names(&ids.iter().cloned().collect::<BTreeSet<String>>())
+}
+
+/// MACRO-tier display names: each model (bare unless ambiguous within
+/// the set — the [`affected_display_names`] collision rule) paired with
+/// its mediating macro, sorted.
+fn macro_tier_names(hits: &[crate::domain::MacroVarHit]) -> Vec<String> {
+    let mut bare_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for hit in hits {
+        *bare_counts.entry(leaf_segment(&hit.model)).or_insert(0) += 1;
+    }
+    let mut names: Vec<String> = hits
+        .iter()
+        .map(|hit| {
+            let bare = leaf_segment(&hit.model);
+            let display = if bare_counts[bare] > 1 {
+                hit.model.as_str()
+            } else {
+                bare
+            };
+            format!("{display} (via {})", leaf_segment(&hit.via))
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// The three tier lines of one var entry, strongest tier first
+/// (cute-dbt#268). MACRO-tier names carry their mediating macro
+/// (`fct_x (via add_dq_flags)`).
+fn var_entry_tier_lines(entry: &VarAttribution) -> Vec<VarTierLineView> {
+    let macro_names = macro_tier_names(&entry.via_macros);
+    [
+        var_tier_line(
+            "direct",
+            "DIRECT",
+            "reads this var directly in SQL",
+            "read this var directly in SQL",
+            var_display_names(&entry.direct),
+        ),
+        var_tier_line(
+            "config",
+            "CONFIG",
+            "carries config driven by this var",
+            "carry config driven by this var",
+            var_display_names(&entry.config),
+        ),
+        var_tier_line(
+            "macro",
+            "MACRO",
+            "reads this var through its macro closure",
+            "read this var through their macro closure",
+            macro_names,
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// The masked / insulated / dynamic / zero-hit note lines of one var
+/// entry (cute-dbt#268) — each an explicit, in-row statement.
+fn var_entry_notes(entry: &VarAttribution) -> Vec<String> {
+    let mut notes = Vec::new();
+    if !entry.masked_packages.is_empty() {
+        notes.push(format!(
+            "masked for {}: a package-scoped value pins this var there, so this edit \
+             does not reach those models (package vars outrank global vars)",
+            entry.masked_packages.join(", "),
+        ));
+    }
+    if !entry.insulated_tests.is_empty() {
+        let count = entry.insulated_tests.len();
+        let noun = if count == 1 {
+            "unit test pins"
+        } else {
+            "unit tests pin"
+        };
+        let names: Vec<&str> = entry
+            .insulated_tests
+            .iter()
+            .map(|id| leaf_segment(id))
+            .collect();
+        notes.push(format!(
+            "{count} {noun} this var in overrides.vars and {} insulated from this edit \
+             (the override always wins): {}",
+            if count == 1 { "is" } else { "are" },
+            names.join(", "),
+        ));
+    }
+    if !entry.dynamic.is_empty() {
+        let count = entry.dynamic.len();
+        let noun = if count == 1 {
+            "model calls"
+        } else {
+            "models call"
+        };
+        let (inline, overflow) = capped_names(var_display_names(&entry.dynamic));
+        notes.push(if overflow.is_empty() {
+            format!("{count} {noun} var() with a computed name and cannot be ruled out: {inline}")
+        } else {
+            format!("{count} {noun} var() with a computed name and cannot be ruled out")
+        });
+    }
+    if entry.direct.is_empty() && entry.config.is_empty() && entry.via_macros.is_empty() {
+        notes.push("no referencing models found by the static scan".to_owned());
+    }
+    notes
+}
+
+/// Build the per-var entries of a vars row from its attached facts.
+fn var_entry_views(facts: &VarChangeFacts) -> Vec<ProjectVarEntryView> {
+    facts
+        .entries
+        .iter()
+        .map(|entry| ProjectVarEntryView {
+            name: entry.name.clone(),
+            scope: entry
+                .package
+                .as_ref()
+                .map(|pkg| format!("package-scoped: {pkg}"))
+                .unwrap_or_default(),
+            detail: side_detail(entry.old.as_ref(), entry.new.as_ref()),
+            tier_lines: var_entry_tier_lines(entry),
+            notes: var_entry_notes(entry),
+        })
+        .collect()
+}
+
+/// The honest-UNKNOWN residual copy of an attributed vars row
+/// (cute-dbt#268), written to the locked principles: in-row (never a
+/// report-global hedge), causes enumerated, what WAS checked stated,
+/// "at least N" framing, the disabled-membership caveat, and the
+/// contextualize-don't-widen statement. Scoped to the pr-diff arm by
+/// construction (the panel only renders there).
+fn vars_row_note(footprint: &VarScanFootprint) -> String {
+    let python = if footprint.python_models > 0 {
+        format!(
+            " ({} Python models could not be scanned)",
+            footprint.python_models,
+        )
+    } else {
+        String::new()
+    };
+    let model_noun = if footprint.models_scanned == 1 {
+        "model's"
+    } else {
+        "models'"
+    };
+    let macro_noun = if footprint.macros_scanned == 1 {
+        "macro body"
+    } else {
+        "macro bodies"
+    };
+    format!(
+        "Blast radius is not fully attributable statically \u{2014} the listed counts \
+         are \u{201c}at least\u{201d}, never exact. Not attributable: dynamic var() \
+         names, var-to-var value indirection, CLI --vars overrides (CLI values outrank \
+         everything shown here), Python models. Checked: {} {model_noun} SQL and \
+         configs plus {} {macro_noun}{python}. An inline var() default never overrides \
+         a project value. Models disabled by this edit drop out of the manifest and \
+         cannot be listed. Referencing models are contextualized here, never widened \
+         into report scope.",
+        footprint.models_scanned, footprint.macros_scanned,
+    )
+}
+
+/// A side pair's compact display — `old → new` / `added:` / `removed:`
+/// (the [`project_change_detail`] vocabulary over explicit sides).
+fn side_detail(old: Option<&Value>, new: Option<&Value>) -> String {
+    let compact = |v: &Value| serde_json::to_string(v).unwrap_or_else(|_| "null".to_owned());
+    match (old, new) {
+        (Some(old), Some(new)) => format!("{} \u{2192} {}", compact(old), compact(new)),
+        (None, Some(new)) => format!("added: {}", compact(new)),
+        (Some(old), None) => format!("removed: {}", compact(old)),
+        (None, None) => String::new(),
+    }
+}
+
 /// Build one categorized panel row, attaching the cute-dbt#267
 /// affected-models listing to `models:`-section config-tree rows.
 fn project_panel_row(
@@ -1658,29 +1933,35 @@ fn project_panel_row(
     // diff drops the raw-JSON detail (the diff IS the old→new statement)
     // and emits the slot the JS fills; the dispatch row renders as the
     // UNKNOWN-tier banner.
+    // cute-dbt#268 — a vars row with attached facts likewise drops the
+    // raw detail (each entry carries its precedence-resolved old→new)
+    // and swaps the interim note for the honest-UNKNOWN residual copy.
     let hook_diff = change
         .hook
         .as_ref()
         .is_some_and(|facts| facts.sql_diff.is_some());
     let is_dispatch = change.category == ProjectChangeCategory::Dispatch;
+    let var_facts = change.vars.as_ref();
     ProjectPanelRowView {
         category_key,
         category_label,
         label: change.label.clone(),
-        detail: if hook_diff {
+        detail: if hook_diff || var_facts.is_some() {
             String::new()
         } else {
             project_change_detail(change)
         },
-        note: change
-            .hook
-            .as_ref()
-            .map_or_else(|| note.to_owned(), hook_row_note),
+        note: match (change.hook.as_ref(), var_facts) {
+            (Some(hook), _) => hook_row_note(hook),
+            (None, Some(facts)) => vars_row_note(&facts.footprint),
+            (None, None) => note.to_owned(),
+        },
         affected_text,
         affected_overflow,
         tier: if is_dispatch { "UNKNOWN" } else { "" },
         banner: is_dispatch,
         hook_slot: hook_diff,
+        var_entries: var_facts.map(var_entry_views).unwrap_or_default(),
     }
 }
 
@@ -1981,6 +2262,11 @@ pub fn build_payload_with_externals(
         if let Some(attributions) = project_facts.config_attributions.get(model_id.as_str()) {
             model_payload.config_attributions.clone_from(attributions);
         }
+        // cute-dbt#268 — the var-reference chips: which edited vars this
+        // (already in-scope) model references. Context, never scope.
+        if let Some(references) = project_facts.var_references.get(model_id.as_str()) {
+            model_payload.var_references.clone_from(references);
+        }
         models.push(model_payload);
     }
     // cute-dbt#170 — the spec catalog covers exactly the checks that
@@ -2233,10 +2519,11 @@ fn build_model_payload(
             .into_iter()
             .map(|finding| finding_payload(&graph, finding))
             .collect(),
-        // cute-dbt#267 — attached by build_payload_with_externals from
-        // ProjectFacts.config_attributions (this builder never sees the
-        // gather stage's facts).
+        // cute-dbt#267 / #268 — attached by build_payload_with_externals
+        // from ProjectFacts (this builder never sees the gather stage's
+        // facts).
         config_attributions: Vec::new(),
+        var_references: Vec::new(),
     }
 }
 
@@ -3348,6 +3635,7 @@ mod tests {
                     path: "models.shop.marts".to_owned(),
                 }],
             )]),
+            var_references: BTreeMap::new(),
         };
         let payload = build_payload_with_externals(
             &manifest,
@@ -3392,6 +3680,298 @@ mod tests {
                 r#""config_attributions":[{"key":"materialized","path":"models.shop.marts"}]"#
             ),
             "the attributed model serializes the full wire shape: {json}",
+        );
+    }
+
+    // ===== cute-dbt#268 — vars attribution render surfaces =====
+
+    /// One attributed var entry with every surface populated.
+    fn full_var_attribution() -> VarAttribution {
+        VarAttribution {
+            name: "dq_threshold".to_owned(),
+            package: None,
+            old: Some(json!(10)),
+            new: Some(json!(5)),
+            direct: vec!["model.shop.mart_dq".to_owned()],
+            config: vec!["model.shop.grid".to_owned()],
+            via_macros: vec![crate::domain::MacroVarHit {
+                model: "model.shop.stg_enc".to_owned(),
+                via: "macro.shop.add_dq_flags".to_owned(),
+            }],
+            dynamic: vec!["model.shop.dyn_caller".to_owned()],
+            masked_packages: vec!["dbt_utils".to_owned()],
+            insulated_tests: vec!["unit_test.shop.mart_dq.test_pins_threshold".to_owned()],
+        }
+    }
+
+    fn vars_change_with_facts(entries: Vec<VarAttribution>) -> ProjectChange {
+        ProjectChange {
+            category: ProjectChangeCategory::Vars,
+            label: "dq_threshold".to_owned(),
+            old: Some(json!(10)),
+            new: Some(json!(5)),
+            hook: None,
+            tree: None,
+            vars: Some(VarChangeFacts {
+                entries,
+                footprint: VarScanFootprint {
+                    models_scanned: 469,
+                    macros_scanned: 910,
+                    python_models: 2,
+                },
+            }),
+        }
+    }
+
+    #[test]
+    fn vars_row_with_facts_builds_entries_and_swaps_in_the_honest_note() {
+        let panel = ProjectChangePanel::Categorized {
+            changes: vec![vars_change_with_facts(vec![full_var_attribution()])],
+        };
+        let view = project_panel_view(&panel, &BTreeMap::new());
+        let row = &view.rows[0];
+        assert!(row.detail.is_empty(), "entries carry their own old→new");
+        // The honest-UNKNOWN residual copy: causes enumerated, footprint
+        // stated, at-least framing, disabled caveat, never-widen statement.
+        for fragment in [
+            "are \u{201c}at least\u{201d}, never exact",
+            "dynamic var() names",
+            "var-to-var value indirection",
+            "CLI --vars overrides",
+            "Python models",
+            "Checked: 469 models' SQL and configs plus 910 macro bodies",
+            "(2 Python models could not be scanned)",
+            "An inline var() default never overrides a project value",
+            "disabled by this edit drop out of the manifest and cannot be listed",
+            "contextualized here, never widened into report scope",
+        ] {
+            assert!(
+                row.note.contains(fragment),
+                "note must state {fragment:?}: {}",
+                row.note
+            );
+        }
+        let entry = &row.var_entries[0];
+        assert_eq!(entry.name, "dq_threshold");
+        assert!(
+            entry.scope.is_empty(),
+            "a global entry carries no scope label"
+        );
+        assert_eq!(entry.detail, "10 \u{2192} 5");
+        let lines: Vec<(&str, &str)> = entry
+            .tier_lines
+            .iter()
+            .map(|l| (l.tier_key, l.text.as_str()))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                (
+                    "direct",
+                    "at least 1 model reads this var directly in SQL: mart_dq",
+                ),
+                (
+                    "config",
+                    "at least 1 model carries config driven by this var: grid",
+                ),
+                (
+                    "macro",
+                    "at least 1 model reads this var through its macro closure: \
+                     stg_enc (via add_dq_flags)",
+                ),
+            ],
+        );
+        assert_eq!(
+            entry.notes,
+            vec![
+                "masked for dbt_utils: a package-scoped value pins this var there, so \
+                 this edit does not reach those models (package vars outrank global vars)"
+                    .to_owned(),
+                "1 unit test pins this var in overrides.vars and is insulated from this \
+                 edit (the override always wins): test_pins_threshold"
+                    .to_owned(),
+                "1 model calls var() with a computed name and cannot be ruled out: \
+                 dyn_caller"
+                    .to_owned(),
+            ],
+        );
+    }
+
+    #[test]
+    fn vars_row_package_scoped_entry_carries_the_scope_label() {
+        let entry = VarAttribution {
+            package: Some("dbt_utils".to_owned()),
+            masked_packages: Vec::new(),
+            ..full_var_attribution()
+        };
+        let panel = ProjectChangePanel::Categorized {
+            changes: vec![vars_change_with_facts(vec![entry])],
+        };
+        let view = project_panel_view(&panel, &BTreeMap::new());
+        assert_eq!(
+            view.rows[0].var_entries[0].scope,
+            "package-scoped: dbt_utils",
+        );
+    }
+
+    #[test]
+    fn vars_row_zero_hit_entry_states_the_empty_scan_explicitly() {
+        let entry = VarAttribution {
+            name: "unreferenced".to_owned(),
+            old: Some(json!("a")),
+            new: Some(json!("b")),
+            ..VarAttribution::default()
+        };
+        let panel = ProjectChangePanel::Categorized {
+            changes: vec![vars_change_with_facts(vec![entry])],
+        };
+        let view = project_panel_view(&panel, &BTreeMap::new());
+        let rendered = &view.rows[0].var_entries[0];
+        assert!(rendered.tier_lines.is_empty());
+        assert_eq!(
+            rendered.notes,
+            vec!["no referencing models found by the static scan".to_owned()],
+        );
+    }
+
+    #[test]
+    fn var_tier_lines_apply_the_r1b_cap() {
+        // Past the cap the sentence keeps the explicit count, drops the
+        // inline names, and the full list rides the <details> overflow
+        // ("listed, not individually rendered").
+        let entry = VarAttribution {
+            direct: (0..=CONFIG_AFFECTED_CAP)
+                .map(|i| format!("model.shop.m{i:02}"))
+                .collect(),
+            config: Vec::new(),
+            via_macros: Vec::new(),
+            dynamic: Vec::new(),
+            masked_packages: Vec::new(),
+            insulated_tests: Vec::new(),
+            ..full_var_attribution()
+        };
+        let lines = var_entry_tier_lines(&entry);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0].text,
+            "at least 11 models read this var directly in SQL \u{2014} listed, not \
+             individually rendered",
+        );
+        assert_eq!(lines[0].overflow.len(), 11);
+        assert_eq!(lines[0].overflow[0], "m00");
+        // At the cap: names inline, no overflow.
+        let at_cap = VarAttribution {
+            direct: (0..CONFIG_AFFECTED_CAP)
+                .map(|i| format!("model.shop.m{i:02}"))
+                .collect(),
+            ..entry
+        };
+        let lines = var_entry_tier_lines(&at_cap);
+        assert!(lines[0].text.contains("m00"), "{}", lines[0].text);
+        assert!(lines[0].overflow.is_empty());
+    }
+
+    #[test]
+    fn vars_row_html_renders_entries_tier_chips_and_notes() {
+        let facts = ProjectFacts {
+            definition: None,
+            panel: Some(ProjectChangePanel::Categorized {
+                changes: vec![vars_change_with_facts(vec![full_var_attribution()])],
+            }),
+            config_attributions: BTreeMap::new(),
+            var_references: BTreeMap::new(),
+        };
+        let html = render_html_with_project_facts("cute_dbt_render_vars_row_test.html", &facts);
+        assert!(
+            html.contains(r#"data-testid="project-def-var-entry""#),
+            "the var entry block renders",
+        );
+        assert!(
+            html.contains(r#"<code class="project-def-var-name">dq_threshold</code>"#),
+            "the var name renders",
+        );
+        for chip in [
+            r#"<span class="tier-chip tier-direct">DIRECT</span>"#,
+            r#"<span class="tier-chip tier-config">CONFIG</span>"#,
+            r#"<span class="tier-chip tier-macro">MACRO</span>"#,
+        ] {
+            assert!(html.contains(chip), "tier chip renders: {chip}");
+        }
+        assert!(
+            html.contains("at least 1 model reads this var directly in SQL: mart_dq"),
+            "the DIRECT tier line renders",
+        );
+        assert!(
+            html.contains("insulated from this\n                 edit")
+                || html.contains("insulated from this edit"),
+            "the insulated-tests note renders",
+        );
+        assert!(
+            html.contains("never widened\n         into report scope")
+                || html.contains("never widened into report scope"),
+            "the contextualize-don't-widen statement renders",
+        );
+    }
+
+    #[test]
+    fn build_payload_attaches_var_reference_chips_to_in_scope_models() {
+        let manifest = manifest_for(
+            vec![
+                model_node("model.shop.mart_dq", "b1", Some("select 1")),
+                model_node("model.shop.stg_raw", "b2", Some("select 1")),
+            ],
+            vec![],
+        );
+        let models = ModelInScopeSet::from_iter([
+            NodeId::new("model.shop.mart_dq"),
+            NodeId::new("model.shop.stg_raw"),
+        ]);
+        let facts = ProjectFacts {
+            definition: None,
+            panel: None,
+            config_attributions: BTreeMap::new(),
+            var_references: BTreeMap::from([(
+                "model.shop.mart_dq".to_owned(),
+                vec![VarReference {
+                    name: "dq_threshold".to_owned(),
+                    tier: crate::domain::VarTier::Direct,
+                    via: None,
+                }],
+            )]),
+        };
+        let payload = build_payload_with_externals(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+            &CheckPolicy::default(),
+            &facts,
+        );
+        let mart = payload
+            .models
+            .iter()
+            .find(|m| m.name == "mart_dq")
+            .expect("referencing model renders");
+        assert_eq!(mart.var_references.len(), 1);
+        assert_eq!(mart.var_references[0].name, "dq_threshold");
+        let stg = payload
+            .models
+            .iter()
+            .find(|m| m.name == "stg_raw")
+            .expect("unreferencing model renders");
+        assert!(stg.var_references.is_empty());
+        // Additive wire shape: absent ⇒ the key is omitted entirely.
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert_eq!(json.matches("var_references").count(), 1, "{json}");
+        assert!(
+            json.contains(r#""var_references":[{"name":"dq_threshold","tier":"direct"}]"#),
+            "the referencing model serializes the full wire shape: {json}",
         );
     }
 
@@ -3472,6 +4052,7 @@ mod tests {
                     new: Some(json!(2)),
                     hook: None,
                     tree: None,
+                    vars: None,
                 },
                 ProjectChange {
                     category: ProjectChangeCategory::ConfigTree,
@@ -3480,6 +4061,7 @@ mod tests {
                     new: Some(json!("table")),
                     hook: None,
                     tree: Some(models_leaf),
+                    vars: None,
                 },
                 ProjectChange {
                     category: ProjectChangeCategory::ConfigTree,
@@ -3488,6 +4070,7 @@ mod tests {
                     new: Some(json!(false)),
                     hook: None,
                     tree: Some(seeds_leaf),
+                    vars: None,
                 },
             ],
         };
@@ -3542,6 +4125,7 @@ mod tests {
                 new: Some(json!("table")),
                 hook: None,
                 tree: Some(leaf),
+                vars: None,
             }],
         };
         let view = project_panel_view(&panel, &BTreeMap::new());
@@ -5663,6 +6247,7 @@ mod tests {
                 manifest: presence,
             }),
             tree: None,
+            vars: None,
         }
     }
 
@@ -5677,6 +6262,7 @@ mod tests {
                 )],
             }),
             config_attributions: BTreeMap::new(),
+            var_references: BTreeMap::new(),
         };
         let html = render_html_with_project_facts("cute_dbt_render_hooks_row_test.html", &facts);
         assert!(
@@ -5703,6 +6289,7 @@ mod tests {
                 changes: vec![change],
             }),
             config_attributions: BTreeMap::new(),
+            var_references: BTreeMap::new(),
         };
         let html = render_html_with_project_facts("cute_dbt_render_hooks_absent_test.html", &facts);
         assert!(
@@ -5739,9 +6326,11 @@ mod tests {
                         "search_order": ["shop", "dbt_utils"] }])),
                     hook: None,
                     tree: None,
+                    vars: None,
                 }],
             }),
             config_attributions: BTreeMap::new(),
+            var_references: BTreeMap::new(),
         };
         let html = render_html_with_project_facts("cute_dbt_render_dispatch_row_test.html", &facts);
         assert!(
