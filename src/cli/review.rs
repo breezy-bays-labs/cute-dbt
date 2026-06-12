@@ -40,6 +40,7 @@ use std::fs;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::SystemTime;
 
 use clap::{ArgGroup, Args};
 
@@ -117,6 +118,24 @@ pub struct ReviewArgs {
     #[arg(long, value_name = "DIR", value_parser = parse_project_dir)]
     pub project_dir: Option<PathBuf>,
 
+    /// Skip the `dbt compile` step and trust the existing manifest.
+    ///
+    /// A staleness check warns (never blocks) when project sources are
+    /// newer than the manifest. With this flag, dbt does not need to be
+    /// installed at all.
+    #[arg(long)]
+    pub no_compile: bool,
+
+    /// dbt target directory holding `manifest.json`.
+    ///
+    /// Wins over the `DBT_TARGET_PATH` environment variable; a relative
+    /// value resolves against the project directory (dbt's own
+    /// semantics). The same value is passed to `dbt compile` as
+    /// `--target-path`, so dbt writes where review reads. Defaults to
+    /// `<project>/target`.
+    #[arg(long, value_name = "DIR")]
+    pub target_path: Option<PathBuf>,
+
     /// Do not open the report when the run finishes.
     ///
     /// Auto-open only happens on an interactive terminal; scripts and
@@ -149,10 +168,11 @@ pub struct ReviewArgs {
     pub experimental: Option<BTreeSet<Experiment>>,
 }
 
-/// Worked examples appended to `review --help`'s long help.
+/// Worked examples + the privacy posture, appended to `review --help`'s
+/// long help.
 const REVIEW_EXAMPLES: &str = "\
 Examples:
-  # On a feature branch, after `dbt compile`: detect the base, diff,
+  # On a feature branch: detect the base, run your dbt compile, diff,
   # render, open.
   cute-dbt review
 
@@ -162,14 +182,26 @@ Examples:
   # Exactly what a PR would show — committed changes only.
   cute-dbt review --committed-only
 
+  # Trust an already-compiled manifest; dbt is not invoked (or needed).
+  cute-dbt review --no-compile
+
   # Show every command a real run would execute, run nothing.
   cute-dbt review --dry-run
 
 Review walks: dbt project discovery -> base detection -> merge-base ->
-`git diff --unified=0` (config-proof flag set) -> the same in-process
-pipeline as `cute-dbt report --pr-diff` -> report written ->
-auto-open on a TTY. The manifest must already be compiled
-(`dbt compile`); a persisted base lives in `git config cute-dbt.base`.";
+`git diff --unified=0` (config-proof flag set) -> your own `dbt compile`
+(exit code is the success signal; skipped with --no-compile) -> the same
+in-process pipeline as `cute-dbt report --pr-diff` -> report written ->
+auto-open on a TTY. A persisted base lives in `git config cute-dbt.base`.
+
+Privacy: review itself makes zero network requests, and the generated
+report makes zero outbound requests when opened. The compile step runs
+YOUR dbt, which may phone home on its own (engine version check,
+anonymous usage stats) — that egress belongs to dbt, not cute-dbt.
+Suppress it with dbt's own switches:
+  DBT_DISABLE_VERSION_CHECK=1 DBT_SEND_ANONYMOUS_USAGE_STATS=false cute-dbt review
+Review never reads or edits your profiles.yml; connection problems
+surface dbt's own error verbatim.";
 
 /// The `--config` value: the path as typed (for the `--dry-run`
 /// listing) plus the eagerly-parsed config (for the composed report
@@ -281,6 +313,23 @@ pub enum ReviewError {
     ManifestMissing {
         /// The resolved manifest path.
         path: PathBuf,
+        /// `true` when a successful `dbt compile` still left no
+        /// manifest at the resolved path (a target-path mismatch);
+        /// `false` on the `--no-compile` arm (nothing was ever
+        /// compiled).
+        after_compile: bool,
+    },
+    /// `dbt` itself could not be spawned (`NotFound` on PATH).
+    DbtMissing,
+    /// `dbt --version` answered with an engine review cannot drive.
+    EngineUnsupported(EngineIssue),
+    /// `dbt compile` exited non-zero. The manifest file may exist
+    /// anyway — fusion writes it even on failed compiles — so the exit
+    /// code, never artifact presence, is the success signal.
+    CompileFailed {
+        /// The compile exit code, when the process was not killed by a
+        /// signal.
+        status: Option<i32>,
     },
     /// An unexpected failure in a review stage (a git command exiting
     /// non-zero, an unreadable directory, …).
@@ -303,10 +352,11 @@ impl ReviewError {
     }
 
     /// `(description, remediation)` for each variant — split into the
-    /// git/ladder half and the project/stage half so each match stays
-    /// readable (and under the line-count lint).
+    /// git/ladder, dbt/manifest, and project/stage thirds so each match
+    /// stays readable (and under the line-count lint).
     fn describe(&self) -> (String, String) {
         self.describe_git()
+            .or_else(|| self.describe_dbt())
             .unwrap_or_else(|| self.describe_project())
     }
 
@@ -367,23 +417,94 @@ impl ReviewError {
                 "Pass `--base <ref>` naming a branch that shares history with HEAD.".to_owned(),
             ),
             // Explicit (never `_`): a new variant must fail to compile
-            // here AND in describe_project, forcing a deliberate
-            // remediation decision — the exit.rs precedent.
+            // here AND in describe_dbt/describe_project, forcing a
+            // deliberate remediation decision — the exit.rs precedent.
             Self::ProjectNotFound { .. }
             | Self::ProjectAmbiguous { .. }
             | Self::ProjectOutsideRepo { .. }
             | Self::ManifestMissing { .. }
+            | Self::DbtMissing
+            | Self::EngineUnsupported(_)
+            | Self::CompileFailed { .. }
             | Self::StageFailed { .. } => return None,
         };
         Some(pair)
     }
 
-    /// The project/manifest/stage arms.
+    /// The dbt/manifest arms; `None` for everything else.
+    fn describe_dbt(&self) -> Option<(String, String)> {
+        let pair = match self {
+            Self::ManifestMissing {
+                path,
+                after_compile,
+            } => {
+                if *after_compile {
+                    (
+                        format!(
+                            "dbt compile succeeded but no manifest appeared at `{}`.",
+                            path.display()
+                        ),
+                        "Your dbt writes its target dir somewhere else — align it via \
+                         `--target-path` / `DBT_TARGET_PATH`, then re-run."
+                            .to_owned(),
+                    )
+                } else {
+                    (
+                        format!("no compiled manifest at `{}`.", path.display()),
+                        "Run `dbt compile` in your dbt project first (or drop \
+                         --no-compile and let review run it), then re-run \
+                         `cute-dbt review`."
+                            .to_owned(),
+                    )
+                }
+            }
+            Self::DbtMissing => (
+                "`dbt` was not found on PATH.".to_owned(),
+                "Install dbt (dbt-core 1.8+: `pip install dbt-core` plus your adapter; \
+                 or the dbt Fusion engine) — or pass --no-compile to trust an \
+                 already-compiled manifest without dbt."
+                    .to_owned(),
+            ),
+            Self::EngineUnsupported(issue) => issue.describe(),
+            Self::CompileFailed { status } => {
+                let exit = status.map_or_else(
+                    || "killed by a signal".to_owned(),
+                    |code| format!("exit {code}"),
+                );
+                (
+                    format!("dbt compile failed ({exit}) — no report was rendered."),
+                    "Fix the dbt error above (its output is your dbt's own, relayed \
+                     verbatim). Profile problems: check ~/.dbt/profiles.yml, \
+                     --profiles-dir, or DBT_PROFILES_DIR, and run `dbt debug`. A \
+                     manifest file may exist anyway — dbt writes it even on failed \
+                     compiles — but review trusts the exit code, not the artifact."
+                        .to_owned(),
+                )
+            }
+            // Explicit (never `_`): see the describe_git twin.
+            Self::GitMissing
+            | Self::NoGitRepo
+            | Self::BareRepo
+            | Self::NoCommits
+            | Self::BaseUndetectable
+            | Self::BaseRefMissing { .. }
+            | Self::ShallowClone { .. }
+            | Self::DisjointHistories { .. }
+            | Self::ProjectNotFound { .. }
+            | Self::ProjectAmbiguous { .. }
+            | Self::ProjectOutsideRepo { .. }
+            | Self::StageFailed { .. } => return None,
+        };
+        Some(pair)
+    }
+
+    /// The project/stage arms.
     ///
     /// # Panics
     ///
-    /// Unreachable for the git-and-ladder variants — [`Self::describe`]
-    /// routes those through [`Self::describe_git`] first.
+    /// Unreachable for the git/ladder and dbt variants —
+    /// [`Self::describe`] routes those through [`Self::describe_git`]
+    /// and [`Self::describe_dbt`] first.
     fn describe_project(&self) -> (String, String) {
         match self {
             Self::ProjectNotFound { searched, explicit } => {
@@ -428,12 +549,6 @@ impl ReviewError {
                 "Run `cute-dbt review` inside the repository that contains the dbt project."
                     .to_owned(),
             ),
-            Self::ManifestMissing { path } => (
-                format!("no compiled manifest at `{}`.", path.display()),
-                "Run `dbt compile` in your dbt project so target/manifest.json exists, \
-                 then re-run `cute-dbt review`."
-                    .to_owned(),
-            ),
             Self::StageFailed { context, detail } => (
                 format!("failed while {context}: {detail}"),
                 "Re-run with `--dry-run` to see every planned command, and run the failing \
@@ -448,11 +563,169 @@ impl ReviewError {
             | Self::BaseUndetectable
             | Self::BaseRefMissing { .. }
             | Self::ShallowClone { .. }
-            | Self::DisjointHistories { .. } => {
-                unreachable!("describe() routes git/ladder variants through describe_git()")
+            | Self::DisjointHistories { .. }
+            | Self::ManifestMissing { .. }
+            | Self::DbtMissing
+            | Self::EngineUnsupported(_)
+            | Self::CompileFailed { .. } => {
+                unreachable!("describe() routes git/ladder and dbt variants through their halves")
             }
         }
     }
+}
+
+// ===================================================================
+// dbt engine detection (research-294 sweep-dbt-engine-mechanics §1)
+// ===================================================================
+
+/// The detected dbt engine, from `dbt --version` output shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DbtEngine {
+    /// The Rust engine — a **single-line** `dbt X.Y.Z` banner (clap's
+    /// default version template). The OSS standalone build brands
+    /// itself `dbt-core` and older betas `dbt-fusion`; the single-line
+    /// shape, not the name, is the discriminator (python core is
+    /// always multi-line).
+    Fusion {
+        /// The reported version string, verbatim.
+        version: String,
+    },
+    /// Python dbt-core — the **multi-line** `Core:` / `- installed:`
+    /// block. Already validated ≥ 1.8 (manifest schema v12).
+    Core {
+        /// The reported `installed:` version, verbatim.
+        version: String,
+    },
+}
+
+impl std::fmt::Display for DbtEngine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fusion { version } => write!(f, "fusion {version}"),
+            Self::Core { version } => write!(f, "dbt-core {version}"),
+        }
+    }
+}
+
+/// Why `dbt --version` output could not be accepted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineIssue {
+    /// The dbt Cloud CLI (`Cloud CLI - x.y.z (…)`) — it compiles in
+    /// dbt Cloud, not locally, so review cannot drive it.
+    CloudCli,
+    /// Python dbt-core older than 1.8 — pre-manifest-v12.
+    CoreTooOld {
+        /// The reported `installed:` version.
+        version: String,
+    },
+    /// Output matching no known engine shape.
+    Unrecognized {
+        /// The first line of what `dbt --version` printed.
+        first_line: String,
+    },
+}
+
+impl EngineIssue {
+    /// `(description, remediation)` for the [`ReviewError::EngineUnsupported`]
+    /// message.
+    fn describe(&self) -> (String, String) {
+        match self {
+            Self::CloudCli => (
+                "the `dbt` on PATH is the dbt Cloud CLI, which compiles in dbt Cloud — \
+                 review needs a local engine."
+                    .to_owned(),
+                "Install dbt-core 1.8+ (`pip install dbt-core` plus your adapter) or the \
+                 dbt Fusion engine, ensure it wins on PATH — or pass --no-compile to \
+                 trust an already-compiled manifest."
+                    .to_owned(),
+            ),
+            Self::CoreTooOld { version } => (
+                format!(
+                    "dbt-core {version} predates manifest schema v12 (dbt 1.8) — its \
+                     manifests cannot drive the report."
+                ),
+                "Upgrade to dbt-core 1.8 or newer (or the dbt Fusion engine), then re-run."
+                    .to_owned(),
+            ),
+            Self::Unrecognized { first_line } => (
+                format!("could not recognize `dbt --version` output: `{first_line}`."),
+                "Pass --no-compile to trust an already-compiled manifest — and please \
+                 report this output so detection can learn the shape."
+                    .to_owned(),
+            ),
+        }
+    }
+}
+
+/// Classify `dbt --version` output (the pure half of detection).
+///
+/// Order matters: the Cloud CLI banner is checked first (it also
+/// carries a version-looking token); the multi-line `Core:` block next
+/// (python core); any remaining single-line `name x.y.z` shape is the
+/// Rust engine.
+///
+/// # Errors
+///
+/// [`EngineIssue`] when the output names the Cloud CLI, a pre-1.8
+/// core, or no recognizable engine at all.
+pub fn parse_dbt_version(stdout: &str) -> Result<DbtEngine, EngineIssue> {
+    if stdout.contains("Cloud CLI") {
+        return Err(EngineIssue::CloudCli);
+    }
+    if stdout.contains("Core:") {
+        let version = stdout
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("- installed:"))
+            .map(|rest| rest.split_whitespace().next().unwrap_or("").to_owned())
+            .unwrap_or_default();
+        if version.is_empty() {
+            return Err(EngineIssue::Unrecognized {
+                first_line: first_line_of(stdout),
+            });
+        }
+        if core_meets_floor(&version) {
+            return Ok(DbtEngine::Core { version });
+        }
+        return Err(EngineIssue::CoreTooOld { version });
+    }
+    let first = first_line_of(stdout);
+    let mut tokens = first.split_whitespace();
+    if let (Some(name), Some(version)) = (tokens.next(), tokens.next())
+        && matches!(name, "dbt" | "dbt-fusion" | "dbt-core")
+        && version.starts_with(|c: char| c.is_ascii_digit())
+    {
+        return Ok(DbtEngine::Fusion {
+            version: version.to_owned(),
+        });
+    }
+    Err(EngineIssue::Unrecognized { first_line: first })
+}
+
+/// The first non-empty line, trimmed (for messages and shape checks).
+fn first_line_of(s: &str) -> String {
+    s.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+        .to_owned()
+}
+
+/// Whether a python dbt-core `installed:` version meets the 1.8 floor
+/// (manifest schema v12). An unparseable version fails closed (false ⇒
+/// `CoreTooOld` carries the raw string for the operator to judge).
+fn core_meets_floor(version: &str) -> bool {
+    let mut parts = version.split('.');
+    let major: u32 = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+    let minor: u32 = parts
+        .next()
+        .map(|p| {
+            p.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+        })
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(0);
+    (major, minor) >= (1, 8)
 }
 
 /// The review run's failure type: a wrapper-stage [`ReviewError`] or a
@@ -683,6 +956,19 @@ impl CommandPlan {
         self.to_command().output()
     }
 
+    /// Execute the plan with stdout/stderr **inherited** — the compile
+    /// step's wiring, so dbt's own progress and errors stream to the
+    /// operator's terminal verbatim (never buffered, never reworded).
+    /// Same [`CommandPlan::to_command`] mapping as [`CommandPlan::execute`];
+    /// only the io wiring differs.
+    ///
+    /// # Errors
+    ///
+    /// The underlying [`io::Error`] when the program cannot be spawned.
+    pub fn execute_streaming(&self) -> io::Result<std::process::ExitStatus> {
+        self.to_command().status()
+    }
+
     /// Render the plan as one shell-style line for the `--dry-run`
     /// listing: `(cwd: …) KEY=VALUE program args…`.
     #[must_use]
@@ -810,6 +1096,41 @@ pub fn status_plan(toplevel: &Path, project_rel: &str) -> CommandPlan {
     }
 }
 
+/// Build the `dbt --version` detection plan (cwd = the project dir, so
+/// any directory-sensitive dbt wrapper behaves as it would for the
+/// user's own invocation).
+#[must_use]
+pub fn version_plan(project_dir: &Path) -> CommandPlan {
+    CommandPlan {
+        program: "dbt",
+        args: vec!["--version".to_owned()],
+        cwd: project_dir.to_path_buf(),
+        env: Vec::new(),
+    }
+}
+
+/// Build the full-project `dbt compile` plan — cwd = the project dir,
+/// exactly the invocation the user would type. A `--target-path` flag
+/// is forwarded so dbt writes where review reads; `DBT_TARGET_PATH`
+/// needs no forwarding (dbt reads the inherited environment itself).
+/// Review adds **no** other flags and **no** env: the compile is the
+/// user's own dbt doing its own thing (privacy switches are documented,
+/// never silently injected).
+#[must_use]
+pub fn compile_plan(project_dir: &Path, target_path: Option<&Path>) -> CommandPlan {
+    let mut args = vec!["compile".to_owned()];
+    if let Some(dir) = target_path {
+        args.push("--target-path".to_owned());
+        args.push(dir.display().to_string());
+    }
+    CommandPlan {
+        program: "dbt",
+        args,
+        cwd: project_dir.to_path_buf(),
+        env: Vec::new(),
+    }
+}
+
 // ===================================================================
 // In-process composition (the no-drift seam)
 // ===================================================================
@@ -886,21 +1207,27 @@ impl ComposeInputs {
     }
 }
 
-/// Resolve the manifest location: `DBT_TARGET_PATH` (relative values
-/// join the project dir — fusion's `in_out_dir` semantics) else the
-/// conventional `<project>/target`, then `manifest.json`.
+/// Resolve the dbt target directory: the `--target-path` flag wins,
+/// then `DBT_TARGET_PATH`, else the conventional `<project>/target`.
+/// Relative values join the project dir — fusion's `in_out_dir`
+/// semantics (dbt-core's `flag > env > dbt_project.yml` ladder agrees
+/// on the flag/env half; review never reads `target-path:` from the
+/// YAML, matching fusion).
 #[must_use]
-pub fn resolve_target_dir(project_dir: &Path, dbt_target_path: Option<&str>) -> PathBuf {
-    match dbt_target_path {
-        Some(p) if !p.trim().is_empty() => {
-            let path = Path::new(p);
-            if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                project_dir.join(path)
-            }
-        }
-        _ => project_dir.join("target"),
+pub fn resolve_target_dir(
+    project_dir: &Path,
+    flag: Option<&Path>,
+    dbt_target_path: Option<&str>,
+) -> PathBuf {
+    let chosen: Option<PathBuf> = match (flag, dbt_target_path) {
+        (Some(p), _) => Some(p.to_path_buf()),
+        (None, Some(p)) if !p.trim().is_empty() => Some(PathBuf::from(p)),
+        _ => None,
+    };
+    match chosen {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => project_dir.join(path),
+        None => project_dir.join("target"),
     }
 }
 
@@ -967,7 +1294,15 @@ pub fn execute_review(args: &ReviewArgs) -> Result<(), ReviewFailure> {
         DiffScope::WorkingTree
     };
     let diff = diff_plan(&toplevel, &project_rel, &merge_base, scope);
-    let target_dir = resolve_target_dir(&project_dir, env::var("DBT_TARGET_PATH").ok().as_deref());
+    let target_dir = resolve_target_dir(
+        &project_dir,
+        args.target_path.as_deref(),
+        env::var("DBT_TARGET_PATH").ok().as_deref(),
+    );
+    // The compile plan exists exactly when the run would compile —
+    // `--dry-run` prints it from the SAME value a real run executes.
+    let compile =
+        (!args.no_compile).then(|| compile_plan(&project_dir, args.target_path.as_deref()));
     let compose = ComposeInputs {
         manifest: target_dir.join("manifest.json"),
         project_root: rel_or_dot(&project_rel),
@@ -976,18 +1311,14 @@ pub fn execute_review(args: &ReviewArgs) -> Result<(), ReviewFailure> {
     };
 
     if args.dry_run {
-        print_dry_run(&diff, &compose);
+        print_dry_run(&diff, compile.as_ref(), &compose);
         return Ok(());
     }
 
-    if !compose.manifest.is_file() {
-        return Err(ReviewError::ManifestMissing {
-            path: compose.manifest.clone(),
-        }
-        .into());
-    }
     warn_untracked(&toplevel, &project_rel);
 
+    // Diff before compile: an empty diff exits here without spending
+    // the (potentially slow) compile on nothing to review.
     let patch = run_diff(&diff)?;
     if patch.trim().is_empty() && !args.force {
         eprintln!(
@@ -1001,6 +1332,30 @@ pub fn execute_review(args: &ReviewArgs) -> Result<(), ReviewFailure> {
         context: "parsing the diff git produced",
         detail,
     })?;
+
+    // The manifest stage: run the user's own dbt compile (exit code is
+    // the success signal — fusion writes manifest.json even on failed
+    // compiles), or on --no-compile trust the existing manifest after
+    // a staleness warning.
+    if let Some(plan) = &compile {
+        run_compile_stage(&project_dir, plan)?;
+        if !compose.manifest.is_file() {
+            return Err(ReviewError::ManifestMissing {
+                path: compose.manifest.clone(),
+                after_compile: true,
+            }
+            .into());
+        }
+    } else {
+        if !compose.manifest.is_file() {
+            return Err(ReviewError::ManifestMissing {
+                path: compose.manifest.clone(),
+                after_compile: false,
+            }
+            .into());
+        }
+        warn_if_stale(&compose.manifest, &project_dir);
+    }
 
     // The composed run loop resolves the relative `--project-root`
     // (diff-side path strip + working-tree YAML reads) against the
@@ -1237,10 +1592,39 @@ fn find_merge_base(toplevel: &Path, base: &str) -> Result<String, ReviewError> {
 /// Print the `--dry-run` listing: the exact commands a real run
 /// executes, rendered from the **same** plan values a real run would
 /// execute.
-fn print_dry_run(diff: &CommandPlan, compose: &ComposeInputs) {
-    println!("cute-dbt review --dry-run: a real run executes, in order:");
-    println!("  [git diff]       {}", diff.rendered());
-    println!(
+fn print_dry_run(diff: &CommandPlan, compile: Option<&CommandPlan>, compose: &ComposeInputs) {
+    print!("{}", dry_run_listing(diff, compile, compose));
+}
+
+/// Build the `--dry-run` listing (separated from printing so tests pin
+/// the exact rows): the git diff plan, the dbt compile plan (when the
+/// run would compile), and the equivalent `cute-dbt report` invocation
+/// — every row rendered from the SAME plan values a real run executes.
+fn dry_run_listing(
+    diff: &CommandPlan,
+    compile: Option<&CommandPlan>,
+    compose: &ComposeInputs,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "cute-dbt review --dry-run: a real run executes, in order:"
+    );
+    let _ = writeln!(out, "  [git diff]        {}", diff.rendered());
+    match compile {
+        Some(plan) => {
+            let _ = writeln!(out, "  [dbt compile]     {}", plan.rendered());
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "  [dbt compile]     skipped (--no-compile): the existing manifest is trusted"
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
         "  [cute-dbt report] (cwd: {}) {}",
         diff.cwd.display(),
         compose
@@ -1250,10 +1634,162 @@ fn print_dry_run(diff: &CommandPlan, compose: &ComposeInputs) {
             .collect::<Vec<_>>()
             .join(" "),
     );
-    println!(
+    let _ = writeln!(
+        out,
         "nothing was executed and no file was written. A real run passes the diff \
          to report in-process ({DIFF_STAND_IN} stands for the first command's output)."
     );
+    out
+}
+
+/// The compile stage: detect the engine from `dbt --version` output
+/// shape, announce it, then run the user's own `dbt compile` with its
+/// output streaming to the terminal verbatim. **The exit code is the
+/// only success signal** — fusion writes `manifest.json` even on failed
+/// compiles (dbt_lib.rs:996-1001 @ 9977b6cb), so artifact presence
+/// proves nothing.
+fn run_compile_stage(project_dir: &Path, plan: &CommandPlan) -> Result<(), ReviewError> {
+    let engine = detect_engine(project_dir)?;
+    eprintln!("cute-dbt: dbt engine: {engine}");
+    eprintln!("cute-dbt: running `dbt compile` (the output below is your dbt's own)");
+    let status = plan
+        .execute_streaming()
+        .map_err(|err| map_dbt_spawn_error(&err))?;
+    if !status.success() {
+        return Err(ReviewError::CompileFailed {
+            status: status.code(),
+        });
+    }
+    Ok(())
+}
+
+/// Run `dbt --version` and classify the engine.
+fn detect_engine(project_dir: &Path) -> Result<DbtEngine, ReviewError> {
+    let output = version_plan(project_dir)
+        .execute()
+        .map_err(|err| map_dbt_spawn_error(&err))?;
+    if !output.status.success() {
+        return Err(ReviewError::EngineUnsupported(EngineIssue::Unrecognized {
+            first_line: first_line_of(&String::from_utf8_lossy(&output.stderr)),
+        }));
+    }
+    parse_dbt_version(&String::from_utf8_lossy(&output.stdout))
+        .map_err(ReviewError::EngineUnsupported)
+}
+
+/// Map a dbt spawn failure: a missing binary gets the install
+/// remediation; anything else is a stage failure.
+fn map_dbt_spawn_error(err: &io::Error) -> ReviewError {
+    if err.kind() == io::ErrorKind::NotFound {
+        ReviewError::DbtMissing
+    } else {
+        ReviewError::StageFailed {
+            context: "spawning dbt",
+            detail: err.to_string(),
+        }
+    }
+}
+
+/// The `--no-compile` staleness check: warn (never block) when any
+/// project source file is newer than the manifest — the report would
+/// not reflect the latest edits. File mtimes are the cheap,
+/// engine-agnostic signal (the manifest's own `generated_at` would
+/// need a parse before Stage-1 preflight).
+fn warn_if_stale(manifest: &Path, project_dir: &Path) {
+    let Ok(manifest_mtime) = fs::metadata(manifest).and_then(|m| m.modified()) else {
+        return;
+    };
+    // Exclude the RESOLVED target dir (the manifest's parent) by path,
+    // not just by the conventional name: with a custom --target-path /
+    // DBT_TARGET_PATH, dbt's own artifacts (run_results.json is written
+    // after manifest.json) would otherwise false-positive the warning.
+    if let Some((newest_path, newest_mtime)) = newest_source_mtime(project_dir, manifest.parent())
+        && newest_mtime > manifest_mtime
+    {
+        let shown = newest_path
+            .strip_prefix(project_dir)
+            .unwrap_or(&newest_path)
+            .display();
+        eprintln!(
+            "cute-dbt: warning: --no-compile, but the manifest is older than {shown} — \
+             the report may not reflect your latest edits (drop --no-compile to refresh)."
+        );
+    }
+}
+
+/// The newest-mtime file under the project, skipping build output (the
+/// conventional `target/` name AND `exclude_dir` — the resolved custom
+/// target dir — by path), VCS metadata (`.git`), installed packages
+/// (`dbt_packages/`), and symlinks (never followed).
+///
+/// Decomposed into named single-purpose helpers (each directly
+/// unit-tested) per the lane-wide CRAP < 15 rule: the walk loop here,
+/// the per-entry classification in [`visit_source_entry`], the skip
+/// list in [`is_skipped_source_dir`], and the max-fold in
+/// [`fold_newest`].
+fn newest_source_mtime(
+    project_dir: &Path,
+    exclude_dir: Option<&Path>,
+) -> Option<(PathBuf, SystemTime)> {
+    let mut newest: Option<(PathBuf, SystemTime)> = None;
+    let mut stack = vec![project_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in readable_dir_entries(&dir) {
+            visit_source_entry(&entry, exclude_dir, &mut stack, &mut newest);
+        }
+    }
+    newest
+}
+
+/// The readable entries of a directory — an unreadable directory walks
+/// as empty (the staleness check is a warning, never worth failing on).
+fn readable_dir_entries(dir: &Path) -> Vec<fs::DirEntry> {
+    fs::read_dir(dir)
+        .map(|entries| entries.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
+/// Classify one walk entry: symlinks are never followed, non-skipped
+/// directories queue onto `stack` (skipped = the conventional names OR
+/// the resolved `exclude_dir` by path), and plain files fold their
+/// mtime into `newest`. Unreadable file types / metadata are silently
+/// skipped (warning-grade signal).
+fn visit_source_entry(
+    entry: &fs::DirEntry,
+    exclude_dir: Option<&Path>,
+    stack: &mut Vec<PathBuf>,
+    newest: &mut Option<(PathBuf, SystemTime)>,
+) {
+    let Ok(file_type) = entry.file_type() else {
+        return;
+    };
+    if file_type.is_symlink() {
+        return;
+    }
+    if file_type.is_dir() {
+        let path = entry.path();
+        if !is_skipped_source_dir(&entry.file_name()) && Some(path.as_path()) != exclude_dir {
+            stack.push(path);
+        }
+        return;
+    }
+    if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
+        fold_newest(newest, entry.path(), mtime);
+    }
+}
+
+/// Whether a directory name is excluded from the staleness walk: build
+/// output, VCS metadata, installed packages.
+fn is_skipped_source_dir(name: &std::ffi::OsStr) -> bool {
+    name == "target" || name == ".git" || name == "dbt_packages"
+}
+
+/// Fold one `(path, mtime)` candidate into the running newest — strictly
+/// newer wins; an equal mtime keeps the incumbent.
+fn fold_newest(newest: &mut Option<(PathBuf, SystemTime)>, path: PathBuf, mtime: SystemTime) {
+    if newest.as_ref().is_none_or(|(_, t)| mtime > *t) {
+        *newest = Some((path, mtime));
+    }
 }
 
 /// Soft warning for untracked files under the project: invisible to
@@ -1541,9 +2077,35 @@ mod tests {
             (
                 ReviewError::ManifestMissing {
                     path: PathBuf::from("/p/target/manifest.json"),
+                    after_compile: false,
                 },
                 "dbt compile",
             ),
+            (
+                ReviewError::ManifestMissing {
+                    path: PathBuf::from("/p/target/manifest.json"),
+                    after_compile: true,
+                },
+                "--target-path",
+            ),
+            (ReviewError::DbtMissing, "--no-compile"),
+            (
+                ReviewError::EngineUnsupported(EngineIssue::CloudCli),
+                "dbt Cloud CLI",
+            ),
+            (
+                ReviewError::EngineUnsupported(EngineIssue::CoreTooOld {
+                    version: "1.7.6".to_owned(),
+                }),
+                "1.8",
+            ),
+            (
+                ReviewError::EngineUnsupported(EngineIssue::Unrecognized {
+                    first_line: "weird".to_owned(),
+                }),
+                "--no-compile",
+            ),
+            (ReviewError::CompileFailed { status: Some(2) }, "dbt debug"),
             (
                 ReviewError::StageFailed {
                     context: "producing the diff",
@@ -1815,7 +2377,7 @@ mod tests {
     #[test]
     fn target_dir_defaults_to_project_target() {
         assert_eq!(
-            resolve_target_dir(Path::new("/p"), None),
+            resolve_target_dir(Path::new("/p"), None, None),
             PathBuf::from("/p/target"),
         );
     }
@@ -1824,17 +2386,30 @@ mod tests {
     fn dbt_target_path_relative_joins_the_project_dir() {
         // fusion's in_out_dir semantics: relative → joined to project.
         assert_eq!(
-            resolve_target_dir(Path::new("/p"), Some("build")),
+            resolve_target_dir(Path::new("/p"), None, Some("build")),
             PathBuf::from("/p/build"),
         );
         assert_eq!(
-            resolve_target_dir(Path::new("/p"), Some("/abs/out")),
+            resolve_target_dir(Path::new("/p"), None, Some("/abs/out")),
             PathBuf::from("/abs/out"),
         );
         assert_eq!(
-            resolve_target_dir(Path::new("/p"), Some("  ")),
+            resolve_target_dir(Path::new("/p"), None, Some("  ")),
             PathBuf::from("/p/target"),
             "a blank value falls back to the default",
+        );
+    }
+
+    #[test]
+    fn the_target_path_flag_wins_over_the_env() {
+        assert_eq!(
+            resolve_target_dir(Path::new("/p"), Some(Path::new("flagged")), Some("build")),
+            PathBuf::from("/p/flagged"),
+            "the --target-path flag outranks DBT_TARGET_PATH",
+        );
+        assert_eq!(
+            resolve_target_dir(Path::new("/p"), Some(Path::new("/abs/flag")), Some("build")),
+            PathBuf::from("/abs/flag"),
         );
     }
 
@@ -1862,6 +2437,335 @@ mod tests {
             ),
             PathBuf::from("/abs/r.html"),
         );
+    }
+
+    // ----- engine detection (research-294 dbt-engine-mechanics §1) ----
+
+    #[test]
+    fn a_single_line_banner_is_the_fusion_engine_under_any_brand() {
+        // The product binary, the old beta brand, AND the OSS
+        // standalone (which brands itself dbt-core!) all emit the
+        // single-line clap template — the SHAPE is the discriminator.
+        for (raw, version) in [
+            ("dbt 2.0.0-preview.186\n", "2.0.0-preview.186"),
+            ("dbt-fusion 2.0.0-beta.51\n", "2.0.0-beta.51"),
+            ("dbt-core 2.0.0-preview.186\n", "2.0.0-preview.186"),
+        ] {
+            assert_eq!(
+                parse_dbt_version(raw),
+                Ok(DbtEngine::Fusion {
+                    version: version.to_owned()
+                }),
+                "single-line {raw:?} is fusion",
+            );
+        }
+    }
+
+    #[test]
+    fn the_multi_line_core_block_is_python_core_with_its_installed_version() {
+        let raw = "Core:\n  - installed: 1.10.2\n  - latest:    1.10.2 - Up to date!\n\n\
+                   Plugins:\n  - duckdb: 1.9.1 - Up to date!\n";
+        assert_eq!(
+            parse_dbt_version(raw),
+            Ok(DbtEngine::Core {
+                version: "1.10.2".to_owned()
+            }),
+        );
+    }
+
+    #[test]
+    fn a_pre_1_8_core_fails_the_floor() {
+        let raw = "Core:\n  - installed: 1.7.6\n";
+        assert_eq!(
+            parse_dbt_version(raw),
+            Err(EngineIssue::CoreTooOld {
+                version: "1.7.6".to_owned()
+            }),
+        );
+        // 1.8 exactly meets the floor; 2.x core (hypothetical) passes.
+        assert!(parse_dbt_version("Core:\n  - installed: 1.8.0\n").is_ok());
+        assert!(parse_dbt_version("Core:\n  - installed: 2.1.0\n").is_ok());
+    }
+
+    #[test]
+    fn the_cloud_cli_banner_is_rejected_before_anything_else() {
+        let raw = "Cloud CLI - 0.38.0 (abc1234 2026-05-01T00:00:00Z)\n";
+        assert_eq!(parse_dbt_version(raw), Err(EngineIssue::CloudCli));
+    }
+
+    #[test]
+    fn unrecognizable_version_output_is_an_honest_error() {
+        for raw in ["", "\n", "not a dbt at all\n", "dbt\n"] {
+            assert!(
+                matches!(
+                    parse_dbt_version(raw),
+                    Err(EngineIssue::Unrecognized { .. })
+                ),
+                "{raw:?} must be Unrecognized",
+            );
+        }
+    }
+
+    #[test]
+    fn engine_display_names_the_engine_and_version() {
+        assert_eq!(
+            DbtEngine::Fusion {
+                version: "2.0.0".to_owned()
+            }
+            .to_string(),
+            "fusion 2.0.0",
+        );
+        assert_eq!(
+            DbtEngine::Core {
+                version: "1.10.2".to_owned()
+            }
+            .to_string(),
+            "dbt-core 1.10.2",
+        );
+    }
+
+    // ----- dbt plans ----------------------------------------------------
+
+    #[test]
+    fn compile_plan_is_the_users_own_invocation() {
+        // Bare `dbt compile`, cwd = the project dir, NO extra flags and
+        // NO injected env — the privacy posture is documented, never
+        // silently applied to the user's dbt.
+        let plan = compile_plan(Path::new("/p"), None);
+        assert_eq!(plan.program, "dbt");
+        assert_eq!(plan.args, vec!["compile".to_owned()]);
+        assert_eq!(plan.cwd, PathBuf::from("/p"));
+        assert!(plan.env.is_empty(), "no env is injected into dbt");
+    }
+
+    #[test]
+    fn compile_plan_forwards_the_target_path_flag() {
+        let plan = compile_plan(Path::new("/p"), Some(Path::new("build")));
+        assert_eq!(
+            plan.args,
+            vec![
+                "compile".to_owned(),
+                "--target-path".to_owned(),
+                "build".to_owned()
+            ],
+            "dbt writes where review reads",
+        );
+    }
+
+    #[test]
+    fn version_plan_asks_dbt_for_its_version() {
+        let plan = version_plan(Path::new("/p"));
+        assert_eq!(plan.program, "dbt");
+        assert_eq!(plan.args, vec!["--version".to_owned()]);
+        assert_eq!(plan.cwd, PathBuf::from("/p"));
+    }
+
+    // ----- dry-run listing ----------------------------------------------
+
+    #[test]
+    fn dry_run_listing_carries_all_three_rows_in_execution_order() {
+        let diff = diff_plan(Path::new("/repo"), "proj", "abc123", DiffScope::WorkingTree);
+        let compile = compile_plan(Path::new("/repo/proj"), None);
+        let listing = dry_run_listing(&diff, Some(&compile), &sample_compose());
+        let diff_at = listing.find("[git diff]").expect("diff row");
+        let compile_at = listing.find("[dbt compile]").expect("compile row");
+        let report_at = listing.find("[cute-dbt report]").expect("report row");
+        assert!(
+            diff_at < compile_at && compile_at < report_at,
+            "rows appear in real execution order: {listing}",
+        );
+        assert!(
+            listing.contains("dbt compile"),
+            "the compile plan argv is shown: {listing}",
+        );
+    }
+
+    #[test]
+    fn dry_run_listing_marks_the_skipped_compile_under_no_compile() {
+        let diff = diff_plan(Path::new("/repo"), "proj", "abc123", DiffScope::WorkingTree);
+        let listing = dry_run_listing(&diff, None, &sample_compose());
+        assert!(
+            listing.contains("skipped (--no-compile)"),
+            "the skip is said out loud: {listing}",
+        );
+    }
+
+    // ----- staleness (--no-compile) ---------------------------------------
+
+    #[test]
+    fn newest_source_mtime_skips_target_git_and_packages() {
+        let dir = unique_temp_dir("stale-walk");
+        fs::write(dir.join("dbt_project.yml"), "name: x\n").expect("write");
+        fs::create_dir_all(dir.join("models")).expect("mkdir");
+        fs::write(dir.join("models/a.sql"), "select 1\n").expect("write");
+        for skipped in ["target", ".git", "dbt_packages"] {
+            fs::create_dir_all(dir.join(skipped)).expect("mkdir");
+            fs::write(dir.join(skipped).join("noise.txt"), "x\n").expect("write");
+        }
+        // Make the skipped files the newest on disk — they must still
+        // never win.
+        let future = SystemTime::now() + std::time::Duration::from_secs(3600);
+        for skipped in ["target", ".git", "dbt_packages"] {
+            let f = fs::File::options()
+                .write(true)
+                .open(dir.join(skipped).join("noise.txt"))
+                .expect("open");
+            f.set_modified(future).expect("set mtime");
+        }
+        let (path, _) = newest_source_mtime(&dir, None).expect("sources found");
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        assert!(
+            name == "a.sql" || name == "dbt_project.yml",
+            "build output / VCS / packages never win the walk: {}",
+            path.display(),
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_skipped_source_dir_excludes_exactly_the_three_names() {
+        for skipped in ["target", ".git", "dbt_packages"] {
+            assert!(
+                is_skipped_source_dir(std::ffi::OsStr::new(skipped)),
+                "{skipped} is excluded",
+            );
+        }
+        for walked in ["models", "tests", "seeds", "macros", "targets", "git"] {
+            assert!(
+                !is_skipped_source_dir(std::ffi::OsStr::new(walked)),
+                "{walked} is walked",
+            );
+        }
+    }
+
+    #[test]
+    fn fold_newest_keeps_the_strictly_newest_candidate() {
+        let t0 = SystemTime::UNIX_EPOCH;
+        let t1 = t0 + std::time::Duration::from_secs(10);
+        let mut newest = None;
+        // First candidate always seeds.
+        fold_newest(&mut newest, PathBuf::from("a"), t0);
+        assert_eq!(newest, Some((PathBuf::from("a"), t0)));
+        // Strictly newer replaces.
+        fold_newest(&mut newest, PathBuf::from("b"), t1);
+        assert_eq!(newest, Some((PathBuf::from("b"), t1)));
+        // Older never replaces.
+        fold_newest(&mut newest, PathBuf::from("c"), t0);
+        assert_eq!(newest, Some((PathBuf::from("b"), t1)));
+        // An EQUAL mtime keeps the incumbent (strictly-greater fold).
+        fold_newest(&mut newest, PathBuf::from("d"), t1);
+        assert_eq!(newest, Some((PathBuf::from("b"), t1)));
+    }
+
+    #[test]
+    fn readable_dir_entries_treats_an_unreadable_dir_as_empty() {
+        let missing = std::env::temp_dir().join("cute-dbt-definitely-not-a-dir");
+        let _ = fs::remove_dir_all(&missing);
+        assert!(
+            readable_dir_entries(&missing).is_empty(),
+            "a missing/unreadable dir walks as empty — warning-grade signal",
+        );
+        let dir = unique_temp_dir("readable-entries");
+        fs::write(dir.join("one.sql"), "select 1\n").expect("write");
+        assert_eq!(readable_dir_entries(&dir).len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn visit_source_entry_queues_dirs_folds_files_and_skips_symlinks() {
+        let dir = unique_temp_dir("visit-entry");
+        fs::write(dir.join("model.sql"), "select 1\n").expect("write");
+        fs::create_dir_all(dir.join("models")).expect("mkdir");
+        fs::create_dir_all(dir.join("target")).expect("mkdir");
+        std::os::unix::fs::symlink(dir.join("model.sql"), dir.join("link.sql"))
+            .expect("create symlink");
+
+        let mut stack: Vec<PathBuf> = Vec::new();
+        let mut newest: Option<(PathBuf, SystemTime)> = None;
+        for entry in readable_dir_entries(&dir) {
+            visit_source_entry(&entry, None, &mut stack, &mut newest);
+        }
+        assert_eq!(
+            stack,
+            vec![dir.join("models")],
+            "the walked dir queues; the skipped target/ does not",
+        );
+        let (path, _) = newest.expect("the plain file folded");
+        assert_eq!(path, dir.join("model.sql"), "the symlink never folds");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_custom_target_dir_is_excluded_by_path_not_just_by_name() {
+        // The gemini-flagged false positive on cute-dbt#312: with a
+        // custom --target-path, dbt's own artifacts (run_results.json
+        // lands after manifest.json) live in a dir NOT named `target` —
+        // the resolved dir must be excluded by path equality.
+        let dir = unique_temp_dir("custom-target");
+        fs::write(dir.join("model.sql"), "select 1\n").expect("write");
+        fs::create_dir_all(dir.join("build")).expect("mkdir");
+        fs::write(dir.join("build/run_results.json"), "{}").expect("write");
+        let future = SystemTime::now() + std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(dir.join("build/run_results.json"))
+            .expect("open")
+            .set_modified(future)
+            .expect("set mtime");
+
+        // WITHOUT the exclusion the artifact wins (the bug shape)…
+        let (path, _) = newest_source_mtime(&dir, None).expect("found");
+        assert_eq!(path, dir.join("build/run_results.json"));
+        // …and WITH the resolved dir excluded, only real sources count.
+        let (path, _) = newest_source_mtime(&dir, Some(&dir.join("build"))).expect("found");
+        assert_eq!(path, dir.join("model.sql"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn newest_source_mtime_ignores_a_symlink_even_when_it_is_newest() {
+        let dir = unique_temp_dir("stale-symlink");
+        fs::write(dir.join("model.sql"), "select 1\n").expect("write");
+        std::os::unix::fs::symlink(dir.join("model.sql"), dir.join("newer-link.sql"))
+            .expect("create symlink");
+        let (path, _) = newest_source_mtime(&dir, None).expect("source found");
+        assert_eq!(path, dir.join("model.sql"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn staleness_is_newer_source_strictly_after_manifest() {
+        let dir = unique_temp_dir("stale-cmp");
+        fs::create_dir_all(dir.join("target")).expect("mkdir");
+        fs::write(dir.join("target/manifest.json"), "{}").expect("write");
+        fs::write(dir.join("model.sql"), "select 1\n").expect("write");
+        let past = SystemTime::now() - std::time::Duration::from_secs(3600);
+        // Manifest older than the source ⇒ stale.
+        fs::File::options()
+            .write(true)
+            .open(dir.join("target/manifest.json"))
+            .expect("open")
+            .set_modified(past)
+            .expect("set mtime");
+        let manifest_mtime = fs::metadata(dir.join("target/manifest.json"))
+            .and_then(|m| m.modified())
+            .expect("mtime");
+        let (_, newest) = newest_source_mtime(&dir, None).expect("source found");
+        assert!(newest > manifest_mtime, "the fixture is genuinely stale");
+        // Manifest newer than every source ⇒ fresh.
+        let future = SystemTime::now() + std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(dir.join("target/manifest.json"))
+            .expect("open")
+            .set_modified(future)
+            .expect("set mtime");
+        let manifest_mtime = fs::metadata(dir.join("target/manifest.json"))
+            .and_then(|m| m.modified())
+            .expect("mtime");
+        let (_, newest) = newest_source_mtime(&dir, None).expect("source found");
+        assert!(newest <= manifest_mtime, "a fresh manifest is not stale");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ----- project discovery -----------------------------------------
@@ -1992,9 +2896,46 @@ mod tests {
         assert!(!review.force);
         assert!(review.out.is_none());
         assert!(review.project_dir.is_none());
+        assert!(!review.no_compile, "compile is the default");
+        assert!(review.target_path.is_none());
         assert!(!review.no_open);
         assert!(review.config.is_none());
         assert!(!review.dry_run);
+    }
+
+    #[test]
+    fn review_parses_no_compile_and_target_path() {
+        let review = parse_review(&[
+            "cute-dbt",
+            "review",
+            "--no-compile",
+            "--target-path",
+            "build",
+        ])
+        .expect("the V2 flags parse");
+        assert!(review.no_compile);
+        assert_eq!(review.target_path, Some(PathBuf::from("build")));
+    }
+
+    #[test]
+    fn review_long_help_documents_the_privacy_switches() {
+        // The honest privacy posture (issue #301 AC): the egress during
+        // compile belongs to the user's own dbt; the help names dbt's
+        // own suppression switches.
+        use clap::CommandFactory;
+        let mut cmd = super::super::args::Cli::command();
+        let review = cmd
+            .find_subcommand_mut("review")
+            .expect("review is a listed verb");
+        let help = review.render_long_help().to_string();
+        assert!(
+            help.contains("DBT_DISABLE_VERSION_CHECK=1"),
+            "names the version-check switch: {help}",
+        );
+        assert!(
+            help.contains("DBT_SEND_ANONYMOUS_USAGE_STATS=false"),
+            "names the usage-stats switch: {help}",
+        );
     }
 
     #[test]

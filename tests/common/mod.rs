@@ -118,6 +118,12 @@ pub struct TestRepo {
     /// Holds the empty gitconfig stand-in, OUTSIDE the repo so it can
     /// never appear as an untracked file.
     home: PathBuf,
+    /// Shim bin dir, prepended to a **fully controlled** PATH
+    /// (`<bin>:/usr/bin:/bin`) on every spawn — so a developer's real
+    /// `dbt` (homebrew, venv, …) can never answer a test, and `dbt` is
+    /// genuinely missing unless a test installs a shim via
+    /// [`TestRepo::install_dbt_shim`].
+    bin: PathBuf,
 }
 
 impl TestRepo {
@@ -135,10 +141,12 @@ impl TestRepo {
         let _ = std::fs::remove_dir_all(&base);
         let root = base.join("repo");
         let home = base.join("home");
+        let bin = base.join("bin");
         std::fs::create_dir_all(&root).expect("create repo dir");
         std::fs::create_dir_all(&home).expect("create home dir");
+        std::fs::create_dir_all(&bin).expect("create bin dir");
         std::fs::write(home.join("gitconfig"), "").expect("write empty gitconfig");
-        let repo = Self { root, home };
+        let repo = Self { root, home, bin };
         repo.git(&["init", "-q", "-b", branch]);
         // Sanity tripwire: every later git command must operate on THIS
         // repo, never an enclosing one (see `scrub_git_env`). Canonical
@@ -167,8 +175,42 @@ impl TestRepo {
             .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
             .env("GIT_COMMITTER_NAME", "cute-dbt-test")
             .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            // Fully controlled PATH: the shim dir, then just enough
+            // system dirs for git/sh. A developer's real dbt can never
+            // answer a test, and "dbt missing" is the true default.
+            .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
             .env_remove("CUTE_DBT_EXPERIMENTAL")
             .env_remove("DBT_TARGET_PATH");
+    }
+
+    /// Install an executable `dbt` shim into the controlled PATH. The
+    /// body is `#!/bin/sh` script text; every invocation's cwd + argv is
+    /// appended to [`TestRepo::dbt_log`] before the body runs, so tests
+    /// can assert exactly what review executed (the planned-argv ==
+    /// executed-argv pin at the subprocess level).
+    pub fn install_dbt_shim(&self, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.bin.join("dbt");
+        let script = format!(
+            "#!/bin/sh\nprintf 'cwd=%s args=%s\\n' \"$(pwd)\" \"$*\" >> \"{log}\"\n{body}\n",
+            log = self.dbt_log().display(),
+        );
+        std::fs::write(&path, script).expect("write dbt shim");
+        let mut perms = std::fs::metadata(&path)
+            .expect("shim metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("chmod shim");
+    }
+
+    /// The shim invocation log (one `cwd=… args=…` line per call).
+    pub fn dbt_log(&self) -> PathBuf {
+        self.bin.join("dbt-invocations.log")
+    }
+
+    /// The shim log contents — empty when dbt never ran.
+    pub fn dbt_log_contents(&self) -> String {
+        std::fs::read_to_string(self.dbt_log()).unwrap_or_default()
     }
 
     /// Run a git command in the repo, asserting success.
@@ -244,7 +286,22 @@ pub fn scaffold_dbt_project(repo: &TestRepo, project_rel: &str, manifest_fixture
     std::fs::create_dir_all(&target).expect("create target dir");
     std::fs::copy(fixture(manifest_fixture), target.join("manifest.json"))
         .expect("copy manifest fixture");
+    // A well-behaved fusion shim (cute-dbt#301): review compiles by
+    // default, so the default scaffold answers `--version` with the
+    // fusion single-line shape and no-op "compiles" (the manifest above
+    // already plays the compiled artifact). Tests that need other
+    // engine behaviors overwrite it via `install_dbt_shim`.
+    repo.install_dbt_shim(WELL_BEHAVED_FUSION_SHIM);
 }
+
+/// The default shim body: fusion version banner; `compile` succeeds
+/// without touching anything (the scaffolded manifest is the artifact).
+pub const WELL_BEHAVED_FUSION_SHIM: &str = "\
+case \"$1\" in
+  --version) printf 'dbt 2.0.0-preview.186\\n'; exit 0;;
+  compile) exit 0;;
+esac
+exit 0";
 
 // ===== Resource-ref lint shared with tests/resource_ref_lint.rs =====
 //
