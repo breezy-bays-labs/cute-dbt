@@ -277,7 +277,7 @@ test. Pure synthetic data only — the `sql_literal_demo` package, `dq_flags` / 
 path = "playground-baseline.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "c22282cec2fe32208382d461f2ced2991ce2b4b6482d1b98bc3d6d4b1b1cec01"
+sha256 = "69092f7505c8edff814e72f99e471259fb7390f09fde1290d0f76036d51b8b32"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -310,6 +310,11 @@ converted to an EXTERNAL fixture — `rows: null` + the resolved \
 `fixture: tests/fixtures/mart_date_state_grid_patients.csv` path (the \
 cute-dbt#126 fusion wire shape); the row data lives in that committed \
 csv under playground-source. \
+Second hand surgery (cute-dbt#249, also applied identically to BOTH \
+sides): both mart_dq_summary tests' `stg_synthea__medications` given \
+inputs flipped to the DOUBLE-quoted style \
+(`ref(\"stg_synthea__medications\")`) — see the playground-current.json \
+entry for the rationale. \
 Private repo; URL provided for provenance audit, not public \
 retrieval.\
 """
@@ -318,7 +323,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "cf3395bd1ea4b8e623cb8d6cae1d52a10bf07f50a963e0660c9c4304c8fc1fd4"
+sha256 = "e31ac9865e8ee9fa97d7236cecd021c621197f993de1930b20905f9e6e7d21ac"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -374,7 +379,17 @@ NOT EXISTS over stg_synthea__encounters, hand-authored synthetic JSON \
 spliced programmatically into the dbt-core output, NOT engine-emitted) \
 is new-in-current ⇒ modified ⇒ in scope, carries NO unit test, and \
 surfaces the cute-dbt#196 join.anti-join not_exists construct UNCOVERED \
-with its inverted (matching-row) given sketch in the playground golden.\
+with its inverted (matching-row) given sketch in the playground golden. \
+cute-dbt#249's quote-style surgery (applied identically to BOTH sides \
+AND to the paired source YAML): both mart_dq_summary tests' \
+`stg_synthea__medications` given inputs are flipped to the DOUBLE-quoted \
+style (`ref(\"stg_synthea__medications\")`) while their sibling \
+encounters givens stay single-quoted — dbt accepts both Python/Jinja \
+string-literal styles and ships the authored text verbatim on the wire \
+(cute-dbt#245) — so the committed goldens prove a double-quoted given \
+binds union.arm-coverage identically to its single-quoted twin \
+(union[combined_metrics] stays COVERED; pre-#249 leaf extraction would \
+have degraded it to a false UNCOVERED).\
 """
 
 [[fixture]]
@@ -461,7 +476,7 @@ provenance note).\
 path = "playground-source/models/marts/analytics/_analytics__models.yml"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "0608635e0fb990e87ec91d3af51d9c32d783e814d40225e3a6418eefee783561"
+sha256 = "61cd54e66b85646d4be5baf96da50fdc1b6e8892ac05871bf514195a8b3edcc6"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -487,6 +502,12 @@ given is authored as `fixture: mart_date_state_grid_patients` (the dbt \
 bare-name authoring convention) instead of inline `rows:`, pairing the \
 manifests' resolved-path wire shape. The edit sits BELOW the dq-test \
 blocks, so the pr-diff showcase's YAML hunk line numbers are unshifted. \
+cute-dbt#249's quote-style surgery: both mart_dq_summary tests' \
+`stg_synthea__medications` given lines flipped to the DOUBLE-quoted \
+style (`- input: ref(\"stg_synthea__medications\")`), keeping the YAML \
+byte-aligned with the manifests' verbatim wire strings (the \
+same-revision contract); 1:1 in-place line replacements, so the pr-diff \
+showcase's YAML hunk line numbers stay unshifted. \
 Pure synthetic.\
 """
 
