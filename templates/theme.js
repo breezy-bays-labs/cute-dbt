@@ -1,93 +1,34 @@
-/* cute-dbt appearance engine v1 (cute-dbt#178)
+/* cute-dbt report appearance settings v1 (cute-dbt#178, re-layered cute-dbt#242)
    ----------------------------------------------------------------------------
-   Wires the theme / style / accent / density / diff-layout controls in the
+   The REPORT-ONLY half of the appearance system: wires the theme / style /
+   accent / density / diff-layout / DAG-engine / coverage controls in the
    report's settings panel (the markup is static in templates/report.html —
-   the askama DOM contract), persists the choices in localStorage (key
-   cute-dbt.appearance.v1) with a graceful in-memory fallback, and syncs
-   DataTables dark mode by toggling html.dark. Plain vanilla JS, no
-   framework, zero egress. The #188 diff-cells colour/marks control was
-   retired by design pass-2 (cute-dbt#198): cells always render in colour;
-   a legacy persisted `diffstyle` key is ignored gracefully (load() copies
-   only the live keys, and nothing sets data-diffstyle any more).
+   the askama DOM contract), syncs their visual state, reflows DataTables on
+   metric-affecting flips and dispatches the DAG-engine pick + re-tint.
+
+   The load/apply/persist core (localStorage key cute-dbt.appearance.v1,
+   prefers-color-scheme default, the html-level attribute application)
+   moved to the SHARED appearance engine at cute-dbt#242 —
+   templates/appearance.js, which parses immediately before this file and
+   exposes window.CuteAppearance. This file drives that engine; it never
+   touches the storage key or the html attributes directly. The #188
+   diff-cells colour/marks control was retired by design pass-2
+   (cute-dbt#198): cells always render in colour; a legacy persisted
+   `diffstyle` key is ignored gracefully by the shared engine's load().
 
    First-party, NOT vendored: this file lives at templates/theme.js, embedded
    at compile time via asset_embed::THEME_JS (include_str!) and interpolated
    inline by the askama renderer. Banner-pin + end-of-file-sentinel tests in
-   src/adapters/asset_embed.rs guard the include.
-
-   The handoff prototype also carried a Cytoscape DAG-engine picker here; that
-   is Bucket 2 (cute-dbt#101 territory) and is deliberately ABSENT from this
-   file — adding it back rides the vendored-Cytoscape PR, never this one. */
+   src/adapters/asset_embed.rs guard the include. */
 (function () {
   "use strict";
 
-  // The eight [data-theme] packs the chassis CSS ships (templates/report.css),
-  // light family first (design pass-2, cute-dbt#198) — kept in lockstep with
-  // the static theme grid in templates/report.html.
-  // `dark` drives the html.dark class DataTables' vendored dark rules key on.
-  var THEMES = [
-    { id: "light",     dark: false },
-    { id: "solarized", dark: false },
-    { id: "latte",     dark: false },
-    { id: "rosepine",  dark: false },
-    { id: "dark",      dark: true  },
-    { id: "tokyo",     dark: true  },
-    { id: "gruvbox",   dark: true  },
-    { id: "dracula",   dark: true  }
-  ];
-
-  // Accent palettes: value / hover / tint triples applied as inline custom
-  // properties on <html>. "theme" = remove the override (the active theme's
-  // own accent shows through).
-  var ACCENTS = [
-    { id: "theme" },
-    { id: "teal",   v: "#1d7484", h: "#155c69", t: "#e3f0f2" },
-    { id: "blue",   v: "#2a6fdb", h: "#1f57b0", t: "#e6eefb" },
-    { id: "violet", v: "#7c3aed", h: "#6027c4", t: "#efe8fd" },
-    { id: "green",  v: "#1f8a5b", h: "#176d47", t: "#e2f3ec" },
-    { id: "amber",  v: "#b45c0c", h: "#8f4708", t: "#fbeede" }
-  ];
-
-  // The public localStorage key for the appearance state — a stable consumer
-  // contract (cute-dbt#178 AC3), not a credential.
-  var KEY = "cute-dbt.appearance.v1"; // gitleaks:allow — a public storage key name, no secret
-  // `engine` (cute-dbt#180) is the DAG-engine picker: "mermaid" (the static
-  // default) or "cytoscape" (the opt-in interactive engine).
-  // `coverage` (cute-dbt#219) is the viewer-side coverage-intelligence
-  // display toggle: "on" (default; the field may be absent) or "off". The
-  // CROSS-PAGE contract: any cute-dbt page that renders check-engine-derived
-  // content reads this same field — the report keys one CSS rule on
-  // html[data-coverage=off]; the explorer pages adopt it as #103/#104 land.
-  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", difflayout: "auto", engine: "mermaid", coverage: "on" };
-
-  // Read the persisted appearance, string-typed keys only. Any storage error
-  // (file:// SecurityError, disabled storage) leaves the defaults intact.
-  function load() {
-    var raw;
-    try { raw = window.localStorage && window.localStorage.getItem(KEY); } catch (e) { raw = null; }
-    if (!raw) return;
-    try {
-      var p = JSON.parse(raw);
-      if (p && typeof p === "object") {
-        ["theme", "style", "accent", "density", "difflayout", "engine", "coverage"].forEach(function (k) {
-          if (typeof p[k] === "string") pref[k] = p[k];
-        });
-      }
-    } catch (e) { /* ignore — defaults hold */ }
-    // Coerce the engine into its closed vocabulary — an unknown persisted
-    // value must fall back to the static default, never reach the dispatcher.
-    if (pref.engine !== "cytoscape") pref.engine = "mermaid";
-    // Same closed-vocabulary coercion for the coverage toggle (cute-dbt#219):
-    // anything but the explicit "off" reads as the default ON.
-    if (pref.coverage !== "off") pref.coverage = "on";
-  }
-  // Persist the current appearance. Swallows any storage error (zero-egress
-  // in-memory fallback, mirrors interaction.js saveSettings).
-  function save() {
-    try { if (window.localStorage) window.localStorage.setItem(KEY, JSON.stringify(pref)); } catch (e) { /* in-memory only */ }
-  }
-
-  var root = document.documentElement;
+  // The shared appearance engine (templates/appearance.js) parses before
+  // this file in the report's script order; its boot already loaded +
+  // applied the persisted appearance. `pref` is the ONE live state object,
+  // shared by reference — the engine's apply* mutate it, save() persists it.
+  var appearance = window.CuteAppearance;
+  var pref = appearance.pref;
 
   // ES5-safe NodeList iteration (gemini review, PR #188): older engines ship
   // querySelectorAll results without NodeList.prototype.forEach; iterate via
@@ -97,62 +38,15 @@
     for (var i = 0; i < list.length; i++) fn(list[i]);
   }
 
-  function themeById(id) {
-    for (var i = 0; i < THEMES.length; i++) if (THEMES[i].id === id) return THEMES[i];
-    return THEMES[0];
-  }
-
-  function applyTheme(id) {
-    var t = themeById(id);
-    root.setAttribute("data-theme", t.id);
-    root.classList.toggle("dark", t.dark); // DataTables dark rules follow html.dark
-    pref.theme = t.id;
-  }
-  function applyAccent(id) {
-    var a = null;
-    for (var i = 0; i < ACCENTS.length; i++) if (ACCENTS[i].id === id) a = ACCENTS[i];
-    if (!a || a.id === "theme") {
-      root.style.removeProperty("--accent");
-      root.style.removeProperty("--accent-hover");
-      root.style.removeProperty("--accent-tint");
-      pref.accent = "theme";
-    } else {
-      root.style.setProperty("--accent", a.v);
-      root.style.setProperty("--accent-hover", a.h);
-      root.style.setProperty("--accent-tint", a.t);
-      pref.accent = a.id;
-    }
-  }
-  function applyDensity(d) {
-    if (d === "auto") root.removeAttribute("data-density");
-    else root.setAttribute("data-density", d);
-    pref.density = d;
-  }
-  function applyDiffLayout(v) {
-    root.setAttribute("data-difflayout", v);
-    pref.difflayout = v;
-  }
-  function applyStyle(s) {
-    root.setAttribute("data-style", s);
-    pref.style = s;
-  }
   // cute-dbt#180 — push the picker's engine to the render dispatcher
-  // (interaction.js owns the DAG; this engine just persists the choice).
-  // The caller follows up with rerenderDag() so the flip happens in place.
+  // (interaction.js owns the DAG; this file just records the choice on the
+  // shared pref). REPORT-ONLY by design: the explore pages run no DAG
+  // engine picker, so this apply stays out of the shared engine. The
+  // caller follows up with rerenderDag() so the flip happens in place.
   function applyEngine(e) {
     var engine = e === "cytoscape" ? "cytoscape" : "mermaid";
     pref.engine = engine;
     if (typeof window.__cuteSetDagEngine === "function") window.__cuteSetDagEngine(engine);
-  }
-  // cute-dbt#219 — the coverage-intelligence display toggle. PURE display:
-  // OFF sets html[data-coverage=off] (one CSS rule hides every
-  // check-engine-derived surface); ON removes the attribute and the
-  // already-rendered content shows again — no re-render, payload untouched.
-  function applyCoverage(v) {
-    var coverage = v === "off" ? "off" : "on";
-    if (coverage === "off") root.setAttribute("data-coverage", "off");
-    else root.removeAttribute("data-coverage");
-    pref.coverage = coverage;
   }
 
   // Re-tint the DAG after a theme flip (the light/dark edge + anchor
@@ -189,31 +83,31 @@
 
   function wire() {
     qsaForEach(".style-opt", function (b) {
-      b.addEventListener("click", function () { applyStyle(b.getAttribute("data-style-id")); save(); syncControls(); reflowTables(); rerenderDag(); });
+      b.addEventListener("click", function () { appearance.applyStyle(b.getAttribute("data-style-id")); appearance.save(); syncControls(); reflowTables(); rerenderDag(); });
     });
     qsaForEach(".theme-chip", function (b) {
-      b.addEventListener("click", function () { applyTheme(b.getAttribute("data-theme-id")); save(); syncControls(); reflowTables(); rerenderDag(); });
+      b.addEventListener("click", function () { appearance.applyTheme(b.getAttribute("data-theme-id")); appearance.save(); syncControls(); reflowTables(); rerenderDag(); });
     });
     qsaForEach(".accent-swatch", function (b) {
-      b.addEventListener("click", function () { applyAccent(b.getAttribute("data-accent")); save(); syncControls(); });
+      b.addEventListener("click", function () { appearance.applyAccent(b.getAttribute("data-accent")); appearance.save(); syncControls(); });
     });
     qsaForEach(".density-seg button", function (b) {
-      b.addEventListener("click", function () { applyDensity(b.getAttribute("data-density")); save(); syncControls(); reflowTables(); });
+      b.addEventListener("click", function () { appearance.applyDensity(b.getAttribute("data-density")); appearance.save(); syncControls(); reflowTables(); });
     });
     qsaForEach(".difflayout-seg button", function (b) {
-      b.addEventListener("click", function () { applyDiffLayout(b.getAttribute("data-difflayout")); save(); syncControls(); });
+      b.addEventListener("click", function () { appearance.applyDiffLayout(b.getAttribute("data-difflayout")); appearance.save(); syncControls(); });
     });
     // cute-dbt#180 — the DAG-engine picker. The swap is IN PLACE: push the
     // engine to the dispatcher, persist, then rerenderDag() tears down the
     // old engine and builds the new one. No reload.
     qsaForEach(".engine-seg button", function (b) {
-      b.addEventListener("click", function () { applyEngine(b.getAttribute("data-engine")); save(); syncControls(); rerenderDag(); });
+      b.addEventListener("click", function () { applyEngine(b.getAttribute("data-engine")); appearance.save(); syncControls(); rerenderDag(); });
     });
     // cute-dbt#219 — the coverage-intelligence switch: flip the attribute,
     // persist. Display-only — no re-render, no DAG/table reflow needed.
     var cov = document.getElementById("settings-coverage-input");
     if (cov) {
-      cov.addEventListener("change", function () { applyCoverage(cov.checked ? "on" : "off"); save(); });
+      cov.addEventListener("change", function () { appearance.applyCoverage(cov.checked ? "on" : "off"); appearance.save(); });
     }
   }
 
@@ -233,26 +127,18 @@
   }
 
   function boot() {
-    load();
-    // Default theme: saved -> prefers-color-scheme -> light.
-    if (!pref.theme) {
-      pref.theme = (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
-    }
-    applyStyle(pref.style);
-    applyTheme(pref.theme);
-    applyAccent(pref.accent);
-    applyDensity(pref.density);
-    applyDiffLayout(pref.difflayout);
-    applyCoverage(pref.coverage);
+    // The shared engine already loaded + applied the persisted appearance
+    // at parse time; this boot owns the report-only side: control state,
+    // wiring, and the deferred DAG-engine apply.
     syncControls();
     wire();
     // Re-tint the legend + the active DAG engine once the theme's .dark
-    // class is on: interaction.js drew them on DOM-ready BEFORE this boot
-    // applied the theme, so the edge swatches would otherwise keep the
-    // light palette. The engine apply rides the same deferred tick
-    // (cute-dbt#180): by then interaction.js's boot has installed
-    // __cuteSetDagEngine, so a persisted "cytoscape" choice flips the DAG
-    // in place right after the default Mermaid render.
+    // class is on: interaction.js drew them on DOM-ready, so the edge
+    // swatches would otherwise keep the light palette on a dark boot.
+    // The engine apply rides the same deferred tick (cute-dbt#180): by
+    // then interaction.js's boot has installed __cuteSetDagEngine, so a
+    // persisted "cytoscape" choice flips the DAG in place right after the
+    // default Mermaid render.
     setTimeout(function () {
       applyEngine(pref.engine);
       rerenderDag();
@@ -262,4 +148,4 @@
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();
 })();
-/* end of cute-dbt appearance engine v1 (cute-dbt#178) */
+/* end of cute-dbt report appearance settings v1 (cute-dbt#178) */

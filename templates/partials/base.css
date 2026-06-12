@@ -1,0 +1,51 @@
+/* ============================================================================
+   cute-dbt base chassis v1 (cute-dbt#242)
+   ----------------------------------------------------------------------------
+   The minimal CROSS-FAMILY page chassis: the token-consuming page-level
+   rules both page families (report + explore) share, moved here from
+   templates/report.css section 4 — rules only, exact current values.
+   Included via askama immediately after partials/tokens.css in every
+   page's <style> block; the report-specific remainder (style packs,
+   chrome, components, reconciliation, coverage panel) stays in
+   templates/report.css and cascades after this file exactly as before.
+
+   ORDER DISCIPLINE (the zero-visual-diff contract of the extraction):
+   only cascade-order-safe rules moved. The report's body GEOMETRY
+   (font-size / max-width / padding-top / font-family) deliberately stays
+   in report.css — it must keep winning the equal-specificity contest
+   against the report's 720px responsive body rule, which sits earlier in
+   that file. This file carries only the body's token skin.
+
+   FIRST-PARTY asset — authored for cute-dbt; integrity gates are the
+   banner-pin + comment-balance tests in `src/adapters/asset_embed.rs`.
+
+   PORTING-BUG GUARD (handoff §2.1): never write a `*` immediately followed
+   by `/` inside a comment body — it closes the comment early and silently
+   eats the next rule. A comment-balance test pins this.
+   ========================================================================== */
+
+/* cute-dbt#121 — make the `hidden` attribute authoritative: Sakura's
+   `pre { display: block }` (author origin) otherwise overrides the UA
+   `[hidden] { display: none }`, so a toggled-off element would still
+   render. Both page families toggle visibility by setting `hidden`;
+   this rule wins. */
+[hidden] { display: none !important; }
+
+html { background: var(--bg); }
+body {
+  background: var(--bg);
+  color: var(--text);
+  transition: background 120ms ease, color 120ms ease;
+}
+
+a { color: var(--accent); }
+a:hover { color: var(--accent-hover); }
+
+select, input, textarea {
+  background: var(--surface); color: var(--text);
+  border: var(--rule-w) solid var(--border); border-radius: var(--radius-sm);
+}
+select:hover, input:hover { border-color: var(--border-strong); }
+select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* end of cute-dbt base chassis v1 (cute-dbt#242) */
