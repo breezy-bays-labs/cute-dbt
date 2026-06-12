@@ -244,7 +244,10 @@ enum WireChecksum {
         checksum: String,
     },
     Bare(String),
-    Other(Value),
+    /// Catch-all: any other JSON shape is accepted and discarded
+    /// ([`serde::de::IgnoredAny`] — the payload is never read; the fold
+    /// substitutes the sentinel).
+    Other(serde::de::IgnoredAny),
 }
 
 /// Fold the tolerant wire checksum into the domain [`Checksum`]
