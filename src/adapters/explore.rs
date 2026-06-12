@@ -87,7 +87,7 @@ pub const EXPLORE_CONTRACT_VERSION: &str = "1";
 /// `manifest/manifest.rs:52-64`); `source` entries live in the
 /// top-level `sources` map (`ManifestSource`) and `exposure` entries in
 /// the top-level `exposures` map (`ManifestExposure`). Serialized
-/// snake_case into the [`LineageNodePayload`] — the exhaustive
+/// `snake_case` into the [`LineageNodePayload`] — the exhaustive
 /// [`Self::wire_key`] match is the compile-time half of the node-vocab
 /// completeness guard (the `edge_type_wire_key` precedent); the
 /// template-grep test below is the belt-and-braces half.
@@ -227,16 +227,14 @@ pub struct Lineage {
 /// exposures, the id's leaf segment otherwise.
 fn lineage_node_name(current: &Manifest, id: &NodeId, node_type: LineageNodeType) -> String {
     match node_type {
-        LineageNodeType::Source => current
-            .sources()
-            .get(id)
-            .map(|s| format!("{}.{}", s.source_name(), s.name()))
-            .unwrap_or_else(|| leaf_segment(id.as_str()).to_owned()),
-        LineageNodeType::Exposure => current
-            .exposures()
-            .get(id)
-            .map(|e| e.name().to_owned())
-            .unwrap_or_else(|| leaf_segment(id.as_str()).to_owned()),
+        LineageNodeType::Source => current.sources().get(id).map_or_else(
+            || leaf_segment(id.as_str()).to_owned(),
+            |s| format!("{}.{}", s.source_name(), s.name()),
+        ),
+        LineageNodeType::Exposure => current.exposures().get(id).map_or_else(
+            || leaf_segment(id.as_str()).to_owned(),
+            |e| e.name().to_owned(),
+        ),
         _ => leaf_segment(id.as_str()).to_owned(),
     }
 }
@@ -292,7 +290,7 @@ pub fn build_lineage(current: &Manifest, models: &ModelInScopeSet) -> Lineage {
             let node = current.node(id);
             LineageNode {
                 id: id.as_str().to_owned(),
-                name: lineage_node_name(current, *id, node_type),
+                name: lineage_node_name(current, id, node_type),
                 node_type,
                 // SQL-bearing types only — see [`LineageNodePayload::not_compiled`].
                 not_compiled: matches!(
@@ -1546,8 +1544,7 @@ mod tests {
                 .nodes
                 .iter()
                 .find(|n| n.id == id)
-                .map(|n| n.badge.as_str())
-                .unwrap_or_else(|| panic!("{id} missing from payload"))
+                .map_or_else(|| panic!("{id} missing from payload"), |n| n.badge.as_str())
         };
         assert_eq!(
             badge_of("model.shop.dim_patients"),

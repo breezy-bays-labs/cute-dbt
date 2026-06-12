@@ -569,7 +569,7 @@ fn assert_lineage_complete(manifest: &Manifest) -> cute_dbt::adapters::explore::
         .map(|e| (e.from.as_str(), e.to.as_str()))
         .collect();
     let mut checked = 0usize;
-    let mut require_edge = |from: &str, to: &str| {
+    let require_edge = |from: &str, to: &str| {
         assert!(
             edges.contains(&(from, to)),
             "manifest dependency {from} -> {to} must be a lineage edge",
