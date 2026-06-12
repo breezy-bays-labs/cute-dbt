@@ -32,8 +32,6 @@
 //! this same seam). File access stays on the existing
 //! [`crate::ports::ProjectFileReader`] port; this module never does I/O.
 
-use std::collections::BTreeMap;
-
 use dbt_yaml::mapping::DuplicateKey;
 use dbt_yaml::{Mapping, Value as YamlValue};
 use serde_json::Value;

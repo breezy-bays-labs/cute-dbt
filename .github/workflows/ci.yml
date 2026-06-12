@@ -335,6 +335,7 @@ jobs:
     #   - 20 after explore_model_detail (cute-dbt#104)
     #   - 21 after explore_js_contract (cute-dbt#105)
     #   - 22 after explore_change_context (cute-dbt#106)
+    #   - 23 after project_definition (cute-dbt#266)
     # The README is not a feature. The job name deliberately carries no
     # number (cute-dbt#68 — the old `==6` display label went stale across
     # several bumps): the enforced count lives ONLY in the `expected=`
@@ -352,7 +353,7 @@ jobs:
       - name: features/*.feature count matches expected
         run: |
           set -euo pipefail
-          expected=22
+          expected=23
           count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
           echo "feature-count: expected ${expected}, found ${count}"
           if [ "$count" != "$expected" ]; then
