@@ -426,7 +426,7 @@ config.contract).\
 path = "playground-pr-diff.patch"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/134"
-sha256 = "6825c7e26007130705ed2f17a7e8bf6c0bafee5e5266e8b141ee4e8812fa7827"
+sha256 = "8f2b4fd8ca1198b0ea7efc21217332a7417952884c7ab68f271fc21a85d37501"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"
@@ -450,7 +450,12 @@ external csv fixture `tests/fixtures/mart_date_state_grid_patients.csv` \
 the showcase renders the cute-dbt#126 external old→new cell diff — an \
 edit, which the all-added live dogfood structurally cannot show. The \
 csv hunk's `+` side is byte-aligned to the committed csv under \
-playground-source (same-revision contract). No \
+playground-source (same-revision contract). cute-dbt#266 appended two \
+dbt_project.yml hunks (a vars edit dq_quarantine_threshold 10→5 + a \
+folder +materialized view→table on models/healthcare_analytics/marts) \
+so the showcase renders the categorized "Project definition changed" \
+panel; their `+` sides are byte-aligned to the committed \
+playground-source/dbt_project.yml (same-revision contract). No \
 real data — a hypothetical PR against the synthetic Synthea playground.\
 """
 
@@ -468,6 +473,30 @@ TOML — the clap value-parser fn fails the parse, producing exit 2 (clap \
 usage error, NOT a PreflightError variant — ARCHITECTURE.md §3 \
 baseline-missing precedent). No real data; not parseable as TOML by \
 design.\
+"""
+
+[[fixture]]
+path = "playground-source/dbt_project.yml"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/266"
+sha256 = "9986151fbe2bd342c4ab6f344036434249a5f289365b1b946861bd06b28380ef"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+Synthetic dbt_project.yml for the playground fixture project \
+(cute-dbt#266) — the dogfood surface of the categorized \
+"Project definition changed" panel. The diff-showcase matrix row \
+(`--pr-diff @tests/fixtures/playground-pr-diff.patch` + \
+`--project-root tests/fixtures/playground-source`) reads it through \
+the ProjectFileReader port; the patch's two dbt_project.yml hunks \
+(vars dq_quarantine_threshold 10→5 + marts +materialized view→table) \
+reverse-apply against it under the same-revision contract, so the \
+committed diff-showcase example renders categorized Vars + ConfigTree \
+rows. The baseline playground row parses it too (standing metadata in \
+the payload, no panel). Hand-authored to match the synthetic \
+healthcare_analytics manifest identity — pure synthetic configuration, \
+no data rows.\
 """
 
 [[fixture]]
@@ -663,6 +692,26 @@ boolean `accepted_values` pills ([true, false]). Consumed by \
 `tests/column_meta_handoff_schema.rs`, which extracts every authored \
 `data_tests` entry and asserts the `column_test_payload` display \
 mapping over them.\
+"""
+
+[[fixture]]
+path = "project-def-acceptance.yml"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/266"
+sha256 = "d8d28ffcfc6ecf2f221e6b6f8316ed4b39bf5820513b0711a03d2ab1d3ccb102"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Synthetic dbt_project.yml exercising the cute-dbt#266 acceptance list \
+(research-262, fusion pinned @ 9977b6cb): anchors + aliases + `<<:` \
+merge keys, duplicate-key last-wins (dbt-yaml Overwrite + apply_merge \
+fusion parity), quoted Jinja scalars, `+`-nested config trees, \
+flow-style lists/mappings, the v1.10 top-level `anchors:` key, a bare \
+legacy config key (dbt-core dialect), and a deprecated path key \
+(`source-paths`). Consumed by `src/adapters/project_def.rs` unit tests \
+via include_str!. Hand-authored — pure synthetic configuration, no \
+data rows at all.\
 """
 
 # ---------------------------------------------------------------------------

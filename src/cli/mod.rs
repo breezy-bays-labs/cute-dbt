@@ -52,6 +52,7 @@ use clap::Parser;
 
 use crate::adapters::explore::render_explore;
 use crate::adapters::manifest::{FileManifestSource, load_baseline};
+use crate::adapters::project_def::parse as parse_project_definition;
 use crate::adapters::project_file::FsProjectFileReader;
 use crate::adapters::render::{
     ExternalFixtures, LoadedFixture, ScopeSource, build_payload, index_tests_for_models,
@@ -60,12 +61,13 @@ use crate::adapters::render::{
 use crate::domain::{
     BlockDiff, CheckPolicy, DEFAULT_REPORT_TITLE, FixtureTableDiff, HeuristicId, InScopeSet,
     Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex,
-    PreflightError, ScopeInput, ScopeSelection, SuppressRule, SuppressionSource, UnitTest,
-    UnitTestDataDiff, UnitTestYamlBlock, all_models, attach_model_yaml_diffs, changed_models,
-    check_by_id, effective_fixture_format, external_fixture_table, extract_model_block,
-    extract_unit_test_block, preflight_compiled, reconstruct_block_diffs,
-    reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
-    refine_changed_by_hunks, resolve_check_policy, scan_pragmas, select_in_scope,
+    PreflightError, ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ScopeInput,
+    ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock,
+    all_models, attach_model_yaml_diffs, changed_models, check_by_id, diff_project_definitions,
+    effective_fixture_format, external_fixture_table, extract_model_block, extract_unit_test_block,
+    preflight_compiled, raw_hunk_lines, reconstruct_block_diffs, reconstruct_external_fixture_diff,
+    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks,
+    resolve_check_policy, reverse_apply, scan_pragmas, select_in_scope,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -266,6 +268,17 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     if let ScopeInput::PrDiff { index } = &scope_input {
         warn_if_not_unified_zero(index);
     }
+    // Project-definition facts (cute-dbt#266): parse the working-tree
+    // dbt_project.yml whenever it is present — STANDING metadata, both
+    // scope arms (the founder's parse-always posture; the parsed model
+    // rides the payload for future consumers). The categorized
+    // "Project definition changed" panel is the diff-gated consumer: on
+    // the PrDiff arm, when dbt_project.yml is in the diff, the old side
+    // is reconstructed by reverse-applying the file's own hunks
+    // (drift-guarded) and the structural diff categorizes the change;
+    // every degrade arm falls back to the Shape-A raw-diff row.
+    // Fail-open: report generation NEVER fails because of this file.
+    let project_facts = gather_project_facts(args, &scope_input);
     let (report_title, report_subtitle) = resolve_report_strings(args);
     let (baseline_label, scope_source) = scope_banner(args, &scope_input);
     // Check selection + suppression (cute-dbt#171): the `[checks]` config
@@ -290,6 +303,7 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
         &report_title,
         report_subtitle.as_deref(),
         &check_policy,
+        &project_facts,
     )
     .map_err(|err| RunError::output(&args.out, err))?;
     Ok(())
@@ -691,6 +705,135 @@ fn is_bare_fixture_name(path: &str) -> bool {
     !path.contains('/')
 }
 
+/// The project-relative name of the file the `gather_project_facts`
+/// stage reads and the panel keys on (cute-dbt#266). A fixed name by dbt
+/// contract — the one file every dbt project defines at its root.
+const DBT_PROJECT_YML: &str = "dbt_project.yml";
+
+/// The `gather_project_facts` stage (cute-dbt#266) — parse the
+/// working-tree `dbt_project.yml` (standing metadata, both scope arms) and,
+/// on the `PrDiff` arm, build the categorized project-change panel.
+///
+/// Same project-root resolution as [`gather_authoring_yaml`]. With no
+/// resolvable root nothing can be read: standing metadata stays `None`,
+/// and when `dbt_project.yml` IS in the diff the panel degrades to the
+/// absence-note fallback (the hunks are still in hand) — the change is
+/// never silently invisible.
+fn gather_project_facts(args: &ReportArgs, scope_input: &ScopeInput) -> ProjectFacts {
+    let index = match scope_input {
+        ScopeInput::PrDiff { index } => Some(index),
+        ScopeInput::Baseline { .. } => None,
+    };
+    let (resolved, _derived) =
+        self::args::resolve_project_root(args.project_root.as_deref(), &args.manifest);
+    let Some(project_root) = resolved else {
+        return ProjectFacts {
+            definition: None,
+            panel: project_panel_without_file(index),
+        };
+    };
+    let reader = FsProjectFileReader::new(project_root);
+    gather_project_facts_with_reader(&reader, index)
+}
+
+/// The absence-note panel arm: `Some(Fallback{FileUnreadable})` exactly
+/// when `dbt_project.yml` is in the diff (its raw hunk lines still show),
+/// else no panel.
+fn project_panel_without_file(index: Option<&NormalizedDiffIndex>) -> Option<ProjectChangePanel> {
+    let index = index?;
+    index
+        .contains_changed(DBT_PROJECT_YML)
+        .then(|| ProjectChangePanel::Fallback {
+            reason: ProjectFallbackReason::FileUnreadable,
+            raw: raw_hunk_lines(index.hunks_for(DBT_PROJECT_YML)),
+        })
+}
+
+/// Pure composition step over the [`ProjectFileReader`] port — testable
+/// without touching the filesystem by passing an in-memory impl.
+///
+/// Standing metadata: the parsed working-tree file whenever it reads +
+/// parses (`None` otherwise — soft failure, stderr warning on non-NotFound
+/// I/O errors and on a parse failure). Panel (diff-gated, fail-open):
+///
+/// - file unreadable → [`ProjectFallbackReason::FileUnreadable`] absence
+///   note;
+/// - new side unparseable → [`ProjectFallbackReason::NewParseFailed`];
+/// - [`reverse_apply`] refuses (drift / malformed hunks) →
+///   [`ProjectFallbackReason::OldNotReconstructable`];
+/// - reconstructed old side unparseable →
+///   [`ProjectFallbackReason::OldParseFailed`];
+/// - otherwise → `Categorized` rows from [`diff_project_definitions`]
+///   (a file created in the PR reverses to empty text, which parses to
+///   the default definition, so every entry reports as added).
+fn gather_project_facts_with_reader(
+    reader: &dyn ProjectFileReader,
+    index: Option<&NormalizedDiffIndex>,
+) -> ProjectFacts {
+    let new_text = match reader.read(DBT_PROJECT_YML) {
+        Ok(text) => Some(text),
+        Err(err)
+            if err.kind() == io::ErrorKind::NotFound
+                || err.kind() == io::ErrorKind::InvalidInput =>
+        {
+            None
+        }
+        Err(err) => {
+            eprintln!("cute-dbt: warning: could not read dbt_project.yml: {err}");
+            None
+        }
+    };
+    let Some(new_text) = new_text else {
+        return ProjectFacts {
+            definition: None,
+            panel: project_panel_without_file(index),
+        };
+    };
+    let definition = match parse_project_definition(&new_text) {
+        Ok(def) => Some(def),
+        Err(err) => {
+            eprintln!(
+                "cute-dbt: warning: could not parse dbt_project.yml ({err:?}); \
+                 the project panel shows the raw diff"
+            );
+            None
+        }
+    };
+    let panel = index
+        .filter(|index| index.contains_changed(DBT_PROJECT_YML))
+        .map(|index| project_change_panel(&new_text, definition.as_ref(), index));
+    ProjectFacts { definition, panel }
+}
+
+/// Build the diff-gated panel content for an in-diff `dbt_project.yml`
+/// whose working-tree text is in hand. See
+/// [`gather_project_facts_with_reader`] for the arm map.
+fn project_change_panel(
+    new_text: &str,
+    definition: Option<&crate::domain::ProjectDefinition>,
+    index: &NormalizedDiffIndex,
+) -> ProjectChangePanel {
+    let hunks = index.hunks_for(DBT_PROJECT_YML);
+    let fallback = |reason: ProjectFallbackReason| ProjectChangePanel::Fallback {
+        reason,
+        raw: raw_hunk_lines(hunks),
+    };
+    let Some(new_def) = definition else {
+        return fallback(ProjectFallbackReason::NewParseFailed);
+    };
+    let Ok(old_text) = reverse_apply(new_text, hunks) else {
+        return fallback(ProjectFallbackReason::OldNotReconstructable);
+    };
+    // An empty old text (file created in this PR) parses to the default
+    // definition, so the diff below reports every entry as added.
+    let Ok(old_def) = parse_project_definition(&old_text) else {
+        return fallback(ProjectFallbackReason::OldParseFailed);
+    };
+    ProjectChangePanel::Categorized {
+        changes: diff_project_definitions(&old_def, new_def),
+    }
+}
+
 /// Merge external fixture FILE cell diffs (cute-dbt#126 AC#3) into the
 /// YAML-block-derived `data_diffs`. For each rendered test's loaded external
 /// `given`/`expect`, reconstruct the file's old→new cell diff from its OWN
@@ -989,6 +1132,7 @@ fn render(
     report_title: &str,
     report_subtitle: Option<&str>,
     check_policy: &CheckPolicy<HeuristicId>,
+    project_facts: &ProjectFacts,
 ) -> Result<(), io::Error> {
     render_report_with_externals(
         out,
@@ -1007,6 +1151,7 @@ fn render(
         report_title,
         report_subtitle,
         check_policy,
+        project_facts,
     )
 }
 
@@ -2036,5 +2181,209 @@ mod tests {
             data_diffs.is_empty(),
             "an untouched external fixture produces no cell diff",
         );
+    }
+
+    // -----------------------------------------------------------------
+    // gather_project_facts_with_reader — the cute-dbt#266 project-
+    // definition stage: standing metadata (parse always) + the
+    // diff-gated categorized panel with its fail-open fallback arms.
+    // -----------------------------------------------------------------
+
+    use crate::domain::{
+        FileHunks, Hunk, PrDiff, ProjectChangeCategory, ProjectChangePanel, ProjectFallbackReason,
+    };
+
+    /// A reader carrying one `dbt_project.yml` body.
+    fn project_reader(text: &str) -> StubReader {
+        let mut entries = StdHashMap::new();
+        entries.insert(
+            "dbt_project.yml".to_owned(),
+            StubResult::Ok(text.to_owned()),
+        );
+        StubReader { entries }
+    }
+
+    /// An index whose only changed file is `dbt_project.yml` with the
+    /// given hunks.
+    fn project_diff_index(hunks: Vec<Hunk>) -> NormalizedDiffIndex {
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![FileHunks {
+                path: "dbt_project.yml".to_owned(),
+                hunks,
+            }],
+        };
+        NormalizedDiffIndex::new(&diff, None)
+    }
+
+    fn replacement_hunk(new_start: usize, removed: &str, added: &str) -> Hunk {
+        Hunk {
+            new_start,
+            new_len: 1,
+            removed_lines: vec![removed.to_owned()],
+            added_lines: vec![added.to_owned()],
+        }
+    }
+
+    const PROJECT_NEW: &str = "name: playground\nvars:\n  default_state: VT\n";
+
+    #[test]
+    fn project_facts_parse_standing_metadata_with_no_diff() {
+        // Baseline arm (no index): the file still parses — the founder's
+        // parse-always posture; the panel stays absent.
+        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), None);
+        let def = facts.definition.expect("standing metadata parsed");
+        assert_eq!(def.name.as_deref(), Some("playground"));
+        assert!(facts.panel.is_none(), "no diff, no panel");
+    }
+
+    #[test]
+    fn project_facts_panel_absent_when_file_not_in_diff() {
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![FileHunks {
+                path: "models/dim_users.sql".to_owned(),
+                hunks: vec![replacement_hunk(1, "a", "b")],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), Some(&index));
+        assert!(facts.definition.is_some(), "standing metadata still rides");
+        assert!(
+            facts.panel.is_none(),
+            "dbt_project.yml untouched ⇒ no panel"
+        );
+    }
+
+    #[test]
+    fn project_facts_categorize_an_in_diff_vars_edit() {
+        // The diff replaced `default_state: CT` with `default_state: VT`
+        // (line 3 of the new text). Reverse-apply reconstructs the old
+        // side; the structural diff categorizes the var change.
+        let index = project_diff_index(vec![replacement_hunk(
+            3,
+            "  default_state: CT",
+            "  default_state: VT",
+        )]);
+        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), Some(&index));
+        match facts.panel.expect("panel present") {
+            ProjectChangePanel::Categorized { changes } => {
+                assert_eq!(changes.len(), 1);
+                assert_eq!(changes[0].category, ProjectChangeCategory::Vars);
+                assert_eq!(changes[0].label, "default_state");
+                assert_eq!(changes[0].old, Some(serde_json::json!("CT")));
+                assert_eq!(changes[0].new, Some(serde_json::json!("VT")));
+            }
+            ProjectChangePanel::Fallback { reason, .. } => {
+                panic!("expected categorized panel, got fallback: {reason:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn project_facts_drift_degrades_to_the_not_reconstructable_fallback() {
+        // The hunk's + body does not match the working tree (stale diff)
+        // — never a silently wrong old side.
+        let index = project_diff_index(vec![replacement_hunk(
+            3,
+            "  default_state: CT",
+            "  default_state: SOMETHING-ELSE",
+        )]);
+        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), Some(&index));
+        match facts.panel.expect("panel present") {
+            ProjectChangePanel::Fallback { reason, raw } => {
+                assert_eq!(reason, ProjectFallbackReason::OldNotReconstructable);
+                assert!(!raw.is_empty(), "the raw hunk lines still show");
+            }
+            ProjectChangePanel::Categorized { .. } => {
+                panic!("a drifting hunk must not categorize")
+            }
+        }
+    }
+
+    #[test]
+    fn project_facts_unparseable_new_side_degrades_to_new_parse_failed() {
+        let broken = "models:\n  - [unclosed\n";
+        let index = project_diff_index(vec![replacement_hunk(2, "  ok: 1", "  - [unclosed")]);
+        let facts = gather_project_facts_with_reader(&project_reader(broken), Some(&index));
+        assert!(facts.definition.is_none(), "no standing metadata");
+        match facts.panel.expect("panel present") {
+            ProjectChangePanel::Fallback { reason, .. } => {
+                assert_eq!(reason, ProjectFallbackReason::NewParseFailed);
+            }
+            ProjectChangePanel::Categorized { .. } => {
+                panic!("an unparseable working tree must not categorize")
+            }
+        }
+    }
+
+    #[test]
+    fn project_facts_missing_file_degrades_to_the_absence_note() {
+        // dbt_project.yml is in the diff but the working tree (under the
+        // resolved project root) has no such file.
+        let reader = StubReader {
+            entries: StdHashMap::new(),
+        };
+        let index = project_diff_index(vec![replacement_hunk(1, "name: a", "name: b")]);
+        let facts = gather_project_facts_with_reader(&reader, Some(&index));
+        assert!(facts.definition.is_none());
+        match facts
+            .panel
+            .expect("panel present — never silently invisible")
+        {
+            ProjectChangePanel::Fallback { reason, raw } => {
+                assert_eq!(reason, ProjectFallbackReason::FileUnreadable);
+                assert!(!raw.is_empty(), "the hunks are still in hand");
+            }
+            ProjectChangePanel::Categorized { .. } => {
+                panic!("an unreadable file must not categorize")
+            }
+        }
+    }
+
+    #[test]
+    fn project_facts_file_created_in_the_pr_reports_all_added() {
+        // One hunk covering the whole (new) file, no removed lines —
+        // reverse-apply yields empty old text, which parses to the
+        // default definition, so every entry reports as added.
+        let lines: Vec<String> = PROJECT_NEW.lines().map(str::to_owned).collect();
+        let hunk = Hunk {
+            new_start: 1,
+            new_len: lines.len(),
+            removed_lines: Vec::new(),
+            added_lines: lines,
+        };
+        let index = project_diff_index(vec![hunk]);
+        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), Some(&index));
+        match facts.panel.expect("panel present") {
+            ProjectChangePanel::Categorized { changes } => {
+                assert!(!changes.is_empty());
+                assert!(
+                    changes.iter().all(|c| c.old.is_none()),
+                    "a created file reports every entry as added",
+                );
+            }
+            ProjectChangePanel::Fallback { reason, .. } => {
+                panic!("a clean creation diff categorizes, got {reason:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn project_facts_formatting_only_edit_categorizes_to_zero_changes() {
+        // A comment edit changes no semantic configuration: categorized,
+        // empty — the panel renders the truthful "formatting only" note.
+        let new_text = "# a comment\nname: playground\n";
+        let index =
+            project_diff_index(vec![replacement_hunk(1, "# an old comment", "# a comment")]);
+        let facts = gather_project_facts_with_reader(&project_reader(new_text), Some(&index));
+        match facts.panel.expect("panel present") {
+            ProjectChangePanel::Categorized { changes } => {
+                assert!(changes.is_empty(), "no semantic change to report");
+            }
+            ProjectChangePanel::Fallback { reason, .. } => {
+                panic!("expected categorized-empty, got {reason:?}")
+            }
+        }
     }
 }

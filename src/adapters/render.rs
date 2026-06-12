@@ -67,9 +67,11 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, CteGraph, EdgeType, Finding, FixtureTable,
-    HeuristicId, InScopeSet, Instrument, Manifest, ModelInScopeSet, ModelYamlOutcome, Node, NodeId,
-    SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
+    BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, CteGraph, DiffLine, DiffLineKind,
+    EdgeType, Finding, FixtureTable, HeuristicId, InScopeSet, Instrument, Manifest,
+    ModelInScopeSet, ModelYamlOutcome, Node, NodeId, ProjectChange, ProjectChangeCategory,
+    ProjectChangePanel, ProjectDefinition, ProjectFacts, ProjectFallbackReason, SourceNode,
+    TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
     UnitTestYamlBlock, apply_check_policy, model_findings, resolve_target_model,
     resolve_tested_model, table_from_manifest_rows,
 };
@@ -1339,6 +1341,21 @@ pub struct ReportPayload {
     /// byte-stable.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub check_specs: BTreeMap<String, CheckSpecPayload>,
+    /// The parsed working-tree `dbt_project.yml` (cute-dbt#266) —
+    /// **standing metadata**, present on both scope arms whenever the
+    /// file is readable + parseable under the resolved project root.
+    /// Future consumers (explorer panes, provenance chips) read it from
+    /// here; nothing in the current report chrome renders it directly.
+    /// Omitted when absent so pre-#266 payloads stay byte-stable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_definition: Option<ProjectDefinition>,
+    /// The "Project definition changed" panel content (cute-dbt#266) —
+    /// present exactly when `dbt_project.yml` is in the PR diff. The
+    /// panel itself is server-rendered (the template's `project_panel`
+    /// view); the payload carries the structured facts for downstream
+    /// consumers + the BDD payload assertions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_change_panel: Option<ProjectChangePanel>,
 }
 
 /// Which scope source produced this report — selects the diff-scope
@@ -1354,6 +1371,163 @@ pub enum ScopeSource {
     Baseline,
     /// Scoped via `--pr-diff` (a PR's `git diff --unified=0`).
     PrDiff,
+}
+
+// ---------------------------------------------------------------------
+// Project-definition panel view (cute-dbt#266)
+// ---------------------------------------------------------------------
+
+/// One server-rendered row of the project-definition panel.
+struct ProjectPanelRowView {
+    /// Snake-case category key — the row's CSS hook + chip class
+    /// (`vars`, `config_tree`, `dispatch`, `hooks`, `paths`,
+    /// `identity`, `other`).
+    category_key: &'static str,
+    /// Human category chip text.
+    category_label: &'static str,
+    /// The changed key's display path (the domain change's `label`).
+    label: String,
+    /// `old → new` / `added: v` / `removed: v`, values as compact JSON
+    /// (type-faithful: `"1"` and `1` read differently).
+    detail: String,
+    /// Honesty note rendered inside the row (empty ⇒ none). Vars rows
+    /// state plainly "blast radius not attributed" (attribution is a
+    /// later slice — the copy never implies coming-soon); dispatch rows
+    /// state the project-wide/not-attributable fact.
+    note: &'static str,
+}
+
+/// One raw diff line of the panel's Shape-A fallback row.
+struct ProjectPanelLineView {
+    /// `context` / `removed` / `added` — the CSS hook.
+    kind: &'static str,
+    /// The line text, sigil-free.
+    text: String,
+}
+
+/// The server-rendered "Project definition changed" panel — built from
+/// the domain [`ProjectChangePanel`] exactly when `dbt_project.yml` is in
+/// the PR diff. Wording lives here (adapter); facts live in the domain
+/// POD (the `ModelYamlOutcome` precedent).
+struct ProjectPanelView {
+    /// Categorized rows (empty in fallback mode and for a
+    /// formatting-only edit).
+    rows: Vec<ProjectPanelRowView>,
+    /// `true` when categorization succeeded but found zero semantic
+    /// changes — the panel says so instead of rendering nothing.
+    is_empty_change: bool,
+    /// Non-empty exactly in fallback mode: the explicit degrade copy
+    /// ("could not categorize" / "could not reconstruct the previous
+    /// version" / the absence note).
+    fallback_copy: String,
+    /// The fallback's raw diff lines (also carried on the absence-note
+    /// arm — the hunks are known even when the file is not).
+    fallback_lines: Vec<ProjectPanelLineView>,
+}
+
+/// Category key + chip label + per-row honesty note for one
+/// [`ProjectChangeCategory`].
+fn project_category_strings(
+    category: ProjectChangeCategory,
+) -> (&'static str, &'static str, &'static str) {
+    match category {
+        ProjectChangeCategory::Vars => (
+            "vars",
+            "vars",
+            // Locked interim copy (shaping #262 v3): plain statement,
+            // never "coming soon".
+            "blast radius not attributed",
+        ),
+        ProjectChangeCategory::ConfigTree => ("config_tree", "config tree", ""),
+        ProjectChangeCategory::Dispatch => (
+            "dispatch",
+            "dispatch",
+            "macro search order changed — project-wide effect, not statically attributable",
+        ),
+        ProjectChangeCategory::Hooks => ("hooks", "hooks", ""),
+        ProjectChangeCategory::Paths => ("paths", "paths", ""),
+        ProjectChangeCategory::Identity => ("identity", "identity", ""),
+        ProjectChangeCategory::Other => ("other", "other", ""),
+    }
+}
+
+/// A change's `detail` string: both sides present → `old → new`;
+/// one-sided → `added:` / `removed:`. Values render as compact JSON.
+fn project_change_detail(change: &ProjectChange) -> String {
+    let compact = |v: &Value| serde_json::to_string(v).unwrap_or_else(|_| "null".to_owned());
+    match (&change.old, &change.new) {
+        (Some(old), Some(new)) => format!("{} \u{2192} {}", compact(old), compact(new)),
+        (None, Some(new)) => format!("added: {}", compact(new)),
+        (Some(old), None) => format!("removed: {}", compact(old)),
+        (None, None) => String::new(), // unreachable by construction
+    }
+}
+
+/// The fallback arm's explicit copy — "could not categorize" /
+/// "could not reconstruct the previous version" / the absence note.
+fn project_fallback_copy(reason: ProjectFallbackReason) -> &'static str {
+    match reason {
+        ProjectFallbackReason::NewParseFailed => {
+            "dbt_project.yml could not be parsed, so this change could not be \
+             categorized — showing the raw diff."
+        }
+        ProjectFallbackReason::OldParseFailed => {
+            "The previous version of dbt_project.yml could not be parsed, so this \
+             change could not be categorized — showing the raw diff."
+        }
+        ProjectFallbackReason::OldNotReconstructable => {
+            "Could not reconstruct the previous version of dbt_project.yml from \
+             the diff, so this change could not be categorized — showing the raw diff."
+        }
+        ProjectFallbackReason::FileUnreadable => {
+            "dbt_project.yml changed in this diff, but the file could not be read \
+             from the project root — nothing to categorize. Showing the raw diff."
+        }
+    }
+}
+
+/// Build the server-rendered panel view from the domain panel POD.
+fn project_panel_view(panel: &ProjectChangePanel) -> ProjectPanelView {
+    match panel {
+        ProjectChangePanel::Categorized { changes } => {
+            let rows = changes
+                .iter()
+                .map(|change| {
+                    let (category_key, category_label, note) =
+                        project_category_strings(change.category);
+                    ProjectPanelRowView {
+                        category_key,
+                        category_label,
+                        label: change.label.clone(),
+                        detail: project_change_detail(change),
+                        note,
+                    }
+                })
+                .collect::<Vec<_>>();
+            ProjectPanelView {
+                is_empty_change: rows.is_empty(),
+                rows,
+                fallback_copy: String::new(),
+                fallback_lines: Vec::new(),
+            }
+        }
+        ProjectChangePanel::Fallback { reason, raw } => ProjectPanelView {
+            rows: Vec::new(),
+            is_empty_change: false,
+            fallback_copy: project_fallback_copy(*reason).to_owned(),
+            fallback_lines: raw
+                .iter()
+                .map(|line: &DiffLine| ProjectPanelLineView {
+                    kind: match line.kind {
+                        DiffLineKind::Context => "context",
+                        DiffLineKind::Removed => "removed",
+                        DiffLineKind::Added => "added",
+                    },
+                    text: line.text.clone(),
+                })
+                .collect(),
+        },
+    }
 }
 
 /// askama template binding for the v0.1 report.
@@ -1430,6 +1604,10 @@ struct ReportTemplate<'a> {
     /// The template emits this with `|safe`; the safety property is the
     /// Rust-side escape, not askama's HTML filter.
     payload_json: &'a str,
+    /// The server-rendered "Project definition changed" panel
+    /// (cute-dbt#266) — `Some` exactly when `dbt_project.yml` is in the
+    /// PR diff; `None` keeps the section out of the DOM entirely.
+    project_panel: Option<ProjectPanelView>,
 }
 
 /// Serialize `payload` to JSON for safe embedding inside an HTML
@@ -1544,6 +1722,7 @@ pub fn build_payload(
         &HashMap::new(),
         baseline_label,
         &CheckPolicy::default(),
+        &ProjectFacts::default(),
     )
 }
 
@@ -1559,6 +1738,11 @@ pub fn build_payload(
 /// from `--config` `[checks]` + scanned SQL pragmas; the [`build_payload`]
 /// convenience passes `CheckPolicy::default()` — everything displayed,
 /// nothing suppressed).
+///
+/// `project_facts` (cute-dbt#266) carries the parsed `dbt_project.yml`
+/// (standing metadata) + the diff-gated panel content; the
+/// [`build_payload`] convenience passes `ProjectFacts::default()` (both
+/// absent — the pre-#266 payload shape, byte-identical).
 #[must_use]
 // `too_many_arguments`: see `render_report` — the composition root threads
 // the run loop's already-built artifacts straight through.
@@ -1575,6 +1759,7 @@ pub fn build_payload_with_externals(
     external_fixtures: &HashMap<String, ExternalFixtures>,
     baseline_label: &str,
     check_policy: &CheckPolicy<HeuristicId>,
+    project_facts: &ProjectFacts,
 ) -> ReportPayload {
     let model_tests = index_tests_for_models(current, models_in_scope);
     let empty: Vec<(&str, &UnitTest)> = Vec::new();
@@ -1617,6 +1802,9 @@ pub fn build_payload_with_externals(
         // upstreams.
         manifest_nodes: build_manifest_nodes(current, models_in_scope, &model_tests),
         check_specs,
+        // cute-dbt#266 — standing metadata + the diff-gated panel facts.
+        project_definition: project_facts.definition.clone(),
+        project_change_panel: project_facts.panel.clone(),
     }
 }
 
@@ -1674,6 +1862,7 @@ pub fn render_report(
         report_title,
         report_subtitle,
         &CheckPolicy::default(),
+        &ProjectFacts::default(),
     )
 }
 
@@ -1704,6 +1893,7 @@ pub fn render_report_with_externals(
     report_title: &str,
     report_subtitle: Option<&str>,
     check_policy: &CheckPolicy<HeuristicId>,
+    project_facts: &ProjectFacts,
 ) -> io::Result<()> {
     let payload = build_payload_with_externals(
         current,
@@ -1717,6 +1907,7 @@ pub fn render_report_with_externals(
         external_fixtures,
         baseline_label,
         check_policy,
+        project_facts,
     );
     // The empty-scope banner contract reads the TRUE in-scope set, not the
     // widened render set or the changed subset (cute-dbt#91).
@@ -1742,6 +1933,7 @@ pub fn render_report_with_externals(
         baseline_label,
         is_pr_diff: scope_source == ScopeSource::PrDiff,
         payload_json: &payload_json,
+        project_panel: project_facts.panel.as_ref().map(project_panel_view),
     };
     let html = template
         .render()
@@ -4773,6 +4965,8 @@ mod tests {
             models: vec![],
             manifest_nodes: BTreeMap::new(),
             check_specs: BTreeMap::new(),
+            project_definition: None,
+            project_change_panel: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -4792,6 +4986,8 @@ mod tests {
             models: vec![],
             manifest_nodes: BTreeMap::new(),
             check_specs: BTreeMap::new(),
+            project_definition: None,
+            project_change_panel: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -4813,6 +5009,8 @@ mod tests {
             models: vec![],
             manifest_nodes: BTreeMap::new(),
             check_specs: BTreeMap::new(),
+            project_definition: None,
+            project_change_panel: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(serialized.contains("a < b"), "bare `<` is preserved");
@@ -4829,6 +5027,8 @@ mod tests {
             models: vec![],
             manifest_nodes: BTreeMap::new(),
             check_specs: BTreeMap::new(),
+            project_definition: None,
+            project_change_panel: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -4858,6 +5058,8 @@ mod tests {
             models: vec![],
             manifest_nodes: BTreeMap::new(),
             check_specs: BTreeMap::new(),
+            project_definition: None,
+            project_change_panel: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -4885,6 +5087,8 @@ mod tests {
             models: vec![],
             manifest_nodes: BTreeMap::new(),
             check_specs: BTreeMap::new(),
+            project_definition: None,
+            project_change_panel: None,
         };
         let serialized = payload_json_for_html_script(&original).unwrap();
         let parsed: serde_json::Value =

@@ -1,0 +1,62 @@
+# Synthetic dbt_project.yml — the cute-dbt#266 acceptance fixture.
+#
+# Exercises the research acceptance list (research-262, fusion pinned
+# @ 9977b6cb): anchors + aliases + `<<:` merge keys, duplicate-key
+# last-wins (dbt-yaml's Overwrite policy + apply_merge — fusion parity),
+# quoted Jinja scalars (opaque strings under zero-compute), `+`-nested
+# config trees, flow-style lists/mappings, the v1.10 top-level
+# `anchors:` key, a bare legacy config key (dbt-core dialect), and a
+# deprecated path key. Entirely synthetic — no real project data.
+name: acceptance_project
+version: "1.0.0"
+config-version: 2
+profile: acceptance
+require-dbt-version: [">=1.8.0", "<3.0.0"]
+
+# v1.10 top-level anchors: reuse block (dbt-core 1.10; fusion models it
+# as Verbatim) — the alias below resolves through it.
+anchors:
+  default_states: &default_states [CT, VT, MA]
+
+vars:
+  greeting: "{{ var('fallback', 'hello') }}"
+  audit_states: *default_states
+  retry_count: 1
+  retry_count: 3
+  scoped_package:
+    enabled: true
+
+models:
+  shared: &shared_config
+    +materialized: view
+    +persist_docs: { relations: true, columns: true }
+  acceptance_project:
+    <<: *shared_config
+    +tags: ["project-wide"]
+    marts:
+      +materialized: table
+      finance:
+        materialized: incremental
+        +meta: { owner: "finance-team" }
+
+seeds:
+  acceptance_project:
+    +quote_columns: false
+
+on-run-start: "grant usage on database analytics to role reporter"
+on-run-end:
+  - "{{ log('done', info=true) }}"
+
+dispatch:
+  - macro_namespace: dbt_utils
+    search_order: [acceptance_project, dbt_utils]
+
+flags:
+  send_anonymous_usage_stats: false
+
+model-paths: ["models"]
+# Deprecated path key (dbt-core dialect) — ingested, never validated.
+source-paths: ["models"]
+clean-targets: [target, dbt_packages]
+
+query-comment: "run by cute-dbt acceptance fixture"
