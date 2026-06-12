@@ -2101,14 +2101,10 @@ fn detect_incremental_branch_coverage(ctx: &CheckContext<'_>) -> Vec<Finding<Heu
             |strategy| format!("incremental (strategy: {strategy})"),
         );
     let mut evidence = vec![Evidence::new("materialized", materialized)];
-    let model_bare = ctx
-        .model
-        .id()
-        .as_str()
-        .rsplit('.')
-        .next()
-        .unwrap_or_default()
-        .to_owned();
+    // cute-dbt#256 — the authored bare name (ingested wire `name`, leaf
+    // fallback): a versioned model's id leaf is the `.vN` suffix, and a
+    // sketch saying `model: v2` would not be valid authoring YAML.
+    let model_bare = ctx.model.bare_name().to_owned();
     // tests_on_model sorts by unit-test id, so `by` is already
     // deterministic.
     let by: Vec<String> = tests.iter().map(|(id, _)| (*id).clone()).collect();
@@ -4828,6 +4824,52 @@ mod tests {
             2,
             "a test-less incremental model gets one sketch per branch"
         );
+    }
+
+    #[test]
+    fn incremental_sketches_name_a_versioned_model_by_its_ingested_name() {
+        // cute-dbt#256 (the #254 handoff): a versioned model's id leaf
+        // is the version suffix — a sketch saying `model: v2` is not
+        // valid authoring YAML. The ingested wire `name` is the
+        // truthful handle; bare_name's leaf fallback preserves the
+        // pre-#256 sketch text for fixtures without a name.
+        let versioned = model_with_config(
+            "model.shop.order_events.v2",
+            &[("materialized", Value::from("incremental"))],
+        )
+        .with_identity(Some("order_events".to_owned()), Some("shop".to_owned()));
+        let manifest = Manifest::new(
+            ManifestMetadata::new("v12"),
+            [versioned]
+                .into_iter()
+                .map(|n| (n.id().clone(), n))
+                .collect(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let finding = single_finding(
+            run(&manifest, "model.shop.order_events.v2")
+                .into_iter()
+                .filter(|f| f.check == HeuristicId::IncrementalBranchCoverage)
+                .collect(),
+        );
+        let sketches: Vec<&str> = finding
+            .evidence
+            .iter()
+            .filter(|e| e.label == "suggested given")
+            .map(|e| e.value.as_str())
+            .collect();
+        assert_eq!(sketches.len(), 2);
+        for sketch in sketches {
+            assert!(
+                sketch.contains("model: order_events"),
+                "the sketch names the authored model, not the version suffix: {sketch}",
+            );
+            assert!(
+                !sketch.contains("model: v2"),
+                "no version-suffix model label: {sketch}",
+            );
+        }
     }
 
     #[test]
