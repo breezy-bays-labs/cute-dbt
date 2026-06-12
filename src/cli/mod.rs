@@ -43,6 +43,7 @@
 mod args;
 mod exit;
 mod pr_diff;
+mod review;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
@@ -92,14 +93,21 @@ pub fn run() -> ExitCode {
         Ok(cli) => cli,
         Err(err) => return report_arg_error(&err),
     };
-    let outcome = match &cli.command {
-        Command::Report(report) => execute_report(report),
-        Command::Explore(explore) => execute_explore(explore),
+    // Per-verb dispatch; every run-time failure is mapped to one
+    // stderr message + exit 1 here. `review` wraps its own cli-layer
+    // `ReviewError` (cute-dbt#300) alongside the composed report's
+    // `RunError`, so its arm converts to the message eagerly.
+    let outcome: Result<(), String> = match &cli.command {
+        Command::Review(review_args) => {
+            review::execute_review(review_args).map_err(|failure| failure.message())
+        }
+        Command::Report(report) => execute_report(report).map_err(|failure| failure.message()),
+        Command::Explore(explore) => execute_explore(explore).map_err(|failure| failure.message()),
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
-        Err(failure) => {
-            eprintln!("{}", failure.message());
+        Err(message) => {
+            eprintln!("{message}");
             ExitCode::from(EXIT_FAILURE)
         }
     }

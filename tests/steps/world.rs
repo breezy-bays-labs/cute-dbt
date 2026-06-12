@@ -220,6 +220,23 @@ pub struct World {
     /// variable first so a developer's shell can never leak an opt-in
     /// into a scenario.
     pub experimental_env: Option<String>,
+
+    // --- One-command review (one_command_review, cute-dbt#300) -----------
+    /// The temp git repo the review scenario built (real `git init`,
+    /// environment-isolated — see `common::TestRepo`).
+    pub review_repo: Option<crate::common::TestRepo>,
+
+    /// A bare (non-git) project directory for the not-a-repository
+    /// scenario.
+    pub review_plain_dir: Option<PathBuf>,
+
+    /// Captured stdout of the last review invocation (review prints the
+    /// report path / the `--dry-run` plan listing on stdout).
+    pub last_stdout: String,
+
+    /// Where the review scenario expects the report
+    /// (`<project>/target/cute-dbt-report.html`).
+    pub review_report_path: Option<PathBuf>,
 }
 
 /// A cute-dbt#200 data-contract scenario plan — described/tagged models,

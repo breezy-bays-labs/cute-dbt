@@ -44,12 +44,13 @@ use crate::domain::{AnalysisConfig, Experiment, ModifierKind, PrDiff, parse_expe
     arg_required_else_help = false
 )]
 pub struct Cli {
-    /// The selected verb: `report` (PR review) or `explore` (local dev).
+    /// The selected verb: `review` (one-command PR review), `report`
+    /// (explicit-inputs PR review), or `explore` (local dev).
     #[command(subcommand)]
     pub command: Command,
 }
 
-/// The two cute-dbt verbs (cute-dbt#100).
+/// The cute-dbt verbs (cute-dbt#100; `review` since cute-dbt#300).
 // large_enum_variant: deliberately NOT boxed — clap's derive requires
 // the variant field to implement `Args` (Box<ReportArgs> does not), and
 // exactly one `Command` exists per process, so the size asymmetry
@@ -57,6 +58,11 @@ pub struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Review your branch's dbt changes in one command: find the dbt
+    /// project, detect the base branch, diff the working tree against
+    /// the merge-base, and render the PR-review report (the porcelain
+    /// verb — `report` is the explicit-inputs plumbing it composes).
+    Review(crate::cli::review::ReviewArgs),
     /// Render a diff-scoped, self-contained HTML report of a dbt
     /// project's unit tests (PR review; baseline-required, fail-closed).
     Report(ReportArgs),
@@ -314,7 +320,7 @@ fn parse_config_file(s: &str) -> Result<AnalysisConfig, String> {
 /// Thin wrapper over the pure domain parser
 /// ([`parse_experimental_env`]); errors are stringified for clap's
 /// usage-error path (exit 2), matching the `[experimental]` TOML arm.
-fn parse_experimental_value(s: &str) -> Result<BTreeSet<Experiment>, String> {
+pub(super) fn parse_experimental_value(s: &str) -> Result<BTreeSet<Experiment>, String> {
     parse_experimental_env(s).map_err(|err| err.to_string())
 }
 
@@ -414,7 +420,7 @@ mod tests {
     fn parse_report(args: &[&str]) -> Result<ReportArgs, clap::Error> {
         parse(args).map(|cli| match cli.command {
             Command::Report(report) => report,
-            Command::Explore(_) => panic!("expected the report arm"),
+            Command::Explore(_) | Command::Review(_) => panic!("expected the report arm"),
         })
     }
 
