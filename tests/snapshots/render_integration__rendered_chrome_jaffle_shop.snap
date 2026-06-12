@@ -1511,14 +1511,16 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
   position: fixed; z-index: 90; max-width: min(34rem, 92vw);
   /* cute-dbt#246 — never a reachability fold: the bubble is
      pointer-events:none and hides on mouseleave, so anything laid past
-     the old fixed 22rem max-height could never be scrolled to or read
-     (overflow:auto painted a scrollbar nothing could operate). The JS
-     side now bounds the content (viewport-derived line budget + a
-     truthful elision row), and the height cap is viewport-relative —
-     the #240 defect-D width-cap pattern — so positionTipNear's post-flip
-     top clamp always fully contains the box on the height axis, at any
-     viewport height. overflow:hidden because a scrollbar here is a lie. */
-  max-height: calc(100vh - 16px); overflow: hidden;
+     the old fixed 22rem max-height could never be scrolled to or read.
+     The JS side now bounds the content by REAL MEASUREMENT (trim lines
+     until the laid-out content fits + a truthful elision row), and the
+     height cap is viewport-relative — the #240 defect-D width-cap
+     pattern — so positionTipNear's post-flip top clamp always fully
+     contains the box on the height axis, at any viewport height.
+     overflow:auto stays as the safety net (PR #286 review): if some
+     exotic rendering still defeats the measured trim, the mismatch
+     degrades to a visible scrollbar — a signal — never a silent clip. */
+  max-height: calc(100vh - 16px); overflow: auto;
   border: var(--rule-w) solid var(--border-strong); border-radius: var(--radius-pan);
   box-shadow: 0 8px 26px rgba(0,0,0,0.34); background: var(--code-bg);
   pointer-events: none;
@@ -3884,35 +3886,54 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
   // mouseleave/blur, so anything laid below a height fold could never be
   // scrolled to or read (the old fixed 22rem + overflow:auto pairing left
   // below-fold rows silently unreachable for EVERY input modality). Bound
-  // the content instead of folding it: show at most a viewport-derived
-  // number of lines — the tip is a glance surface; the grid below the
-  // badge carries the full data — and close with a truthful elision row
-  // counting exactly what was trimmed. 20px/line over-approximates the
-  // 12px/1.6 .sql-block line boxes and 96px over-approximates the fixed
-  // chrome (code-header, paddings, borders, the elision row, the 16px
-  // positioning gutters), so the trimmed block always fits the CSS
-  // viewport-relative height cap and the fold cannot occur.
+  // the content instead of folding it: show at most FMT_TIP_MAX_LINES
+  // lines — the tip is a glance surface; the grid below the badge
+  // carries the full data — then trim by REAL MEASUREMENT (PR #286
+  // review): remove rendered lines until the laid-out content fits the
+  // bubble's viewport-capped box. Measuring the live layout (never a
+  // px-per-line estimate) keeps the bound correct under browser zoom, a
+  // forced minimum font size (a11y), wrapped long lines, and any future
+  // rem-based sizing — and the truthful elision row counts exactly what
+  // was trimmed, however it was trimmed.
   var FMT_TIP_MAX_LINES = 20;
-  function fmtTipLineBudget() {
-    var vh = document.documentElement.clientHeight || window.innerHeight;
-    return Math.max(1, Math.min(FMT_TIP_MAX_LINES, Math.floor((vh - 96) / 20)));
+  function fmtTipMoreText(more) {
+    return "… +" + more + " more line" + (more === 1 ? "" : "s");
   }
   function showFmtTip(trigger) {
     var fmt = trigger.getAttribute("data-fmt"), lang = trigger.getAttribute("data-fmt-lang");
     var block = trigger.getAttribute("data-fmt-block") || "";
     var lines = String(block).replace(/\n+$/, "").split("\n");
-    var more = lines.length - fmtTipLineBudget();
-    if (more > 0) block = lines.slice(0, lines.length - more).join("\n");
-    var code = lang === "sql" ? highlightLinesSql(block)
-             : lang === "yaml" ? highlightLinesYaml(block)
-             : highlightLinesPlain(block);
+    var shown = Math.min(lines.length, FMT_TIP_MAX_LINES);
+    var more = lines.length - shown;
+    var code = lang === "sql" ? highlightLinesSql(lines.slice(0, shown).join("\n"))
+             : lang === "yaml" ? highlightLinesYaml(lines.slice(0, shown).join("\n"))
+             : highlightLinesPlain(lines.slice(0, shown).join("\n"));
     var el = ensureTip("fmt-tooltip", "fmt-tooltip");
     el.innerHTML = '<div class="code-header"><span class="code-filename">format: ' + escapeHtml(fmt)
       + '</span></div><pre class="sql-block"><code>' + code + "</code></pre>"
-      + (more > 0
-        ? '<div class="fmt-more">… +' + more + " more line" + (more === 1 ? "" : "s") + "</div>"
-        : "");
+      + (more > 0 ? '<div class="fmt-more">' + fmtTipMoreText(more) + "</div>" : "");
     el.hidden = false;
+    // Measure the live layout at full width (reset a stale edge-clamped
+    // left BEFORE measuring — the #232 D18 lesson: a squeezed box wraps
+    // differently and mis-measures).
+    el.style.left = "0px";
+    // The elision row participates in the measured height, so it must
+    // exist before trimming starts (created here if the ceiling alone
+    // didn't already call for one).
+    var moreEl = el.querySelector(".fmt-more");
+    if (!moreEl && el.scrollHeight > el.clientHeight + 1) {
+      moreEl = document.createElement("div");
+      moreEl.className = "fmt-more";
+      el.appendChild(moreEl);
+    }
+    var rows = el.querySelectorAll(".code-line");
+    var keep = rows.length;
+    while (keep > 1 && el.scrollHeight > el.clientHeight + 1) {
+      keep -= 1;
+      rows[keep].parentNode.removeChild(rows[keep]);
+      more += 1;
+    }
+    if (moreEl) moreEl.textContent = fmtTipMoreText(more);
     positionTipNear(el, trigger);
   }
   // Overrides tip: key = value rows grouped by macros / vars / env_vars.

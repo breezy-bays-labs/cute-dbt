@@ -9952,8 +9952,8 @@ fn fmt_tip_long_fixture_is_bounded_not_folded() {
     // fold (the old fixed 22rem + overflow:auto pairing) could never be
     // scrolled to or read — silently unreachable for EVERY input
     // modality. RED pre-fix with this 60-line reconstruction (content
-    // ~3× the fold); the fix bounds the content (viewport-derived line
-    // budget + a truthful elision row) so the fold cannot occur.
+    // ~3× the fold); the fix bounds the content (measurement-driven line
+    // trim + a truthful elision row) so the fold cannot occur.
     let url = render_to_file(
         "headless_246_fmt_tip_long.html",
         vec![model_node("model.shop.dim_x"), model_node("model.shop.src")],
@@ -10038,6 +10038,66 @@ fn fmt_tip_long_fixture_is_bounded_not_folded() {
             ),
         ),
         "the fmt tip's box lies fully within the visible viewport",
+    );
+
+    // ===== font-scale phase (PR #286 review) =====
+    // A forced minimum font size (Chrome a11y) inflates the px-sized
+    // .sql-block lines past any per-line estimate; the bound must come
+    // from measuring the live layout, never constants. Simulate the
+    // inflation (12px → 24px doubles every line box), re-show the tip,
+    // and re-assert the same truths: no fold, truthful elision.
+    let shown_normal = eval(
+        &tab,
+        &format!("{TIP}.querySelectorAll('.diff-code').length"),
+    )
+    .as_i64()
+    .expect("shown line count is a number");
+    let _ = eval(&tab, &format!("{BADGE}.blur()"));
+    let _ = eval(
+        &tab,
+        "(function(){var s=document.createElement('style');\
+         s.textContent='.fmt-tooltip .sql-block { font-size: 24px; }';\
+         document.head.appendChild(s);})()",
+    );
+    let _ = eval(&tab, &format!("{BADGE}.focus()"));
+    assert!(
+        !eval_bool(&tab, &format!("{TIP}.hidden")),
+        "the fmt tip re-reveals under the inflated font",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{TIP}.scrollHeight <= {TIP}.clientHeight + 1")
+        ),
+        "no fold under a forced larger font — the measured trim adapts \
+         (an estimate-based budget would overshoot and clip)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{var shown={TIP}.querySelectorAll('.diff-code').length;\
+                 var m={TIP}.querySelector('.fmt-more');\
+                 if (!m) return false;\
+                 var n=parseInt(m.textContent.replace(/[^0-9]/g, ''), 10);\
+                 return shown > 0 && shown <= 20 && shown + n === 60;}})()"
+            ),
+        ),
+        "the elision row stays truthful under the inflated font \
+         (shown + counted === 60)",
+    );
+    // Non-vacuous: doubled line boxes must fit FEWER lines — proof the
+    // trim measured the new layout rather than reusing a constant.
+    let shown_scaled = eval(
+        &tab,
+        &format!("{TIP}.querySelectorAll('.diff-code').length"),
+    )
+    .as_i64()
+    .expect("shown line count is a number");
+    assert!(
+        shown_scaled < shown_normal,
+        "the measured trim adapts to the inflated font \
+         ({shown_scaled} lines shown vs {shown_normal} at normal size)",
     );
 
     let _ = tab.close(true);

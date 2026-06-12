@@ -1047,14 +1047,16 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
   position: fixed; z-index: 90; max-width: min(34rem, 92vw);
   /* cute-dbt#246 — never a reachability fold: the bubble is
      pointer-events:none and hides on mouseleave, so anything laid past
-     the old fixed 22rem max-height could never be scrolled to or read
-     (overflow:auto painted a scrollbar nothing could operate). The JS
-     side now bounds the content (viewport-derived line budget + a
-     truthful elision row), and the height cap is viewport-relative —
-     the #240 defect-D width-cap pattern — so positionTipNear's post-flip
-     top clamp always fully contains the box on the height axis, at any
-     viewport height. overflow:hidden because a scrollbar here is a lie. */
-  max-height: calc(100vh - 16px); overflow: hidden;
+     the old fixed 22rem max-height could never be scrolled to or read.
+     The JS side now bounds the content by REAL MEASUREMENT (trim lines
+     until the laid-out content fits + a truthful elision row), and the
+     height cap is viewport-relative — the #240 defect-D width-cap
+     pattern — so positionTipNear's post-flip top clamp always fully
+     contains the box on the height axis, at any viewport height.
+     overflow:auto stays as the safety net (PR #286 review): if some
+     exotic rendering still defeats the measured trim, the mismatch
+     degrades to a visible scrollbar — a signal — never a silent clip. */
+  max-height: calc(100vh - 16px); overflow: auto;
   border: var(--rule-w) solid var(--border-strong); border-radius: var(--radius-pan);
   box-shadow: 0 8px 26px rgba(0,0,0,0.34); background: var(--code-bg);
   pointer-events: none;
