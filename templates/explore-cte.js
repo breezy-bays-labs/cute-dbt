@@ -221,10 +221,22 @@
     });
   }
 
+  // cute-dbt#253 — the CTE view is MODEL semantics (per-model CTE DAGs
+  // off the cte_dags map, built for models only): a highlighted
+  // snapshot/seed/source/exposure keeps the CTE arm locked rather than
+  // opening a misleading "no CTE structure" sparse state for a node the
+  // engine never parsed. Pre-#253 payloads carry no node_type and stay
+  // model-typed by default.
+  function modelTyped(id) {
+    var n = modelById[id];
+    return !!n && (!n.node_type || n.node_type === "model");
+  }
+
   // ---- the view toggle (chrome + selection persist; same page) ------------
   function setView(next) {
     if (next === view) return;
-    if (next === "cte" && !highlightedId) return; // gated on a highlight
+    // gated on a MODEL highlight
+    if (next === "cte" && (!highlightedId || !modelTyped(highlightedId))) return;
     view = next;
     var isCte = view === "cte";
     lineageView.hidden = isCte;
@@ -251,9 +263,9 @@
   // and retargets an active CTE view in place.
   document.addEventListener("cute-explore-highlight", function (ev) {
     highlightedId = ev.detail ? ev.detail.id : null;
-    btnCte.disabled = !highlightedId;
+    btnCte.disabled = !highlightedId || !modelTyped(highlightedId);
     if (view !== "cte") return;
-    if (!highlightedId) {
+    if (!highlightedId || !modelTyped(highlightedId)) {
       setView("lineage");
       return;
     }

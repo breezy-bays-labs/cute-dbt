@@ -40,6 +40,7 @@ fn declares_model(world: &mut World, bare: String) {
         compiled: true,
         compiled_sql: None,
         deps: Vec::new(),
+        raw_deps: Vec::new(),
         tests: Vec::new(),
         description: None,
         tags: Vec::new(),
@@ -163,15 +164,111 @@ pub fn serialize_plan_manifest(world: &World, stem: &str) -> std::path::PathBuf 
     for t in &plan.path_tests {
         manifest = with_unit_test(manifest, super::explore_js_contract::path_unit_test(t));
     }
+    // cute-dbt#253 — non-model dependencies (snapshot/seed/source ids)
+    // ride a wire `depends_on` patch: the domain decl's bare `deps` map
+    // through `model_id`, which is model-only by design.
+    for m in &plan.models {
+        if m.raw_deps.is_empty() {
+            continue;
+        }
+        let mut dep_ids: Vec<String> = m
+            .deps
+            .iter()
+            .map(|d| super::builders::model_id(d).as_str().to_owned())
+            .collect();
+        dep_ids.extend(m.raw_deps.iter().cloned());
+        node_patches.push((
+            m.bare.clone(),
+            "depends_on".to_owned(),
+            serde_json::json!({ "macros": [], "nodes": dep_ids }),
+        ));
+    }
     // cute-dbt#103 — splice the declared data-test nodes in the REAL
     // fusion wire shape (the coverage_checks.rs precedent: the domain
     // types do not round-trip a flat test-node `config`). An empty
     // declaration list degenerates to the plain serialization.
     // cute-dbt#104 — the uniqueness-test nodes ride the same splice.
-    let mut test_nodes: Vec<(String, serde_json::Value)> =
+    let mut raw_nodes: Vec<(String, serde_json::Value)> =
         plan.data_tests.iter().map(wire_data_test).collect();
-    test_nodes.extend(plan.uniqueness_tests.iter().map(wire_uniqueness_test));
-    serialize_explore_to_tmp(&manifest, stem, &node_patches, &test_nodes)
+    raw_nodes.extend(plan.uniqueness_tests.iter().map(wire_uniqueness_test));
+    // cute-dbt#253 — splice the declared snapshot/seed nodes in the
+    // REAL wire shapes: snapshots carry `compiled_code` (the fusion
+    // compile-backfill, `dbt-tasks-sa/src/utils.rs:151-172` @
+    // `9977b6cb…`); seeds carry `compiled_code: null` and a
+    // `depends_on` WITHOUT a `nodes` key (fusion null-fills seed
+    // compiled code unconditionally, `manifest_nodes.rs:232-233`).
+    for (bare, dep_bares) in &plan.snapshots {
+        let deps: Vec<String> = dep_bares
+            .iter()
+            .map(|d| super::builders::model_id(d).as_str().to_owned())
+            .collect();
+        raw_nodes.push((
+            format!("snapshot.jaffle_shop.{bare}"),
+            serde_json::json!({
+                "resource_type": "snapshot",
+                "name": bare,
+                "package_name": "jaffle_shop",
+                "checksum": { "name": "sha256", "checksum": "snapck" },
+                "raw_code": "select * from upstream",
+                "compiled_code": "select * from upstream",
+                "config": { "materialized": "snapshot" },
+                "depends_on": { "macros": [], "nodes": deps },
+                "original_file_path": format!("snapshots/{bare}.sql"),
+            }),
+        ));
+    }
+    for bare in &plan.seeds {
+        raw_nodes.push((
+            format!("seed.jaffle_shop.{bare}"),
+            serde_json::json!({
+                "resource_type": "seed",
+                "name": bare,
+                "package_name": "jaffle_shop",
+                "checksum": { "name": "sha256", "checksum": "seedck" },
+                "raw_code": "",
+                "compiled_code": null,
+                "depends_on": { "macros": [] },
+                "original_file_path": format!("seeds/{bare}.csv"),
+            }),
+        ));
+    }
+    // cute-dbt#253 — splice the declared sources/exposures into their
+    // top-level manifest maps in the real wire shape.
+    let mut top_map_entries: Vec<(String, String, serde_json::Value)> = Vec::new();
+    for (source_name, table) in &plan.sources {
+        top_map_entries.push((
+            "sources".to_owned(),
+            format!("source.jaffle_shop.{source_name}.{table}"),
+            serde_json::json!({
+                "resource_type": "source",
+                "source_name": source_name,
+                "name": table,
+                "identifier": table,
+                "schema": "main",
+                "database": null,
+                "relation_name": null,
+                "original_file_path": "models/staging/_sources.yml",
+            }),
+        ));
+    }
+    for (name, dep_bares) in &plan.exposures {
+        let deps: Vec<String> = dep_bares
+            .iter()
+            .map(|d| super::builders::model_id(d).as_str().to_owned())
+            .collect();
+        top_map_entries.push((
+            "exposures".to_owned(),
+            format!("exposure.jaffle_shop.{name}"),
+            serde_json::json!({
+                "resource_type": "exposure",
+                "name": name,
+                "type": "dashboard",
+                "owner": { "name": "analytics", "email": null },
+                "depends_on": { "macros": [], "nodes": deps },
+            }),
+        ));
+    }
+    serialize_explore_to_tmp(&manifest, stem, &node_patches, &raw_nodes, &top_map_entries)
 }
 
 // --- Then ----------------------------------------------------------------
