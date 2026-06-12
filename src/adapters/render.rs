@@ -62,8 +62,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::adapters::asset_embed::{
-    CYTO_DAG_JS, CYTOSCAPE_JS, DATATABLES_CSS, DATATABLES_JS, FAVICON_DATA_URI, INTERACTION_JS,
-    JQUERY_JS, MERMAID_JS, REPORT_CSS, SAKURA_CSS, THEME_JS,
+    APPEARANCE_JS, CYTO_DAG_JS, CYTOSCAPE_JS, DATATABLES_CSS, DATATABLES_JS, FAVICON_DATA_URI,
+    INTERACTION_JS, JQUERY_JS, MERMAID_JS, REPORT_CSS, SAKURA_CSS, THEME_JS,
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
@@ -1372,10 +1372,15 @@ struct ReportTemplate<'a> {
     /// grids and settings wiring that fill the template's engine
     /// `<script>` block. [`INTERACTION_JS`], not a vendored asset.
     interaction_js: &'a str,
-    /// First-party appearance engine (cute-dbt#178) — theme / style /
-    /// accent / density / diff-style / diff-layout + `localStorage`
-    /// persistence + the `DataTables` dark sync. [`THEME_JS`], not a
+    /// SHARED appearance engine (cute-dbt#242) — reads + applies the
+    /// persisted `cute-dbt.appearance.v1` appearance on `<html>`;
+    /// identical bytes on every page family. [`APPEARANCE_JS`], not a
     /// vendored asset.
+    appearance_js: &'a str,
+    /// Report-only appearance settings UI (cute-dbt#178, re-layered at
+    /// cute-dbt#242) — the settings panel's controls + `DataTables`
+    /// reflow + DAG-engine dispatch over the shared engine.
+    /// [`THEME_JS`], not a vendored asset.
     theme_js: &'a str,
     /// First-party Cytoscape DAG engine (cute-dbt#180) — preset layout,
     /// canvas-text labels, hover card, click-to-highlight lineage.
@@ -1715,6 +1720,7 @@ pub fn render_report_with_externals(
         mermaid_js: MERMAID_JS,
         cytoscape_js: CYTOSCAPE_JS,
         interaction_js: INTERACTION_JS,
+        appearance_js: APPEARANCE_JS,
         theme_js: THEME_JS,
         cyto_dag_js: CYTO_DAG_JS,
         favicon_data_uri: FAVICON_DATA_URI,

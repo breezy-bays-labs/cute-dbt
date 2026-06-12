@@ -46,8 +46,8 @@ use askama::Template;
 use serde::Serialize;
 
 use crate::adapters::asset_embed::{
-    CYTOSCAPE_DAGRE_JS, CYTOSCAPE_JS, EXPLORE_CTE_JS, EXPLORE_LINEAGE_JS, EXPLORE_TESTS_JS,
-    FAVICON_DATA_URI, SAKURA_CSS,
+    APPEARANCE_JS, CYTOSCAPE_DAGRE_JS, CYTOSCAPE_JS, EXPLORE_CTE_JS, EXPLORE_LINEAGE_JS,
+    EXPLORE_TESTS_JS, FAVICON_DATA_URI, SAKURA_CSS,
 };
 use crate::adapters::render::{DagPayload, ReportPayload};
 use crate::domain::{
@@ -707,6 +707,10 @@ fn test_badge(data_tests: usize, unit_tests: usize) -> String {
 #[template(path = "explore-dag.html", escape = "html")]
 struct ExploreDagTemplate<'a> {
     sakura_css: &'a str,
+    /// SHARED appearance engine (cute-dbt#242) — the page honors the
+    /// saved `cute-dbt.appearance.v1` appearance (read-only; the
+    /// explore-side settings affordance is cute-dbt#219).
+    appearance_js: &'a str,
     cytoscape_js: &'a str,
     cytoscape_dagre_js: &'a str,
     explore_lineage_js: &'a str,
@@ -740,6 +744,10 @@ struct ExploreDagTemplate<'a> {
 #[template(path = "explore-tests.html", escape = "html")]
 struct ExploreTestsTemplate<'a> {
     sakura_css: &'a str,
+    /// SHARED appearance engine (cute-dbt#242) — the page honors the
+    /// saved `cute-dbt.appearance.v1` appearance (read-only; the
+    /// explore-side settings affordance is cute-dbt#219).
+    appearance_js: &'a str,
     favicon_data_uri: &'a str,
     models: &'a [ExploreModel],
     model_count: usize,
@@ -864,6 +872,7 @@ pub fn render_explore(
         .map_err(|err| io::Error::other(format!("dag payload serialization: {err}")))?;
     let dag_html = ExploreDagTemplate {
         sakura_css: SAKURA_CSS,
+        appearance_js: APPEARANCE_JS,
         cytoscape_js: CYTOSCAPE_JS,
         cytoscape_dagre_js: CYTOSCAPE_DAGRE_JS,
         explore_lineage_js: EXPLORE_LINEAGE_JS,
@@ -887,6 +896,7 @@ pub fn render_explore(
         .map_err(|err| io::Error::other(format!("payload serialization: {err}")))?;
     let tests_html = ExploreTestsTemplate {
         sakura_css: SAKURA_CSS,
+        appearance_js: APPEARANCE_JS,
         favicon_data_uri: FAVICON_DATA_URI,
         models: &models_pod,
         model_count: models_pod.len(),
@@ -1205,8 +1215,19 @@ mod tests {
         assert!(tests.contains("not compiled"), "{tests}");
         // tests.html embeds the build_payload reuse seam.
         assert!(tests.contains("id=\"cute-dbt-data\""), "payload embedded");
-        // tests.html is the page-aware static page: no Mermaid bundle.
-        assert!(!tests.contains("mermaid"), "tests.html carries no Mermaid");
+        // tests.html is the page-aware static page: no Mermaid BUNDLE.
+        // (The bare substring "mermaid" legitimately appears since
+        // cute-dbt#242 — the shared appearance engine's DAG-engine pref
+        // defaults to the string "mermaid"; the page-weight contract is
+        // about the vendored bundle's bytes, so pin exactly those.)
+        assert!(
+            !tests.contains(crate::adapters::asset_embed::MERMAID_JS),
+            "tests.html carries no Mermaid bundle",
+        );
+        assert!(
+            !tests.contains("mermaid.initialize"),
+            "tests.html runs no Mermaid init",
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

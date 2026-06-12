@@ -16,32 +16,30 @@ expression: chrome
 <style>
 
 /* ============================================================================
-   cute-dbt report chassis CSS v1 (cute-dbt#177)
+   cute-dbt design tokens v1 (cute-dbt#242)
    ----------------------------------------------------------------------------
-   Claude Design Phase-1 integration, PR-1: semantic token layer + 8 AA-pinned
-   themes (5 from pass-1 + Dracula / Catppuccin Latte / Rosé Pine Dawn from
-   pass-2, cute-dbt#198) + 4 style packs + density layer + the tokenized
-   component rules.
-   FIRST-PARTY asset — authored for cute-dbt, embedded via `include_str!`
-   (`asset_embed::REPORT_CSS`) and interpolated into the report template's
-   custom <style> block. Deliberately NOT listed in `assets/MANIFEST.toml`:
-   that index is third-party vendoring provenance (Sakura, jQuery, DataTables,
-   Mermaid); this file has no upstream to pin. Its integrity gate is the
-   banner-pin + comment-balance tests in `src/adapters/asset_embed.rs`.
+   The design-system ROOT: the semantic token layer + ALL EIGHT [data-theme]
+   blocks, extracted VERBATIM from templates/report.css (the cute-dbt#177
+   chassis) at cute-dbt#242 — exact current values, zero value changes.
+   Shared by BOTH page families through an askama include (report.html and
+   explore-dag.html / explore-tests.html each inline this partial into their
+   own <style> block at compile time), so the report and the explore pages
+   consume ONE design system structurally. Single-file outputs hold: the
+   sharing happens at the template layer, never via a runtime asset.
 
-   Merge of the design handoff's engine files, in this cascade order:
-     1. tokens.css  — :root semantic tokens + eight [data-theme] blocks
-     2. styles.css  — the four html[data-style] direction packs
-     3. chrome.css  — settings panel, pickers, Cytoscape host chrome
-     4. base.css    — tokenized component layer
-   followed by a cute-dbt reconciliation + PR-1 bridge layer (this repo's
-   shipped affordances the handoff forked before: #157, #165, #166; plus
-   pre-engine DOM compatibility that the engine PR removes).
+   FIRST-PARTY asset — authored for cute-dbt. Deliberately NOT listed in
+   `assets/MANIFEST.toml` (that index is third-party vendoring provenance);
+   its integrity gates are the banner-pin + comment-balance tests in
+   `src/adapters/asset_embed.rs`.
+
+   Design sessions: treat THIS file as the design-system root (see
+   DESIGN.md). Tokens are law — no new color literals; per-theme,
+   surface-scoped AA overrides live with their surfaces in the page
+   layers, never here.
 
    PORTING-BUG GUARD (handoff §2.1): never write a `*` immediately followed
    by `/` inside a comment body — it closes the comment early and silently
-   eats the next rule (this once ate the `[hidden]` rule and broke every
-   toggle). A comment-balance test pins this.
+   eats the next rule. A comment-balance test pins this.
    ========================================================================== */
 
 /* ============================================================================
@@ -384,6 +382,93 @@ expression: chrome
   --code-add-sigil:#45700f; --code-rem-sigil:#b01b43;
 }
 
+/* end of cute-dbt design tokens v1 (cute-dbt#242) */
+/* ============================================================================
+   cute-dbt base chassis v1 (cute-dbt#242)
+   ----------------------------------------------------------------------------
+   The minimal CROSS-FAMILY page chassis: the token-consuming page-level
+   rules both page families (report + explore) share, moved here from
+   templates/report.css section 4 — rules only, exact current values.
+   Included via askama immediately after partials/tokens.css in every
+   page's <style> block; the report-specific remainder (style packs,
+   chrome, components, reconciliation, coverage panel) stays in
+   templates/report.css and cascades after this file exactly as before.
+
+   ORDER DISCIPLINE (the zero-visual-diff contract of the extraction):
+   only cascade-order-safe rules moved. The report's body GEOMETRY
+   (font-size / max-width / padding-top / font-family) deliberately stays
+   in report.css — it must keep winning the equal-specificity contest
+   against the report's 720px responsive body rule, which sits earlier in
+   that file. This file carries only the body's token skin.
+
+   FIRST-PARTY asset — authored for cute-dbt; integrity gates are the
+   banner-pin + comment-balance tests in `src/adapters/asset_embed.rs`.
+
+   PORTING-BUG GUARD (handoff §2.1): never write a `*` immediately followed
+   by `/` inside a comment body — it closes the comment early and silently
+   eats the next rule. A comment-balance test pins this.
+   ========================================================================== */
+
+/* cute-dbt#121 — make the `hidden` attribute authoritative: Sakura's
+   `pre { display: block }` (author origin) otherwise overrides the UA
+   `[hidden] { display: none }`, so a toggled-off element would still
+   render. Both page families toggle visibility by setting `hidden`;
+   this rule wins. */
+[hidden] { display: none !important; }
+
+html { background: var(--bg); }
+body {
+  background: var(--bg);
+  color: var(--text);
+  transition: background 120ms ease, color 120ms ease;
+}
+
+a { color: var(--accent); }
+a:hover { color: var(--accent-hover); }
+
+select, input, textarea {
+  background: var(--surface); color: var(--text);
+  border: var(--rule-w) solid var(--border); border-radius: var(--radius-sm);
+}
+select:hover, input:hover { border-color: var(--border-strong); }
+select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* end of cute-dbt base chassis v1 (cute-dbt#242) */
+/* ============================================================================
+   cute-dbt report chassis CSS v1 (cute-dbt#177)
+   ----------------------------------------------------------------------------
+   Claude Design Phase-1 integration, PR-1: semantic token layer + 8 AA-pinned
+   themes (5 from pass-1 + Dracula / Catppuccin Latte / Rosé Pine Dawn from
+   pass-2, cute-dbt#198) + 4 style packs + density layer + the tokenized
+   component rules.
+   FIRST-PARTY asset — authored for cute-dbt, embedded via `include_str!`
+   (`asset_embed::REPORT_CSS`) and interpolated into the report template's
+   custom <style> block. Deliberately NOT listed in `assets/MANIFEST.toml`:
+   that index is third-party vendoring provenance (Sakura, jQuery, DataTables,
+   Mermaid); this file has no upstream to pin. Its integrity gate is the
+   banner-pin + comment-balance tests in `src/adapters/asset_embed.rs`.
+
+   RE-LAYERED at cute-dbt#242: the design-system root — the semantic token
+   layer + all eight [data-theme] blocks — now lives in
+   templates/partials/tokens.css, and the minimal cross-family page chassis
+   ([hidden], the html/body token skin, links, form controls) in
+   templates/partials/base.css. Both partials are askama-included into the
+   report's <style> block IMMEDIATELY BEFORE this file (and identically into
+   the explore pages), so the emitted cascade order is:
+     1. partials/tokens.css — :root semantic tokens + eight [data-theme] blocks
+     2. partials/base.css   — shared page chassis (both page families)
+     3. styles.css layer    — the four html[data-style] direction packs (here)
+     4. chrome.css layer    — settings panel, pickers, Cytoscape host (here)
+     5. base.css layer      — report-specific tokenized components (here)
+   followed by the cute-dbt reconciliation + engine + coverage layers (this
+   repo's shipped affordances the handoff forked before: #157, #165, #166).
+
+   PORTING-BUG GUARD (handoff §2.1): never write a `*` immediately followed
+   by `/` inside a comment body — it closes the comment early and silently
+   eats the next rule (this once ate the `[hidden]` rule and broke every
+   toggle). A comment-balance test pins this.
+   ========================================================================== */
+
 /* ============================================================================
    2. STYLE PACKS  (engine/styles.css — runtime "Style" setting on
    html[data-style])
@@ -668,27 +753,20 @@ html[data-style="soft"] .report-header h1 { letter-spacing: -0.01em; }
    of tokens.
    ========================================================================== */
 
-/* cute-dbt#121 — make the `hidden` attribute authoritative: Sakura's
-   `pre { display: block }` (author origin) otherwise overrides the UA
-   `[hidden] { display: none }`, so a toggled-off diff/raw <pre> would still
-   render. The diff drawers (#111 Model SQL, #96 Authoring YAML) toggle
-   visibility by setting `hidden` on the inactive <pre>; this rule wins. */
-[hidden] { display: none !important; }
-
-html { background: var(--bg); }
+/* The cute-dbt#121 [hidden] override, the html/body token skin (background /
+   color / 120ms transition), the link colors and the select/input/textarea
+   form-control skin moved to templates/partials/base.css at cute-dbt#242 —
+   the shared cross-family chassis both page families include before this
+   file. The body GEOMETRY below stays here on purpose: it must keep winning
+   the equal-specificity contest against the 720px responsive body rule in
+   the chrome layer above (cascade-order-sensitive — see base.css's banner). */
 body {
   font-size: var(--fs-base);
   line-height: var(--lh-base);
   max-width: min(120rem, 100% - 4rem);
   padding-top: 0.5rem;   /* small air under the fixed settings cog */
-  background: var(--bg);
-  color: var(--text);
   font-family: var(--font-ui);
-  transition: background 120ms ease, color 120ms ease;
 }
-
-a { color: var(--accent); }
-a:hover { color: var(--accent-hover); }
 
 h1, h2, h3, h4, h5, h6 { margin-top: 1.25rem; margin-bottom: 0.5rem; color: var(--text); }
 h1 { font-size: 1.5em; }
@@ -765,12 +843,7 @@ table.given-table th, table.expected-table th {
 .selector-field { display: flex; flex-direction: column; min-width: 16rem; }
 .selector-field label { color: var(--text-muted); font-size: 0.85em; margin-bottom: 0.15rem; }
 
-select, input, textarea {
-  background: var(--surface); color: var(--text);
-  border: var(--rule-w) solid var(--border); border-radius: var(--radius-sm);
-}
-select:hover, input:hover { border-color: var(--border-strong); }
-select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* select / input / textarea token skin -> partials/base.css (cute-dbt#242) */
 
 /* ---- DAG host (Mermaid) + Cytoscape host ----------------------------- */
 .cte-dag-mermaid { display: flex; justify-content: center; overflow-x: auto; padding: 0.5rem 0; }
@@ -5712,32 +5785,45 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
 </script>
 <script>
 
-/* cute-dbt appearance engine v1 (cute-dbt#178)
+/* cute-dbt shared appearance engine v1 (cute-dbt#242)
    ----------------------------------------------------------------------------
-   Wires the theme / style / accent / density / diff-layout controls in the
-   report's settings panel (the markup is static in templates/report.html —
-   the askama DOM contract), persists the choices in localStorage (key
-   cute-dbt.appearance.v1) with a graceful in-memory fallback, and syncs
-   DataTables dark mode by toggling html.dark. Plain vanilla JS, no
-   framework, zero egress. The #188 diff-cells colour/marks control was
-   retired by design pass-2 (cute-dbt#198): cells always render in colour;
-   a legacy persisted `diffstyle` key is ignored gracefully (load() copies
-   only the live keys, and nothing sets data-diffstyle any more).
+   The cross-page-family half of the appearance system, re-layered out of
+   templates/theme.js at cute-dbt#242: reads the persisted appearance
+   (localStorage key cute-dbt.appearance.v1, graceful in-memory fallback),
+   resolves the prefers-color-scheme default, and applies the html-level
+   hooks the shared token partial (templates/partials/tokens.css) keys on:
+   [data-theme] + the html.dark family class (the DataTables dark sync),
+   [data-style], [data-density], [data-difflayout], [data-coverage] and the
+   accent custom-property overrides. Embedded into BOTH page families —
+   report.html (where templates/theme.js layers the settings UI on top via
+   window.CuteAppearance) and explore-dag.html / explore-tests.html (which
+   apply the saved appearance read-only; the explore-side settings
+   affordance is cute-dbt#219's lane). Plain vanilla ES5, no framework,
+   zero egress.
 
-   First-party, NOT vendored: this file lives at templates/theme.js, embedded
-   at compile time via asset_embed::THEME_JS (include_str!) and interpolated
-   inline by the askama renderer. Banner-pin + end-of-file-sentinel tests in
-   src/adapters/asset_embed.rs guard the include.
+   Application happens at PARSE TIME (the script sits at the end of <body>;
+   documentElement already exists), so the attributes are in place before
+   any DOMContentLoaded boot — including the report's interaction engine
+   and theme.js's control sync.
 
-   The handoff prototype also carried a Cytoscape DAG-engine picker here; that
-   is Bucket 2 (cute-dbt#101 territory) and is deliberately ABSENT from this
-   file — adding it back rides the vendored-Cytoscape PR, never this one. */
+   Attributes without matching rules on a page are deliberately applied
+   anyway ([data-difflayout] / [data-coverage] are inert on the explore
+   pages today): ONE attribute contract across page families, so pages
+   adopt new surfaces without touching this engine. The `engine` field
+   (the report's Mermaid <-> Cytoscape DAG pick) is persisted state only
+   here — applying it is report-specific (theme.js applyEngine).
+
+   First-party, NOT vendored: this file lives at templates/appearance.js,
+   embedded at compile time via asset_embed::APPEARANCE_JS (include_str!)
+   and interpolated inline by the askama renderers. Banner-pin +
+   end-of-file-sentinel tests in src/adapters/asset_embed.rs guard the
+   include. */
 (function () {
   "use strict";
 
-  // The eight [data-theme] packs the chassis CSS ships (templates/report.css),
-  // light family first (design pass-2, cute-dbt#198) — kept in lockstep with
-  // the static theme grid in templates/report.html.
+  // The eight [data-theme] packs the token partial ships
+  // (templates/partials/tokens.css), light family first (design pass-2,
+  // cute-dbt#198) — kept in lockstep with the report's static theme grid.
   // `dark` drives the html.dark class DataTables' vendored dark rules key on.
   var THEMES = [
     { id: "light",     dark: false },
@@ -5763,7 +5849,8 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   ];
 
   // The public localStorage key for the appearance state — a stable consumer
-  // contract (cute-dbt#178 AC3), not a credential.
+  // contract (cute-dbt#178 AC3), not a credential. Cross-page since #242:
+  // every cute-dbt page family reads + applies this same key.
   var KEY = "cute-dbt.appearance.v1"; // gitleaks:allow — a public storage key name, no secret
   // `engine` (cute-dbt#180) is the DAG-engine picker: "mermaid" (the static
   // default) or "cytoscape" (the opt-in interactive engine).
@@ -5802,14 +5889,6 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   }
 
   var root = document.documentElement;
-
-  // ES5-safe NodeList iteration (gemini review, PR #188): older engines ship
-  // querySelectorAll results without NodeList.prototype.forEach; iterate via
-  // an index loop so this file keeps its deliberate ES5 posture throughout.
-  function qsaForEach(selector, fn) {
-    var list = document.querySelectorAll(selector);
-    for (var i = 0; i < list.length; i++) fn(list[i]);
-  }
 
   function themeById(id) {
     for (var i = 0; i < THEMES.length; i++) if (THEMES[i].id === id) return THEMES[i];
@@ -5850,14 +5929,6 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     root.setAttribute("data-style", s);
     pref.style = s;
   }
-  // cute-dbt#180 — push the picker's engine to the render dispatcher
-  // (interaction.js owns the DAG; this engine just persists the choice).
-  // The caller follows up with rerenderDag() so the flip happens in place.
-  function applyEngine(e) {
-    var engine = e === "cytoscape" ? "cytoscape" : "mermaid";
-    pref.engine = engine;
-    if (typeof window.__cuteSetDagEngine === "function") window.__cuteSetDagEngine(engine);
-  }
   // cute-dbt#219 — the coverage-intelligence display toggle. PURE display:
   // OFF sets html[data-coverage=off] (one CSS rule hides every
   // check-engine-derived surface); ON removes the attribute and the
@@ -5867,6 +5938,90 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
     if (coverage === "off") root.setAttribute("data-coverage", "off");
     else root.removeAttribute("data-coverage");
     pref.coverage = coverage;
+  }
+
+  // ---- boot: load, resolve the default theme, apply everything ----------
+  load();
+  // Default theme: saved -> prefers-color-scheme -> light.
+  if (!pref.theme) {
+    pref.theme = (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
+  }
+  applyStyle(pref.style);
+  applyTheme(pref.theme);
+  applyAccent(pref.accent);
+  applyDensity(pref.density);
+  applyDiffLayout(pref.difflayout);
+  applyCoverage(pref.coverage);
+
+  // The page-facing seam: templates/theme.js (the report's settings UI)
+  // drives the engine through this object — `pref` is the ONE live state
+  // (shared by reference; apply* mutate it, save() persists it).
+  window.CuteAppearance = {
+    key: KEY,
+    pref: pref,
+    save: save,
+    applyTheme: applyTheme,
+    applyStyle: applyStyle,
+    applyAccent: applyAccent,
+    applyDensity: applyDensity,
+    applyDiffLayout: applyDiffLayout,
+    applyCoverage: applyCoverage
+  };
+})();
+/* end of cute-dbt shared appearance engine v1 (cute-dbt#242) */
+
+</script>
+<script>
+
+/* cute-dbt report appearance settings v1 (cute-dbt#178, re-layered cute-dbt#242)
+   ----------------------------------------------------------------------------
+   The REPORT-ONLY half of the appearance system: wires the theme / style /
+   accent / density / diff-layout / DAG-engine / coverage controls in the
+   report's settings panel (the markup is static in templates/report.html —
+   the askama DOM contract), syncs their visual state, reflows DataTables on
+   metric-affecting flips and dispatches the DAG-engine pick + re-tint.
+
+   The load/apply/persist core (localStorage key cute-dbt.appearance.v1,
+   prefers-color-scheme default, the html-level attribute application)
+   moved to the SHARED appearance engine at cute-dbt#242 —
+   templates/appearance.js, which parses immediately before this file and
+   exposes window.CuteAppearance. This file drives that engine; it never
+   touches the storage key or the html attributes directly. The #188
+   diff-cells colour/marks control was retired by design pass-2
+   (cute-dbt#198): cells always render in colour; a legacy persisted
+   `diffstyle` key is ignored gracefully by the shared engine's load().
+
+   First-party, NOT vendored: this file lives at templates/theme.js, embedded
+   at compile time via asset_embed::THEME_JS (include_str!) and interpolated
+   inline by the askama renderer. Banner-pin + end-of-file-sentinel tests in
+   src/adapters/asset_embed.rs guard the include. */
+(function () {
+  "use strict";
+
+  // The shared appearance engine (templates/appearance.js) parses before
+  // this file in the report's script order; its boot already loaded +
+  // applied the persisted appearance. `pref` is the ONE live state object,
+  // shared by reference — the engine's apply* mutate it, save() persists it.
+  var appearance = window.CuteAppearance;
+  var pref = appearance.pref;
+
+  // ES5-safe NodeList iteration (gemini review, PR #188): older engines ship
+  // querySelectorAll results without NodeList.prototype.forEach; iterate via
+  // an index loop so this file keeps its deliberate ES5 posture throughout.
+  function qsaForEach(selector, fn) {
+    var list = document.querySelectorAll(selector);
+    for (var i = 0; i < list.length; i++) fn(list[i]);
+  }
+
+  // cute-dbt#180 — push the picker's engine to the render dispatcher
+  // (interaction.js owns the DAG; this file just records the choice on the
+  // shared pref). REPORT-ONLY by design: the explore pages run no DAG
+  // engine picker, so this apply stays out of the shared engine. The
+  // caller follows up with rerenderDag() so the flip happens in place.
+  function applyEngine(e) {
+    var engine = e === "cytoscape" ? "cytoscape" : "mermaid";
+    pref.engine = engine;
+    if (typeof window.__cuteSetDagEngine === "function") window.__cuteSetDagEngine(engine);
   }
 
   // Re-tint the DAG after a theme flip (the light/dark edge + anchor
@@ -5903,31 +6058,31 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
 
   function wire() {
     qsaForEach(".style-opt", function (b) {
-      b.addEventListener("click", function () { applyStyle(b.getAttribute("data-style-id")); save(); syncControls(); reflowTables(); rerenderDag(); });
+      b.addEventListener("click", function () { appearance.applyStyle(b.getAttribute("data-style-id")); appearance.save(); syncControls(); reflowTables(); rerenderDag(); });
     });
     qsaForEach(".theme-chip", function (b) {
-      b.addEventListener("click", function () { applyTheme(b.getAttribute("data-theme-id")); save(); syncControls(); reflowTables(); rerenderDag(); });
+      b.addEventListener("click", function () { appearance.applyTheme(b.getAttribute("data-theme-id")); appearance.save(); syncControls(); reflowTables(); rerenderDag(); });
     });
     qsaForEach(".accent-swatch", function (b) {
-      b.addEventListener("click", function () { applyAccent(b.getAttribute("data-accent")); save(); syncControls(); });
+      b.addEventListener("click", function () { appearance.applyAccent(b.getAttribute("data-accent")); appearance.save(); syncControls(); });
     });
     qsaForEach(".density-seg button", function (b) {
-      b.addEventListener("click", function () { applyDensity(b.getAttribute("data-density")); save(); syncControls(); reflowTables(); });
+      b.addEventListener("click", function () { appearance.applyDensity(b.getAttribute("data-density")); appearance.save(); syncControls(); reflowTables(); });
     });
     qsaForEach(".difflayout-seg button", function (b) {
-      b.addEventListener("click", function () { applyDiffLayout(b.getAttribute("data-difflayout")); save(); syncControls(); });
+      b.addEventListener("click", function () { appearance.applyDiffLayout(b.getAttribute("data-difflayout")); appearance.save(); syncControls(); });
     });
     // cute-dbt#180 — the DAG-engine picker. The swap is IN PLACE: push the
     // engine to the dispatcher, persist, then rerenderDag() tears down the
     // old engine and builds the new one. No reload.
     qsaForEach(".engine-seg button", function (b) {
-      b.addEventListener("click", function () { applyEngine(b.getAttribute("data-engine")); save(); syncControls(); rerenderDag(); });
+      b.addEventListener("click", function () { applyEngine(b.getAttribute("data-engine")); appearance.save(); syncControls(); rerenderDag(); });
     });
     // cute-dbt#219 — the coverage-intelligence switch: flip the attribute,
     // persist. Display-only — no re-render, no DAG/table reflow needed.
     var cov = document.getElementById("settings-coverage-input");
     if (cov) {
-      cov.addEventListener("change", function () { applyCoverage(cov.checked ? "on" : "off"); save(); });
+      cov.addEventListener("change", function () { appearance.applyCoverage(cov.checked ? "on" : "off"); appearance.save(); });
     }
   }
 
@@ -5947,26 +6102,18 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   }
 
   function boot() {
-    load();
-    // Default theme: saved -> prefers-color-scheme -> light.
-    if (!pref.theme) {
-      pref.theme = (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
-    }
-    applyStyle(pref.style);
-    applyTheme(pref.theme);
-    applyAccent(pref.accent);
-    applyDensity(pref.density);
-    applyDiffLayout(pref.difflayout);
-    applyCoverage(pref.coverage);
+    // The shared engine already loaded + applied the persisted appearance
+    // at parse time; this boot owns the report-only side: control state,
+    // wiring, and the deferred DAG-engine apply.
     syncControls();
     wire();
     // Re-tint the legend + the active DAG engine once the theme's .dark
-    // class is on: interaction.js drew them on DOM-ready BEFORE this boot
-    // applied the theme, so the edge swatches would otherwise keep the
-    // light palette. The engine apply rides the same deferred tick
-    // (cute-dbt#180): by then interaction.js's boot has installed
-    // __cuteSetDagEngine, so a persisted "cytoscape" choice flips the DAG
-    // in place right after the default Mermaid render.
+    // class is on: interaction.js drew them on DOM-ready, so the edge
+    // swatches would otherwise keep the light palette on a dark boot.
+    // The engine apply rides the same deferred tick (cute-dbt#180): by
+    // then interaction.js's boot has installed __cuteSetDagEngine, so a
+    // persisted "cytoscape" choice flips the DAG in place right after the
+    // default Mermaid render.
     setTimeout(function () {
       applyEngine(pref.engine);
       rerenderDag();
@@ -5976,7 +6123,7 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
   else boot();
 })();
-/* end of cute-dbt appearance engine v1 (cute-dbt#178) */
+/* end of cute-dbt report appearance settings v1 (cute-dbt#178) */
 
 </script>
 </body>
