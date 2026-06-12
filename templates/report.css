@@ -793,7 +793,11 @@ th.col-removed { text-decoration: line-through; text-decoration-color: var(--dif
 .dln { box-sizing: border-box; flex: 0 0 auto; display: inline-block; width: 2.8em; padding: 0 0.5em; text-align: right; }
 .diff-gutter-hunk { box-sizing: border-box; width: 5.6em; }
 
-.diff-sigil { flex: 0 0 auto; width: 2ch; padding-left: 0.6ch; text-align: left; opacity: 0.9; font-weight: 700; user-select: none; }
+/* cute-dbt#251 — no opacity dimming on the sigil: composited opacity is
+   not used for text (the #227 rule); the per-theme --code-add/rem-sigil
+   tokens carry the full AA ratio and the headless AA-matrix guard fails
+   loudly if a self-or-ancestor opacity returns. */
+.diff-sigil { flex: 0 0 auto; width: 2ch; padding-left: 0.6ch; text-align: left; font-weight: 700; user-select: none; }
 .diff-code { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .diff-fold-label { flex: 1 1 auto; }
 

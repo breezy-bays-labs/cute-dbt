@@ -10862,9 +10862,13 @@ fn explore_pages_honor_the_saved_appearance_key() {
 fn explore_dag_page_themes_correctly_on_every_theme() {
     // dag.html: the page consumes the shared token layer on all 8 themes
     // and the key text surfaces stay AA against their EFFECTIVE
-    // composited backdrops. Surfaces chosen to be AA-by-construction
-    // (`--text` on `--bg`/`--bg-alt`; the fixed dag palette): the known
-    // muted-token sub-AA debt is cute-dbt#251's lane, not this guard's.
+    // composited backdrops. Since cute-dbt#251 the sweep also pins the
+    // token-level AA matrix this page consumes: `--text-muted` on `--bg`
+    // (the counts caption + hint), the `--accent` link on `--bg` (the
+    // cross-page nav), and `--text-muted` on `--surface-2` (the hint's
+    // kbd chip) — the combos the #251 per-theme token repair brought to
+    // >= 4.5:1 (solarized/latte/rosepine accent; latte/rosepine/tokyo/
+    // gruvbox muted).
     let dir = render_explore_theme_pages("explore-theme-dag");
     let browser = launch_browser();
     let tab = browser.new_tab().expect("new tab");
@@ -10878,9 +10882,13 @@ fn explore_dag_page_themes_correctly_on_every_theme() {
         r#"[
           ["page-title", ".explore-header h1"],
           ["legend-chip", ".lineage-legend .legend-chip"],
-          ["legend-code", ".lineage-legend code"]
+          ["legend-code", ".lineage-legend code"],
+          ["counts-muted-on-bg", ".explore-counts"],
+          ["nav-link-on-bg", ".explore-nav a"],
+          ["hint-muted-on-bg", ".lineage-hint"],
+          ["kbd-muted-on-surface2", ".lineage-hint kbd"]
         ]"#,
-        3,
+        7,
     );
     let _ = tab.close(true);
 }
@@ -10890,7 +10898,12 @@ fn explore_dag_page_themes_correctly_on_every_theme() {
 fn explore_tests_page_themes_correctly_on_every_theme() {
     // tests.html: same universal sweep over the unit-test index + the
     // shared test-card viewer (visible — the fixture carries a unit
-    // test, so the viewer section is not hidden).
+    // test, so the viewer section is not hidden). Since cute-dbt#251 the
+    // sweep also pins this page's token-level AA matrix: `--text-muted`
+    // on `--bg` (counts caption + the index's test-shape suffix), the
+    // `--accent` nav link on `--bg`, and `--text-muted` on `--surface-2`
+    // (the row-count badge — the C3 matrix's worst offender, 3.77:1 on
+    // rosepine pre-repair).
     let dir = render_explore_theme_pages("explore-theme-tests");
     let browser = launch_browser();
     let tab = browser.new_tab().expect("new tab");
@@ -10905,10 +10918,312 @@ fn explore_tests_page_themes_correctly_on_every_theme() {
           ["page-title", ".explore-header h1"],
           ["model-heading", ".explore-model h2"],
           ["model-path-code", ".model-path code"],
-          ["test-card-label", ".explore-viewer .test-card .test-select-field label"]
+          ["test-card-label", ".explore-viewer .test-card .test-select-field label"],
+          ["counts-muted-on-bg", ".explore-counts"],
+          ["nav-link-on-bg", ".explore-nav a"],
+          ["test-shape-muted-on-bg", ".explore-test .test-shape"],
+          ["row-count-badge-muted-on-surface2", ".explore-viewer .row-count-badge"]
         ]"#,
-        4,
+        8,
     );
+    let _ = tab.close(true);
+}
+
+// ===== cute-dbt#251 — token-level AA matrix: the shared palette ==========
+//
+// The #264 adversarial verification measured the SHARED palette tokens
+// sub-AA on 5 of 8 themes: `--accent` nav links on `--bg` (solarized
+// 3.41), `--text-muted` on `--bg` (rosepine 3.53) and on `--surface-2`
+// (the row-count badge — rosepine/latte/tokyo/gruvbox 3.77–4.41), plus
+// the issue's original block-diff surfaces (solarized add-sigil 2.81,
+// removed-line word-emphasis 3.53–4.08 across the light themes, the
+// `.code-filename` header path and the `--text-muted` degrade copy).
+// The repair is TOKEN-LEVEL (the #206 solarized-tier-chip pattern):
+// per-theme value deepening in templates/partials/tokens.css, repairing
+// the report and explore pages simultaneously. This guard is the
+// mechanical encoding for the REPORT page (the explore twins live on
+// the #242 sweeps above, extended with the same combos): for EVERY
+// theme, every measured surface reaches AA 4.5:1 on its EFFECTIVE
+// composited backdrop — semi-transparent layers (the dark themes' rgba
+// row/word tints) are alpha-composited down to the first opaque fill,
+// never skipped.
+//
+// Measurement hygiene (the #242 lessons, plus #227's mechanism pin):
+//   - transitions/animations killed via injected style before measuring;
+//   - visibility asserted via checkVisibility() on every target (the
+//     Model SQL / Model YAML <details> are opened first; closed-details
+//     rects lie in headless Chromium);
+//   - the unified diff layout is pinned via html[data-difflayout] so the
+//     measured sigil/word instances are the PAINTED ones (both layouts
+//     are emitted; the hidden twin would measure vacuously);
+//   - `dimmed` records any self-or-ancestor computed opacity < 1 on a
+//     measured surface — composited opacity is not used for text (the
+//     #227 decision; `.diff-sigil { opacity: 0.9 }` was removed at #251
+//     under that rule, and this pin fails loudly if it returns);
+//   - the link probe is injected (the #206 advisory-chip precedent): a
+//     bare <a> on <body> exercises the shipped `a { color:
+//     var(--accent) }` chassis rule on the page background, the exact
+//     combo the C3 matrix measured on the explore nav.
+//
+// The split-view `.ds-num` line numbers are NOT contrast-measured:
+// they are classified decorative (positional metadata duplicated from
+// document order — the GitHub gutter idiom) and instead pinned to
+// aria-hidden parity with the unified `.diff-gutter`, which has carried
+// aria-hidden since #178 ("screen readers read the code, not the
+// numbering"). The #251 AC sanctions exactly this either/or.
+
+const REPORT_AA_TOKEN_MATRIX_SWEEP_JS: &str = r##"(function () {
+  var THEMES = ["light", "solarized", "latte", "rosepine",
+                "dark", "tokyo", "gruvbox", "dracula"];
+  var DARK = { dark: true, tokyo: true, gruvbox: true, dracula: true };
+  function parseRgb(s) {
+    var m = /rgba?\(([^)]+)\)/.exec(s || "");
+    if (!m) return null;
+    var p = m[1].split(",");
+    return { r: parseFloat(p[0]), g: parseFloat(p[1]), b: parseFloat(p[2]),
+             a: p.length > 3 ? parseFloat(p[3]) : 1 };
+  }
+  function chan(v) {
+    v = v / 255;
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+  function lum(c) {
+    return 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
+  }
+  function ratio(f, b) {
+    var lf = lum(f), lb = lum(b);
+    var hi = Math.max(lf, lb), lo = Math.min(lf, lb);
+    return (hi + 0.05) / (lo + 0.05);
+  }
+  /* The EFFECTIVE composited backdrop: collect every painted fill from
+     the element itself up to the first OPAQUE one, then alpha-composite
+     top-down. An opaque-only walk would skip the dark themes' rgba
+     row/word tints entirely and measure the wrong backdrop. */
+  function effectiveBackdrop(el) {
+    var layers = [];
+    for (var n = el; n; n = n.parentElement) {
+      var c = parseRgb(getComputedStyle(n).backgroundColor);
+      if (c && c.a > 0) {
+        layers.push(c);
+        if (c.a === 1) {
+          var acc = layers.pop();
+          while (layers.length) {
+            var top = layers.pop();
+            acc = { r: top.a * top.r + (1 - top.a) * acc.r,
+                    g: top.a * top.g + (1 - top.a) * acc.g,
+                    b: top.a * top.b + (1 - top.a) * acc.b, a: 1 };
+          }
+          return acc;
+        }
+      }
+    }
+    return null;
+  }
+  function dimmedChain(el) {
+    var out = [];
+    for (var n = el; n; n = n.parentElement) {
+      if (parseFloat(getComputedStyle(n).opacity) < 1) {
+        out.push(n.tagName.toLowerCase()
+          + (n.className ? "." + String(n.className).trim().split(/\s+/).join(".") : ""));
+      }
+    }
+    return out;
+  }
+  /* measurement hygiene: kill transitions before any read */
+  var kill = document.createElement("style");
+  kill.textContent = "* { transition: none !important; animation: none !important; }";
+  document.head.appendChild(kill);
+  /* open the drawers the measured surfaces live in */
+  var sqlDetails = document.querySelector(".model-sql-details");
+  if (!sqlDetails) { throw new Error("aa-matrix sweep: no .model-sql-details in the DOM"); }
+  sqlDetails.open = true;
+  var yamlDetails = document.querySelector(".model-yaml-details");
+  if (!yamlDetails) { throw new Error("aa-matrix sweep: no .model-yaml-details in the DOM"); }
+  yamlDetails.open = true;
+  /* pin the unified layout so the measured diff instances are painted */
+  document.documentElement.setAttribute("data-difflayout", "unified");
+  /* the injected link probe (the #206 advisory-chip precedent) */
+  if (!document.getElementById("aa251-link-probe")) {
+    var a = document.createElement("a");
+    a.id = "aa251-link-probe";
+    a.href = "#aa251";
+    a.textContent = "link probe";
+    document.body.appendChild(a);
+  }
+  var TARGETS = [
+    ["muted-hint-on-bg", ".model-sql .model-sql-summary-hint"],
+    ["accent-link-on-bg", "#aa251-link-probe"],
+    ["row-count-badge-muted", ".row-count-badge"],
+    ["code-filename-muted", ".model-sql .code-header .code-filename"],
+    ["yaml-degrade-muted", ".model-yaml .model-yaml-missing"],
+    ["diff-add-sigil", ".model-sql .sql-diff-view .diff-unified .diff-added .diff-sigil"],
+    ["diff-rem-sigil", ".model-sql .sql-diff-view .diff-unified .diff-removed .diff-sigil"],
+    ["diff-add-word", ".model-sql .sql-diff-view .diff-unified .diff-added strong"],
+    ["diff-rem-word", ".model-sql .sql-diff-view .diff-unified .diff-removed strong"]
+  ];
+  var resolved = [];
+  for (var t = 0; t < TARGETS.length; t++) {
+    var el = document.querySelector(TARGETS[t][1]);
+    if (!el) {
+      throw new Error("aa-matrix sweep: no element for " + TARGETS[t][0]
+        + " (" + TARGETS[t][1] + ")");
+    }
+    /* checkVisibility, never rect>0 (closed-details rects lie) */
+    if (!el.checkVisibility()) {
+      throw new Error("aa-matrix sweep: " + TARGETS[t][0]
+        + " (" + TARGETS[t][1] + ") is not visible — a hidden twin would "
+        + "measure vacuously");
+    }
+    resolved.push([TARGETS[t][0], el]);
+  }
+  var root = document.documentElement;
+  var out = [];
+  for (var i = 0; i < THEMES.length; i++) {
+    /* exactly theme.js applyTheme: data-theme + the html.dark sync */
+    root.setAttribute("data-theme", THEMES[i]);
+    root.classList.toggle("dark", !!DARK[THEMES[i]]);
+    for (var j = 0; j < resolved.length; j++) {
+      var el2 = resolved[j][1];
+      var cs = getComputedStyle(el2);
+      var fg = parseRgb(cs.color);
+      var bg = effectiveBackdrop(el2);
+      out.push({
+        theme: THEMES[i], el: resolved[j][0],
+        ratio: fg && bg ? ratio(fg, bg) : -1,
+        fg: cs.color,
+        bg: bg ? "rgb(" + bg.r + ", " + bg.g + ", " + bg.b + ")" : "none",
+        dimmed: dimmedChain(el2)
+      });
+    }
+  }
+  return JSON.stringify(out);
+})()"##;
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn report_aa_token_palette_matrix_on_every_theme() {
+    // One PR-diff report carrying every #251 surface: a model SQL diff
+    // (sigils + word-emphasis on both sides), the code-card file header,
+    // the Model YAML degrade copy, the row-count badge, a muted summary
+    // hint, and the injected link probe.
+    let diff = BlockDiff {
+        lines: vec![
+            dl(DiffLineKind::Context, "select id", None),
+            dl(DiffLineKind::Removed, "from t", Some((5, 6))),
+            dl(DiffLineKind::Added, "from u", Some((5, 6))),
+        ],
+    };
+    let m = manifest(
+        vec![model_node_with_raw_and_path(
+            "model.shop.dim_orders",
+            "select id\nfrom u",
+            "models/marts/dim_orders.sql",
+        )],
+        vec![(
+            "unit_test.shop.dim_orders.t1",
+            unit_test("t1", "dim_orders"),
+        )],
+    );
+    let in_scope: InScopeSet = ["unit_test.shop.dim_orders.t1".to_owned()]
+        .into_iter()
+        .collect();
+    let models: ModelInScopeSet = [NodeId::new("model.shop.dim_orders")].into_iter().collect();
+    let sql_diffs: HashMap<String, BlockDiff> = [("model.shop.dim_orders".to_owned(), diff)]
+        .into_iter()
+        .collect();
+    let model_yaml: HashMap<String, ModelYamlOutcome> = [(
+        "model.shop.dim_orders".to_owned(),
+        ModelYamlOutcome::FileMissing {
+            path: "models/missing.yml".to_owned(),
+        },
+    )]
+    .into_iter()
+    .collect();
+    let out = tmp("headless_aa_token_matrix.html");
+    let _ = std::fs::remove_file(&out);
+    render_report(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &sql_diffs,
+        &model_yaml,
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+    )
+    .expect("render writes the report");
+    let url = format!("file://{}", out.to_str().expect("path is valid UTF-8"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    let raw = eval_string(&tab, REPORT_AA_TOKEN_MATRIX_SWEEP_JS);
+    let measured: Vec<serde_json::Value> =
+        serde_json::from_str(&raw).expect("the aa-matrix sweep returns valid JSON");
+    assert_eq!(
+        measured.len(),
+        8 * 9,
+        "8 themes x 9 surfaces measured, got: {raw}",
+    );
+    let mut failures = Vec::new();
+    for m in &measured {
+        let theme = m["theme"].as_str().expect("theme is a string");
+        let el = m["el"].as_str().expect("el is a string");
+        let ratio = m["ratio"].as_f64().expect("ratio is a number");
+        let fg = m["fg"].as_str().unwrap_or("?");
+        let bg = m["bg"].as_str().unwrap_or("?");
+        assert!(
+            ratio > 0.0,
+            "the {theme}/{el} surface resolved no painted backdrop — the \
+             composite walk must end on an opaque fill",
+        );
+        let dimmed = m["dimmed"].as_array().expect("dimmed is an array");
+        if !dimmed.is_empty() {
+            failures.push(format!(
+                "{theme}/{el}: opacity-dimmed via {dimmed:?} — composited \
+                 opacity is not used for text (the #227 rule; the token \
+                 ratio must BE the painted one)"
+            ));
+        }
+        eprintln!("aa-matrix contrast {theme:>9} / {el:<22} = {ratio:.2}  ({fg} on {bg})");
+        if ratio < 4.5 {
+            failures.push(format!("{theme}/{el} = {ratio:.2} ({fg} on {bg})"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "report surfaces below the WCAG AA 4.5:1 floor (cute-dbt#251): {failures:#?}",
+    );
+
+    // The split-view `.ds-num` line numbers: decorative (the unified
+    // `.diff-gutter` idiom) — pinned to aria-hidden PARITY, not to a
+    // contrast floor (the #251 AC's either/or, decided decorative).
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){\
+               var n = document.querySelectorAll('.model-sql .diff-split td.ds-num');\
+               if (!n.length) { throw new Error('no split-view .ds-num cells rendered'); }\
+               for (var i = 0; i < n.length; i++) {\
+                 if (n[i].getAttribute('aria-hidden') !== 'true') return false;\
+               }\
+               return true;\
+             })()"
+        ),
+        "every split-view .ds-num cell carries aria-hidden=\"true\" — parity \
+         with the unified .diff-gutter (screen readers read the code, not \
+         the numbering)",
+    );
+
     let _ = tab.close(true);
 }
 
