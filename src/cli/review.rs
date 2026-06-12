@@ -1699,7 +1699,11 @@ fn warn_if_stale(manifest: &Path, project_dir: &Path) {
     let Ok(manifest_mtime) = fs::metadata(manifest).and_then(|m| m.modified()) else {
         return;
     };
-    if let Some((newest_path, newest_mtime)) = newest_source_mtime(project_dir)
+    // Exclude the RESOLVED target dir (the manifest's parent) by path,
+    // not just by the conventional name: with a custom --target-path /
+    // DBT_TARGET_PATH, dbt's own artifacts (run_results.json is written
+    // after manifest.json) would otherwise false-positive the warning.
+    if let Some((newest_path, newest_mtime)) = newest_source_mtime(project_dir, manifest.parent())
         && newest_mtime > manifest_mtime
     {
         let shown = newest_path
@@ -1713,9 +1717,9 @@ fn warn_if_stale(manifest: &Path, project_dir: &Path) {
     }
 }
 
-/// The newest-mtime file under the project, skipping build output
-/// (`target/`, the default and any custom name is excluded only by the
-/// conventional name), VCS metadata (`.git`), installed packages
+/// The newest-mtime file under the project, skipping build output (the
+/// conventional `target/` name AND `exclude_dir` — the resolved custom
+/// target dir — by path), VCS metadata (`.git`), installed packages
 /// (`dbt_packages/`), and symlinks (never followed).
 ///
 /// Decomposed into named single-purpose helpers (each directly
@@ -1723,12 +1727,15 @@ fn warn_if_stale(manifest: &Path, project_dir: &Path) {
 /// the per-entry classification in [`visit_source_entry`], the skip
 /// list in [`is_skipped_source_dir`], and the max-fold in
 /// [`fold_newest`].
-fn newest_source_mtime(project_dir: &Path) -> Option<(PathBuf, SystemTime)> {
+fn newest_source_mtime(
+    project_dir: &Path,
+    exclude_dir: Option<&Path>,
+) -> Option<(PathBuf, SystemTime)> {
     let mut newest: Option<(PathBuf, SystemTime)> = None;
     let mut stack = vec![project_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in readable_dir_entries(&dir) {
-            visit_source_entry(&entry, &mut stack, &mut newest);
+            visit_source_entry(&entry, exclude_dir, &mut stack, &mut newest);
         }
     }
     newest
@@ -1743,11 +1750,13 @@ fn readable_dir_entries(dir: &Path) -> Vec<fs::DirEntry> {
 }
 
 /// Classify one walk entry: symlinks are never followed, non-skipped
-/// directories queue onto `stack`, and plain files fold their mtime
-/// into `newest`. Unreadable file types / metadata are silently skipped
-/// (warning-grade signal).
+/// directories queue onto `stack` (skipped = the conventional names OR
+/// the resolved `exclude_dir` by path), and plain files fold their
+/// mtime into `newest`. Unreadable file types / metadata are silently
+/// skipped (warning-grade signal).
 fn visit_source_entry(
     entry: &fs::DirEntry,
+    exclude_dir: Option<&Path>,
     stack: &mut Vec<PathBuf>,
     newest: &mut Option<(PathBuf, SystemTime)>,
 ) {
@@ -1758,8 +1767,9 @@ fn visit_source_entry(
         return;
     }
     if file_type.is_dir() {
-        if !is_skipped_source_dir(&entry.file_name()) {
-            stack.push(entry.path());
+        let path = entry.path();
+        if !is_skipped_source_dir(&entry.file_name()) && Some(path.as_path()) != exclude_dir {
+            stack.push(path);
         }
         return;
     }
@@ -2602,7 +2612,7 @@ mod tests {
                 .expect("open");
             f.set_modified(future).expect("set mtime");
         }
-        let (path, _) = newest_source_mtime(&dir).expect("sources found");
+        let (path, _) = newest_source_mtime(&dir, None).expect("sources found");
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         assert!(
             name == "a.sql" || name == "dbt_project.yml",
@@ -2673,7 +2683,7 @@ mod tests {
         let mut stack: Vec<PathBuf> = Vec::new();
         let mut newest: Option<(PathBuf, SystemTime)> = None;
         for entry in readable_dir_entries(&dir) {
-            visit_source_entry(&entry, &mut stack, &mut newest);
+            visit_source_entry(&entry, None, &mut stack, &mut newest);
         }
         assert_eq!(
             stack,
@@ -2686,12 +2696,39 @@ mod tests {
     }
 
     #[test]
+    fn a_custom_target_dir_is_excluded_by_path_not_just_by_name() {
+        // The gemini-flagged false positive on cute-dbt#312: with a
+        // custom --target-path, dbt's own artifacts (run_results.json
+        // lands after manifest.json) live in a dir NOT named `target` —
+        // the resolved dir must be excluded by path equality.
+        let dir = unique_temp_dir("custom-target");
+        fs::write(dir.join("model.sql"), "select 1\n").expect("write");
+        fs::create_dir_all(dir.join("build")).expect("mkdir");
+        fs::write(dir.join("build/run_results.json"), "{}").expect("write");
+        let future = SystemTime::now() + std::time::Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(dir.join("build/run_results.json"))
+            .expect("open")
+            .set_modified(future)
+            .expect("set mtime");
+
+        // WITHOUT the exclusion the artifact wins (the bug shape)…
+        let (path, _) = newest_source_mtime(&dir, None).expect("found");
+        assert_eq!(path, dir.join("build/run_results.json"));
+        // …and WITH the resolved dir excluded, only real sources count.
+        let (path, _) = newest_source_mtime(&dir, Some(&dir.join("build"))).expect("found");
+        assert_eq!(path, dir.join("model.sql"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn newest_source_mtime_ignores_a_symlink_even_when_it_is_newest() {
         let dir = unique_temp_dir("stale-symlink");
         fs::write(dir.join("model.sql"), "select 1\n").expect("write");
         std::os::unix::fs::symlink(dir.join("model.sql"), dir.join("newer-link.sql"))
             .expect("create symlink");
-        let (path, _) = newest_source_mtime(&dir).expect("source found");
+        let (path, _) = newest_source_mtime(&dir, None).expect("source found");
         assert_eq!(path, dir.join("model.sql"));
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2713,7 +2750,7 @@ mod tests {
         let manifest_mtime = fs::metadata(dir.join("target/manifest.json"))
             .and_then(|m| m.modified())
             .expect("mtime");
-        let (_, newest) = newest_source_mtime(&dir).expect("source found");
+        let (_, newest) = newest_source_mtime(&dir, None).expect("source found");
         assert!(newest > manifest_mtime, "the fixture is genuinely stale");
         // Manifest newer than every source ⇒ fresh.
         let future = SystemTime::now() + std::time::Duration::from_secs(3600);
@@ -2726,7 +2763,7 @@ mod tests {
         let manifest_mtime = fs::metadata(dir.join("target/manifest.json"))
             .and_then(|m| m.modified())
             .expect("mtime");
-        let (_, newest) = newest_source_mtime(&dir).expect("source found");
+        let (_, newest) = newest_source_mtime(&dir, None).expect("source found");
         assert!(newest <= manifest_mtime, "a fresh manifest is not stale");
         let _ = fs::remove_dir_all(&dir);
     }

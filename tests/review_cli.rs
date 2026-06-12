@@ -760,6 +760,84 @@ fn no_compile_with_a_fresh_manifest_does_not_warn() {
 }
 
 #[test]
+fn no_compile_with_a_custom_target_path_ignores_dbt_artifacts_beside_the_manifest() {
+    // The gemini-flagged false positive on this PR: with a custom
+    // --target-path, dbt's own run_results.json (written after
+    // manifest.json) lives in a dir not named `target` — the staleness
+    // walk must exclude the RESOLVED target dir by path, or every
+    // --no-compile run with a custom target path warns spuriously.
+    let repo = repo_with_branch_change("custom-target-stale");
+    std::fs::create_dir_all(repo.root.join("build2")).expect("mkdir");
+    std::fs::rename(
+        repo.root.join("target/manifest.json"),
+        repo.root.join("build2/manifest.json"),
+    )
+    .expect("relocate manifest");
+    // Manifest newer than every source…
+    let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(repo.root.join("build2/manifest.json"))
+        .expect("open manifest")
+        .set_modified(future)
+        .expect("freshen manifest");
+    // …but a dbt artifact in the SAME custom target dir is newer still.
+    std::fs::write(repo.root.join("build2/run_results.json"), "{}").expect("write");
+    std::fs::File::options()
+        .write(true)
+        .open(repo.root.join("build2/run_results.json"))
+        .expect("open artifact")
+        .set_modified(future + std::time::Duration::from_secs(60))
+        .expect("age artifact newer");
+
+    let output = repo.review(&["--no-compile", "--target-path", "build2", "--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        !stderr_of(&output).contains("older than"),
+        "dbt's own artifacts beside the manifest never trigger the staleness warning: {}",
+        stderr_of(&output),
+    );
+    assert!(
+        repo.root.join("build2/cute-dbt-report.html").exists(),
+        "the report renders",
+    );
+}
+
+#[test]
+fn no_compile_with_a_custom_target_path_still_warns_on_genuinely_newer_sources() {
+    // The positive twin of the exclusion fix: skipping the resolved
+    // target dir must NOT swallow real staleness — a model source newer
+    // than the manifest still warns under a custom --target-path.
+    let repo = repo_with_branch_change("custom-target-genuine");
+    std::fs::create_dir_all(repo.root.join("build2")).expect("mkdir");
+    std::fs::rename(
+        repo.root.join("target/manifest.json"),
+        repo.root.join("build2/manifest.json"),
+    )
+    .expect("relocate manifest");
+    // Manifest aged behind the branch edit: the model source is newer.
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(repo.root.join("build2/manifest.json"))
+        .expect("open manifest")
+        .set_modified(past)
+        .expect("age manifest");
+
+    let output = repo.review(&["--no-compile", "--target-path", "build2", "--no-open"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "warn never blocks: {output:?}"
+    );
+    assert!(
+        stderr_of(&output).contains("older than"),
+        "a genuinely newer source still warns with a custom target dir: {}",
+        stderr_of(&output),
+    );
+}
+
+#[test]
 fn an_empty_diff_exits_before_any_dbt_runs() {
     let repo = TestRepo::init("empty-skips-compile");
     scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
