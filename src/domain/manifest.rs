@@ -1081,6 +1081,11 @@ impl Owner {
 /// @ `9977b6cb…`) and exposure entries carry no `checksum`. Keyed in
 /// [`Manifest::exposures`] by the wire map key
 /// (`exposure.<package>.<name>`), folded into [`Self::id`].
+// `exposure_type` (clippy::struct_field_names: starts with the struct's
+// name) — the wire key is `type`, a Rust keyword; `exposure_type` keeps
+// the field and its accessor self-describing (fusion's own workaround is
+// `type_`). The Node `attached_node` allow precedent.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Exposure {
     id: NodeId,

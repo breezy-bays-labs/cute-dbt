@@ -893,7 +893,7 @@ fn resolve_scope_input(args: &ReportArgs) -> Result<ScopeInput, RunError> {
             .map(|selector| selector.kind())
             .collect();
         Ok(ScopeInput::Baseline {
-            manifest: baseline,
+            manifest: Box::new(baseline),
             sub_selectors,
         })
     } else if let Some(diff) = args.pr_diff.as_ref() {
