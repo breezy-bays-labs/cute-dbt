@@ -63,9 +63,10 @@ use crate::domain::{
     Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex,
     PreflightError, ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ScopeInput,
     ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock,
-    all_models, attach_model_yaml_diffs, changed_models, check_by_id, diff_project_definitions,
-    effective_fixture_format, external_fixture_table, extract_model_block, extract_unit_test_block,
-    preflight_compiled, raw_hunk_lines, reconstruct_block_diffs, reconstruct_external_fixture_diff,
+    all_models, attach_hook_facts, attach_model_yaml_diffs, changed_models, check_by_id,
+    diff_project_definitions, effective_fixture_format, external_fixture_table,
+    extract_model_block, extract_unit_test_block, hook_operations, preflight_compiled,
+    raw_hunk_lines, reconstruct_block_diffs, reconstruct_external_fixture_diff,
     reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks,
     resolve_check_policy, reverse_apply, scan_pragmas, select_in_scope,
 };
@@ -278,7 +279,7 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     // (drift-guarded) and the structural diff categorizes the change;
     // every degrade arm falls back to the Shape-A raw-diff row.
     // Fail-open: report generation NEVER fails because of this file.
-    let project_facts = gather_project_facts(args, &scope_input);
+    let project_facts = gather_project_facts(args, &scope_input, &current);
     let (report_title, report_subtitle) = resolve_report_strings(args);
     let (baseline_label, scope_source) = scope_banner(args, &scope_input);
     // Check selection + suppression (cute-dbt#171): the `[checks]` config
@@ -719,7 +720,11 @@ const DBT_PROJECT_YML: &str = "dbt_project.yml";
 /// and when `dbt_project.yml` IS in the diff the panel degrades to the
 /// absence-note fallback (the hunks are still in hand) — the change is
 /// never silently invisible.
-fn gather_project_facts(args: &ReportArgs, scope_input: &ScopeInput) -> ProjectFacts {
+fn gather_project_facts(
+    args: &ReportArgs,
+    scope_input: &ScopeInput,
+    current: &Manifest,
+) -> ProjectFacts {
     let index = match scope_input {
         ScopeInput::PrDiff { index } => Some(index),
         ScopeInput::Baseline { .. } => None,
@@ -733,7 +738,7 @@ fn gather_project_facts(args: &ReportArgs, scope_input: &ScopeInput) -> ProjectF
         };
     };
     let reader = FsProjectFileReader::new(project_root);
-    gather_project_facts_with_reader(&reader, index)
+    gather_project_facts_with_reader(&reader, index, current)
 }
 
 /// The absence-note panel arm: `Some(Fallback{FileUnreadable})` exactly
@@ -769,6 +774,7 @@ fn project_panel_without_file(index: Option<&NormalizedDiffIndex>) -> Option<Pro
 fn gather_project_facts_with_reader(
     reader: &dyn ProjectFileReader,
     index: Option<&NormalizedDiffIndex>,
+    current: &Manifest,
 ) -> ProjectFacts {
     let new_text = match reader.read(DBT_PROJECT_YML) {
         Ok(text) => Some(text),
@@ -801,17 +807,25 @@ fn gather_project_facts_with_reader(
     };
     let panel = index
         .filter(|index| index.contains_changed(DBT_PROJECT_YML))
-        .map(|index| project_change_panel(&new_text, definition.as_ref(), index));
+        .map(|index| project_change_panel(&new_text, definition.as_ref(), index, current));
     ProjectFacts { definition, panel }
 }
 
 /// Build the diff-gated panel content for an in-diff `dbt_project.yml`
 /// whose working-tree text is in hand. See
 /// [`gather_project_facts_with_reader`] for the arm map.
+///
+/// Hooks rows are enriched from the manifest's `operation.*` nodes
+/// (cute-dbt#269): the project name comes from the parsed file's own
+/// `name:` (the file IS the root project definition — no wire field
+/// needed; operation node names are built from exactly this name), and
+/// [`attach_hook_facts`] adds the inline SQL diff + the manifest-side
+/// presence verdict to each `Hooks` change.
 fn project_change_panel(
     new_text: &str,
     definition: Option<&crate::domain::ProjectDefinition>,
     index: &NormalizedDiffIndex,
+    current: &Manifest,
 ) -> ProjectChangePanel {
     let hunks = index.hunks_for(DBT_PROJECT_YML);
     let fallback = |reason: ProjectFallbackReason| ProjectChangePanel::Fallback {
@@ -829,9 +843,10 @@ fn project_change_panel(
     let Ok(old_def) = parse_project_definition(&old_text) else {
         return fallback(ProjectFallbackReason::OldParseFailed);
     };
-    ProjectChangePanel::Categorized {
-        changes: diff_project_definitions(&old_def, new_def),
-    }
+    let mut changes = diff_project_definitions(&old_def, new_def);
+    let ops = hook_operations(current, new_def.name.as_deref().unwrap_or_default());
+    attach_hook_facts(&mut changes, &ops);
+    ProjectChangePanel::Categorized { changes }
 }
 
 /// Merge external fixture FILE cell diffs (cute-dbt#126 AC#3) into the
@@ -2203,6 +2218,17 @@ mod tests {
         StubReader { entries }
     }
 
+    /// The no-nodes manifest most panel tests thread (hook enrichment
+    /// then trivially reports `absent` — cute-dbt#269).
+    fn empty_manifest() -> Manifest {
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            StdHashMap::new(),
+            StdHashMap::new(),
+            StdHashMap::new(),
+        )
+    }
+
     /// An index whose only changed file is `dbt_project.yml` with the
     /// given hunks.
     fn project_diff_index(hunks: Vec<Hunk>) -> NormalizedDiffIndex {
@@ -2231,7 +2257,8 @@ mod tests {
     fn project_facts_parse_standing_metadata_with_no_diff() {
         // Baseline arm (no index): the file still parses — the founder's
         // parse-always posture; the panel stays absent.
-        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), None);
+        let facts =
+            gather_project_facts_with_reader(&project_reader(PROJECT_NEW), None, &empty_manifest());
         let def = facts.definition.expect("standing metadata parsed");
         assert_eq!(def.name.as_deref(), Some("playground"));
         assert!(facts.panel.is_none(), "no diff, no panel");
@@ -2247,7 +2274,11 @@ mod tests {
             }],
         };
         let index = NormalizedDiffIndex::new(&diff, None);
-        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), Some(&index));
+        let facts = gather_project_facts_with_reader(
+            &project_reader(PROJECT_NEW),
+            Some(&index),
+            &empty_manifest(),
+        );
         assert!(facts.definition.is_some(), "standing metadata still rides");
         assert!(
             facts.panel.is_none(),
@@ -2265,7 +2296,11 @@ mod tests {
             "  default_state: CT",
             "  default_state: VT",
         )]);
-        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), Some(&index));
+        let facts = gather_project_facts_with_reader(
+            &project_reader(PROJECT_NEW),
+            Some(&index),
+            &empty_manifest(),
+        );
         match facts.panel.expect("panel present") {
             ProjectChangePanel::Categorized { changes } => {
                 assert_eq!(changes.len(), 1);
@@ -2289,7 +2324,11 @@ mod tests {
             "  default_state: CT",
             "  default_state: SOMETHING-ELSE",
         )]);
-        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), Some(&index));
+        let facts = gather_project_facts_with_reader(
+            &project_reader(PROJECT_NEW),
+            Some(&index),
+            &empty_manifest(),
+        );
         match facts.panel.expect("panel present") {
             ProjectChangePanel::Fallback { reason, raw } => {
                 assert_eq!(reason, ProjectFallbackReason::OldNotReconstructable);
@@ -2305,7 +2344,11 @@ mod tests {
     fn project_facts_unparseable_new_side_degrades_to_new_parse_failed() {
         let broken = "models:\n  - [unclosed\n";
         let index = project_diff_index(vec![replacement_hunk(2, "  ok: 1", "  - [unclosed")]);
-        let facts = gather_project_facts_with_reader(&project_reader(broken), Some(&index));
+        let facts = gather_project_facts_with_reader(
+            &project_reader(broken),
+            Some(&index),
+            &empty_manifest(),
+        );
         assert!(facts.definition.is_none(), "no standing metadata");
         match facts.panel.expect("panel present") {
             ProjectChangePanel::Fallback { reason, .. } => {
@@ -2325,7 +2368,7 @@ mod tests {
             entries: StdHashMap::new(),
         };
         let index = project_diff_index(vec![replacement_hunk(1, "name: a", "name: b")]);
-        let facts = gather_project_facts_with_reader(&reader, Some(&index));
+        let facts = gather_project_facts_with_reader(&reader, Some(&index), &empty_manifest());
         assert!(facts.definition.is_none());
         match facts
             .panel
@@ -2354,7 +2397,11 @@ mod tests {
             added_lines: lines,
         };
         let index = project_diff_index(vec![hunk]);
-        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), Some(&index));
+        let facts = gather_project_facts_with_reader(
+            &project_reader(PROJECT_NEW),
+            Some(&index),
+            &empty_manifest(),
+        );
         match facts.panel.expect("panel present") {
             ProjectChangePanel::Categorized { changes } => {
                 assert!(!changes.is_empty());
@@ -2376,7 +2423,11 @@ mod tests {
         let new_text = "# a comment\nname: playground\n";
         let index =
             project_diff_index(vec![replacement_hunk(1, "# an old comment", "# a comment")]);
-        let facts = gather_project_facts_with_reader(&project_reader(new_text), Some(&index));
+        let facts = gather_project_facts_with_reader(
+            &project_reader(new_text),
+            Some(&index),
+            &empty_manifest(),
+        );
         match facts.panel.expect("panel present") {
             ProjectChangePanel::Categorized { changes } => {
                 assert!(changes.is_empty(), "no semantic change to report");
@@ -2385,5 +2436,65 @@ mod tests {
                 panic!("expected categorized-empty, got {reason:?}")
             }
         }
+    }
+
+    #[test]
+    fn project_facts_hook_edit_enriches_the_hooks_row_from_operation_nodes() {
+        // cute-dbt#269: a hooks edit + a manifest carrying the matching
+        // operation node (declaring path `./dbt_project.yml` VERBATIM,
+        // the fusion shape) ⇒ the hooks row carries HookChangeFacts:
+        // Matched presence, the operation id, and the inline SQL diff
+        // whose new side came from the manifest node.
+        let new_text = "name: playground\non-run-start:\n  - \"grant select on schema x\"\n";
+        let index = project_diff_index(vec![replacement_hunk(
+            3,
+            "  - \"grant usage on schema x\"",
+            "  - \"grant select on schema x\"",
+        )]);
+        let op_id = crate::domain::NodeId::new("operation.playground.playground-on-run-start-0");
+        let op = crate::domain::Node::new(
+            op_id.clone(),
+            "operation",
+            crate::domain::Checksum::new("sha256", "feed"),
+            None,
+            Some("grant select on schema x".to_owned()),
+            crate::domain::DependsOn::default(),
+            Some("./dbt_project.yml".to_owned()),
+            crate::domain::NodeConfig::default(),
+            None,
+            std::collections::BTreeMap::new(),
+        )
+        .with_identity(
+            Some("playground-on-run-start-0".to_owned()),
+            Some("playground".to_owned()),
+        );
+        let manifest = Manifest::new(
+            ManifestMetadata::new("v12"),
+            StdHashMap::from([(op_id, op)]),
+            StdHashMap::new(),
+            StdHashMap::new(),
+        );
+        let facts =
+            gather_project_facts_with_reader(&project_reader(new_text), Some(&index), &manifest);
+        let ProjectChangePanel::Categorized { changes } = facts.panel.expect("panel present")
+        else {
+            panic!("a clean hook edit categorizes");
+        };
+        let hooks_row = changes
+            .iter()
+            .find(|c| c.category == ProjectChangeCategory::Hooks)
+            .expect("a hooks row");
+        let hook = hooks_row.hook.as_ref().expect("hook facts attached");
+        assert_eq!(hook.manifest, crate::domain::HookManifestPresence::Matched);
+        assert_eq!(
+            hook.operation_ids,
+            vec!["operation.playground.playground-on-run-start-0"],
+        );
+        let diff = hook.sql_diff.as_ref().expect("inline SQL diff");
+        assert!(
+            diff.lines
+                .iter()
+                .any(|l| l.text == "grant select on schema x"),
+        );
     }
 }
