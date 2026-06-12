@@ -6,8 +6,8 @@
    resolves the prefers-color-scheme default, and applies the html-level
    hooks the shared token partial (templates/partials/tokens.css) keys on:
    [data-theme] + the html.dark family class (the DataTables dark sync),
-   [data-style], [data-density], [data-difflayout], [data-coverage] and the
-   accent custom-property overrides. Embedded into BOTH page families —
+   [data-style], [data-density], [data-difflayout], [data-coverage],
+   [data-project] and the accent custom-property overrides. Embedded into BOTH page families —
    report.html (where templates/theme.js layers the settings UI on top via
    window.CuteAppearance) and explore-dag.html / explore-tests.html (which
    apply the saved appearance read-only; the explore-side settings
@@ -20,8 +20,9 @@
    and theme.js's control sync.
 
    Attributes without matching rules on a page are deliberately applied
-   anyway ([data-difflayout] / [data-coverage] are inert on the explore
-   pages today): ONE attribute contract across page families, so pages
+   anyway ([data-difflayout] / [data-coverage] / [data-project] are inert
+   on the explore pages today): ONE attribute contract across page
+   families, so pages
    adopt new surfaces without touching this engine. The `engine` field
    (the report's Mermaid <-> Cytoscape DAG pick) is persisted state only
    here — applying it is report-specific (theme.js applyEngine).
@@ -68,11 +69,18 @@
   // `engine` (cute-dbt#180) is the DAG-engine picker: "mermaid" (the static
   // default) or "cytoscape" (the opt-in interactive engine).
   // `coverage` (cute-dbt#219) is the viewer-side coverage-intelligence
-  // display toggle: "on" (default; the field may be absent) or "off". The
-  // CROSS-PAGE contract: any cute-dbt page that renders check-engine-derived
-  // content reads this same field — the report keys one CSS rule on
-  // html[data-coverage=off]; the explorer pages adopt it as #103/#104 land.
-  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", difflayout: "auto", engine: "mermaid", coverage: "on" };
+  // display toggle: "off" (the default since cute-dbt#292 — the settings
+  // panel's Experimental group; the field may be absent) or the explicit
+  // opt-in "on". The CROSS-PAGE contract: any cute-dbt page that renders
+  // check-engine-derived content reads this same field — the report keys
+  // one CSS rule on html[data-coverage=off]; the explorer pages adopt it
+  // as #103/#104 land.
+  // `project` (cute-dbt#292) is the viewer-side project-state display
+  // toggle: "on" (default; the field may be absent) or "off". Emission is
+  // already opt-in at render time (the cute-dbt#291 experimental gate), so
+  // the viewer default SHOWS what the producer chose to emit; the report
+  // keys CSS rules on html[data-project=off].
+  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", difflayout: "auto", engine: "mermaid", coverage: "off", project: "on" };
 
   // Read the persisted appearance, string-typed keys only. Any storage error
   // (file:// SecurityError, disabled storage) leaves the defaults intact.
@@ -83,7 +91,7 @@
     try {
       var p = JSON.parse(raw);
       if (p && typeof p === "object") {
-        ["theme", "style", "accent", "density", "difflayout", "engine", "coverage"].forEach(function (k) {
+        ["theme", "style", "accent", "density", "difflayout", "engine", "coverage", "project"].forEach(function (k) {
           if (typeof p[k] === "string") pref[k] = p[k];
         });
       }
@@ -91,9 +99,14 @@
     // Coerce the engine into its closed vocabulary — an unknown persisted
     // value must fall back to the static default, never reach the dispatcher.
     if (pref.engine !== "cytoscape") pref.engine = "mermaid";
-    // Same closed-vocabulary coercion for the coverage toggle (cute-dbt#219):
-    // anything but the explicit "off" reads as the default ON.
-    if (pref.coverage !== "off") pref.coverage = "on";
+    // Same closed-vocabulary coercion for the coverage toggle (cute-dbt#219;
+    // default flipped OFF at cute-dbt#292): anything but the explicit "on"
+    // reads as the default OFF.
+    if (pref.coverage !== "on") pref.coverage = "off";
+    // And for the project-state display toggle (cute-dbt#292): anything but
+    // the explicit "off" reads as the default ON — emission is already
+    // opt-in at render time (cute-dbt#291).
+    if (pref.project !== "off") pref.project = "on";
   }
   // Persist the current appearance. Swallows any storage error (zero-egress
   // in-memory fallback, mirrors interaction.js saveSettings).
@@ -146,11 +159,25 @@
   // OFF sets html[data-coverage=off] (one CSS rule hides every
   // check-engine-derived surface); ON removes the attribute and the
   // already-rendered content shows again — no re-render, payload untouched.
+  // Default OFF since cute-dbt#292 (the Experimental settings group), so an
+  // unknown value reads as OFF.
   function applyCoverage(v) {
-    var coverage = v === "off" ? "off" : "on";
+    var coverage = v === "on" ? "on" : "off";
     if (coverage === "off") root.setAttribute("data-coverage", "off");
     else root.removeAttribute("data-coverage");
     pref.coverage = coverage;
+  }
+  // cute-dbt#292 — the project-state display toggle, the applyCoverage
+  // twin with the OPPOSITE default polarity (emission is already opt-in at
+  // render time, so an unknown value reads as ON): OFF sets
+  // html[data-project=off] — CSS hides the project-definition panel and the
+  // per-model provenance/var chips; ON removes the attribute. PURE display:
+  // no re-render, payload untouched.
+  function applyProject(v) {
+    var project = v === "off" ? "off" : "on";
+    if (project === "off") root.setAttribute("data-project", "off");
+    else root.removeAttribute("data-project");
+    pref.project = project;
   }
 
   // ---- boot: load, resolve the default theme, apply everything ----------
@@ -165,6 +192,7 @@
   applyDensity(pref.density);
   applyDiffLayout(pref.difflayout);
   applyCoverage(pref.coverage);
+  applyProject(pref.project);
 
   // The page-facing seam: templates/theme.js (the report's settings UI)
   // drives the engine through this object — `pref` is the ONE live state
@@ -178,7 +206,8 @@
     applyAccent: applyAccent,
     applyDensity: applyDensity,
     applyDiffLayout: applyDiffLayout,
-    applyCoverage: applyCoverage
+    applyCoverage: applyCoverage,
+    applyProject: applyProject
   };
 })();
 /* end of cute-dbt shared appearance engine v1 (cute-dbt#242) */

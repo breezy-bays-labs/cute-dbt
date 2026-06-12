@@ -1966,6 +1966,23 @@ fn visible(tab: &Tab, selector: &str) -> bool {
     )
 }
 
+/// cute-dbt#292 — the coverage-intelligence display defaults OFF (the
+/// Experimental settings group). Tests asserting findings-surface
+/// BEHAVIOR that requires layout (visibility, keyboard-focus tooltip
+/// reveals — `focus()` is inert inside a `display:none` subtree) opt the
+/// display ON first through the page's own seam, exactly as the settings
+/// switch would. The toggle test itself covers the switch UI path.
+fn enable_coverage_display(tab: &Tab) {
+    let _ = eval(tab, "window.CuteAppearance.applyCoverage('on')");
+    assert!(
+        !eval_bool(
+            tab,
+            "document.documentElement.hasAttribute('data-coverage')",
+        ),
+        "coverage display enabled for findings-surface assertions",
+    );
+}
+
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn diff_drawers_render_exactly_one_view_each() {
@@ -6755,6 +6772,7 @@ fn findings_panel_renders_checklist_tiers_sketch_rationale_and_pin() {
     let tab = browser.new_tab().expect("new tab");
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
+    enable_coverage_display(&tab);
 
     // --- panel + three-valued checklist ------------------------------
     assert!(
@@ -7197,6 +7215,7 @@ fn degraded_disabled_and_singular_truthfulness_render_in_the_findings_panel() {
     let tab = browser.new_tab().expect("new tab");
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
+    enable_coverage_display(&tab);
 
     const ROW: &str =
         "document.querySelector('.finding-row[data-check=\"grain.unique-key-unbacked\"]')";
@@ -7437,13 +7456,14 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn coverage_intelligence_toggle_hides_check_surfaces_and_persists() {
-    // cute-dbt#219 — the viewer-side coverage-intelligence display toggle.
-    // A settings-panel switch (default ON, persisted as the `coverage` field
-    // of cute-dbt.appearance.v1 — the SAME mechanism as theme/density/the
-    // engine picker) hides every check-engine-derived surface via
-    // html[data-coverage=off] + one CSS rule. PURE display: the findings
-    // panel's rendered content stays in the DOM while hidden (the payload is
-    // untouched), so flipping back ON restores it with zero re-render.
+    // cute-dbt#219 — the viewer-side coverage-intelligence display toggle,
+    // relocated into the settings panel's Experimental group with its
+    // default flipped OFF at cute-dbt#292. Persisted as the `coverage`
+    // field of cute-dbt.appearance.v1 — the SAME mechanism as
+    // theme/density/the engine picker; OFF hides every check-engine-derived
+    // surface via html[data-coverage=off] + one CSS rule. PURE display: the
+    // findings panel's rendered content stays in the DOM while hidden (the
+    // payload is untouched), so flipping ON reveals it with zero re-render.
     let url = render_to_file(
         "headless_coverage_toggle.html",
         vec![findings_model("model.shop.dim_both")],
@@ -7460,30 +7480,35 @@ fn coverage_intelligence_toggle_hides_check_surfaces_and_persists() {
     const ROOT: &str = "document.documentElement";
     const INPUT: &str = "document.querySelector('#settings-coverage-input')";
 
-    // ===== boot defaults: toggle present, ON, panel visible =====
+    // ===== boot defaults (cute-dbt#292): toggle present, OFF, panel
+    // hidden — the experimental surface stays out of sight until the
+    // viewer opts in =====
     assert!(
         eval_bool(&tab, &format!("{INPUT} !== null")),
         "the settings panel carries the coverage-intelligence switch",
     );
     assert!(
-        eval_bool(&tab, &format!("{INPUT}.checked")),
-        "the coverage-intelligence toggle defaults to ON",
+        !eval_bool(&tab, &format!("{INPUT}.checked")),
+        "the coverage-intelligence toggle defaults to OFF (cute-dbt#292)",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{ROOT}.getAttribute('data-coverage')")),
+        "off",
+        "the default boot sets html[data-coverage=off] — the one CSS hook",
     );
     assert!(
-        !eval_bool(&tab, &format!("{ROOT}.hasAttribute('data-coverage')")),
-        "ON leaves no data-coverage attribute on <html> (the default state)",
+        !visible(&tab, ".model-findings"),
+        "the findings panel is hidden at boot (default OFF)",
     );
-    assert!(
-        visible(&tab, ".model-findings"),
-        "the findings panel renders at boot (toggle ON)",
-    );
+    // Display-only even at boot: the checklist is fully rendered behind
+    // the CSS rule — the payload and the DOM are untouched by the toggle.
     assert_eq!(
         eval_i64(
             &tab,
             "document.querySelectorAll('.findings-checklist > .finding-row').length",
         ),
         2,
-        "the fixture model trips both checks — two checklist rows render",
+        "the fixture model trips both checks — two checklist rows render in the DOM",
     );
 
     // ===== a11y: focusable + aria-labelled (the #146 discipline) =====
@@ -7501,14 +7526,30 @@ fn coverage_intelligence_toggle_hides_check_surfaces_and_persists() {
         "the switch input is keyboard-focusable",
     );
 
-    // ===== keyboard-operable: a REAL Space keypress toggles OFF =====
+    // ===== keyboard-operable: a REAL Space keypress toggles ON =====
     // (tab.press_key sends CDP input, so the checkbox's native default
     // action fires — a synthetic KeyboardEvent would not.)
     tab.press_key(" ")
         .expect("press Space on the focused switch");
     assert!(
+        eval_bool(&tab, &format!("{INPUT}.checked")),
+        "Space on the focused switch turns coverage intelligence ON",
+    );
+    assert!(
+        !eval_bool(&tab, &format!("{ROOT}.hasAttribute('data-coverage')")),
+        "ON removes the data-coverage attribute from <html>",
+    );
+    assert!(
+        visible(&tab, ".model-findings"),
+        "ON reveals the findings panel without a re-render (it was \
+         rendered all along)",
+    );
+
+    // ===== toggling back OFF hides in place (no re-render) =====
+    let _ = eval(&tab, &format!("{INPUT}.click()"));
+    assert!(
         !eval_bool(&tab, &format!("{INPUT}.checked")),
-        "Space on the focused switch turns coverage intelligence OFF",
+        "clicking the switch turns coverage intelligence back OFF",
     );
     assert_eq!(
         eval_string(&tab, &format!("{ROOT}.getAttribute('data-coverage')")),
@@ -7530,21 +7571,6 @@ fn coverage_intelligence_toggle_hides_check_surfaces_and_persists() {
         "hiding is class/visibility mutation only — the checklist rows stay in the DOM",
     );
 
-    // ===== toggling back ON restores in place (no re-render) =====
-    let _ = eval(&tab, &format!("{INPUT}.click()"));
-    assert!(
-        eval_bool(&tab, &format!("{INPUT}.checked")),
-        "clicking the switch turns coverage intelligence back ON",
-    );
-    assert!(
-        !eval_bool(&tab, &format!("{ROOT}.hasAttribute('data-coverage')")),
-        "ON removes the data-coverage attribute",
-    );
-    assert!(
-        visible(&tab, ".model-findings"),
-        "ON restores the findings panel without a re-render",
-    );
-
     // ===== persistence: the appearance blob + reload hydration =====
     let storage_ok = eval_bool(
         &tab,
@@ -7554,45 +7580,49 @@ fn coverage_intelligence_toggle_hides_check_surfaces_and_persists() {
            catch(e){return false;}})()",
     );
     if storage_ok {
-        let _ = eval(&tab, &format!("{INPUT}.click()")); // OFF again
+        let _ = eval(&tab, &format!("{INPUT}.click()")); // ON again
         let raw = eval_string(
             &tab,
             "window.localStorage.getItem('cute-dbt.appearance.v1') || ''",
         );
         assert!(
-            raw.contains("\"coverage\":\"off\""),
-            "the coverage choice persists alongside the appearance state \
+            raw.contains("\"coverage\":\"on\""),
+            "the coverage opt-in persists alongside the appearance state \
              under cute-dbt.appearance.v1: {raw}",
         );
         tab.reload(false, None).expect("reload");
         tab.wait_until_navigated().expect("await reload");
         wait_for_document_ready(&tab);
-        // Poll the hydrated attribute — theme.js boots after DOMContentLoaded,
+        // Poll the hydrated switch — theme.js boots after DOMContentLoaded,
         // which wait_for_document_ready alone can race (the cute-dbt#178
-        // pattern). NULL-SAFE on documentElement mid-swap (cute-dbt#208).
-        let mut coverage = String::new();
+        // pattern). The switch's checked state is the positive hydration
+        // signal (the data-coverage attribute is ABSENT in the ON state,
+        // and absence cannot distinguish hydrated from not-yet-booted).
+        // NULL-SAFE on the input mid-swap (cute-dbt#208).
+        let mut hydrated = false;
         for _ in 0..50 {
-            coverage = eval_string(
+            hydrated = eval_bool(
                 &tab,
-                "(document.documentElement \
-                 && document.documentElement.getAttribute('data-coverage')) || ''",
+                "!!(document.querySelector('#settings-coverage-input') \
+                 && document.querySelector('#settings-coverage-input').checked)",
             );
-            if coverage == "off" {
+            if hydrated {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        assert_eq!(
-            coverage, "off",
-            "the persisted OFF state hydrates html[data-coverage=off] across a reload",
+        assert!(
+            hydrated,
+            "the persisted ON state hydrates the switch across a reload \
+             (default would be OFF)",
         );
         assert!(
-            !eval_bool(&tab, &format!("{INPUT}.checked")),
-            "the switch hydrates to OFF from localStorage after reload",
+            !eval_bool(&tab, &format!("{ROOT}.hasAttribute('data-coverage')")),
+            "the persisted ON state leaves no data-coverage attribute",
         );
         assert!(
-            !visible(&tab, ".model-findings"),
-            "the findings panel stays hidden across the reload",
+            visible(&tab, ".model-findings"),
+            "the findings panel stays revealed across the reload",
         );
     }
 
@@ -12675,6 +12705,163 @@ fn project_state_gated_default_renders_no_panel_and_no_chips() {
         visible_count(&tab, "[data-testid=\"model-attribution\"]"),
         0,
         "the default report renders no model-attribution provenance chips",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn project_state_display_toggle_hides_surfaces_and_renders_only_when_emitted() {
+    // cute-dbt#292 — the Experimental group's project-state display
+    // toggle. The settings row exists only when the report emitted
+    // project-state content (the cute-dbt#291 render-time opt-in);
+    // default ON (emission was already explicit, the opposite polarity
+    // of the coverage toggle); OFF sets html[data-project=off] and the
+    // CSS rules hide the panel + chips in place — display-only, the
+    // data-coverage twin. (`eval*` here is the harness's CDP
+    // Runtime.evaluate wrapper over our own generated page —
+    // test-authored strings only, no untrusted input.)
+    let hunks = vec![Hunk {
+        new_start: 1,
+        new_len: 1,
+        removed_lines: vec!["name: old".to_owned()],
+        added_lines: vec!["name: new".to_owned()],
+    }];
+    let facts = ProjectFacts {
+        definition: None,
+        panel: Some(ProjectChangePanel::Fallback {
+            reason: ProjectFallbackReason::FileUnreadable,
+            raw: raw_hunk_lines(&hunks),
+        }),
+        config_attributions: BTreeMap::new(),
+        var_references: BTreeMap::new(),
+    };
+    let url = render_with_project_facts("headless_project_toggle_emitted.html", &facts);
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    const ROOT: &str = "document.documentElement";
+    const INPUT: &str = "document.querySelector('#settings-project-input')";
+
+    // ===== boot: row present (content was emitted), ON, panel visible =====
+    assert!(
+        eval_bool(&tab, &format!("{INPUT} !== null")),
+        "the Experimental group carries the project-state switch when \
+         project-state content was emitted",
+    );
+    assert!(
+        eval_bool(&tab, &format!("{INPUT}.checked")),
+        "the project-state display toggle defaults to ON (emission was \
+         already the render-time opt-in)",
+    );
+    assert!(
+        !eval_bool(&tab, &format!("{ROOT}.hasAttribute('data-project')")),
+        "ON leaves no data-project attribute on <html>",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"project-def-panel\"]"),
+        1,
+        "the project-definition panel is visible at boot",
+    );
+
+    // ===== OFF hides the panel in place =====
+    let _ = eval(&tab, &format!("{INPUT}.click()"));
+    assert!(
+        !eval_bool(&tab, &format!("{INPUT}.checked")),
+        "clicking the switch turns the project-state display OFF",
+    );
+    assert_eq!(
+        eval_string(&tab, &format!("{ROOT}.getAttribute('data-project')")),
+        "off",
+        "OFF sets html[data-project=off] — the CSS hook",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"project-def-panel\"]"),
+        0,
+        "OFF hides the project-definition panel",
+    );
+    // Display-only: the panel stays in the DOM while hidden.
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('[data-testid=\"project-def-panel\"]').length",
+        ),
+        1,
+        "hiding is display-only — the panel stays in the DOM",
+    );
+
+    // ===== persistence (storage permitting): OFF survives a reload =====
+    let storage_ok = eval_bool(
+        &tab,
+        "(function(){try{if(!window.localStorage)return false;\
+           window.localStorage.setItem('__probe','1');\
+           window.localStorage.removeItem('__probe');return true;}\
+           catch(e){return false;}})()",
+    );
+    if storage_ok {
+        let raw = eval_string(
+            &tab,
+            "window.localStorage.getItem('cute-dbt.appearance.v1') || ''",
+        );
+        assert!(
+            raw.contains("\"project\":\"off\""),
+            "the project-state choice persists under cute-dbt.appearance.v1: {raw}",
+        );
+        tab.reload(false, None).expect("reload");
+        tab.wait_until_navigated().expect("await reload");
+        wait_for_document_ready(&tab);
+        // Poll the hydrated attribute (the cute-dbt#178 pattern; OFF is
+        // the positive signal here). NULL-SAFE mid-swap (cute-dbt#208).
+        let mut project = String::new();
+        for _ in 0..50 {
+            project = eval_string(
+                &tab,
+                "(document.documentElement \
+                 && document.documentElement.getAttribute('data-project')) || ''",
+            );
+            if project == "off" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(
+            project, "off",
+            "the persisted OFF state hydrates html[data-project=off] across a reload",
+        );
+        assert_eq!(
+            visible_count(&tab, "[data-testid=\"project-def-panel\"]"),
+            0,
+            "the panel stays hidden across the reload",
+        );
+    }
+    let _ = tab.close(true);
+
+    // ===== not emitted ⇒ no row: a default-facts report renders the
+    // Experimental group without the project-state switch =====
+    let url = render_with_project_facts(
+        "headless_project_toggle_absent.html",
+        &ProjectFacts::default(),
+    );
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    assert!(
+        eval_bool(&tab, &format!("{INPUT} === null")),
+        "a report with no emitted project-state content renders no \
+         project-state settings row",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('#settings-coverage-input') !== null",
+        ),
+        "the Experimental group itself still renders (the coverage toggle \
+         is unconditional)",
     );
     let _ = tab.close(true);
 }
