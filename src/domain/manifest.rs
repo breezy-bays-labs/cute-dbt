@@ -1817,6 +1817,21 @@ pub struct Manifest {
     /// tolerance + byte-stable omission as [`Self::exposures`].
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     disabled: BTreeMap<String, Vec<DisabledEntry>>,
+    /// The macro reference family (cute-dbt#271): macro `unique_id` →
+    /// the `depends_on.macros` list, verbatim wire order (fusion
+    /// `MacroDependsOn.macros: Vec<String>`, `dbt-schemas`
+    /// `macros.rs:52-57` @ `9977b6cb…`; dbt-core mirrors the shape).
+    /// A PARALLEL map beside [`Self::macros`] (id → body string), not a
+    /// value-type change — pre-#271 serialized manifests keep
+    /// deserializing (payload byte-stability). Only macros with a
+    /// non-empty list appear (drop-empty); dispatch indirection is
+    /// ALREADY RESOLVED on the wire — both engines record the
+    /// adapter-resolved impl (e.g. `macro.dbt.create_table_as` →
+    /// `macro.dbt_duckdb.duckdb__create_table_as`), so the closure is
+    /// target-adapter-specific. The #262 vars-attribution macro-closure
+    /// input and the #265 macro-perspective building block.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    macro_depends_on: BTreeMap<String, Vec<String>>,
 }
 
 impl Manifest {
@@ -1841,6 +1856,7 @@ impl Manifest {
             exposures: HashMap::new(),
             groups: HashMap::new(),
             disabled: BTreeMap::new(),
+            macro_depends_on: BTreeMap::new(),
         }
     }
 
@@ -1869,6 +1885,17 @@ impl Manifest {
     #[must_use]
     pub fn with_disabled(mut self, disabled: BTreeMap<String, Vec<DisabledEntry>>) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Attach the macro reference family (cute-dbt#271) — the adapter
+    /// passes only macros with a non-empty `depends_on.macros` list.
+    #[must_use]
+    pub fn with_macro_depends_on(
+        mut self,
+        macro_depends_on: BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        self.macro_depends_on = macro_depends_on;
         self
     }
 
@@ -1935,6 +1962,25 @@ impl Manifest {
     #[must_use]
     pub fn disabled(&self) -> &BTreeMap<String, Vec<DisabledEntry>> {
         &self.disabled
+    }
+
+    /// The macro reference map (cute-dbt#271): macro `unique_id` → its
+    /// `depends_on.macros` list, wire order. Empty on pre-#271
+    /// serializations; only macros with references appear.
+    #[must_use]
+    pub fn macro_depends_on(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.macro_depends_on
+    }
+
+    /// The macro ids a macro references (cute-dbt#271) — the empty
+    /// slice for reference-free / unknown ids (the drop-empty store
+    /// makes the two indistinguishable, and the closure consumer treats
+    /// both as leaves).
+    #[must_use]
+    pub fn macro_refs(&self, macro_id: &str) -> &[String] {
+        self.macro_depends_on
+            .get(macro_id)
+            .map_or(&[], Vec::as_slice)
     }
 
     /// Look up a group by its NAME — the value a node's [`Node::group`]
@@ -2584,6 +2630,57 @@ mod tests {
         assert!(m.unit_tests().is_empty());
         assert!(m.macros().is_empty());
         assert!(m.sources().is_empty());
+        assert!(m.macro_depends_on().is_empty());
+    }
+
+    // ----- cute-dbt#271: macro reference family ------------------------
+
+    #[test]
+    fn manifest_macro_depends_on_builder_lookup_round_trip_and_byte_stable_omission() {
+        let bare = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        assert!(bare.macro_depends_on().is_empty());
+        assert_eq!(
+            bare.macro_refs("macro.dbt.create_table_as"),
+            &[] as &[String],
+            "an unknown / reference-free macro reads as the empty slice",
+        );
+        // Byte-stability: a macro-reference-free Manifest serializes
+        // without the key (pre-#271 shape).
+        assert!(
+            !serde_json::to_string(&bare)
+                .unwrap()
+                .contains("macro_depends_on"),
+        );
+
+        let mut macro_depends_on = BTreeMap::new();
+        macro_depends_on.insert(
+            "macro.dbt.create_table_as".to_owned(),
+            vec!["macro.dbt_duckdb.duckdb__create_table_as".to_owned()],
+        );
+        macro_depends_on.insert(
+            "macro.shop.add_dq_flags".to_owned(),
+            vec![
+                "macro.shop._all_validations_pass".to_owned(),
+                "macro.shop._collect_failed_tests".to_owned(),
+            ],
+        );
+        let m = bare.with_macro_depends_on(macro_depends_on);
+        assert_eq!(m.macro_depends_on().len(), 2);
+        assert_eq!(
+            m.macro_refs("macro.shop.add_dq_flags"),
+            &[
+                "macro.shop._all_validations_pass".to_owned(),
+                "macro.shop._collect_failed_tests".to_owned(),
+            ],
+            "wire order preserved — never sorted or deduplicated",
+        );
+        let back: Manifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
     }
 
     // ===== SourceNode (cute-dbt#57) =====

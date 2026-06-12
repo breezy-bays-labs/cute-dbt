@@ -549,10 +549,19 @@ impl WireNodeConfig {
     }
 }
 
-/// Wire projection of one `macros` entry — only the body is consumed.
+/// Wire projection of one `macros` entry: the body plus the macro
+/// reference family (cute-dbt#271) — `depends_on.macros`, the
+/// adapter-resolved macro-call edges (fusion `ManifestMacro.depends_on:
+/// MacroDependsOn`, `dbt-schemas` `manifest_nodes.rs:714+` /
+/// `macros.rs:52-57` @ `9977b6cb…`). Reuses the domain [`DependsOn`]
+/// wire-verbatim (the `Checksum` precedent — the macro shape carries
+/// only `macros`, and `nodes` defaults empty). `Option` for the #145
+/// null-fill tolerance; pre-#271 synthetic fixtures omit the key.
 #[derive(Debug, Deserialize)]
 struct WireMacro {
     macro_sql: String,
+    #[serde(default)]
+    depends_on: Option<DependsOn>,
 }
 
 /// Wire projection of one top-level `sources` entry (cute-dbt#57).
@@ -896,11 +905,23 @@ impl WireManifest {
             .into_iter()
             .map(|(key, wire)| (key, wire.into_domain()))
             .collect();
-        let macros = self
-            .macros
-            .into_iter()
-            .map(|(key, wire)| (key, wire.macro_sql))
-            .collect();
+        // One pass over the wire macros feeds two domain maps: id →
+        // body string (the pre-#271 reduction, unchanged) and id →
+        // depends_on.macros for macros that reference others
+        // (cute-dbt#271, drop-empty — real wire from both engines
+        // populates the list densely; an empty list is the leaf shape).
+        let mut macros = HashMap::with_capacity(self.macros.len());
+        let mut macro_depends_on = BTreeMap::new();
+        for (key, wire) in self.macros {
+            let referenced = wire
+                .depends_on
+                .map(|depends_on| depends_on.macros().to_vec())
+                .unwrap_or_default();
+            if !referenced.is_empty() {
+                macro_depends_on.insert(key.clone(), referenced);
+            }
+            macros.insert(key, wire.macro_sql);
+        }
         let sources = self
             .sources
             .into_iter()
@@ -925,6 +946,8 @@ impl WireManifest {
             .with_groups(groups)
             // cute-dbt#258 — the disabled map, folded entry-tolerantly.
             .with_disabled(fold_disabled(self.disabled))
+            // cute-dbt#271 — the macro reference family.
+            .with_macro_depends_on(macro_depends_on)
     }
 }
 
@@ -3304,6 +3327,70 @@ mod tests {
                 .is_empty()
         );
         assert!(node("model.shop.pre258").unrendered_config().is_empty());
+    }
+
+    #[test]
+    fn parse_manifest_reads_macro_depends_on_shapes() {
+        // cute-dbt#271 — the macro reference family. Real wire from
+        // BOTH engines populates depends_on.macros (core 1.11:
+        // 324/485 jaffle macros; fusion 2.0-preview.177: 334/510,
+        // verified 2026-06-12); empty lists are the no-reference
+        // shape and store nothing (drop-empty). Absent / null
+        // depends_on tolerated (#145 null-fill).
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{}},
+              "macros": {{
+                "macro.dbt.create_table_as": {{
+                  "macro_sql": "/* dispatcher */",
+                  "depends_on": {{
+                    "macros": ["macro.dbt_duckdb.duckdb__create_table_as"]
+                  }}
+                }},
+                "macro.shop.add_dq_flags": {{
+                  "macro_sql": "/* caller */",
+                  "depends_on": {{
+                    "macros": [
+                      "macro.shop._b_second",
+                      "macro.shop._a_first"
+                    ]
+                  }}
+                }},
+                "macro.dbt.statement": {{
+                  "macro_sql": "/* leaf */",
+                  "depends_on": {{ "macros": [] }}
+                }},
+                "macro.shop.pre271": {{ "macro_sql": "/* old fixture */" }},
+                "macro.shop.null_filled": {{
+                  "macro_sql": "/* fusion unset */",
+                  "depends_on": null
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        assert_eq!(manifest.macros().len(), 5, "macro bodies still all fold");
+        let refs = manifest.macro_depends_on();
+        assert_eq!(refs.len(), 2, "only macros with references store");
+        assert_eq!(
+            manifest.macro_refs("macro.dbt.create_table_as"),
+            &["macro.dbt_duckdb.duckdb__create_table_as".to_owned()],
+        );
+        assert_eq!(
+            manifest.macro_refs("macro.shop.add_dq_flags"),
+            &[
+                "macro.shop._b_second".to_owned(),
+                "macro.shop._a_first".to_owned(),
+            ],
+            "wire order preserved verbatim",
+        );
+        assert_eq!(manifest.macro_refs("macro.dbt.statement"), &[] as &[String]);
+        assert_eq!(manifest.macro_refs("macro.shop.pre271"), &[] as &[String]);
+        assert_eq!(
+            manifest.macro_refs("macro.shop.null_filled"),
+            &[] as &[String],
+        );
     }
 
     #[test]

@@ -601,6 +601,45 @@ fn real_fixtures_carry_the_test_config_disabled_singular_wire_family() {
 }
 
 #[test]
+fn real_fixtures_carry_the_macro_reference_family() {
+    // cute-dbt#271 verified against BOTH committed real fixtures —
+    // depends_on.macros is POPULATED real wire on both engines
+    // (research-262's UNVERIFIED flag resolves to verified-populated:
+    // core 1.11.9 jaffle = 324/485 macros, core 1.11.11 playground =
+    // 639/910, fusion 2.0-preview.177 live probe = 334/510). No splice.
+    let jaffle = FileManifestSource
+        .load(&fixture("jaffle-shop-current.json"))
+        .expect("the jaffle fixture is a valid compiled v12 manifest");
+    // Dispatch indirection (the issue's Discovery question): the
+    // recorded edge is the ADAPTER-RESOLVED impl, not the dispatcher
+    // name — identical on both engines.
+    assert_eq!(
+        jaffle.macro_refs("macro.dbt.create_table_as"),
+        &["macro.dbt_duckdb.duckdb__create_table_as".to_owned()],
+        "dispatch resolves to the target adapter's impl",
+    );
+    assert!(
+        jaffle.macro_depends_on().len() > 300,
+        "the reference family is dense real wire, not an edge case",
+    );
+    // A reference-free macro stores nothing (drop-empty).
+    assert!(jaffle.macros().contains_key("macro.dbt.statement"));
+    assert_eq!(jaffle.macro_refs("macro.dbt.statement"), &[] as &[String]);
+
+    let playground = FileManifestSource
+        .load(&fixture("playground-current.json"))
+        .expect("the playground fixture is a valid compiled v12 manifest");
+    assert_eq!(
+        playground.macro_refs("macro.healthcare_analytics.add_dq_flags"),
+        &[
+            "macro.healthcare_analytics._all_validations_pass".to_owned(),
+            "macro.healthcare_analytics._collect_failed_tests".to_owned(),
+        ],
+        "project-local macro closure — the #262 vars-attribution input",
+    );
+}
+
+#[test]
 fn baseline_and_current_form_the_modified_stg_customers_diff_pair() {
     // PR 5's StateComparator diffs node body checksums; PR 4b must carry
     // that signal through translation intact. The fixtures are a pair:
