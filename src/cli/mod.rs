@@ -196,8 +196,8 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     // STANDING `definition` metadata is gated too, not kept (the
     // cute-dbt#291 Discovery call): the default report is byte-identical
     // to pre-#262 output and dbt_project.yml contributes zero bytes
-    // (pinned by `project_state_off_dbt_project_yml_contributes_zero_
-    // bytes` in tests/run_loop.rs), which also keeps the default path
+    // (pinned by `project_state_off_dbt_project_yml_contributes_zero_bytes`
+    // in tests/run_loop.rs), which also keeps the default path
     // zero-compute (no file read, no YAML parse). Render reproduces the
     // pre-#266 payload byte-for-byte on default facts and the empty
     // attribution map makes the cute-dbt#267 widening below a no-op —
