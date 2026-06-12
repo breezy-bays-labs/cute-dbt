@@ -57,3 +57,32 @@ Feature: explore's dag.html renders an interactive Cytoscape lineage with highli
     Then the exit code is 0
     And the lineage payload round-trips the name "evil</script><img src=x onerror=alert(1)>"
     And dag.html carries no unescaped script-closing markup in the payload carrier
+
+  @no-baseline-usage-error
+  Scenario: A snapshot mid-chain renders as a typed node and keeps the lineage connected
+    Given the explore manifest declares the model "stg_patients"
+    And the explore manifest declares the snapshot "snp_patients" built from "stg_patients"
+    And the explore manifest declares the model "dim_patients"
+    And the explore model "dim_patients" depends on the snapshot "snp_patients"
+    When I run cute-dbt explore on the synthetic manifest
+    Then the exit code is 0
+    And the lineage payload types "snp_patients" as "snapshot"
+    And dag.html carries a lineage edge from "stg_patients" to "snp_patients"
+    And dag.html carries a lineage edge from "snp_patients" to "dim_patients"
+
+  @no-baseline-usage-error
+  Scenario: Seeds, sources and exposures render as typed lineage nodes
+    Given the explore manifest declares the model "stg_orders"
+    And the explore manifest declares the seed "raw_orders"
+    And the explore manifest declares the source "raw" table "orders"
+    And the explore model "stg_orders" depends on the seed "raw_orders"
+    And the explore model "stg_orders" depends on the source "raw" table "orders"
+    And the explore manifest declares the exposure "orders_dashboard" on "stg_orders"
+    When I run cute-dbt explore on the synthetic manifest
+    Then the exit code is 0
+    And the lineage payload types "raw_orders" as "seed"
+    And the lineage payload types "raw.orders" as "source"
+    And the lineage payload types "orders_dashboard" as "exposure"
+    And dag.html carries a lineage edge from "raw_orders" to "stg_orders"
+    And dag.html carries a lineage edge from "raw.orders" to "stg_orders"
+    And dag.html carries a lineage edge from "stg_orders" to "orders_dashboard"

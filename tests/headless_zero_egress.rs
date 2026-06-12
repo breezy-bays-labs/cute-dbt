@@ -62,8 +62,8 @@ use headless_chrome::protocol::cdp::{Network, Runtime};
 use cute_dbt::adapters::explore::render_explore;
 use cute_dbt::adapters::render::build_payload;
 use cute_dbt::domain::{
-    Checksum, DependsOn, InScopeSet, Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig,
-    NodeId, TestMetadata, all_models,
+    Checksum, DependsOn, Exposure, InScopeSet, Manifest, ManifestMetadata, ModelInScopeSet, Node,
+    NodeConfig, NodeId, SourceNode, TestMetadata, all_models,
 };
 
 fn report_file_url(filename: &str) -> String {
@@ -71,6 +71,44 @@ fn report_file_url(filename: &str) -> String {
     let p = path.to_str().expect("report path must be valid UTF-8");
     format!("file://{p}")
 }
+
+/// The cute-dbt#253 universal lineage-fidelity probe, evaluated inside
+/// a booted dag.html: re-derives the connected components of the
+/// embedded `explore-dag-data` payload graph (union-find) and compares
+/// them against the LIVE Cytoscape instance's components. Returns the
+/// string `"ok"` iff every payload node is rendered AND each rendered
+/// component's node set equals its payload component — i.e. every node
+/// id in the manifest's connected component appears in ONE rendered
+/// component (the severed-snapshot defect would split it in two).
+const LINEAGE_COMPONENT_FIDELITY_JS: &str = r#"(function () {
+  try {
+    var data = JSON.parse(document.getElementById('explore-dag-data').textContent);
+    var cy = window.CuteExploreLineage && window.CuteExploreLineage.cyInstance();
+    if (!cy) return 'no cy instance';
+    if (cy.nodes().length !== data.nodes.length) {
+      return 'node count mismatch: cy=' + cy.nodes().length + ' payload=' + data.nodes.length;
+    }
+    var parent = {};
+    function find(x) { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+    function union(a, b) { a = find(a); b = find(b); if (a !== b) parent[a] = b; }
+    data.nodes.forEach(function (n) { parent[n.id] = n.id; });
+    data.edges.forEach(function (e) { union(e.from, e.to); });
+    var payloadComp = {};
+    data.nodes.forEach(function (n) {
+      var root = find(n.id);
+      (payloadComp[root] = payloadComp[root] || []).push(n.id);
+    });
+    var mismatches = [];
+    cy.elements().components().forEach(function (comp) {
+      var ids = comp.nodes().map(function (el) { return el.id(); }).sort();
+      var expected = (payloadComp[find(ids[0])] || []).slice().sort();
+      if (ids.join('') !== expected.join('')) {
+        mismatches.push('[' + ids.join(',') + '] != [' + expected.join(',') + ']');
+      }
+    });
+    return mismatches.length ? 'component mismatch: ' + mismatches.join(' | ') : 'ok';
+  } catch (err) { return 'error: ' + String(err); }
+})()"#;
 
 #[derive(Debug, Clone)]
 struct ExternalRequest {
@@ -385,6 +423,17 @@ fn every_committed_explore_page_makes_zero_external_requests_when_opened_via_fil
                      .lineage-canvas — either the inlined Cytoscape/cytoscape-dagre UMD \
                      bundles are broken offline or the explore lineage engine failed to boot.",
                 ));
+            } else {
+                // cute-dbt#253 — the universal lineage-fidelity guard on
+                // the COMMITTED golden page: every payload node renders
+                // and every connected component survives intact (the
+                // severed-snapshot defect class).
+                let fidelity = eval(&tab, LINEAGE_COMPONENT_FIDELITY_JS);
+                if fidelity != serde_json::Value::String("ok".to_owned()) {
+                    failures.push(format!(
+                        "examples/{filename}: lineage component fidelity failed: {fidelity}",
+                    ));
+                }
             }
         } else {
             // `eval` is this file's Runtime.Evaluate helper (a CDP probe
@@ -528,6 +577,30 @@ fn render_explore_pages(
 /// the emitted `dag.html`.
 fn render_explore_dag(stem: &str, nodes: Vec<Node>) -> String {
     let dir = render_explore_pages(stem, nodes, HashMap::new(), None);
+    let p = dir.join("dag.html");
+    format!("file://{}", p.to_str().expect("page path is valid UTF-8"))
+}
+
+/// Render an explore dag.html from a fully-assembled domain manifest
+/// (cute-dbt#253 — the typed-node scenarios attach `sources` /
+/// `exposures` maps the node-list helper above cannot express) and
+/// return its `file://` URL.
+fn render_explore_dag_manifest(stem: &str, manifest: &Manifest) -> String {
+    let models = all_models(manifest);
+    let payload = build_payload(
+        manifest,
+        &InScopeSet::new(),
+        &models,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+    );
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
+    let _ = std::fs::remove_dir_all(&dir);
+    render_explore(&dir, manifest, &models, None, &payload).expect("explore renders");
     let p = dir.join("dag.html");
     format!("file://{}", p.to_str().expect("page path is valid UTF-8"))
 }
@@ -2457,6 +2530,184 @@ fn explore_dag_change_context_marks_changed_nodes_and_composes_with_highlight() 
         noise.is_empty(),
         "the contexted explore page must emit zero console warnings/errors; got:\n{}",
         noise.join("\n"),
+    );
+
+    let _ = tab.close(true);
+}
+
+// ===== cute-dbt#253 — typed DAG nodes (snapshots / seeds / sources / =====
+// ===== exposures) in a REAL booted lineage                          =====
+
+/// A `nodes`-map entry of an arbitrary resource type (snapshot / seed)
+/// with explicit dependency edges — the [`explore_node`] twin for the
+/// cute-dbt#253 typed-lineage scenarios.
+fn typed_explore_node(
+    id: &str,
+    resource_type: &str,
+    deps: &[&str],
+    compiled: Option<&str>,
+) -> Node {
+    Node::new(
+        NodeId::new(id),
+        resource_type,
+        Checksum::new("sha256", "ck"),
+        compiled.map(str::to_owned),
+        None,
+        DependsOn::new(Vec::new(), deps.iter().map(|d| NodeId::new(*d)).collect()),
+        None,
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_dag_renders_typed_nodes_in_one_connected_component() {
+    // cute-dbt#253 — typed DAG nodes end-to-end in a real browser:
+    //   1. the typed union renders: source / seed / snapshot / exposure
+    //      are live Cytoscape nodes carrying data('type'),
+    //   2. the UNIVERSAL fidelity guard: every node id in the payload's
+    //      connected component appears in ONE rendered component (the
+    //      severed-snapshot defect split `stg → snapshot → dim` in two
+    //      and faked dim as a root),
+    //   3. the CTE arm is MODEL semantics: a highlighted source keeps
+    //      it locked; a highlighted model unlocks it.
+    // The chain: source → stg → snapshot → dim → exposure, plus
+    // seed → stg — every type in one connected component.
+    let nodes = vec![
+        explore_node(
+            "model.shop.stg_patients",
+            &["source.shop.raw.patients", "seed.shop.raw_codes"],
+            Some("select 1"),
+        ),
+        typed_explore_node(
+            "snapshot.shop.snp_patients",
+            "snapshot",
+            &["model.shop.stg_patients"],
+            Some("select 1"),
+        ),
+        typed_explore_node("seed.shop.raw_codes", "seed", &[], None),
+        explore_node(
+            "model.shop.dim_patients",
+            &["snapshot.shop.snp_patients"],
+            Some("select 1"),
+        ),
+    ];
+    let manifest = Manifest::new(
+        ManifestMetadata::new("v12"),
+        nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+        HashMap::new(),
+        HashMap::new(),
+    )
+    .with_sources(
+        [(
+            NodeId::new("source.shop.raw.patients"),
+            SourceNode::new(
+                NodeId::new("source.shop.raw.patients"),
+                "raw",
+                "patients",
+                None,
+                "main",
+                None,
+                None,
+            ),
+        )]
+        .into_iter()
+        .collect(),
+    )
+    .with_exposures(
+        [(
+            NodeId::new("exposure.shop.patient_dashboard"),
+            Exposure::new(
+                NodeId::new("exposure.shop.patient_dashboard"),
+                "patient_dashboard",
+                Some("dashboard".to_owned()),
+                None,
+                None,
+                DependsOn::new(Vec::new(), vec![NodeId::new("model.shop.dim_patients")]),
+            ),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    let url = render_explore_dag_manifest("explore-typed-nodes", &manifest);
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate to file:// URL");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(".lineage-canvas canvas", Duration::from_secs(15))
+        .expect("the Cytoscape canvas boots offline");
+
+    // (1) every typed node is live, carrying its wire type.
+    for (id, expected_type) in [
+        ("model.shop.stg_patients", "model"),
+        ("snapshot.shop.snp_patients", "snapshot"),
+        ("seed.shop.raw_codes", "seed"),
+        ("source.shop.raw.patients", "source"),
+        ("exposure.shop.patient_dashboard", "exposure"),
+    ] {
+        let probe =
+            format!("window.CuteExploreLineage.cyInstance().getElementById({id:?}).data('type')",);
+        assert_eq!(
+            eval(&tab, &probe),
+            serde_json::Value::String(expected_type.to_owned()),
+            "{id} must render as a {expected_type}-typed Cytoscape node",
+        );
+    }
+
+    // (2) the universal fidelity guard: payload components == rendered
+    // components — and this manifest is ONE component by construction.
+    assert_eq!(
+        eval(&tab, LINEAGE_COMPONENT_FIDELITY_JS),
+        serde_json::Value::String("ok".to_owned()),
+        "every payload component must render as one connected component",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "window.CuteExploreLineage.cyInstance().elements().components().length",
+        ),
+        serde_json::Value::from(1u64),
+        "source → stg → snapshot → dim → exposure (+ seed) is ONE chain — \
+         a second component is the severed-lineage defect",
+    );
+
+    // The seed never renders dbt-parse-dashed despite compiled_code: null
+    // (fusion null-fills seed compiled code unconditionally).
+    assert_eq!(
+        eval(
+            &tab,
+            "window.CuteExploreLineage.cyInstance().getElementById('seed.shop.raw_codes').data('notCompiled')",
+        ),
+        serde_json::Value::from(0u64),
+        "a seed is never 'not compiled'",
+    );
+
+    // (3) CTE-arm gating: model semantics only. focusModel is the
+    // host-forward hook — it highlights without committing.
+    assert_eq!(
+        eval(
+            &tab,
+            "(function () { \
+               window.focusModel('source.shop.raw.patients'); \
+               return document.querySelector('[data-view=\"cte\"]').disabled; \
+             })()",
+        ),
+        serde_json::Value::Bool(true),
+        "a highlighted SOURCE keeps the CTE arm locked (model semantics)",
+    );
+    assert_eq!(
+        eval(
+            &tab,
+            "(function () { \
+               window.focusModel('model.shop.stg_patients'); \
+               return document.querySelector('[data-view=\"cte\"]').disabled; \
+             })()",
+        ),
+        serde_json::Value::Bool(false),
+        "a highlighted MODEL unlocks the CTE arm",
     );
 
     let _ = tab.close(true);

@@ -2,8 +2,9 @@
 //!
 //! Emits the full-manifest explorer into `--out-dir`:
 //!
-//! - **`dag.html`** — the **interactive** model-lineage DAG
-//!   (cute-dbt#101): every `model` node, edges from `depends_on.nodes`,
+//! - **`dag.html`** — the **interactive** lineage DAG (cute-dbt#101):
+//!   every `model` node plus — typed, since cute-dbt#253 — every
+//!   snapshot / seed / source / exposure, edges from `depends_on.nodes`,
 //!   rendered by the vendored Cytoscape UMD core + the cytoscape-dagre
 //!   layout extension (left-to-right ranks) and driven by the
 //!   first-party explore lineage engine
@@ -51,7 +52,8 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::render::{DagPayload, ReportPayload};
 use crate::domain::{
-    GrainKind, Manifest, ModelInScopeSet, Node, NodeId, model_grain_signals, resolve_tested_model,
+    GrainKind, Manifest, ModelInScopeSet, Node, NodeId, SourceNode, model_grain_signals,
+    resolve_tested_model,
 };
 
 /// The explorer's external-drive contract version (cute-dbt#105).
@@ -76,13 +78,77 @@ use crate::domain::{
 /// event) — no separate versioning system.
 pub const EXPLORE_CONTRACT_VERSION: &str = "1";
 
-/// One model node in the lineage graph.
+/// Render-layer lineage node typing (cute-dbt#253) — the wire
+/// vocabulary for dag.html's typed DAG nodes.
+///
+/// Mirrors the manifest's own partition @ dbt-fusion `9977b6cb…`:
+/// `model` / `snapshot` / `seed` are `nodes`-map resource types (the
+/// serde tag on fusion's `DbtNode` enum, `dbt-schemas`
+/// `manifest/manifest.rs:52-64`); `source` entries live in the
+/// top-level `sources` map (`ManifestSource`) and `exposure` entries in
+/// the top-level `exposures` map (`ManifestExposure`). Serialized
+/// `snake_case` into the [`LineageNodePayload`] — the exhaustive
+/// [`Self::wire_key`] match is the compile-time half of the node-vocab
+/// completeness guard (the `edge_type_wire_key` precedent); the
+/// template-grep test below is the belt-and-braces half.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageNodeType {
+    /// A `model` node — the only type the pre-#253 lineage rendered.
+    Model,
+    /// A `snapshot` node (`nodes` map) — mid-graph: it both depends on
+    /// upstream nodes and feeds downstream models.
+    Snapshot,
+    /// A `seed` node (`nodes` map) — a root: seeds carry no
+    /// `depends_on.nodes` (fusion serializes the key absent).
+    Seed,
+    /// A `sources`-map entry — a root: sources declare no dependencies.
+    Source,
+    /// An `exposures`-map entry — a sink: the lineage terminus
+    /// (cute-dbt#253 folds exposures in alongside the AC types).
+    Exposure,
+}
+
+impl LineageNodeType {
+    /// Every variant — the iteration source for the completeness guard.
+    pub const ALL: [Self; 5] = [
+        Self::Model,
+        Self::Snapshot,
+        Self::Seed,
+        Self::Source,
+        Self::Exposure,
+    ];
+
+    /// Snake-case wire key — the exact serde string
+    /// (`rename_all = "snake_case"`). Exhaustive: a new variant fails to
+    /// compile here before it can ship untyped to the client engine.
+    #[must_use]
+    pub fn wire_key(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Snapshot => "snapshot",
+            Self::Seed => "seed",
+            Self::Source => "source",
+            Self::Exposure => "exposure",
+        }
+    }
+}
+
+/// One node in the lineage graph (typed since cute-dbt#253).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineageNode {
-    /// Full manifest node id (`model.<package>.<name>`).
+    /// Full manifest node id (`model.<package>.<name>`,
+    /// `snapshot.<package>.<name>`, `seed.<package>.<name>`,
+    /// `source.<package>.<source_name>.<name>`,
+    /// `exposure.<package>.<name>`).
     pub id: String,
-    /// Bare model name (the last dotted segment) — the rendered label.
+    /// Rendered label: the bare name (last dotted segment) for
+    /// `nodes`-map types and exposures; `source_name.table` for sources
+    /// (the two `source(...)` arguments — a bare table name could
+    /// collide with a model name in search).
     pub name: String,
+    /// The render-layer node type (cute-dbt#253).
+    pub node_type: LineageNodeType,
     /// `true` when the manifest carries `compiled_code: null` for this
     /// model (`dbt parse`) — rendered as a "not compiled" node, never
     /// raised (the cute-dbt#100 fail-open contract).
@@ -144,51 +210,112 @@ fn unit_test_counts(current: &Manifest) -> HashMap<NodeId, usize> {
     counts
 }
 
-/// The full-manifest model lineage: nodes in deterministic node-id
+/// The full-manifest lineage: typed nodes in deterministic full-id
 /// order, edges as `(from_index, to_index)` pairs pointing **upstream →
-/// downstream** (a model depends on its `from`).
+/// downstream** (a node depends on its `from`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lineage {
-    /// Every `model` node, ordered by node id.
+    /// Every lineage node (models + snapshots + seeds + sources +
+    /// exposures since cute-dbt#253), ordered by full node id.
     pub nodes: Vec<LineageNode>,
-    /// Dependency edges between models in `nodes` (indices), ordered.
+    /// Dependency edges between entries of `nodes` (indices), ordered.
     pub edges: Vec<(usize, usize)>,
 }
 
-/// Build the model-lineage graph for the explore scope.
+/// The rendered label for one typed lineage node (cute-dbt#253):
+/// `source_name.table` for sources, the entry's own `name` for
+/// exposures, the id's leaf segment otherwise.
+fn lineage_node_name(current: &Manifest, id: &NodeId, node_type: LineageNodeType) -> String {
+    match node_type {
+        LineageNodeType::Source => current.sources().get(id).map_or_else(
+            || leaf_segment(id.as_str()).to_owned(),
+            |s| format!("{}.{}", s.source_name(), s.name()),
+        ),
+        LineageNodeType::Exposure => current.exposures().get(id).map_or_else(
+            || leaf_segment(id.as_str()).to_owned(),
+            |e| e.name().to_owned(),
+        ),
+        _ => leaf_segment(id.as_str()).to_owned(),
+    }
+}
+
+/// Build the lineage graph for the explore scope.
 ///
-/// Nodes are exactly the `models` set (the
-/// [`all_models`](crate::domain::all_models) seam), in its deterministic
-/// `BTreeSet` order. Edges come from each model's `depends_on.nodes`,
-/// filtered to ids inside the same set — sources, seeds, macros and
-/// cross-project refs outside the model set are silently skipped (they
-/// are not model-lineage edges in v0.x). Self-edges are skipped
-/// defensively (a manifest should never carry one).
+/// Nodes are the `models` set (the
+/// [`all_models`](crate::domain::all_models) seam) **unioned with**
+/// (cute-dbt#253) every `snapshot`/`seed` node in the manifest's
+/// `nodes` map, every `sources`-map entry and every `exposures`-map
+/// entry — the typed-node fix for the severed `stg → snapshot →
+/// downstream` chain (a filtered-out snapshot split the graph and faked
+/// the downstream model as a root; absent seeds/sources faked further
+/// roots). The union iterates in deterministic full-id order
+/// (`BTreeMap`).
+///
+/// Edges come from each `nodes`-map entry's `depends_on.nodes` and each
+/// exposure's `depends_on.nodes`, filtered to ids inside the union —
+/// macros, cross-project refs and other resource types (`test`,
+/// `operation`, `analysis`, `function` — the remaining fusion `DbtNode`
+/// serde tags @ `9977b6cb…`) are silently skipped. Sources contribute
+/// no outgoing dependencies (roots by construction). Self-edges are
+/// skipped defensively (a manifest should never carry one).
 #[must_use]
 pub fn build_lineage(current: &Manifest, models: &ModelInScopeSet) -> Lineage {
+    // The typed union, ordered by full node id.
+    let mut typed: BTreeMap<&NodeId, LineageNodeType> = models
+        .iter()
+        .map(|id| (id, LineageNodeType::Model))
+        .collect();
+    for (id, node) in current.nodes() {
+        let node_type = match node.resource_type() {
+            "snapshot" => LineageNodeType::Snapshot,
+            "seed" => LineageNodeType::Seed,
+            _ => continue,
+        };
+        typed.entry(id).or_insert(node_type);
+    }
+    for id in current.sources().keys() {
+        typed.entry(id).or_insert(LineageNodeType::Source);
+    }
+    for id in current.exposures().keys() {
+        typed.entry(id).or_insert(LineageNodeType::Exposure);
+    }
+
     let index_of: HashMap<&NodeId, usize> =
-        models.iter().enumerate().map(|(i, id)| (id, i)).collect();
+        typed.keys().enumerate().map(|(i, id)| (*id, i)).collect();
     let data_tests = data_test_counts(current);
     let unit_tests = unit_test_counts(current);
-    let nodes: Vec<LineageNode> = models
+    let nodes: Vec<LineageNode> = typed
         .iter()
-        .map(|id| {
+        .map(|(id, &node_type)| {
             let node = current.node(id);
             LineageNode {
                 id: id.as_str().to_owned(),
-                name: leaf_segment(id.as_str()).to_owned(),
-                not_compiled: node.is_none_or(|n| n.compiled_code().is_none()),
-                data_tests: data_tests.get(id).copied().unwrap_or(0),
-                unit_tests: unit_tests.get(id).copied().unwrap_or(0),
+                name: lineage_node_name(current, id, node_type),
+                node_type,
+                // SQL-bearing types only — see [`LineageNodePayload::not_compiled`].
+                not_compiled: matches!(
+                    node_type,
+                    LineageNodeType::Model | LineageNodeType::Snapshot
+                ) && node.is_none_or(|n| n.compiled_code().is_none()),
+                data_tests: data_tests.get(*id).copied().unwrap_or(0),
+                unit_tests: unit_tests.get(*id).copied().unwrap_or(0),
             }
         })
         .collect();
+
     let mut edges: Vec<(usize, usize)> = Vec::new();
-    for (to_idx, id) in models.iter().enumerate() {
-        let Some(node) = current.node(id) else {
-            continue;
+    for (to_idx, (id, node_type)) in typed.iter().enumerate() {
+        let deps: &[NodeId] = match node_type {
+            LineageNodeType::Model | LineageNodeType::Snapshot | LineageNodeType::Seed => {
+                current.node(id).map_or(&[], |n| n.depends_on().nodes())
+            }
+            LineageNodeType::Exposure => current
+                .exposures()
+                .get(*id)
+                .map_or(&[], |e| e.depends_on().nodes()),
+            LineageNodeType::Source => &[],
         };
-        for dep in node.depends_on().nodes() {
+        for dep in deps {
             if let Some(&from_idx) = index_of.get(dep)
                 && from_idx != to_idx
             {
@@ -209,11 +336,24 @@ pub struct LineageNodePayload {
     /// element id and the value the Space focus commit writes to
     /// `document.body.dataset.selectedModel`.
     pub id: String,
-    /// Bare model name — the canvas-text label and the fuzzy-search
-    /// candidate.
+    /// Rendered label — the canvas-text label and the fuzzy-search
+    /// candidate (`source_name.table` for sources, the bare name
+    /// otherwise).
     pub name: String,
+    /// The render-layer node type (cute-dbt#253) — the engine's
+    /// `node[type = "…"]` style/shape hook and the legend vocabulary.
+    /// Always serialized (the explicit posture; `"model"` included).
+    pub node_type: LineageNodeType,
     /// The fail-open "not compiled" flag (cute-dbt#100) — rendered as a
-    /// dashed node, never raised.
+    /// dashed node, never raised. Honest per type (cute-dbt#253):
+    /// consulted only for SQL-bearing types (`model`, `snapshot` — both
+    /// engines backfill snapshot `compiled_code` on compile; fusion
+    /// null-fills it at parse, `dbt-tasks-sa/src/utils.rs:151-172` vs
+    /// `dbt-schemas/src/schemas/manifest/manifest_nodes.rs:616-617` @
+    /// `9977b6cb…`). Seeds are NEVER flagged: fusion null-fills seed
+    /// `compiled_code` unconditionally (`manifest_nodes.rs:232-233`) —
+    /// a seed has no SQL to compile, so the flag would be noise, not
+    /// honesty. Sources/exposures have no code at all.
     pub not_compiled: bool,
     /// YAML data-tests attached to this model (cute-dbt#103). Always
     /// serialized — the 0/0 badge is explicit, never an omitted key.
@@ -527,6 +667,29 @@ fn node_paths(node: Option<&Node>, unit_tests: Vec<UnitTestPathsPayload>) -> Nod
     }
 }
 
+/// Assemble the detail facts for a `sources`-map node (cute-dbt#253):
+/// the authored column descriptions are the only detail the ingested
+/// [`SourceNode`] carries (cute-dbt#235); every other fact stays the
+/// explicit default (the [`ModelDetailPayload`] absent shapes — `null`
+/// / `[]` / the explicit-unknown grain).
+fn source_detail(source: Option<&SourceNode>) -> ModelDetailPayload {
+    let Some(source) = source else {
+        return ModelDetailPayload::default();
+    };
+    ModelDetailPayload {
+        columns: source
+            .column_descriptions()
+            .iter()
+            .map(|(name, description)| ColumnDetailPayload {
+                name: name.clone(),
+                data_type: None,
+                description: Some(description.clone()),
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
 /// One dependency edge in the serialized lineage payload, by node id.
 ///
 /// Edges are **forward only** — upstream (`from`) → downstream (`to`),
@@ -542,14 +705,15 @@ pub struct LineageEdgePayload {
 }
 
 /// The `explore-dag-data` JSON carrier embedded in `dag.html` —
-/// nodes = models, edges = forward dependency edges. An empty `nodes`
-/// array selects the page's empty-state message instead of a Cytoscape
-/// render.
+/// nodes = the typed union (models + snapshots + seeds + sources +
+/// exposures, cute-dbt#253), edges = forward dependency edges. An empty
+/// `nodes` array selects the page's empty-state message instead of a
+/// Cytoscape render.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct LineagePayload {
-    /// Every model node, in deterministic node-id order.
+    /// Every typed lineage node, in deterministic full-id order.
     pub nodes: Vec<LineageNodePayload>,
-    /// Forward dependency edges between models in `nodes`, ordered.
+    /// Forward dependency edges between entries of `nodes`, ordered.
     pub edges: Vec<LineageEdgePayload>,
     /// Per-model CTE DAGs (cute-dbt#102) — the CTE ⇄ model view
     /// toggle's data, keyed by full model node id. Each entry is the
@@ -564,10 +728,11 @@ pub struct LineagePayload {
 
 /// Build the serializable lineage payload for `dag.html` (cute-dbt#101).
 ///
-/// Composes [`build_lineage`] (nodes = the model set, edges =
-/// `depends_on.nodes` filtered to models, **forward only**) into the
-/// id-keyed POD the Cytoscape engine consumes. Pure assembly over owned
-/// manifest data — no I/O.
+/// Composes [`build_lineage`] (nodes = the typed union of the model set
+/// with the manifest's snapshots / seeds / sources / exposures since
+/// cute-dbt#253; edges = `depends_on.nodes` filtered to the union,
+/// **forward only**) into the id-keyed POD the Cytoscape engine
+/// consumes. Pure assembly over owned manifest data — no I/O.
 ///
 /// `changed` is the optional PR-diff **change context** (cute-dbt#106):
 /// `Some(set)` marks each member node `changed: true` (the set comes
@@ -590,24 +755,47 @@ pub fn build_lineage_payload(
             to: lineage.nodes[to].id.clone(),
         })
         .collect();
-    // `lineage.nodes` mirrors `models` one-to-one and in the same order
-    // (build_lineage maps the same set), so the zip rebinds each node to
-    // its manifest entry for the cute-dbt#104 detail assembly.
     let mut test_paths = unit_test_paths_by_model(current);
     let nodes = lineage
         .nodes
         .into_iter()
-        .zip(models.iter())
-        .map(|(n, id)| LineageNodePayload {
-            id: n.id,
-            name: n.name,
-            not_compiled: n.not_compiled,
-            data_tests: n.data_tests,
-            unit_tests: n.unit_tests,
-            badge: test_badge(n.data_tests, n.unit_tests),
-            detail: model_detail(current, current.node(id)),
-            paths: node_paths(current.node(id), test_paths.remove(id).unwrap_or_default()),
-            changed: changed.is_some_and(|set| set.contains(id)),
+        .map(|n| {
+            // Each lineage node carries its full manifest id — rebind it
+            // for the per-type detail/paths assembly (the pre-#253 zip
+            // against `models` no longer holds over the typed union).
+            let id = NodeId::new(n.id.as_str());
+            let (detail, paths) = match n.node_type {
+                // `nodes`-map types share the model detail assembly —
+                // snapshots/seeds carry the same authored description /
+                // config / columns surfaces (fusion's shared
+                // `ManifestNodeBaseAttributes` @ `9977b6cb…`).
+                LineageNodeType::Model | LineageNodeType::Snapshot | LineageNodeType::Seed => (
+                    model_detail(current, current.node(&id)),
+                    node_paths(
+                        current.node(&id),
+                        test_paths.remove(&id).unwrap_or_default(),
+                    ),
+                ),
+                LineageNodeType::Source => (
+                    source_detail(current.sources().get(&id)),
+                    NodePathsPayload::default(),
+                ),
+                LineageNodeType::Exposure => {
+                    (ModelDetailPayload::default(), NodePathsPayload::default())
+                }
+            };
+            LineageNodePayload {
+                badge: typed_badge(n.node_type, n.data_tests, n.unit_tests),
+                changed: changed.is_some_and(|set| set.contains(&id)),
+                id: n.id,
+                name: n.name,
+                node_type: n.node_type,
+                not_compiled: n.not_compiled,
+                data_tests: n.data_tests,
+                unit_tests: n.unit_tests,
+                detail,
+                paths,
+            }
         })
         .collect();
     LineagePayload {
@@ -702,6 +890,26 @@ fn test_badge(data_tests: usize, unit_tests: usize) -> String {
     )
 }
 
+/// The type-aware badge line (cute-dbt#253). Models keep the explicit
+/// 0/0 [`test_badge`] (the cute-dbt#103 posture). Snapshots / seeds /
+/// sources badge their data-test count only when non-zero — dbt unit
+/// tests cannot target them, so an explicit `"0 unit-tests"` would be
+/// structural noise, not honesty, and an all-zero line carries no fact.
+/// Exposures are untestable and never badge (single-line label).
+fn typed_badge(node_type: LineageNodeType, data_tests: usize, unit_tests: usize) -> String {
+    match node_type {
+        LineageNodeType::Model => test_badge(data_tests, unit_tests),
+        LineageNodeType::Snapshot | LineageNodeType::Seed | LineageNodeType::Source => {
+            if data_tests > 0 {
+                plural(data_tests, "data-test")
+            } else {
+                String::new()
+            }
+        }
+        LineageNodeType::Exposure => String::new(),
+    }
+}
+
 /// askama binding for `templates/explore-dag.html`.
 #[derive(Template)]
 #[template(path = "explore-dag.html", escape = "html")]
@@ -721,7 +929,15 @@ struct ExploreDagTemplate<'a> {
     /// Pre-escaped JSON for the `explore-dag-data` carrier (the
     /// [`LineagePayload`]).
     dag_json: &'a str,
+    /// `model`-typed lineage nodes only (cute-dbt#253 — the header's
+    /// typed counts; pre-#253 this was every node).
     model_count: usize,
+    /// Typed-node counts (cute-dbt#253) — each gates its header segment
+    /// and its legend chip (rendered only when present).
+    snapshot_count: usize,
+    seed_count: usize,
+    source_count: usize,
+    exposure_count: usize,
     edge_count: usize,
     not_compiled_count: usize,
     /// The external-drive contract version (cute-dbt#105) — rendered as
@@ -868,6 +1084,14 @@ pub fn render_explore(
     // The marked-node count (what actually renders), not `changed.len()`
     // — a defensive id outside the model set must not inflate the banner.
     let changed_count = lineage.nodes.iter().filter(|n| n.changed).count();
+    // cute-dbt#253 — typed counts for the header + the legend gating.
+    let count_of = |node_type: LineageNodeType| {
+        lineage
+            .nodes
+            .iter()
+            .filter(|n| n.node_type == node_type)
+            .count()
+    };
     let dag_json = json_for_html_script(&lineage)
         .map_err(|err| io::Error::other(format!("dag payload serialization: {err}")))?;
     let dag_html = ExploreDagTemplate {
@@ -879,7 +1103,11 @@ pub fn render_explore(
         explore_cte_js: EXPLORE_CTE_JS,
         favicon_data_uri: FAVICON_DATA_URI,
         dag_json: &dag_json,
-        model_count: lineage.nodes.len(),
+        model_count: count_of(LineageNodeType::Model),
+        snapshot_count: count_of(LineageNodeType::Snapshot),
+        seed_count: count_of(LineageNodeType::Seed),
+        source_count: count_of(LineageNodeType::Source),
+        exposure_count: count_of(LineageNodeType::Exposure),
         edge_count: lineage.edges.len(),
         not_compiled_count,
         contract_version: EXPLORE_CONTRACT_VERSION,
@@ -1027,6 +1255,387 @@ mod tests {
         // stg_orders(2) -> dim_orders(0); dim_orders(0) -> mart_orders(1).
         // The source.shop.raw.orders dependency is NOT a lineage edge.
         assert_eq!(lineage.edges, vec![(0, 1), (2, 0)]);
+    }
+
+    // ----- typed lineage nodes (cute-dbt#253) -------------------------
+
+    /// A `nodes`-map entry of an arbitrary resource type with explicit
+    /// dependency edges — the snapshot/seed builder.
+    fn typed_node(id: &str, resource_type: &str, compiled: Option<&str>, deps: &[&str]) -> Node {
+        Node::new(
+            NodeId::new(id),
+            resource_type,
+            Checksum::new("sha256", "ck"),
+            compiled.map(str::to_owned),
+            None,
+            DependsOn::new(Vec::new(), deps.iter().map(|d| NodeId::new(*d)).collect()),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    /// A `sources`-map entry.
+    fn source_entry(id: &str, source_name: &str, table: &str) -> crate::domain::SourceNode {
+        crate::domain::SourceNode::new(
+            NodeId::new(id),
+            source_name,
+            table,
+            None,
+            "main",
+            None,
+            None,
+        )
+    }
+
+    /// An `exposures`-map entry depending on `deps`.
+    fn exposure_entry(id: &str, name: &str, deps: &[&str]) -> crate::domain::Exposure {
+        crate::domain::Exposure::new(
+            NodeId::new(id),
+            name,
+            Some("dashboard".to_owned()),
+            None,
+            None,
+            DependsOn::new(Vec::new(), deps.iter().map(|d| NodeId::new(*d)).collect()),
+        )
+    }
+
+    /// source → stg → snapshot → dim → exposure, plus seed → stg — every
+    /// cute-dbt#253 node type in one connected manifest.
+    fn typed_manifest() -> Manifest {
+        manifest_of(vec![
+            model(
+                "model.shop.stg_patients",
+                Some("select 1"),
+                &["source.shop.raw.patients", "seed.shop.raw_codes"],
+            ),
+            typed_node(
+                "snapshot.shop.snp_patients",
+                "snapshot",
+                Some("select 1"),
+                &["model.shop.stg_patients"],
+            ),
+            typed_node("seed.shop.raw_codes", "seed", None, &[]),
+            model(
+                "model.shop.dim_patients",
+                Some("select 1"),
+                &["snapshot.shop.snp_patients"],
+            ),
+        ])
+        .with_sources(
+            [(
+                NodeId::new("source.shop.raw.patients"),
+                source_entry("source.shop.raw.patients", "raw", "patients"),
+            )]
+            .into_iter()
+            .collect(),
+        )
+        .with_exposures(
+            [(
+                NodeId::new("exposure.shop.patient_dashboard"),
+                exposure_entry(
+                    "exposure.shop.patient_dashboard",
+                    "patient_dashboard",
+                    &["model.shop.dim_patients"],
+                ),
+            )]
+            .into_iter()
+            .collect(),
+        )
+    }
+
+    /// Edge lookup by node name — index-based assertions are brittle
+    /// across the typed union's id ordering.
+    fn edge_names(lineage: &Lineage) -> Vec<(String, String)> {
+        lineage
+            .edges
+            .iter()
+            .map(|&(from, to)| {
+                (
+                    lineage.nodes[from].name.clone(),
+                    lineage.nodes[to].name.clone(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lineage_renders_a_snapshot_as_a_typed_mid_chain_node() {
+        // The cute-dbt#253 defect: stg → snapshot → dim must stay ONE
+        // connected chain — the snapshot is a typed node, never filtered
+        // (which severed the graph and faked dim as a root).
+        let current = typed_manifest();
+        let lineage = build_lineage(&current, &all_models(&current));
+        let snp = lineage
+            .nodes
+            .iter()
+            .find(|n| n.id == "snapshot.shop.snp_patients")
+            .expect("the snapshot is a lineage node");
+        assert_eq!(snp.node_type, LineageNodeType::Snapshot);
+        let edges = edge_names(&lineage);
+        assert!(
+            edges.contains(&("stg_patients".to_owned(), "snp_patients".to_owned())),
+            "upstream chain into the snapshot survives: {edges:?}",
+        );
+        assert!(
+            edges.contains(&("snp_patients".to_owned(), "dim_patients".to_owned())),
+            "downstream chain out of the snapshot survives (dim is NOT a false root): {edges:?}",
+        );
+    }
+
+    #[test]
+    fn lineage_renders_seeds_and_sources_as_typed_roots() {
+        let current = typed_manifest();
+        let lineage = build_lineage(&current, &all_models(&current));
+        let by_id: StdHashMap<&str, &LineageNode> =
+            lineage.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+        assert_eq!(
+            by_id["seed.shop.raw_codes"].node_type,
+            LineageNodeType::Seed
+        );
+        assert_eq!(
+            by_id["source.shop.raw.patients"].node_type,
+            LineageNodeType::Source
+        );
+        let edges = edge_names(&lineage);
+        assert!(
+            edges.contains(&("raw_codes".to_owned(), "stg_patients".to_owned())),
+            "seed feeds the staging model: {edges:?}",
+        );
+        assert!(
+            edges.contains(&("raw.patients".to_owned(), "stg_patients".to_owned())),
+            "source feeds the staging model (stg is NOT a false root): {edges:?}",
+        );
+        // Roots: nothing flows INTO a seed or a source.
+        for root in ["raw_codes", "raw.patients"] {
+            assert!(
+                !edges.iter().any(|(_, to)| to == root),
+                "{root} must have no incoming edge: {edges:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn lineage_renders_exposures_as_typed_sinks() {
+        let current = typed_manifest();
+        let lineage = build_lineage(&current, &all_models(&current));
+        let exposure = lineage
+            .nodes
+            .iter()
+            .find(|n| n.id == "exposure.shop.patient_dashboard")
+            .expect("the exposure is a lineage node");
+        assert_eq!(exposure.node_type, LineageNodeType::Exposure);
+        let edges = edge_names(&lineage);
+        assert!(
+            edges.contains(&("dim_patients".to_owned(), "patient_dashboard".to_owned())),
+            "the exposure terminates the lineage: {edges:?}",
+        );
+        assert!(
+            !edges.iter().any(|(from, _)| from == "patient_dashboard"),
+            "an exposure is a sink — no outgoing edge: {edges:?}",
+        );
+    }
+
+    #[test]
+    fn lineage_source_labels_carry_the_source_name_prefix() {
+        let current = typed_manifest();
+        let lineage = build_lineage(&current, &all_models(&current));
+        let source = lineage
+            .nodes
+            .iter()
+            .find(|n| n.node_type == LineageNodeType::Source)
+            .expect("source node present");
+        assert_eq!(
+            source.name, "raw.patients",
+            "source labels are source_name.table — the two source(...) arguments",
+        );
+    }
+
+    #[test]
+    fn seeds_are_never_flagged_not_compiled() {
+        // fusion null-fills seed compiled_code UNCONDITIONALLY
+        // (manifest_nodes.rs:232-233 @ 9977b6cb…) — a seed has no SQL,
+        // so the dbt-parse "not compiled" treatment would be dishonest.
+        let current = typed_manifest();
+        let lineage = build_lineage(&current, &all_models(&current));
+        let seed = lineage
+            .nodes
+            .iter()
+            .find(|n| n.node_type == LineageNodeType::Seed)
+            .expect("seed node present");
+        assert!(!seed.not_compiled, "seeds never render dbt-parse-dashed");
+        let source = lineage
+            .nodes
+            .iter()
+            .find(|n| n.node_type == LineageNodeType::Source)
+            .expect("source node present");
+        assert!(!source.not_compiled, "sources carry no code at all");
+    }
+
+    #[test]
+    fn snapshot_not_compiled_mirrors_compiled_code_presence() {
+        // fusion null-fills snapshot compiled_code at parse
+        // (manifest_nodes.rs:616-617 @ 9977b6cb…) and backfills it on
+        // compile (dbt-tasks-sa/src/utils.rs:151-172) — the flag is the
+        // honest dbt-parse signal for snapshots, exactly like models.
+        let current = manifest_of(vec![
+            typed_node("snapshot.shop.compiled", "snapshot", Some("select 1"), &[]),
+            typed_node("snapshot.shop.parse_only", "snapshot", None, &[]),
+        ]);
+        let lineage = build_lineage(&current, &all_models(&current));
+        let by_id: StdHashMap<&str, bool> = lineage
+            .nodes
+            .iter()
+            .map(|n| (n.id.as_str(), n.not_compiled))
+            .collect();
+        assert!(!by_id["snapshot.shop.compiled"]);
+        assert!(by_id["snapshot.shop.parse_only"]);
+    }
+
+    #[test]
+    fn typed_nodes_order_deterministically_by_full_id() {
+        let current = typed_manifest();
+        let lineage = build_lineage(&current, &all_models(&current));
+        let ids: Vec<&str> = lineage.nodes.iter().map(|n| n.id.as_str()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted, "typed union iterates in full-id order");
+        assert_eq!(lineage.nodes.len(), 6, "all five types render");
+    }
+
+    #[test]
+    fn non_model_badges_show_data_tests_only_and_only_when_present() {
+        // Models keep the explicit 0/0 badge (the cute-dbt#103 posture).
+        // The new types show their data-test count only when non-zero
+        // (unit tests cannot target them — an explicit "0 unit-tests"
+        // there would be structural noise, not honesty); exposures are
+        // untestable and never badge.
+        let mut current = typed_manifest();
+        // Attach one data test to the snapshot and one to the source
+        // (the `attached_node` linkage names non-model parents here —
+        // pre-#253 those entries were inert; now they badge).
+        let t1 = data_test(
+            "test.shop.snp_check",
+            Some("snapshot.shop.snp_patients"),
+            &[],
+            None,
+        );
+        let t2 = data_test(
+            "test.shop.src_check",
+            Some("source.shop.raw.patients"),
+            &[],
+            None,
+        );
+        let mut nodes = current.nodes().clone();
+        nodes.insert(t1.id().clone(), t1);
+        nodes.insert(t2.id().clone(), t2);
+        current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            StdHashMap::new(),
+            StdHashMap::new(),
+        )
+        .with_sources(current.sources().clone())
+        .with_exposures(current.exposures().clone());
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
+        let badge_of = |id: &str| -> &str {
+            payload
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .map_or_else(|| panic!("{id} missing from payload"), |n| n.badge.as_str())
+        };
+        assert_eq!(
+            badge_of("model.shop.dim_patients"),
+            "0 data-tests \u{b7} 0 unit-tests",
+            "models keep the explicit 0/0 badge",
+        );
+        assert_eq!(badge_of("snapshot.shop.snp_patients"), "1 data-test");
+        assert_eq!(badge_of("source.shop.raw.patients"), "1 data-test");
+        assert_eq!(
+            badge_of("seed.shop.raw_codes"),
+            "",
+            "untested seed: no badge line"
+        );
+        assert_eq!(badge_of("exposure.shop.patient_dashboard"), "");
+    }
+
+    #[test]
+    fn payload_serializes_node_type_wire_keys() {
+        let current = typed_manifest();
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
+        let json: serde_json::Value = serde_json::to_value(&payload).expect("payload serializes");
+        let type_of = |id: &str| -> String {
+            json["nodes"]
+                .as_array()
+                .expect("nodes array")
+                .iter()
+                .find(|n| n["id"] == id)
+                .unwrap_or_else(|| panic!("{id} missing"))["node_type"]
+                .as_str()
+                .expect("node_type is a string")
+                .to_owned()
+        };
+        assert_eq!(type_of("model.shop.stg_patients"), "model");
+        assert_eq!(type_of("snapshot.shop.snp_patients"), "snapshot");
+        assert_eq!(type_of("seed.shop.raw_codes"), "seed");
+        assert_eq!(type_of("source.shop.raw.patients"), "source");
+        assert_eq!(type_of("exposure.shop.patient_dashboard"), "exposure");
+    }
+
+    #[test]
+    fn source_payload_detail_carries_column_descriptions_and_empty_paths() {
+        let mut sources = StdHashMap::new();
+        sources.insert(
+            NodeId::new("source.shop.raw.patients"),
+            source_entry("source.shop.raw.patients", "raw", "patients").with_column_descriptions(
+                [("patient_id".to_owned(), "natural key".to_owned())]
+                    .into_iter()
+                    .collect(),
+            ),
+        );
+        let current = manifest_of(vec![model(
+            "model.shop.stg_patients",
+            Some("select 1"),
+            &["source.shop.raw.patients"],
+        )])
+        .with_sources(sources);
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
+        let source = payload
+            .nodes
+            .iter()
+            .find(|n| n.id == "source.shop.raw.patients")
+            .expect("source node present");
+        assert_eq!(source.detail.columns.len(), 1);
+        assert_eq!(source.detail.columns[0].name, "patient_id");
+        assert_eq!(
+            source.detail.columns[0].description.as_deref(),
+            Some("natural key"),
+        );
+        assert_eq!(source.paths, NodePathsPayload::default());
+    }
+
+    #[test]
+    fn every_lineage_node_type_is_styled_and_legended() {
+        // The node-vocab completeness guard (cute-dbt#253) — the
+        // edge-vocab-completeness twin, test-level: every wire key must
+        // have a Cytoscape style selector in the lineage engine AND a
+        // legend chip in the dag template. The exhaustive
+        // `wire_key` match is the compile-time half.
+        let engine = include_str!("../../templates/explore-lineage.js");
+        let template = include_str!("../../templates/explore-dag.html");
+        for node_type in LineageNodeType::ALL {
+            let key = node_type.wire_key();
+            assert!(
+                engine.contains(&format!("node[type = \"{key}\"]")),
+                "templates/explore-lineage.js must style node[type = \"{key}\"]",
+            );
+            assert!(
+                template.contains(&format!("legend-chip type-{key}")),
+                "templates/explore-dag.html must legend the {key} chip",
+            );
+        }
     }
 
     #[test]

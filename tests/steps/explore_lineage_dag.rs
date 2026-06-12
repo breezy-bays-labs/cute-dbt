@@ -12,11 +12,70 @@
 //! only the runtime Space commit writes it, which the headless suite
 //! drives with a real keyboard).
 
-use cucumber::then;
+use cucumber::{given, then};
 use serde_json::Value;
 
 use super::World;
 use super::explore_full_manifest::{lineage_payload, payload_node};
+
+// --- typed-node Givens (cute-dbt#253) -------------------------------------
+// Declarations accumulate on the ExplorePlan; the shared explore `When`
+// splices them into the serialized wire manifest in the REAL engine
+// shapes (snapshot/seed `nodes`-map entries, `sources`/`exposures`
+// top-level maps) — the subprocess wire-round-trip discipline.
+
+#[given(regex = r#"^the explore manifest declares the snapshot "([^"]+)" built from "([^"]+)"$"#)]
+fn declares_snapshot(world: &mut World, bare: String, upstream: String) {
+    world.explore_plan.snapshots.push((bare, vec![upstream]));
+}
+
+#[given(regex = r#"^the explore manifest declares the seed "([^"]+)"$"#)]
+fn declares_seed(world: &mut World, bare: String) {
+    world.explore_plan.seeds.push(bare);
+}
+
+#[given(regex = r#"^the explore manifest declares the source "([^"]+)" table "([^"]+)"$"#)]
+fn declares_source(world: &mut World, source_name: String, table: String) {
+    world.explore_plan.sources.push((source_name, table));
+}
+
+#[given(regex = r#"^the explore manifest declares the exposure "([^"]+)" on "([^"]+)"$"#)]
+fn declares_exposure(world: &mut World, name: String, target: String) {
+    world.explore_plan.exposures.push((name, vec![target]));
+}
+
+#[given(regex = r#"^the explore model "([^"]+)" depends on the snapshot "([^"]+)"$"#)]
+fn model_depends_on_snapshot(world: &mut World, bare: String, snapshot: String) {
+    model_raw_dep(world, &bare, format!("snapshot.jaffle_shop.{snapshot}"));
+}
+
+#[given(regex = r#"^the explore model "([^"]+)" depends on the seed "([^"]+)"$"#)]
+fn model_depends_on_seed(world: &mut World, bare: String, seed: String) {
+    model_raw_dep(world, &bare, format!("seed.jaffle_shop.{seed}"));
+}
+
+#[given(regex = r#"^the explore model "([^"]+)" depends on the source "([^"]+)" table "([^"]+)"$"#)]
+fn model_depends_on_source(world: &mut World, bare: String, source_name: String, table: String) {
+    model_raw_dep(
+        world,
+        &bare,
+        format!("source.jaffle_shop.{source_name}.{table}"),
+    );
+}
+
+/// Push a FULL-id dependency onto a declared model (the non-model
+/// `raw_deps` channel — bare `deps` map through the model-only
+/// `model_id`).
+fn model_raw_dep(world: &mut World, bare: &str, dep_id: String) {
+    world
+        .explore_plan
+        .models
+        .iter_mut()
+        .find(|m| m.bare == bare)
+        .unwrap_or_else(|| panic!("model {bare:?} must be declared before it is configured"))
+        .raw_deps
+        .push(dep_id);
+}
 
 /// The rendered dag.html, panicking with stderr context when absent.
 fn dag_html(world: &World) -> String {
@@ -170,6 +229,19 @@ fn dag_no_selected_model_at_render(world: &mut World) {
         body.attributes().get("data-selected-model").is_none(),
         "data-selected-model is the RUNTIME focus-commit signal (Space \
          only) — the renderer must never bake it into the page",
+    );
+}
+
+// --- typed nodes (cute-dbt#253) --------------------------------------------
+
+#[then(regex = r#"^the lineage payload types "([^"]+)" as "([^"]+)"$"#)]
+fn payload_types_node(world: &mut World, name: String, node_type: String) {
+    let payload = lineage_payload(world);
+    let node = payload_node(&payload, &name);
+    assert_eq!(
+        node["node_type"],
+        Value::String(node_type.clone()),
+        "{name:?} must carry node_type {node_type:?}: {payload}",
     );
 }
 

@@ -249,6 +249,25 @@ pub struct ExplorePlan {
     /// the wire shape — `rows: null` + `fixture`, the confirmed fusion
     /// external-fixture shape).
     pub path_tests: Vec<ExplorePathTestDecl>,
+    /// Declared snapshot nodes (cute-dbt#253 — the typed-lineage
+    /// scenarios): `(bare name, upstream bare model names)`. Spliced
+    /// into the serialized manifest's `nodes` map in the REAL wire
+    /// shape (`resource_type: "snapshot"`, `depends_on.nodes`,
+    /// `compiled_code` present — fusion's compile-backfill shape,
+    /// `dbt-tasks-sa/src/utils.rs:151-172` @ `9977b6cb…`).
+    pub snapshots: Vec<(String, Vec<String>)>,
+    /// Declared seed nodes (cute-dbt#253): bare names. Spliced in the
+    /// REAL fusion wire shape — `resource_type: "seed"`,
+    /// `compiled_code: null` (fusion null-fills it unconditionally,
+    /// `manifest_nodes.rs:232-233` @ `9977b6cb…`) and `depends_on`
+    /// WITHOUT a `nodes` key (seeds have no dependencies).
+    pub seeds: Vec<String>,
+    /// Declared `sources`-map entries (cute-dbt#253):
+    /// `(source_name, table)` — the two `source(...)` arguments.
+    pub sources: Vec<(String, String)>,
+    /// Declared `exposures`-map entries (cute-dbt#253):
+    /// `(name, depended-on bare model names)`.
+    pub exposures: Vec<(String, Vec<String>)>,
 }
 
 /// One path-bearing unit test in an [`ExplorePlan`] (cute-dbt#105).
@@ -314,6 +333,11 @@ pub struct ExploreModelDecl {
     pub compiled_sql: Option<String>,
     /// Bare names of models this model depends on (lineage edges).
     pub deps: Vec<String>,
+    /// FULL node ids of non-model dependencies (cute-dbt#253 —
+    /// `snapshot.…` / `seed.…` / `source.…`). Spliced as a wire
+    /// `depends_on` patch by the explore `When` (the bare `deps` map
+    /// through `model_id`, which is model-only).
+    pub raw_deps: Vec<String>,
     /// Bare names of unit tests targeting this model.
     pub tests: Vec<String>,
     /// Authored model description (cute-dbt#104) — rides the domain

@@ -148,12 +148,17 @@
   var MAX_TEXT_WIDTH = 274;
   var measureCtx = document.createElement("canvas").getContext("2d");
   measureCtx.font = "13px " + FONT_STACK;
-  function nodeWidth(name, badge) {
+  // cute-dbt#253 — per-type horizontal padding: non-rectangular shapes
+  // (ellipse / barrel / round-tag) inscribe less text than a rectangle,
+  // so their labels need wider boxes to stay un-clipped.
+  var TYPE_PAD = { model: 26, snapshot: 34, seed: 44, source: 44, exposure: 44 };
+  function nodeWidth(name, badge, type) {
     var widest = Math.max(
       measureCtx.measureText(name).width,
       measureCtx.measureText(badge).width
     );
-    return Math.min(300, Math.ceil(widest) + 26);
+    var pad = TYPE_PAD[type] || 26;
+    return Math.min(300, Math.ceil(widest) + pad);
   }
   // Manual single-line ellipsis (the label is two lines under
   // `text-wrap: wrap` for the cute-dbt#103 badge, so Cytoscape's
@@ -178,6 +183,10 @@
     // are manifest test-count facts, not check-engine output.
     var name = ellipsize(String(n.name || n.id));
     var badge = String(n.badge || "");
+    // cute-dbt#253 — the typed-node vocabulary (model / snapshot / seed
+    // / source / exposure), the style/shape hook below. Pre-#253
+    // payloads carried models only; default accordingly.
+    var type = String(n.node_type || "model");
     elements.push({
       group: "nodes",
       // The element id is the full manifest node id. It is only ever
@@ -187,7 +196,8 @@
       data: {
         id: n.id,
         label: badge ? name + "\n" + badge : name,
-        w: nodeWidth(name, badge),
+        w: nodeWidth(name, badge, type),
+        type: type,
         notCompiled: n.not_compiled ? 1 : 0,
         // cute-dbt#106 — PR-diff change context. The payload omits the
         // key entirely on a no-context render, so `n.changed` is
@@ -225,6 +235,37 @@
       "border-color": "#0072B2",
       "transition-property": "opacity",
       "transition-duration": 120
+    }},
+    // cute-dbt#253 — the typed-node vocabulary. Redundant coding (shape
+    // AND canvas-paired color) so the typing never rides color alone;
+    // the dag.html legend chips mirror these exact fills/strokes (the
+    // report's fixed-DAG-palette posture — identical in every theme).
+    // The explicit model selector restates the base style so the
+    // node-vocab completeness guard greps one selector per wire key.
+    { selector: 'node[type = "model"]', style: {
+      "shape": "round-rectangle",
+      "background-color": "#e8f1f8",
+      "border-color": "#0072B2"
+    }},
+    { selector: 'node[type = "snapshot"]', style: {
+      "shape": "cut-rectangle",
+      "background-color": "#f1ecf9",
+      "border-color": "#7b5ea7"
+    }},
+    { selector: 'node[type = "seed"]', style: {
+      "shape": "barrel",
+      "background-color": "#e6f4f2",
+      "border-color": "#00756d"
+    }},
+    { selector: 'node[type = "source"]', style: {
+      "shape": "ellipse",
+      "background-color": "#eef7ee",
+      "border-color": "#1f8a5b"
+    }},
+    { selector: 'node[type = "exposure"]', style: {
+      "shape": "round-tag",
+      "background-color": "#f4f4f5",
+      "border-color": "#6b6b76"
     }},
     { selector: "node[notCompiled = 1]", style: {
       "background-color": "#f4f4f5",
@@ -358,9 +399,17 @@
     var n = nodeById[id];
     if (!card || !n) return;
     var d = n.detail;
+    // cute-dbt#253 — type-aware facts: code-bearing nodes-map types
+    // carry files/grain; sources/exposures honestly omit what they
+    // structurally cannot have.
+    var type = String(n.node_type || "model");
+    var codeBearing = type === "model" || type === "snapshot" || type === "seed";
     while (card.firstChild) card.removeChild(card.firstChild);
 
     card.appendChild(el("h2", null, n.name || n.id));
+    if (type !== "model") {
+      card.appendChild(el("span", "detail-type type-" + type, type));
+    }
     if (n.not_compiled) {
       card.appendChild(el("span", "detail-notcompiled", "not compiled"));
     }
@@ -374,11 +423,17 @@
       : el("p", "detail-description detail-empty", "no description"));
 
     var facts = el("dl", "detail-facts", null);
-    fact(facts, "tests", document.createTextNode(n.badge || ""));
+    // The badge string is empty only on the cute-dbt#253 non-model
+    // types (models always carry the explicit 0/0 line).
+    fact(facts, "tests", n.badge
+      ? document.createTextNode(n.badge)
+      : el("span", "detail-empty", "none"));
     fact(facts, "materialized", d.materialized
       ? el("code", null, d.materialized)
       : el("span", "detail-empty", "not set"));
-    fact(facts, "grain", grainValueNode(d.grain));
+    // Grain is SQL-model semantics — sources/exposures have no grain
+    // ladder to consult, so the row is omitted, not "unknown".
+    if (codeBearing) fact(facts, "grain", grainValueNode(d.grain));
     var tagsNode = document.createElement("span");
     if (d.tags.length) {
       d.tags.forEach(function (tag) {
@@ -401,27 +456,32 @@
 
     // cute-dbt#105 — read-only per-node file paths (the external-drive
     // contract's NodePathsPayload, surfaced for humans too). All values
-    // are project-relative manifest facts; textContent only.
-    card.appendChild(el("p", "detail-section-title", "files"));
-    var pathFacts = el("dl", "detail-facts detail-paths", null);
-    fact(pathFacts, "sql", n.paths.sql
-      ? el("code", null, n.paths.sql)
-      : el("span", "detail-empty", "not in manifest"));
-    fact(pathFacts, "schema yaml", n.paths.schema_yaml
-      ? el("code", null, n.paths.schema_yaml)
-      : el("span", "detail-empty", "none"));
-    n.paths.unit_tests.forEach(function (t) {
-      var holder = document.createElement("span");
-      holder.appendChild(t.yaml
-        ? el("code", null, t.yaml)
-        : el("span", "detail-empty", "yaml not in manifest"));
-      t.fixtures.forEach(function (fixture) {
-        holder.appendChild(document.createTextNode(" "));
-        holder.appendChild(el("code", "detail-path-fixtures", fixture));
+    // are project-relative manifest facts; textContent only. Code-bearing
+    // nodes-map types only (cute-dbt#253): a source/exposure carries no
+    // per-node file paths in the payload, so an all-empty section would
+    // be noise.
+    if (codeBearing) {
+      card.appendChild(el("p", "detail-section-title", "files"));
+      var pathFacts = el("dl", "detail-facts detail-paths", null);
+      fact(pathFacts, "sql", n.paths.sql
+        ? el("code", null, n.paths.sql)
+        : el("span", "detail-empty", "not in manifest"));
+      fact(pathFacts, "schema yaml", n.paths.schema_yaml
+        ? el("code", null, n.paths.schema_yaml)
+        : el("span", "detail-empty", "none"));
+      n.paths.unit_tests.forEach(function (t) {
+        var holder = document.createElement("span");
+        holder.appendChild(t.yaml
+          ? el("code", null, t.yaml)
+          : el("span", "detail-empty", "yaml not in manifest"));
+        t.fixtures.forEach(function (fixture) {
+          holder.appendChild(document.createTextNode(" "));
+          holder.appendChild(el("code", "detail-path-fixtures", fixture));
+        });
+        fact(pathFacts, t.name, holder);
       });
-      fact(pathFacts, t.name, holder);
-    });
-    card.appendChild(pathFacts);
+      card.appendChild(pathFacts);
+    }
 
     card.appendChild(el("p", "detail-section-title", "columns"));
     if (d.columns.length) {
@@ -461,13 +521,25 @@
   function showTooltip(node) {
     var n = nodeById[node.id()];
     if (!tooltip || !n) return;
+    var type = String(n.node_type || "model");
     while (tooltip.firstChild) tooltip.removeChild(tooltip.firstChild);
     tooltip.appendChild(el("span", "tooltip-name", n.name || n.id));
-    tooltip.appendChild(el("span", "tooltip-fact", n.badge || ""));
+    // cute-dbt#253 — surface the non-model typing as a key fact; the
+    // badge line is skipped when empty (non-model types without tests).
+    if (type !== "model") {
+      tooltip.appendChild(el("span", "tooltip-fact", "type: " + type));
+    }
+    if (n.badge) {
+      tooltip.appendChild(el("span", "tooltip-fact", n.badge));
+    }
     if (n.detail.materialized) {
       tooltip.appendChild(el("span", "tooltip-fact", "materialized: " + n.detail.materialized));
     }
-    tooltip.appendChild(el("span", "tooltip-fact", "grain: " + n.detail.grain.value));
+    // Grain is SQL-model semantics (omitted for sources/exposures, the
+    // detail-card rule).
+    if (type === "model" || type === "snapshot" || type === "seed") {
+      tooltip.appendChild(el("span", "tooltip-fact", "grain: " + n.detail.grain.value));
+    }
     if (n.not_compiled) {
       tooltip.appendChild(el("span", "tooltip-fact", "not compiled"));
     }
@@ -609,7 +681,7 @@
     if (!matches.length) {
       var none = document.createElement("li");
       none.className = "lineage-search-none";
-      none.textContent = "no matching model";
+      none.textContent = "no matching node";
       list.appendChild(none);
     }
     matches.forEach(function (m, i) {

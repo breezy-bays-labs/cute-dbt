@@ -409,23 +409,33 @@ pub fn serialize_coverage_to_tmp(
 ///    (domain `NodeConfig` serializes nested; the wire reader flattens)
 ///    and the object-shaped `columns` map (the domain serializes a
 ///    name→type map the wire reader cannot ingest);
-/// 2. **test nodes** — each `(node id, node json)` entry is spliced
-///    into `nodes` verbatim in the real wire shape (`resource_type:
-///    "test"`, `attached_node`, `test_metadata`, flat `config.enabled`).
+/// 2. **raw nodes** — each `(node id, node json)` entry is spliced
+///    into `nodes` verbatim in the real wire shape: test nodes
+///    (`resource_type: "test"`, `attached_node`, `test_metadata`, flat
+///    `config.enabled`) and, since cute-dbt#253, snapshot/seed nodes;
+/// 3. **top-level map entries** (cute-dbt#253) — each
+///    `(map, entry key, entry json)` triple is spliced into a top-level
+///    manifest map (`sources` / `exposures`) verbatim, in the real wire
+///    shape the domain types do not round-trip (the domain serializes
+///    its own field names; the wire reader expects dbt's).
 #[must_use]
 pub fn serialize_explore_to_tmp(
     manifest: &Manifest,
     name: &str,
     node_patches: &[(String, String, Value)],
-    test_nodes: &[(String, Value)],
+    raw_nodes: &[(String, Value)],
+    top_map_entries: &[(String, String, Value)],
 ) -> PathBuf {
     let mut value: Value = serde_json::to_value(manifest).expect("manifest serializes to Value");
     for (bare, key, patch) in node_patches {
         let id = model_id(bare);
         value["nodes"][id.as_str()][key.as_str()] = patch.clone();
     }
-    for (id, node) in test_nodes {
+    for (id, node) in raw_nodes {
         value["nodes"][id.as_str()] = node.clone();
+    }
+    for (map, key, entry) in top_map_entries {
+        value[map.as_str()][key.as_str()] = entry.clone();
     }
     let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.json"));
     std::fs::write(
