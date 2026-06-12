@@ -450,6 +450,56 @@ pub struct Node {
     /// patch and every pre-#105 fixture.
     #[serde(default)]
     patch_path: Option<String>,
+    /// The node's authored bare name from the top-level wire `name`
+    /// (cute-dbt#256; fusion `ManifestCommonAttributes.name`,
+    /// `dbt-schemas` `manifest/manifest_nodes.rs:84-88` @ `9977b6cb…`).
+    /// For a **versioned model** this is the only truthful handle — the
+    /// `unique_id` leaf segment is the version suffix (`.v2`), verified
+    /// live on fusion 2.0-preview (`model.jaffle_shop.versioned_demo.v2`
+    /// carries `name: "versioned_demo"`). `None` for pre-#256 fixtures;
+    /// [`Self::bare_name`] falls back to the leaf segment.
+    /// Every new #256 Option field carries `skip_serializing_if` so a
+    /// serialized Node without governance data stays byte-identical to
+    /// its pre-#256 serialization (payload byte-stability).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    /// The package/project owning this node (cute-dbt#256) — the
+    /// own-project-vs-installed-package partition input. Joined against
+    /// [`ManifestMetadata::project_name`]. Always populated on real
+    /// dbt-core 1.11 / fusion 2.0-preview wire; `None` tolerated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package_name: Option<String>,
+    /// The model's governance group NAME (cute-dbt#256) — joins
+    /// [`Manifest::groups`] via [`Manifest::group_by_name`]. Both
+    /// engines emit `null` for ungrouped models (the committed fixtures'
+    /// shape); fusion ≥2.0-preview.177 may omit the key entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
+    /// The model's access level (cute-dbt#256) — `"private"` /
+    /// `"protected"` / `"public"` (fusion `Access`, `dbt-schemas`
+    /// `common.rs:524-529` @ `9977b6cb…`). Kept a tolerant string —
+    /// unknown future levels must never fail ingestion (ADR-5). Both
+    /// committed real fixtures populate the default `"protected"` on
+    /// every model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    access: Option<String>,
+    /// The model's version (cute-dbt#256), post-normalized to a string:
+    /// the wire is fusion `StringOrInteger` (`dbt-schemas`
+    /// `serde.rs:419-422` @ `9977b6cb…`) and a real fusion compile emits
+    /// the bare integer `2` — the adapter renders integers in decimal.
+    /// `None` for unversioned models (both engines emit explicit `null`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    /// The latest declared version of this model's family (cute-dbt#256)
+    /// — same wire shape + normalization as [`Self::version`]. An
+    /// unpinned `ref()` resolves to the node whose `version` equals
+    /// `latest_version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latest_version: Option<String>,
+    /// The model's declared deprecation date (cute-dbt#256), verbatim
+    /// wire string (fusion `Option<String>`). `None` when undeclared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deprecation_date: Option<String>,
 }
 
 impl Node {
@@ -486,7 +536,50 @@ impl Node {
             description: None,
             tags: Vec::new(),
             patch_path: None,
+            name: None,
+            package_name: None,
+            group: None,
+            access: None,
+            version: None,
+            latest_version: None,
+            deprecation_date: None,
         }
+    }
+
+    /// Attach the node's identity fields (cute-dbt#256): the authored
+    /// bare `name` and the owning `package_name`. Builder for the same
+    /// reason as [`Self::with_column_descriptions`] — no constructor
+    /// churn across the many existing test call sites.
+    #[must_use]
+    pub fn with_identity(mut self, name: Option<String>, package_name: Option<String>) -> Self {
+        self.name = name;
+        self.package_name = package_name;
+        self
+    }
+
+    /// Attach the node's governance fields (cute-dbt#256): the group
+    /// NAME and the access level.
+    #[must_use]
+    pub fn with_governance(mut self, group: Option<String>, access: Option<String>) -> Self {
+        self.group = group;
+        self.access = access;
+        self
+    }
+
+    /// Attach the model-version fields (cute-dbt#256, deferred from
+    /// #254): `version` / `latest_version` (post-normalized strings) and
+    /// the declared `deprecation_date`.
+    #[must_use]
+    pub fn with_versions(
+        mut self,
+        version: Option<String>,
+        latest_version: Option<String>,
+        deprecation_date: Option<String>,
+    ) -> Self {
+        self.version = version;
+        self.latest_version = latest_version;
+        self.deprecation_date = deprecation_date;
+        self
     }
 
     /// Attach the schema-properties YAML path (cute-dbt#105) — the
@@ -671,6 +764,76 @@ impl Node {
     pub fn patch_path(&self) -> Option<&str> {
         self.patch_path.as_deref()
     }
+
+    /// The node's authored bare name (cute-dbt#256), when the manifest
+    /// carried one. `None` for pre-#256 fixtures — prefer
+    /// [`Self::bare_name`] for lookups.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The package/project owning this node (cute-dbt#256).
+    #[must_use]
+    pub fn package_name(&self) -> Option<&str> {
+        self.package_name.as_deref()
+    }
+
+    /// The node's governance group NAME (cute-dbt#256) — resolve the
+    /// full [`Group`] via [`Manifest::group_by_name`]. `None` for
+    /// ungrouped nodes.
+    #[must_use]
+    pub fn group(&self) -> Option<&str> {
+        self.group.as_deref()
+    }
+
+    /// The model's access level (cute-dbt#256) — `"private"` /
+    /// `"protected"` / `"public"`, tolerant of unknown future values.
+    #[must_use]
+    pub fn access(&self) -> Option<&str> {
+        self.access.as_deref()
+    }
+
+    /// The model's version (cute-dbt#256), post-normalized to a string
+    /// (the wire integer `2` arrives as `"2"`). `None` for unversioned
+    /// models.
+    #[must_use]
+    pub fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+
+    /// The latest declared version of this model's family
+    /// (cute-dbt#256). `None` for unversioned models.
+    #[must_use]
+    pub fn latest_version(&self) -> Option<&str> {
+        self.latest_version.as_deref()
+    }
+
+    /// The model's declared deprecation date (cute-dbt#256), verbatim.
+    #[must_use]
+    pub fn deprecation_date(&self) -> Option<&str> {
+        self.deprecation_date.as_deref()
+    }
+
+    /// The node's bare name for `ref(...)` / `models:`-entry / display
+    /// resolution: the ingested wire [`Self::name`] when present (and
+    /// non-empty — defensive), else the final dot-segment of the id —
+    /// the exact pre-#256 behavior, preserved for synthetic fixtures
+    /// that carry no `name`. For a versioned model the ingested name is
+    /// the only correct answer (the leaf segment is the `.vN` suffix);
+    /// the fallback keeps the documented pre-#256 wart in that case.
+    #[must_use]
+    pub fn bare_name(&self) -> &str {
+        match self.name.as_deref() {
+            Some(name) if !name.is_empty() => name,
+            _ => self
+                .id
+                .as_str()
+                .rsplit('.')
+                .next()
+                .unwrap_or(self.id.as_str()),
+        }
+    }
 }
 
 /// One entry of the manifest's top-level `sources` map — a dbt
@@ -812,14 +975,25 @@ impl SourceNode {
     }
 }
 
-/// `metadata` block — currently consumed only for the
-/// `dbt_schema_version` floor check (ADR-2 Stage-1, PR 4b).
+/// `metadata` block — the `dbt_schema_version` floor check (ADR-2
+/// Stage-1, PR 4b) plus the project identity (cute-dbt#256).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestMetadata {
     /// `metadata.dbt_schema_version` URL/string. Read verbatim — the
     /// adapter (PR 4b) is responsible for parsing the embedded version
     /// number for the floor comparison.
     dbt_schema_version: String,
+    /// `metadata.project_name` (cute-dbt#256) — the root project's name,
+    /// the own-project half of the package partition (joined against
+    /// each node's [`Node::package_name`]). fusion types it
+    /// `#[serde(default)] String` (`dbt-schemas`
+    /// `manifest/manifest.rs:72-73` @ `9977b6cb…`) so an unset name
+    /// arrives as `""`; both committed real fixtures populate it.
+    /// Stored verbatim — [`Self::project_name`] drops the empty-string
+    /// unset shape (the #165/#200 precedent). `skip_serializing_if`
+    /// keeps pre-#256 serializations byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_name: Option<String>,
 }
 
 impl ManifestMetadata {
@@ -828,13 +1002,208 @@ impl ManifestMetadata {
     pub fn new(dbt_schema_version: impl Into<String>) -> Self {
         Self {
             dbt_schema_version: dbt_schema_version.into(),
+            project_name: None,
         }
+    }
+
+    /// Attach the root project's name (cute-dbt#256) — builder, the
+    /// [`Node::with_column_descriptions`] precedent (no constructor
+    /// churn across existing call sites).
+    #[must_use]
+    pub fn with_project_name(mut self, project_name: Option<String>) -> Self {
+        self.project_name = project_name;
+        self
     }
 
     /// `dbt_schema_version` value (verbatim from the manifest).
     #[must_use]
     pub fn dbt_schema_version(&self) -> &str {
         &self.dbt_schema_version
+    }
+
+    /// The root project's name (cute-dbt#256). `None` when the manifest
+    /// omitted it or carried fusion's empty-string unset default.
+    #[must_use]
+    pub fn project_name(&self) -> Option<&str> {
+        self.project_name.as_deref().filter(|name| !name.is_empty())
+    }
+}
+
+/// A dbt owner block (cute-dbt#256) — carried by [`Group`]s and
+/// [`Exposure`]s, the only ownership signal in the manifest artifact
+/// chain (review routing, findings-envelope assignees).
+///
+/// **Post-normalized shape**: the wire `email` is fusion's
+/// `Option<StringOrArrayOfStrings>` (`DbtOwner`, `dbt-schemas`
+/// `manifest/common.rs:39-44` @ `9977b6cb…` — dbt-core emits a single
+/// string); the adapter normalizes both to a list (a lone string becomes
+/// a one-element list, empty strings dropped). fusion serializes an
+/// unset owner `name` as an explicit `null` (`#[serialize_always]`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Owner {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    email: Vec<String>,
+}
+
+impl Owner {
+    /// Canonical constructor.
+    #[must_use]
+    pub fn new(name: Option<String>, email: Vec<String>) -> Self {
+        Self { name, email }
+    }
+
+    /// The owner's display name, when declared.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The owner's email address(es) — post-normalized list (a wire
+    /// string arrives as one element). Empty when undeclared.
+    #[must_use]
+    pub fn email(&self) -> &[String] {
+        &self.email
+    }
+}
+
+/// One entry of the manifest's top-level `exposures` map (cute-dbt#256)
+/// — a downstream consumer (dashboard / notebook / analysis / ml /
+/// application) declared in properties YAML. The highest-leverage
+/// P1 signal in the ignored-key inventory: a changed model whose
+/// `depends_on` chain terminates in an exposure is "this PR affects
+/// dashboard X, owner Y".
+///
+/// A separate POD from [`Node`] (the [`SourceNode`] precedent): dbt
+/// keeps exposures a distinct type end-to-end (fusion
+/// `ManifestExposure`, `dbt-schemas` `manifest/manifest_nodes.rs:1526+`
+/// @ `9977b6cb…`) and exposure entries carry no `checksum`. Keyed in
+/// [`Manifest::exposures`] by the wire map key
+/// (`exposure.<package>.<name>`), folded into [`Self::id`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Exposure {
+    id: NodeId,
+    /// The exposure's bare name (the YAML `- name:`).
+    name: String,
+    /// The exposure kind — `"dashboard"` / `"notebook"` / `"analysis"` /
+    /// `"ml"` / `"application"` (fusion `ExposureType`, `dbt-schemas`
+    /// `nodes.rs:4594-4602` @ `9977b6cb…`). Kept a tolerant string
+    /// (ADR-5: unknown future kinds must never fail ingestion). The
+    /// wire key is `type`; the field name avoids a Rust keyword.
+    #[serde(default)]
+    exposure_type: Option<String>,
+    /// The exposure's URL, when declared.
+    #[serde(default)]
+    url: Option<String>,
+    /// The owning team/person. fusion requires `owner` at parse on
+    /// authored exposures; tolerated as `None` here (ADR-5, and an
+    /// owner with no content collapses to `None` in the adapter).
+    #[serde(default)]
+    owner: Option<Owner>,
+    /// The models/sources/metrics this exposure reads — the lineage
+    /// terminus edge set.
+    #[serde(default)]
+    depends_on: DependsOn,
+}
+
+impl Exposure {
+    /// Canonical constructor — every field is owned and explicit.
+    #[must_use]
+    pub fn new(
+        id: NodeId,
+        name: impl Into<String>,
+        exposure_type: Option<String>,
+        url: Option<String>,
+        owner: Option<Owner>,
+        depends_on: DependsOn,
+    ) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            exposure_type,
+            url,
+            owner,
+            depends_on,
+        }
+    }
+
+    /// Exposure id (`exposure.<package>.<name>`).
+    #[must_use]
+    pub fn id(&self) -> &NodeId {
+        &self.id
+    }
+
+    /// The exposure's bare name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The exposure kind (`"dashboard"`, …), when declared.
+    #[must_use]
+    pub fn exposure_type(&self) -> Option<&str> {
+        self.exposure_type.as_deref()
+    }
+
+    /// The exposure's URL, when declared.
+    #[must_use]
+    pub fn url(&self) -> Option<&str> {
+        self.url.as_deref()
+    }
+
+    /// The owning team/person, when declared with content.
+    #[must_use]
+    pub fn owner(&self) -> Option<&Owner> {
+        self.owner.as_ref()
+    }
+
+    /// The nodes (and macros) this exposure depends on.
+    #[must_use]
+    pub fn depends_on(&self) -> &DependsOn {
+        &self.depends_on
+    }
+}
+
+/// One entry of the manifest's top-level `groups` map (cute-dbt#256) —
+/// a named governance group with an owner. Nodes reference groups by
+/// NAME (the [`Node::group`] field), not by map key; join via
+/// [`Manifest::group_by_name`].
+///
+/// fusion **requires** `owner:` at parse on an authored group
+/// (`GroupProperties.owner: DbtOwner`, no default — `dbt-schemas`
+/// `properties/properties.rs:120-125` @ `9977b6cb…`; verified live on
+/// fusion 2.0-preview: a group without `owner:` fails compile with
+/// `dbt1013 missing field 'owner'`). cute-dbt still tolerates an absent
+/// or content-free owner (ADR-5 — synthetic fixtures and engine drift
+/// must never fail the parse).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Group {
+    name: String,
+    #[serde(default)]
+    owner: Option<Owner>,
+}
+
+impl Group {
+    /// Canonical constructor.
+    #[must_use]
+    pub fn new(name: impl Into<String>, owner: Option<Owner>) -> Self {
+        Self {
+            name: name.into(),
+            owner,
+        }
+    }
+
+    /// The group's name — the value a node's [`Node::group`] carries.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The owning team/person, when declared with content.
+    #[must_use]
+    pub fn owner(&self) -> Option<&Owner> {
+        self.owner.as_ref()
     }
 }
 
@@ -859,6 +1228,17 @@ pub struct Manifest {
     /// test fixtures without sources) still deserialize.
     #[serde(default)]
     sources: HashMap<NodeId, SourceNode>,
+    /// The manifest's top-level `exposures` map (cute-dbt#256), keyed by
+    /// the wire map key (`exposure.<package>.<name>`). Defaults to empty
+    /// (pre-#256 serializations); `skip_serializing_if` keeps an
+    /// exposure-free serialization byte-stable.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    exposures: HashMap<NodeId, Exposure>,
+    /// The manifest's top-level `groups` map (cute-dbt#256), keyed by
+    /// the wire map key (`group.<package>.<name>`). Same tolerance as
+    /// [`Self::exposures`].
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    groups: HashMap<String, Group>,
 }
 
 impl Manifest {
@@ -880,6 +1260,8 @@ impl Manifest {
             unit_tests,
             macros,
             sources: HashMap::new(),
+            exposures: HashMap::new(),
+            groups: HashMap::new(),
         }
     }
 
@@ -887,6 +1269,20 @@ impl Manifest {
     #[must_use]
     pub fn with_sources(mut self, sources: HashMap<NodeId, SourceNode>) -> Self {
         self.sources = sources;
+        self
+    }
+
+    /// Attach the manifest's parsed `exposures` map (cute-dbt#256).
+    #[must_use]
+    pub fn with_exposures(mut self, exposures: HashMap<NodeId, Exposure>) -> Self {
+        self.exposures = exposures;
+        self
+    }
+
+    /// Attach the manifest's parsed `groups` map (cute-dbt#256).
+    #[must_use]
+    pub fn with_groups(mut self, groups: HashMap<String, Group>) -> Self {
+        self.groups = groups;
         self
     }
 
@@ -931,6 +1327,28 @@ impl Manifest {
     #[must_use]
     pub fn sources(&self) -> &HashMap<NodeId, SourceNode> {
         &self.sources
+    }
+
+    /// All exposures keyed by id (cute-dbt#256).
+    #[must_use]
+    pub fn exposures(&self) -> &HashMap<NodeId, Exposure> {
+        &self.exposures
+    }
+
+    /// All groups keyed by the wire map key (`group.<package>.<name>`)
+    /// (cute-dbt#256).
+    #[must_use]
+    pub fn groups(&self) -> &HashMap<String, Group> {
+        &self.groups
+    }
+
+    /// Look up a group by its NAME — the value a node's [`Node::group`]
+    /// field carries (cute-dbt#256). Linear scan, the
+    /// [`Self::source_by_name`] precedent: manifests carry few groups
+    /// and the lookup runs per grouped node.
+    #[must_use]
+    pub fn group_by_name(&self, name: &str) -> Option<&Group> {
+        self.groups.values().find(|group| group.name() == name)
     }
 
     /// Look up a source by its `(source_name, name)` pair — the two
@@ -1696,6 +2114,285 @@ mod tests {
             m.source_by_name("SYNTHEA_RAW", "Patients").is_some(),
             "lookup is case-insensitive on both halves (symmetric with the ref binding contract)",
         );
+    }
+
+    // ===== cute-dbt#256 — governance + identity wire family =====
+
+    fn bare_node(id: &str) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "model",
+            sample_checksum(),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn node_new_defaults_identity_governance_and_versions_empty() {
+        let n = bare_node("model.shop.bare");
+        assert!(n.name().is_none());
+        assert!(n.package_name().is_none());
+        assert!(n.group().is_none());
+        assert!(n.access().is_none());
+        assert!(n.version().is_none());
+        assert!(n.latest_version().is_none());
+        assert!(n.deprecation_date().is_none());
+    }
+
+    #[test]
+    fn with_identity_sets_name_and_package_name() {
+        let n = bare_node("model.shop.dim_customers.v2")
+            .with_identity(Some("dim_customers".to_owned()), Some("shop".to_owned()));
+        assert_eq!(n.name(), Some("dim_customers"));
+        assert_eq!(n.package_name(), Some("shop"));
+    }
+
+    #[test]
+    fn with_governance_sets_group_and_access() {
+        let n = bare_node("model.shop.dim_payers")
+            .with_governance(Some("finance".to_owned()), Some("private".to_owned()));
+        assert_eq!(n.group(), Some("finance"));
+        assert_eq!(n.access(), Some("private"));
+    }
+
+    #[test]
+    fn with_versions_sets_version_fields() {
+        let n = bare_node("model.shop.dim_customers.v2").with_versions(
+            Some("2".to_owned()),
+            Some("2".to_owned()),
+            Some("2027-01-01".to_owned()),
+        );
+        assert_eq!(n.version(), Some("2"));
+        assert_eq!(n.latest_version(), Some("2"));
+        assert_eq!(n.deprecation_date(), Some("2027-01-01"));
+    }
+
+    #[test]
+    fn bare_name_prefers_the_ingested_name_over_the_leaf_segment() {
+        // The cute-dbt#254 handoff root fix: a versioned model's leaf
+        // segment is the VERSION SUFFIX ("v2"), never the authored name.
+        let n = bare_node("model.shop.dim_customers.v2")
+            .with_identity(Some("dim_customers".to_owned()), None);
+        assert_eq!(n.bare_name(), "dim_customers");
+    }
+
+    #[test]
+    fn bare_name_falls_back_to_the_leaf_segment_without_a_name() {
+        // Pre-#256 fixtures carry no `name` — the old leaf behavior is
+        // the documented fallback (including the versioned-id "v2" wart).
+        assert_eq!(bare_node("model.shop.dim_payers").bare_name(), "dim_payers");
+        assert_eq!(bare_node("model.shop.dim_customers.v2").bare_name(), "v2");
+        // Defensive: an empty ingested name never produces an empty bare
+        // name — the leaf fallback applies.
+        let n = bare_node("model.shop.dim_payers").with_identity(Some(String::new()), None);
+        assert_eq!(n.bare_name(), "dim_payers");
+    }
+
+    #[test]
+    fn node_identity_governance_versions_round_trip_through_serde() {
+        let n = bare_node("model.shop.dim_customers.v2")
+            .with_identity(Some("dim_customers".to_owned()), Some("shop".to_owned()))
+            .with_governance(Some("finance".to_owned()), Some("private".to_owned()))
+            .with_versions(Some("2".to_owned()), Some("3".to_owned()), None);
+        let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
+        assert_eq!(back, n);
+        assert_eq!(back.name(), Some("dim_customers"));
+        assert_eq!(back.group(), Some("finance"));
+        assert_eq!(back.version(), Some("2"));
+    }
+
+    #[test]
+    fn node_serialization_omits_unset_256_fields_for_payload_byte_stability() {
+        // `skip_serializing_if` on every new Option keeps serialized
+        // payloads byte-stable: a pre-#256 Node and a post-#256 Node with
+        // no governance data serialize identically.
+        let value = serde_json::to_value(bare_node("model.shop.x")).unwrap();
+        let obj = value.as_object().unwrap();
+        for key in [
+            "name",
+            "package_name",
+            "group",
+            "access",
+            "version",
+            "latest_version",
+            "deprecation_date",
+        ] {
+            assert!(!obj.contains_key(key), "unset `{key}` must be omitted");
+        }
+    }
+
+    #[test]
+    fn node_without_256_fields_deserializes_from_pre_256_json() {
+        // ADR-5 tolerance: a serialized pre-#256 Node still deserializes,
+        // defaulting every new field.
+        let json = r#"{
+            "id": "model.shop.x",
+            "resource_type": "model",
+            "checksum": { "name": "sha256", "checksum": "deadbeef" }
+        }"#;
+        let n: Node = serde_json::from_str(json).unwrap();
+        assert!(n.name().is_none());
+        assert!(n.package_name().is_none());
+        assert!(n.group().is_none());
+        assert!(n.access().is_none());
+        assert!(n.version().is_none());
+        assert!(n.latest_version().is_none());
+        assert!(n.deprecation_date().is_none());
+    }
+
+    #[test]
+    fn manifest_metadata_project_name_accessor_drops_the_empty_string() {
+        // fusion defaults an unset `project_name` to `""`
+        // (`#[serde(default)] pub project_name: String`, `dbt-schemas`
+        // `manifest/manifest.rs:72-73` @ `9977b6cb…`) — the accessor
+        // treats it as unset (the #165/#200 drop-empty precedent).
+        let m = ManifestMetadata::new("v12");
+        assert_eq!(m.project_name(), None);
+        let m = m.with_project_name(Some("jaffle_shop".to_owned()));
+        assert_eq!(m.project_name(), Some("jaffle_shop"));
+        let m = ManifestMetadata::new("v12").with_project_name(Some(String::new()));
+        assert_eq!(m.project_name(), None, "empty string is the unset shape");
+    }
+
+    #[test]
+    fn manifest_metadata_project_name_round_trips_and_tolerates_absence() {
+        let m = ManifestMetadata::new("v12").with_project_name(Some("shop".to_owned()));
+        let back: ManifestMetadata =
+            serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+        // Pre-#256 JSON (no project_name key) still deserializes.
+        let back: ManifestMetadata =
+            serde_json::from_str(r#"{ "dbt_schema_version": "v12" }"#).unwrap();
+        assert_eq!(back.project_name(), None);
+        // Wire-shape direct deserialization: fusion's empty default and
+        // an explicit null both tolerate.
+        let back: ManifestMetadata =
+            serde_json::from_str(r#"{ "dbt_schema_version": "v12", "project_name": "" }"#).unwrap();
+        assert_eq!(back.project_name(), None);
+        let back: ManifestMetadata =
+            serde_json::from_str(r#"{ "dbt_schema_version": "v12", "project_name": null }"#)
+                .unwrap();
+        assert_eq!(back.project_name(), None);
+    }
+
+    // ----- Owner / Exposure / Group PODs -----
+
+    #[test]
+    fn owner_constructor_and_accessors() {
+        let o = Owner::new(
+            Some("Finance Team".to_owned()),
+            vec!["finance@example.com".to_owned()],
+        );
+        assert_eq!(o.name(), Some("Finance Team"));
+        assert_eq!(o.email(), ["finance@example.com".to_owned()]);
+    }
+
+    #[test]
+    fn owner_serde_round_trips() {
+        let o = Owner::new(Some("Data Team".to_owned()), Vec::new());
+        let back: Owner = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+        assert_eq!(back, o);
+    }
+
+    fn sample_exposure() -> Exposure {
+        Exposure::new(
+            NodeId::new("exposure.shop.weekly_revenue_dashboard"),
+            "weekly_revenue_dashboard",
+            Some("dashboard".to_owned()),
+            Some("https://bi.example.com/dashboards/revenue".to_owned()),
+            Some(Owner::new(
+                Some("Data Team".to_owned()),
+                vec!["data@example.com".to_owned()],
+            )),
+            DependsOn::new(Vec::new(), vec![NodeId::new("model.shop.orders")]),
+        )
+    }
+
+    #[test]
+    fn exposure_constructor_and_accessors() {
+        let e = sample_exposure();
+        assert_eq!(e.id().as_str(), "exposure.shop.weekly_revenue_dashboard");
+        assert_eq!(e.name(), "weekly_revenue_dashboard");
+        assert_eq!(e.exposure_type(), Some("dashboard"));
+        assert_eq!(e.url(), Some("https://bi.example.com/dashboards/revenue"));
+        assert_eq!(e.owner().and_then(Owner::name), Some("Data Team"));
+        assert_eq!(e.depends_on().nodes(), &[NodeId::new("model.shop.orders")]);
+    }
+
+    #[test]
+    fn exposure_serde_round_trips() {
+        let e = sample_exposure();
+        let back: Exposure = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert_eq!(back, e);
+    }
+
+    #[test]
+    fn group_constructor_accessors_and_round_trip() {
+        let g = Group::new(
+            "finance",
+            Some(Owner::new(
+                Some("Finance Team".to_owned()),
+                vec!["finance@example.com".to_owned()],
+            )),
+        );
+        assert_eq!(g.name(), "finance");
+        assert_eq!(g.owner().and_then(Owner::name), Some("Finance Team"));
+        let back: Group = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
+        assert_eq!(back, g);
+    }
+
+    #[test]
+    fn manifest_with_exposures_and_groups_round_trips() {
+        let exposure = sample_exposure();
+        let mut exposures = HashMap::new();
+        exposures.insert(exposure.id().clone(), exposure);
+        let mut groups = HashMap::new();
+        groups.insert("group.shop.finance".to_owned(), Group::new("finance", None));
+        let m = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .with_exposures(exposures)
+        .with_groups(groups);
+        assert_eq!(m.exposures().len(), 1);
+        assert_eq!(m.groups().len(), 1);
+        let back: Manifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn manifest_tolerates_missing_exposures_and_groups() {
+        // Pre-#256 serialized manifests (and minimal wire JSON) carry
+        // neither key — both default to empty.
+        let json = r#"{ "metadata": { "dbt_schema_version": "v12" } }"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        assert!(m.exposures().is_empty());
+        assert!(m.groups().is_empty());
+    }
+
+    #[test]
+    fn group_by_name_resolves_a_node_group_reference() {
+        // A node's `group` field carries the group NAME, not the
+        // `group.<package>.<name>` map key — the lookup joins them.
+        let mut groups = HashMap::new();
+        groups.insert("group.shop.finance".to_owned(), Group::new("finance", None));
+        let m = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .with_groups(groups);
+        assert!(m.group_by_name("finance").is_some());
+        assert!(m.group_by_name("marketing").is_none());
     }
 
     #[test]
