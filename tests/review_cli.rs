@@ -277,9 +277,11 @@ fn disjoint_histories_are_diagnosed_with_the_base_remediation() {
 }
 
 #[test]
-fn a_missing_manifest_errors_naming_dbt_compile() {
+fn no_compile_with_a_missing_manifest_errors_naming_dbt_compile() {
     let repo = TestRepo::init("nomanifest");
-    // Scaffold WITHOUT a manifest copy.
+    // Scaffold WITHOUT a manifest copy and WITHOUT any dbt shim: the
+    // --no-compile arm needs no dbt at all, and its missing-manifest
+    // remediation names `dbt compile`.
     repo.write(
         "dbt_project.yml",
         "name: jaffle_shop\nversion: \"1.0\"\nprofile: jaffle_shop\n",
@@ -291,7 +293,7 @@ fn a_missing_manifest_errors_naming_dbt_compile() {
     repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
     repo.commit_all("edit");
 
-    let output = repo.review(&["--no-open"]);
+    let output = repo.review(&["--no-compile", "--no-open"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = stderr_of(&output);
     assert!(
@@ -415,8 +417,11 @@ fn dbt_target_path_relocates_the_manifest_and_the_default_out() {
     repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
     repo.commit_all("edit");
 
+    // --no-compile: this test pins manifest LOCATION, not the compile
+    // step (no shim is installed — dbt is genuinely absent).
     let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
-    cmd.args(["review", "--no-open"]).current_dir(&repo.root);
+    cmd.args(["review", "--no-compile", "--no-open"])
+        .current_dir(&repo.root);
     repo.isolate(&mut cmd);
     cmd.env("DBT_TARGET_PATH", "build");
     let output = cmd.output().expect("binary spawns");
@@ -424,6 +429,35 @@ fn dbt_target_path_relocates_the_manifest_and_the_default_out() {
     assert!(
         repo.root.join("build/cute-dbt-report.html").exists(),
         "the report follows DBT_TARGET_PATH",
+    );
+}
+
+#[test]
+fn the_target_path_flag_relocates_and_is_forwarded_to_dbt() {
+    let repo = TestRepo::init("targetflag");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    // Move the manifest where the flag points (the scaffold put it in
+    // target/).
+    std::fs::create_dir_all(repo.root.join("build2")).expect("mkdir");
+    std::fs::rename(
+        repo.root.join("target/manifest.json"),
+        repo.root.join("build2/manifest.json"),
+    )
+    .expect("relocate manifest");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+
+    let output = repo.review(&["--target-path", "build2", "--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        repo.root.join("build2/cute-dbt-report.html").exists(),
+        "the report follows --target-path",
+    );
+    let log = repo.dbt_log_contents();
+    assert!(
+        log.contains("args=compile --target-path build2"),
+        "dbt is told to write where review reads: {log}",
     );
 }
 
@@ -455,6 +489,7 @@ fn dry_run_prints_the_exact_plans_and_executes_nothing() {
         "--unified=0",
         "--find-renames",
         "--no-ext-diff",
+        "[dbt compile]",
         "cute-dbt report",
         "--pr-diff",
         "--project-root",
@@ -469,6 +504,11 @@ fn dry_run_prints_the_exact_plans_and_executes_nothing() {
         !repo.root.join("target/cute-dbt-report.html").exists(),
         "--dry-run writes nothing",
     );
+    assert!(
+        repo.dbt_log_contents().is_empty(),
+        "--dry-run never spawns dbt (not even --version): {}",
+        repo.dbt_log_contents(),
+    );
 
     // Prove the sentinel is live: the same repo WITHOUT --dry-run fails.
     let real = repo.review(&["--no-open"]);
@@ -476,6 +516,292 @@ fn dry_run_prints_the_exact_plans_and_executes_nothing() {
         real.status.code(),
         Some(1),
         "the real run hits the corrupt manifest — proving --dry-run executed nothing: {real:?}",
+    );
+}
+
+#[test]
+fn dry_run_with_no_compile_marks_the_skipped_compile() {
+    let repo = TestRepo::init("dryrun-nocompile");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+
+    let dry = repo.review(&["--dry-run", "--no-compile", "--no-open"]);
+    assert_eq!(dry.status.code(), Some(0), "{dry:?}");
+    assert!(
+        stdout_of(&dry).contains("skipped (--no-compile)"),
+        "the listing says the compile is skipped: {}",
+        stdout_of(&dry),
+    );
+}
+
+// ===================================================================
+// Engine detection + compile (V2, cute-dbt#301)
+// ===================================================================
+
+/// Scaffold + a committed model edit on a feature branch — the standard
+/// V2 setup with something to review.
+fn repo_with_branch_change(stem: &str) -> TestRepo {
+    let repo = TestRepo::init(stem);
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+    repo
+}
+
+#[test]
+fn the_compile_step_runs_in_the_project_dir_and_is_announced() {
+    let repo = repo_with_branch_change("compile-runs");
+    let output = repo.review(&["--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("dbt engine: fusion 2.0.0-preview.186"),
+        "the detected engine is announced: {stderr}",
+    );
+    let log = repo.dbt_log_contents();
+    assert!(
+        log.contains("args=--version") && log.contains("args=compile"),
+        "detection then compile, via the shim: {log}",
+    );
+    let canonical_root = std::fs::canonicalize(&repo.root).expect("canonical root");
+    assert!(
+        log.contains(&format!("cwd={} args=compile", canonical_root.display())),
+        "compile runs with cwd = the project dir: {log}",
+    );
+}
+
+#[test]
+fn a_failed_compile_is_fatal_even_though_the_manifest_exists() {
+    // THE fusion trap (research-294 dbt-engine-mechanics §2): fusion
+    // writes manifest.json even on FAILED compiles — exit code, never
+    // artifact presence, is the success signal. The scaffold has a
+    // perfectly valid manifest sitting in target/; the run must still
+    // fail and write no report.
+    let repo = repo_with_branch_change("compile-fails");
+    repo.install_dbt_shim(
+        "case \"$1\" in\n  --version) printf 'dbt 2.0.0-preview.186\\n'; exit 0;;\n  \
+         compile) printf 'Compilation Error in model stg_customers\\n' >&2; exit 1;;\nesac\nexit 0",
+    );
+
+    let output = repo.review(&["--no-open"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("Compilation Error in model stg_customers"),
+        "dbt's own stderr streams through verbatim: {stderr}",
+    );
+    assert!(
+        stderr.contains("dbt compile failed (exit 1)"),
+        "the review-stage failure names the exit code: {stderr}",
+    );
+    assert!(
+        stderr.contains("dbt debug"),
+        "the engine-uniform profile remediation is present: {stderr}",
+    );
+    assert!(
+        repo.root.join("target/manifest.json").exists(),
+        "the manifest exists (the trap precondition holds)",
+    );
+    assert!(
+        !repo.root.join("target/cute-dbt-report.html").exists(),
+        "no report is written on a failed compile",
+    );
+}
+
+#[test]
+fn the_python_core_version_shape_is_detected_and_announced() {
+    let repo = repo_with_branch_change("core-engine");
+    repo.install_dbt_shim(
+        "case \"$1\" in\n  --version) printf 'Core:\\n  - installed: 1.10.2\\n  - latest:    \
+         1.10.2 - Up to date!\\n\\nPlugins:\\n  - duckdb: 1.9.1\\n'; exit 0;;\n  \
+         compile) exit 0;;\nesac\nexit 0",
+    );
+
+    let output = repo.review(&["--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        stderr_of(&output).contains("dbt engine: dbt-core 1.10.2"),
+        "the core engine is announced from the multi-line shape: {}",
+        stderr_of(&output),
+    );
+    assert!(
+        repo.root.join("target/cute-dbt-report.html").exists(),
+        "the run completes on core",
+    );
+}
+
+#[test]
+fn a_pre_1_8_core_is_rejected_before_compiling() {
+    let repo = repo_with_branch_change("core-old");
+    repo.install_dbt_shim(
+        "case \"$1\" in\n  --version) printf 'Core:\\n  - installed: 1.7.6\\n'; exit 0;;\n  \
+         compile) exit 0;;\nesac\nexit 0",
+    );
+
+    let output = repo.review(&["--no-open"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("1.7.6") && stderr.contains("1.8"),
+        "the floor is named: {stderr}",
+    );
+    let log = repo.dbt_log_contents();
+    assert!(
+        !log.contains("args=compile"),
+        "compile never runs on a rejected engine: {log}",
+    );
+    assert!(
+        !repo.root.join("target/cute-dbt-report.html").exists(),
+        "no report on a rejected engine",
+    );
+}
+
+#[test]
+fn the_cloud_cli_is_rejected_with_remediation() {
+    let repo = repo_with_branch_change("cloud-cli");
+    repo.install_dbt_shim(
+        "case \"$1\" in\n  --version) printf 'Cloud CLI - 0.38.0 (abc1234 \
+         2026-05-01T00:00:00Z)\\n'; exit 0;;\nesac\nexit 0",
+    );
+
+    let output = repo.review(&["--no-open"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("dbt Cloud CLI") && stderr.contains("--no-compile"),
+        "the Cloud CLI remediation names the local engines and the escape hatch: {stderr}",
+    );
+}
+
+#[test]
+fn a_missing_dbt_gets_the_install_remediation() {
+    let repo = repo_with_branch_change("dbt-missing");
+    // Remove the scaffold's default shim: the controlled PATH now has
+    // no dbt at all (a developer's real dbt can never leak in).
+    std::fs::remove_file(repo.root.parent().expect("base").join("bin/dbt"))
+        .expect("remove the default shim");
+
+    let output = repo.review(&["--no-open"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = stderr_of(&output);
+    assert!(stderr.contains("`dbt` was not found on PATH"), "{stderr}");
+    assert!(
+        stderr.contains("--no-compile"),
+        "the remediation names the no-dbt escape hatch: {stderr}",
+    );
+}
+
+#[test]
+fn no_compile_needs_no_dbt_at_all() {
+    let repo = repo_with_branch_change("nocompile-nodbt");
+    std::fs::remove_file(repo.root.parent().expect("base").join("bin/dbt"))
+        .expect("remove the default shim");
+
+    let output = repo.review(&["--no-compile", "--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        repo.root.join("target/cute-dbt-report.html").exists(),
+        "--no-compile renders from the existing manifest without dbt",
+    );
+    assert!(repo.dbt_log_contents().is_empty(), "dbt was never spawned",);
+}
+
+#[test]
+fn no_compile_warns_when_the_manifest_is_stale() {
+    let repo = repo_with_branch_change("stale-warn");
+    // Age the manifest behind the branch edit.
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(repo.root.join("target/manifest.json"))
+        .expect("open manifest")
+        .set_modified(past)
+        .expect("age the manifest");
+
+    let output = repo.review(&["--no-compile", "--no-open"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a stale manifest warns, never blocks: {output:?}"
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("older than"),
+        "the staleness warning fires: {stderr}",
+    );
+    assert!(
+        repo.root.join("target/cute-dbt-report.html").exists(),
+        "the report still renders",
+    );
+}
+
+#[test]
+fn no_compile_with_a_fresh_manifest_does_not_warn() {
+    let repo = repo_with_branch_change("fresh-quiet");
+    // Make the manifest strictly newest.
+    let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(repo.root.join("target/manifest.json"))
+        .expect("open manifest")
+        .set_modified(future)
+        .expect("freshen the manifest");
+
+    let output = repo.review(&["--no-compile", "--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        !stderr_of(&output).contains("older than"),
+        "a fresh manifest stays quiet: {}",
+        stderr_of(&output),
+    );
+}
+
+#[test]
+fn an_empty_diff_exits_before_any_dbt_runs() {
+    let repo = TestRepo::init("empty-skips-compile");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+
+    let output = repo.review(&["--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        stderr_of(&output).contains("nothing to review"),
+        "{}",
+        stderr_of(&output),
+    );
+    assert!(
+        repo.dbt_log_contents().is_empty(),
+        "nothing to review ⇒ no detection, no compile: {}",
+        repo.dbt_log_contents(),
+    );
+}
+
+#[test]
+fn a_successful_compile_that_writes_no_manifest_gets_the_target_path_remediation() {
+    // The after-compile arm of ManifestMissing: dbt exited 0 but
+    // review's resolved manifest path stayed empty — a target-path
+    // mismatch, NOT a "run dbt compile" situation.
+    let repo = TestRepo::init("ghost-target");
+    repo.write(
+        "dbt_project.yml",
+        "name: jaffle_shop\nversion: \"1.0\"\nprofile: jaffle_shop\n",
+    );
+    repo.write(".gitignore", "target/\n");
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id\n");
+    repo.commit_all("init");
+    repo.install_dbt_shim(common::WELL_BEHAVED_FUSION_SHIM);
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+
+    let output = repo.review(&["--no-open"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("no manifest appeared") && stderr.contains("--target-path"),
+        "the remediation points at target-path alignment, not dbt compile: {stderr}",
     );
 }
 
