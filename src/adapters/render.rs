@@ -71,7 +71,7 @@ use crate::domain::{
     HeuristicId, InScopeSet, Instrument, Manifest, ModelInScopeSet, ModelYamlOutcome, Node, NodeId,
     SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
     UnitTestYamlBlock, apply_check_policy, model_findings, resolve_target_model,
-    table_from_manifest_rows,
+    resolve_tested_model, table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -2276,8 +2276,9 @@ fn is_leaf_binding_candidate(graph: &CteGraph, index: usize) -> bool {
 /// Build a map from in-scope model id to **all** unit tests targeting it
 /// in the current manifest (cute-dbt#91 widening).
 ///
-/// Resolved via [`resolve_target_model`] (the bare `model:` name → full
-/// node id mapping). Unlike the prior in-scope-only indexer, this
+/// Resolved via [`resolve_tested_model`] (the engine-resolved
+/// `tested_node_unique_id` when present, the bare `model:` name
+/// otherwise — cute-dbt#254). Unlike the prior in-scope-only indexer, this
 /// enumerates every unit test whose resolved target is one of
 /// `models_in_scope`, regardless of whether the test is itself in scope —
 /// so a model that entered scope solely via a changed test also carries
@@ -2295,7 +2296,7 @@ pub fn index_tests_for_models<'m>(
 ) -> HashMap<NodeId, Vec<(&'m str, &'m UnitTest)>> {
     let mut map: HashMap<NodeId, Vec<(&'m str, &'m UnitTest)>> = HashMap::new();
     for (test_id, unit_test) in current.unit_tests() {
-        let Some(model) = resolve_target_model(current, unit_test.model()) else {
+        let Some(model) = resolve_tested_model(current, unit_test) else {
             continue;
         };
         if models_in_scope.contains(model.id()) {

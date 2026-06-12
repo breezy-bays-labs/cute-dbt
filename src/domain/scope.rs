@@ -34,7 +34,7 @@ use std::collections::{BTreeSet, HashMap};
 use crate::domain::manifest::{Manifest, NodeId};
 use crate::domain::pr_diff::NormalizedDiffIndex;
 use crate::domain::state::{
-    InScopeSet, ModelInScopeSet, ModifierKind, StateComparator, resolve_target_model,
+    InScopeSet, ModelInScopeSet, ModifierKind, StateComparator, resolve_tested_model,
 };
 
 /// Source of the in-scope set: either a baseline manifest (dbt
@@ -209,7 +209,7 @@ fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> S
     let mut in_scope_ids: Vec<String> = Vec::new();
     let mut changed_ids: Vec<String> = Vec::new();
     for (test_id, ut) in current.unit_tests() {
-        let target_path_modified = resolve_target_model(current, ut.model())
+        let target_path_modified = resolve_tested_model(current, ut)
             .is_some_and(|model| path_modified_models.contains(model.id()));
         let test_yaml_changed = ut
             .original_file_path()
@@ -232,7 +232,7 @@ fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> S
     let tests_per_model: HashMap<NodeId, usize> = current
         .unit_tests()
         .values()
-        .filter_map(|ut| resolve_target_model(current, ut.model()).map(|m| m.id().clone()))
+        .filter_map(|ut| resolve_tested_model(current, ut).map(|m| m.id().clone()))
         .fold(HashMap::new(), |mut acc, id| {
             *acc.entry(id).or_insert(0) += 1;
             acc
@@ -241,7 +241,7 @@ fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> S
     let mut model_ids: BTreeSet<NodeId> = BTreeSet::new();
     for test_id in in_scope.iter() {
         if let Some(ut) = current.unit_test(test_id) {
-            if let Some(model) = resolve_target_model(current, ut.model()) {
+            if let Some(model) = resolve_tested_model(current, ut) {
                 model_ids.insert(model.id().clone());
             }
         }

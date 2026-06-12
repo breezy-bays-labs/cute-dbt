@@ -88,7 +88,7 @@ pub use scope::{ScopeInput, ScopeSelection, all_models, changed_models, select_i
 pub use state::{
     BANNER_EMPTY_SCOPE, BodyChecksumModifier, ConfigsModifier, ContractModifier, InScopeSet,
     MacrosModifier, ModelInScopeSet, ModifiedSet, ModifierKind, RelationModifier, StateComparator,
-    StateModifier, resolve_target_model,
+    StateModifier, resolve_target_model, resolve_tested_model,
 };
 pub use unit_test::{UnitTest, UnitTestExpect, UnitTestGiven, UnitTestOverrides};
 pub use unit_test_table::{

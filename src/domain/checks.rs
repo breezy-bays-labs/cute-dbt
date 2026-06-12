@@ -99,7 +99,7 @@ use crate::domain::cte::{
 };
 use crate::domain::grain::test_is_enabled;
 use crate::domain::manifest::{Manifest, Node, NodeConfig, NodeId};
-use crate::domain::state::resolve_target_model;
+use crate::domain::state::{resolve_target_model, resolve_tested_model};
 use crate::domain::unit_test::{UnitTest, UnitTestGiven};
 use crate::domain::unit_test_table::{CellValue, FixtureTable, table_from_manifest_rows};
 
@@ -1148,8 +1148,7 @@ fn detect_union_arm_coverage(ctx: &CheckContext<'_>) -> Vec<Finding<HeuristicId>
         .unit_tests()
         .iter()
         .filter(|(_, ut)| {
-            resolve_target_model(ctx.manifest, ut.model())
-                .is_some_and(|model| model.id() == ctx.model.id())
+            resolve_tested_model(ctx.manifest, ut).is_some_and(|model| model.id() == ctx.model.id())
         })
         .collect();
     tests.sort_by(|a, b| a.0.cmp(b.0));
@@ -1568,7 +1567,7 @@ fn tests_on_model<'a>(ctx: &'a CheckContext<'_>) -> Vec<(&'a String, &'a UnitTes
         .unit_tests()
         .iter()
         .filter(|(_, unit_test)| {
-            resolve_target_model(ctx.manifest, unit_test.model())
+            resolve_tested_model(ctx.manifest, unit_test)
                 .is_some_and(|model| model.id() == ctx.model.id())
         })
         .collect();

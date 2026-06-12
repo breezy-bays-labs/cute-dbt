@@ -424,8 +424,9 @@ impl StateComparator {
     /// Unit-test ids in scope for this diff.
     ///
     /// A unit test is in scope when **either** its target model is in the
-    /// modified set (resolved from the bare `model:` name via
-    /// [`resolve_target_model`]) **or** the unit test itself was added or
+    /// modified set (resolved via [`resolve_tested_model`] — the
+    /// engine-resolved id when present, the bare `model:` name
+    /// otherwise) **or** the unit test itself was added or
     /// changed relative to the baseline. The second arm is ADR-3's "a
     /// changed test on an unchanged model is in scope": because dbt unit
     /// tests are a top-level manifest map — not checksum-bearing `nodes` —
@@ -449,7 +450,7 @@ impl StateComparator {
     ) -> InScopeSet {
         let mut in_scope = InScopeSet::new();
         for (id, unit_test) in current.unit_tests() {
-            let target_modified = resolve_target_model(current, unit_test.model())
+            let target_modified = resolve_tested_model(current, unit_test)
                 .is_some_and(|node| modified.contains(node.id()));
             let test_changed = unit_test_is_changed(baseline, id, unit_test);
             if target_modified || test_changed {
@@ -466,7 +467,7 @@ impl StateComparator {
     ///
     /// 1. Every model that is the resolved target of an in-scope unit test
     ///    (the same models the existing `in_scope_unit_tests` would surface
-    ///    via `resolve_target_model`).
+    ///    via `resolve_tested_model`).
     /// 2. Every modified **`model`** node that has **zero** unit tests
     ///    targeting it in the current manifest — the "no tests wired"
     ///    signal. The modified set itself is resource-agnostic (dbt's
@@ -495,7 +496,7 @@ impl StateComparator {
             let Some(unit_test) = current.unit_test(test_id) else {
                 continue;
             };
-            if let Some(model) = resolve_target_model(current, unit_test.model()) {
+            if let Some(model) = resolve_tested_model(current, unit_test) {
                 ids.insert(model.id().clone());
             }
         }
@@ -505,7 +506,7 @@ impl StateComparator {
         // `state:modified` matcher is resource-agnostic; generic test /
         // seed / snapshot nodes all qualify), but only `model` nodes render
         // as cards — so arm 2 projects to `resource_type == "model"`
-        // exactly as arm 1 does via `resolve_target_model` and as the
+        // exactly as arm 1 does via `resolve_tested_model` and as the
         // PrDiff arm does in `select_in_scope_pr_diff` (cute-dbt#167).
         for modified_id in modified.iter() {
             let is_model = current
@@ -603,17 +604,42 @@ fn leaf_segment(id: &str) -> &str {
     id.rsplit('.').next().unwrap_or(id)
 }
 
+/// Resolve a unit test's target model, preferring the engine-resolved
+/// id over bare-name matching (cute-dbt#254).
+///
+/// When the manifest carries `tested_node_unique_id` (both engines emit
+/// it on every resolvable unit test; for **versioned** models it is the
+/// `.vN`-suffixed `unique_id` — fusion `dbt-parser`
+/// `resolve_unit_tests.rs` @ `9977b6cb…`), the target is a direct
+/// `nodes` lookup. This is the only resolution that can bind a
+/// versioned model: its `unique_id` ends in the version suffix
+/// (`model.shop.dim_customers.v2`), so [`resolve_target_model`]'s
+/// leaf-segment match against the bare `model:` name can never reach it.
+///
+/// Graceful absence (ADR-5 tolerance): a missing/null field, an id
+/// dangling outside `nodes`, or an id naming a non-`model` node all
+/// fall back to [`resolve_target_model`] — the exact pre-#254 behavior
+/// for dbt-core and older manifests.
+#[must_use]
+pub fn resolve_tested_model<'m>(manifest: &'m Manifest, unit_test: &UnitTest) -> Option<&'m Node> {
+    unit_test
+        .tested_node_unique_id()
+        .and_then(|id| manifest.node(id))
+        .filter(|node| node.resource_type() == "model")
+        .or_else(|| resolve_target_model(manifest, unit_test.model()))
+}
+
 /// Build a map from resolved model node id to the unit-test ids in
 /// `manifest` that target it.
 ///
 /// Used by [`StateComparator::models_in_scope`] to determine which
 /// modified models have zero unit tests targeting them. Resolution is
-/// via [`resolve_target_model`]; unresolvable `model:` references
+/// via [`resolve_tested_model`]; unresolvable `model:` references
 /// contribute nothing to the map (they are skipped, not failed).
 fn unit_test_targets(manifest: &Manifest) -> HashMap<NodeId, Vec<String>> {
     let mut map: HashMap<NodeId, Vec<String>> = HashMap::new();
     for (test_id, unit_test) in manifest.unit_tests() {
-        if let Some(model) = resolve_target_model(manifest, unit_test.model()) {
+        if let Some(model) = resolve_tested_model(manifest, unit_test) {
             map.entry(model.id().clone())
                 .or_default()
                 .push(test_id.clone());
@@ -1902,6 +1928,107 @@ mod tests {
         );
         let resolved = resolve_target_model(&m, &id("dup"));
         assert_eq!(resolved.map(|n| n.id().as_str()), Some("model.pkg_a.dup"));
+    }
+
+    // ===== resolve_tested_model (cute-dbt#254) =====
+
+    /// A unit test targeting `model_bare` whose engine-resolved target id
+    /// is `tested_id` (the wire `tested_node_unique_id`).
+    fn unit_test_with_tested_id(model_bare: &str, tested_id: &str) -> UnitTest {
+        unit_test_for(model_bare, None).with_tested_node_unique_id(Some(NodeId::new(tested_id)))
+    }
+
+    #[test]
+    fn resolve_target_model_misses_a_versioned_model_by_bare_name() {
+        // The cute-dbt#254 bug shape: a versioned model's unique_id ends
+        // in its version suffix (`model.shop.dim_customers.v2` →
+        // leaf `"v2"`), so bare-name leaf matching can never bind it.
+        // This pins WHY the engine-resolved id is load-bearing.
+        let m = manifest(vec![model("model.shop.dim_customers.v2", "c")], vec![]);
+        assert!(resolve_target_model(&m, &id("dim_customers")).is_none());
+    }
+
+    #[test]
+    fn resolve_tested_model_binds_a_versioned_model_via_engine_resolved_id() {
+        let m = manifest(vec![model("model.shop.dim_customers.v2", "c")], vec![]);
+        let ut = unit_test_with_tested_id("dim_customers", "model.shop.dim_customers.v2");
+        assert_eq!(
+            resolve_tested_model(&m, &ut).map(|n| n.id().as_str()),
+            Some("model.shop.dim_customers.v2"),
+        );
+    }
+
+    #[test]
+    fn resolve_tested_model_falls_back_to_bare_name_when_id_absent() {
+        // Graceful absence: dbt-core / older manifests omit the field —
+        // resolution degrades to the exact pre-#254 behavior.
+        let m = manifest(vec![model("model.jaffle_shop.stg_customers", "c")], vec![]);
+        let ut = unit_test_for("stg_customers", None);
+        assert_eq!(
+            resolve_tested_model(&m, &ut).map(|n| n.id().as_str()),
+            Some("model.jaffle_shop.stg_customers"),
+        );
+    }
+
+    #[test]
+    fn resolve_tested_model_falls_back_when_the_id_dangles() {
+        // A tested_node_unique_id naming a node absent from `nodes`
+        // (hand-edited manifest) must not fail resolution — the bare-name
+        // path still binds (ADR-5 tolerance).
+        let m = manifest(vec![model("model.jaffle_shop.orders", "o")], vec![]);
+        let ut = unit_test_with_tested_id("orders", "model.jaffle_shop.gone");
+        assert_eq!(
+            resolve_tested_model(&m, &ut).map(|n| n.id().as_str()),
+            Some("model.jaffle_shop.orders"),
+        );
+    }
+
+    #[test]
+    fn resolve_tested_model_falls_back_when_the_id_names_a_non_model() {
+        // Defensive: a unit test's target is always a model in dbt; an id
+        // resolving to any other resource type falls back to name
+        // matching rather than mis-binding a seed as the target.
+        let m = manifest(
+            vec![
+                typed_node("seed.jaffle_shop.orders", "seed"),
+                model("model.jaffle_shop.orders", "o"),
+            ],
+            vec![],
+        );
+        let ut = unit_test_with_tested_id("orders", "seed.jaffle_shop.orders");
+        assert_eq!(
+            resolve_tested_model(&m, &ut).map(|n| n.id().as_str()),
+            Some("model.jaffle_shop.orders"),
+        );
+    }
+
+    #[test]
+    fn in_scope_unit_tests_includes_a_test_on_a_modified_versioned_model() {
+        // Attribution-level proof of the cute-dbt#254 fix: a unit test on
+        // a versioned model enters scope when the versioned node's
+        // checksum changes — pre-fix the bare-name resolution missed the
+        // `.v2` node and the test silently dropped out of scope.
+        let ut = unit_test_with_tested_id("dim_customers", "model.shop.dim_customers.v2");
+        let test_id = "unit_test.shop.dim_customers.v2.t";
+        let current = manifest(
+            vec![model("model.shop.dim_customers.v2", "after")],
+            vec![(test_id, ut.clone())],
+        );
+        let baseline = manifest(
+            vec![model("model.shop.dim_customers.v2", "before")],
+            vec![(test_id, ut)],
+        );
+        let comparator = StateComparator::body_only();
+        let in_scope = comparator.in_scope_unit_tests(&current, &baseline);
+        assert!(
+            in_scope.contains(test_id),
+            "the versioned model's unit test must be in scope"
+        );
+        let models = comparator.models_in_scope(&current, &baseline);
+        assert!(
+            models.contains(&id("model.shop.dim_customers.v2")),
+            "the versioned model itself must be in scope (arm 1)"
+        );
     }
 
     // ===== InScopeSet =====
