@@ -189,10 +189,10 @@ pub fn build_lineage(current: &Manifest, models: &ModelInScopeSet) -> Lineage {
             continue;
         };
         for dep in node.depends_on().nodes() {
-            if let Some(&from_idx) = index_of.get(dep) {
-                if from_idx != to_idx {
-                    edges.push((from_idx, to_idx));
-                }
+            if let Some(&from_idx) = index_of.get(dep)
+                && from_idx != to_idx
+            {
+                edges.push((from_idx, to_idx));
             }
         }
     }

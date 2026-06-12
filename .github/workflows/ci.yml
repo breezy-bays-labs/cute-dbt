@@ -122,7 +122,7 @@ jobs:
     # Version-agnostic job name (cute-dbt#266): the enforced version lives
     # ONLY in Cargo.toml `rust-version` + the `toolchain:` pin below, so an
     # MSRV bump never needs a branch-protection rename again. Currently
-    # 1.88 (dbt-yaml's MSRV).
+    # 1.88 (dbt-yaml's MSRV; cute-dbt#276's let-chain fixes need it too).
     name: MSRV
     runs-on: ubuntu-latest
     timeout-minutes: 15
