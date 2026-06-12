@@ -17,13 +17,16 @@ use serde_json::Value;
 
 use super::super::common;
 use super::World;
-use super::builders::{empty_manifest, serialize_to_tmp};
+use super::builders::{
+    empty_manifest, model_node_with_fqn, serialize_to_tmp, unit_test_for, with_node, with_unit_test,
+};
 
 /// The canonical working-tree dbt_project.yml every happy-path scenario
-/// shares. Line 5 carries the var; line 10 carries the marts config —
-/// the patches below address exactly those lines (`concat!` keeps the
-/// authored indentation byte-exact — a `\`-continued literal would eat
-/// it).
+/// shares. Line 5 carries the var; line 10 carries the marts config;
+/// line 11 carries the project-level config the cute-dbt#267
+/// deepest-match scenario edits — the patches below address exactly
+/// those lines (`concat!` keeps the authored indentation byte-exact — a
+/// `\`-continued literal would eat it).
 const PROJECT_YML: &str = concat!(
     "name: bdd_project\n",
     "version: \"1.0\"\n",
@@ -35,6 +38,7 @@ const PROJECT_YML: &str = concat!(
     "  bdd_project:\n",
     "    marts:\n",
     "      +materialized: table\n",
+    "    +materialized: view\n",
 );
 
 /// A one-hunk `--unified=0` patch against dbt_project.yml.
@@ -91,6 +95,56 @@ fn diff_edits_marts_config(world: &mut World, old: String, new: String) {
             10,
             &format!("      +materialized: {old}"),
             &format!("      +materialized: {new}"),
+        ),
+    );
+}
+
+#[given(
+    regex = r#"^the current manifest carries a marts model "([^"]+)" and a staging model "([^"]+)" with fqns$"#
+)]
+fn manifest_with_fqn_models(world: &mut World, marts_bare: String, staging_bare: String) {
+    // fqn first segments match the canonical file's project name
+    // (`bdd_project`) — the config-tree prefix-matcher input. The marts
+    // model carries one unit test so the widening can be asserted to
+    // pull it in as CONTEXT (compiled code keeps Stage-2 green).
+    let mut manifest = empty_manifest();
+    manifest = with_node(
+        manifest,
+        model_node_with_fqn(
+            &marts_bare,
+            "ck-marts",
+            Some("select 1"),
+            &["bdd_project", "marts", &marts_bare],
+        ),
+    );
+    manifest = with_node(
+        manifest,
+        model_node_with_fqn(
+            &staging_bare,
+            "ck-staging",
+            Some("select 1"),
+            &["bdd_project", "staging", &staging_bare],
+        ),
+    );
+    manifest = with_unit_test(
+        manifest,
+        unit_test_for(&format!("test_{marts_bare}_rows"), &marts_bare),
+    );
+    world.current_manifest = Some(manifest);
+}
+
+#[given(
+    regex = r#"^the PR diff edits the project-level materialization from "([^"]+)" to "([^"]+)"$"#
+)]
+fn diff_edits_project_level_config(world: &mut World, old: String, new: String) {
+    // Line 11 of the canonical file (the bdd_project-level
+    // `+materialized` leaf the marts subtree shadows).
+    write_patch(
+        world,
+        &project_patch(
+            11,
+            &format!("    +materialized: {old}"),
+            &format!("    +materialized: {new}"),
         ),
     );
 }
@@ -280,6 +334,86 @@ fn payload_carries_definition(world: &mut World) {
         def["vars"]["dq_threshold"],
         Value::from(5),
         "standing metadata must carry the parsed vars",
+    );
+}
+
+// ---------------------------------------------------------------------
+// Then — cute-dbt#267 config-tree widening + provenance chips
+// ---------------------------------------------------------------------
+
+/// The payload's model entry by bare name, or `None`.
+fn payload_model(payload: &Value, name: &str) -> Option<Value> {
+    payload["models"]
+        .as_array()
+        .expect("payload carries a models array")
+        .iter()
+        .find(|m| m["name"].as_str() == Some(name))
+        .cloned()
+}
+
+#[then(regex = r#"^the payload carries the model "([^"]+)" in scope$"#)]
+fn payload_carries_model(world: &mut World, name: String) {
+    let payload = payload(world);
+    assert!(
+        payload_model(&payload, &name).is_some(),
+        "model {name:?} must be in the rendered scope; stderr={}",
+        world.last_stderr,
+    );
+}
+
+#[then(regex = r#"^the payload carries no model "([^"]+)"$"#)]
+fn payload_carries_no_model(world: &mut World, name: String) {
+    let payload = payload(world);
+    assert!(
+        payload_model(&payload, &name).is_none(),
+        "model {name:?} must NOT be widened into scope",
+    );
+}
+
+#[then(
+    regex = r#"^the payload model "([^"]+)" carries the config attribution "([^"]+)" via "([^"]+)"$"#
+)]
+fn payload_model_carries_attribution(world: &mut World, name: String, key: String, path: String) {
+    let payload = payload(world);
+    let model = payload_model(&payload, &name).expect("the model is in scope");
+    let attributions = model["config_attributions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("model {name:?} carries config_attributions; got {model}"));
+    assert!(
+        attributions.iter().any(|a| {
+            a["key"].as_str() == Some(key.as_str()) && a["path"].as_str() == Some(path.as_str())
+        }),
+        "model {name:?} must carry the +{key} chip via {path}; got {attributions:?}",
+    );
+}
+
+#[then(regex = r#"^the payload carries the unit test "([^"]+)" as context, not changed$"#)]
+fn payload_carries_context_test(world: &mut World, test_name: String) {
+    let payload = payload(world);
+    let test = payload["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .flat_map(|m| m["tests"].as_array().cloned().unwrap_or_default())
+        .find(|t| t["name"].as_str() == Some(test_name.as_str()))
+        .unwrap_or_else(|| panic!("unit test {test_name:?} must ride into scope"));
+    assert_eq!(
+        test["changed"],
+        Value::Bool(false),
+        "a config-widened test is context — its definition was not updated",
+    );
+}
+
+#[then(regex = r#"^the panel's config-tree row states "([^"]+)"$"#)]
+fn panel_config_tree_row_states(world: &mut World, sentence: String) {
+    let html = html(world);
+    assert!(
+        html.contains(r#"data-testid="project-def-affected""#),
+        "the config-tree row must carry the affected-models listing",
+    );
+    assert!(
+        html.contains(&sentence),
+        "the affected listing must state {sentence:?}",
     );
 }
 

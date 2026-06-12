@@ -52,7 +52,7 @@
 //! [`ARCHITECTURE.md` §5](../../../ARCHITECTURE.md) for the zero-egress
 //! gate this preserves.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -67,8 +67,8 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, CteGraph, DiffLine, DiffLineKind,
-    EdgeType, Finding, FixtureTable, HeuristicId, InScopeSet, Instrument, Manifest,
+    BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, ConfigAttribution, CteGraph, DiffLine,
+    DiffLineKind, EdgeType, Finding, FixtureTable, HeuristicId, InScopeSet, Instrument, Manifest,
     ModelInScopeSet, ModelYamlOutcome, Node, NodeId, ProjectChange, ProjectChangeCategory,
     ProjectChangePanel, ProjectDefinition, ProjectFacts, ProjectFallbackReason, SourceNode,
     TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
@@ -348,6 +348,15 @@ pub struct ModelPayload {
     /// check) stays byte-stable.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<FindingPayload>,
+    /// Config-tree provenance chips (cute-dbt#267): the `dbt_project.yml`
+    /// subtree edits whose fqn-resolved value changed for this model —
+    /// the reason a config-widened model is in the report. The JS
+    /// renders one chip per entry
+    /// (`+materialized via dbt_project.yml · models.shop.marts`).
+    /// Omitted from JSON when empty (baseline mode, unwidened models,
+    /// every pre-#267 payload stays byte-stable).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub config_attributions: Vec<ConfigAttribution>,
 }
 
 /// The Model-YAML section's render shape (cute-dbt#247): the model's
@@ -1395,6 +1404,16 @@ struct ProjectPanelRowView {
     /// later slice — the copy never implies coming-soon); dispatch rows
     /// state the project-wide/not-attributable fact.
     note: &'static str,
+    /// The affected-models sentence for a `models:`-section config-tree
+    /// row (cute-dbt#267) — counts always explicit; names inline up to
+    /// the R1b cap. Empty for every other row (no claim is made for
+    /// sections this slice does not attribute).
+    affected_text: String,
+    /// R1b overflow (cute-dbt#267): the full affected-model name list
+    /// when the count exceeds [`CONFIG_AFFECTED_CAP`] — rendered inside
+    /// a collapsed `<details>` ("listed, not individually rendered").
+    /// Empty when the names already ride inline in `affected_text`.
+    affected_overflow: Vec<String>,
 }
 
 /// One raw diff line of the panel's Shape-A fallback row.
@@ -1486,23 +1505,129 @@ fn project_fallback_copy(reason: ProjectFallbackReason) -> &'static str {
     }
 }
 
-/// Build the server-rendered panel view from the domain panel POD.
-fn project_panel_view(panel: &ProjectChangePanel) -> ProjectPanelView {
+/// R1b presentation cap (cute-dbt#267): up to this many affected-model
+/// names ride inline in the config-tree row's sentence; past it the
+/// names collapse into a `<details>` listing with the count stated
+/// explicitly ("listed, not individually rendered"). Calibrated from the
+/// diff-showcase dogfood (its marts edit affects 20 models).
+const CONFIG_AFFECTED_CAP: usize = 10;
+
+/// Invert the per-model attribution map into per-(subtree-path, key)
+/// affected-model NODE-ID sets — the panel rows' listing source. Full
+/// node ids dedupe and count (dbt 1.6+ allows same-named models across
+/// packages, and a section-root edit selects across packages — bare-name
+/// dedupe would under-count exactly there); the human-facing names
+/// derive at sentence-build time ([`affected_display_names`]),
+/// disambiguating only on collision.
+fn affected_models_by_leaf(
+    attributions: &BTreeMap<String, Vec<ConfigAttribution>>,
+) -> BTreeMap<(String, String), BTreeSet<String>> {
+    let mut out: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for (node_id, entries) in attributions {
+        for attribution in entries {
+            out.entry((attribution.path.clone(), attribution.key.clone()))
+                .or_default()
+                .insert(node_id.clone());
+        }
+    }
+    out
+}
+
+/// The sorted display names for one row's affected node-id set: the bare
+/// model name (the selector vocabulary) wherever it is unique within the
+/// set, the full node id where two packages collide on the same bare
+/// name (so the listing never shows two indistinguishable entries).
+fn affected_display_names(ids: &BTreeSet<String>) -> Vec<String> {
+    let mut bare_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for id in ids {
+        *bare_counts.entry(leaf_segment(id)).or_insert(0) += 1;
+    }
+    let mut names: Vec<String> = ids
+        .iter()
+        .map(|id| {
+            let bare = leaf_segment(id);
+            if bare_counts[bare] > 1 {
+                id.clone()
+            } else {
+                bare.to_owned()
+            }
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// The affected-models sentence + R1b overflow list for one
+/// `models:`-section config-tree row (cute-dbt#267). TOTAL-tier copy:
+/// counts are exact — counted over full node ids (fusion's own
+/// resolution; cross-package bare-name twins both count) — so a zero is
+/// a truthful "affects 0 models in this manifest" (shadowed everywhere,
+/// or no model's fqn descends through the edited path).
+fn affected_models_strings(ids: &BTreeSet<String>) -> (String, Vec<String>) {
+    let count = ids.len();
+    if count == 0 {
+        return ("affects 0 models in this manifest".to_owned(), Vec::new());
+    }
+    let noun = if count == 1 { "model" } else { "models" };
+    let names = affected_display_names(ids);
+    if count <= CONFIG_AFFECTED_CAP {
+        (
+            format!(
+                "affects {count} {noun} — widened into report scope: {}",
+                names.join(", ")
+            ),
+            Vec::new(),
+        )
+    } else {
+        (
+            format!("affects {count} {noun} — widened into report scope, listed below"),
+            names,
+        )
+    }
+}
+
+/// Build one categorized panel row, attaching the cute-dbt#267
+/// affected-models listing to `models:`-section config-tree rows.
+fn project_panel_row(
+    change: &ProjectChange,
+    affected: &BTreeMap<(String, String), BTreeSet<String>>,
+) -> ProjectPanelRowView {
+    let (category_key, category_label, note) = project_category_strings(change.category);
+    let empty = BTreeSet::new();
+    let (affected_text, affected_overflow) = change
+        .tree
+        .as_ref()
+        .filter(|tree| tree.section == "models")
+        .map_or((String::new(), Vec::new()), |tree| {
+            let names = affected
+                .get(&(tree.dotted(), tree.key.clone()))
+                .unwrap_or(&empty);
+            affected_models_strings(names)
+        });
+    ProjectPanelRowView {
+        category_key,
+        category_label,
+        label: change.label.clone(),
+        detail: project_change_detail(change),
+        note,
+        affected_text,
+        affected_overflow,
+    }
+}
+
+/// Build the server-rendered panel view from the domain panel POD plus
+/// the cute-dbt#267 attribution map (the affected-models listings on
+/// `models:`-section config-tree rows).
+fn project_panel_view(
+    panel: &ProjectChangePanel,
+    attributions: &BTreeMap<String, Vec<ConfigAttribution>>,
+) -> ProjectPanelView {
     match panel {
         ProjectChangePanel::Categorized { changes } => {
+            let affected = affected_models_by_leaf(attributions);
             let rows = changes
                 .iter()
-                .map(|change| {
-                    let (category_key, category_label, note) =
-                        project_category_strings(change.category);
-                    ProjectPanelRowView {
-                        category_key,
-                        category_label,
-                        label: change.label.clone(),
-                        detail: project_change_detail(change),
-                        note,
-                    }
-                })
+                .map(|change| project_panel_row(change, &affected))
                 .collect::<Vec<_>>();
             ProjectPanelView {
                 is_empty_change: rows.is_empty(),
@@ -1769,7 +1894,7 @@ pub fn build_payload_with_externals(
             continue;
         };
         let tests = model_tests.get(model_id).unwrap_or(&empty).as_slice();
-        models.push(build_model_payload(
+        let mut model_payload = build_model_payload(
             current,
             model,
             tests,
@@ -1781,7 +1906,13 @@ pub fn build_payload_with_externals(
             data_diffs,
             external_fixtures,
             check_policy,
-        ));
+        );
+        // cute-dbt#267 — the model-row provenance chips: which
+        // dbt_project.yml subtree edit put (or kept) this model in scope.
+        if let Some(attributions) = project_facts.config_attributions.get(model_id.as_str()) {
+            model_payload.config_attributions.clone_from(attributions);
+        }
+        models.push(model_payload);
     }
     // cute-dbt#170 — the spec catalog covers exactly the checks that
     // fired (suppressed findings included: they render, quietly).
@@ -1933,7 +2064,10 @@ pub fn render_report_with_externals(
         baseline_label,
         is_pr_diff: scope_source == ScopeSource::PrDiff,
         payload_json: &payload_json,
-        project_panel: project_facts.panel.as_ref().map(project_panel_view),
+        project_panel: project_facts
+            .panel
+            .as_ref()
+            .map(|panel| project_panel_view(panel, &project_facts.config_attributions)),
     };
     let html = template
         .render()
@@ -2030,6 +2164,10 @@ fn build_model_payload(
             .into_iter()
             .map(|finding| finding_payload(&graph, finding))
             .collect(),
+        // cute-dbt#267 — attached by build_payload_with_externals from
+        // ProjectFacts.config_attributions (this builder never sees the
+        // gather stage's facts).
+        config_attributions: Vec::new(),
     }
 }
 
@@ -3114,6 +3252,230 @@ mod tests {
     ) -> Manifest {
         manifest_for(nodes, tests)
             .with_sources(sources.into_iter().map(|s| (s.id().clone(), s)).collect())
+    }
+
+    // ===== cute-dbt#267 — config-tree attribution render surfaces =====
+
+    #[test]
+    fn build_payload_attaches_config_attribution_chips_to_widened_models() {
+        let manifest = manifest_for(
+            vec![
+                model_node("model.shop.fct_orders", "b1", Some("select 1")),
+                model_node("model.shop.stg_raw", "b2", Some("select 1")),
+            ],
+            vec![],
+        );
+        let models = ModelInScopeSet::from_iter([
+            NodeId::new("model.shop.fct_orders"),
+            NodeId::new("model.shop.stg_raw"),
+        ]);
+        let facts = ProjectFacts {
+            definition: None,
+            panel: None,
+            config_attributions: BTreeMap::from([(
+                "model.shop.fct_orders".to_owned(),
+                vec![ConfigAttribution {
+                    key: "materialized".to_owned(),
+                    path: "models.shop.marts".to_owned(),
+                }],
+            )]),
+        };
+        let payload = build_payload_with_externals(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+            &CheckPolicy::default(),
+            &facts,
+        );
+        let fct = payload
+            .models
+            .iter()
+            .find(|m| m.name == "fct_orders")
+            .expect("widened model renders");
+        assert_eq!(
+            fct.config_attributions,
+            vec![ConfigAttribution {
+                key: "materialized".to_owned(),
+                path: "models.shop.marts".to_owned(),
+            }],
+        );
+        let stg = payload
+            .models
+            .iter()
+            .find(|m| m.name == "stg_raw")
+            .expect("unattributed model renders");
+        assert!(stg.config_attributions.is_empty());
+        // The unattributed model's JSON omits the key entirely (additive
+        // payload shape — pre-#267 byte stability). The field is a Vec —
+        // exactly two wire states, both pinned here: present-with-content
+        // (the exact serialized shape the report JS consumes) and absent.
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert_eq!(json.matches("config_attributions").count(), 1, "{json}");
+        assert!(
+            json.contains(
+                r#""config_attributions":[{"key":"materialized","path":"models.shop.marts"}]"#
+            ),
+            "the attributed model serializes the full wire shape: {json}",
+        );
+    }
+
+    #[test]
+    fn affected_models_strings_inline_up_to_the_cap_and_collapse_past_it() {
+        // Zero — a truthful TOTAL-tier zero, no name list.
+        let (text, overflow) = affected_models_strings(&BTreeSet::new());
+        assert_eq!(text, "affects 0 models in this manifest");
+        assert!(overflow.is_empty());
+
+        // At the cap — names ride inline, no overflow.
+        let at_cap: BTreeSet<String> = (0..CONFIG_AFFECTED_CAP)
+            .map(|i| format!("m{i:02}"))
+            .collect();
+        let (text, overflow) = affected_models_strings(&at_cap);
+        assert!(
+            text.contains("affects 10 models — widened into report scope: m00,"),
+            "{text}",
+        );
+        assert!(text.contains("m09"), "every name rides inline: {text}");
+        assert!(overflow.is_empty());
+
+        // Past the cap (R1b) — explicit count, names collapse to overflow.
+        let over: BTreeSet<String> = (0..=CONFIG_AFFECTED_CAP)
+            .map(|i| format!("m{i:02}"))
+            .collect();
+        let (text, overflow) = affected_models_strings(&over);
+        assert_eq!(
+            text,
+            "affects 11 models — widened into report scope, listed below",
+        );
+        assert_eq!(overflow.len(), 11);
+        assert!(!text.contains("m00"), "no name leaks inline past the cap");
+    }
+
+    #[test]
+    fn affected_models_count_by_node_id_and_disambiguate_bare_name_twins() {
+        // Two packages each carrying a model named `dim_x` (legal since
+        // dbt 1.6 two-arg ref), both selected by a section-root edit:
+        // the count is over full node ids — never a bare-name collapse —
+        // and the colliding entries display their full ids so the
+        // listing never shows two indistinguishable names. The unique
+        // name keeps its bare (selector-vocabulary) form.
+        let ids: BTreeSet<String> = [
+            "model.shop.dim_x".to_owned(),
+            "model.pkg_two.dim_x".to_owned(),
+            "model.shop.fct_solo".to_owned(),
+        ]
+        .into_iter()
+        .collect();
+        let (text, overflow) = affected_models_strings(&ids);
+        assert_eq!(
+            text,
+            "affects 3 models — widened into report scope: \
+             fct_solo, model.pkg_two.dim_x, model.shop.dim_x",
+        );
+        assert!(overflow.is_empty());
+    }
+
+    #[test]
+    fn project_panel_view_attaches_affected_listing_to_models_tree_rows_only() {
+        let models_leaf = crate::domain::ConfigLeafPath {
+            section: "models".to_owned(),
+            segments: vec!["shop".to_owned(), "marts".to_owned()],
+            key: "materialized".to_owned(),
+        };
+        let seeds_leaf = crate::domain::ConfigLeafPath {
+            section: "seeds".to_owned(),
+            segments: Vec::new(),
+            key: "quote_columns".to_owned(),
+        };
+        let panel = ProjectChangePanel::Categorized {
+            changes: vec![
+                ProjectChange {
+                    category: ProjectChangeCategory::Vars,
+                    label: "flag".to_owned(),
+                    old: Some(json!(1)),
+                    new: Some(json!(2)),
+                    tree: None,
+                },
+                ProjectChange {
+                    category: ProjectChangeCategory::ConfigTree,
+                    label: models_leaf.label(),
+                    old: Some(json!("view")),
+                    new: Some(json!("table")),
+                    tree: Some(models_leaf),
+                },
+                ProjectChange {
+                    category: ProjectChangeCategory::ConfigTree,
+                    label: seeds_leaf.label(),
+                    old: None,
+                    new: Some(json!(false)),
+                    tree: Some(seeds_leaf),
+                },
+            ],
+        };
+        let attributions = BTreeMap::from([
+            (
+                "model.shop.dim_a".to_owned(),
+                vec![ConfigAttribution {
+                    key: "materialized".to_owned(),
+                    path: "models.shop.marts".to_owned(),
+                }],
+            ),
+            (
+                "model.shop.fct_b".to_owned(),
+                vec![ConfigAttribution {
+                    key: "materialized".to_owned(),
+                    path: "models.shop.marts".to_owned(),
+                }],
+            ),
+        ]);
+        let view = project_panel_view(&panel, &attributions);
+        assert_eq!(view.rows.len(), 3);
+        let vars_row = &view.rows[0];
+        assert!(
+            vars_row.affected_text.is_empty(),
+            "vars rows make no affected-models claim (contextualize, never widen)",
+        );
+        let models_row = &view.rows[1];
+        assert_eq!(
+            models_row.affected_text,
+            "affects 2 models — widened into report scope: dim_a, fct_b",
+        );
+        assert!(models_row.affected_overflow.is_empty());
+        let seeds_row = &view.rows[2];
+        assert!(
+            seeds_row.affected_text.is_empty(),
+            "non-models sections make no claim (this slice attributes models: only)",
+        );
+    }
+
+    #[test]
+    fn project_panel_view_reports_a_truthful_zero_for_a_shadowed_models_edit() {
+        let leaf = crate::domain::ConfigLeafPath {
+            section: "models".to_owned(),
+            segments: vec!["shop".to_owned()],
+            key: "materialized".to_owned(),
+        };
+        let panel = ProjectChangePanel::Categorized {
+            changes: vec![ProjectChange {
+                category: ProjectChangeCategory::ConfigTree,
+                label: leaf.label(),
+                old: Some(json!("view")),
+                new: Some(json!("table")),
+                tree: Some(leaf),
+            }],
+        };
+        let view = project_panel_view(&panel, &BTreeMap::new());
+        assert_eq!(
+            view.rows[0].affected_text,
+            "affects 0 models in this manifest",
+        );
     }
 
     #[test]

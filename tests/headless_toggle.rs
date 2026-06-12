@@ -11794,6 +11794,110 @@ fn project_panel_renders_categorized_on_the_committed_showcase() {
         note, "blast radius not attributed",
         "the vars row carries the locked interim honesty copy",
     );
+
+    // cute-dbt#267 — the config-tree row's affected-models listing (the
+    // marts +materialized edit selects the 20 marts models, fusion's
+    // fqn-prefix descent) with the R1b cap exercised: 20 > the inline
+    // cap, so the count sentence shows and the names collapse into the
+    // <details> listing.
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"project-def-affected\"]"),
+        1,
+        "the config-tree row carries the affected-models sentence",
+    );
+    let affected = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"project-def-affected\"]').textContent",
+    );
+    assert_eq!(
+        affected, "affects 20 models — widened into report scope, listed below",
+        "the count is explicit (TOTAL tier) and past the R1b cap the names collapse",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"project-def-affected-list\"]"),
+        1,
+        "the collapsed name listing renders",
+    );
+    let names = eval_string(
+        &tab,
+        "document.querySelector('.project-def-affected-names').textContent",
+    );
+    assert!(
+        names.contains("dim_payers") && names.contains("v_encounter_summary"),
+        "the overflow listing carries the widened model names: {names}",
+    );
+    assert!(
+        !names.contains("stg_synthea__patients"),
+        "staging models are NOT under the edited marts subtree: {names}",
+    );
+
+    // The landing model (first with an updated test — a marts model) is
+    // config-widened too, so its provenance chip row is visible on load.
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"model-attribution\"]"),
+        1,
+        "the provenance chip row renders for the widened landing model",
+    );
+    let chip = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"model-attribution\"] .config-attribution-chip').textContent",
+    );
+    assert_eq!(
+        chip, "+materialized via dbt_project.yml · models.healthcare_analytics.marts",
+        "the chip names the contributing subtree",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn config_attribution_chip_renders_for_the_widened_model_and_hides_otherwise() {
+    // cute-dbt#267 — the synthetic chip guard: a model carrying a
+    // config attribution shows the chip row; a model without one keeps
+    // the row hidden (out of the accessibility tree).
+    let facts = ProjectFacts {
+        definition: None,
+        panel: None,
+        config_attributions: BTreeMap::from([(
+            "model.shop.dim_a".to_owned(),
+            vec![cute_dbt::domain::ConfigAttribution {
+                key: "materialized".to_owned(),
+                path: "models.shop.marts".to_owned(),
+            }],
+        )]),
+    };
+    let url = render_with_project_facts("headless_project_chip.html", &facts);
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"model-attribution\"]"),
+        1,
+        "the chip row is visible for the attributed model",
+    );
+    let chip = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"model-attribution\"] .config-attribution-chip').textContent",
+    );
+    assert_eq!(
+        chip,
+        "+materialized via dbt_project.yml · models.shop.marts"
+    );
+
+    // The unattributed control: same render, no attributions — hidden.
+    let url = render_with_project_facts("headless_project_no_chip.html", &ProjectFacts::default());
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"model-attribution\"]"),
+        0,
+        "no chip row for a model without attribution (hidden element)",
+    );
     let _ = tab.close(true);
 }
 
@@ -11814,6 +11918,7 @@ fn project_panel_fallback_row_renders_for_unparseable_yaml() {
             reason: ProjectFallbackReason::NewParseFailed,
             raw: raw_hunk_lines(&hunks),
         }),
+        config_attributions: BTreeMap::new(),
     };
     let url = render_with_project_facts("headless_project_fallback.html", &facts);
 
@@ -11864,6 +11969,7 @@ fn project_panel_absence_note_renders_when_file_unreadable() {
             reason: ProjectFallbackReason::FileUnreadable,
             raw: raw_hunk_lines(&hunks),
         }),
+        config_attributions: BTreeMap::new(),
     };
     let url = render_with_project_facts("headless_project_absence.html", &facts);
 
