@@ -323,7 +323,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "2bf23e49cbb92fa6e7b19f32c0ed1ff1235aeed38d1bb77b4d981d753bae8545"
+sha256 = "61cd7ef4f844de74ae5d5bc0772982919a8341073e04c7cf00160e36a496de6f"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -419,7 +419,26 @@ ingestion (empty `[]`/`{}` everywhere else in the fixture is the real \
 unset shape; contract checksums stay the real `null` — an \
 enforced-contract specimen lives only in the PR's probe evidence, \
 since splicing one would pair implausibly with unenforced \
-config.contract).\
+config.contract). \
+cute-dbt#258's disabled+test-config splice (current side only, same \
+throwaway-compile method — VERBATIM dbt-core 1.11.11 output): the \
+empty top-level `disabled` map gains three entries (a disabled model \
+stg_synthea__claims_archive, a disabled SINGULAR test \
+assert_payer_amounts_reconcile, and a disabled GENERIC test \
+accepted_values_dim_payers_payer_type — the generic one keeps its \
+attached_node/column_name/test_metadata linkage, the live-verified \
+core shape fusion mirrors), and the existing \
+not_null_dim_payers_payer_name test node's `config` + \
+`unrendered_config` are replaced wholesale with the engine-emitted \
+twins (same deterministic id) carrying severity "warn" (authored \
+case), where, limit 50, store_failures true (+ the core-derived \
+store_failures_as "table") and the matching authored \
+unrendered_config — the populated specimens for the cute-dbt#258 \
+test-config/disabled/unrendered ingestion. Nothing reads these \
+surfaces at render time, so no rendered surface moves; every other \
+test keeps the real null-filled limit/store_failures and `{}` \
+unrendered_config unset shapes, and singular-test linkage was already \
+real committed wire (the assert_* tests).\
 """
 
 [[fixture]]
