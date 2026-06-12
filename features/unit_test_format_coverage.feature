@@ -24,6 +24,14 @@
 # `tests/fixtures/MANIFEST.toml`), so csv rows arrive as arrays here.
 # A future fusion-emitted fixture will exercise the csv-as-string
 # path end-to-end (follow-up cute-dbt#85).
+#
+# Quote-style note (cute-dbt#249): the `stg_synthea__medications` givens
+# are authored DOUBLE-quoted (`ref("…")`) while their sibling
+# `stg_synthea__encounters` givens stay single-quoted — dbt accepts both
+# Python/Jinja string-literal styles and ships the authored text verbatim
+# on the manifest wire (cute-dbt#245), so these scenarios also pin that a
+# double-quoted given binds and tabulates identically to its
+# single-quoted twin.
 Feature: cute-dbt renders unit tests authored in dict / csv / sql formats
   As a dbt analytics engineer authoring unit tests
   I want my unit tests to render in the report regardless of authored format
@@ -44,7 +52,7 @@ Feature: cute-dbt renders unit tests authored in dict / csv / sql formats
     Then the playground report contains the unit test "test_mart_dq_summary_combines_encounter_and_medication_metrics"
     And that unit test names the target model "mart_dq_summary"
     And the unit test's given fixture for input "ref('stg_synthea__encounters')" has format "csv" with rows as an array
-    And the unit test's given fixture for input "ref('stg_synthea__medications')" has format "csv" with rows as an array
+    And the unit test's given fixture for input "ref("stg_synthea__medications")" has format "csv" with rows as an array
     And the unit test's expected fixture has format "csv" with rows as an array
 
   Scenario: A unit test authored with literal-row sql givens tabulates them as data tables (cute-dbt#137)
@@ -52,9 +60,9 @@ Feature: cute-dbt renders unit tests authored in dict / csv / sql formats
     Then the playground report contains the unit test "test_mart_dq_summary_zero_quarantined_when_all_valid"
     And that unit test names the target model "mart_dq_summary"
     And the unit test's given fixture for input "ref('stg_synthea__encounters')" has format "sql" with rows as a string
-    And the unit test's given fixture for input "ref('stg_synthea__medications')" has format "sql" with rows as a string
+    And the unit test's given fixture for input "ref("stg_synthea__medications")" has format "sql" with rows as a string
     And the unit test's given fixture for input "ref('stg_synthea__encounters')" tabulates as a data table
-    And the unit test's given fixture for input "ref('stg_synthea__medications')" tabulates as a data table
+    And the unit test's given fixture for input "ref("stg_synthea__medications")" tabulates as a data table
     And the unit test's expected fixture has format "dict" with rows as an array
 
   Scenario: A modified model with zero unit tests in scope renders the empty-state card

@@ -247,8 +247,13 @@ fn json_kind(v: &Value) -> &'static str {
     }
 }
 
+// The input capture is greedy `(.+)` (not `[^"]+`): a dbt given input may
+// itself carry double quotes (`ref("stg_synthea__medications")` — both
+// quote styles are engine-valid and ship verbatim on the manifest wire,
+// cute-dbt#245/#249). The trailing ` has format "..."` anchor keeps the
+// capture unambiguous.
 #[then(
-    regex = r#"^the unit test's given fixture for input "([^"]+)" has format "([^"]+)" with rows as an? (array|string)$"#
+    regex = r#"^the unit test's given fixture for input "(.+)" has format "([^"]+)" with rows as an? (array|string)$"#
 )]
 fn given_fixture_shape(world: &mut World, input: String, format: String, kind: String) {
     let html = world
@@ -315,8 +320,10 @@ fn expected_fixture_shape(world: &mut World, format: String, kind: String) {
 /// cute-dbt#137 — a given fixture either tabulates (the renderer computed a
 /// `table` POD: a data grid in the Current view) or falls back (no `table`
 /// POD: the sql code block / external-fixture affordance).
+// Greedy `(.+)` input capture for the same reason as `given_fixture_shape`
+// above: the input string may carry double quotes (cute-dbt#245/#249).
 #[then(
-    regex = r#"^the unit test's given fixture for input "([^"]+)" (tabulates as a data table|falls back to a sql code block)$"#
+    regex = r#"^the unit test's given fixture for input "(.+)" (tabulates as a data table|falls back to a sql code block)$"#
 )]
 fn given_fixture_tabulation(world: &mut World, input: String, verdict: String) {
     let html = world
