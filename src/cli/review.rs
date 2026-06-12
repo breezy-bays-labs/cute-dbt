@@ -1717,37 +1717,69 @@ fn warn_if_stale(manifest: &Path, project_dir: &Path) {
 /// (`target/`, the default and any custom name is excluded only by the
 /// conventional name), VCS metadata (`.git`), installed packages
 /// (`dbt_packages/`), and symlinks (never followed).
+///
+/// Decomposed into named single-purpose helpers (each directly
+/// unit-tested) per the lane-wide CRAP < 15 rule: the walk loop here,
+/// the per-entry classification in [`visit_source_entry`], the skip
+/// list in [`is_skipped_source_dir`], and the max-fold in
+/// [`fold_newest`].
 fn newest_source_mtime(project_dir: &Path) -> Option<(PathBuf, SystemTime)> {
     let mut newest: Option<(PathBuf, SystemTime)> = None;
     let mut stack = vec![project_dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.filter_map(Result::ok) {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            let path = entry.path();
-            if file_type.is_dir() {
-                let name = entry.file_name();
-                if name != "target" && name != ".git" && name != "dbt_packages" {
-                    stack.push(path);
-                }
-                continue;
-            }
-            let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
-                continue;
-            };
-            if newest.as_ref().is_none_or(|(_, t)| mtime > *t) {
-                newest = Some((path, mtime));
-            }
+        for entry in readable_dir_entries(&dir) {
+            visit_source_entry(&entry, &mut stack, &mut newest);
         }
     }
     newest
+}
+
+/// The readable entries of a directory — an unreadable directory walks
+/// as empty (the staleness check is a warning, never worth failing on).
+fn readable_dir_entries(dir: &Path) -> Vec<fs::DirEntry> {
+    fs::read_dir(dir)
+        .map(|entries| entries.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
+/// Classify one walk entry: symlinks are never followed, non-skipped
+/// directories queue onto `stack`, and plain files fold their mtime
+/// into `newest`. Unreadable file types / metadata are silently skipped
+/// (warning-grade signal).
+fn visit_source_entry(
+    entry: &fs::DirEntry,
+    stack: &mut Vec<PathBuf>,
+    newest: &mut Option<(PathBuf, SystemTime)>,
+) {
+    let Ok(file_type) = entry.file_type() else {
+        return;
+    };
+    if file_type.is_symlink() {
+        return;
+    }
+    if file_type.is_dir() {
+        if !is_skipped_source_dir(&entry.file_name()) {
+            stack.push(entry.path());
+        }
+        return;
+    }
+    if let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) {
+        fold_newest(newest, entry.path(), mtime);
+    }
+}
+
+/// Whether a directory name is excluded from the staleness walk: build
+/// output, VCS metadata, installed packages.
+fn is_skipped_source_dir(name: &std::ffi::OsStr) -> bool {
+    name == "target" || name == ".git" || name == "dbt_packages"
+}
+
+/// Fold one `(path, mtime)` candidate into the running newest — strictly
+/// newer wins; an equal mtime keeps the incumbent.
+fn fold_newest(newest: &mut Option<(PathBuf, SystemTime)>, path: PathBuf, mtime: SystemTime) {
+    if newest.as_ref().is_none_or(|(_, t)| mtime > *t) {
+        *newest = Some((path, mtime));
+    }
 }
 
 /// Soft warning for untracked files under the project: invisible to
@@ -2577,6 +2609,90 @@ mod tests {
             "build output / VCS / packages never win the walk: {}",
             path.display(),
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_skipped_source_dir_excludes_exactly_the_three_names() {
+        for skipped in ["target", ".git", "dbt_packages"] {
+            assert!(
+                is_skipped_source_dir(std::ffi::OsStr::new(skipped)),
+                "{skipped} is excluded",
+            );
+        }
+        for walked in ["models", "tests", "seeds", "macros", "targets", "git"] {
+            assert!(
+                !is_skipped_source_dir(std::ffi::OsStr::new(walked)),
+                "{walked} is walked",
+            );
+        }
+    }
+
+    #[test]
+    fn fold_newest_keeps_the_strictly_newest_candidate() {
+        let t0 = SystemTime::UNIX_EPOCH;
+        let t1 = t0 + std::time::Duration::from_secs(10);
+        let mut newest = None;
+        // First candidate always seeds.
+        fold_newest(&mut newest, PathBuf::from("a"), t0);
+        assert_eq!(newest, Some((PathBuf::from("a"), t0)));
+        // Strictly newer replaces.
+        fold_newest(&mut newest, PathBuf::from("b"), t1);
+        assert_eq!(newest, Some((PathBuf::from("b"), t1)));
+        // Older never replaces.
+        fold_newest(&mut newest, PathBuf::from("c"), t0);
+        assert_eq!(newest, Some((PathBuf::from("b"), t1)));
+        // An EQUAL mtime keeps the incumbent (strictly-greater fold).
+        fold_newest(&mut newest, PathBuf::from("d"), t1);
+        assert_eq!(newest, Some((PathBuf::from("b"), t1)));
+    }
+
+    #[test]
+    fn readable_dir_entries_treats_an_unreadable_dir_as_empty() {
+        let missing = std::env::temp_dir().join("cute-dbt-definitely-not-a-dir");
+        let _ = fs::remove_dir_all(&missing);
+        assert!(
+            readable_dir_entries(&missing).is_empty(),
+            "a missing/unreadable dir walks as empty — warning-grade signal",
+        );
+        let dir = unique_temp_dir("readable-entries");
+        fs::write(dir.join("one.sql"), "select 1\n").expect("write");
+        assert_eq!(readable_dir_entries(&dir).len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn visit_source_entry_queues_dirs_folds_files_and_skips_symlinks() {
+        let dir = unique_temp_dir("visit-entry");
+        fs::write(dir.join("model.sql"), "select 1\n").expect("write");
+        fs::create_dir_all(dir.join("models")).expect("mkdir");
+        fs::create_dir_all(dir.join("target")).expect("mkdir");
+        std::os::unix::fs::symlink(dir.join("model.sql"), dir.join("link.sql"))
+            .expect("create symlink");
+
+        let mut stack: Vec<PathBuf> = Vec::new();
+        let mut newest: Option<(PathBuf, SystemTime)> = None;
+        for entry in readable_dir_entries(&dir) {
+            visit_source_entry(&entry, &mut stack, &mut newest);
+        }
+        assert_eq!(
+            stack,
+            vec![dir.join("models")],
+            "the walked dir queues; the skipped target/ does not",
+        );
+        let (path, _) = newest.expect("the plain file folded");
+        assert_eq!(path, dir.join("model.sql"), "the symlink never folds");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn newest_source_mtime_ignores_a_symlink_even_when_it_is_newest() {
+        let dir = unique_temp_dir("stale-symlink");
+        fs::write(dir.join("model.sql"), "select 1\n").expect("write");
+        std::os::unix::fs::symlink(dir.join("model.sql"), dir.join("newer-link.sql"))
+            .expect("create symlink");
+        let (path, _) = newest_source_mtime(&dir).expect("source found");
+        assert_eq!(path, dir.join("model.sql"));
         let _ = fs::remove_dir_all(&dir);
     }
 
