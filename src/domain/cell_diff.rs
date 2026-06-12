@@ -584,10 +584,10 @@ pub fn reconstruct_table_diffs(
 ) -> HashMap<String, UnitTestDataDiff> {
     let mut out = HashMap::new();
     for id in changed.iter() {
-        if let Some(data) = data_diff_for_test(current, id, blocks, index) {
-            if !data.is_empty() {
-                out.insert(id.to_owned(), data);
-            }
+        if let Some(data) = data_diff_for_test(current, id, blocks, index)
+            && !data.is_empty()
+        {
+            out.insert(id.to_owned(), data);
         }
     }
     out

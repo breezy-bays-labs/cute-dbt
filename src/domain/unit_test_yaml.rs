@@ -283,10 +283,10 @@ fn list_item_name_matches(
     let field_indent = list_indent + 2 + (after_dash_full.len() - after_dash.len());
 
     // Case 1: `name:` is the first field on the `- ` line.
-    if let Some(rest) = after_dash.strip_prefix("name:") {
-        if parse_yaml_scalar(rest) == test_name {
-            return true;
-        }
+    if let Some(rest) = after_dash.strip_prefix("name:")
+        && parse_yaml_scalar(rest) == test_name
+    {
+        return true;
     }
 
     // Case 2: `name:` is on a subsequent line at the field-indent.
