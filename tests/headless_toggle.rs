@@ -9877,16 +9877,20 @@ fn ov_tip_long_value_contained_in_bubble_and_viewport_at_right_edge() {
         "the overrides tip CONTAINS its content (the long value wraps \
          inside the painted background instead of painting past it)",
     );
-    // Pin 2 — viewport containment at the right-edge trigger. The top
-    // bound also pins the PR #244-review post-flip top clamp (the full
-    // pathological-viewport-height pin rides cute-dbt#246).
+    // Pin 2 — viewport containment at the right-edge trigger, on BOTH
+    // axes (cute-dbt#246 extended the guard to the height axis; the top
+    // bound also pins the PR #244-review post-flip top clamp, and the
+    // full pathological-viewport-height pin lives in
+    // `fmt_tip_contained_at_pathological_viewport_height`).
     assert!(
         eval_bool(
             &tab,
             &format!(
                 "(function(){{var r={TIP}.getBoundingClientRect();\
                  var vw=document.documentElement.clientWidth;\
-                 return r.top >= 0 && r.left >= 0 && r.right <= vw + 1;}})()"
+                 var vh=document.documentElement.clientHeight;\
+                 return r.top >= 0 && r.bottom <= vh + 1 \
+                 && r.left >= 0 && r.right <= vw + 1;}})()"
             ),
         ),
         "the overrides bubble's box lies fully within the visible viewport \
@@ -9906,6 +9910,297 @@ fn ov_tip_long_value_contained_in_bubble_and_viewport_at_right_edge() {
             ),
         ),
         "no overrides-tip descendant paints past the bubble or the viewport",
+    );
+
+    let _ = tab.close(true);
+}
+
+/// A long unit-test fixture for the cute-dbt#246 fmt-tip reachability
+/// pins: 30 dict rows × 2 columns reconstruct as 60 YAML lines — far
+/// past any realistic bubble fold.
+fn long_fixture_unit_test() -> UnitTest {
+    let rows: Vec<serde_json::Value> = (1..=30)
+        .map(|i| serde_json::json!({ "id": i, "amount": i * 10 }))
+        .collect();
+    UnitTest::new(
+        "longfix".to_owned(),
+        NodeId::new("dim_x"),
+        vec![UnitTestGiven::new(
+            "ref('src')".to_owned(),
+            serde_json::Value::Array(rows),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(
+            serde_json::json!([{ "id": 1 }]),
+            Some("dict".to_owned()),
+            None,
+        ),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn fmt_tip_long_fixture_is_bounded_not_folded() {
+    // cute-dbt#246 (bullet 1) — #fmt-tooltip is pointer-events:none and
+    // hides on mouseleave/blur, so any content laid below its max-height
+    // fold (the old fixed 22rem + overflow:auto pairing) could never be
+    // scrolled to or read — silently unreachable for EVERY input
+    // modality. RED pre-fix with this 60-line reconstruction (content
+    // ~3× the fold); the fix bounds the content (measurement-driven line
+    // trim + a truthful elision row) so the fold cannot occur.
+    let url = render_to_file(
+        "headless_246_fmt_tip_long.html",
+        vec![model_node("model.shop.dim_x"), model_node("model.shop.src")],
+        vec![("unit_test.shop.dim_x.longfix", long_fixture_unit_test())],
+        &["model.shop.dim_x"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    select_model(&tab, "dim_x");
+
+    const BADGE: &str = "document.querySelector('.given-section .format-badge.has-fmt-tip')";
+    const TIP: &str = "document.getElementById('fmt-tooltip')";
+    let _ = eval(&tab, &format!("{BADGE}.focus()"));
+    assert!(
+        !eval_bool(&tab, &format!("{TIP}.hidden")),
+        "focusing the format badge reveals the fmt tip",
+    );
+    // The reachability pin (RED pre-fix): no fold — everything the bubble
+    // holds paints inside its own painted box (1px tolerance, the repo
+    // convention). A fold here is unreachable by definition: the bubble
+    // is pointer-events:none and hides the moment the trigger is left.
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{TIP}.scrollHeight <= {TIP}.clientHeight + 1")
+        ),
+        "the fmt tip CONTAINS its content — no below-fold rows (a fold is \
+         unreachable for every input modality: pointer-events:none + \
+         hide-on-mouseleave)",
+    );
+    // The bound is truthful, not silent: a visible elision row counts
+    // exactly what was trimmed (shown + counted == the 60 authored
+    // lines). Relational pins, not exact counts — the budget is derived
+    // from the live viewport height, and the headless default window
+    // maps to different viewport heights per platform (macOS reserves
+    // window chrome; Linux does not).
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{var shown={TIP}.querySelectorAll('.diff-code').length;\
+                 var m={TIP}.querySelector('.fmt-more');\
+                 if (!m) return false;\
+                 var n=parseInt(m.textContent.replace(/[^0-9]/g, ''), 10);\
+                 return shown > 0 && shown <= 20 && shown + n === 60;}})()"
+            ),
+        ),
+        "the elision row truthfully accounts for every trimmed line \
+         (shown + counted === 60, within the 20-line ceiling)",
+    );
+    assert!(
+        eval_string(
+            &tab,
+            &format!("{TIP}.querySelector('.fmt-more').textContent")
+        )
+        .starts_with('\u{2026}'),
+        "the elision row reads as an ellipsis line",
+    );
+    // The trim takes the HEAD of the reconstruction (sorted dict keys:
+    // amount precedes id), never a mid-block slice.
+    assert_eq!(
+        eval_string(
+            &tab,
+            &format!("{TIP}.querySelector('.diff-code').textContent")
+        ),
+        "- amount: 10",
+        "the first shown line is the head of the authored reconstruction",
+    );
+    // And the box itself lies fully inside the visible viewport.
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{var r={TIP}.getBoundingClientRect();\
+                 var vw=document.documentElement.clientWidth;\
+                 var vh=document.documentElement.clientHeight;\
+                 return r.top >= 0 && r.bottom <= vh + 1 \
+                 && r.left >= 0 && r.right <= vw + 1;}})()"
+            ),
+        ),
+        "the fmt tip's box lies fully within the visible viewport",
+    );
+
+    // ===== font-scale phase (PR #286 review) =====
+    // A forced minimum font size (Chrome a11y) inflates the px-sized
+    // .sql-block lines past any per-line estimate; the bound must come
+    // from measuring the live layout, never constants. Simulate the
+    // inflation (12px → 24px doubles every line box), re-show the tip,
+    // and re-assert the same truths: no fold, truthful elision.
+    let shown_normal = eval(
+        &tab,
+        &format!("{TIP}.querySelectorAll('.diff-code').length"),
+    )
+    .as_i64()
+    .expect("shown line count is a number");
+    let _ = eval(&tab, &format!("{BADGE}.blur()"));
+    let _ = eval(
+        &tab,
+        "(function(){var s=document.createElement('style');\
+         s.textContent='.fmt-tooltip .sql-block { font-size: 24px; }';\
+         document.head.appendChild(s);})()",
+    );
+    let _ = eval(&tab, &format!("{BADGE}.focus()"));
+    assert!(
+        !eval_bool(&tab, &format!("{TIP}.hidden")),
+        "the fmt tip re-reveals under the inflated font",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{TIP}.scrollHeight <= {TIP}.clientHeight + 1")
+        ),
+        "no fold under a forced larger font — the measured trim adapts \
+         (an estimate-based budget would overshoot and clip)",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{var shown={TIP}.querySelectorAll('.diff-code').length;\
+                 var m={TIP}.querySelector('.fmt-more');\
+                 if (!m) return false;\
+                 var n=parseInt(m.textContent.replace(/[^0-9]/g, ''), 10);\
+                 return shown > 0 && shown <= 20 && shown + n === 60;}})()"
+            ),
+        ),
+        "the elision row stays truthful under the inflated font \
+         (shown + counted === 60)",
+    );
+    // Non-vacuous: doubled line boxes must fit FEWER lines — proof the
+    // trim measured the new layout rather than reusing a constant.
+    let shown_scaled = eval(
+        &tab,
+        &format!("{TIP}.querySelectorAll('.diff-code').length"),
+    )
+    .as_i64()
+    .expect("shown line count is a number");
+    assert!(
+        shown_scaled < shown_normal,
+        "the measured trim adapts to the inflated font \
+         ({shown_scaled} lines shown vs {shown_normal} at normal size)",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn fmt_tip_contained_at_pathological_viewport_height() {
+    // cute-dbt#246 (bullet 2's remaining pin) — the full pathological-
+    // viewport-height containment pin promised by the PR #244 guard
+    // comment: at pathological viewport heights the flip-above branch
+    // used to park bubbles at negative top (clamped since #244), and the
+    // fixed 22rem max-height kept the box taller than the screen (bottom
+    // far past the viewport — RED pre-fix). The viewport-relative height
+    // cap + the post-flip top clamp must fully contain the box on the
+    // height axis even here; contained beats clipped.
+    //
+    // Window-size → viewport mapping is PLATFORM-DEPENDENT (CDP
+    // setDeviceMetricsOverride is a documented no-op in headless_chrome
+    // 1.0.21, see the #157 viewport test, so the launch window is the
+    // only lever): macOS floors the outer window at ~375px and reserves
+    // ~143px of chrome (a ~111px request measured a 232px viewport),
+    // while the Linux CI runner HONORS tiny requests (the same ~111px
+    // request measured a 24px viewport — too short to even hold the
+    // 1-line budget floor plus the bubble chrome). A ~300px request
+    // lands BOTH platforms in a comparable pathological-but-sane band
+    // (macOS ≈232px via its floor; Linux ≈213-300px depending on chrome
+    // height). Every pin below therefore measures against the LIVE
+    // clientHeight, and the premise assert keeps the resulting viewport
+    // inside that band — well under the ~440px a full 20-line budget
+    // needs, so the height-axis pins are exercised for real (RED
+    // pre-fix here via the no-fold pin: the old fixed 222px box — 22rem
+    // at the Sakura 10px root + borders — folded 1178px of content).
+    let url = render_to_file(
+        "headless_246_fmt_tip_pathological.html",
+        vec![model_node("model.shop.dim_x"), model_node("model.shop.src")],
+        vec![("unit_test.shop.dim_x.longfix", long_fixture_unit_test())],
+        &["model.shop.dim_x"],
+        &[],
+    );
+    let browser = launch_browser_sized(Some((900, 300)));
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    select_model(&tab, "dim_x");
+
+    const BADGE: &str = "document.querySelector('.given-section .format-badge.has-fmt-tip')";
+    const TIP: &str = "document.getElementById('fmt-tooltip')";
+    // Premise: the launch produced a pathologically short viewport on
+    // this platform's window mapping, so the pins below cannot pass as
+    // a tall-viewport no-op.
+    let vh = eval(&tab, "document.documentElement.clientHeight")
+        .as_i64()
+        .expect("clientHeight is a number");
+    assert!(
+        (100..=352).contains(&vh),
+        "premise: the pathological launch yields a short viewport \
+         (got {vh}px; expected the ~300px request to land in the \
+         100..=352 band on every platform's window-chrome mapping)",
+    );
+    // focus() scrolls the trigger into the (tiny) viewport, so the
+    // singleton positions off a real on-screen rect — the keyboard path.
+    let _ = eval(&tab, &format!("{BADGE}.focus()"));
+    assert!(
+        !eval_bool(&tab, &format!("{TIP}.hidden")),
+        "focusing the format badge reveals the fmt tip at the pathological height",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{var r={TIP}.getBoundingClientRect();\
+                 var vh=document.documentElement.clientHeight;\
+                 return r.top >= 0 && r.bottom <= vh + 1;}})()"
+            ),
+        ),
+        "the fmt tip is contained on the height axis at a pathological \
+         viewport height (post-flip top clamp + viewport-relative height cap)",
+    );
+    // No fold even here: the viewport-derived line budget keeps the
+    // content inside the capped box.
+    assert!(
+        eval_bool(
+            &tab,
+            &format!("{TIP}.scrollHeight <= {TIP}.clientHeight + 1")
+        ),
+        "the fmt tip contains its content with no fold at the pathological height",
+    );
+    // The elision stays truthful at whatever budget the platform's floor
+    // produced: shown lines + the counted trim == the 60 authored lines.
+    assert!(
+        eval_bool(
+            &tab,
+            &format!(
+                "(function(){{var shown={TIP}.querySelectorAll('.diff-code').length;\
+                 var m={TIP}.querySelector('.fmt-more');\
+                 if (!m) return false;\
+                 var n=parseInt(m.textContent.replace(/[^0-9]/g, ''), 10);\
+                 return shown < 60 && shown + n === 60;}})()"
+            ),
+        ),
+        "the elision row truthfully accounts for every trimmed line \
+         (shown + counted === 60)",
     );
 
     let _ = tab.close(true);
