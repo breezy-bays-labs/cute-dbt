@@ -1611,6 +1611,12 @@ html[data-coverage="off"] .model-findings { display: none; }
 .tier-chip.tier-total    { background: var(--control-active-bg); color: var(--control-active-fg); border-color: var(--control-active-bg); }
 .tier-chip.tier-high     { background: transparent; color: var(--accent); border-color: var(--accent); }
 .tier-chip.tier-advisory { background: transparent; color: var(--text-muted); border-color: var(--border-strong); text-transform: none; }
+/* cute-dbt#269 — the honest-UNKNOWN tier (the project panel's dispatch
+   banner). Same muted-outline token recipe as tier-advisory (the pair
+   the #206/#227 AA sweeps gate on every theme — including the latte
+   .tier-chip --text-muted override above), dashed to read as
+   "unattributable", uppercase from the base rule. */
+.tier-chip.tier-unknown  { background: transparent; color: var(--text-muted); border-color: var(--border-strong); border-style: dashed; }
 .tier-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* cute-dbt#198 discovery — Latte chip AA: the verbatim latte accent
    (#1e66f5, 4.34:1) and text-muted (#6c6f85, 4.37:1) sit a hair under AA
@@ -1808,6 +1814,20 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
 .project-def-raw-line.is-added { color: var(--diff-add-fg); background: var(--diff-add-row); }
 .project-def-raw-line.is-removed::before { content: "- "; }
 .project-def-raw-line.is-added::before { content: "+ "; }
+/* cute-dbt#269 — purpose-built hooks + dispatch rows. The dispatch
+   banner is a full-width bordered row on the panel's own --surface
+   (no fill: the note's --text-muted/--surface pairing is the
+   #227-gated AA pair; a --bg-alt fill would re-open the #231 gap).
+   The hook slot hosts the JS-rendered #111 SQL diff (.sql-block +
+   .diff-line family, already themed). */
+.project-def-row.is-banner {
+  flex-basis: 100%;
+  border: var(--rule-w) solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.6rem;
+}
+.project-def-hook-slot { flex-basis: 100%; min-width: 0; }
+.project-def-hook-slot .project-hook-sql { margin: 0.25rem 0 0; }
 
 /* end of cute-dbt report chassis v1 (cute-dbt#177) */
 
@@ -2243,6 +2263,10 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     loadSettings();
     diffFoldPad = settings.contextLines;
     renderBanner();
+    // cute-dbt#269 — fill the project panel's hook-diff slots before the
+    // zero-models early return: a dbt_project.yml-only PR still renders
+    // its hook SQL diff.
+    renderProjectHookDiffs();
     if (!DATA.models.length) {
       $(".test-selection").hide();
       $(".model-sql").hide();
@@ -4744,6 +4768,34 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
   function renderYamlDiff(diff) { return renderBlockDiff(diff, tokenizeYaml); }
   window.__cuteRenderBlockDiff = renderBlockDiff;
   window.__cuteRenderYamlDiff = renderYamlDiff;
+
+  // cute-dbt#269 — the project panel's hook rows. The Rust side attaches a
+  // BlockDiff of the hook bodies (new side = the manifest's operation.*
+  // nodes when they match the working tree) to each hooks ProjectChange;
+  // this fills the server-rendered row's slot with the SAME #111 renderer
+  // the Model SQL diff uses (renderBlockDiff + tokenizeSql), so hook SQL
+  // gets the full diff treatment: row tints, gutters, intra-line emphasis,
+  // syntax palette. Server-rendered chrome stays intact without JS — the
+  // slot is simply empty. Runs at boot BEFORE the zero-models early return
+  // (a PR can touch only dbt_project.yml).
+  function renderProjectHookDiffs() {
+    var panel = DATA.project_change_panel;
+    if (!panel || panel.kind !== "categorized" || !panel.changes) return;
+    panel.changes.forEach(function (c) {
+      if (c.category !== "hooks" || !c.hook || !c.hook.sql_diff) return;
+      var d = c.hook.sql_diff;
+      if (!d.lines || !d.lines.length) return;
+      var slot = document.querySelector(
+        '.project-def-hook-slot[data-hook-slot="' + c.label + '"]'
+      );
+      if (!slot) return;
+      $(slot).empty().append(
+        $("<pre>").addClass("sql-block project-hook-sql sql-diff-view").append(
+          $("<code>").addClass("project-hook-code").html(renderBlockDiff(d, tokenizeSql))
+        )
+      );
+    });
+  }
 
   // cute-dbt#178 / cute-dbt#199 — SPLIT (side-by-side) diff. Old lines on
   // the left, new on the right, paired index-wise within each change block;

@@ -68,12 +68,12 @@ use crate::adapters::asset_embed::{
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
     BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, CteGraph, DiffLine, DiffLineKind,
-    EdgeType, Finding, FixtureTable, HeuristicId, InScopeSet, Instrument, Manifest,
-    ModelInScopeSet, ModelYamlOutcome, Node, NodeId, ProjectChange, ProjectChangeCategory,
-    ProjectChangePanel, ProjectDefinition, ProjectFacts, ProjectFallbackReason, SourceNode,
-    TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
-    UnitTestYamlBlock, apply_check_policy, model_findings, resolve_target_model,
-    resolve_tested_model, table_from_manifest_rows,
+    EdgeType, Finding, FixtureTable, HeuristicId, HookChangeFacts, HookManifestPresence,
+    InScopeSet, Instrument, Manifest, ModelInScopeSet, ModelYamlOutcome, Node, NodeId,
+    ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition, ProjectFacts,
+    ProjectFallbackReason, SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff,
+    UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock, apply_check_policy, model_findings,
+    resolve_target_model, resolve_tested_model, table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -1388,13 +1388,25 @@ struct ProjectPanelRowView {
     /// The changed key's display path (the domain change's `label`).
     label: String,
     /// `old → new` / `added: v` / `removed: v`, values as compact JSON
-    /// (type-faithful: `"1"` and `1` read differently).
+    /// (type-faithful: `"1"` and `1` read differently). Empty on a
+    /// hooks row whose inline SQL diff renders instead (cute-dbt#269) —
+    /// the raw JSON arrays would only duplicate the diff.
     detail: String,
     /// Honesty note rendered inside the row (empty ⇒ none). Vars rows
     /// state plainly "blast radius not attributed" (attribution is a
     /// later slice — the copy never implies coming-soon); dispatch rows
-    /// state the project-wide/not-attributable fact.
-    note: &'static str,
+    /// state the project-wide/not-attributable fact; hook rows state
+    /// the manifest-side `operation.*` reality (cute-dbt#269).
+    note: String,
+    /// Tier-chip label (cute-dbt#269) — empty ⇒ no chip. The dispatch
+    /// banner carries `UNKNOWN` (the shaping's per-category tier).
+    tier: &'static str,
+    /// `true` ⇒ the row renders as a full-width banner (`is-banner`) —
+    /// the dispatch row's project-wide-warning presentation.
+    banner: bool,
+    /// `true` ⇒ the row emits the `data-hook-slot` container the report
+    /// JS fills with the #111-rendered hook SQL diff (cute-dbt#269).
+    hook_slot: bool,
 }
 
 /// One raw diff line of the panel's Shape-A fallback row.
@@ -1427,6 +1439,13 @@ struct ProjectPanelView {
 
 /// Category key + chip label + per-row honesty note for one
 /// [`ProjectChangeCategory`].
+///
+/// The dispatch note is the UNKNOWN-tier banner copy (cute-dbt#269),
+/// written to the honest-UNKNOWN principles: it stays in-row (never a
+/// report-global claim), enumerates why attribution is impossible, and
+/// states what WAS checked. Hook rows get their note per-change from
+/// [`hook_row_note`] (the manifest-side facts are per-row, not
+/// per-category).
 fn project_category_strings(
     category: ProjectChangeCategory,
 ) -> (&'static str, &'static str, &'static str) {
@@ -1442,12 +1461,43 @@ fn project_category_strings(
         ProjectChangeCategory::Dispatch => (
             "dispatch",
             "dispatch",
-            "macro search order changed — project-wide effect, not statically attributable",
+            "macro search order changed — a project-wide effect. Any model, test, \
+             snapshot, or hook may resolve dispatched macros differently after this \
+             edit; which ones cannot be attributed statically, because macro \
+             resolution happens per call at compile time. Checked: the old and new \
+             dispatch values in dbt_project.yml, shown in this row — no call-site \
+             resolution was attempted (zero-compute).",
         ),
         ProjectChangeCategory::Hooks => ("hooks", "hooks", ""),
         ProjectChangeCategory::Paths => ("paths", "paths", ""),
         ProjectChangeCategory::Identity => ("identity", "identity", ""),
         ProjectChangeCategory::Other => ("other", "other", ""),
+    }
+}
+
+/// The hook row's manifest-side honesty note (cute-dbt#269): names the
+/// `operation.*` reality and — on every degrade — what was checked and
+/// the enumerable causes, per the honest-UNKNOWN copy principles.
+fn hook_row_note(facts: &HookChangeFacts) -> String {
+    match facts.manifest {
+        HookManifestPresence::Matched if facts.operation_ids.is_empty() => {
+            "no operation nodes remain in the manifest — consistent with this removal".to_owned()
+        }
+        HookManifestPresence::Matched => {
+            format!("runs in the manifest as {}", facts.operation_ids.join(", "))
+        }
+        HookManifestPresence::Absent => {
+            "no matching operation.* nodes in the manifest (checked the manifest nodes \
+             map for this project's hook names) — the manifest may predate this edit; \
+             the diff is read from dbt_project.yml itself"
+                .to_owned()
+        }
+        HookManifestPresence::Diverged => format!(
+            "the manifest's operation nodes ({}) do not match the working-tree hooks \
+             — manifest and working tree may be out of sync; the diff is read from \
+             dbt_project.yml itself",
+            facts.operation_ids.join(", "),
+        ),
     }
 }
 
@@ -1495,12 +1545,32 @@ fn project_panel_view(panel: &ProjectChangePanel) -> ProjectPanelView {
                 .map(|change| {
                     let (category_key, category_label, note) =
                         project_category_strings(change.category);
+                    // cute-dbt#269 — purpose-built rows: a hooks row with
+                    // an inline SQL diff drops the raw-JSON detail (the
+                    // diff IS the old→new statement) and emits the slot
+                    // the JS fills; the dispatch row renders as the
+                    // UNKNOWN-tier banner.
+                    let hook_diff = change
+                        .hook
+                        .as_ref()
+                        .is_some_and(|facts| facts.sql_diff.is_some());
+                    let is_dispatch = change.category == ProjectChangeCategory::Dispatch;
                     ProjectPanelRowView {
                         category_key,
                         category_label,
                         label: change.label.clone(),
-                        detail: project_change_detail(change),
-                        note,
+                        detail: if hook_diff {
+                            String::new()
+                        } else {
+                            project_change_detail(change)
+                        },
+                        note: change
+                            .hook
+                            .as_ref()
+                            .map_or_else(|| note.to_owned(), hook_row_note),
+                        tier: if is_dispatch { "UNKNOWN" } else { "" },
+                        banner: is_dispatch,
+                        hook_slot: hook_diff,
                     }
                 })
                 .collect::<Vec<_>>();
@@ -5168,6 +5238,157 @@ mod tests {
             serde_json::Value::String("</script><!--end".to_owned()),
             "round-trip recovers the original baseline value",
         );
+    }
+
+    // ===== project panel: hooks + dispatch rows (cute-dbt#269) =====
+
+    /// Render a one-model PR-diff report carrying `facts`, returning the
+    /// HTML.
+    fn render_html_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
+        let node = model_node("model.shop.x", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let tmp = std::env::temp_dir().join(filename);
+        let _ = std::fs::remove_file(&tmp);
+        render_report_with_externals(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &InScopeSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+            ScopeSource::PrDiff,
+            "t",
+            None,
+            &CheckPolicy::default(),
+            facts,
+        )
+        .expect("report renders");
+        std::fs::read_to_string(&tmp).expect("read rendered report")
+    }
+
+    fn hooks_change_with_facts(presence: HookManifestPresence, ids: Vec<String>) -> ProjectChange {
+        ProjectChange {
+            category: ProjectChangeCategory::Hooks,
+            label: "on-run-start".to_owned(),
+            old: Some(serde_json::json!(["grant usage on schema x"])),
+            new: Some(serde_json::json!(["grant select on schema x"])),
+            hook: Some(HookChangeFacts {
+                sql_diff: Some(BlockDiff {
+                    lines: vec![
+                        DiffLine {
+                            kind: DiffLineKind::Removed,
+                            text: "grant usage on schema x".to_owned(),
+                            emphasis: Some((6, 11)),
+                        },
+                        DiffLine {
+                            kind: DiffLineKind::Added,
+                            text: "grant select on schema x".to_owned(),
+                            emphasis: Some((6, 12)),
+                        },
+                    ],
+                }),
+                operation_ids: ids,
+                manifest: presence,
+            }),
+        }
+    }
+
+    #[test]
+    fn hooks_row_emits_slot_and_manifest_note_and_drops_json_detail() {
+        let facts = ProjectFacts {
+            definition: None,
+            panel: Some(ProjectChangePanel::Categorized {
+                changes: vec![hooks_change_with_facts(
+                    HookManifestPresence::Matched,
+                    vec!["operation.shop.shop-on-run-start-0".to_owned()],
+                )],
+            }),
+        };
+        let html = render_html_with_project_facts("cute_dbt_render_hooks_row_test.html", &facts);
+        assert!(
+            html.contains(r#"data-hook-slot="on-run-start""#),
+            "the hooks row emits the JS-fill slot",
+        );
+        assert!(
+            html.contains("runs in the manifest as operation.shop.shop-on-run-start-0"),
+            "the note states the manifest-side operation reality",
+        );
+        assert!(
+            !html.contains("[&#34;grant usage on schema x&#34;]"),
+            "the raw JSON detail is dropped when the SQL diff renders",
+        );
+    }
+
+    #[test]
+    fn hooks_row_absent_note_enumerates_causes_and_what_was_checked() {
+        let mut change = hooks_change_with_facts(HookManifestPresence::Absent, Vec::new());
+        change.hook.as_mut().unwrap().sql_diff = None;
+        let facts = ProjectFacts {
+            definition: None,
+            panel: Some(ProjectChangePanel::Categorized {
+                changes: vec![change],
+            }),
+        };
+        let html = render_html_with_project_facts("cute_dbt_render_hooks_absent_test.html", &facts);
+        assert!(
+            html.contains("no matching operation.* nodes in the manifest"),
+            "the absent verdict is stated in-row",
+        );
+        assert!(
+            html.contains("checked the manifest nodes"),
+            "the note states what WAS checked",
+        );
+        // (the bare attribute name also appears in the embedded JS
+        // source, so the assertion targets the labelled slot markup.)
+        assert!(
+            !html.contains(r#"data-hook-slot="on-run-start""#),
+            "no slot without a diff to fill",
+        );
+        assert!(
+            html.contains("[&#34;grant select on schema x&#34;]"),
+            "without a diff the row keeps its plain detail",
+        );
+    }
+
+    #[test]
+    fn dispatch_row_renders_unknown_tier_banner_with_honest_copy() {
+        let facts = ProjectFacts {
+            definition: None,
+            panel: Some(ProjectChangePanel::Categorized {
+                changes: vec![ProjectChange {
+                    category: ProjectChangeCategory::Dispatch,
+                    label: "dispatch".to_owned(),
+                    old: Some(serde_json::json!([{ "macro_namespace": "dbt_utils",
+                        "search_order": ["dbt_utils", "shop"] }])),
+                    new: Some(serde_json::json!([{ "macro_namespace": "dbt_utils",
+                        "search_order": ["shop", "dbt_utils"] }])),
+                    hook: None,
+                }],
+            }),
+        };
+        let html = render_html_with_project_facts("cute_dbt_render_dispatch_row_test.html", &facts);
+        assert!(
+            html.contains(r#"class="project-def-row is-banner" data-category="dispatch""#),
+            "the dispatch row renders as a banner",
+        );
+        assert!(
+            html.contains(r#"<span class="tier-chip tier-unknown">UNKNOWN</span>"#),
+            "the UNKNOWN tier chip renders",
+        );
+        // The honest-UNKNOWN copy: in-row, causes enumerated, what was
+        // checked stated.
+        assert!(html.contains("cannot be attributed statically"));
+        assert!(html.contains("macro resolution happens per call at compile time"));
+        assert!(html.contains("Checked: the old and new dispatch values"));
+        // The old → new values still render (what WAS checked, shown).
+        assert!(html.contains("search_order"));
     }
 
     // ===== render_report: report_title + report_subtitle threading =====

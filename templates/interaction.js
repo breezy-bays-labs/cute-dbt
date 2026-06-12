@@ -184,6 +184,10 @@
     loadSettings();
     diffFoldPad = settings.contextLines;
     renderBanner();
+    // cute-dbt#269 — fill the project panel's hook-diff slots before the
+    // zero-models early return: a dbt_project.yml-only PR still renders
+    // its hook SQL diff.
+    renderProjectHookDiffs();
     if (!DATA.models.length) {
       $(".test-selection").hide();
       $(".model-sql").hide();
@@ -2685,6 +2689,34 @@
   function renderYamlDiff(diff) { return renderBlockDiff(diff, tokenizeYaml); }
   window.__cuteRenderBlockDiff = renderBlockDiff;
   window.__cuteRenderYamlDiff = renderYamlDiff;
+
+  // cute-dbt#269 — the project panel's hook rows. The Rust side attaches a
+  // BlockDiff of the hook bodies (new side = the manifest's operation.*
+  // nodes when they match the working tree) to each hooks ProjectChange;
+  // this fills the server-rendered row's slot with the SAME #111 renderer
+  // the Model SQL diff uses (renderBlockDiff + tokenizeSql), so hook SQL
+  // gets the full diff treatment: row tints, gutters, intra-line emphasis,
+  // syntax palette. Server-rendered chrome stays intact without JS — the
+  // slot is simply empty. Runs at boot BEFORE the zero-models early return
+  // (a PR can touch only dbt_project.yml).
+  function renderProjectHookDiffs() {
+    var panel = DATA.project_change_panel;
+    if (!panel || panel.kind !== "categorized" || !panel.changes) return;
+    panel.changes.forEach(function (c) {
+      if (c.category !== "hooks" || !c.hook || !c.hook.sql_diff) return;
+      var d = c.hook.sql_diff;
+      if (!d.lines || !d.lines.length) return;
+      var slot = document.querySelector(
+        '.project-def-hook-slot[data-hook-slot="' + c.label + '"]'
+      );
+      if (!slot) return;
+      $(slot).empty().append(
+        $("<pre>").addClass("sql-block project-hook-sql sql-diff-view").append(
+          $("<code>").addClass("project-hook-code").html(renderBlockDiff(d, tokenizeSql))
+        )
+      );
+    });
+  }
 
   // cute-dbt#178 / cute-dbt#199 — SPLIT (side-by-side) diff. Old lines on
   // the left, new on the right, paired index-wise within each change block;

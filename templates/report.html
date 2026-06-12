@@ -210,12 +210,24 @@
 {%- if !panel.rows.is_empty() %}
   <ul class="project-def-rows">
 {%- for row in panel.rows %}
-    <li class="project-def-row" data-category="{{ row.category_key }}">
+    <li class="project-def-row{% if row.banner %} is-banner{% endif %}" data-category="{{ row.category_key }}">
       <span class="project-def-chip project-def-chip-{{ row.category_key }}">{{ row.category_label }}</span>
+      {%- if !row.tier.is_empty() %}
+      <span class="tier-chip tier-unknown">{{ row.tier }}</span>
+      {%- endif %}
       <code class="project-def-label">{{ row.label }}</code>
+      {%- if !row.detail.is_empty() %}
       <span class="project-def-detail">{{ row.detail }}</span>
+      {%- endif %}
       {%- if !row.note.is_empty() %}
       <span class="project-def-note">{{ row.note }}</span>
+      {%- endif %}
+      {%- if row.hook_slot %}
+      {#- cute-dbt#269 — the report JS fills this slot with the hook
+          bodies' inline SQL diff via the #111 renderer (renderBlockDiff
+          + tokenizeSql); the payload's project_change_panel carries the
+          Rust-computed BlockDiff. -#}
+      <div class="project-def-hook-slot" data-hook-slot="{{ row.label }}"></div>
       {%- endif %}
     </li>
 {%- endfor %}
