@@ -10593,7 +10593,8 @@ fn explore_page_url(dir: &Path, page: &str) -> String {
 ///   - one entry per (theme, surface): WCAG contrast of the surface's
 ///     text against its EFFECTIVE composited backdrop (own opaque fill,
 ///     else the nearest opaque ancestor fill).
-/// `targets` is a JS array literal of [label, selector] pairs; every
+///
+/// `targets` is a JS array literal of \[label, selector\] pairs; every
 /// target must exist and be visible (checkVisibility) or the sweep
 /// throws with the absentee's name.
 fn explore_theme_sweep_js(targets: &str) -> String {
