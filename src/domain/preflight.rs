@@ -30,7 +30,7 @@
 use thiserror::Error;
 
 use crate::domain::manifest::Manifest;
-use crate::domain::state::{InScopeSet, ModelInScopeSet, resolve_target_model};
+use crate::domain::state::{InScopeSet, ModelInScopeSet, resolve_tested_model};
 
 /// Domain-level fail-closed currency for the two-stage preflight check.
 ///
@@ -172,7 +172,7 @@ fn first_in_scope_test_for_model(
         let Some(unit_test) = current.unit_test(test_id) else {
             continue;
         };
-        if let Some(resolved) = resolve_target_model(current, unit_test.model()) {
+        if let Some(resolved) = resolve_tested_model(current, unit_test) {
             if resolved.id() == model_id {
                 return Some(unit_test.name().to_owned());
             }
