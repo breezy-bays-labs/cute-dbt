@@ -44,7 +44,7 @@ mod args;
 mod exit;
 mod pr_diff;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -1098,8 +1098,9 @@ fn resolve_enabled_experiments(args: &ReportArgs) -> EnabledExperiments {
         resolve_experimental_config(&c.experimental)
             .expect("[experimental] was validated by the --config value-parser at parse time")
     });
-    let env = args.experimental.clone().unwrap_or_default();
-    EnabledExperiments::from_union(&toml, &env)
+    let no_env = BTreeSet::new();
+    let env = args.experimental.as_ref().unwrap_or(&no_env);
+    EnabledExperiments::from_union(&toml, env)
 }
 
 /// Emit a stderr note for an inline pragma naming an unknown check id
