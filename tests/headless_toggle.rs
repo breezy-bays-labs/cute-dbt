@@ -10508,3 +10508,402 @@ fn fold_toggle_hides_in_file_view_and_folds_only_the_visible_diff_universal() {
 
     let _ = tab.close(true);
 }
+
+// ===== cute-dbt#242 — explore pages adopt the design system ==============
+//
+// The explore pages historically embedded Sakura plus hardcoded
+// light-mode inline styles and ignored the saved appearance entirely.
+// The #242 extraction re-layers report.css into shared askama partials
+// (templates/partials/tokens.css + templates/partials/base.css) and
+// ships a minimal shared appearance engine (templates/appearance.js),
+// so both explore pages honor cute-dbt.appearance.v1 and theme
+// correctly on ALL 8 themes. The guards below quantify UNIVERSALLY:
+// every theme x both pages x every measured surface.
+//
+// Measurement hygiene (hard-won on prior verification runs):
+//   - transitions are killed via `* { transition: none !important }`
+//     before measuring — the body carries a 120ms background/color
+//     transition that corrupts mid-flip reads;
+//   - visibility is asserted via checkVisibility(), never rect>0
+//     (closed-<details> children return non-zero rects in headless
+//     Chromium) and never first-match sampling over duplicated classes.
+
+use cute_dbt::adapters::explore::render_explore;
+use cute_dbt::adapters::render::build_payload;
+use cute_dbt::domain::all_models;
+
+/// A compiled explore model with `raw_code` and a file path (so the
+/// tests page renders a `.model-path code` surface).
+fn explore_theme_model(id: &str, path: &str) -> Node {
+    Node::new(
+        NodeId::new(id),
+        "model",
+        Checksum::new("sha256", "ck"),
+        Some("select 1".to_owned()),
+        Some("select 1".to_owned()),
+        DependsOn::default(),
+        Some(path.to_owned()),
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+}
+
+/// Render the explore pages in-process (domain objects ->
+/// `render_explore`, no subprocess) and return the out directory.
+fn render_explore_theme_pages(stem: &str) -> PathBuf {
+    let m = manifest(
+        vec![
+            explore_theme_model("model.shop.stg_orders", "models/staging/stg_orders.sql"),
+            explore_theme_model("model.shop.dim_orders", "models/marts/dim_orders.sql"),
+        ],
+        vec![(
+            "unit_test.shop.dim_orders.t1",
+            unit_test("t1", "dim_orders"),
+        )],
+    );
+    let models = all_models(&m);
+    let payload = build_payload(
+        &m,
+        &InScopeSet::new(),
+        &models,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+    );
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
+    let _ = std::fs::remove_dir_all(&dir);
+    render_explore(&dir, &m, &models, None, &payload).expect("explore renders");
+    dir
+}
+
+fn explore_page_url(dir: &Path, page: &str) -> String {
+    let p = dir.join(page);
+    format!("file://{}", p.to_str().expect("page path is valid UTF-8"))
+}
+
+/// The per-page theme sweep, evaluated in-page. For each of the 8
+/// themes it sets `html[data-theme]` + the `html.dark` family class
+/// (exactly what the shared appearance engine does), then measures:
+///   - `pageBg`: the body's computed background vs the theme's resolved
+///     `--bg` token (the page actually consumes the token layer);
+///   - one entry per (theme, surface): WCAG contrast of the surface's
+///     text against its EFFECTIVE composited backdrop (own opaque fill,
+///     else the nearest opaque ancestor fill).
+/// `targets` is a JS array literal of [label, selector] pairs; every
+/// target must exist and be visible (checkVisibility) or the sweep
+/// throws with the absentee's name.
+fn explore_theme_sweep_js(targets: &str) -> String {
+    format!(
+        r#"(function () {{
+  var THEMES = ["light", "solarized", "latte", "rosepine",
+                "dark", "tokyo", "gruvbox", "dracula"];
+  var DARK = {{ dark: true, tokyo: true, gruvbox: true, dracula: true }};
+  function parseRgb(s) {{
+    var m = /rgba?\(([^)]+)\)/.exec(s || "");
+    if (!m) return null;
+    var p = m[1].split(",");
+    return {{ r: parseFloat(p[0]), g: parseFloat(p[1]), b: parseFloat(p[2]),
+             a: p.length > 3 ? parseFloat(p[3]) : 1 }};
+  }}
+  function hexRgb(s) {{
+    var m = /^#([0-9a-f]{{6}})$/i.exec((s || "").trim());
+    if (!m) return null;
+    return {{ r: parseInt(m[1].slice(0, 2), 16), g: parseInt(m[1].slice(2, 4), 16),
+             b: parseInt(m[1].slice(4, 6), 16), a: 1 }};
+  }}
+  function chan(v) {{
+    v = v / 255;
+    return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }}
+  function lum(c) {{
+    return 0.2126 * chan(c.r) + 0.7152 * chan(c.g) + 0.0722 * chan(c.b);
+  }}
+  function ratio(f, b) {{
+    var lf = lum(f), lb = lum(b);
+    var hi = Math.max(lf, lb), lo = Math.min(lf, lb);
+    return (hi + 0.05) / (lo + 0.05);
+  }}
+  function backdropOf(el) {{
+    for (var n = el; n; n = n.parentElement) {{
+      var c = parseRgb(getComputedStyle(n).backgroundColor);
+      if (c && c.a === 1) return c;
+    }}
+    return null;
+  }}
+  /* measurement hygiene: the shared base chassis transitions body
+     background/color over 120ms — kill every transition first */
+  var kill = document.createElement("style");
+  kill.textContent = "* {{ transition: none !important; animation: none !important; }}";
+  document.head.appendChild(kill);
+  var TARGETS = {targets};
+  var resolved = [];
+  for (var t = 0; t < TARGETS.length; t++) {{
+    var el = document.querySelector(TARGETS[t][1]);
+    if (!el) {{
+      throw new Error("explore theme sweep: no element for " + TARGETS[t][0]
+        + " (" + TARGETS[t][1] + ")");
+    }}
+    /* checkVisibility, never rect>0: closed-details children report
+       non-zero rects in headless Chromium */
+    if (!el.checkVisibility()) {{
+      throw new Error("explore theme sweep: " + TARGETS[t][0]
+        + " (" + TARGETS[t][1] + ") is not visible — measuring a hidden "
+        + "twin would be vacuous");
+    }}
+    resolved.push([TARGETS[t][0], el]);
+  }}
+  var root = document.documentElement;
+  var out = [];
+  for (var i = 0; i < THEMES.length; i++) {{
+    /* exactly appearance.js applyTheme: data-theme + the html.dark sync */
+    root.setAttribute("data-theme", THEMES[i]);
+    root.classList.toggle("dark", !!DARK[THEMES[i]]);
+    var tokenBg = hexRgb(getComputedStyle(root).getPropertyValue("--bg"));
+    var bodyBg = parseRgb(getComputedStyle(document.body).backgroundColor);
+    out.push({{
+      theme: THEMES[i], el: "pageBg",
+      ratio: -1,
+      fg: getComputedStyle(root).getPropertyValue("--bg").trim(),
+      bg: bodyBg ? "rgb(" + bodyBg.r + ", " + bodyBg.g + ", " + bodyBg.b + ")" : "none",
+      tokenApplied: !!(tokenBg && bodyBg && bodyBg.a === 1
+        && tokenBg.r === bodyBg.r && tokenBg.g === bodyBg.g && tokenBg.b === bodyBg.b)
+    }});
+    for (var j = 0; j < resolved.length; j++) {{
+      var el2 = resolved[j][1];
+      var cs = getComputedStyle(el2);
+      var fg = parseRgb(cs.color);
+      var own = parseRgb(cs.backgroundColor);
+      var bg = own && own.a === 1 ? own : backdropOf(el2.parentElement);
+      out.push({{
+        theme: THEMES[i], el: resolved[j][0],
+        ratio: fg && bg ? ratio(fg, bg) : -1,
+        fg: cs.color,
+        bg: bg ? "rgb(" + bg.r + ", " + bg.g + ", " + bg.b + ")" : "none",
+        tokenApplied: true
+      }});
+    }}
+  }}
+  return JSON.stringify(out);
+}})()"#
+    )
+}
+
+/// Drive the per-page sweep and assert: the page consumes the token
+/// layer on every theme (body bg == resolved --bg) and every measured
+/// text surface clears WCAG AA 4.5:1 on its effective backdrop.
+fn assert_explore_page_themes(tab: &Tab, page: &str, targets: &str, surfaces: usize) {
+    let raw = eval_string(tab, &explore_theme_sweep_js(targets));
+    let measured: Vec<serde_json::Value> =
+        serde_json::from_str(&raw).expect("the explore theme sweep returns valid JSON");
+    assert_eq!(
+        measured.len(),
+        8 * (surfaces + 1),
+        "[{page}] 8 themes x ({surfaces} surfaces + pageBg) measured, got: {raw}",
+    );
+    let mut failures = Vec::new();
+    for m in &measured {
+        let theme = m["theme"].as_str().expect("theme is a string");
+        let el = m["el"].as_str().expect("el is a string");
+        let fg = m["fg"].as_str().unwrap_or("?");
+        let bg = m["bg"].as_str().unwrap_or("?");
+        if el == "pageBg" {
+            if m["tokenApplied"] != serde_json::Value::Bool(true) {
+                failures.push(format!(
+                    "[{page}] {theme}: body background ({bg}) does not paint the \
+                     theme's resolved --bg token ({fg}) — the page is not \
+                     consuming the shared token layer"
+                ));
+            }
+            continue;
+        }
+        let ratio = m["ratio"].as_f64().expect("ratio is a number");
+        assert!(
+            ratio > 0.0,
+            "[{page}] the {theme}/{el} surface resolved no opaque backdrop — \
+             the backdrop walk must end on a painted surface",
+        );
+        eprintln!("explore contrast [{page}] {theme:>9} / {el:<16} = {ratio:.2}  ({fg} on {bg})");
+        if ratio < 4.5 {
+            failures.push(format!("[{page}] {theme}/{el} = {ratio:.2} ({fg} on {bg})"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "explore surfaces below the WCAG AA 4.5:1 floor or not token-themed \
+         (cute-dbt#242): {failures:#?}",
+    );
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_pages_boot_applies_the_appearance_attributes() {
+    // The shared appearance engine boots on BOTH explore pages: with no
+    // saved appearance, html[data-theme] follows the host's
+    // prefers-color-scheme (saved -> scheme -> light, the same contract
+    // the report's persist test pins — never a platform-pinned value),
+    // and the html.dark family class tracks the theme family.
+    let dir = render_explore_theme_pages("explore-theme-boot");
+    let browser = launch_browser();
+    for page in ["dag.html", "tests.html"] {
+        let tab = browser.new_tab().expect("new tab");
+        tab.navigate_to(&explore_page_url(&dir, page))
+            .expect("navigate");
+        tab.wait_until_navigated().expect("await navigation");
+        wait_for_document_ready(&tab);
+        assert!(
+            eval_bool(
+                &tab,
+                "document.documentElement.getAttribute('data-theme') === \
+                 ((window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light')"
+            ),
+            "[{page}] boot applies the prefers-color-scheme default theme \
+             (saved -> scheme -> light)",
+        );
+        assert!(
+            eval_bool(
+                &tab,
+                "document.documentElement.classList.contains('dark') === \
+                 (document.documentElement.getAttribute('data-theme') === 'dark')"
+            ),
+            "[{page}] the html.dark family class tracks the booted theme",
+        );
+        let _ = tab.close(true);
+    }
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_pages_honor_the_saved_appearance_key() {
+    // The cross-page contract: a theme saved on ANY cute-dbt page
+    // (cute-dbt.appearance.v1) hydrates on the explore pages at boot.
+    // Storage-gated exactly like the report's persist guard: where the
+    // headless file:// origin denies localStorage the hydration legs are
+    // skipped (the boot + sweep guards still run storage-free).
+    let dir = render_explore_theme_pages("explore-theme-persist");
+    let browser = launch_browser();
+    for page in ["dag.html", "tests.html"] {
+        let tab = browser.new_tab().expect("new tab");
+        tab.navigate_to(&explore_page_url(&dir, page))
+            .expect("navigate");
+        tab.wait_until_navigated().expect("await navigation");
+        wait_for_document_ready(&tab);
+        let storage_ok = eval_bool(
+            &tab,
+            "(function(){try{if(!window.localStorage)return false;\
+               window.localStorage.setItem('__probe','1');\
+               window.localStorage.removeItem('__probe');return true;}\
+               catch(e){return false;}})()",
+        );
+        if !storage_ok {
+            eprintln!(
+                "[{page}] localStorage unusable on this file:// origin — hydration leg skipped"
+            );
+            let _ = tab.close(true);
+            continue;
+        }
+        let _ = eval(
+            &tab,
+            "window.localStorage.setItem('cute-dbt.appearance.v1', \
+             JSON.stringify({theme:'dracula',density:'compact'}))",
+        );
+        tab.reload(false, None).expect("reload");
+        tab.wait_until_navigated().expect("await reload");
+        wait_for_document_ready(&tab);
+        // Poll the hydrated theme — boot timing must never race the read
+        // (the report persist guard's #208 lesson), null-safe mid-swap.
+        let mut theme = String::new();
+        for _ in 0..50 {
+            theme = eval_string(
+                &tab,
+                "(document.documentElement \
+                 && document.documentElement.getAttribute('data-theme')) || ''",
+            );
+            if theme == "dracula" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(
+            theme, "dracula",
+            "[{page}] the saved cute-dbt.appearance.v1 theme hydrates at boot",
+        );
+        assert!(
+            eval_bool(&tab, "document.documentElement.classList.contains('dark')"),
+            "[{page}] dracula is dark-family — html.dark follows the saved theme",
+        );
+        assert_eq!(
+            eval_string(
+                &tab,
+                "document.documentElement.getAttribute('data-density') || ''",
+            ),
+            "compact",
+            "[{page}] the saved density attribute applies (inert without \
+             density rules, but the attribute contract is one across pages)",
+        );
+        // Clean up so the sibling page's leg starts from no-saved-state.
+        let _ = eval(
+            &tab,
+            "window.localStorage.removeItem('cute-dbt.appearance.v1')",
+        );
+        let _ = tab.close(true);
+    }
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_dag_page_themes_correctly_on_every_theme() {
+    // dag.html: the page consumes the shared token layer on all 8 themes
+    // and the key text surfaces stay AA against their EFFECTIVE
+    // composited backdrops. Surfaces chosen to be AA-by-construction
+    // (`--text` on `--bg`/`--bg-alt`; the fixed dag palette): the known
+    // muted-token sub-AA debt is cute-dbt#251's lane, not this guard's.
+    let dir = render_explore_theme_pages("explore-theme-dag");
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&explore_page_url(&dir, "dag.html"))
+        .expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    assert_explore_page_themes(
+        &tab,
+        "dag.html",
+        r#"[
+          ["page-title", ".explore-header h1"],
+          ["legend-chip", ".lineage-legend .legend-chip"],
+          ["legend-code", ".lineage-legend code"]
+        ]"#,
+        3,
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_tests_page_themes_correctly_on_every_theme() {
+    // tests.html: same universal sweep over the unit-test index + the
+    // shared test-card viewer (visible — the fixture carries a unit
+    // test, so the viewer section is not hidden).
+    let dir = render_explore_theme_pages("explore-theme-tests");
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&explore_page_url(&dir, "tests.html"))
+        .expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    assert_explore_page_themes(
+        &tab,
+        "tests.html",
+        r#"[
+          ["page-title", ".explore-header h1"],
+          ["model-heading", ".explore-model h2"],
+          ["model-path-code", ".model-path code"],
+          ["test-card-label", ".explore-viewer .test-card .test-select-field label"]
+        ]"#,
+        4,
+    );
+    let _ = tab.close(true);
+}
