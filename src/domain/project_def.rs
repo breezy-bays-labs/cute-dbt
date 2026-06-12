@@ -643,18 +643,40 @@ fn hook_entry_texts(side: Option<&Value>) -> Vec<String> {
         .collect()
 }
 
-/// Strip exactly one trailing `\n` (the engine frame divergence
-/// precedent from the #111 model SQL diff — never `trim_end_matches`).
+/// Strip exactly one trailing line terminator — `\r\n` or `\n` (the
+/// engine frame divergence precedent from the #111 model SQL diff,
+/// extended to the CRLF frame; never `trim_end_matches`).
+///
+/// The parsed-file sides are LF-clean by construction (dbt-yaml
+/// normalizes every CRLF scalar style — pinned by the adapter's
+/// `crlf_authored_files_parse_to_lf_clean_hook_entries`), but the
+/// manifest `raw_code` side is engine-serialized JSON with no such
+/// guarantee from this pipeline — fusion already ships MODEL `raw_code`
+/// file-verbatim including the file's line endings (the #111 finding),
+/// so a CRLF frame here must not silently degrade the byte-match
+/// verdict to the file fallback (gemini review on PR #285).
 fn trim_one_newline(s: &str) -> &str {
-    s.strip_suffix('\n').unwrap_or(s)
+    s.strip_suffix("\r\n")
+        .or_else(|| s.strip_suffix('\n'))
+        .unwrap_or(s)
 }
 
 /// Flatten hook entries into diffable lines (an entry may be a
-/// multi-line block scalar).
+/// multi-line block scalar), `\r`-trimmed per line — the
+/// [`DiffLine::text`] contract (gemini review on PR #285).
+///
+/// Deliberately `split('\n')` + per-line `\r` strip, NOT [`str::lines`]:
+/// `lines()` also swallows a trailing empty segment, so a genuine blank
+/// last line (`"a\n\n"` after the one-terminator frame trim → `"a\n"`)
+/// would vanish from the diff — the #111 "real blank line at EOF
+/// survives" precedent.
 fn entry_lines(entries: &[String]) -> Vec<String> {
     entries
         .iter()
-        .flat_map(|e| e.split('\n').map(str::to_owned))
+        .flat_map(|e| {
+            e.split('\n')
+                .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
+        })
         .collect()
 }
 
@@ -1235,6 +1257,92 @@ mod tests {
         assert_eq!(
             changes[0].hook.as_ref().unwrap().manifest,
             HookManifestPresence::Matched,
+        );
+    }
+
+    #[test]
+    fn attach_matched_tolerates_a_crlf_trailing_frame() {
+        // Gemini review on PR #285: a CRLF terminator on the manifest's
+        // operation body (an engine serializing raw_code file-verbatim
+        // from a Windows-authored project — the #111 model-raw_code
+        // semantic) must not degrade the Matched verdict to the file
+        // fallback. The parsed-file side is LF-clean by construction
+        // (the adapter CRLF pin), so the frame trim is what bridges.
+        let m = manifest_with(vec![operation_node(
+            "playground",
+            "start",
+            0,
+            "grant select on schema x\r\n",
+        )]);
+        let ops = hook_operations(&m, "playground");
+        let mut changes = vec![hooks_change(
+            "on-run-start",
+            None,
+            Some(json!(["grant select on schema x"])),
+        )];
+        attach_hook_facts(&mut changes, &ops);
+        assert_eq!(
+            changes[0].hook.as_ref().unwrap().manifest,
+            HookManifestPresence::Matched,
+        );
+    }
+
+    #[test]
+    fn attach_diff_lines_are_cr_trimmed_for_crlf_multiline_bodies() {
+        // Gemini review on PR #285: interior CRLF breaks in a multiline
+        // hook body must split into `\r`-free diff lines (the
+        // DiffLine::text contract) — a stray `\r` would skew the
+        // intra-line emphasis offsets and leak into the rendered diff.
+        let m = manifest_with(vec![operation_node(
+            "playground",
+            "end",
+            0,
+            "analyze t1\r\nanalyze t3",
+        )]);
+        let ops = hook_operations(&m, "playground");
+        let mut changes = vec![hooks_change(
+            "on-run-end",
+            Some(json!(["analyze t1\nanalyze t2"])),
+            Some(json!(["analyze t1\nanalyze t3"])),
+        )];
+        attach_hook_facts(&mut changes, &ops);
+        let facts = changes[0].hook.as_ref().expect("hook facts attached");
+        // The byte-match verdict compares whole entries pre-split, so an
+        // interior-CRLF op body reads as Diverged (honest: the bytes
+        // differ from the parser-clean file side) and the diff comes
+        // from the file — the Diverged fallback is itself the guard
+        // that keeps interior `\r` out of the rendered diff.
+        assert_eq!(facts.manifest, HookManifestPresence::Diverged);
+        let diff = facts.sql_diff.as_ref().expect("diff present");
+        assert!(
+            diff.lines.iter().all(|l| !l.text.contains('\r')),
+            "every diff line is \\r-trimmed: {:?}",
+            diff.lines,
+        );
+        let kinds: Vec<(crate::domain::pr_diff::DiffLineKind, &str)> = diff
+            .lines
+            .iter()
+            .map(|l| (l.kind, l.text.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (crate::domain::pr_diff::DiffLineKind::Context, "analyze t1"),
+                (crate::domain::pr_diff::DiffLineKind::Removed, "analyze t2"),
+                (crate::domain::pr_diff::DiffLineKind::Added, "analyze t3"),
+            ],
+        );
+    }
+
+    #[test]
+    fn entry_lines_keeps_a_genuine_trailing_blank_line() {
+        // The reason entry_lines is split('\n')+strip and NOT
+        // str::lines(): a real blank last line must survive into the
+        // diff (the #111 precedent); lines() would swallow the trailing
+        // empty segment along with the `\r`s.
+        assert_eq!(
+            entry_lines(&["a\r\n\r".to_owned()]),
+            vec!["a".to_owned(), String::new()],
         );
     }
 
