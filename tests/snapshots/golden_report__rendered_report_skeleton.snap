@@ -1,5 +1,6 @@
 ---
 source: tests/golden_report.rs
+assertion_line: 115
 expression: skeleton
 ---
 <!DOCTYPE html>
@@ -128,6 +129,7 @@ expression: skeleton
       
     </div>
   </div>
+  <p class="model-attribution-row" data-testid="model-attribution" hidden></p>
   <p class="zero-updated-hint" data-testid="zero-updated-hint" hidden></p>
 </section>
 

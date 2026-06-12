@@ -106,6 +106,21 @@ pub fn model_node_with_deps(
 }
 
 /// Construct a model `Node` like [`model_node`] but carrying an explicit
+/// manifest `fqn` (cute-dbt#267 — the config-tree attribution
+/// scenarios; the fqn's first segment is the PROJECT name from the
+/// scenario's dbt_project.yml, independent of the node-id package
+/// label).
+#[must_use]
+pub fn model_node_with_fqn(
+    bare: &str,
+    checksum: &str,
+    compiled: Option<&str>,
+    fqn: &[&str],
+) -> Node {
+    model_node(bare, checksum, compiled).with_fqn(fqn.iter().map(|s| (*s).to_owned()).collect())
+}
+
+/// Construct a model `Node` like [`model_node`] but carrying an explicit
 /// resolved config dict (cute-dbt#160 — the config-only-change
 /// scenarios). Contract stays unenforced; the other facets mirror
 /// [`model_node`].
