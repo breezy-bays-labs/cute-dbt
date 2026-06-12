@@ -12645,3 +12645,36 @@ fn project_panel_absence_note_renders_when_file_unreadable() {
     );
     let _ = tab.close(true);
 }
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn project_state_gated_default_renders_no_panel_and_no_chips() {
+    // cute-dbt#291: with the project-state experiment OFF the run loop
+    // passes `ProjectFacts::default()` — this renders exactly that
+    // posture (a model card in scope, default facts) and pins the
+    // visible absence: no project-definition panel, no per-model
+    // provenance chips. The positive twins above pin that enabled runs
+    // render today's behavior unchanged.
+    let url = render_with_project_facts(
+        "headless_project_state_gated.html",
+        &ProjectFacts::default(),
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"project-def-panel\"]"),
+        0,
+        "the default report renders no project-definition panel",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"model-attribution\"]"),
+        0,
+        "the default report renders no model-attribution provenance chips",
+    );
+    let _ = tab.close(true);
+}

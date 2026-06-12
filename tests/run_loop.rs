@@ -35,6 +35,9 @@ fn clear(path: &Path) {
 fn run(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_cute-dbt"))
         .args(args)
+        // cute-dbt#291: scrub the ambient opt-in — a developer's shell
+        // CUTE_DBT_EXPERIMENTAL must never flip a default-posture test.
+        .env_remove("CUTE_DBT_EXPERIMENTAL")
         .output()
         .expect("the cute-dbt binary spawns")
 }
@@ -186,6 +189,113 @@ fn an_enabled_experimental_env_value_changes_nothing_in_this_slice() {
     assert_eq!(
         default_html, opted_html,
         "the switch is mechanism-only in cute-dbt#289: no byte changes",
+    );
+}
+
+#[test]
+fn project_state_off_dbt_project_yml_contributes_zero_bytes() {
+    // cute-dbt#291 Discovery call, pinned: with project-state OFF the
+    // STANDING `project_definition` metadata is gated too (not kept).
+    // The strongest expressible byte-identity form: the same default
+    // run with dbt_project.yml present vs absent (same root otherwise)
+    // must emit byte-identical reports — the file contributes ZERO
+    // bytes to a default report. (A literal pre-#262 binary is not
+    // runnable here; render's `ProjectFacts::default()` arm is the
+    // pre-#266 byte-identity contract this composes with.)
+    let manifest = fixture("playground-current.json");
+    let root = tmp("project_state_pin_root");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create the pin project root");
+    std::fs::write(
+        root.join("dbt_project.yml"),
+        "name: pin_project\nversion: \"1.0\"\n\nvars:\n  dq_threshold: 5\n",
+    )
+    .expect("write dbt_project.yml");
+
+    let with_file = tmp("project_state_off_with_file.html");
+    let without_file = tmp("project_state_off_without_file.html");
+    clear(&with_file);
+    clear(&without_file);
+
+    let run_with = run(&[
+        "report",
+        "--manifest",
+        s(&manifest),
+        "--baseline-manifest",
+        s(&manifest),
+        "--project-root",
+        s(&root),
+        "--out",
+        s(&with_file),
+    ]);
+    assert!(run_with.status.success(), "{run_with:?}");
+
+    std::fs::remove_file(root.join("dbt_project.yml")).expect("remove dbt_project.yml");
+    let run_without = run(&[
+        "report",
+        "--manifest",
+        s(&manifest),
+        "--baseline-manifest",
+        s(&manifest),
+        "--project-root",
+        s(&root),
+        "--out",
+        s(&without_file),
+    ]);
+    assert!(run_without.status.success(), "{run_without:?}");
+
+    let html_with = std::fs::read_to_string(&with_file).expect("with-file report written");
+    let html_without = std::fs::read_to_string(&without_file).expect("without-file report written");
+    assert_eq!(
+        html_with, html_without,
+        "project-state off: dbt_project.yml must contribute zero bytes",
+    );
+    assert!(
+        !html_with.contains("\"project_definition\""),
+        "project-state off: no standing metadata key in the payload",
+    );
+}
+
+#[test]
+fn project_state_on_embeds_standing_metadata() {
+    // The positive twin of the zero-bytes pin (and the mutant-killer
+    // for the gate condition): the SAME inputs with the experiment
+    // enabled embed the parsed standing metadata.
+    let manifest = fixture("playground-current.json");
+    let root = tmp("project_state_on_root");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create the pin project root");
+    std::fs::write(
+        root.join("dbt_project.yml"),
+        "name: pin_project\nversion: \"1.0\"\n\nvars:\n  dq_threshold: 5\n",
+    )
+    .expect("write dbt_project.yml");
+
+    let out = tmp("project_state_on.html");
+    clear(&out);
+    let opted = run_with_experimental_env(
+        &[
+            "report",
+            "--manifest",
+            s(&manifest),
+            "--baseline-manifest",
+            s(&manifest),
+            "--project-root",
+            s(&root),
+            "--out",
+            s(&out),
+        ],
+        "project-state",
+    );
+    assert!(opted.status.success(), "{opted:?}");
+    let html = std::fs::read_to_string(&out).expect("opted report written");
+    assert!(
+        html.contains("\"project_definition\""),
+        "project-state on: the standing metadata embeds in the payload",
+    );
+    assert!(
+        html.contains("pin_project"),
+        "project-state on: the parsed project name rides the payload",
     );
 }
 
