@@ -25,6 +25,7 @@
 use serde::Deserialize;
 
 use crate::domain::check_config::ChecksConfig;
+use crate::domain::experimental::ExperimentalConfig;
 
 /// Default `<title>` and `<h1>` text when no `--config` is supplied or
 /// the config omits `report.title`.
@@ -59,6 +60,16 @@ pub struct AnalysisConfig {
     /// TOML syntax error).
     #[serde(default)]
     pub checks: ChecksConfig,
+    /// `[experimental]` section (cute-dbt#289, epic #288) — opt-in to
+    /// not-yet-stable surfaces by exact experiment id
+    /// (`enable = ["project-state"]`). Validated against the closed
+    /// vocabulary by
+    /// [`crate::domain::experimental::resolve_experimental_config`] at
+    /// `--config` parse time (the `[checks]` posture — an unknown id is
+    /// a clap usage error, exit 2). Union semantics with the
+    /// `CUTE_DBT_EXPERIMENTAL` env var.
+    #[serde(default)]
+    pub experimental: ExperimentalConfig,
 }
 
 /// `[report]` table — both keys optional.
@@ -224,6 +235,42 @@ reason = "we know and don't care"
     fn unknown_checks_key_is_rejected() {
         let err = toml::from_str::<AnalysisConfig>("[checks]\nenabel = [\"grain.*\"]\n")
             .expect_err("typo'd checks key");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("enabel") || msg.contains("unknown field"),
+            "error names the unknown field: {msg}"
+        );
+    }
+
+    #[test]
+    fn experimental_section_parses_through_analysis_config() {
+        // The [experimental] POD lives in domain::experimental; this
+        // pins the AnalysisConfig wiring (section name + serde(default)).
+        let cfg: AnalysisConfig = toml::from_str(
+            r#"
+[experimental]
+enable = ["project-state"]
+"#,
+        )
+        .expect("experimental section parses");
+        assert_eq!(cfg.experimental.enable, vec!["project-state".to_owned()]);
+    }
+
+    #[test]
+    fn absent_experimental_section_yields_the_default() {
+        let cfg: AnalysisConfig = toml::from_str("[report]\ntitle = \"t\"\n").expect("parses");
+        assert_eq!(
+            cfg.experimental,
+            crate::domain::experimental::ExperimentalConfig::default()
+        );
+        assert!(cfg.experimental.enable.is_empty());
+    }
+
+    #[test]
+    fn unknown_experimental_key_is_rejected() {
+        let err =
+            toml::from_str::<AnalysisConfig>("[experimental]\nenabel = [\"project-state\"]\n")
+                .expect_err("typo'd experimental key");
         let msg = err.to_string();
         assert!(
             msg.contains("enabel") || msg.contains("unknown field"),

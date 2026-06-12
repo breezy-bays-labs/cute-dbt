@@ -18,6 +18,7 @@
   - [join.anti-join](./checks/join.anti-join.md)
   - [incremental.branch-coverage](./checks/incremental.branch-coverage.md)
 - [Selecting & suppressing checks](./check-selection.md)
+- [Experimental features](./experimental.md)
 - [Examples](./examples.md)
 - [Explorer external-drive contract](./explore-contract.md)
 - [Release discipline](./release-discipline.md)

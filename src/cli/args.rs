@@ -24,8 +24,10 @@ use std::path::{Path, PathBuf};
 
 use clap::{ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
+use std::collections::BTreeSet;
+
 use crate::adapters::config_reader::load_config;
-use crate::domain::{AnalysisConfig, ModifierKind, PrDiff};
+use crate::domain::{AnalysisConfig, Experiment, ModifierKind, PrDiff, parse_experimental_env};
 
 /// cute-dbt — zero-compute dbt unit-test and lineage HTML visualizer.
 #[derive(Debug, Parser)]
@@ -179,6 +181,29 @@ pub struct ReportArgs {
         conflicts_with = "pr_diff"
     )]
     pub modified_selectors: Vec<ModifiedSelector>,
+
+    /// Experimental opt-in via the `CUTE_DBT_EXPERIMENTAL` environment
+    /// variable (cute-dbt#289, epic #288).
+    ///
+    /// The env var is the documented surface; the `--experimental` flag
+    /// exists only because clap's env-fallback requires a named arg, and
+    /// is hidden from help. Accepted values: `1` or `all` (enable every
+    /// experiment) or a comma-separated list of exact experiment ids
+    /// (`project-state`). An unknown id is a clap usage error (exit 2)
+    /// — the `[experimental]` TOML posture. An empty value enables
+    /// nothing. Union semantics with the `--config` `[experimental]`
+    /// table: enabled = TOML set ∪ env set.
+    ///
+    /// `explore` deliberately has no counterpart (no gate, per the
+    /// founder call): the env var is inert on that verb.
+    #[arg(
+        long,
+        value_name = "IDS",
+        env = "CUTE_DBT_EXPERIMENTAL",
+        value_parser = parse_experimental_value,
+        hide = true
+    )]
+    pub experimental: Option<BTreeSet<Experiment>>,
 }
 
 /// Arguments for `cute-dbt explore` (cute-dbt#100) — full-manifest,
@@ -281,6 +306,16 @@ impl ModifiedSelector {
 /// [`AnalysisConfig`] is stored in [`ReportArgs::config`].
 fn parse_config_file(s: &str) -> Result<AnalysisConfig, String> {
     load_config(Path::new(s)).map_err(|err| err.to_string())
+}
+
+/// clap value-parser: resolve a `CUTE_DBT_EXPERIMENTAL` value
+/// (cute-dbt#289) against the closed experiment vocabulary.
+///
+/// Thin wrapper over the pure domain parser
+/// ([`parse_experimental_env`]); errors are stringified for clap's
+/// usage-error path (exit 2), matching the `[experimental]` TOML arm.
+fn parse_experimental_value(s: &str) -> Result<BTreeSet<Experiment>, String> {
+    parse_experimental_env(s).map_err(|err| err.to_string())
 }
 
 /// clap value-parser: validate that an explicit `--project-root` points
@@ -1285,5 +1320,118 @@ tilte = "typo'd"
         let resolved = resolve_project_root(None, Path::new("/tmp/arbitrary/foo.json"));
         assert_eq!(resolved.0, None);
         assert!(!resolved.1);
+    }
+
+    // ----- experimental switch (cute-dbt#289) -----
+    //
+    // The env-fallback path itself (CUTE_DBT_EXPERIMENTAL with no flag)
+    // is pinned by subprocess tests in tests/run_loop.rs — process env
+    // is global state, and `unsafe_code = "forbid"` rules out
+    // `std::env::set_var` here (edition 2024). These tests exercise the
+    // same clap arg through its flag form.
+
+    #[test]
+    fn experimental_flag_with_a_known_id_parses_into_the_set() {
+        let report = parse_report(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+            "--experimental",
+            "project-state",
+        ])
+        .expect("a known experiment id parses");
+        let set = report.experimental.expect("the set is Some");
+        assert!(set.contains(&crate::domain::Experiment::ProjectState));
+    }
+
+    #[test]
+    fn experimental_flag_accepts_the_all_shorthand() {
+        let report = parse_report(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+            "--experimental",
+            "all",
+        ])
+        .expect("the all shorthand parses");
+        let set = report.experimental.expect("the set is Some");
+        assert_eq!(
+            set,
+            crate::domain::Experiment::ALL.iter().copied().collect(),
+        );
+    }
+
+    #[test]
+    fn experimental_flag_with_an_unknown_id_is_a_usage_error_with_remediation() {
+        let err = parse_report(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+            "--experimental",
+            "projcet-state",
+        ])
+        .expect_err("an unknown experiment id is a usage error");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        assert!(err.use_stderr(), "validation failures are usage errors");
+        let msg = err.to_string();
+        assert!(msg.contains("projcet-state"), "names the entry: {msg}");
+        assert!(msg.contains("project-state"), "names known ids: {msg}");
+    }
+
+    #[test]
+    fn experimental_absent_is_none() {
+        // Env-sensitive: clap's env-fallback reads the real process
+        // env, so this assertion only holds when the variable is unset
+        // in the test environment. Skip (rather than fail) when a
+        // developer shell exports it.
+        if std::env::var_os("CUTE_DBT_EXPERIMENTAL").is_some() {
+            return;
+        }
+        let report = parse_report(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+        ])
+        .expect("a flag-free invocation parses");
+        assert!(report.experimental.is_none());
+    }
+
+    #[test]
+    fn explore_rejects_the_experimental_flag() {
+        // The switch is report-only mechanism (cute-dbt#289); explore
+        // ships ungated (founder call) so the verb takes no such arg —
+        // and the CUTE_DBT_EXPERIMENTAL env var is inert on it.
+        let err = parse(&[
+            "cute-dbt",
+            "explore",
+            "--manifest",
+            "m.json",
+            "--out-dir",
+            "d",
+            "--experimental",
+            "project-state",
+        ])
+        .expect_err("explore takes no experimental flag");
+        assert_eq!(err.kind(), ErrorKind::UnknownArgument);
     }
 }
