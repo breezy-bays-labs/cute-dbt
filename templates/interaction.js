@@ -1761,15 +1761,39 @@
   }
   // Format tip: the fixture reconstructed in its authored format, in a
   // framed mini code-surface (sql/yaml ride the #132 highlighters).
+  //
+  // cute-dbt#246 — the bubble is pointer-events:none and hides on
+  // mouseleave/blur, so anything laid below a height fold could never be
+  // scrolled to or read (the old fixed 22rem + overflow:auto pairing left
+  // below-fold rows silently unreachable for EVERY input modality). Bound
+  // the content instead of folding it: show at most a viewport-derived
+  // number of lines — the tip is a glance surface; the grid below the
+  // badge carries the full data — and close with a truthful elision row
+  // counting exactly what was trimmed. 20px/line over-approximates the
+  // 12px/1.6 .sql-block line boxes and 96px over-approximates the fixed
+  // chrome (code-header, paddings, borders, the elision row, the 16px
+  // positioning gutters), so the trimmed block always fits the CSS
+  // viewport-relative height cap and the fold cannot occur.
+  var FMT_TIP_MAX_LINES = 20;
+  function fmtTipLineBudget() {
+    var vh = document.documentElement.clientHeight || window.innerHeight;
+    return Math.max(1, Math.min(FMT_TIP_MAX_LINES, Math.floor((vh - 96) / 20)));
+  }
   function showFmtTip(trigger) {
     var fmt = trigger.getAttribute("data-fmt"), lang = trigger.getAttribute("data-fmt-lang");
     var block = trigger.getAttribute("data-fmt-block") || "";
+    var lines = String(block).replace(/\n+$/, "").split("\n");
+    var more = lines.length - fmtTipLineBudget();
+    if (more > 0) block = lines.slice(0, lines.length - more).join("\n");
     var code = lang === "sql" ? highlightLinesSql(block)
              : lang === "yaml" ? highlightLinesYaml(block)
              : highlightLinesPlain(block);
     var el = ensureTip("fmt-tooltip", "fmt-tooltip");
     el.innerHTML = '<div class="code-header"><span class="code-filename">format: ' + escapeHtml(fmt)
-      + '</span></div><pre class="sql-block"><code>' + code + "</code></pre>";
+      + '</span></div><pre class="sql-block"><code>' + code + "</code></pre>"
+      + (more > 0
+        ? '<div class="fmt-more">… +' + more + " more line" + (more === 1 ? "" : "s") + "</div>"
+        : "");
     el.hidden = false;
     positionTipNear(el, trigger);
   }

@@ -1508,7 +1508,17 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
    surface (NOT the dark .col-tooltip shell — it reuses the code-card
    chrome so the reconstruction reads like the drawers). */
 .fmt-tooltip {
-  position: fixed; z-index: 90; max-width: min(34rem, 92vw); max-height: 22rem; overflow: auto;
+  position: fixed; z-index: 90; max-width: min(34rem, 92vw);
+  /* cute-dbt#246 — never a reachability fold: the bubble is
+     pointer-events:none and hides on mouseleave, so anything laid past
+     the old fixed 22rem max-height could never be scrolled to or read
+     (overflow:auto painted a scrollbar nothing could operate). The JS
+     side now bounds the content (viewport-derived line budget + a
+     truthful elision row), and the height cap is viewport-relative —
+     the #240 defect-D width-cap pattern — so positionTipNear's post-flip
+     top clamp always fully contains the box on the height axis, at any
+     viewport height. overflow:hidden because a scrollbar here is a lie. */
+  max-height: calc(100vh - 16px); overflow: hidden;
   border: var(--rule-w) solid var(--border-strong); border-radius: var(--radius-pan);
   box-shadow: 0 8px 26px rgba(0,0,0,0.34); background: var(--code-bg);
   pointer-events: none;
@@ -1516,6 +1526,11 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
 .fmt-tooltip .code-header { font-size: 0.74rem; }
 .fmt-tooltip .sql-block { margin: 0; padding: 0.4rem 0; }
 .fmt-tooltip .code-line { padding-right: 1rem; }
+/* cute-dbt#246 — the truthful elision row under the trimmed block. Plain
+   var(--text) on the bubble's var(--code-bg) (the code-line pairing the
+   8-theme AA matrix already covers); fixed px so the Sakura 62.5% root
+   (1rem = 10px) cannot shrink it unreadable. */
+.fmt-tooltip .fmt-more { padding: 0.15rem 0.8rem 0.4rem; font-size: 11px; color: var(--text); }
 
 /* ============================================================================
    6. ENGINE-PR ADDITIONS (cute-dbt#178)
@@ -3864,15 +3879,39 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
   }
   // Format tip: the fixture reconstructed in its authored format, in a
   // framed mini code-surface (sql/yaml ride the #132 highlighters).
+  //
+  // cute-dbt#246 — the bubble is pointer-events:none and hides on
+  // mouseleave/blur, so anything laid below a height fold could never be
+  // scrolled to or read (the old fixed 22rem + overflow:auto pairing left
+  // below-fold rows silently unreachable for EVERY input modality). Bound
+  // the content instead of folding it: show at most a viewport-derived
+  // number of lines — the tip is a glance surface; the grid below the
+  // badge carries the full data — and close with a truthful elision row
+  // counting exactly what was trimmed. 20px/line over-approximates the
+  // 12px/1.6 .sql-block line boxes and 96px over-approximates the fixed
+  // chrome (code-header, paddings, borders, the elision row, the 16px
+  // positioning gutters), so the trimmed block always fits the CSS
+  // viewport-relative height cap and the fold cannot occur.
+  var FMT_TIP_MAX_LINES = 20;
+  function fmtTipLineBudget() {
+    var vh = document.documentElement.clientHeight || window.innerHeight;
+    return Math.max(1, Math.min(FMT_TIP_MAX_LINES, Math.floor((vh - 96) / 20)));
+  }
   function showFmtTip(trigger) {
     var fmt = trigger.getAttribute("data-fmt"), lang = trigger.getAttribute("data-fmt-lang");
     var block = trigger.getAttribute("data-fmt-block") || "";
+    var lines = String(block).replace(/\n+$/, "").split("\n");
+    var more = lines.length - fmtTipLineBudget();
+    if (more > 0) block = lines.slice(0, lines.length - more).join("\n");
     var code = lang === "sql" ? highlightLinesSql(block)
              : lang === "yaml" ? highlightLinesYaml(block)
              : highlightLinesPlain(block);
     var el = ensureTip("fmt-tooltip", "fmt-tooltip");
     el.innerHTML = '<div class="code-header"><span class="code-filename">format: ' + escapeHtml(fmt)
-      + '</span></div><pre class="sql-block"><code>' + code + "</code></pre>";
+      + '</span></div><pre class="sql-block"><code>' + code + "</code></pre>"
+      + (more > 0
+        ? '<div class="fmt-more">… +' + more + " more line" + (more === 1 ? "" : "s") + "</div>"
+        : "");
     el.hidden = false;
     positionTipNear(el, trigger);
   }
