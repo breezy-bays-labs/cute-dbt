@@ -75,6 +75,140 @@ pub fn run_cli(args: &[&str]) -> Output {
         .expect("the cute-dbt binary spawns")
 }
 
+// ===== Temp git repos for the `review` verb (cute-dbt#300) ==========
+//
+// Real `git init` repos under CARGO_TARGET_TMPDIR, fully isolated from
+// the developer's git environment: an empty file stands in for the
+// global AND system gitconfig (a host `commit.gpgsign = true`, a
+// `diff.noprefix = true`, or a global `cute-dbt.base` must never steer
+// a test), and identity comes from explicit env vars. The SAME
+// isolation wraps the spawned `cute-dbt review` subprocess, because the
+// binary itself shells out to git.
+
+/// A throwaway git repository for `cute-dbt review` tests.
+#[derive(Debug)]
+pub struct TestRepo {
+    /// The repository root (also the spawn cwd for `review`).
+    pub root: PathBuf,
+    /// Holds the empty gitconfig stand-in, OUTSIDE the repo so it can
+    /// never appear as an untracked file.
+    home: PathBuf,
+}
+
+impl TestRepo {
+    /// Create a fresh repo under `CARGO_TARGET_TMPDIR` with `main` as
+    /// the initial branch (the probes' first candidate).
+    pub fn init(stem: &str) -> Self {
+        Self::init_with_branch(stem, "main")
+    }
+
+    /// Create a fresh repo with an explicit initial branch name (the
+    /// no-detectable-base scenarios use a branch the ladder never
+    /// probes).
+    pub fn init_with_branch(stem: &str, branch: &str) -> Self {
+        let base = tmp(&format!("review-repo-{stem}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("repo");
+        let home = base.join("home");
+        std::fs::create_dir_all(&root).expect("create repo dir");
+        std::fs::create_dir_all(&home).expect("create home dir");
+        std::fs::write(home.join("gitconfig"), "").expect("write empty gitconfig");
+        let repo = Self { root, home };
+        repo.git(&["init", "-q", "-b", branch]);
+        repo
+    }
+
+    /// Apply the git-environment isolation to any command (git itself
+    /// or the spawned `cute-dbt`, which shells out to git).
+    pub fn isolate(&self, cmd: &mut Command) {
+        let empty = self.home.join("gitconfig");
+        cmd.env("GIT_CONFIG_GLOBAL", &empty)
+            .env("GIT_CONFIG_SYSTEM", &empty)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", &self.home)
+            .env("GIT_AUTHOR_NAME", "cute-dbt-test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "cute-dbt-test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .env_remove("CUTE_DBT_EXPERIMENTAL")
+            .env_remove("DBT_TARGET_PATH");
+    }
+
+    /// Run a git command in the repo, asserting success.
+    pub fn git(&self, args: &[&str]) -> Output {
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(&self.root);
+        self.isolate(&mut cmd);
+        let output = cmd.output().expect("git spawns");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+        output
+    }
+
+    /// Write a file (creating parents) relative to the repo root.
+    pub fn write(&self, rel: &str, content: &str) {
+        let path = self.root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dirs");
+        }
+        std::fs::write(&path, content).expect("write file");
+    }
+
+    /// Stage everything and commit.
+    pub fn commit_all(&self, message: &str) {
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-q", "-m", message]);
+    }
+
+    /// Spawn `cute-dbt review <args>` with cwd at `cwd_rel` under the
+    /// repo root, fully environment-isolated, output captured (so
+    /// stdout is never a TTY and auto-open can never fire).
+    pub fn review_in(&self, cwd_rel: &str, args: &[&str]) -> Output {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
+        cmd.arg("review")
+            .args(args)
+            .current_dir(self.root.join(cwd_rel));
+        self.isolate(&mut cmd);
+        cmd.output().expect("the cute-dbt binary spawns")
+    }
+
+    /// Spawn `cute-dbt review <args>` from the repo root.
+    pub fn review(&self, args: &[&str]) -> Output {
+        self.review_in(".", args)
+    }
+}
+
+/// Scaffold a minimal dbt project at `project_rel` (`"."` = the repo
+/// root): `dbt_project.yml`, the jaffle-shop staging model the
+/// committed fixtures know, a `target/`-ignoring `.gitignore`, one
+/// initial commit — then the committed `manifest_fixture` copied to
+/// `<project>/target/manifest.json` (untracked + ignored, like a real
+/// `dbt compile` output).
+pub fn scaffold_dbt_project(repo: &TestRepo, project_rel: &str, manifest_fixture: &str) {
+    let prefix = if project_rel == "." {
+        String::new()
+    } else {
+        format!("{project_rel}/")
+    };
+    repo.write(
+        &format!("{prefix}dbt_project.yml"),
+        "name: jaffle_shop\nversion: \"1.0\"\nprofile: jaffle_shop\n",
+    );
+    repo.write(&format!("{prefix}.gitignore"), "target/\n");
+    repo.write(
+        &format!("{prefix}models/staging/stg_customers.sql"),
+        "select 1 as customer_id\n",
+    );
+    repo.commit_all("initial dbt project");
+    let target = repo.root.join(project_rel).join("target");
+    std::fs::create_dir_all(&target).expect("create target dir");
+    std::fs::copy(fixture(manifest_fixture), target.join("manifest.json"))
+        .expect("copy manifest fixture");
+}
+
 // ===== Resource-ref lint shared with tests/resource_ref_lint.rs =====
 //
 // Same shape as the standalone lint test — the BDD scenario for

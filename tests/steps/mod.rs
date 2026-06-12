@@ -26,6 +26,7 @@ pub mod explore_test_badges;
 pub mod explore_view_toggle;
 pub mod fail_closed;
 pub mod incremental_models;
+pub mod one_command_review;
 pub mod pr_diff_scoping;
 pub mod project_definition;
 pub mod report_generation;
