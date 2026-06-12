@@ -51,7 +51,7 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::render::{DagPayload, ReportPayload};
 use crate::domain::{
-    GrainKind, Manifest, ModelInScopeSet, Node, NodeId, model_grain_signals, resolve_target_model,
+    GrainKind, Manifest, ModelInScopeSet, Node, NodeId, model_grain_signals, resolve_tested_model,
 };
 
 /// The explorer's external-drive contract version (cute-dbt#105).
@@ -93,8 +93,8 @@ pub struct LineageNode {
     /// `data_test_counts` helper below).
     pub data_tests: usize,
     /// Unit tests targeting this model (cute-dbt#103) — manifest
-    /// `unit_tests` entries whose bare `model:` reference resolves here
-    /// ([`resolve_target_model`], the same bridge the report uses).
+    /// `unit_tests` entries whose target resolves here
+    /// ([`resolve_tested_model`], the same bridge the report uses).
     pub unit_tests: usize,
 }
 
@@ -128,15 +128,16 @@ fn data_test_counts(current: &Manifest) -> HashMap<&NodeId, usize> {
 }
 
 /// Count the unit tests per target model (cute-dbt#103): each manifest
-/// `unit_tests` entry stores the BARE model name, bridged to its node
-/// by [`resolve_target_model`] (the report renderer's exact resolution
-/// — the two surfaces cannot disagree on a test's target). An
-/// unresolvable `model:` reference contributes nothing (skipped, not
-/// failed — the explore fail-open posture).
+/// `unit_tests` entry is bridged to its node by [`resolve_tested_model`]
+/// (the engine-resolved id when present, the bare `model:` name
+/// otherwise — the report renderer's exact resolution, so the two
+/// surfaces cannot disagree on a test's target). An unresolvable
+/// `model:` reference contributes nothing (skipped, not failed — the
+/// explore fail-open posture).
 fn unit_test_counts(current: &Manifest) -> HashMap<NodeId, usize> {
     let mut counts: HashMap<NodeId, usize> = HashMap::new();
     for unit_test in current.unit_tests().values() {
-        if let Some(model) = resolve_target_model(current, unit_test.model()) {
+        if let Some(model) = resolve_tested_model(current, unit_test) {
             *counts.entry(model.id().clone()).or_insert(0) += 1;
         }
     }
@@ -479,8 +480,8 @@ fn model_detail(current: &Manifest, node: Option<&Node>) -> ModelDetailPayload {
 }
 
 /// Collect each model's unit-test file paths (cute-dbt#105), keyed by
-/// resolved target model: each `unit_tests` entry stores the BARE model
-/// name, bridged by [`resolve_target_model`] (the [`unit_test_counts`]
+/// resolved target model: each `unit_tests` entry is bridged by
+/// [`resolve_tested_model`] (the [`unit_test_counts`]
 /// twin — the badge count and the paths list cannot disagree on a
 /// test's target). Entries are name-ordered per model (the manifest
 /// `unit_tests` map iterates non-deterministically). An unresolvable
@@ -489,7 +490,7 @@ fn model_detail(current: &Manifest, node: Option<&Node>) -> ModelDetailPayload {
 fn unit_test_paths_by_model(current: &Manifest) -> HashMap<NodeId, Vec<UnitTestPathsPayload>> {
     let mut by_model: HashMap<NodeId, Vec<UnitTestPathsPayload>> = HashMap::new();
     for unit_test in current.unit_tests().values() {
-        let Some(model) = resolve_target_model(current, unit_test.model()) else {
+        let Some(model) = resolve_tested_model(current, unit_test) else {
             continue;
         };
         // given-order fixture refs, then the expect's — verbatim off
@@ -951,6 +952,46 @@ mod tests {
         ])
     }
 
+    // ----- unit_test_counts (cute-dbt#254) ---------------------------
+
+    #[test]
+    fn unit_test_counts_bind_a_versioned_model_via_engine_resolved_id() {
+        // A versioned model's leaf segment is its version suffix
+        // (`…dim_customers.v2` → `"v2"`), so bare-name resolution can
+        // never bind it — the engine-resolved `tested_node_unique_id`
+        // must carry the badge attribution (cute-dbt#254).
+        use crate::domain::{UnitTest, UnitTestExpect};
+        let versioned = model("model.shop.dim_customers.v2", Some("select 1"), &[]);
+        let ut = UnitTest::new(
+            "t1",
+            NodeId::new("dim_customers"),
+            Vec::new(),
+            UnitTestExpect::new(serde_json::Value::Null, None, None),
+            None,
+            DependsOn::default(),
+            None,
+            None,
+            None,
+        )
+        .with_tested_node_unique_id(Some(NodeId::new("model.shop.dim_customers.v2")));
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            [(versioned.id().clone(), versioned)].into_iter().collect(),
+            [("unit_test.shop.t1.v2".to_owned(), ut)]
+                .into_iter()
+                .collect(),
+            StdHashMap::new(),
+        );
+        let counts = unit_test_counts(&current);
+        assert_eq!(
+            counts
+                .get(&NodeId::new("model.shop.dim_customers.v2"))
+                .copied(),
+            Some(1),
+            "the versioned model's badge must count its unit test",
+        );
+    }
+
     // ----- build_lineage --------------------------------------------
 
     #[test]
@@ -1389,7 +1430,7 @@ mod tests {
     }
 
     /// A minimal unit test targeting `target_bare` (the manifest stores
-    /// the BARE model name — resolution is `resolve_target_model`).
+    /// the BARE model name — resolution is `resolve_tested_model`).
     fn unit_test_on(target_bare: &str) -> crate::domain::UnitTest {
         crate::domain::UnitTest::new(
             format!("test_{target_bare}"),
