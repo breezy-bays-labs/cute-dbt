@@ -87,14 +87,15 @@ pub fn normalize_path(p: &str, strip_prefix: Option<&Path>) -> String {
         if !prefix_str.is_empty() {
             if remaining == prefix_str {
                 remaining = "";
-            } else if let Some(rest) = remaining.strip_prefix(prefix_str) {
-                if let Some(after_slash) = rest.strip_prefix('/') {
-                    remaining = after_slash;
-                }
-                // else: prefix matches at position 0 but is followed by
-                // a non-`/` character (e.g. `dbt_project_notes/...`) —
-                // not a real path-component match, leave `remaining`
-                // unchanged.
+            } else if let Some(rest) = remaining.strip_prefix(prefix_str)
+                // Segment-aware guard: a prefix match only counts as a real
+                // path-component match when followed by `/`. If the next
+                // character is anything else (e.g. `dbt_project_notes/...`
+                // with prefix `dbt_project`), this leg fails, the arm is
+                // skipped, and `remaining` is left unchanged.
+                && let Some(after_slash) = rest.strip_prefix('/')
+            {
+                remaining = after_slash;
             }
         }
     }

@@ -319,10 +319,10 @@ pub fn resolve_project_root(
     if let Some(p) = explicit {
         return (Some(p.to_path_buf()), false);
     }
-    if let Some(derived) = derive_project_root_from_manifest(manifest_path) {
-        if derived.is_dir() {
-            return (Some(derived), true);
-        }
+    if let Some(derived) = derive_project_root_from_manifest(manifest_path)
+        && derived.is_dir()
+    {
+        return (Some(derived), true);
     }
     (None, false)
 }
