@@ -475,7 +475,7 @@ struct WireColumn {
     /// `dbt-schemas` `dbt_column.rs:38-60` @ `9977b6cb…`): authored
     /// `meta` (core emits `{}` when unset), resolved top-level `tags`
     /// (the nested `config` mirror is deliberately not read — the #200
-    /// precedent), BigQuery `policy_tags` (fusion-only first-class
+    /// precedent), `BigQuery` `policy_tags` (fusion-only first-class
     /// field; core never serializes the key), and declared
     /// `constraints`. All fold into [`ColumnFacts`] via
     /// [`Self::into_facts`]; fact-free columns store nothing.
@@ -492,7 +492,7 @@ struct WireColumn {
 /// Fold a wire column's #257 extension into a [`ColumnFacts`], dropping
 /// every unset shape (absent key, engine null-fill, core's empty `{}` /
 /// `[]`); a fact-free column yields `None` so the domain map keeps only
-/// real facts (the column_descriptions precedent). A non-object `meta`
+/// real facts (the `column_descriptions` precedent). A non-object `meta`
 /// passes through verbatim (the untyped-passthrough posture of
 /// `config.meta`).
 fn fold_column_facts(
@@ -2894,7 +2894,7 @@ mod tests {
     }
 
     /// cute-dbt#257: the column-level extension (meta / tags /
-    /// policy_tags / constraints) folds into [`ColumnFacts`], keeping
+    /// `policy_tags` / constraints) folds into [`ColumnFacts`], keeping
     /// only columns with at least one fact. The populated entry is the
     /// live-probed wire shape (core mirrors meta/tags under the
     /// column's `config` — the nested copy is deliberately not read,

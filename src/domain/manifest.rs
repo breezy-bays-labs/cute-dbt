@@ -518,7 +518,7 @@ pub struct Node {
     /// The engine-INFERRED primary-key column set (cute-dbt#257) —
     /// fusion `ManifestModel.primary_key: Option<Vec<String>>`
     /// (`manifest_nodes.rs:782+` @ `9977b6cb…`). Derived by the engine
-    /// from PK constraints and unique+not_null tests; POPULATED on real
+    /// from PK constraints and `unique`+`not_null` tests; POPULATED on real
     /// wire for most models (both committed fixtures carry e.g.
     /// `["payer_key"]`) — the grain-intelligence sibling of
     /// `config.unique_key`.
@@ -532,8 +532,8 @@ pub struct Node {
     /// (live-verified) — `None` covers both unset shapes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     contract_checksum: Option<String>,
-    /// Per-column facts beyond data_type/description (cute-dbt#257):
-    /// meta / tags / policy_tags / constraints. Only columns with at
+    /// Per-column facts beyond `data_type`/description (cute-dbt#257):
+    /// meta / tags / `policy_tags` / constraints. Only columns with at
     /// least one fact appear (the `column_descriptions` precedent).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     column_facts: BTreeMap<String, ColumnFacts>,
@@ -918,7 +918,7 @@ impl Node {
         self.contract_checksum.as_deref()
     }
 
-    /// Per-column facts beyond data_type/description (cute-dbt#257) —
+    /// Per-column facts beyond `data_type`/description (cute-dbt#257) —
     /// only columns with at least one fact appear.
     #[must_use]
     pub fn column_facts(&self) -> &BTreeMap<String, ColumnFacts> {
@@ -1342,6 +1342,11 @@ impl Group {
 /// (`"db"."schema"."dim_payers"`), fusion 2.0-preview keeps the
 /// AUTHORED `ref('dim_payers')`. Stored verbatim — the ERD consumer
 /// owns the normalization.
+// `constraint_type` (clippy::struct_field_names: starts with the
+// struct's name) — the wire key is `type`, a Rust keyword;
+// `constraint_type` keeps the field and its accessor self-describing.
+// The Exposure `exposure_type` allow precedent.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Constraint {
     /// The wire `type` string, verbatim ([`Self::kind`] types it).
@@ -1464,7 +1469,7 @@ impl Constraint {
 /// The cute-dbt#257 column-level extension — the per-column facts
 /// beyond the already-ingested `data_type` ([`Node::columns`]) and
 /// `description` ([`Node::column_descriptions`]): authored `meta`,
-/// resolved `tags`, BigQuery `policy_tags`, and declared `constraints`
+/// resolved `tags`, `BigQuery` `policy_tags`, and declared `constraints`
 /// (fusion `DbtColumn`, `dbt-schemas` `dbt_column.rs:38-60` @
 /// `9977b6cb…`). Grouped in one POD (rather than four more parallel
 /// maps) since the whole family arrived together; only columns with at
@@ -1484,7 +1489,7 @@ pub struct ColumnFacts {
     /// which is what the adapter reads.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tags: Vec<String>,
-    /// BigQuery policy tags — a first-class fusion `DbtColumn` field
+    /// `BigQuery` policy tags — a first-class fusion `DbtColumn` field
     /// (column governance that escapes `meta`); dbt-core 1.11 does not
     /// serialize the key at all (live-verified).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1523,7 +1528,7 @@ impl ColumnFacts {
         &self.tags
     }
 
-    /// BigQuery policy tags (fusion first-class field).
+    /// `BigQuery` policy tags (fusion first-class field).
     #[must_use]
     pub fn policy_tags(&self) -> &[String] {
         &self.policy_tags
@@ -2818,7 +2823,7 @@ mod tests {
         assert!(c.to_columns().is_empty());
 
         // A missing `type` degrades to Other (tolerant), not an error.
-        let degenerate = r#"{}"#;
+        let degenerate = "{}";
         let c: Constraint = serde_json::from_str(degenerate).unwrap();
         assert_eq!(c.kind(), ConstraintKind::Other);
     }
