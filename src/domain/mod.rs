@@ -73,8 +73,9 @@ pub use cte::{
 };
 pub use grain::{GrainKind, GrainSignal, model_grain_signals, test_is_enabled};
 pub use manifest::{
-    Checksum, ColumnFacts, Constraint, ConstraintKind, DependsOn, Exposure, Group, Manifest,
-    ManifestMetadata, Node, NodeConfig, NodeId, Owner, SourceNode, TestMetadata, UniqueKey,
+    Checksum, ColumnFacts, Constraint, ConstraintKind, DependsOn, DisabledEntry, Exposure, Group,
+    Manifest, ManifestMetadata, Node, NodeConfig, NodeId, Owner, SourceNode, TestMetadata,
+    TestSeverity, UniqueKey,
 };
 pub use model_yaml::ModelYamlOutcome;
 pub use path::{match_changed_path, normalize_path};
