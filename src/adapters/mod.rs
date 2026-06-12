@@ -32,11 +32,19 @@
 //!   authoring-YAML drawer (cute-dbt#69) and the external unit-test
 //!   fixture reader (cute-dbt#126). Soft failure path: `NotFound` is the
 //!   "no content to surface for this test" signal, not a fatal error.
+//! - [`project_def`] — the dbt_project.yml parser (cute-dbt#266):
+//!   dbt-yaml (the engine's own published serde-yaml fork — fusion's
+//!   exact loading semantics: Overwrite duplicate-key policy +
+//!   `apply_merge`) into the domain `ProjectDefinition` POD. A plain
+//!   `fn parse(&str)`, no port trait (one impl; the serde-saphyr
+//!   contingency swaps behind the same seam); file access stays on the
+//!   `ProjectFileReader` port.
 
 pub mod asset_embed;
 pub mod config_reader;
 pub mod cte_engine;
 pub mod explore;
 pub mod manifest;
+pub mod project_def;
 pub mod project_file;
 pub mod render;

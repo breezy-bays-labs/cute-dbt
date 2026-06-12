@@ -614,6 +614,26 @@ boolean `accepted_values` pills ([true, false]). Consumed by \
 mapping over them.\
 """
 
+[[fixture]]
+path = "project-def-acceptance.yml"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/266"
+sha256 = "d8d28ffcfc6ecf2f221e6b6f8316ed4b39bf5820513b0711a03d2ab1d3ccb102"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Synthetic dbt_project.yml exercising the cute-dbt#266 acceptance list \
+(research-262, fusion pinned @ 9977b6cb): anchors + aliases + `<<:` \
+merge keys, duplicate-key last-wins (dbt-yaml Overwrite + apply_merge \
+fusion parity), quoted Jinja scalars, `+`-nested config trees, \
+flow-style lists/mappings, the v1.10 top-level `anchors:` key, a bare \
+legacy config key (dbt-core dialect), and a deprecated path key \
+(`source-paths`). Consumed by `src/adapters/project_def.rs` unit tests \
+via include_str!. Hand-authored — pure synthetic configuration, no \
+data rows at all.\
+"""
+
 # ---------------------------------------------------------------------------
 # dbt-project/ data carriers (cute-dbt#114 / #115)
 #
