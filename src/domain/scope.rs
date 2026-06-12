@@ -214,42 +214,37 @@ pub fn changed_models(current: &Manifest, index: &NormalizedDiffIndex) -> ModelI
 /// [`attribute_config_tree_changes`]: crate::domain::project_def::attribute_config_tree_changes
 #[must_use]
 pub fn widen_with_config_attributions(
-    selection: ScopeSelection,
+    mut selection: ScopeSelection,
     current: &Manifest,
     attributions: &BTreeMap<String, Vec<ConfigAttribution>>,
 ) -> ScopeSelection {
     if attributions.is_empty() {
         return selection;
     }
+    // One NodeId allocation per attributed key, reused for both the
+    // manifest existence probe and the membership set below. A fully
+    // borrowed `&str` keyset would not save it: `Manifest::node` keys on
+    // `&NodeId` (no `Borrow<str>` bridge on the node map), so the probe
+    // needs the owned id either way.
     let widened: BTreeSet<NodeId> = attributions
         .keys()
-        .filter(|id| current.node(&NodeId::new((*id).clone())).is_some())
         .map(|id| NodeId::new(id.clone()))
+        .filter(|id| current.node(id).is_some())
         .collect();
-    let models_in_scope: ModelInScopeSet = selection
-        .models_in_scope
-        .iter()
-        .cloned()
-        .chain(widened.iter().cloned())
-        .collect();
-    let widened_tests = current
-        .unit_tests()
-        .iter()
-        .filter(|(_, ut)| {
-            resolve_tested_model(current, ut).is_some_and(|model| widened.contains(model.id()))
-        })
-        .map(|(id, _)| id.clone());
-    let in_scope: InScopeSet = selection
-        .in_scope
-        .iter()
-        .map(str::to_owned)
-        .chain(widened_tests)
-        .collect();
-    ScopeSelection {
-        in_scope,
-        models_in_scope,
-        changed: selection.changed,
-    }
+    // In-place union over the by-value selection — pre-existing members
+    // are never re-cloned; the widened tests stream straight into the
+    // set. `changed` is untouched.
+    selection.in_scope.extend(
+        current
+            .unit_tests()
+            .iter()
+            .filter(|(_, ut)| {
+                resolve_tested_model(current, ut).is_some_and(|model| widened.contains(model.id()))
+            })
+            .map(|(id, _)| id.clone()),
+    );
+    selection.models_in_scope.extend(widened);
+    selection
 }
 
 // ---------------------------------------------------------------------

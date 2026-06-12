@@ -1541,19 +1541,22 @@ fn affected_models_strings(names: &BTreeSet<String>) -> (String, Vec<String>) {
         return ("affects 0 models in this manifest".to_owned(), Vec::new());
     }
     let noun = if count == 1 { "model" } else { "models" };
-    let listed = names.iter().cloned().collect::<Vec<_>>();
     if count <= CONFIG_AFFECTED_CAP {
+        // Inline arm: join straight from borrowed slices — the owned
+        // name list is only ever returned on the over-cap arm below.
+        let inline = names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
         (
-            format!(
-                "affects {count} {noun} — widened into report scope: {}",
-                listed.join(", ")
-            ),
+            format!("affects {count} {noun} — widened into report scope: {inline}"),
             Vec::new(),
         )
     } else {
         (
             format!("affects {count} {noun} — widened into report scope, listed below"),
-            listed,
+            names.iter().cloned().collect(),
         )
     }
 }
