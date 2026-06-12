@@ -78,7 +78,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/preview
-          cute-dbt \
+          cute-dbt report \
             --manifest "$MANIFEST_CURRENT" \
             --baseline-manifest "$MANIFEST_BASELINE" \
             --out target/preview/report.html
