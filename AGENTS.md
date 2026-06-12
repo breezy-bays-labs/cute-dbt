@@ -114,13 +114,18 @@ deprecated test-args that core only warns about.
   repo cannot accept a PR targeting `main`).
 - **Worktrees** for parallel work: `git worktree add ../cute-dbt-issue-N -b
   <area>-<issue>-<slug>`.
-- **Research dbt-fusion source first.** Any feature work that touches a dbt
-  artifact or dbt concept starts by reading the
-  [`dbt-fusion`](https://github.com/dbt-labs/dbt-fusion) Rust source
-  (`dbt-schemas` for manifest/node types, `dbt-parser` for resolution,
-  `dbt-tasks-sa` for runtime/materialization semantics) — fusion is the
-  source-of-truth engine cute-dbt consumes, authoritative over docs or
-  training priors. Use it to pick the long-term-robust solution
+- **Research the fusion engine source first.** Any feature work that
+  touches a dbt artifact or dbt concept starts by reading the Rust engine
+  workspace in [`dbt-labs/dbt-core`](https://github.com/dbt-labs/dbt-core)
+  (`crates/dbt-schemas` for manifest/node types, `crates/dbt-parser` for
+  resolution, `crates/dbt-tasks-sa` for runtime/materialization
+  semantics) — fusion is the source-of-truth engine cute-dbt consumes,
+  authoritative over docs or training priors. The old
+  [`dbt-labs/dbt-fusion`](https://github.com/dbt-labs/dbt-fusion) repo is
+  an **archive** (final push 2026-06-04; final SHA `9977b6cb` remains
+  usable for historical citations) — the engine's `crates/` tree moved
+  into dbt-core's monorepo, so pin new citations to `dbt-labs/dbt-core`
+  SHAs. Use it to pick the long-term-robust solution
   (performant, maintainable, idiomatic Rust, on the product vision), confirm
   the wire shape **and** its runtime meaning, pin citations to a commit SHA,
   and then verify the new field against a **real committed fixture** — not
