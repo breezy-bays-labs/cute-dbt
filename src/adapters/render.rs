@@ -1513,9 +1513,12 @@ fn project_fallback_copy(reason: ProjectFallbackReason) -> &'static str {
 const CONFIG_AFFECTED_CAP: usize = 10;
 
 /// Invert the per-model attribution map into per-(subtree-path, key)
-/// affected-model name lists — the panel rows' listing source. Names are
-/// the bare model names (the selector vocabulary), sorted and deduped
-/// by the `BTreeSet`.
+/// affected-model NODE-ID sets — the panel rows' listing source. Full
+/// node ids dedupe and count (dbt 1.6+ allows same-named models across
+/// packages, and a section-root edit selects across packages — bare-name
+/// dedupe would under-count exactly there); the human-facing names
+/// derive at sentence-build time ([`affected_display_names`]),
+/// disambiguating only on collision.
 fn affected_models_by_leaf(
     attributions: &BTreeMap<String, Vec<ConfigAttribution>>,
 ) -> BTreeMap<(String, String), BTreeSet<String>> {
@@ -1524,39 +1527,61 @@ fn affected_models_by_leaf(
         for attribution in entries {
             out.entry((attribution.path.clone(), attribution.key.clone()))
                 .or_default()
-                .insert(leaf_segment(node_id).to_owned());
+                .insert(node_id.clone());
         }
     }
     out
 }
 
+/// The sorted display names for one row's affected node-id set: the bare
+/// model name (the selector vocabulary) wherever it is unique within the
+/// set, the full node id where two packages collide on the same bare
+/// name (so the listing never shows two indistinguishable entries).
+fn affected_display_names(ids: &BTreeSet<String>) -> Vec<String> {
+    let mut bare_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for id in ids {
+        *bare_counts.entry(leaf_segment(id)).or_insert(0) += 1;
+    }
+    let mut names: Vec<String> = ids
+        .iter()
+        .map(|id| {
+            let bare = leaf_segment(id);
+            if bare_counts[bare] > 1 {
+                id.clone()
+            } else {
+                bare.to_owned()
+            }
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 /// The affected-models sentence + R1b overflow list for one
 /// `models:`-section config-tree row (cute-dbt#267). TOTAL-tier copy:
-/// counts are exact (fusion's own resolution), so a zero is a truthful
-/// "affects 0 models in this manifest" (shadowed everywhere, or no
-/// model's fqn descends through the edited path).
-fn affected_models_strings(names: &BTreeSet<String>) -> (String, Vec<String>) {
-    let count = names.len();
+/// counts are exact — counted over full node ids (fusion's own
+/// resolution; cross-package bare-name twins both count) — so a zero is
+/// a truthful "affects 0 models in this manifest" (shadowed everywhere,
+/// or no model's fqn descends through the edited path).
+fn affected_models_strings(ids: &BTreeSet<String>) -> (String, Vec<String>) {
+    let count = ids.len();
     if count == 0 {
         return ("affects 0 models in this manifest".to_owned(), Vec::new());
     }
     let noun = if count == 1 { "model" } else { "models" };
+    let names = affected_display_names(ids);
     if count <= CONFIG_AFFECTED_CAP {
-        // Inline arm: join straight from borrowed slices — the owned
-        // name list is only ever returned on the over-cap arm below.
-        let inline = names
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(", ");
         (
-            format!("affects {count} {noun} — widened into report scope: {inline}"),
+            format!(
+                "affects {count} {noun} — widened into report scope: {}",
+                names.join(", ")
+            ),
             Vec::new(),
         )
     } else {
         (
             format!("affects {count} {noun} — widened into report scope, listed below"),
-            names.iter().cloned().collect(),
+            names,
         )
     }
 }
@@ -3288,9 +3313,17 @@ mod tests {
             .expect("unattributed model renders");
         assert!(stg.config_attributions.is_empty());
         // The unattributed model's JSON omits the key entirely (additive
-        // payload shape — pre-#267 byte stability).
+        // payload shape — pre-#267 byte stability). The field is a Vec —
+        // exactly two wire states, both pinned here: present-with-content
+        // (the exact serialized shape the report JS consumes) and absent.
         let json = serde_json::to_string(&payload).expect("serialize");
         assert_eq!(json.matches("config_attributions").count(), 1, "{json}");
+        assert!(
+            json.contains(
+                r#""config_attributions":[{"key":"materialized","path":"models.shop.marts"}]"#
+            ),
+            "the attributed model serializes the full wire shape: {json}",
+        );
     }
 
     #[test]
@@ -3323,6 +3356,30 @@ mod tests {
         );
         assert_eq!(overflow.len(), 11);
         assert!(!text.contains("m00"), "no name leaks inline past the cap");
+    }
+
+    #[test]
+    fn affected_models_count_by_node_id_and_disambiguate_bare_name_twins() {
+        // Two packages each carrying a model named `dim_x` (legal since
+        // dbt 1.6 two-arg ref), both selected by a section-root edit:
+        // the count is over full node ids — never a bare-name collapse —
+        // and the colliding entries display their full ids so the
+        // listing never shows two indistinguishable names. The unique
+        // name keeps its bare (selector-vocabulary) form.
+        let ids: BTreeSet<String> = [
+            "model.shop.dim_x".to_owned(),
+            "model.pkg_two.dim_x".to_owned(),
+            "model.shop.fct_solo".to_owned(),
+        ]
+        .into_iter()
+        .collect();
+        let (text, overflow) = affected_models_strings(&ids);
+        assert_eq!(
+            text,
+            "affects 3 models — widened into report scope: \
+             fct_solo, model.pkg_two.dim_x, model.shop.dim_x",
+        );
+        assert!(overflow.is_empty());
     }
 
     #[test]
