@@ -951,18 +951,30 @@ fn column_meta_for_source(
 /// dbt's full refable set — models, seeds, and snapshots (the committed
 /// jaffle-shop fixture's `ref('raw_customers')` seed given is the real
 /// wire shape; fusion validates given inputs as any ref/source/this,
-/// `dbt-parser` `resolve_unit_tests.rs` @ `9977b6cb…`). Deterministic
-/// under a leaf-name collision: the lexicographically smallest node id
-/// wins (`model.*` sorts before `seed.*`/`snapshot.*`).
+/// `dbt-parser` `resolve_unit_tests.rs` @ `9977b6cb…`).
+///
+/// Matching is by [`Node::bare_name`] (cute-dbt#256, the #254 handoff
+/// root fix): the ingested wire `name` when present — the only handle
+/// that binds a VERSIONED model, whose id leaf segment is the `.vN`
+/// suffix — with the pre-#256 leaf-segment fallback for synthetic
+/// fixtures. Among matches, the node whose `version` equals
+/// `latest_version` wins (dbt's unpinned-ref resolution rule for
+/// versioned families); otherwise the lexicographically smallest node
+/// id wins (`model.*` sorts before `seed.*`/`snapshot.*`) — the
+/// unchanged determinism contract.
 fn resolve_given_ref_node<'m>(current: &'m Manifest, ref_name: &str) -> Option<&'m Node> {
     const REFABLE: [&str; 3] = ["model", "seed", "snapshot"];
-    current
+    let matches = current
         .nodes()
         .values()
-        .filter(|node| {
-            REFABLE.contains(&node.resource_type()) && leaf_segment(node.id().as_str()) == ref_name
-        })
-        .min_by(|a, b| a.id().cmp(b.id()))
+        .filter(|node| REFABLE.contains(&node.resource_type()) && node.bare_name() == ref_name);
+    matches.min_by(|a, b| {
+        let a_latest = a.version().is_some() && a.version() == a.latest_version();
+        let b_latest = b.version().is_some() && b.version() == b.latest_version();
+        // A latest-version node sorts first; ties fall back to the
+        // smallest-id rule.
+        b_latest.cmp(&a_latest).then_with(|| a.id().cmp(b.id()))
+    })
 }
 
 /// Filter a model's full column-metadata map down to the columns that
@@ -5954,6 +5966,58 @@ mod tests {
                 .and_then(|m| m.description.as_deref()),
             Some("Primary key"),
             "a `this` given is the model's own prior state — target meta applies",
+        );
+    }
+
+    #[test]
+    fn resolve_given_ref_node_resolves_a_versioned_model_by_ingested_name() {
+        // cute-dbt#256 (the #254 handoff): a versioned model's leaf
+        // segment is the VERSION SUFFIX ("v2") — pre-#256 a given's
+        // ref('dim_customers') could never bind it. The ingested wire
+        // `name` is the truthful handle; among version siblings the node
+        // whose version equals latest_version wins (dbt's unpinned-ref
+        // resolution rule).
+        let v1 = model_node("model.shop.dim_customers.v1", "v1", Some("select 1"))
+            .with_identity(Some("dim_customers".to_owned()), Some("shop".to_owned()))
+            .with_versions(Some("1".to_owned()), Some("2".to_owned()), None);
+        let v2 = model_node("model.shop.dim_customers.v2", "v2", Some("select 2"))
+            .with_identity(Some("dim_customers".to_owned()), Some("shop".to_owned()))
+            .with_versions(Some("2".to_owned()), Some("2".to_owned()), None);
+        let manifest = manifest_for(vec![v1, v2], vec![]);
+        let resolved = resolve_given_ref_node(&manifest, "dim_customers")
+            .expect("the authored name binds versioned nodes");
+        assert_eq!(
+            resolved.id().as_str(),
+            "model.shop.dim_customers.v2",
+            "the latest version wins for an unpinned ref",
+        );
+    }
+
+    #[test]
+    fn resolve_given_ref_node_keeps_the_leaf_fallback_and_determinism() {
+        // Pre-#256 synthetic manifests carry no `name` — the leaf
+        // fallback (via Node::bare_name) preserves the old behavior,
+        // including smallest-id determinism under a leaf collision.
+        let model = model_node("model.shop.raw_orders", "m", Some("select 1"));
+        let seed = Node::new(
+            NodeId::new("seed.shop.raw_orders"),
+            "seed",
+            checksum("s"),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        );
+        let manifest = manifest_for(vec![model, seed], vec![]);
+        let resolved =
+            resolve_given_ref_node(&manifest, "raw_orders").expect("leaf fallback resolves");
+        assert_eq!(
+            resolved.id().as_str(),
+            "model.shop.raw_orders",
+            "model.* sorts before seed.* — unchanged determinism",
         );
     }
 

@@ -323,7 +323,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "e31ac9865e8ee9fa97d7236cecd021c621197f993de1930b20905f9e6e7d21ac"
+sha256 = "591d996f76b26271a5367aa945dabff13d34a5db5aa976f98e947742bcf348e6"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -389,7 +389,20 @@ string-literal styles and ships the authored text verbatim on the wire \
 (cute-dbt#245) — so the committed goldens prove a double-quoted given \
 binds union.arm-coverage identically to its single-quoted twin \
 (union[combined_metrics] stays COVERED; pre-#249 leaf extraction would \
-have degraded it to a false UNCOVERED).\
+have degraded it to a false UNCOVERED). \
+cute-dbt#256's governance splice (current side only): one `exposures` \
+entry (exposure.healthcare_analytics.provider_quality_dashboard) + one \
+`groups` entry (group.healthcare_analytics.clinical_quality, owner \
+name+email) replace the empty top-level maps, and dim_payers' top-level \
+`"group": null` flips to `"group": "clinical_quality"` (its `access` \
+stays the engine-emitted "protected"; config.group untouched). All \
+three values are VERBATIM dbt-core 1.11.2 output — compiled from a \
+throwaway local copy of the playground project with the governance YAML \
+added (synthetic example.com owner contact), entries copied byte-for- \
+byte, never committed to the playground repo — so the committed fixture \
+proves the real engine wire shape for the cute-dbt#256 \
+exposures/groups/per-node-group ingestion (the only #256 field families \
+absent from every committed fixture).\
 """
 
 [[fixture]]
