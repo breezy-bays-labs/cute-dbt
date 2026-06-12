@@ -333,6 +333,24 @@ struct WireUnitTest {
     /// case — a bare struct field rejects `null` and fails the parse.
     #[serde(default)]
     overrides: Option<WireUnitTestOverrides>,
+    /// Engine-resolved `unique_id` of the tested model (cute-dbt#254).
+    /// Top-level sibling of `model` (`ManifestUnitTest
+    /// .tested_node_unique_id`, `dbt-schemas`
+    /// `manifest/manifest_nodes.rs:273` @ `9977b6cb…`). For versioned
+    /// models this is the `.vN`-suffixed `unique_id` — the only handle
+    /// that binds them (the bare `model:` name never leaf-matches a
+    /// versioned id). `Option` + `#[serde(default)]` tolerate both the
+    /// absent key (every committed fixture predates the field) and an
+    /// explicit `null` (the engine null-fill shape).
+    #[serde(default)]
+    tested_node_unique_id: Option<NodeId>,
+    /// Engine-resolved `unique_id` of the node backing a `this` given
+    /// input — the [`Self::tested_node_unique_id`] twin
+    /// (`manifest_nodes.rs:274` @ `9977b6cb…`; fusion never populates
+    /// it as of that SHA — dbt-core parity field). Same tolerance
+    /// contract.
+    #[serde(default)]
+    this_input_node_unique_id: Option<NodeId>,
 }
 
 /// Tolerant wire projection of the `config` sub-object on a dbt unit-test
@@ -453,6 +471,8 @@ impl WireUnitTest {
         )
         .with_incremental_mode(is_incremental_mode)
         .with_overrides(overrides)
+        .with_tested_node_unique_id(self.tested_node_unique_id)
+        .with_this_input_node_unique_id(self.this_input_node_unique_id)
     }
 }
 
@@ -762,6 +782,79 @@ mod tests {
             SUPPORTED_SCHEMA_MIN_LABEL,
             format!("v{SUPPORTED_SCHEMA_FLOOR}")
         );
+    }
+
+    // ----- cute-dbt#254 — engine-resolved unit-test target ids ------
+
+    #[test]
+    fn parse_manifest_threads_engine_resolved_target_ids() {
+        // The versioned-model wire shape: fusion resolves each per-version
+        // unit test's target to the `.vN`-suffixed unique_id
+        // (`tested_node_unique_id` / `this_input_node_unique_id`,
+        // `dbt-schemas` `manifest/manifest_nodes.rs:273-274` @ `9977b6cb…`).
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.dim_customers.v2": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "deadbeef" }},
+                  "compiled_code": "select 1"
+                }}
+              }},
+              "unit_tests": {{
+                "unit_test.shop.dim_customers.t1.v2": {{
+                  "name": "t1",
+                  "model": "dim_customers",
+                  "expect": {{ "rows": [{{"id":1}}], "format": "dict" }},
+                  "tested_node_unique_id": "model.shop.dim_customers.v2",
+                  "this_input_node_unique_id": "model.shop.dim_customers.v2"
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("versioned manifest parses");
+        let ut = manifest
+            .unit_test("unit_test.shop.dim_customers.t1.v2")
+            .expect("unit test ingested");
+        assert_eq!(
+            ut.tested_node_unique_id().map(NodeId::as_str),
+            Some("model.shop.dim_customers.v2"),
+        );
+        assert_eq!(
+            ut.this_input_node_unique_id().map(NodeId::as_str),
+            Some("model.shop.dim_customers.v2"),
+        );
+    }
+
+    #[test]
+    fn parse_manifest_tolerates_absent_and_null_resolved_ids() {
+        // Absent keys: every committed fixture predates the fields.
+        let manifest = parse_manifest(&minimal_v12_manifest()).expect("valid v12 manifest");
+        let ut = manifest.unit_test("unit_test.shop.t1").expect("ingested");
+        assert!(ut.tested_node_unique_id().is_none());
+        assert!(ut.this_input_node_unique_id().is_none());
+
+        // Explicit nulls: the engine null-fill shape (the cute-dbt#145
+        // `"overrides": null` precedent) must not fail the parse.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "unit_tests": {{
+                "unit_test.shop.t1": {{
+                  "name": "t1",
+                  "model": "stg_orders",
+                  "expect": {{ "rows": [] }},
+                  "tested_node_unique_id": null,
+                  "this_input_node_unique_id": null
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("null-filled ids parse");
+        let ut = manifest.unit_test("unit_test.shop.t1").expect("ingested");
+        assert!(ut.tested_node_unique_id().is_none());
+        assert!(ut.this_input_node_unique_id().is_none());
     }
 
     // ----- parse_manifest: happy path + translation -----------------

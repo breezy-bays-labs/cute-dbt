@@ -190,6 +190,23 @@ pub struct UnitTest {
     /// the authoritative incremental-branch discriminator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     overrides: Option<UnitTestOverrides>,
+    /// Engine-resolved `unique_id` of the tested model (the wire
+    /// `tested_node_unique_id`, cute-dbt#254). Authoritative over the
+    /// bare [`Self::model`] name: a **versioned** model's `unique_id`
+    /// ends in its version suffix (`model.shop.dim_customers.v2`), which
+    /// leaf-segment name matching can never bind. `None` when the
+    /// manifest omits or null-fills the field (dbt-core / older
+    /// manifests) — resolution then degrades to bare-name matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tested_node_unique_id: Option<NodeId>,
+    /// Engine-resolved `unique_id` of the node backing a `this` given
+    /// input (the wire `this_input_node_unique_id`, cute-dbt#254) — the
+    /// [`Self::tested_node_unique_id`] twin for incremental-model unit
+    /// tests whose `given` includes `this`. Carried for the same
+    /// versioned-model robustness; `None` when absent or null-filled
+    /// (dbt-fusion never populates it as of `9977b6cb…`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    this_input_node_unique_id: Option<NodeId>,
 }
 
 impl UnitTest {
@@ -218,6 +235,8 @@ impl UnitTest {
             original_file_path,
             is_incremental_mode: None,
             overrides: None,
+            tested_node_unique_id: None,
+            this_input_node_unique_id: None,
         }
     }
 
@@ -312,6 +331,39 @@ impl UnitTest {
     #[must_use]
     pub fn overrides(&self) -> Option<&UnitTestOverrides> {
         self.overrides.as_ref()
+    }
+
+    /// Set the engine-resolved tested-model id (builder, cute-dbt#254).
+    /// The adapter threads the wire's top-level `tested_node_unique_id`
+    /// here — the [`Self::with_incremental_mode`] precedent (no
+    /// constructor churn across the many test call sites).
+    #[must_use]
+    pub fn with_tested_node_unique_id(mut self, id: Option<NodeId>) -> Self {
+        self.tested_node_unique_id = id;
+        self
+    }
+
+    /// Engine-resolved `unique_id` of the tested model (cute-dbt#254) —
+    /// `None` when the manifest omits or null-fills the field.
+    #[must_use]
+    pub fn tested_node_unique_id(&self) -> Option<&NodeId> {
+        self.tested_node_unique_id.as_ref()
+    }
+
+    /// Set the engine-resolved `this`-input node id (builder,
+    /// cute-dbt#254) — the [`Self::with_tested_node_unique_id`] twin.
+    #[must_use]
+    pub fn with_this_input_node_unique_id(mut self, id: Option<NodeId>) -> Self {
+        self.this_input_node_unique_id = id;
+        self
+    }
+
+    /// Engine-resolved `unique_id` of the node backing a `this` given
+    /// input (cute-dbt#254) — `None` when the manifest omits or
+    /// null-fills the field.
+    #[must_use]
+    pub fn this_input_node_unique_id(&self) -> Option<&NodeId> {
+        self.this_input_node_unique_id.as_ref()
     }
 }
 
@@ -695,6 +747,55 @@ mod tests {
         let back: UnitTest = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ut, "grouped round-trip preserves all fields");
         assert_eq!(back.overrides(), Some(&sample_overrides()));
+    }
+
+    // ----- cute-dbt#254 — engine-resolved target node ids -----
+
+    #[test]
+    fn resolved_node_ids_default_none_and_skip_keys() {
+        let ut = bare_unit_test();
+        assert!(
+            ut.tested_node_unique_id().is_none(),
+            "no engine-resolved target id by default"
+        );
+        assert!(
+            ut.this_input_node_unique_id().is_none(),
+            "no engine-resolved `this` input id by default"
+        );
+        let json = serde_json::to_string(&ut).unwrap();
+        assert!(
+            !json.contains("tested_node_unique_id"),
+            "None must skip the key (pre-#254 payloads stay byte-stable): {json}"
+        );
+        assert!(
+            !json.contains("this_input_node_unique_id"),
+            "None must skip the key (pre-#254 payloads stay byte-stable): {json}"
+        );
+    }
+
+    #[test]
+    fn resolved_node_ids_roundtrip_when_present() {
+        // The versioned-model shape the fields exist for: the engine
+        // resolves the bare `model:` name to the `.vN`-suffixed unique_id
+        // cute-dbt's leaf-segment matching can never reach.
+        let ut = bare_unit_test()
+            .with_tested_node_unique_id(Some(NodeId::new("model.shop.order_events.v2")))
+            .with_this_input_node_unique_id(Some(NodeId::new("model.shop.order_events.v2")));
+        assert_eq!(
+            ut.tested_node_unique_id().map(NodeId::as_str),
+            Some("model.shop.order_events.v2")
+        );
+        assert_eq!(
+            ut.this_input_node_unique_id().map(NodeId::as_str),
+            Some("model.shop.order_events.v2")
+        );
+        let json = serde_json::to_string(&ut).unwrap();
+        assert!(
+            json.contains("\"tested_node_unique_id\":\"model.shop.order_events.v2\""),
+            "Some must emit the key: {json}"
+        );
+        let back: UnitTest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ut, "round-trip preserves the resolved ids");
     }
 
     #[test]
