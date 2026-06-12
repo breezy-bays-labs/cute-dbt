@@ -967,9 +967,16 @@ fn given_rows_presence(given: &UnitTestGiven) -> RowsPresence {
 }
 
 /// The lowercased leaf relation a given's `input` mocks: the **last
-/// single-quoted argument** of a `ref(...)` / `source(...)` call —
+/// string-literal argument** of a `ref(...)` / `source(...)` call —
 /// `ref('stg_orders')` → `stg_orders`, `ref('pkg', 'stg_orders')` →
-/// `stg_orders`, `source('raw', 'orders')` → `orders`. Mirrors the
+/// `stg_orders`, `source('raw', 'orders')` → `orders`. Either quote
+/// style is accepted under the matching-quote rule (dbt given inputs
+/// are Python/Jinja string literals — dbt accepts both quote
+/// characters and both engines ship the authored string verbatim on
+/// the manifest wire, cute-dbt#245): the open and close quote must be
+/// the **same** character; a mixed pair or an unbalanced quote fails
+/// open to `None` — the domain twin of the renderer's
+/// `strip_matching_quotes` contract (cute-dbt#249). Mirrors the
 /// renderer's given↔leaf-ref binding (cute-dbt#34/#131:
 /// `render::parse_ref_name` + the source unwrap; duplicated here because
 /// domain never imports adapters). `None` for `this` (incremental prior
@@ -981,8 +988,13 @@ fn given_input_leaf(input: &str) -> Option<String> {
     if !is_call || !trimmed.ends_with(')') {
         return None;
     }
-    let close = trimmed.rfind('\'')?;
-    let open = trimmed[..close].rfind('\'')?;
+    // Right-to-left scan: the LAST quote character of either style
+    // closes the last string-literal argument (tolerating trailing
+    // non-string kwargs like `ref('orders', v=2)`); its opener must be
+    // the SAME character — mixed/unbalanced pairs fall through to None.
+    let close = trimmed.rfind(['\'', '"'])?;
+    let quote = char::from(trimmed.as_bytes()[close]);
+    let open = trimmed[..close].rfind(quote)?;
     let name = trimmed[open + 1..close].trim();
     (!name.is_empty()).then(|| name.to_ascii_lowercase())
 }
@@ -3261,6 +3273,126 @@ mod tests {
                 .collect(),
             HashMap::new(),
         )
+    }
+
+    // ----- given_input_leaf: quoted-leaf extraction (cute-dbt#249) ---
+
+    #[test]
+    fn given_input_leaf_extracts_single_quoted_arguments() {
+        // The pre-#249 pins: single-quoted ref()/source() stay accepted.
+        assert_eq!(
+            given_input_leaf("ref('stg_orders')").as_deref(),
+            Some("stg_orders")
+        );
+        assert_eq!(
+            given_input_leaf("ref('pkg', 'stg_orders')").as_deref(),
+            Some("stg_orders")
+        );
+        assert_eq!(
+            given_input_leaf("source('raw', 'orders')").as_deref(),
+            Some("orders")
+        );
+        // A trailing non-string kwarg: the LAST string literal wins (the
+        // versioned-ref tolerance the right-to-left scan has always
+        // carried — `ref('orders', v=2)` binds the model, not the kwarg).
+        assert_eq!(
+            given_input_leaf("ref('orders', v=2)").as_deref(),
+            Some("orders")
+        );
+        // Case-insensitive keyword + lowercased leaf.
+        assert_eq!(
+            given_input_leaf("REF('Stg_Orders')").as_deref(),
+            Some("stg_orders")
+        );
+    }
+
+    #[test]
+    fn given_input_leaf_extracts_double_quoted_arguments() {
+        // cute-dbt#249: dbt accepts either Python/Jinja quote style in a
+        // given's `input:` and both engines ship the authored string
+        // verbatim on the manifest wire (cute-dbt#245) — a double-quoted
+        // given must extract identically to its single-quoted twin.
+        assert_eq!(
+            given_input_leaf(r#"ref("stg_orders")"#).as_deref(),
+            Some("stg_orders")
+        );
+        assert_eq!(
+            given_input_leaf(r#"ref("pkg", "stg_orders")"#).as_deref(),
+            Some("stg_orders")
+        );
+        assert_eq!(
+            given_input_leaf(r#"source("raw", "orders")"#).as_deref(),
+            Some("orders")
+        );
+        // Per-argument quote style: each argument is its own string
+        // literal, so mixing styles ACROSS arguments is engine-valid
+        // (the cute-dbt#245 contract render's parse_source_ref pins).
+        assert_eq!(
+            given_input_leaf(r#"source("raw", 'orders')"#).as_deref(),
+            Some("orders")
+        );
+        assert_eq!(
+            given_input_leaf(r#"source('raw', "orders")"#).as_deref(),
+            Some("orders")
+        );
+        assert_eq!(
+            given_input_leaf(r#"ref("orders", v=2)"#).as_deref(),
+            Some("orders")
+        );
+        assert_eq!(
+            given_input_leaf(r#"REF("Stg_Orders")"#).as_deref(),
+            Some("stg_orders")
+        );
+    }
+
+    #[test]
+    fn given_input_leaf_rejects_mixed_or_unbalanced_quotes_and_non_calls() {
+        // The strip_matching_quotes contract (cute-dbt#245 / PR #248):
+        // open and close must be the SAME character; a mixed pair or an
+        // unbalanced quote fails open to None — never a half-stripped
+        // garbage leaf.
+        assert_eq!(given_input_leaf(r#"ref("stg_orders')"#), None);
+        assert_eq!(given_input_leaf(r#"ref('stg_orders")"#), None);
+        assert_eq!(given_input_leaf(r#"ref("stg_orders)"#), None);
+        assert_eq!(given_input_leaf("ref('stg_orders)"), None);
+        assert_eq!(given_input_leaf("ref(stg_orders)"), None);
+        assert_eq!(given_input_leaf(r#"ref("")"#), None);
+        assert_eq!(given_input_leaf("ref('')"), None);
+        // `this` (incremental prior state) and non-call shapes stay None.
+        assert_eq!(given_input_leaf("this"), None);
+        assert_eq!(given_input_leaf("raw_orders"), None);
+    }
+
+    #[test]
+    fn union_double_quoted_given_classifies_like_its_single_quoted_twin() {
+        // cute-dbt#249 AC: a double-quoted given input classifies
+        // arm-coverage IDENTICALLY to its single-quoted twin. Before the
+        // fix, `ref("x")` lost its leaf binding entirely and a fed arm
+        // degraded to a false UNCOVERED nag.
+        let graph = charges_refunds_graph();
+        let verdict_for = |charges_input: &str, refunds_input: &str| {
+            let manifest = manifest_with_unit_tests(
+                vec![payments_model()],
+                vec![(
+                    "unit_test.shop.fct_payments.test_fct_payments",
+                    unit_test_on_payments(vec![
+                        given(charges_input, serde_json::json!([{ "amount": 100 }])),
+                        given(refunds_input, serde_json::json!([{ "amount": 40 }])),
+                    ]),
+                )],
+            );
+            single_finding(run_with_graph(&manifest, PAYMENTS, Some(&graph))).verdict
+        };
+        let single_quoted = verdict_for("ref('stg_charges')", "ref('stg_refunds')");
+        let double_quoted = verdict_for(r#"ref("stg_charges")"#, r#"ref("stg_refunds")"#);
+        assert!(
+            matches!(single_quoted, Verdict::Covered { .. }),
+            "the single-quoted twin is the established covered case",
+        );
+        assert_eq!(
+            double_quoted, single_quoted,
+            "quote style must not change the arm-coverage verdict",
+        );
     }
 
     #[test]
