@@ -16,7 +16,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use cute_dbt::adapters::manifest::{FileManifestSource, load_baseline};
-use cute_dbt::domain::{ConstraintKind, Manifest, NodeId, PreflightError, UnitTest};
+use cute_dbt::domain::{
+    ConstraintKind, Manifest, NodeId, PreflightError, TestMetadata, TestSeverity, UnitTest,
+};
 use cute_dbt::ports::ManifestSource;
 
 /// Absolute path to a committed fixture under `tests/fixtures/`.
@@ -471,6 +473,131 @@ fn real_fixtures_carry_the_contract_column_structure_wire_family() {
     // Every OTHER column of the model is fact-free — the real
     // empty-{}/[] shapes store nothing.
     assert_eq!(dim_payers.column_facts().len(), 1);
+}
+
+#[test]
+fn real_fixtures_carry_the_test_config_disabled_singular_wire_family() {
+    // cute-dbt#258 verified against BOTH committed real fixtures
+    // (dbt-core 1.11.9 / 1.11.11). Populated disabled entries + the
+    // populated limit/store_failures/unrendered specimens are the #258
+    // splice — verbatim dbt-core 1.11.11 output, see
+    // tests/fixtures/MANIFEST.toml; everything else asserted here is
+    // untouched engine emission.
+    let playground = FileManifestSource
+        .load(&fixture("playground-current.json"))
+        .expect("the playground fixture is a valid compiled v12 manifest");
+
+    // --- singular-test linkage: REAL committed wire, no splice. Both
+    // engines omit test_metadata/attached_node; linkage travels only
+    // through depends_on.
+    let singular = playground
+        .node(&NodeId::new(
+            "test.healthcare_analytics.assert_provider_active_patients_counts_valid",
+        ))
+        .expect("the committed singular test is present");
+    assert!(singular.is_singular_test());
+    assert!(singular.attached_node().is_none());
+    assert!(singular.test_metadata().is_none());
+    assert_eq!(
+        singular.depends_on().nodes(),
+        [NodeId::new(
+            "model.healthcare_analytics.v_provider_active_patients"
+        )],
+        "singular tests link to their models ONLY via depends_on",
+    );
+
+    // --- test-config semantics on real wire: authored-case "warn"
+    // (untouched emission) + the spliced fully-populated specimen.
+    let warn_test = playground
+        .node(&NodeId::new(
+            "test.healthcare_analytics.dbt_expectations_expect_column_values_to_be_between_fct_patient_summary_patient_age_at_year_end__150__0.430b64533b",
+        ))
+        .expect("the warn-severity test is present");
+    assert_eq!(warn_test.config().severity(), Some(TestSeverity::Warn));
+    assert!(
+        !warn_test.is_singular_test(),
+        "generic tests carry metadata"
+    );
+
+    let populated = playground
+        .node(&NodeId::new(
+            "test.healthcare_analytics.not_null_dim_payers_payer_name.a40249ff7e",
+        ))
+        .expect("the spliced populated-config test is present");
+    let config = populated.config();
+    assert_eq!(config.severity(), Some(TestSeverity::Warn));
+    assert_eq!(config.where_filter(), Some("payer_key != -1"));
+    assert_eq!(config.limit(), Some(50));
+    assert_eq!(config.enabled(), Some(true));
+    assert_eq!(config.store_failures(), Some(true));
+    // …and its authored provenance: exactly the four authored keys.
+    let authored = populated.unrendered_config();
+    assert_eq!(authored.len(), 4);
+    assert_eq!(
+        authored.get("limit").and_then(serde_json::Value::as_i64),
+        Some(50),
+    );
+
+    // --- unrendered_config on real model wire (untouched emission).
+    let stg = playground
+        .node(&NodeId::new(
+            "model.healthcare_analytics.stg_synthea__organizations",
+        ))
+        .expect("model present");
+    assert_eq!(
+        stg.unrendered_config()
+            .get("materialized")
+            .and_then(serde_json::Value::as_str),
+        Some("view"),
+        "dbt-core emits the authored pre-Jinja values",
+    );
+
+    // --- the spliced disabled map: per-id arrays; the generic entry
+    // keeps its linkage; the singular + model entries carry none.
+    let disabled = playground.disabled();
+    assert_eq!(disabled.len(), 3);
+    let archive = &disabled["model.healthcare_analytics.stg_synthea__claims_archive"][0];
+    assert_eq!(archive.resource_type(), "model");
+    assert_eq!(
+        archive.original_file_path(),
+        Some("models/staging/synthea/stg_synthea__claims_archive.sql"),
+    );
+    let generic = &disabled["test.healthcare_analytics.accepted_values_dim_payers_payer_type__Medicare__Medicaid__Commercial.0fe18914c7"]
+        [0];
+    assert_eq!(
+        generic.attached_node().map(NodeId::as_str),
+        Some("model.healthcare_analytics.dim_payers"),
+    );
+    assert_eq!(generic.column_name(), Some("payer_type"));
+    assert_eq!(
+        generic.test_metadata().map(TestMetadata::name),
+        Some("accepted_values"),
+    );
+    let disabled_singular =
+        &disabled["test.healthcare_analytics.assert_payer_amounts_reconcile"][0];
+    assert!(disabled_singular.attached_node().is_none());
+    assert!(disabled_singular.test_metadata().is_none());
+
+    // --- jaffle-shop: the real "nothing disabled" shape ({} on wire)
+    // and a default-config generic test (null-filled semantics).
+    let jaffle = FileManifestSource
+        .load(&fixture("jaffle-shop-current.json"))
+        .expect("the jaffle fixture is a valid compiled v12 manifest");
+    assert!(jaffle.disabled().is_empty());
+    let unique = jaffle
+        .node(&NodeId::new(
+            "test.jaffle_shop.unique_customers_customer_id.c5af1ff4b1",
+        ))
+        .expect("generic test present");
+    assert_eq!(unique.config().severity(), Some(TestSeverity::Error));
+    assert_eq!(unique.config().where_filter(), None);
+    assert_eq!(unique.config().limit(), None);
+    assert_eq!(unique.config().store_failures(), None);
+    assert_eq!(unique.config().enabled(), Some(true));
+    assert!(
+        unique.unrendered_config().is_empty(),
+        "an unauthored test emits {{}} — the real unset shape",
+    );
 }
 
 #[test]

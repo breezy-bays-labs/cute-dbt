@@ -271,6 +271,79 @@ impl NodeConfig {
             Some(_) => Some(UniqueKey::Unrecognized),
         }
     }
+
+    /// `config.severity` — the data-test failure severity, typed
+    /// (cute-dbt#258). A pure POD read over the config dict (the
+    /// [`Self::materialized`] / [`Self::unique_key`] precedent).
+    ///
+    /// Real wire carries three case variants (live-probed 2026-06-12):
+    /// dbt-core's default `"ERROR"`, dbt-core's authored-case `"warn"`
+    /// (the committed playground fixture carries both), and fusion
+    /// 2.0-preview's `"Warn"` — so the read is case-insensitive. An
+    /// unrecognized value degrades to
+    /// [`TestSeverity::Unrecognized`], never an error (the
+    /// [`UniqueKey::Unrecognized`] posture); absent / `null` ⇒ `None`.
+    #[must_use]
+    pub fn severity(&self) -> Option<TestSeverity> {
+        match self.config.get("severity") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) if s.eq_ignore_ascii_case("error") => Some(TestSeverity::Error),
+            Some(Value::String(s)) if s.eq_ignore_ascii_case("warn") => Some(TestSeverity::Warn),
+            Some(_) => Some(TestSeverity::Unrecognized),
+        }
+    }
+
+    /// `config.where` — the data-test row filter (fusion
+    /// `DataTestConfig.where_`, `dbt-schemas`
+    /// `project/configs/data_test_config.rs` @ `9977b6cb…`), applied via
+    /// `get_where_subquery`. `None` when unset (both committed fixtures
+    /// null-fill) or a non-string (ADR-5).
+    #[must_use]
+    pub fn where_filter(&self) -> Option<&str> {
+        self.config.get("where").and_then(Value::as_str)
+    }
+
+    /// `config.limit` — the data-test failing-row cap (fusion
+    /// `Option<i32>`). `None` when unset or non-integer (ADR-5).
+    #[must_use]
+    pub fn limit(&self) -> Option<i64> {
+        self.config.get("limit").and_then(Value::as_i64)
+    }
+
+    /// `config.enabled` — nodes in the `nodes` map are enabled (disabled
+    /// ones live in [`Manifest::disabled`]), so real wire carries `true`
+    /// here; `None` when the key is absent (synthetic fixtures).
+    #[must_use]
+    pub fn enabled(&self) -> Option<bool> {
+        self.config.get("enabled").and_then(Value::as_bool)
+    }
+
+    /// `config.store_failures` — whether failing rows persist to the
+    /// audit schema. `None` when unset (both committed fixtures
+    /// null-fill; the coverage consumer treats that as the adapter
+    /// default).
+    #[must_use]
+    pub fn store_failures(&self) -> Option<bool> {
+        self.config.get("store_failures").and_then(Value::as_bool)
+    }
+}
+
+/// A data-test's typed failure severity (cute-dbt#258).
+///
+/// Mirrors fusion's two-variant `Severity` enum (`dbt-schemas`
+/// `common.rs:1341` @ `9977b6cb…`: `Error` default, `Warn`) plus the
+/// tolerant [`Self::Unrecognized`] arm for a present-but-unknown value
+/// (the [`UniqueKey::Unrecognized`] precedent — one odd config value
+/// must never fail anything, ADR-5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestSeverity {
+    /// A failing test fails the run (dbt's default).
+    Error,
+    /// A failing test only warns — the coverage-truthfulness signal
+    /// that a "covered" model's guarantee is advisory.
+    Warn,
+    /// Present but neither `error` nor `warn` in any case variant.
+    Unrecognized,
 }
 
 /// dbt's `test_metadata` block on a **generic-test** node (cute-dbt#165).
@@ -537,6 +610,22 @@ pub struct Node {
     /// least one fact appear (the `column_descriptions` precedent).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     column_facts: BTreeMap<String, ColumnFacts>,
+    /// The node's AUTHORED pre-Jinja config values (cute-dbt#258) —
+    /// fusion `NodeBaseAttributes.unrendered_config:
+    /// BTreeMap<String, YmlValue>` (`dbt-schemas` `nodes.rs:4536-4541`
+    /// @ `9977b6cb…`), the dbt-core-compatible `state:*` comparison
+    /// surface. The #262 C3 provenance input: a key here was set by the
+    /// author (model file / properties YAML / `dbt_project.yml`); a
+    /// resolved [`Self::config`] key absent here came from defaults.
+    /// Values pass through verbatim (nested objects like
+    /// `docs.node_color` included). Engine divergence (live-probed
+    /// 2026-06-12): dbt-core emits every authored key; fusion
+    /// 2.0-preview emits a SPARSER map (e.g. drops `materialized` /
+    /// `enabled` authored in `dbt_project.yml` or SQL `config()`) and
+    /// `{}` on test nodes — consumers must treat absence as
+    /// "provenance unknown", never "not authored".
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    unrendered_config: BTreeMap<String, Value>,
 }
 
 impl Node {
@@ -585,6 +674,7 @@ impl Node {
             primary_key: Vec::new(),
             contract_checksum: None,
             column_facts: BTreeMap::new(),
+            unrendered_config: BTreeMap::new(),
         }
     }
 
@@ -618,6 +708,14 @@ impl Node {
     #[must_use]
     pub fn with_column_facts(mut self, column_facts: BTreeMap<String, ColumnFacts>) -> Self {
         self.column_facts = column_facts;
+        self
+    }
+
+    /// Attach the node's authored pre-Jinja config values (cute-dbt#258)
+    /// — the adapter passes the wire `unrendered_config` map verbatim.
+    #[must_use]
+    pub fn with_unrendered_config(mut self, unrendered_config: BTreeMap<String, Value>) -> Self {
+        self.unrendered_config = unrendered_config;
         self
     }
 
@@ -923,6 +1021,25 @@ impl Node {
     #[must_use]
     pub fn column_facts(&self) -> &BTreeMap<String, ColumnFacts> {
         &self.column_facts
+    }
+
+    /// The node's AUTHORED pre-Jinja config values (cute-dbt#258) — the
+    /// #262 C3 provenance surface. Empty when nothing was authored, on
+    /// fusion test nodes, and on pre-#258 fixtures.
+    #[must_use]
+    pub fn unrendered_config(&self) -> &BTreeMap<String, Value> {
+        &self.unrendered_config
+    }
+
+    /// `true` for a **singular** (SQL-file) data test: a `test` node
+    /// without `test_metadata` (cute-dbt#258). Both engines omit
+    /// `test_metadata` / `attached_node` on singular tests (live-probed
+    /// 2026-06-12), so linkage to the tested model travels ONLY through
+    /// [`Self::depends_on`] — the committed playground fixture's
+    /// `assert_*` tests are the real specimens.
+    #[must_use]
+    pub fn is_singular_test(&self) -> bool {
+        self.resource_type == "test" && self.test_metadata.is_none()
     }
 
     /// The node's bare name for `ref(...)` / `models:`-entry / display
@@ -1551,6 +1668,116 @@ impl ColumnFacts {
     }
 }
 
+/// One entry of the manifest's top-level `disabled` map (cute-dbt#258)
+/// — a node the project declares but excludes via `enabled: false`.
+///
+/// A tolerant LIGHT projection, not a [`Node`]: the wire entries are
+/// whole heterogeneous node payloads (models, tests, seeds, sources,
+/// future kinds — fusion `build_disabled_map`, `dbt-schemas`
+/// `manifest/manifest.rs:648` @ `9977b6cb…`, returns
+/// `BTreeMap<String, Vec<YmlValue>>`), and the coverage-truthfulness
+/// consumer needs only identity + test linkage. Every field defaults so
+/// any object shape ingests (ADR-5).
+///
+/// Linkage truth (live-probed on both engines 2026-06-12): a disabled
+/// GENERIC test keeps `attached_node` / `column_name` /
+/// `test_metadata`; a disabled SINGULAR test and a disabled model carry
+/// none of them AND an empty `depends_on` (disabled nodes are never
+/// resolved) — absence here is honest "linkage unknown".
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DisabledEntry {
+    #[serde(default)]
+    resource_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original_file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    column_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    attached_node: Option<NodeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    test_metadata: Option<TestMetadata>,
+}
+
+impl DisabledEntry {
+    /// Canonical constructor — the resource kind discriminator.
+    #[must_use]
+    pub fn new(resource_type: impl Into<String>) -> Self {
+        Self {
+            resource_type: resource_type.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Attach the authored bare name.
+    #[must_use]
+    pub fn with_name(mut self, name: Option<String>) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// Attach the project-relative source path.
+    #[must_use]
+    pub fn with_original_file_path(mut self, original_file_path: Option<String>) -> Self {
+        self.original_file_path = original_file_path;
+        self
+    }
+
+    /// Attach the test-linkage triplet (the [`Node::with_test_attachment`]
+    /// shape) — populated only for disabled generic tests.
+    #[must_use]
+    pub fn with_attachment(
+        mut self,
+        column_name: Option<String>,
+        attached_node: Option<NodeId>,
+        test_metadata: Option<TestMetadata>,
+    ) -> Self {
+        self.column_name = column_name;
+        self.attached_node = attached_node;
+        self.test_metadata = test_metadata;
+        self
+    }
+
+    /// `resource_type` discriminator (`"model"` / `"test"` / `"seed"` /
+    /// …); empty when the wire entry omitted it (degenerate, tolerated).
+    #[must_use]
+    pub fn resource_type(&self) -> &str {
+        &self.resource_type
+    }
+
+    /// The authored bare name.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The project-relative source path.
+    #[must_use]
+    pub fn original_file_path(&self) -> Option<&str> {
+        self.original_file_path.as_deref()
+    }
+
+    /// `column_name` — set iff a disabled column-scoped generic test.
+    #[must_use]
+    pub fn column_name(&self) -> Option<&str> {
+        self.column_name.as_deref()
+    }
+
+    /// The model a disabled generic test is declared on.
+    #[must_use]
+    pub fn attached_node(&self) -> Option<&NodeId> {
+        self.attached_node.as_ref()
+    }
+
+    /// The generic-test descriptor; `None` on disabled singular tests
+    /// and non-test entries.
+    #[must_use]
+    pub fn test_metadata(&self) -> Option<&TestMetadata> {
+        self.test_metadata.as_ref()
+    }
+}
+
 /// Parsed dbt `manifest.json` projection.
 ///
 /// **Post-normalized shape** (see module docs) — `unit_tests` is a
@@ -1583,6 +1810,13 @@ pub struct Manifest {
     /// [`Self::exposures`].
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     groups: HashMap<String, Group>,
+    /// The manifest's top-level `disabled` map (cute-dbt#258), keyed by
+    /// `unique_id` with per-id ARRAYS of entries — dbt's shape is never
+    /// 1:1 (multiple disabled definitions can share an id across
+    /// versions/packages). [`BTreeMap`] for deterministic order. Same
+    /// tolerance + byte-stable omission as [`Self::exposures`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    disabled: BTreeMap<String, Vec<DisabledEntry>>,
 }
 
 impl Manifest {
@@ -1606,6 +1840,7 @@ impl Manifest {
             sources: HashMap::new(),
             exposures: HashMap::new(),
             groups: HashMap::new(),
+            disabled: BTreeMap::new(),
         }
     }
 
@@ -1627,6 +1862,13 @@ impl Manifest {
     #[must_use]
     pub fn with_groups(mut self, groups: HashMap<String, Group>) -> Self {
         self.groups = groups;
+        self
+    }
+
+    /// Attach the manifest's parsed `disabled` map (cute-dbt#258).
+    #[must_use]
+    pub fn with_disabled(mut self, disabled: BTreeMap<String, Vec<DisabledEntry>>) -> Self {
+        self.disabled = disabled;
         self
     }
 
@@ -1684,6 +1926,15 @@ impl Manifest {
     #[must_use]
     pub fn groups(&self) -> &HashMap<String, Group> {
         &self.groups
+    }
+
+    /// The manifest's `disabled` map (cute-dbt#258), keyed by
+    /// `unique_id` — per-id arrays of light [`DisabledEntry`]
+    /// projections. Empty on every pre-#258 fixture and on projects
+    /// with nothing disabled (both engines emit `{}`).
+    #[must_use]
+    pub fn disabled(&self) -> &BTreeMap<String, Vec<DisabledEntry>> {
+        &self.disabled
     }
 
     /// Look up a group by its NAME — the value a node's [`Node::group`]
@@ -2998,6 +3249,224 @@ mod tests {
         assert!(n.primary_key().is_empty());
         assert!(n.contract_checksum().is_none());
         assert!(n.column_facts().is_empty());
+    }
+
+    // ----- cute-dbt#258: test-config semantics (typed dict reads) ----
+
+    fn config_with(key: &str, value: Value) -> NodeConfig {
+        let mut map = BTreeMap::new();
+        map.insert(key.to_owned(), value);
+        NodeConfig::new(map, false)
+    }
+
+    #[test]
+    fn severity_reads_case_insensitively_with_tolerant_fallback() {
+        // Real wire carries three case variants: dbt-core default
+        // "ERROR", dbt-core authored "warn", fusion "Warn"
+        // (live-probed 2026-06-12).
+        for raw in ["ERROR", "error", "Error"] {
+            assert_eq!(
+                config_with("severity", Value::String(raw.to_owned())).severity(),
+                Some(TestSeverity::Error),
+                "{raw}",
+            );
+        }
+        for raw in ["warn", "Warn", "WARN"] {
+            assert_eq!(
+                config_with("severity", Value::String(raw.to_owned())).severity(),
+                Some(TestSeverity::Warn),
+                "{raw}",
+            );
+        }
+        assert_eq!(
+            config_with("severity", Value::String("fatal".to_owned())).severity(),
+            Some(TestSeverity::Unrecognized),
+        );
+        assert_eq!(
+            config_with("severity", Value::from(42)).severity(),
+            Some(TestSeverity::Unrecognized),
+        );
+        assert_eq!(config_with("severity", Value::Null).severity(), None);
+        assert_eq!(NodeConfig::default().severity(), None);
+    }
+
+    #[test]
+    fn test_config_semantics_read_where_limit_enabled_store_failures() {
+        let c = config_with("where", Value::String("payer_key != -1".to_owned()));
+        assert_eq!(c.where_filter(), Some("payer_key != -1"));
+        assert_eq!(config_with("where", Value::Null).where_filter(), None);
+        assert_eq!(NodeConfig::default().where_filter(), None);
+
+        assert_eq!(config_with("limit", Value::from(50)).limit(), Some(50));
+        assert_eq!(config_with("limit", Value::Null).limit(), None);
+        assert_eq!(
+            config_with("limit", Value::String("50".to_owned())).limit(),
+            None,
+            "a non-integer limit degrades to None (ADR-5), never panics",
+        );
+
+        assert_eq!(
+            config_with("enabled", Value::Bool(true)).enabled(),
+            Some(true)
+        );
+        assert_eq!(NodeConfig::default().enabled(), None);
+
+        assert_eq!(
+            config_with("store_failures", Value::Bool(true)).store_failures(),
+            Some(true),
+        );
+        assert_eq!(
+            config_with("store_failures", Value::Null).store_failures(),
+            None,
+            "both committed fixtures null-fill store_failures when unset",
+        );
+    }
+
+    // ----- cute-dbt#258: singular-test discrimination -----------------
+
+    #[test]
+    fn is_singular_test_discriminates_test_nodes() {
+        let base = |resource_type: &str| {
+            Node::new(
+                NodeId::new("test.shop.assert_x"),
+                resource_type,
+                sample_checksum(),
+                None,
+                None,
+                DependsOn::default(),
+                None,
+                NodeConfig::default(),
+                None,
+                BTreeMap::new(),
+            )
+        };
+        // A test node WITHOUT test_metadata is a singular (SQL-file)
+        // test — both engines omit the key (live-probed 2026-06-12).
+        assert!(base("test").is_singular_test());
+        // A generic test carries test_metadata.
+        assert!(
+            !base("test")
+                .with_test_attachment(
+                    None,
+                    Some(NodeId::new("model.shop.x")),
+                    Some(TestMetadata::new("unique", None, Value::Null)),
+                )
+                .is_singular_test()
+        );
+        // Non-test nodes are never singular tests.
+        assert!(!base("model").is_singular_test());
+    }
+
+    // ----- cute-dbt#258: unrendered_config -----------------------------
+
+    #[test]
+    fn node_unrendered_config_round_trips_and_omits_when_empty() {
+        let bare = Node::new(
+            NodeId::new("model.shop.m"),
+            "model",
+            sample_checksum(),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        );
+        // Byte-stability: an unrendered-config-free Node serializes
+        // without the key (pre-#258 shape).
+        let json = serde_json::to_string(&bare).unwrap();
+        assert!(!json.contains("unrendered_config"));
+        assert!(bare.unrendered_config().is_empty());
+
+        let mut authored = BTreeMap::new();
+        authored.insert("materialized".to_owned(), Value::String("view".to_owned()));
+        authored.insert(
+            "docs".to_owned(),
+            serde_json::json!({ "node_color": "gold" }),
+        );
+        let n = bare.with_unrendered_config(authored.clone());
+        assert_eq!(n.unrendered_config(), &authored);
+        let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
+        assert_eq!(back, n);
+    }
+
+    // ----- cute-dbt#258: disabled map ----------------------------------
+
+    #[test]
+    fn disabled_entry_construction_and_linkage_accessors() {
+        // A disabled GENERIC test keeps its attachment (live-probed on
+        // both engines 2026-06-12) — the coverage-truthfulness linkage.
+        let generic = DisabledEntry::new("test")
+            .with_name(Some("accepted_values_dim_payers_payer_type".to_owned()))
+            .with_original_file_path(Some("models/marts/core/_core.yml".to_owned()))
+            .with_attachment(
+                Some("payer_type".to_owned()),
+                Some(NodeId::new("model.shop.dim_payers")),
+                Some(TestMetadata::new("accepted_values", None, Value::Null)),
+            );
+        assert_eq!(generic.resource_type(), "test");
+        assert_eq!(
+            generic.name(),
+            Some("accepted_values_dim_payers_payer_type"),
+        );
+        assert_eq!(
+            generic.original_file_path(),
+            Some("models/marts/core/_core.yml"),
+        );
+        assert_eq!(generic.column_name(), Some("payer_type"));
+        assert_eq!(
+            generic.attached_node().map(NodeId::as_str),
+            Some("model.shop.dim_payers"),
+        );
+        assert_eq!(
+            generic.test_metadata().map(TestMetadata::name),
+            Some("accepted_values")
+        );
+
+        // A disabled MODEL (or singular test) carries no attachment —
+        // honest None, never invented linkage.
+        let model = DisabledEntry::new("model");
+        assert_eq!(model.resource_type(), "model");
+        assert_eq!(model.name(), None);
+        assert_eq!(model.attached_node(), None);
+        assert_eq!(model.test_metadata(), None);
+
+        let back: DisabledEntry =
+            serde_json::from_str(&serde_json::to_string(&generic).unwrap()).unwrap();
+        assert_eq!(back, generic);
+    }
+
+    #[test]
+    fn manifest_disabled_default_empty_with_builder_and_byte_stable_omission() {
+        let bare = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        assert!(bare.disabled().is_empty());
+        // Byte-stability: a disabled-free Manifest serializes without
+        // the key (pre-#258 shape).
+        assert!(
+            !serde_json::to_string(&bare)
+                .unwrap()
+                .contains("\"disabled\"")
+        );
+
+        let mut disabled = BTreeMap::new();
+        disabled.insert(
+            "model.shop.archived".to_owned(),
+            vec![DisabledEntry::new("model"), DisabledEntry::new("model")],
+        );
+        let m = bare.with_disabled(disabled);
+        assert_eq!(
+            m.disabled()["model.shop.archived"].len(),
+            2,
+            "per-id ARRAYS preserved — dbt's shape is never 1:1",
+        );
+        let back: Manifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
     }
 
     #[test]
