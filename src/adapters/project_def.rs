@@ -1,4 +1,4 @@
-//! dbt_project.yml parser — dbt-yaml (the engine's own published
+//! `dbt_project.yml` parser — dbt-yaml (the engine's own published
 //! serde-yaml fork) → [`ProjectDefinition`] (cute-dbt#266).
 //!
 //! **Engine fidelity by construction**: this adapter mirrors the exact
@@ -28,8 +28,8 @@
 //! mapping key is stringified. Visible degrades, never silent drops.
 //!
 //! **No port trait**: one impl, a plain `fn parse(&str)` — ADR-1's
-//! >1-impl bar is not met (the serde-saphyr contingency swaps behind
-//! this same seam). File access stays on the existing
+//! more-than-one-impl bar is not met (the serde-saphyr contingency
+//! swaps behind this same seam). File access stays on the existing
 //! [`crate::ports::ProjectFileReader`] port; this module never does I/O.
 
 use dbt_yaml::mapping::DuplicateKey;
@@ -39,7 +39,7 @@ use serde_json::Value;
 use crate::domain::project_def::Span;
 use crate::domain::{ConfigTree, ProjectDefinition};
 
-/// Why a dbt_project.yml text failed to parse — an **owned** degradation
+/// Why a `dbt_project.yml` text failed to parse — an **owned** degradation
 /// enum (no parser types cross it). Every variant degrades the panel to
 /// the Shape-A raw-diff row; report generation never fails on it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +52,7 @@ pub enum ProjectParseError {
         message: String,
     },
     /// The document parsed but its root is not a mapping (a bare scalar
-    /// or sequence) — not a dbt_project.yml shape.
+    /// or sequence) — not a `dbt_project.yml` shape.
     NotAMapping,
 }
 
@@ -80,7 +80,7 @@ const CONFIG_TREE_SECTIONS: [&str; 17] = [
     "functions",
 ];
 
-/// Parse dbt_project.yml text into the domain [`ProjectDefinition`].
+/// Parse `dbt_project.yml` text into the domain [`ProjectDefinition`].
 ///
 /// Loading semantics match fusion's shared YAML entry: duplicate keys
 /// resolve last-wins ([`DuplicateKey::Overwrite`]), then `<<:` merge

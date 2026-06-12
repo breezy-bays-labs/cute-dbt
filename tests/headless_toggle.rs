@@ -11247,7 +11247,7 @@ fn report_aa_token_palette_matrix_on_every_theme() {
 /// `selector` are check-visible.
 fn visible_count(tab: &Tab, selector: &str) -> i64 {
     let _ = eval(
-        &tab,
+        tab,
         "(() => { const s = document.createElement('style'); \
            s.textContent = '* { transition: none !important; animation: none !important; }'; \
            document.head.appendChild(s); return true; })()",

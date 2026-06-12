@@ -709,12 +709,12 @@ fn is_bare_fixture_name(path: &str) -> bool {
 const DBT_PROJECT_YML: &str = "dbt_project.yml";
 
 /// The `gather_project_facts` stage (cute-dbt#266) — parse the
-/// working-tree dbt_project.yml (standing metadata, both scope arms) and,
-/// on the PrDiff arm, build the categorized project-change panel.
+/// working-tree `dbt_project.yml` (standing metadata, both scope arms) and,
+/// on the `PrDiff` arm, build the categorized project-change panel.
 ///
 /// Same project-root resolution as [`gather_authoring_yaml`]. With no
 /// resolvable root nothing can be read: standing metadata stays `None`,
-/// and when dbt_project.yml IS in the diff the panel degrades to the
+/// and when `dbt_project.yml` IS in the diff the panel degrades to the
 /// absence-note fallback (the hunks are still in hand) — the change is
 /// never silently invisible.
 fn gather_project_facts(args: &ReportArgs, scope_input: &ScopeInput) -> ProjectFacts {
@@ -735,7 +735,7 @@ fn gather_project_facts(args: &ReportArgs, scope_input: &ScopeInput) -> ProjectF
 }
 
 /// The absence-note panel arm: `Some(Fallback{FileUnreadable})` exactly
-/// when dbt_project.yml is in the diff (its raw hunk lines still show),
+/// when `dbt_project.yml` is in the diff (its raw hunk lines still show),
 /// else no panel.
 fn project_panel_without_file(index: Option<&NormalizedDiffIndex>) -> Option<ProjectChangePanel> {
     let index = index?;
@@ -803,7 +803,7 @@ fn gather_project_facts_with_reader(
     ProjectFacts { definition, panel }
 }
 
-/// Build the diff-gated panel content for an in-diff dbt_project.yml
+/// Build the diff-gated panel content for an in-diff `dbt_project.yml`
 /// whose working-tree text is in hand. See
 /// [`gather_project_facts_with_reader`] for the arm map.
 fn project_change_panel(
@@ -2161,7 +2161,7 @@ mod tests {
         FileHunks, Hunk, PrDiff, ProjectChangeCategory, ProjectChangePanel, ProjectFallbackReason,
     };
 
-    /// A reader carrying one dbt_project.yml body.
+    /// A reader carrying one `dbt_project.yml` body.
     fn project_reader(text: &str) -> StubReader {
         let mut entries = StdHashMap::new();
         entries.insert(
@@ -2171,7 +2171,7 @@ mod tests {
         StubReader { entries }
     }
 
-    /// An index whose only changed file is dbt_project.yml with the
+    /// An index whose only changed file is `dbt_project.yml` with the
     /// given hunks.
     fn project_diff_index(hunks: Vec<Hunk>) -> NormalizedDiffIndex {
         let diff = PrDiff {

@@ -1152,7 +1152,7 @@ fn validate_reversible(lines: &[&str], sorted: &[&Hunk]) -> Result<(), ReverseAp
 /// added (`+`) bodies per hunk, in diff order, `\r`-trimmed, no context,
 /// no emphasis (cute-dbt#266).
 ///
-/// The Shape-A fallback row's content: when the semantic dbt_project.yml
+/// The Shape-A fallback row's content: when the semantic `dbt_project.yml`
 /// categorization degrades (parse failure / un-reconstructable old side /
 /// unreadable working-tree file) the panel still shows the *diff itself*,
 /// truthfully, without needing the working-tree text or any alignment
@@ -3175,7 +3175,7 @@ mod tests {
     /// non-overlapping edits over a fixed base file, with and without a
     /// trailing newline. The forward side is constructed BY the edit
     /// script (replace/insert/delete at a 1-based old line), so the test
-    /// derives (new_text, hunks) pairs exactly shaped like
+    /// derives `(new_text, hunks)` pairs exactly shaped like
     /// `git diff --unified=0` output and asserts the reversal returns
     /// the original old text.
     #[test]
@@ -3352,7 +3352,10 @@ mod tests {
     #[test]
     fn reverse_apply_preserves_the_new_texts_trailing_newline_framing() {
         let h = full_hunk(2, &["was-b"], &["b"]);
-        assert_eq!(reverse_apply("a\nb\n", &[h.clone()]).unwrap(), "a\nwas-b\n");
+        assert_eq!(
+            reverse_apply("a\nb\n", std::slice::from_ref(&h)).unwrap(),
+            "a\nwas-b\n",
+        );
         assert_eq!(reverse_apply("a\nb", &[h]).unwrap(), "a\nwas-b");
     }
 

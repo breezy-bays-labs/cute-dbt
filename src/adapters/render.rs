@@ -1329,7 +1329,7 @@ pub struct ReportPayload {
     /// byte-stable.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub check_specs: BTreeMap<String, CheckSpecPayload>,
-    /// The parsed working-tree dbt_project.yml (cute-dbt#266) —
+    /// The parsed working-tree `dbt_project.yml` (cute-dbt#266) —
     /// **standing metadata**, present on both scope arms whenever the
     /// file is readable + parseable under the resolved project root.
     /// Future consumers (explorer panes, provenance chips) read it from
@@ -1338,7 +1338,7 @@ pub struct ReportPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_definition: Option<ProjectDefinition>,
     /// The "Project definition changed" panel content (cute-dbt#266) —
-    /// present exactly when dbt_project.yml is in the PR diff. The
+    /// present exactly when `dbt_project.yml` is in the PR diff. The
     /// panel itself is server-rendered (the template's `project_panel`
     /// view); the payload carries the structured facts for downstream
     /// consumers + the BDD payload assertions.
@@ -1394,7 +1394,7 @@ struct ProjectPanelLineView {
 }
 
 /// The server-rendered "Project definition changed" panel — built from
-/// the domain [`ProjectChangePanel`] exactly when dbt_project.yml is in
+/// the domain [`ProjectChangePanel`] exactly when `dbt_project.yml` is in
 /// the PR diff. Wording lives here (adapter); facts live in the domain
 /// POD (the `ModelYamlOutcome` precedent).
 struct ProjectPanelView {
@@ -1593,7 +1593,7 @@ struct ReportTemplate<'a> {
     /// Rust-side escape, not askama's HTML filter.
     payload_json: &'a str,
     /// The server-rendered "Project definition changed" panel
-    /// (cute-dbt#266) — `Some` exactly when dbt_project.yml is in the
+    /// (cute-dbt#266) — `Some` exactly when `dbt_project.yml` is in the
     /// PR diff; `None` keeps the section out of the DOM entirely.
     project_panel: Option<ProjectPanelView>,
 }
@@ -1727,7 +1727,7 @@ pub fn build_payload(
 /// convenience passes `CheckPolicy::default()` — everything displayed,
 /// nothing suppressed).
 ///
-/// `project_facts` (cute-dbt#266) carries the parsed dbt_project.yml
+/// `project_facts` (cute-dbt#266) carries the parsed `dbt_project.yml`
 /// (standing metadata) + the diff-gated panel content; the
 /// [`build_payload`] convenience passes `ProjectFacts::default()` (both
 /// absent — the pre-#266 payload shape, byte-identical).

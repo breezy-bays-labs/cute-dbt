@@ -1,8 +1,8 @@
-//! Parsed dbt_project.yml facts + the structural old/new diff
+//! Parsed `dbt_project.yml` facts + the structural old/new diff
 //! (cute-dbt#266, epic #262).
 //!
 //! [`ProjectDefinition`] is the owned POD the project-file adapter
-//! (`adapters::project_def`) parses dbt_project.yml into — **standing
+//! (`adapters::project_def`) parses `dbt_project.yml` into — **standing
 //! metadata**: the file is parsed whenever it is present, with or
 //! without a diff, because vars / config trees / hooks / dispatch
 //! defined there are part of every model's truth (the founder's v3
@@ -10,7 +10,7 @@
 //! consumer of the parsed model, not the trigger for parsing.
 //!
 //! Value vocabulary is `serde_json::Value` ONLY (the domain already
-//! speaks serde_json — `cell_diff`, `unit_test_table`); the YAML parser's
+//! speaks `serde_json` — `cell_diff`, `unit_test_table`); the YAML parser's
 //! types never appear here (the adapter converts, degrading
 //! non-JSON-representable subtrees per-subtree). Source positions are
 //! carried by the tiny [`Span`] POD — `{ line, column }`, nothing of the
@@ -22,7 +22,7 @@
 //!
 //! The structural diff ([`diff_project_definitions`]) compares two parsed
 //! definitions field-by-field and emits categorized [`ProjectChange`]s —
-//! Vars / ConfigTree / Dispatch / Hooks / Paths / Identity / Other — the
+//! Vars / `ConfigTree` / Dispatch / Hooks / Paths / Identity / Other — the
 //! rows the report's "Project definition changed" panel renders. The
 //! old side comes from [`crate::domain::pr_diff::reverse_apply`] over the
 //! file's own hunks; when that (or either side's parse) degrades, the
@@ -36,7 +36,7 @@ use serde_json::Value;
 
 use crate::domain::pr_diff::DiffLine;
 
-/// A source position in the authored dbt_project.yml — 1-based line and
+/// A source position in the authored `dbt_project.yml` — 1-based line and
 /// column.
 ///
 /// The domain twin of the YAML parser's marker type: only the two fields
@@ -70,12 +70,12 @@ pub struct ConfigTree {
     pub children: BTreeMap<String, ConfigTree>,
 }
 
-/// The parsed dbt_project.yml — owned data, `std` + `serde` +
+/// The parsed `dbt_project.yml` — owned data, `std` + `serde` +
 /// `serde_json` only (POD-only domain).
 ///
 /// Field-to-category map for the diff: `name` / `version` /
 /// `require_dbt_version` → Identity; `vars` → Vars; `config_trees` →
-/// ConfigTree; `dispatch` → Dispatch; `on_run_start` / `on_run_end` →
+/// `ConfigTree`; `dispatch` → Dispatch; `on_run_start` / `on_run_end` →
 /// Hooks; `paths` → Paths; `flags` and `other` → Other. The adapter
 /// routes every top-level key into exactly one field, so nothing a
 /// project file says is silently dropped — unrecognized keys land in
@@ -185,7 +185,7 @@ pub struct ProjectChange {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectFallbackReason {
-    /// The working-tree dbt_project.yml could not be parsed — nothing
+    /// The working-tree `dbt_project.yml` could not be parsed — nothing
     /// to categorize ("could not categorize").
     NewParseFailed,
     /// The reconstructed previous version could not be parsed
@@ -194,13 +194,13 @@ pub enum ProjectFallbackReason {
     /// [`crate::domain::pr_diff::reverse_apply`] refused (drift /
     /// malformed hunks) — "could not reconstruct the previous version".
     OldNotReconstructable,
-    /// dbt_project.yml is in the diff but could not be read from the
+    /// `dbt_project.yml` is in the diff but could not be read from the
     /// project root (absence note).
     FileUnreadable,
 }
 
 /// What the "Project definition changed" panel shows — rendered whenever
-/// dbt_project.yml is in the PR diff (cute-dbt#266).
+/// `dbt_project.yml` is in the PR diff (cute-dbt#266).
 ///
 /// Fail-open by construction: every degrade arm is a [`Fallback`]
 /// (raw diff + explicit copy), never a missing panel and never a failed
@@ -232,20 +232,20 @@ pub enum ProjectChangePanel {
 /// renderer (cute-dbt#266) — one value, two consumers.
 ///
 /// `definition` is the **standing metadata**: the parsed working-tree
-/// dbt_project.yml whenever it is present and parses, on BOTH scope
+/// `dbt_project.yml` whenever it is present and parses, on BOTH scope
 /// arms (the founder's parse-always posture; future consumers — explorer
 /// panes, provenance chips — read it from the payload). `panel` is the
-/// **diff-gated** consumer: `Some` exactly when dbt_project.yml is in
+/// **diff-gated** consumer: `Some` exactly when `dbt_project.yml` is in
 /// the PR diff. Both `None` (the default) leaves the payload
 /// byte-identical to the pre-#266 shape.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProjectFacts {
-    /// The parsed working-tree dbt_project.yml (standing metadata);
+    /// The parsed working-tree `dbt_project.yml` (standing metadata);
     /// `None` when unreadable, unparseable, or no project root resolves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub definition: Option<ProjectDefinition>,
     /// The "Project definition changed" panel content; `Some` exactly
-    /// when dbt_project.yml is in the PR diff.
+    /// when `dbt_project.yml` is in the PR diff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel: Option<ProjectChangePanel>,
 }
@@ -386,7 +386,7 @@ fn diff_value_maps(
 }
 
 /// Recursively diff one config-tree node — `path` is the dotted tree
-/// path so far (starting at the section name). Emits one ConfigTree
+/// path so far (starting at the section name). Emits one `ConfigTree`
 /// change per differing `+key` leaf, labelled `"{path}: +{key}"`.
 fn diff_config_tree(
     out: &mut Vec<ProjectChange>,
