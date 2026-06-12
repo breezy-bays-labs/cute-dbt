@@ -18,3 +18,10 @@ models:
       +materialized: table
     staging:
       +materialized: view
+
+on-run-start:
+  - "grant select on all tables in schema analytics to role reporting"
+
+dispatch:
+  - macro_namespace: dbt_utils
+    search_order: ["healthcare_analytics", "dbt_utils"]
