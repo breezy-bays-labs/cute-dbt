@@ -172,10 +172,10 @@ fn first_in_scope_test_for_model(
         let Some(unit_test) = current.unit_test(test_id) else {
             continue;
         };
-        if let Some(resolved) = resolve_tested_model(current, unit_test) {
-            if resolved.id() == model_id {
-                return Some(unit_test.name().to_owned());
-            }
+        if let Some(resolved) = resolve_tested_model(current, unit_test)
+            && resolved.id() == model_id
+        {
+            return Some(unit_test.name().to_owned());
         }
     }
     None

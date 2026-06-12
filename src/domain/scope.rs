@@ -244,10 +244,10 @@ fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> S
 
     let mut model_ids: BTreeSet<NodeId> = BTreeSet::new();
     for test_id in in_scope.iter() {
-        if let Some(ut) = current.unit_test(test_id) {
-            if let Some(model) = resolve_tested_model(current, ut) {
-                model_ids.insert(model.id().clone());
-            }
+        if let Some(ut) = current.unit_test(test_id)
+            && let Some(model) = resolve_tested_model(current, ut)
+        {
+            model_ids.insert(model.id().clone());
         }
     }
     for model_id in path_modified_models.iter() {

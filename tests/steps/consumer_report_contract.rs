@@ -137,11 +137,11 @@ fn then_drawer_contains_substring(world: &mut World, substring: String) {
             .and_then(Value::as_array)
             .unwrap_or(&empty);
         for test in tests {
-            if let Some(yaml) = test.get("authoring_yaml").and_then(Value::as_str) {
-                if yaml.contains(&substring) {
-                    found = true;
-                    break;
-                }
+            if let Some(yaml) = test.get("authoring_yaml").and_then(Value::as_str)
+                && yaml.contains(&substring)
+            {
+                found = true;
+                break;
             }
         }
         if found {
