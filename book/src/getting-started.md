@@ -68,7 +68,14 @@ xdg-open report.html
 The HTML opens via `file://`. No server. No outbound requests. Your
 data does not leave your machine.
 
-## Explore the full project
+## Experimental: explore the full project
+
+> **Experimental** — the `explore` verb may change or be removed in
+> any v0.x release. It stays listed and runnable (there is no gate);
+> every invocation prints a one-line notice on stderr — stderr only,
+> so stdout-consuming scripts are unaffected. `report` is the stable,
+> polished surface; treat everything in this section as
+> subject to change.
 
 Where `report` is diff-scoped, the **`explore`** verb renders the
 **full manifest** — no baseline, no scope source:

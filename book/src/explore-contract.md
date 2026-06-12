@@ -1,5 +1,11 @@
 # Explorer external-drive contract
 
+> **Experimental** — the `explore` verb (and with it this contract's
+> host page) may change or be removed in any v0.x release. The
+> contract-versioning discipline below still applies while the
+> surface exists: a breaking change to a named surface bumps the
+> contract version.
+
 The explorer's `dag.html` is not just a page you click around — it is a
 surface other tools can **drive** and **observe**. An IDE extension, a
 terminal browser pane, or any embedding host can push focus into the

@@ -102,6 +102,18 @@ cute-dbt report --manifest target/current/manifest.json \
          --out report.html
 ```
 
+`report` itself stays diff-scoped by design: bounded reports, narrow
+fail-closed surface. Bare `cute-dbt` without a verb is a usage error.
+For a full-manifest overview there is an experimental `explore` verb —
+see [Experimental: the `explore` verb](#experimental-the-explore-verb).
+
+## Experimental: the `explore` verb
+
+> **Experimental** — `explore` may change or be removed in any v0.x
+> release. It stays listed and runnable (no gate); every invocation
+> prints a one-line notice on stderr. `report` is the stable,
+> polished surface.
+
 For a full-manifest overview, use the **`explore`** verb instead of a
 diff trick:
 
@@ -112,9 +124,7 @@ cute-dbt explore --manifest target/manifest.json --out-dir explore/
 It renders **every** model to two self-contained pages — `explore/dag.html`
 (the model-lineage DAG) and `explore/tests.html` (the unit-test index) —
 with no baseline, fail-open on uncompiled models (they render as
-"not compiled" nodes). `report` itself stays diff-scoped by design:
-bounded reports, narrow fail-closed surface. Bare `cute-dbt` without a
-verb is a usage error.
+"not compiled" nodes).
 
 ## Known v0.1 fidelity limits
 

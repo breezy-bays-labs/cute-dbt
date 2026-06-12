@@ -15,8 +15,30 @@ authors = ["Christopher Bays <cmbays@breezybayslabs.com>"]
 # line and the toolchain pin.
 rust-version = "1.88"
 readme = "README.md"
-keywords = ["dbt", "unit-test", "cte", "analytics-engineering", "cli"]
+# crates.io rejects keywords >20 chars server-side at upload (and
+# `cargo package` does not warn): `analytics-engineering` is 21 chars,
+# replaced with `data-engineering` (cute-dbt#293). Max 5, each ≤20.
+keywords = ["dbt", "unit-test", "cte", "data-engineering", "cli"]
 categories = ["command-line-utilities", "development-tools", "visualization"]
+# Package whitelist (cute-dbt#293): the published .crate ships only what
+# the build + crates.io page need. `templates/**` and `assets/**` are
+# LOAD-BEARING — every vendored frontend asset and askama template is
+# embedded at compile time (`include_str!`/`include_bytes!` from
+# src/adapters/), so the verify build breaks without them;
+# `assets/MANIFEST.toml` (the provenance index) travels inside
+# `assets/**` by design. Excluded: examples/, tests/, dbt-project/,
+# book/, .github/, agent notes. Cargo.toml itself is always included.
+include = [
+    "src/**",
+    "templates/**",
+    "assets/**",
+    # Leading `/` anchors to the package root — the patterns are
+    # gitignore-style, so a bare `README.md` would also drag in
+    # `dbt-project/README.md` and `examples/README.md`.
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+]
 
 # Single-crate by deliberate design — see ARCHITECTURE.md. The hexagonal
 # layering (`src/{domain,ports,adapters,cli}`) is enforced by module

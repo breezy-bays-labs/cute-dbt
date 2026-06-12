@@ -360,6 +360,14 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
 /// (founder respec 2026-06-10): the developer-native diff signal is
 /// git, not environment manifests.
 fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
+    // Experimental-status notice (cute-dbt#290): one line, stderr ONLY —
+    // stdout must stay clean so scripted flows are never corrupted. No
+    // access gate: the verb stays listed and runnable; this notice (plus
+    // the EXPERIMENTAL-prefixed help text) is the whole marking.
+    eprintln!(
+        "cute-dbt: note: `explore` is experimental — its surface and \
+         output may change or be removed in any v0.x release"
+    );
     let current = load_explore_manifest(args)?;
     let models = all_models(&current);
     let changed = resolve_change_context(args, &current);
