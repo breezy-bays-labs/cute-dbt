@@ -897,14 +897,16 @@ fn detect_grain_unique_key_unbacked(ctx: &CheckContext<'_>) -> Vec<Finding<Heuri
         .iter()
         .map(|column| column.to_ascii_lowercase())
         .collect();
-    let mut covering: Vec<(String, &Node)> = ctx
+    // Borrowed scan: ids stay `&str` through the sort and only become
+    // owned at the POD ownership boundary (`by` / `DegradedBacking.by`).
+    let mut covering: Vec<(&str, &Node)> = ctx
         .manifest
         .nodes()
         .iter()
         .filter(|(_, node)| covers_grain(node, ctx.model.id(), &key_set))
-        .map(|(id, node)| (id.as_str().to_owned(), node))
+        .map(|(id, node)| (id.as_str(), node))
         .collect();
-    covering.sort_by(|a, b| a.0.cmp(&b.0));
+    covering.sort_by_key(|(id, _)| *id);
     // cute-dbt#259 — per-test degradation cues beside the attribution:
     // a warn-severity / where-filtered / limit-capped test still backs
     // the grain, but never silently as full-strength coverage.
@@ -913,12 +915,12 @@ fn detect_grain_unique_key_unbacked(ctx: &CheckContext<'_>) -> Vec<Finding<Heuri
         .filter_map(|(id, node)| {
             let causes = backing_degradations(node.config());
             (!causes.is_empty()).then(|| DegradedBacking {
-                by: id.clone(),
+                by: (*id).to_owned(),
                 causes,
             })
         })
         .collect();
-    let by: Vec<String> = covering.into_iter().map(|(id, _)| id).collect();
+    let by: Vec<String> = covering.into_iter().map(|(id, _)| id.to_owned()).collect();
     evidence.extend(disabled_grain_evidence(
         ctx.manifest,
         ctx.model.id(),
@@ -1090,9 +1092,11 @@ fn disabled_grain_evidence(
 /// through `depends_on.nodes`, sorted by id (cute-dbt#259). Singular
 /// tests carry no `attached_node` / `test_metadata` on either engine
 /// (cute-dbt#258) — `depends_on` is the only statically recoverable
-/// linkage.
-fn singular_tests_on(manifest: &Manifest, model_id: &NodeId) -> Vec<String> {
-    let mut ids: Vec<String> = manifest
+/// linkage. Borrowed from the manifest: the sole consumer
+/// ([`grain_fallback_verdict`]) only formats the ids into evidence
+/// copy, so owning them here would allocate just to discard.
+fn singular_tests_on<'a>(manifest: &'a Manifest, model_id: &NodeId) -> Vec<&'a str> {
+    let mut ids: Vec<&str> = manifest
         .nodes()
         .iter()
         .filter(|(_, node)| {
@@ -1100,9 +1104,9 @@ fn singular_tests_on(manifest: &Manifest, model_id: &NodeId) -> Vec<String> {
                 && test_is_enabled(node)
                 && node.depends_on().nodes().contains(model_id)
         })
-        .map(|(id, _)| id.as_str().to_owned())
+        .map(|(id, _)| id.as_str())
         .collect();
-    ids.sort();
+    ids.sort_unstable();
     ids
 }
 
