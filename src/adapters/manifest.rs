@@ -478,7 +478,7 @@ struct WireColumn {
     /// precedent), `BigQuery` `policy_tags` (fusion-only first-class
     /// field; core never serializes the key), and declared
     /// `constraints`. All fold into [`ColumnFacts`] via
-    /// [`Self::into_facts`]; fact-free columns store nothing.
+    /// [`fold_column_facts`]; fact-free columns store nothing.
     #[serde(default)]
     meta: Option<Value>,
     #[serde(default)]
