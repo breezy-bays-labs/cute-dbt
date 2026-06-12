@@ -515,6 +515,7 @@ fn render_explore_pages(
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        &HashMap::new(),
         "",
     );
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);

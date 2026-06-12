@@ -36,6 +36,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::domain::manifest::{Manifest, Node};
+use crate::domain::model_yaml::ModelYamlOutcome;
 use crate::domain::path::normalize_path;
 use crate::domain::state::{InScopeSet, ModelInScopeSet};
 use crate::domain::unit_test::UnitTest;
@@ -695,6 +696,59 @@ fn model_sql_diff(model: &Node, index: &NormalizedDiffIndex) -> Option<BlockDiff
     let diff = reconstruct_one(&span, &touching);
     // Whitespace-only model edit → all-Context → no diff (plain SQL).
     diff.has_real_change().then_some(diff)
+}
+
+/// Attach an inline diff to each gathered Model-YAML block the PR diff
+/// genuinely edited (cute-dbt#247).
+///
+/// The [`reconstruct_block_diffs`] sibling for the Model-YAML drawer,
+/// operating **in place** on the cli's `gather_model_yaml` outcome map
+/// (keyed by model node id). For each [`ModelYamlOutcome::Found`] entry,
+/// resolve the hunks touching its schema file — the entry's `path` is the
+/// scheme-stripped manifest `patch_path`, project-relative exactly like
+/// an `original_file_path`, so [`NormalizedDiffIndex::hunks_for`] keys it
+/// identically — and attach a [`BlockDiff`] **only** when the sliced
+/// block is aligned ([`block_aligns_with_hunks`]), touched
+/// ([`hunk_touches_block`]), and the reconstruction carries a substantive
+/// change ([`BlockDiff::has_real_change`] — a whitespace-only edit
+/// attaches nothing, cute-dbt#111). Every other entry (degrade variants,
+/// untouched/stale/whitespace-only blocks) passes through unchanged, so
+/// the section falls back to the plain File view.
+///
+/// Runs only on the [`crate::domain::scope::ScopeInput::PrDiff`] arm —
+/// baseline mode has no hunks to reconstruct from (the cli skips the
+/// call there).
+///
+/// The run loop passes the default-hasher gather map, so generalizing
+/// over the hasher (`clippy::implicit_hasher`) buys nothing — same
+/// rationale as [`reconstruct_block_diffs`].
+#[allow(clippy::implicit_hasher)]
+pub fn attach_model_yaml_diffs(
+    model_yaml: &mut HashMap<String, ModelYamlOutcome>,
+    index: &NormalizedDiffIndex,
+) {
+    for outcome in model_yaml.values_mut() {
+        let ModelYamlOutcome::Found { path, block, diff } = outcome else {
+            continue; // degrade variants have no block to diff
+        };
+        let hunks = index.hunks_for(path);
+        let span = BlockSpan::new(&block.raw, block.block_start, block.block_end);
+        if !block_aligns_with_hunks(&span, hunks) {
+            continue; // stale diff (N7b) → plain File view
+        }
+        let touching: Vec<&Hunk> = hunks
+            .iter()
+            .filter(|h| hunk_touches_block(block.block_start, block.block_end, h))
+            .collect();
+        if touching.is_empty() {
+            continue; // change is elsewhere in the file → plain File view
+        }
+        let reconstructed = reconstruct_one(&span, &touching);
+        // Whitespace-only edit → all-Context → no diff (cute-dbt#111).
+        if reconstructed.has_real_change() {
+            *diff = Some(reconstructed);
+        }
+    }
 }
 
 /// Trim a trailing `\r` (CRLF tolerance — see [`block_aligns_with_hunks`]).
@@ -2196,6 +2250,183 @@ mod tests {
                 ctx("    given: []"),
             ],
         );
+    }
+
+    // ----- cute-dbt#247: attach_model_yaml_diffs -----
+    //
+    // The reconstruct_block_diffs sibling for the Model-YAML drawer:
+    // operates in place on the gather map, attaching an inline diff to
+    // each Found outcome whose sliced `models:` block the PR diff
+    // genuinely edited. Same gate set as #96 (present + aligned +
+    // touched + substantive) — pinned here against every outcome arm.
+
+    #[test]
+    fn attach_model_yaml_diffs_attaches_only_for_edited_aligned_blocks() {
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![
+                // _a.yml: hunk replaces line 2 with the working-tree body
+                // line → aligned + touches the edited block [1,3].
+                FileHunks {
+                    path: "models/_a.yml".to_owned(),
+                    hunks: vec![replace(
+                        2,
+                        &["    description: was"],
+                        &["    description: now"],
+                    )],
+                },
+                // _c.yml: hunk's added body does NOT match the block line
+                // at that position → misaligned (stale diff).
+                FileHunks {
+                    path: "models/_c.yml".to_owned(),
+                    hunks: vec![replace(
+                        2,
+                        &["    description: was"],
+                        &["    description: DRIFTED"],
+                    )],
+                },
+                // _d.yml: the only hunk is outside the block [10,12].
+                FileHunks {
+                    path: "models/_d.yml".to_owned(),
+                    hunks: vec![replace(
+                        2,
+                        &["    description: was"],
+                        &["    description: now"],
+                    )],
+                },
+            ],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+
+        let found = |path: &str, raw: &str, start: usize| ModelYamlOutcome::Found {
+            path: path.to_owned(),
+            block: block_at(raw, start),
+            diff: None,
+        };
+        let mut outcomes: HashMap<String, ModelYamlOutcome> = HashMap::new();
+        outcomes.insert(
+            "model.shop.edited".to_owned(),
+            found(
+                "models/_a.yml",
+                "  - name: edited\n    description: now\n    columns: []",
+                1, // [1,3]
+            ),
+        );
+        outcomes.insert(
+            "model.shop.stale".to_owned(),
+            found(
+                "models/_c.yml",
+                "  - name: stale\n    description: now\n    columns: []",
+                1, // [1,3]
+            ),
+        );
+        outcomes.insert(
+            "model.shop.untouched".to_owned(),
+            found(
+                "models/_d.yml",
+                "  - name: untouched\n    description: x\n    columns: []",
+                10, // [10,12]
+            ),
+        );
+        attach_model_yaml_diffs(&mut outcomes, &index);
+
+        let diff_of = |id: &str| match &outcomes[id] {
+            ModelYamlOutcome::Found { diff, .. } => diff.clone(),
+            other => panic!("outcome variant changed for {id}: {other:?}"),
+        };
+        let edited = diff_of("model.shop.edited").expect("edited block → diff attached");
+        assert_eq!(
+            edited.lines,
+            vec![
+                ctx("  - name: edited"),
+                rem_e("    description: was", (17, 20)), // "was"
+                add_e("    description: now", (17, 20)), // "now"
+                ctx("    columns: []"),
+            ],
+        );
+        assert!(
+            diff_of("model.shop.stale").is_none(),
+            "misaligned (stale) diff → no inline diff",
+        );
+        assert!(
+            diff_of("model.shop.untouched").is_none(),
+            "change outside the block → no inline diff",
+        );
+    }
+
+    #[test]
+    fn attach_model_yaml_diffs_passes_degrade_variants_through() {
+        // Non-Found outcomes carry no block — they must pass through the
+        // attach untouched even when their (unreadable) file has hunks.
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![FileHunks {
+                path: "models/_zz.yml".to_owned(),
+                hunks: vec![replace(1, &["old"], &["new"])],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        let mut outcomes: HashMap<String, ModelYamlOutcome> = HashMap::new();
+        outcomes.insert(
+            "model.shop.no_patch".to_owned(),
+            ModelYamlOutcome::NoPatchPath,
+        );
+        outcomes.insert(
+            "model.shop.missing".to_owned(),
+            ModelYamlOutcome::FileMissing {
+                path: "models/_zz.yml".to_owned(),
+            },
+        );
+
+        attach_model_yaml_diffs(&mut outcomes, &index);
+
+        assert_eq!(
+            outcomes["model.shop.no_patch"],
+            ModelYamlOutcome::NoPatchPath
+        );
+        assert_eq!(
+            outcomes["model.shop.missing"],
+            ModelYamlOutcome::FileMissing {
+                path: "models/_zz.yml".to_owned(),
+            },
+        );
+    }
+
+    #[test]
+    fn attach_model_yaml_diffs_skips_a_whitespace_only_edit() {
+        // A re-indent inside the block reconstructs to all-Context
+        // (cute-dbt#111 `ws_equal` pairing) → no diff attached, the
+        // section keeps the plain File view.
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![FileHunks {
+                path: "models/_a.yml".to_owned(),
+                hunks: vec![replace(
+                    2,
+                    &["      description: d"],
+                    &["    description: d"],
+                )],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        let mut outcomes: HashMap<String, ModelYamlOutcome> = HashMap::new();
+        outcomes.insert(
+            "model.shop.ws".to_owned(),
+            ModelYamlOutcome::Found {
+                path: "models/_a.yml".to_owned(),
+                block: block_at("  - name: ws\n    description: d", 1),
+                diff: None,
+            },
+        );
+
+        attach_model_yaml_diffs(&mut outcomes, &index);
+
+        match &outcomes["model.shop.ws"] {
+            ModelYamlOutcome::Found { diff, .. } => {
+                assert!(diff.is_none(), "whitespace-only edit → no inline diff");
+            }
+            other => panic!("outcome variant changed: {other:?}"),
+        }
     }
 
     // ----- BlockDiff serde: the exact JS wire shape -----

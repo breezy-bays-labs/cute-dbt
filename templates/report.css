@@ -1053,9 +1053,9 @@ th.col-removed { text-decoration: line-through; text-decoration-color: var(--dif
    pass-2 (cute-dbt#198): diff cells always render in colour. */
 
 /* ---- SQL / YAML drawers + syntax ------------------------------------- */
-.compiled-sql > summary, .authoring-yaml > summary, .model-sql > details > summary { cursor: pointer; }
-.authoring-yaml > summary, .model-sql > details > summary { font-weight: 600; color: var(--text); }
-.model-sql-summary-hint, .yaml-diff-summary-hint { font-weight: 400; color: var(--text-muted); margin-left: 0.4rem; font-size: 0.9em; }
+.compiled-sql > summary, .authoring-yaml > summary, .model-sql > details > summary, .model-yaml > details > summary { cursor: pointer; }
+.authoring-yaml > summary, .model-sql > details > summary, .model-yaml > details > summary { font-weight: 600; color: var(--text); }
+.model-sql-summary-hint, .model-yaml-summary-hint, .yaml-diff-summary-hint { font-weight: 400; color: var(--text-muted); margin-left: 0.4rem; font-size: 0.9em; }
 .sql-block { margin: 0; padding: 0.4rem 0; background: var(--code-bg); border-radius: 0; color: var(--text); font-size: 12px; line-height: 1.6; font-variant-numeric: tabular-nums; overflow-x: auto; }
 .sql-block code { display: block; }
 .sql-block-wrap, .model-sql-wrap {
@@ -1242,6 +1242,16 @@ html[data-difflayout="unified"] .diff-unified { display: block; }
 /* ---- Model SQL ------------------------------------------------------- */
 .model-sql-block { height: 24rem; min-height: 8rem; overflow: auto; resize: vertical; }
 
+/* ---- Model YAML (cute-dbt#247) ---------------------------------------- */
+/* The authored schema-entry block: capped like the Model SQL card but
+   shorter by default (schema entries are usually narrower than model SQL),
+   same resize affordance. max-height (not height) so a short entry does
+   not float in empty chrome. */
+.model-yaml-block { max-height: 24rem; min-height: 4rem; overflow: auto; resize: vertical; }
+/* The truthful degrade placeholder — muted prose inside the code chrome,
+   never an empty card. */
+.model-yaml-missing { margin: 0; padding: 0.6rem 0.75rem; color: var(--text-muted); font-size: 0.85em; }
+
 /* ---- column-header info tooltip --------------------------------------- */
 /* DELIBERATE divergence from the handoff's base.css (decided at PR-1, kept
    at the engine PR cute-dbt#178): the redesign's `.col-tooltip` was a
@@ -1392,8 +1402,9 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
 .diff-fold[aria-expanded="true"] { filter: brightness(0.96); }
 
 /* The Model SQL section keeps its vertical rhythm (it sits outside the
-   .panel spacing list). */
-.model-sql { margin-bottom: var(--gap-section); }
+   .panel spacing list). The Model YAML section (cute-dbt#247) is its
+   peer and keeps the same rhythm. */
+.model-sql, .model-yaml { margin-bottom: var(--gap-section); }
 
 /* Stacked settings rows (the appearance section): the control grid sits
    UNDER its label, full-width — the prototype expressed this with inline

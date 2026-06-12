@@ -68,8 +68,8 @@ use crate::adapters::asset_embed::{
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
     BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, CteGraph, EdgeType, Finding, FixtureTable,
-    HeuristicId, InScopeSet, Instrument, Manifest, ModelInScopeSet, Node, NodeId, SourceNode,
-    TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
+    HeuristicId, InScopeSet, Instrument, Manifest, ModelInScopeSet, ModelYamlOutcome, Node, NodeId,
+    SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
     UnitTestYamlBlock, apply_check_policy, model_findings, resolve_target_model,
     table_from_manifest_rows,
 };
@@ -276,6 +276,17 @@ pub struct ModelPayload {
     /// Mirrors [`TestPayload::yaml_diff`]'s threading exactly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sql_diff: Option<BlockDiff>,
+    /// The model's authored schema-file `models:` entry (cute-dbt#247) —
+    /// the Model-YAML section, peer of Model SQL. Built from the cli's
+    /// `gather_model_yaml` outcome (`Node.patch_path` read through the
+    /// `ProjectFileReader`): either the sliced block (`raw`, plus a
+    /// `diff` in PR-diff mode when the diff edited it) or a truthful
+    /// `missing` placeholder naming what is absent. `None` (key omitted
+    /// — pre-#247 payloads and render paths that skip the gather stay
+    /// byte-stable) only when no gather outcome exists for the model;
+    /// the template then hides the section entirely.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_yaml: Option<ModelYamlPayload>,
     /// Unit tests targeting this model that are in scope. Empty
     /// `[]` triggers the "0 unit tests wired" empty state.
     pub tests: Vec<TestPayload>,
@@ -305,6 +316,103 @@ pub struct ModelPayload {
     /// check) stays byte-stable.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub findings: Vec<FindingPayload>,
+}
+
+/// The Model-YAML section's render shape (cute-dbt#247): the model's
+/// authored schema-file `models:` entry, or a truthful degrade.
+///
+/// Exactly one of [`raw`](Self::raw) / [`missing`](Self::missing) is
+/// set. `Rust computes, JS only renders`: the degrade copy is composed
+/// here (the private `model_yaml_payload` mapping) from the domain
+/// [`ModelYamlOutcome`], so the wording lives in one testable place and
+/// the template never invents text.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelYamlPayload {
+    /// Project-relative schema file path (the scheme-stripped manifest
+    /// `patch_path`) — the code-card header label. `None` (key omitted)
+    /// only on the no-`patch_path` degrade (there is no file to name).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The sliced authored `models:` entry, verbatim (the
+    /// [`crate::domain::extract_model_block`] slice — leading/trailing
+    /// comments included). `None` on every degrade arm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<String>,
+    /// Inline diff of the block (PR-diff mode, block aligned + touched +
+    /// substantive — `attach_model_yaml_diffs`). `None` in baseline mode
+    /// and whenever the diff did not edit this block, so the section
+    /// shows the plain File view. Same Diff/File semantics as
+    /// [`ModelPayload::sql_diff`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<BlockDiff>,
+    /// Truthful placeholder copy when the authored block could not be
+    /// surfaced — names exactly what is missing (no `patch_path`, no
+    /// `--project-root`, file missing/unreadable, entry not found). The
+    /// template renders this text verbatim; it never shows an empty or
+    /// misleading section.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missing: Option<String>,
+}
+
+/// Map a model's gather outcome onto the Model-YAML render shape
+/// (cute-dbt#247). `None` in → `None` out (no gather ran for this model
+/// — direct render paths and the explore arm — so the template hides
+/// the section). `model_name` is the bare model name, used by the
+/// entry-not-found copy.
+fn model_yaml_payload(
+    outcome: Option<&ModelYamlOutcome>,
+    model_name: &str,
+) -> Option<ModelYamlPayload> {
+    let payload = match outcome? {
+        ModelYamlOutcome::Found { path, block, diff } => ModelYamlPayload {
+            path: Some(path.clone()),
+            raw: Some(block.raw.clone()),
+            diff: diff.clone(),
+            missing: None,
+        },
+        ModelYamlOutcome::NoPatchPath => ModelYamlPayload {
+            path: None,
+            raw: None,
+            diff: None,
+            missing: Some(
+                "No schema file declares this model in the manifest — there is no authored \
+                 models: entry to show."
+                    .to_owned(),
+            ),
+        },
+        ModelYamlOutcome::NoProjectRoot { path } => ModelYamlPayload {
+            path: Some(path.clone()),
+            raw: None,
+            diff: None,
+            missing: Some(format!(
+                "Schema file {path} was not read — re-run with --project-root to surface the \
+                 authored model YAML."
+            )),
+        },
+        ModelYamlOutcome::FileMissing { path } => ModelYamlPayload {
+            path: Some(path.clone()),
+            raw: None,
+            diff: None,
+            missing: Some(format!(
+                "Schema file {path} was not found under the project root."
+            )),
+        },
+        ModelYamlOutcome::Unreadable { path } => ModelYamlPayload {
+            path: Some(path.clone()),
+            raw: None,
+            diff: None,
+            missing: Some(format!("Schema file {path} could not be read.")),
+        },
+        ModelYamlOutcome::EntryNotFound { path } => ModelYamlPayload {
+            path: Some(path.clone()),
+            raw: None,
+            diff: None,
+            missing: Some(format!(
+                "No models: entry named \"{model_name}\" was found in {path}."
+            )),
+        },
+    };
+    Some(payload)
 }
 
 /// One coverage finding in render shape (cute-dbt#170): the domain
@@ -1373,6 +1481,7 @@ pub fn build_payload(
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     yaml_diffs: &HashMap<String, BlockDiff>,
     sql_diffs: &HashMap<String, BlockDiff>,
+    model_yaml: &HashMap<String, ModelYamlOutcome>,
     data_diffs: &HashMap<String, UnitTestDataDiff>,
     baseline_label: &str,
 ) -> ReportPayload {
@@ -1383,6 +1492,7 @@ pub fn build_payload(
         authoring_yaml,
         yaml_diffs,
         sql_diffs,
+        model_yaml,
         data_diffs,
         &HashMap::new(),
         baseline_label,
@@ -1413,6 +1523,7 @@ pub fn build_payload_with_externals(
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     yaml_diffs: &HashMap<String, BlockDiff>,
     sql_diffs: &HashMap<String, BlockDiff>,
+    model_yaml: &HashMap<String, ModelYamlOutcome>,
     data_diffs: &HashMap<String, UnitTestDataDiff>,
     external_fixtures: &HashMap<String, ExternalFixtures>,
     baseline_label: &str,
@@ -1434,6 +1545,7 @@ pub fn build_payload_with_externals(
             authoring_yaml,
             yaml_diffs,
             sql_diffs,
+            model_yaml,
             data_diffs,
             external_fixtures,
             check_policy,
@@ -1491,6 +1603,7 @@ pub fn render_report(
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     yaml_diffs: &HashMap<String, BlockDiff>,
     sql_diffs: &HashMap<String, BlockDiff>,
+    model_yaml: &HashMap<String, ModelYamlOutcome>,
     data_diffs: &HashMap<String, UnitTestDataDiff>,
     baseline_label: &str,
     scope_source: ScopeSource,
@@ -1506,6 +1619,7 @@ pub fn render_report(
         authoring_yaml,
         yaml_diffs,
         sql_diffs,
+        model_yaml,
         data_diffs,
         &HashMap::new(),
         baseline_label,
@@ -1535,6 +1649,7 @@ pub fn render_report_with_externals(
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     yaml_diffs: &HashMap<String, BlockDiff>,
     sql_diffs: &HashMap<String, BlockDiff>,
+    model_yaml: &HashMap<String, ModelYamlOutcome>,
     data_diffs: &HashMap<String, UnitTestDataDiff>,
     external_fixtures: &HashMap<String, ExternalFixtures>,
     baseline_label: &str,
@@ -1550,6 +1665,7 @@ pub fn render_report_with_externals(
         authoring_yaml,
         yaml_diffs,
         sql_diffs,
+        model_yaml,
         data_diffs,
         external_fixtures,
         baseline_label,
@@ -1597,6 +1713,7 @@ fn build_model_payload(
     authoring_yaml: &HashMap<String, UnitTestYamlBlock>,
     yaml_diffs: &HashMap<String, BlockDiff>,
     sql_diffs: &HashMap<String, BlockDiff>,
+    model_yaml: &HashMap<String, ModelYamlOutcome>,
     data_diffs: &HashMap<String, UnitTestDataDiff>,
     external_fixtures: &HashMap<String, ExternalFixtures>,
     check_policy: &CheckPolicy<HeuristicId>,
@@ -1615,6 +1732,10 @@ fn build_model_payload(
     // SQL diff is keyed by the model's FULL node id (the
     // `reconstruct_model_sql_diffs` key), not the bare name.
     let sql_diff = sql_diffs.get(model.id().as_str()).cloned();
+    // cute-dbt#247 — the Model-YAML gather outcome is keyed by the FULL
+    // node id too (the `gather_model_yaml` key); the payload mapping
+    // resolves it to the sliced block or a truthful degrade placeholder.
+    let model_yaml = model_yaml_payload(model_yaml.get(model.id().as_str()), &bare_name);
     // cute-dbt#165 — the target model's full column-metadata map, built
     // once and shared by every test's expect table (and `this` givens).
     let target_column_meta = column_meta_for_model(current, model);
@@ -1649,6 +1770,7 @@ fn build_model_payload(
         compiled_sql,
         raw_sql,
         sql_diff,
+        model_yaml,
         tests: test_payloads,
         is_recursive,
         is_incremental: model.config().materialized() == Some("incremental"),
@@ -2631,6 +2753,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "main@a1f3c7e",
         );
         assert_eq!(payload.baseline, "main@a1f3c7e");
@@ -2650,6 +2773,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2696,6 +2820,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(
@@ -2724,6 +2849,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2769,6 +2895,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         let json = serde_json::to_value(&payload.models[0]).expect("serialize");
@@ -2788,6 +2915,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2829,6 +2957,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -2879,6 +3008,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         let json = serde_json::to_value(&payload.models[0]).expect("serialize");
@@ -2922,6 +3052,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -3017,6 +3148,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         let json = serde_json::to_value(&payload).expect("serialize");
@@ -3040,6 +3172,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -3077,6 +3210,7 @@ mod tests {
             &HashMap::new(),
             &sql_diffs,
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(payload.models.len(), 1);
@@ -3104,6 +3238,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(payload.models.len(), 1);
@@ -3113,6 +3248,186 @@ mod tests {
         assert!(
             !json.contains("sql_diff"),
             "absent sql_diff must be omitted from the wire; got {json}",
+        );
+    }
+
+    // ----- cute-dbt#247: the Model-YAML section payload -----
+
+    #[test]
+    fn build_payload_carries_model_yaml_found_keyed_by_full_model_id() {
+        // A Found gather outcome (keyed by the FULL node id, the
+        // `gather_model_yaml` key) surfaces the sliced block + the schema
+        // file path; no degrade copy.
+        let node = model_node("model.shop.dim_x", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.dim_x")]);
+        let raw_block = "  - name: dim_x\n    description: a model";
+        let mut model_yaml = HashMap::new();
+        model_yaml.insert(
+            "model.shop.dim_x".to_owned(),
+            crate::domain::ModelYamlOutcome::Found {
+                path: "models/schema.yml".to_owned(),
+                block: UnitTestYamlBlock::new(raw_block.to_owned(), 2, 2, 3),
+                diff: None,
+            },
+        );
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &model_yaml,
+            &HashMap::new(),
+            "baseline.json",
+        );
+        let my = payload.models[0]
+            .model_yaml
+            .as_ref()
+            .expect("model_yaml present for the keyed model");
+        assert_eq!(my.path.as_deref(), Some("models/schema.yml"));
+        assert_eq!(my.raw.as_deref(), Some(raw_block));
+        assert!(my.diff.is_none());
+        assert!(my.missing.is_none());
+    }
+
+    #[test]
+    fn build_payload_model_yaml_carries_the_attached_diff() {
+        // A Found outcome with an attached inline diff (the PrDiff arm's
+        // `attach_model_yaml_diffs`) rides into the payload — the section's
+        // Diff view.
+        let node = model_node("model.shop.dim_x", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.dim_x")]);
+        let mut model_yaml = HashMap::new();
+        model_yaml.insert(
+            "model.shop.dim_x".to_owned(),
+            crate::domain::ModelYamlOutcome::Found {
+                path: "models/schema.yml".to_owned(),
+                block: UnitTestYamlBlock::new("  - name: dim_x".to_owned(), 2, 2, 2),
+                diff: Some(BlockDiff {
+                    lines: vec![DiffLine {
+                        kind: DiffLineKind::Added,
+                        text: "    description: new".to_owned(),
+                        emphasis: None,
+                    }],
+                }),
+            },
+        );
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &model_yaml,
+            &HashMap::new(),
+            "",
+        );
+        let my = payload.models[0].model_yaml.as_ref().expect("model_yaml");
+        let diff = my.diff.as_ref().expect("attached diff rides the payload");
+        assert_eq!(diff.lines[0].kind, DiffLineKind::Added);
+    }
+
+    #[test]
+    fn build_payload_model_yaml_is_omitted_without_a_gather_entry() {
+        // No gather outcome for this model (a direct render / explore
+        // path) → key omitted from the wire, the template hides the
+        // section; pre-#247 payload shapes stay byte-stable.
+        let node = model_node("model.shop.dim_y", "body", Some("select 1"));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.dim_y")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        assert!(payload.models[0].model_yaml.is_none());
+        let json = serde_json::to_string(&payload.models[0]).expect("serialize");
+        assert!(
+            !json.contains("model_yaml"),
+            "absent model_yaml must be omitted from the wire; got {json}",
+        );
+    }
+
+    #[test]
+    fn model_yaml_payload_degrades_truthfully_per_outcome() {
+        // Every degrade arm yields a `missing` copy naming exactly what is
+        // absent — the section never renders empty or misleading. The
+        // wording lives HERE (Rust computes, JS only renders), so these
+        // facts pin it.
+        use crate::domain::ModelYamlOutcome as O;
+
+        let no_patch = model_yaml_payload(Some(&O::NoPatchPath), "dim_x").expect("payload");
+        assert!(no_patch.raw.is_none() && no_patch.path.is_none());
+        let msg = no_patch.missing.expect("degrade copy");
+        assert!(
+            msg.contains("No schema file declares this model"),
+            "names the absence: {msg}"
+        );
+
+        let no_root = model_yaml_payload(
+            Some(&O::NoProjectRoot {
+                path: "models/schema.yml".to_owned(),
+            }),
+            "dim_x",
+        )
+        .expect("payload");
+        assert_eq!(no_root.path.as_deref(), Some("models/schema.yml"));
+        let msg = no_root.missing.expect("degrade copy");
+        assert!(msg.contains("models/schema.yml"), "names the file: {msg}");
+        assert!(
+            msg.contains("--project-root"),
+            "names the remediation flag: {msg}"
+        );
+
+        let missing_file = model_yaml_payload(
+            Some(&O::FileMissing {
+                path: "models/gone.yml".to_owned(),
+            }),
+            "dim_x",
+        )
+        .expect("payload");
+        let msg = missing_file.missing.expect("degrade copy");
+        assert!(msg.contains("models/gone.yml"), "names the file: {msg}");
+        assert!(msg.contains("not found"), "states the failure: {msg}");
+
+        let unreadable = model_yaml_payload(
+            Some(&O::Unreadable {
+                path: "models/locked.yml".to_owned(),
+            }),
+            "dim_x",
+        )
+        .expect("payload");
+        let msg = unreadable.missing.expect("degrade copy");
+        assert!(msg.contains("models/locked.yml"), "names the file: {msg}");
+        assert!(
+            msg.contains("could not be read"),
+            "states the failure: {msg}"
+        );
+
+        let not_found = model_yaml_payload(
+            Some(&O::EntryNotFound {
+                path: "models/schema.yml".to_owned(),
+            }),
+            "dim_x",
+        )
+        .expect("payload");
+        let msg = not_found.missing.expect("degrade copy");
+        assert!(msg.contains("dim_x"), "names the model: {msg}");
+        assert!(msg.contains("models/schema.yml"), "names the file: {msg}");
+
+        assert!(
+            model_yaml_payload(None, "dim_x").is_none(),
+            "no gather outcome → no payload (section hidden)"
         );
     }
 
@@ -3128,6 +3443,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -3154,6 +3470,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(payload.models.len(), 1);
@@ -3175,6 +3492,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
         );
         assert_eq!(payload.models.len(), 1);
@@ -3189,6 +3507,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -3225,6 +3544,7 @@ mod tests {
             &manifest,
             &changed,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -3280,6 +3600,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         // No models in scope → no payload entries; the indexer's None
@@ -3301,6 +3622,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -3339,6 +3661,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         let model = &payload.models[0];
@@ -3370,6 +3693,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -3467,6 +3791,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         assert_eq!(
@@ -3487,6 +3812,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -3515,6 +3841,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -3556,6 +3883,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -3607,6 +3935,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         let test = &payload.models[0].tests[0];
@@ -3652,6 +3981,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -3711,6 +4041,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         let test = &payload.models[0].tests[0];
@@ -3757,6 +4088,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         let test = &payload.models[0].tests[0];
@@ -3795,6 +4127,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -3838,6 +4171,7 @@ mod tests {
             manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -4019,6 +4353,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         let test = &payload.models[0].tests[0];
@@ -4048,6 +4383,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -4091,6 +4427,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         assert!(
@@ -4106,6 +4443,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -4140,6 +4478,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -4189,6 +4528,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         let json = serde_json::to_string(&payload.models[0]).unwrap();
@@ -4222,6 +4562,7 @@ mod tests {
             &manifest,
             &in_scope,
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -4392,6 +4733,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -4429,6 +4771,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -4474,6 +4817,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -4501,6 +4845,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -4538,6 +4883,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -4602,6 +4948,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -4635,6 +4982,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -4677,6 +5025,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "baseline.json",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
@@ -4711,6 +5060,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -4758,6 +5108,7 @@ mod tests {
             &InScopeSet::new(),
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -4827,6 +5178,7 @@ mod tests {
             &in_scope,
             &models,
             &InScopeSet::new(),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -5846,6 +6198,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         let entry = payload
@@ -5930,6 +6283,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         assert_eq!(
@@ -5957,6 +6311,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
@@ -5991,6 +6346,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         let test = &payload.models[0].tests[0];
@@ -6020,6 +6376,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         let json = serde_json::to_string(&payload.models[0].tests[0]).unwrap();
@@ -6043,6 +6400,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
         );
         assert_eq!(
@@ -6060,6 +6418,7 @@ mod tests {
             &manifest,
             &InScopeSet::new(),
             &models,
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),

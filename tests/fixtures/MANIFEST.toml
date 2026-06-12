@@ -381,7 +381,7 @@ with its inverted (matching-row) given sketch in the playground golden.\
 path = "playground-pr-diff.patch"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/134"
-sha256 = "13aa582eb6c4a689ccf2563372cf5e4487c1501c4aede480f75670c3cba87f5a"
+sha256 = "6825c7e26007130705ed2f17a7e8bf6c0bafee5e5266e8b141ee4e8812fa7827"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"
@@ -538,7 +538,7 @@ Pure synthetic data — fictitious patient ids, no real records.\
 path = "source-yaml/manifest-current.json"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/69"
-sha256 = "aa1b8849819eb44f8dae4625caccd7c02a9ab29abd7a3903bf9677a10cb4da35"
+sha256 = "4c2f3cfc52379161cea4c43d706899597340b94bb2844813f72853bf07375e12"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "Apache-2.0"
@@ -573,7 +573,7 @@ Pure synthetic.\
 path = "source-yaml/project/models/_unit_tests.yml"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/69"
-sha256 = "1a76143a182efe5a17e404f0ac170879ce30466b232fce05d444c910e2911889"
+sha256 = "ac15d83054046429481ff9c6b4a47be6798b0ab2e77c8f7737e1e2372942dedd"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "Apache-2.0"

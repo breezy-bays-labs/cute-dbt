@@ -4,6 +4,24 @@
 # pairs with `tests/fixtures/source-yaml/manifest-{current,baseline}.json`
 # via the `original_file_path` field; cute-dbt slices each `- name:`
 # entry out of this file at render time.
+#
+# cute-dbt#247 adds the `models:` section: the manifest's dim_users node
+# carries `patch_path: yaml_demo://models/_unit_tests.yml`, so the
+# Model-YAML drawer pipeline (scheme strip -> ProjectFileReader ->
+# extract_model_block) slices the entry below end-to-end.
+
+models:
+  # Model-level comment for dim_users — the slicer captures leading
+  # comments on `models:` entries exactly like it does on unit tests.
+  - name: dim_users
+    description: "Synthetic demo model for the source-yaml feature pair"
+    columns:
+      - name: id
+        description: synthetic primary key
+        data_tests:
+          - unique
+      - name: name
+        description: synthetic display name
 
 unit_tests:
   # Leading comment for test_dim_users_basic — the slicer should

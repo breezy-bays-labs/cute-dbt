@@ -59,6 +59,7 @@ fn render_jaffle_shop(out: &Path) {
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        &HashMap::new(),
         "jaffle-shop-baseline.json",
         ScopeSource::Baseline,
         DEFAULT_REPORT_TITLE,
@@ -410,6 +411,7 @@ fn source_given_binds_end_to_end_from_a_committed_fixture() {
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        &HashMap::new(),
         "baseline",
     );
     let test = &payload.models[0].tests[0];
@@ -469,6 +471,7 @@ fn source_given_binds_against_the_real_playground_fixture() {
         &current,
         &in_scope,
         &models,
+        &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),

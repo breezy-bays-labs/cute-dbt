@@ -13,6 +13,9 @@ diff --git a/models/marts/analytics/fct_provider_metrics.sql b/models/marts/anal
 diff --git a/models/marts/analytics/_analytics__models.yml b/models/marts/analytics/_analytics__models.yml
 --- a/models/marts/analytics/_analytics__models.yml
 +++ b/models/marts/analytics/_analytics__models.yml
+@@ -362 +362 @@
+-      One row per provider per month.
++      One row per provider per calendar month with patient volumes, costs, and efficiency metrics.
 @@ -1446,2 +1446,2 @@
 -          quarantined_count: null
 -          total_count: 2

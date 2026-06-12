@@ -42,6 +42,7 @@ pub mod config;
 pub mod cte;
 pub mod grain;
 pub mod manifest;
+pub mod model_yaml;
 pub mod path;
 pub mod pr_diff;
 pub mod preflight;
@@ -75,10 +76,12 @@ pub use manifest::{
     Checksum, DependsOn, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, SourceNode,
     TestMetadata, UniqueKey,
 };
+pub use model_yaml::ModelYamlOutcome;
 pub use path::{match_changed_path, normalize_path};
 pub use pr_diff::{
     BlockDiff, DiffLine, DiffLineKind, FileHunks, Hunk, NormalizedDiffIndex, PrDiff,
-    reconstruct_block_diffs, reconstruct_model_sql_diffs, refine_changed_by_hunks, ws_equal,
+    attach_model_yaml_diffs, reconstruct_block_diffs, reconstruct_model_sql_diffs,
+    refine_changed_by_hunks, ws_equal,
 };
 pub use preflight::{PreflightError, preflight_compiled};
 pub use scope::{ScopeInput, ScopeSelection, all_models, changed_models, select_in_scope};
@@ -94,4 +97,4 @@ pub use unit_test_table::{
     parse_inline_flow_row, table_from_manifest_rows, table_from_yaml_fragment, type_cell_scalar,
     type_cell_value, type_csv_token,
 };
-pub use unit_test_yaml::{UnitTestYamlBlock, extract_unit_test_block};
+pub use unit_test_yaml::{UnitTestYamlBlock, extract_model_block, extract_unit_test_block};

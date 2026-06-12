@@ -245,6 +245,27 @@
   </details>
 </section>
 
+{# cute-dbt#247 — the Model YAML section: the model's FULL authored
+   schema-file `models:` entry (description, tags, model-level data tests,
+   columns + column tests, meta), sliced from the file the manifest's
+   patch_path names. Peer of Model SQL — same collapsed-by-default drawer
+   idiom, same JS-rebuilt wrap (renderModelYaml), File + Diff views in
+   --pr-diff mode. The section always says something truthful: when the
+   block could not be surfaced the payload's `missing` copy renders as a
+   placeholder naming exactly what is absent (no project root / file
+   missing / no schema entry) — never an empty or misleading drawer. The
+   per-test drawer inside the test card shows the selected UNIT TEST's
+   YAML and is labeled "Unit test YAML" (the #233 D7 label was a spec
+   naming error this section's name supersedes). #}
+<section class="model-yaml" aria-label="Model YAML">
+  <details class="model-yaml-details">
+    <summary>Model YAML<span class="model-yaml-summary-hint">authored schema entry</span></summary>
+    <div class="sql-block-wrap model-yaml-wrap">
+      <pre class="sql-block model-yaml-block"><code class="model-yaml-code"></code></pre>
+    </div>
+  </details>
+</section>
+
 <section class="cte-dag" aria-label="CTE dependency DAG">
   <div class="cte-dag-header">
     <h2>CTE dependency DAG</h2>

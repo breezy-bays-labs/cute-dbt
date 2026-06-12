@@ -131,12 +131,15 @@ pub struct ReportArgs {
     /// `original_file_path` entries.
     ///
     /// When supplied, cute-dbt reads each in-scope `unit_test`'s source
-    /// YAML and surfaces a "Model YAML" drawer in the report
-    /// (cute-dbt#69; label per the pass-2 spec, cute-dbt#233). When
+    /// YAML and surfaces a "Unit test YAML" drawer in the report
+    /// (cute-dbt#69; truthful relabel per cute-dbt#247), plus each
+    /// in-scope model's authored schema-file entry in the "Model YAML"
+    /// section (cute-dbt#247, via the manifest `patch_path`). When
     /// absent, cute-dbt attempts to derive the
     /// project root from `--manifest` (by stripping a trailing
     /// `target/manifest.json`) before silently skipping the YAML
-    /// extraction.
+    /// extraction (the Model YAML section then shows a truthful
+    /// placeholder naming the unread schema file).
     ///
     /// An explicit `--project-root` that does not exist or is not a
     /// directory is a clap usage error (exit 2). The implicit-derive

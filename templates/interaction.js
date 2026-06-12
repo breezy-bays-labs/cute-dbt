@@ -187,6 +187,7 @@
     if (!DATA.models.length) {
       $(".test-selection").hide();
       $(".model-sql").hide();
+      $(".model-yaml").hide();
       $(".cte-dag").hide();
       $(".model-findings").hide();
       $(".test-section").hide();
@@ -438,6 +439,10 @@
     closeNodeShelf();
     renderTestDetails(t);
     renderModelSql(m);
+    // cute-dbt#247 — the Model YAML section (peer of Model SQL): the
+    // model's authored schema-file `models:` entry, or its truthful
+    // degrade placeholder.
+    renderModelYaml(m);
     // cute-dbt#170 — the coverage-checks panel is MODEL-scoped: it renders
     // for the selected model in both scope-toggle views and regardless of
     // whether a test is selected (findings are current-state facts).
@@ -579,10 +584,13 @@
       // authored YAML exactly as cute-dbt#69 did.
       var hasDiff = t.yaml_diff && t.yaml_diff.lines && t.yaml_diff.lines.length;
       var $yamlDet = $("<details>").addClass("authoring-yaml").attr("open", "open");
-      // cute-dbt#233 (audit D7) — pass-2 labels the drawer "Model YAML"
-      // with no diff-variant suffix; the Diff/File toggle in the code
-      // header carries the diff affordance.
-      $yamlDet.append($("<summary>").text("Model YAML"));
+      // cute-dbt#247 — the drawer shows the SELECTED UNIT TEST's authored
+      // YAML block, so it is labeled "Unit test YAML" (the #233 D7
+      // "Model YAML" label was a spec naming error — that name now
+      // belongs to the model-level schema-entry section). No diff-variant
+      // suffix; the Diff/File toggle in the code header carries the diff
+      // affordance.
+      $yamlDet.append($("<summary>").text("Unit test YAML"));
       var $yamlWrap = $("<div>").addClass("sql-block-wrap fixture-sql-block-wrap");
       // cute-dbt#178 — GitHub-style code-card header: the file path sits left
       // of the Diff/File toggle. `defined_in` is the test's authoring-YAML
@@ -605,6 +613,13 @@
           .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
         var $authBtn = $("<button>").attr("type", "button")
           .addClass("yaml-view-btn").attr("data-view", "authored").text("File");
+        // cute-dbt#199 — per-diff fold toggle + copy-icon button ride the
+        // code header: fold toggle left of the view toggle, copy far right.
+        // PR #250 review (gemini): the fold toggle drives the DIFF pre's
+        // folds — its only meaningful target (the File view has no fold
+        // structure) — so it hides while the File view is active rather
+        // than mutating an invisible pre.
+        var $foldBtn = buildFoldToggleBtn(function () { return $diffPre[0]; });
         $toggle.append($diffBtn).append($authBtn);
         $toggle.on("click", ".yaml-view-btn", function () {
           var view = $(this).attr("data-view");
@@ -612,10 +627,9 @@
           $(this).addClass("active");
           $diffPre.prop("hidden", view !== "diff");
           $authPre.prop("hidden", view !== "authored");
+          $foldBtn.prop("hidden", view !== "diff");
         });
-        // cute-dbt#199 — per-diff fold toggle + copy-icon button ride the
-        // code header: fold toggle left of the view toggle, copy far right.
-        $yamlHeader.append(buildFoldToggleBtn(function () { return $diffPre[0]; }));
+        $yamlHeader.append($foldBtn);
         $yamlHeader.append($toggle);
         $yamlHeader.append(copyIconBtn(function () { return t.authoring_yaml; }));
         $yamlWrap.append($yamlHeader).append($diffPre).append($authPre);
@@ -686,6 +700,11 @@
         .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
       var $rawBtn = $("<button>").attr("type", "button")
         .addClass("yaml-view-btn").attr("data-view", "raw").text("File");
+      // cute-dbt#199 — per-diff fold toggle + copy-icon button in the header.
+      // Copy always copies the raw SQL regardless of the active view.
+      // PR #250 review (gemini): the fold toggle hides while the File view
+      // is active — its only meaningful target is the diff pre's folds.
+      var $foldBtn = buildFoldToggleBtn(function () { return $diffPre[0]; });
       $toggle.append($diffBtn).append($rawBtn);
       $toggle.on("click", ".yaml-view-btn", function () {
         var view = $(this).attr("data-view");
@@ -693,10 +712,9 @@
         $(this).addClass("active");
         $diffPre.prop("hidden", view !== "diff");
         $rawPre.prop("hidden", view !== "raw");
+        $foldBtn.prop("hidden", view !== "diff");
       });
-      // cute-dbt#199 — per-diff fold toggle + copy-icon button in the header.
-      // Copy always copies the raw SQL regardless of the active view.
-      $mHeader.append(buildFoldToggleBtn(function () { return $diffPre[0]; }));
+      $mHeader.append($foldBtn);
       $mHeader.append($toggle);
       $mHeader.append(copyIconBtn(function () { return raw; }));
       $wrap.append($mHeader).append($diffPre).append($rawPre);
@@ -706,6 +724,87 @@
         $("<code>").addClass("model-sql-code").html(highlightLinesSql(raw))
       );
       $wrap.append($mHeader).append($pre);
+    }
+  }
+
+  // cute-dbt#247 — populate the per-model Model YAML section: the model's
+  // FULL authored schema-file `models:` entry (description, tags,
+  // model-level data tests, columns + column tests, meta), sliced by Rust
+  // from the file the manifest's patch_path names. Peer of Model SQL —
+  // same code-card idiom, same Diff/File toggle in --pr-diff mode
+  // (my.diff present), YAML highlighter on the File view.
+  //
+  // Honest degrade: when the block could not be surfaced, the payload
+  // carries my.missing (truthful copy naming exactly what is absent —
+  // composed in Rust, rendered verbatim here) and the section shows that
+  // placeholder instead of vanishing. Only a payload with NO model_yaml
+  // key at all (a render path that skipped the gather entirely) hides
+  // the section.
+  function renderModelYaml(m) {
+    var $section = $(".model-yaml");
+    var my = m && m.model_yaml;
+    if (!my) {
+      $section.hide();
+      return;
+    }
+    $section.show();
+    var $wrap = $section.find(".model-yaml-wrap");
+    // Rebuild the wrap body each model switch so a prior model's
+    // toggle/diff/placeholder never leaks (the renderModelSql contract).
+    $wrap.empty();
+    if (!my.raw) {
+      $section.find(".model-yaml-summary-hint").text("unavailable");
+      $wrap.append(
+        $("<p>").addClass("model-yaml-missing")
+          .text(my.missing || "The authored model YAML could not be surfaced.")
+      );
+      return;
+    }
+    var hasDiff = my.diff && my.diff.lines && my.diff.lines.length;
+    $section.find(".model-yaml-summary-hint").text(hasDiff ? "diff" : "authored schema entry");
+    // GitHub-style code-card header with the schema file path (the
+    // manifest patch_path, project-relative).
+    var $header = $("<div>").addClass("code-header");
+    if (my.path) {
+      $header.append($("<span>").addClass("code-filename").attr("title", my.path).text(my.path));
+    }
+    $header.append($("<span>").addClass("code-header-spacer"));
+    if (hasDiff) {
+      var $diffPre = $("<pre>").addClass("sql-block model-yaml-block yaml-diff-view").html(
+        diffViewsHtml(my.diff, tokenizeYaml, "model-yaml-code")
+      );
+      var $filePre = $("<pre>").addClass("sql-block model-yaml-block yaml-authored-view").prop("hidden", true).append(
+        $("<code>").addClass("model-yaml-code").html(highlightLinesYaml(my.raw))
+      );
+      var $toggle = $("<div>").addClass("yaml-diff-toggle model-yaml-toggle");
+      var $diffBtn = $("<button>").attr("type", "button")
+        .addClass("yaml-view-btn active").attr("data-view", "diff").text("Diff");
+      var $fileBtn = $("<button>").attr("type", "button")
+        .addClass("yaml-view-btn").attr("data-view", "file").text("File");
+      // cute-dbt#199 — per-diff fold toggle + copy-icon button in the
+      // header. Copy always copies the raw block regardless of view.
+      // PR #250 review (gemini): the fold toggle hides while the File view
+      // is active — its only meaningful target is the diff pre's folds.
+      var $foldBtn = buildFoldToggleBtn(function () { return $diffPre[0]; });
+      $toggle.append($diffBtn).append($fileBtn);
+      $toggle.on("click", ".yaml-view-btn", function () {
+        var view = $(this).attr("data-view");
+        $toggle.find(".yaml-view-btn").removeClass("active");
+        $(this).addClass("active");
+        $diffPre.prop("hidden", view !== "diff");
+        $filePre.prop("hidden", view !== "file");
+        $foldBtn.prop("hidden", view !== "diff");
+      });
+      $header.append($foldBtn);
+      $header.append($toggle);
+      $header.append(copyIconBtn(function () { return my.raw; }));
+      $wrap.append($header).append($diffPre).append($filePre);
+    } else {
+      $header.append(copyIconBtn(function () { return my.raw; }));
+      var $pre = $("<pre>").addClass("sql-block model-yaml-block").append(
+        $("<code>").addClass("model-yaml-code").html(highlightLinesYaml(my.raw))
+      );
+      $wrap.append($header).append($pre);
     }
   }
 
@@ -3123,14 +3222,14 @@
   }
 
   // The external-fixture affordance: never a silently-empty grid. Names the
-  // file and points the reader at the Model YAML drawer (the #96 view),
+  // file and points the reader at the Unit test YAML drawer (the #96 view),
   // which surfaces the authored block including the `fixture:` line.
-  // (Pointer copy follows the cute-dbt#233 D7 drawer rename.)
+  // (Pointer copy follows the cute-dbt#247 truthful drawer rename.)
   function buildExternalFixtureAffordance(name) {
     var $box = $("<div>").addClass("given-empty external-fixture-note");
     $box.append(document.createTextNode("data in external fixture file: "));
     $box.append($("<code>").addClass("td-defined-in").text(String(name)));
-    $box.append(document.createTextNode(" — see the Model YAML drawer above for this test's block."));
+    $box.append(document.createTextNode(" — see the Unit test YAML drawer above for this test's block."));
     return $box;
   }
 

@@ -19,6 +19,7 @@
       "package_name": "yaml_demo",
       "path": "dim_users.sql",
       "original_file_path": "models/dim_users.sql",
+      "patch_path": "yaml_demo://models/_unit_tests.yml",
       "unique_id": "model.yaml_demo.dim_users",
       "fqn": ["yaml_demo", "dim_users"],
       "alias": "dim_users",

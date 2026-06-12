@@ -49,3 +49,27 @@ Feature: cute-dbt surfaces the raw authoring YAML for each in-scope unit test
     When I run cute-dbt against the source-yaml fixture pair with --project-root pointing at an empty directory
     Then the source-yaml report contains the unit test "test_dim_users_basic"
     And the unit test "test_dim_users_basic" carries no authoring YAML in the payload
+
+  # cute-dbt#247 — the Model-YAML drawer pipeline rides the same fixture
+  # pair: the manifest's dim_users node carries
+  # `patch_path: yaml_demo://models/_unit_tests.yml` (the package-URI wire
+  # shape both engines emit), and the combined source file carries a
+  # `models:` section. These scenarios pin the end-to-end wiring (scheme
+  # strip -> ProjectFileReader -> extract_model_block -> ModelPayload
+  # .model_yaml) plus the truthful degrade arms the section renders when
+  # the file cannot be read.
+
+  Scenario: --project-root resolves and the Model YAML payload carries the authored entry
+    When I run cute-dbt against the source-yaml fixture pair with --project-root pointing at the synthetic project
+    Then the model "dim_users" carries model YAML containing "- name: dim_users"
+    And the model "dim_users" carries model YAML containing "Model-level comment for dim_users"
+    And the model "dim_users" carries model YAML containing "data_tests:"
+    And the model "dim_users" names "models/_unit_tests.yml" as its schema file
+
+  Scenario: No --project-root degrades the Model YAML section truthfully
+    When I run cute-dbt against the source-yaml fixture pair without --project-root
+    Then the model "dim_users" carries a Model YAML placeholder naming "--project-root"
+
+  Scenario: --project-root resolves but the schema file is missing
+    When I run cute-dbt against the source-yaml fixture pair with --project-root pointing at an empty directory
+    Then the model "dim_users" carries a Model YAML placeholder naming "models/_unit_tests.yml"

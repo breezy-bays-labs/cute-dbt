@@ -122,21 +122,51 @@ impl UnitTestYamlBlock {
 /// are interpreted beyond list-item indentation and `#` comments.
 #[must_use]
 pub fn extract_unit_test_block(file_contents: &str, test_name: &str) -> Option<UnitTestYamlBlock> {
+    extract_named_list_block(file_contents, "unit_tests:", test_name)
+}
+
+/// Extract the raw YAML slice for a model's authored `models:` entry from
+/// the contents of a dbt schema/properties file (cute-dbt#247 — the
+/// Model-YAML drawer's source of truth). Returns `None` if the file has
+/// no top-level `models:` key or no entry named `model_name`.
+///
+/// The slicer is the SAME generic indent/name-keyed list-item extractor
+/// the `unit_tests:` path uses — the whole entry rides along
+/// (description, tags, model-level `data_tests:`, `columns:` with their
+/// descriptions and tests, `meta:`), and the comment-bracketing rule from
+/// the module doc applies unchanged. A column-level `- name:` can never
+/// satisfy the lookup: columns sit deeper than the model list-item
+/// indent, and matching is pinned to the canonical list indent.
+#[must_use]
+pub fn extract_model_block(file_contents: &str, model_name: &str) -> Option<UnitTestYamlBlock> {
+    extract_named_list_block(file_contents, "models:", model_name)
+}
+
+/// The shared engine behind [`extract_unit_test_block`] and
+/// [`extract_model_block`]: locate `section_key` at column 0, pin the
+/// list-item indent, find the `- name: <name>` entry, and slice its body
+/// plus bracketing comments.
+fn extract_named_list_block(
+    file_contents: &str,
+    section_key: &str,
+    name: &str,
+) -> Option<UnitTestYamlBlock> {
     let lines: Vec<&str> = file_contents.split('\n').collect();
 
-    // Locate the `unit_tests:` top-level key. dbt allows it at column
-    // 0 only — any deeper indent would not be a top-level YAML key.
-    let unit_tests_idx = lines.iter().position(|l| l.starts_with("unit_tests:"))?;
+    // Locate the section's top-level key (`unit_tests:` / `models:`).
+    // dbt allows it at column 0 only — any deeper indent would not be a
+    // top-level YAML key.
+    let section_idx = lines.iter().position(|l| l.starts_with(section_key))?;
 
-    // Find the first sibling `- name:` after `unit_tests:` to pin the
+    // Find the first sibling `- name:` after the section key to pin the
     // list-item indent (the column where each `-` sits). Once we know
     // that indent, sibling matching and same-indent comment matching
     // are well-defined.
-    let (list_indent, _first_name_idx) = find_list_item_indent(&lines, unit_tests_idx + 1)?;
+    let (list_indent, _first_name_idx) = find_list_item_indent(&lines, section_idx + 1)?;
 
-    // Scan for `- name: <test_name>` at the list-item indent. dbt
+    // Scan for `- name: <name>` at the list-item indent. dbt
     // allows quoted or unquoted scalars for the name — accept either.
-    let name_idx = find_named_list_item(&lines, unit_tests_idx + 1, list_indent, test_name)?;
+    let name_idx = find_named_list_item(&lines, section_idx + 1, list_indent, name)?;
 
     // Body end = last line that belongs to THIS test's entry. The
     // entry ends at the next sibling `- ` at the same indent, or at
@@ -990,6 +1020,205 @@ unit_tests:
                 block.block_end,
             );
         }
+    }
+
+    // ----- cute-dbt#247: extract_model_block — the `models:` analog -----
+    //
+    // The same indent/name-keyed list-item extractor keyed on the
+    // `models:` top-level section. These pin the model-entry slicing the
+    // Model-YAML drawer renders from: whole-entry slices (description /
+    // data_tests / columns / meta ride along), section isolation (no
+    // bleed into `unit_tests:` or sibling models), and the column-level
+    // `- name:` exclusion (a column name must never satisfy a model
+    // lookup — columns sit deeper than the model list-item indent).
+
+    #[test]
+    fn model_block_found_in_combined_schema_file() {
+        let src = yaml(
+            "
+version: 2
+
+models:
+  - name: dim_users
+    description: a model
+    columns:
+      - name: user_id
+        description: pk
+        data_tests:
+          - unique
+          - not_null
+
+unit_tests:
+  - name: test_dim_users
+    model: dim_users
+",
+        );
+        let block = extract_model_block(&src, "dim_users").expect("dim_users present");
+        assert!(block.raw.contains("- name: dim_users"));
+        assert!(block.raw.contains("description: a model"));
+        assert!(block.raw.contains("data_tests:"));
+        assert!(block.raw.contains("- not_null"));
+        // Section isolation: nothing from `unit_tests:` rides along.
+        assert!(!block.raw.contains("test_dim_users"));
+        assert!(!block.raw.contains("unit_tests:"));
+    }
+
+    #[test]
+    fn model_block_returns_none_when_model_not_found() {
+        let src = yaml(
+            "
+models:
+  - name: dim_users
+    description: a model
+",
+        );
+        assert_eq!(extract_model_block(&src, "dim_payers"), None);
+    }
+
+    #[test]
+    fn model_block_returns_none_when_file_has_no_models_section() {
+        let src = yaml(
+            "
+unit_tests:
+  - name: test_a
+    model: dim_users
+",
+        );
+        assert_eq!(extract_model_block(&src, "dim_users"), None);
+    }
+
+    #[test]
+    fn model_block_ignores_column_level_name_entries() {
+        // A column named like a model must NEVER satisfy the model lookup
+        // — column list items sit deeper than the model list-item indent.
+        let src = yaml(
+            "
+models:
+  - name: dim_users
+    columns:
+      - name: dim_payers
+        description: a column that shares a model-ish name
+",
+        );
+        assert_eq!(extract_model_block(&src, "dim_payers"), None);
+        let block = extract_model_block(&src, "dim_users").expect("dim_users present");
+        assert!(
+            block.raw.contains("- name: dim_payers"),
+            "column rides along in the body"
+        );
+    }
+
+    #[test]
+    fn model_block_slices_only_the_requested_sibling() {
+        let src = yaml(
+            "
+models:
+  - name: dim_users
+    description: users
+  - name: dim_payers
+    description: payers
+",
+        );
+        let users = extract_model_block(&src, "dim_users").expect("dim_users present");
+        assert!(users.raw.contains("description: users"));
+        assert!(!users.raw.contains("dim_payers"));
+        let payers = extract_model_block(&src, "dim_payers").expect("dim_payers present");
+        assert!(payers.raw.contains("description: payers"));
+        assert!(!payers.raw.contains("dim_users"));
+    }
+
+    #[test]
+    fn model_block_includes_leading_comments_at_list_indent() {
+        let src = yaml(
+            "
+models:
+  # documents dim_users
+  - name: dim_users
+    description: users
+",
+        );
+        let block = extract_model_block(&src, "dim_users").expect("dim_users present");
+        assert!(block.raw.starts_with("  # documents dim_users"));
+    }
+
+    #[test]
+    fn model_block_terminates_at_the_next_top_level_section() {
+        // The LAST model in `models:` ends at the `unit_tests:` boundary.
+        let src = yaml(
+            "
+models:
+  - name: dim_users
+    description: users
+unit_tests:
+  - name: test_a
+    model: dim_users
+",
+        );
+        let block = extract_model_block(&src, "dim_users").expect("dim_users present");
+        assert!(!block.raw.contains("unit_tests:"));
+        assert!(!block.raw.contains("test_a"));
+    }
+
+    #[test]
+    fn model_block_found_when_models_section_follows_unit_tests() {
+        // Top-level key order is author's choice — the slicer must find
+        // `models:` wherever it sits.
+        let src = yaml(
+            "
+unit_tests:
+  - name: test_a
+    model: dim_users
+models:
+  - name: dim_users
+    description: users
+",
+        );
+        let block = extract_model_block(&src, "dim_users").expect("dim_users present");
+        assert!(block.raw.contains("description: users"));
+        assert!(!block.raw.contains("test_a"));
+    }
+
+    #[test]
+    fn model_block_matches_quoted_names() {
+        let src = yaml(
+            "
+models:
+  - name: 'dim_users'
+    description: users
+",
+        );
+        let block = extract_model_block(&src, "dim_users").expect("quoted name matched");
+        assert_eq!(block.line_of_name, 2);
+    }
+
+    #[test]
+    fn model_block_span_is_consistent_with_raw() {
+        // The same span↔raw invariant the unit-test slices pin — the
+        // model-YAML diff overlap math (cute-dbt#247) anchors on these
+        // 1-based bounds exactly like cute-dbt#96 did.
+        let src = yaml(
+            "
+version: 2
+
+models:
+  # lead
+  - name: dim_users
+    description: |
+      first line
+      second line
+    columns:
+      - name: user_id
+",
+        );
+        let block = extract_model_block(&src, "dim_users").expect("dim_users present");
+        let line_count = block.raw.split('\n').count();
+        assert_eq!(block.block_end - block.block_start + 1, line_count);
+        assert!(block.block_start <= block.line_of_name && block.line_of_name <= block.block_end);
+        assert_eq!(
+            block.block_start, 4,
+            "first slice line is the leading comment"
+        );
+        assert_eq!(block.line_of_name, 5);
     }
 
     // ----- cute-dbt#125: the slicer includes the `overrides:` block -----

@@ -1121,6 +1121,7 @@ mod tests {
             &StdHashMap::new(),
             &StdHashMap::new(),
             &StdHashMap::new(),
+            &HashMap::new(),
             &StdHashMap::new(),
             "",
         )

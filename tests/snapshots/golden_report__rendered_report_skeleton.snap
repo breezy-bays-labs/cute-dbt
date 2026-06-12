@@ -150,6 +150,16 @@ expression: skeleton
   </details>
 </section>
 
+
+<section class="model-yaml" aria-label="Model YAML">
+  <details class="model-yaml-details">
+    <summary>Model YAML<span class="model-yaml-summary-hint">authored schema entry</span></summary>
+    <div class="sql-block-wrap model-yaml-wrap">
+      <pre class="sql-block model-yaml-block"><code class="model-yaml-code"></code></pre>
+    </div>
+  </details>
+</section>
+
 <section class="cte-dag" aria-label="CTE dependency DAG">
   <div class="cte-dag-header">
     <h2>CTE dependency DAG</h2>
