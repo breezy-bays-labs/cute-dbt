@@ -7672,6 +7672,19 @@ const TIER_CHIP_CONTRAST_SWEEP_JS: &str = r#"(function () {
     su.textContent = "UNKNOWN";
     document.querySelector(".finding-summary").appendChild(su);
   }
+  /* cute-dbt#268 — the vars-attribution evidence tiers (the project
+     panel's per-var lines) ship three more chip classes. This fixture
+     renders no project panel, so inject them the same way — the exact
+     shipped rules are exercised on the same --surface backdrop family
+     the real vars rows sit on. */
+  ["direct", "config", "macro"].forEach(function (t) {
+    if (!document.querySelector(".tier-chip.tier-" + t)) {
+      var sv = document.createElement("span");
+      sv.className = "tier-chip tier-" + t;
+      sv.textContent = t.toUpperCase();
+      document.querySelector(".finding-summary").appendChild(sv);
+    }
+  });
   var root = document.documentElement;
   var out = [];
   for (var i = 0; i < THEMES.length; i++) {
@@ -7685,7 +7698,7 @@ const TIER_CHIP_CONTRAST_SWEEP_JS: &str = r#"(function () {
       var own = parseRgb(cs.backgroundColor);
       var bg = own && own.a === 1 ? own : backdropOf(chips[j].parentElement);
       var tier =
-        (/tier-(total|high|advisory|unknown)/.exec(chips[j].className) || [])[1]
+        (/tier-(total|high|advisory|unknown|direct|config|macro)/.exec(chips[j].className) || [])[1]
         || "unclassed";
       out.push({
         theme: THEMES[i], tier: tier,
@@ -7721,8 +7734,9 @@ fn tier_chips_meet_aa_contrast_on_every_theme() {
         serde_json::from_str(&raw).expect("the contrast sweep returns valid JSON");
     assert_eq!(
         measured.len(),
-        32,
-        "8 themes x 4 tier chips (total/high/advisory/unknown) measured, got: {raw}",
+        56,
+        "8 themes x 7 tier chips (total/high/advisory/unknown + the \
+         cute-dbt#268 direct/config/macro) measured, got: {raw}",
     );
 
     let mut failures = Vec::new();
@@ -12065,8 +12079,8 @@ fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn project_panel_renders_categorized_on_the_committed_showcase() {
     // The dogfood surface: the committed diff-showcase golden must carry
-    // the categorized panel — one vars row (with the locked
-    // blast-radius copy) + one config-tree row.
+    // the categorized panel — two vars rows (cute-dbt#268: tiered
+    // attribution + the honest blast-radius copy) + one config-tree row.
     let showcase = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("examples")
         .join("diff-showcase-report.html");
@@ -12085,21 +12099,70 @@ fn project_panel_renders_categorized_on_the_committed_showcase() {
     );
     assert_eq!(
         visible_count(&tab, ".project-def-row[data-category=\"vars\"]"),
-        1,
-        "the vars row (dq_quarantine_threshold 10→5) is visible",
+        2,
+        "both vars rows (dq_quarantine_threshold 10→5, \
+         default_state_grid_density weekly→monthly) are visible",
     );
     assert_eq!(
         visible_count(&tab, ".project-def-row[data-category=\"config_tree\"]"),
         1,
         "the config-tree row (marts +materialized view→table) is visible",
     );
+    // cute-dbt#268 — the vars rows carry tiered attribution: the dq
+    // threshold row has DIRECT (mart_dq_summary's own SQL), MACRO (the
+    // staging models via add_dq_flags), and the insulated override-pin;
+    // the grid-density row has CONFIG (mart_date_state_grid's
+    // unrendered_config). The honest residual copy is in-row.
     let note = eval_string(
         &tab,
         "document.querySelector('.project-def-row[data-category=\"vars\"] .project-def-note').textContent",
     );
-    assert_eq!(
-        note, "blast radius not attributed",
-        "the vars row carries the locked interim honesty copy",
+    assert!(
+        note.contains("Blast radius is not fully attributable statically"),
+        "the vars row carries the honest residual copy: {note}",
+    );
+    assert!(
+        note.contains("never widened into report scope"),
+        "the contextualize-don't-widen statement is in-row: {note}",
+    );
+    for (chip_selector, expected_text) in [
+        (".project-def-var-tier .tier-chip.tier-direct", "DIRECT"),
+        (".project-def-var-tier .tier-chip.tier-config", "CONFIG"),
+        (".project-def-var-tier .tier-chip.tier-macro", "MACRO"),
+    ] {
+        let text = eval_string(
+            &tab,
+            &format!("document.querySelector('{chip_selector}').textContent"),
+        );
+        assert_eq!(text, expected_text, "the {expected_text} tier chip renders");
+    }
+    let tier_texts = eval_string(
+        &tab,
+        "Array.from(document.querySelectorAll('.project-def-var-tier-text')).map(function (e) { return e.textContent; }).join(' | ')",
+    );
+    assert!(
+        tier_texts.contains("at least 1 model reads this var directly in SQL: mart_dq_summary"),
+        "the DIRECT tier line names the dogfood reader: {tier_texts}",
+    );
+    assert!(
+        tier_texts.contains("read this var through their macro closure")
+            && tier_texts.contains("(via add_dq_flags)"),
+        "the MACRO tier line names the mediating macro: {tier_texts}",
+    );
+    assert!(
+        tier_texts
+            .contains("at least 1 model carries config driven by this var: mart_date_state_grid"),
+        "the CONFIG tier line names the grid model: {tier_texts}",
+    );
+    let var_notes = eval_string(
+        &tab,
+        "Array.from(document.querySelectorAll('.project-def-var-note')).map(function (e) { return e.textContent; }).join(' | ')",
+    );
+    assert!(
+        var_notes.contains(
+            "1 unit test pins this var in overrides.vars and is insulated from this edit",
+        ),
+        "the override-pin subtraction is stated in-row: {var_notes}",
     );
 
     // cute-dbt#269 — the purpose-built hooks + dispatch rows on the same
@@ -12263,6 +12326,149 @@ fn config_attribution_chip_renders_for_the_widened_model_and_hides_otherwise() {
         visible_count(&tab, "[data-testid=\"model-attribution\"]"),
         0,
         "no chip row for a model without attribution (hidden element)",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn var_reference_chip_renders_for_the_referencing_model() {
+    // cute-dbt#268 — the synthetic var-chip guard: an in-scope model
+    // referencing an edited var shows the chip beside the #267 config
+    // chips ("reads var 'x' · tier"; the macro tier names its mediating
+    // macro). Context only — the chip never implies widening.
+    let facts = ProjectFacts {
+        definition: None,
+        panel: None,
+        config_attributions: BTreeMap::new(),
+        var_references: BTreeMap::from([(
+            "model.shop.dim_a".to_owned(),
+            vec![
+                cute_dbt::domain::VarReference {
+                    name: "dq_threshold".to_owned(),
+                    tier: cute_dbt::domain::VarTier::Direct,
+                    via: None,
+                },
+                cute_dbt::domain::VarReference {
+                    name: "dq_threshold".to_owned(),
+                    tier: cute_dbt::domain::VarTier::Macro,
+                    via: Some("macro.shop.add_dq_flags".to_owned()),
+                },
+            ],
+        )]),
+    };
+    let url = render_with_project_facts("headless_var_chip.html", &facts);
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"model-attribution\"]"),
+        1,
+        "the chip row is visible for the referencing model",
+    );
+    let chips = eval_string(
+        &tab,
+        "Array.from(document.querySelectorAll('[data-testid=\"model-attribution\"] .var-reference-chip')).map(function (e) { return e.textContent; }).join(' | ')",
+    );
+    assert_eq!(
+        chips, "reads var 'dq_threshold' · direct | reads var 'dq_threshold' · via add_dq_flags",
+        "one chip per reference; the macro tier names its mediating macro",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn vars_row_attribution_renders_visible_in_the_panel() {
+    // cute-dbt#268 — the synthetic vars-row guard: a vars change
+    // carrying VarChangeFacts renders the per-var entry (name, resolved
+    // old→new, tier chips + lines, the masked/insulated notes, the
+    // honest residual row note), all visible.
+    let facts = ProjectFacts {
+        definition: None,
+        panel: Some(ProjectChangePanel::Categorized {
+            changes: vec![ProjectChange {
+                category: ProjectChangeCategory::Vars,
+                label: "dq_threshold".to_owned(),
+                old: Some(serde_json::json!(10)),
+                new: Some(serde_json::json!(5)),
+                hook: None,
+                tree: None,
+                vars: Some(cute_dbt::domain::VarChangeFacts {
+                    entries: vec![cute_dbt::domain::VarAttribution {
+                        name: "dq_threshold".to_owned(),
+                        package: None,
+                        old: Some(serde_json::json!(10)),
+                        new: Some(serde_json::json!(5)),
+                        direct: vec!["model.shop.mart_dq".to_owned()],
+                        config: Vec::new(),
+                        via_macros: vec![cute_dbt::domain::MacroVarHit {
+                            model: "model.shop.stg_enc".to_owned(),
+                            via: "macro.shop.add_dq_flags".to_owned(),
+                        }],
+                        dynamic: Vec::new(),
+                        masked_packages: vec!["dbt_utils".to_owned()],
+                        insulated_tests: vec![
+                            "unit_test.shop.mart_dq.test_pins_threshold".to_owned(),
+                        ],
+                    }],
+                    footprint: cute_dbt::domain::VarScanFootprint {
+                        models_scanned: 3,
+                        macros_scanned: 1,
+                        python_models: 0,
+                    },
+                }),
+            }],
+        }),
+        config_attributions: BTreeMap::new(),
+        var_references: BTreeMap::new(),
+    };
+    let url = render_with_project_facts("headless_vars_row.html", &facts);
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"project-def-var-entry\"]"),
+        1,
+        "the var entry block is visible",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"project-def-var-tier\"]"),
+        2,
+        "the DIRECT and MACRO tier lines are visible",
+    );
+    let direct_chip = eval_string(
+        &tab,
+        "document.querySelector('.project-def-var-tier .tier-chip.tier-direct').textContent",
+    );
+    assert_eq!(direct_chip, "DIRECT");
+    let notes = eval_string(
+        &tab,
+        "Array.from(document.querySelectorAll('[data-testid=\"project-def-var-note\"]')).map(function (e) { return e.textContent; }).join(' | ')",
+    );
+    assert!(
+        notes.contains("masked for dbt_utils"),
+        "the masked-package note is visible: {notes}",
+    );
+    assert!(
+        notes.contains("test_pins_threshold"),
+        "the insulated-test note names the pinning test: {notes}",
+    );
+    let row_note = eval_string(
+        &tab,
+        "document.querySelector('.project-def-row[data-category=\"vars\"] .project-def-note').textContent",
+    );
+    assert!(
+        row_note.contains("Checked: 3 models' SQL and configs plus 1 macro body"),
+        "the footprint statement is visible: {row_note}",
     );
     let _ = tab.close(true);
 }

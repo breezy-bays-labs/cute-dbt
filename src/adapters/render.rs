@@ -1519,8 +1519,11 @@ fn project_category_strings(
         ProjectChangeCategory::Vars => (
             "vars",
             "vars",
-            // Locked interim copy (shaping #262 v3): plain statement,
-            // never "coming soon".
+            // Defensive fallback only: since cute-dbt#268 every
+            // categorized vars row carries VarChangeFacts and
+            // project_panel_row swaps this note for the honest-UNKNOWN
+            // residual copy (vars_row_note). A facts-less row keeps the
+            // locked interim statement (plain, never "coming soon").
             "blast radius not attributed",
         ),
         ProjectChangeCategory::ConfigTree => ("config_tree", "config tree", ""),

@@ -195,8 +195,10 @@ impl ConfigLeafPath {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectChangeCategory {
-    /// A `vars:` entry changed (blast radius not attributed in this
-    /// slice — the panel row states so plainly).
+    /// A `vars:` entry changed. Since cute-dbt#268 the row carries
+    /// precedence-resolved per-var attribution
+    /// ([`ProjectChange::vars`]); blast radius is stated at honest
+    /// tiers, never widened into scope.
     Vars,
     /// A config-tree path changed (`models:`/`seeds:`/… `+key` values).
     ConfigTree,
