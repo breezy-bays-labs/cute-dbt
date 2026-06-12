@@ -90,7 +90,7 @@ pub use preflight::{PreflightError, preflight_compiled};
 // YAML source span as `project_def::Span`.
 pub use project_def::{
     ConfigTree, ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition,
-    ProjectFallbackReason, diff_project_definitions,
+    ProjectFacts, ProjectFallbackReason, diff_project_definitions,
 };
 pub use scope::{ScopeInput, ScopeSelection, all_models, changed_models, select_in_scope};
 pub use state::{

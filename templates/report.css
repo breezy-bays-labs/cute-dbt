@@ -1268,4 +1268,48 @@ html[data-style="swiss"] .suppress-chip { border-radius: 0; }
 }
 .cte-dag.pin-flash { animation: cute-pin-flash 1.4s ease-out; border-radius: var(--radius-sm); }
 
+/* ============================================================================
+   §9 PROJECT-DEFINITION PANEL (cute-dbt#266)
+   The server-rendered "Project definition changed" callout: categorized
+   rows for an in-diff dbt_project.yml (vars / config tree / dispatch /
+   hooks / paths / identity / other), the formatting-only empty note, and
+   the Shape-A raw-diff fallback row. Theme-token-only (AA pairs come from
+   tokens.css); the raw lines reuse the diff row/fg token family.
+   ========================================================================= */
+.project-def-panel {
+  border: var(--rule-w) solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: var(--radius-pan); background: var(--surface);
+  padding: 0.75rem 1rem; margin: 0 0 var(--gap-section);
+}
+.project-def-panel h2 { margin: 0 0 0.15rem; font-size: 1.05em; }
+.project-def-subtitle { margin: 0 0 0.5rem; color: var(--text-muted); font-size: 0.9em; }
+.project-def-subtitle code, .project-def-label {
+  font-family: var(--font-mono); background: var(--bg-alt); color: var(--text);
+  padding: 0.05rem 0.35rem; border-radius: var(--radius-sm);
+}
+.project-def-rows { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+.project-def-row { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; font-size: 0.9em; }
+.project-def-chip {
+  font-family: var(--font-ui); font-size: 0.78em; text-transform: uppercase;
+  letter-spacing: 0.04em; background: var(--bg-alt); color: var(--text-muted);
+  border: var(--rule-w) solid var(--border); border-radius: var(--radius-sm);
+  padding: 0.05rem 0.4rem; white-space: nowrap;
+}
+.project-def-detail { font-family: var(--font-mono); color: var(--text); overflow-wrap: anywhere; }
+.project-def-note { color: var(--text-muted); font-style: italic; font-size: 0.9em; }
+.project-def-empty, .project-def-fallback-copy {
+  margin: 0; color: var(--text-muted); font-style: italic; font-size: 0.9em;
+}
+.project-def-fallback-copy { margin-bottom: 0.4rem; }
+.project-def-raw-diff {
+  margin: 0; padding: 0.5rem 0.75rem; background: var(--bg-alt);
+  border: var(--rule-w) solid var(--border); border-radius: var(--radius-sm);
+  font-family: var(--font-mono); font-size: 0.82em; overflow-x: auto;
+}
+.project-def-raw-line { display: block; }
+.project-def-raw-line.is-removed { color: var(--diff-remove-fg); background: var(--diff-remove-row); }
+.project-def-raw-line.is-added { color: var(--diff-add-fg); background: var(--diff-add-row); }
+.project-def-raw-line.is-removed::before { content: "- "; }
+.project-def-raw-line.is-added::before { content: "+ "; }
+
 /* end of cute-dbt report chassis v1 (cute-dbt#177) */

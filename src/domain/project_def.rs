@@ -228,6 +228,28 @@ pub enum ProjectChangePanel {
     },
 }
 
+/// The project-definition gather outcome the run loop threads into the
+/// renderer (cute-dbt#266) — one value, two consumers.
+///
+/// `definition` is the **standing metadata**: the parsed working-tree
+/// dbt_project.yml whenever it is present and parses, on BOTH scope
+/// arms (the founder's parse-always posture; future consumers — explorer
+/// panes, provenance chips — read it from the payload). `panel` is the
+/// **diff-gated** consumer: `Some` exactly when dbt_project.yml is in
+/// the PR diff. Both `None` (the default) leaves the payload
+/// byte-identical to the pre-#266 shape.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProjectFacts {
+    /// The parsed working-tree dbt_project.yml (standing metadata);
+    /// `None` when unreadable, unparseable, or no project root resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<ProjectDefinition>,
+    /// The "Project definition changed" panel content; `Some` exactly
+    /// when dbt_project.yml is in the PR diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel: Option<ProjectChangePanel>,
+}
+
 /// Structurally diff two parsed project definitions into categorized
 /// changes, sorted by (category, label) for deterministic panel rows.
 ///

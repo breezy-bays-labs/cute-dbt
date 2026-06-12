@@ -4762,6 +4762,7 @@ fn render_with_external_fixtures(
         DEFAULT_REPORT_TITLE,
         None,
         &cute_dbt::domain::CheckPolicy::default(),
+        &cute_dbt::domain::ProjectFacts::default(),
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -7124,6 +7125,7 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
         DEFAULT_REPORT_TITLE,
         None,
         &policy,
+        &cute_dbt::domain::ProjectFacts::default(),
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -7656,6 +7658,7 @@ fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
         DEFAULT_REPORT_TITLE,
         None,
         &policy,
+        &cute_dbt::domain::ProjectFacts::default(),
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
