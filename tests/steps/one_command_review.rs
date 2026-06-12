@@ -124,12 +124,15 @@ fn run_review_in_plain_dir(world: &mut World) {
         .review_plain_dir
         .clone()
         .expect("a Given prepared the plain directory");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"))
-        .args(["review", "--no-open"])
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
+    cmd.args(["review", "--no-open"])
         .current_dir(&dir)
-        .env_remove("CUTE_DBT_EXPERIMENTAL")
-        .output()
-        .expect("the cute-dbt binary spawns");
+        .env_remove("CUTE_DBT_EXPERIMENTAL");
+    // Without this scrub, running the suite under a git hook (which
+    // exports GIT_DIR) would hand the binary a repository context and
+    // flip this scenario's outcome.
+    super::super::common::scrub_git_env(&mut cmd);
+    let output = cmd.output().expect("the cute-dbt binary spawns");
     capture(world, &output);
 }
 

@@ -62,6 +62,11 @@ use super::pr_diff::parse_diff;
 /// `--committed-only`; `--staged` / `--unstaged` (V3) and `--pr` (V4)
 /// extend the same group, so a conflicting pair is a clap usage error
 /// (exit 2) from the day the second member lands.
+// struct_excessive_bools: each bool IS one CLI flag on a clap-derive
+// surface (`--committed-only`, `--force`, `--no-open`, `--dry-run`) —
+// folding them into two-variant enums would fight the derive for zero
+// modeling gain. The flags are orthogonal switches, not a state machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Args)]
 #[command(
     group = ArgGroup::new("review_scope").multiple(false).args(["committed_only"]),
@@ -297,9 +302,17 @@ impl ReviewError {
         format!("cute-dbt review: {what}\n{fix}")
     }
 
-    /// `(description, remediation)` for each variant.
+    /// `(description, remediation)` for each variant — split into the
+    /// git/ladder half and the project/stage half so each match stays
+    /// readable (and under the line-count lint).
     fn describe(&self) -> (String, String) {
-        match self {
+        self.describe_git()
+            .unwrap_or_else(|| self.describe_project())
+    }
+
+    /// The git-and-ladder arms; `None` for the project/stage arms.
+    fn describe_git(&self) -> Option<(String, String)> {
+        let pair = match self {
             Self::GitMissing => (
                 "`git` was not found on PATH.".to_owned(),
                 "Install Git (on Windows: Git for Windows) and ensure `git` is on PATH, \
@@ -353,6 +366,26 @@ impl ReviewError {
                 format!("no merge-base with `{base}`: the histories share no common ancestor."),
                 "Pass `--base <ref>` naming a branch that shares history with HEAD.".to_owned(),
             ),
+            // Explicit (never `_`): a new variant must fail to compile
+            // here AND in describe_project, forcing a deliberate
+            // remediation decision — the exit.rs precedent.
+            Self::ProjectNotFound { .. }
+            | Self::ProjectAmbiguous { .. }
+            | Self::ProjectOutsideRepo { .. }
+            | Self::ManifestMissing { .. }
+            | Self::StageFailed { .. } => return None,
+        };
+        Some(pair)
+    }
+
+    /// The project/manifest/stage arms.
+    ///
+    /// # Panics
+    ///
+    /// Unreachable for the git-and-ladder variants — [`Self::describe`]
+    /// routes those through [`Self::describe_git`] first.
+    fn describe_project(&self) -> (String, String) {
+        match self {
             Self::ProjectNotFound { searched, explicit } => {
                 let what = if *explicit {
                     format!(
@@ -407,6 +440,17 @@ impl ReviewError {
                  one manually to investigate."
                     .to_owned(),
             ),
+            // Explicit (never `_`): see the describe_git twin.
+            Self::GitMissing
+            | Self::NoGitRepo
+            | Self::BareRepo
+            | Self::NoCommits
+            | Self::BaseUndetectable
+            | Self::BaseRefMissing { .. }
+            | Self::ShallowClone { .. }
+            | Self::DisjointHistories { .. } => {
+                unreachable!("describe() routes git/ladder variants through describe_git()")
+            }
         }
     }
 }
@@ -1309,18 +1353,18 @@ mod tests {
 
     // ----- ladder decision table -----------------------------------
 
-    fn probe(name: &str, resolves: bool) -> Option<RefProbe> {
-        Some(RefProbe {
+    fn probe(name: &str, resolves: bool) -> RefProbe {
+        RefProbe {
             name: name.to_owned(),
             resolves,
-        })
+        }
     }
 
     #[test]
     fn explicit_base_wins_over_every_other_rung() {
         let facts = BaseFacts {
-            explicit: probe("release-2.4", true),
-            configured: probe("develop", true),
+            explicit: Some(probe("release-2.4", true)),
+            configured: Some(probe("develop", true)),
             origin_head: Some("origin/main".to_owned()),
             remote_probe: Some("origin/main".to_owned()),
             local_probe: Some("main".to_owned()),
@@ -1335,8 +1379,8 @@ mod tests {
         // The operator asked for something specific — silently using a
         // different base would be a wrong-report hazard.
         let facts = BaseFacts {
-            explicit: probe("nope", false),
-            configured: probe("develop", true),
+            explicit: Some(probe("nope", false)),
+            configured: Some(probe("develop", true)),
             ..BaseFacts::default()
         };
         let err = decide_base(&facts).expect_err("an unresolvable --base errors");
@@ -1352,7 +1396,7 @@ mod tests {
     #[test]
     fn configured_base_answers_when_no_flag_is_given() {
         let facts = BaseFacts {
-            configured: probe("develop", true),
+            configured: Some(probe("develop", true)),
             origin_head: Some("origin/main".to_owned()),
             ..BaseFacts::default()
         };
@@ -1364,7 +1408,7 @@ mod tests {
     #[test]
     fn an_unresolvable_configured_base_is_an_error_naming_the_config() {
         let facts = BaseFacts {
-            configured: probe("gone", false),
+            configured: Some(probe("gone", false)),
             origin_head: Some("origin/main".to_owned()),
             ..BaseFacts::default()
         };
@@ -1703,7 +1747,7 @@ mod tests {
         // the composed run receives.
         let compose = sample_compose();
         let argv = compose.report_display_argv();
-        let args = compose.report_args(
+        let composed = compose.report_args(
             parse_diff("").expect("an empty diff parses to zero scope"),
             None,
         );
@@ -1712,13 +1756,13 @@ mod tests {
             .position(|a| a == "--manifest")
             .map(|i| &argv[i + 1])
             .expect("--manifest displayed");
-        assert_eq!(Path::new(displayed_manifest), args.manifest);
+        assert_eq!(Path::new(displayed_manifest), composed.manifest);
         let displayed_out = argv
             .iter()
             .position(|a| a == "--out")
             .map(|i| &argv[i + 1])
             .expect("--out displayed");
-        assert_eq!(Path::new(displayed_out), args.out);
+        assert_eq!(Path::new(displayed_out), composed.out);
         let displayed_root = argv
             .iter()
             .position(|a| a == "--project-root")
@@ -1726,13 +1770,13 @@ mod tests {
             .expect("--project-root displayed");
         assert_eq!(
             Some(Path::new(displayed_root)),
-            args.project_root.as_deref()
+            composed.project_root.as_deref()
         );
         // Review never selects the baseline arm and never widens
         // selectors — by construction.
-        assert!(args.baseline_manifest.is_none());
-        assert!(args.modified_selectors.is_empty());
-        assert!(args.pr_diff.is_some());
+        assert!(composed.baseline_manifest.is_none());
+        assert!(composed.modified_selectors.is_empty());
+        assert!(composed.pr_diff.is_some());
     }
 
     #[test]
@@ -1753,9 +1797,10 @@ mod tests {
             .map(|i| &argv[i + 1])
             .expect("--config displayed");
         assert_eq!(Path::new(displayed), path);
-        let args = compose.report_args(parse_diff("").expect("empty diff"), None);
+        let composed = compose.report_args(parse_diff("").expect("empty diff"), None);
         assert_eq!(
-            args.config
+            composed
+                .config
                 .expect("config composed")
                 .report
                 .title

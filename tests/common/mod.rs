@@ -85,6 +85,31 @@ pub fn run_cli(args: &[&str]) -> Output {
 // isolation wraps the spawned `cute-dbt review` subprocess, because the
 // binary itself shells out to git.
 
+/// Scrub every repo-pointing `GIT_*` variable from a command's
+/// environment. **Load-bearing**: `git push` exports `GIT_DIR` into its
+/// pre-push hook, so a test suite running UNDER lefthook would
+/// otherwise have every spawned `git add`/`git commit` operate on the
+/// *developer's actual repository* (with the work tree defaulting to
+/// the test cwd) instead of the temp repo — exactly the near-miss that
+/// rewrote this branch's index during cute-dbt#300 development. Applied
+/// to every test-spawned `git` AND to the spawned `cute-dbt` binary
+/// (which shells out to git itself).
+pub fn scrub_git_env(cmd: &mut Command) {
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_PREFIX",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_NAMESPACE",
+    ] {
+        cmd.env_remove(var);
+    }
+}
+
 /// A throwaway git repository for `cute-dbt review` tests.
 #[derive(Debug)]
 pub struct TestRepo {
@@ -115,6 +140,17 @@ impl TestRepo {
         std::fs::write(home.join("gitconfig"), "").expect("write empty gitconfig");
         let repo = Self { root, home };
         repo.git(&["init", "-q", "-b", branch]);
+        // Sanity tripwire: every later git command must operate on THIS
+        // repo, never an enclosing one (see `scrub_git_env`). Canonical
+        // comparison — macOS tempdirs traverse the /var symlink.
+        let toplevel = repo.git(&["rev-parse", "--show-toplevel"]);
+        let reported = std::fs::canonicalize(String::from_utf8_lossy(&toplevel.stdout).trim())
+            .expect("canonicalize reported toplevel");
+        let expected = std::fs::canonicalize(&repo.root).expect("canonicalize repo root");
+        assert_eq!(
+            reported, expected,
+            "the temp repo's git context leaked outside its root",
+        );
         repo
     }
 
@@ -122,6 +158,7 @@ impl TestRepo {
     /// or the spawned `cute-dbt`, which shells out to git).
     pub fn isolate(&self, cmd: &mut Command) {
         let empty = self.home.join("gitconfig");
+        scrub_git_env(cmd);
         cmd.env("GIT_CONFIG_GLOBAL", &empty)
             .env("GIT_CONFIG_SYSTEM", &empty)
             .env("GIT_CONFIG_NOSYSTEM", "1")

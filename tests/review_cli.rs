@@ -181,12 +181,15 @@ fn outside_a_git_repository_review_fails_with_remediation() {
     std::fs::create_dir_all(&dir).expect("create dir");
     std::fs::write(dir.join("dbt_project.yml"), "name: x\n").expect("write");
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"))
-        .args(["review", "--no-open"])
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
+    cmd.args(["review", "--no-open"])
         .current_dir(&dir)
-        .env_remove("CUTE_DBT_EXPERIMENTAL")
-        .output()
-        .expect("binary spawns");
+        .env_remove("CUTE_DBT_EXPERIMENTAL");
+    // Without this scrub, running the suite under a git hook (which
+    // exports GIT_DIR) would hand the binary a repository context and
+    // flip this scenario's outcome.
+    common::scrub_git_env(&mut cmd);
+    let output = cmd.output().expect("binary spawns");
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = stderr_of(&output);
     assert!(
