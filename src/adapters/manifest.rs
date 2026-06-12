@@ -43,9 +43,9 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::domain::{
-    Checksum, DependsOn, Exposure, Group, Manifest, ManifestMetadata, Node, NodeConfig, NodeId,
-    Owner, PreflightError, SourceNode, TestMetadata, UnitTest, UnitTestExpect, UnitTestGiven,
-    UnitTestOverrides,
+    Checksum, ColumnFacts, Constraint, DependsOn, Exposure, Group, Manifest, ManifestMetadata,
+    Node, NodeConfig, NodeId, Owner, PreflightError, SourceNode, TestMetadata, UnitTest,
+    UnitTestExpect, UnitTestGiven, UnitTestOverrides,
 };
 use crate::ports::ManifestSource;
 use serde_json::Value;
@@ -210,6 +210,53 @@ struct WireNode {
     latest_version: Option<Value>,
     #[serde(default)]
     deprecation_date: Option<String>,
+    /// Structure (cute-dbt#257): the engine-built fully-qualified name
+    /// path (fusion `get_node_fqn`, `dbt-parser` `utils.rs:132-159` @
+    /// `9977b6cb…`) — the #262 C2 config-tree prefix-matcher input.
+    /// `Option` for the #145 null-fill tolerance; both committed real
+    /// fixtures populate it on every node.
+    #[serde(default)]
+    fqn: Option<Vec<String>>,
+    /// Contract family (cute-dbt#257): model-level declared
+    /// `constraints` (fusion `ModelConstraint`,
+    /// `properties/model_properties.rs:31-51` @ `9977b6cb…` — the
+    /// domain [`Constraint`] deserializes the wire verbatim, the
+    /// `Checksum`/`DependsOn` reuse precedent), the engine-inferred
+    /// `primary_key` (`ManifestModel.primary_key`), and the TOP-LEVEL
+    /// `contract` block whose `checksum` is hoisted flat. Both
+    /// committed fixtures emit `constraints: []` / populated
+    /// `primary_key` / `contract.checksum: null`.
+    #[serde(default)]
+    constraints: Option<Vec<Constraint>>,
+    #[serde(default)]
+    primary_key: Option<Vec<String>>,
+    #[serde(default)]
+    contract: Option<WireContract>,
+}
+
+/// Tolerant wire projection of a node's TOP-LEVEL `contract` block
+/// (cute-dbt#257) — distinct from the `config.contract` sub-object the
+/// `.contract` sub-selector hoists `enforced` from. Only `checksum` is
+/// consumed; fusion types it `Option<YmlValue>` (`DbtContract`,
+/// `dbt-schemas` `common.rs:762-770` @ `9977b6cb…`), so a non-string
+/// value degrades to `None` (ADR-5). dbt-core emits a hex string when
+/// the contract is enforced and `null` otherwise; fusion 2.0-preview
+/// omits the key even when enforced (live-verified 2026-06-11).
+#[derive(Debug, Default, Deserialize)]
+struct WireContract {
+    #[serde(default)]
+    checksum: Option<Value>,
+}
+
+impl WireContract {
+    /// The contract checksum when the wire carried a string; any other
+    /// shape (null, absent, defensive non-string) is `None`.
+    fn checksum_string(self) -> Option<String> {
+        match self.checksum {
+            Some(Value::String(s)) if !s.is_empty() => Some(s),
+            _ => None,
+        }
+    }
 }
 
 /// Strip the `<package>://` URI scheme off a wire `patch_path`,
@@ -424,6 +471,44 @@ struct WireColumn {
     data_type: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    /// The cute-dbt#257 column-level extension (fusion `DbtColumn`,
+    /// `dbt-schemas` `dbt_column.rs:38-60` @ `9977b6cb…`): authored
+    /// `meta` (core emits `{}` when unset), resolved top-level `tags`
+    /// (the nested `config` mirror is deliberately not read — the #200
+    /// precedent), `BigQuery` `policy_tags` (fusion-only first-class
+    /// field; core never serializes the key), and declared
+    /// `constraints`. All fold into [`ColumnFacts`] via
+    /// [`fold_column_facts`]; fact-free columns store nothing.
+    #[serde(default)]
+    meta: Option<Value>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    policy_tags: Option<Vec<String>>,
+    #[serde(default)]
+    constraints: Option<Vec<Constraint>>,
+}
+
+/// Fold a wire column's #257 extension into a [`ColumnFacts`], dropping
+/// every unset shape (absent key, engine null-fill, core's empty `{}` /
+/// `[]`); a fact-free column yields `None` so the domain map keeps only
+/// real facts (the `column_descriptions` precedent). A non-object `meta`
+/// passes through verbatim (the untyped-passthrough posture of
+/// `config.meta`).
+fn fold_column_facts(
+    meta: Option<Value>,
+    tags: Option<Vec<String>>,
+    policy_tags: Option<Vec<String>>,
+    constraints: Option<Vec<Constraint>>,
+) -> Option<ColumnFacts> {
+    let meta = meta.filter(|m| m.as_object().is_none_or(|obj| !obj.is_empty()));
+    let facts = ColumnFacts::new(
+        meta,
+        tags.unwrap_or_default(),
+        policy_tags.unwrap_or_default(),
+        constraints.unwrap_or_default(),
+    );
+    (!facts.is_empty()).then_some(facts)
 }
 
 impl WireNodeConfig {
@@ -707,16 +792,24 @@ impl WireManifest {
             .into_iter()
             .map(|(key, wire)| {
                 let id = NodeId::new(key);
-                // One pass over the wire columns feeds both domain maps:
-                // name → data_type (the `.contract` column-set diff) and
-                // name → non-empty description (the cute-dbt#165
+                // One pass over the wire columns feeds three domain
+                // maps: name → data_type (the `.contract` column-set
+                // diff), name → non-empty description (the cute-dbt#165
                 // column-header tooltips; fusion serializes an unset
-                // description as `""`, which is dropped here).
+                // description as `""`, which is dropped here), and
+                // name → ColumnFacts (the cute-dbt#257 extension —
+                // fact-free columns store nothing).
                 let mut columns = BTreeMap::new();
                 let mut column_descriptions = BTreeMap::new();
+                let mut column_facts = BTreeMap::new();
                 for (name, col) in wire.columns {
                     if let Some(desc) = col.description.filter(|d| !d.is_empty()) {
                         column_descriptions.insert(name.clone(), desc);
+                    }
+                    if let Some(facts) =
+                        fold_column_facts(col.meta, col.tags, col.policy_tags, col.constraints)
+                    {
+                        column_facts.insert(name.clone(), facts);
                     }
                     columns.insert(name, col.data_type);
                 }
@@ -761,7 +854,18 @@ impl WireManifest {
                     version_string(wire.version),
                     version_string(wire.latest_version),
                     wire.deprecation_date,
-                );
+                )
+                // cute-dbt#257 — structure (fqn) + the contract family
+                // (model constraints, engine-inferred primary_key, the
+                // top-level contract checksum hoisted flat) + the
+                // per-column facts gathered above.
+                .with_fqn(wire.fqn.unwrap_or_default())
+                .with_contract_facts(
+                    wire.constraints.unwrap_or_default(),
+                    wire.primary_key.unwrap_or_default(),
+                    wire.contract.and_then(WireContract::checksum_string),
+                )
+                .with_column_facts(column_facts);
                 (id, node)
             })
             .collect();
@@ -919,6 +1023,7 @@ fn baseline_detail(err: &PreflightError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ConstraintKind;
 
     const V12_URL: &str = "https://schemas.getdbt.com/dbt/manifest/v12.json";
 
@@ -2624,6 +2729,259 @@ mod tests {
             checksum("model.shop.garbage"),
             Checksum::new("none", ""),
             "an unrecognizable shape degrades to the sentinel"
+        );
+    }
+
+    // ===== cute-dbt#257 — contract + column + structure wire family ====
+
+    /// cute-dbt#257: `fqn` ingests verbatim — the #262 C2 config-tree
+    /// prefix-matcher input (fusion `get_node_fqn`, `dbt-parser`
+    /// `utils.rs:132-159` @ `9977b6cb…`). Populated on every node of
+    /// both committed real fixtures; absence and an engine null-fill
+    /// both degrade to empty.
+    #[test]
+    fn parse_manifest_extracts_node_fqn() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.stg_orders": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "aa" }},
+                  "fqn": ["shop", "staging", "stg_orders"]
+                }},
+                "model.shop.unset": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "bb" }}
+                }},
+                "model.shop.null_filled": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "cc" }},
+                  "fqn": null
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        let node = |id: &str| manifest.node(&NodeId::new(id)).expect("node present");
+        assert_eq!(
+            node("model.shop.stg_orders").fqn(),
+            [
+                "shop".to_owned(),
+                "staging".to_owned(),
+                "stg_orders".to_owned()
+            ]
+        );
+        assert!(node("model.shop.unset").fqn().is_empty());
+        assert!(node("model.shop.null_filled").fqn().is_empty());
+    }
+
+    /// cute-dbt#257: model-level `constraints` + the engine-inferred
+    /// `primary_key` + the top-level contract `checksum` ingest from
+    /// the wire. The populated constraint shapes are the LIVE-PROBED
+    /// engine outputs (dbt-core 1.11.2 resolves FK `to` to the quoted
+    /// relation; fusion 2.0-preview keeps the authored `ref(...)`).
+    #[test]
+    fn parse_manifest_extracts_model_constraints_primary_key_and_contract_checksum() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.fct_encounters": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "aa" }},
+                  "constraints": [
+                    {{"type":"primary_key","name":null,"expression":null,"warn_unenforced":true,"warn_unsupported":true,"to":null,"to_columns":[],"columns":["encounter_key"]}},
+                    {{"type":"foreign_key","name":null,"expression":null,"warn_unenforced":true,"warn_unsupported":true,"to":"\"memory\".\"main_marts\".\"dim_payers\"","to_columns":["payer_key"],"columns":["payer_key"]}}
+                  ],
+                  "primary_key": ["encounter_key"],
+                  "contract": {{"enforced": true, "alias_types": true, "checksum": "0cb79927be0760dd"}}
+                }},
+                "model.shop.fusion_style": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "bb" }},
+                  "constraints": [
+                    {{"type":"foreign_key","expression":null,"name":null,"to":"ref('orders')","to_columns":["customer_id"],"columns":["customer_id"],"warn_unsupported":null,"warn_unenforced":null}}
+                  ],
+                  "primary_key": ["customer_id"],
+                  "contract": {{"alias_types": true, "enforced": true}}
+                }},
+                "model.shop.unset": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "cc" }},
+                  "constraints": [],
+                  "primary_key": [],
+                  "contract": {{"enforced": false, "alias_types": true, "checksum": null}}
+                }},
+                "model.shop.absent": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "dd" }}
+                }},
+                "model.shop.null_filled": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "ee" }},
+                  "constraints": null,
+                  "primary_key": null,
+                  "contract": null
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        let node = |id: &str| manifest.node(&NodeId::new(id)).expect("node present");
+
+        // dbt-core dialect: resolved FK `to`, warn_* siblings ignored.
+        let core = node("model.shop.fct_encounters");
+        assert_eq!(core.constraints().len(), 2);
+        assert_eq!(core.constraints()[0].kind(), ConstraintKind::PrimaryKey);
+        assert_eq!(
+            core.constraints()[0].columns(),
+            ["encounter_key".to_owned()]
+        );
+        let fk = &core.constraints()[1];
+        assert_eq!(fk.kind(), ConstraintKind::ForeignKey);
+        assert_eq!(fk.to(), Some("\"memory\".\"main_marts\".\"dim_payers\""));
+        assert_eq!(fk.to_columns(), ["payer_key".to_owned()]);
+        assert_eq!(core.primary_key(), ["encounter_key".to_owned()]);
+        assert_eq!(core.contract_checksum(), Some("0cb79927be0760dd"));
+
+        // fusion dialect: authored ref() in `to`, checksum key OMITTED
+        // even when enforced (live-verified).
+        let fusion = node("model.shop.fusion_style");
+        assert_eq!(fusion.constraints()[0].to(), Some("ref('orders')"));
+        assert_eq!(fusion.contract_checksum(), None);
+
+        // The real fixture shape: empty arrays + null checksum.
+        let unset = node("model.shop.unset");
+        assert!(unset.constraints().is_empty());
+        assert!(unset.primary_key().is_empty());
+        assert_eq!(unset.contract_checksum(), None);
+
+        // Absent keys and engine null-fills both degrade.
+        for id in ["model.shop.absent", "model.shop.null_filled"] {
+            let n = node(id);
+            assert!(n.constraints().is_empty(), "{id}");
+            assert!(n.primary_key().is_empty(), "{id}");
+            assert_eq!(n.contract_checksum(), None, "{id}");
+        }
+    }
+
+    /// cute-dbt#257: a non-string contract checksum (defensive — the
+    /// fusion type is `Option<YmlValue>`) degrades to `None`, never an
+    /// error.
+    #[test]
+    fn parse_manifest_tolerates_a_non_string_contract_checksum() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.odd": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "aa" }},
+                  "contract": {{"enforced": true, "checksum": 42}}
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("tolerant parse");
+        assert_eq!(
+            manifest
+                .node(&NodeId::new("model.shop.odd"))
+                .expect("node present")
+                .contract_checksum(),
+            None
+        );
+    }
+
+    /// cute-dbt#257: the column-level extension (meta / tags /
+    /// `policy_tags` / constraints) folds into [`ColumnFacts`], keeping
+    /// only columns with at least one fact. The populated entry is the
+    /// live-probed wire shape (core mirrors meta/tags under the
+    /// column's `config` — the nested copy is deliberately not read,
+    /// the #200 top-level-tags precedent); the unset entry is the
+    /// verbatim dbt-core fixture shape (`meta: {{}}`, `tags: []`,
+    /// `constraints: []`, no `policy_tags` key). fusion null-fills
+    /// `policy_tags` on undeclared columns.
+    #[test]
+    fn parse_manifest_extracts_column_facts_and_drops_factless_columns() {
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.dim_payers": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "aa" }},
+                  "columns": {{
+                    "payer_key": {{
+                      "name": "payer_key",
+                      "description": "Surrogate key",
+                      "meta": {{"pii": false, "owner": "clinical-quality"}},
+                      "data_type": null,
+                      "constraints": [{{"type":"not_null","name":null,"expression":null,"warn_unenforced":true,"warn_unsupported":true,"to":null,"to_columns":[]}}],
+                      "quote": null,
+                      "config": {{"meta": {{"pii": false}}, "tags": ["dimension_key"]}},
+                      "tags": ["dimension_key"],
+                      "granularity": null,
+                      "doc_blocks": []
+                    }},
+                    "governed": {{
+                      "name": "governed",
+                      "policy_tags": ["projects/example/locations/us/taxonomies/1/policyTags/2"]
+                    }},
+                    "factless": {{
+                      "name": "factless",
+                      "description": "Documented but fact-free",
+                      "meta": {{}},
+                      "data_type": "integer",
+                      "constraints": [],
+                      "tags": [],
+                      "policy_tags": null
+                    }}
+                  }}
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        let node = manifest
+            .node(&NodeId::new("model.shop.dim_payers"))
+            .expect("node present");
+
+        let payer = node
+            .column_facts()
+            .get("payer_key")
+            .expect("facts stored for the populated column");
+        assert_eq!(
+            payer.meta().and_then(|m| m.get("owner")),
+            Some(&serde_json::json!("clinical-quality"))
+        );
+        assert_eq!(payer.tags(), ["dimension_key".to_owned()]);
+        assert!(payer.policy_tags().is_empty());
+        assert_eq!(payer.constraints()[0].kind(), ConstraintKind::NotNull);
+
+        let governed = node
+            .column_facts()
+            .get("governed")
+            .expect("policy_tags alone is a fact");
+        assert_eq!(
+            governed.policy_tags(),
+            ["projects/example/locations/us/taxonomies/1/policyTags/2".to_owned()]
+        );
+
+        assert!(
+            !node.column_facts().contains_key("factless"),
+            "core's empty-meta/empty-tags/empty-constraints shape stores nothing"
+        );
+        // The pre-#257 column surfaces are untouched by the extension.
+        assert_eq!(
+            node.columns().get("factless"),
+            Some(&Some("integer".to_owned()))
+        );
+        assert_eq!(
+            node.column_descriptions()
+                .get("factless")
+                .map(String::as_str),
+            Some("Documented but fact-free")
         );
     }
 
