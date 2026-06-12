@@ -1131,7 +1131,16 @@ fn validate_reversible(lines: &[&str], sorted: &[&Hunk]) -> Result<(), ReverseAp
             claimed_through = claimed_through.max(new_start);
             continue;
         }
-        if new_start == 0 || new_start + h.new_len - 1 > lines.len() {
+        // Overflow-proof bounds check (Gemini review on cute-dbt#266):
+        // the naive `new_start + h.new_len - 1 > lines.len()` adds in
+        // usize BEFORE comparing, so a malformed/malicious hunk with
+        // `new_start` near `usize::MAX` overflows — a debug panic
+        // ("cute-dbt never panics on a bad diff"). Subtraction form:
+        // `h.new_len > lines.len()` guards the later
+        // `lines.len() - h.new_len`, and `new_start - 1` is safe after
+        // the `new_start == 0` test. Algebraically equivalent to the
+        // additive form everywhere both are defined.
+        if new_start == 0 || h.new_len > lines.len() || new_start - 1 > lines.len() - h.new_len {
             return Err(ReverseApplyError::OutOfBounds { new_start });
         }
         if new_start <= claimed_through {
@@ -3331,6 +3340,34 @@ mod tests {
         assert_eq!(
             reverse_apply("a\nb\n", &[h]),
             Err(ReverseApplyError::OutOfBounds { new_start: 9 }),
+        );
+    }
+
+    #[test]
+    fn reverse_apply_rejects_a_near_usize_max_footprint_without_overflow() {
+        // Gemini review on cute-dbt#266: the additive bounds form
+        // (`new_start + new_len - 1`) overflows usize on a malformed /
+        // malicious hunk with a huge line number — a debug panic
+        // ("cute-dbt never panics on a bad diff"). The subtraction-form
+        // check must return Err(OutOfBounds), never panic. Runs under
+        // the default debug profile (overflow-checks on), so a
+        // regression to additive arithmetic fails this test by panic.
+        for new_start in [usize::MAX, usize::MAX - 1] {
+            let h = full_hunk(new_start, &["was"], &["x"]);
+            assert_eq!(
+                reverse_apply("a\nb\n", std::slice::from_ref(&h)),
+                Err(ReverseApplyError::OutOfBounds { new_start }),
+                "a near-usize::MAX footprint must degrade, never overflow",
+            );
+        }
+        // The multi-line shape overflows the additive form even harder
+        // (new_start + new_len wraps twice past zero).
+        let wide = full_hunk(usize::MAX, &["was"], &["x", "y"]);
+        assert_eq!(
+            reverse_apply("a\nb\n", &[wide]),
+            Err(ReverseApplyError::OutOfBounds {
+                new_start: usize::MAX
+            }),
         );
     }
 
