@@ -85,6 +85,14 @@ fn working_tree_has_no_project_yml(world: &mut World) {
     let _ = std::fs::remove_file(workdir.join("dbt_project.yml"));
 }
 
+#[given("the experimental switch enables project-state")]
+fn experimental_switch_enables_project_state(world: &mut World) {
+    // cute-dbt#291: the project-state family is default-OFF; scenarios
+    // asserting its surfaces opt in exactly like a consumer would —
+    // through the CUTE_DBT_EXPERIMENTAL env surface on the subprocess.
+    world.experimental_env = Some("project-state".to_owned());
+}
+
 #[given(regex = r#"^the PR diff edits the project var "([^"]+)" from (\d+) to (\d+)$"#)]
 fn diff_edits_var(world: &mut World, var: String, old: String, new: String) {
     // Line 5 of the canonical file: the `+` side must byte-match it.
@@ -345,21 +353,21 @@ fn run_pr_diff_arm(world: &mut World) {
     common::clear(&out);
 
     let scope_arg = format!("@{}", common::s(&patch_path));
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"))
-        .args([
-            "report",
-            "--manifest",
-            common::s(&manifest_path),
-            "--pr-diff",
-            &scope_arg,
-            "--project-root",
-            ".",
-            "--out",
-            common::s(&out),
-        ])
-        .current_dir(&workdir)
-        .output()
-        .expect("the cute-dbt binary spawns");
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
+    cmd.args([
+        "report",
+        "--manifest",
+        common::s(&manifest_path),
+        "--pr-diff",
+        &scope_arg,
+        "--project-root",
+        ".",
+        "--out",
+        common::s(&out),
+    ])
+    .current_dir(&workdir);
+    apply_experimental_env(world, &mut cmd);
+    let output = cmd.output().expect("the cute-dbt binary spawns");
     capture(world, output, out);
 }
 
@@ -381,22 +389,32 @@ fn run_baseline_arm(world: &mut World) {
     let out = common::tmp("project_def_report.html");
     common::clear(&out);
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"))
-        .args([
-            "report",
-            "--manifest",
-            common::s(&manifest_path),
-            "--baseline-manifest",
-            common::s(&baseline_path),
-            "--project-root",
-            ".",
-            "--out",
-            common::s(&out),
-        ])
-        .current_dir(&workdir)
-        .output()
-        .expect("the cute-dbt binary spawns");
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
+    cmd.args([
+        "report",
+        "--manifest",
+        common::s(&manifest_path),
+        "--baseline-manifest",
+        common::s(&baseline_path),
+        "--project-root",
+        ".",
+        "--out",
+        common::s(&out),
+    ])
+    .current_dir(&workdir);
+    apply_experimental_env(world, &mut cmd);
+    let output = cmd.output().expect("the cute-dbt binary spawns");
     capture(world, output, out);
+}
+
+/// cute-dbt#291: scrub the ambient `CUTE_DBT_EXPERIMENTAL` (a
+/// developer's shell opt-in must never leak into a scenario), then arm
+/// the value the experimental-switch Given chose, if any.
+fn apply_experimental_env(world: &World, cmd: &mut std::process::Command) {
+    cmd.env_remove("CUTE_DBT_EXPERIMENTAL");
+    if let Some(value) = &world.experimental_env {
+        cmd.env("CUTE_DBT_EXPERIMENTAL", value);
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -571,6 +589,20 @@ fn payload_carries_definition(world: &mut World) {
         def["vars"]["dq_threshold"],
         Value::from(5),
         "standing metadata must carry the parsed vars",
+    );
+}
+
+#[then("the payload carries no parsed project definition")]
+fn payload_carries_no_definition(world: &mut World) {
+    // cute-dbt#291: with project-state off the STANDING metadata is
+    // gated too (the gate-everything Discovery call) — the default
+    // payload must not embed anything parsed from dbt_project.yml.
+    let payload = payload(world);
+    assert!(
+        payload.get("project_definition").is_none(),
+        "the default (project-state off) payload must not embed standing \
+         dbt_project.yml metadata; got {}",
+        payload["project_definition"],
     );
 }
 

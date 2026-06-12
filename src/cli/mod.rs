@@ -61,11 +61,11 @@ use crate::adapters::render::{
 };
 use crate::domain::{
     BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_REPORT_TITLE, EnabledExperiments,
-    FixtureTableDiff, HeuristicId, InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome,
-    NamedTableDiff, NormalizedDiffIndex, PreflightError, ProjectChangePanel, ProjectFacts,
-    ProjectFallbackReason, ScopeInput, ScopeSelection, SuppressRule, SuppressionSource, UnitTest,
-    UnitTestDataDiff, UnitTestYamlBlock, VarReference, all_models, attach_hook_facts,
-    attach_model_yaml_diffs, attach_var_facts, attribute_config_tree_changes,
+    Experiment, FixtureTableDiff, HeuristicId, InScopeSet, Manifest, ModelInScopeSet,
+    ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex, PreflightError, ProjectChangePanel,
+    ProjectFacts, ProjectFallbackReason, ScopeInput, ScopeSelection, SuppressRule,
+    SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock, VarReference, all_models,
+    attach_hook_facts, attach_model_yaml_diffs, attach_var_facts, attribute_config_tree_changes,
     attribute_var_changes, changed_models, check_by_id, diff_project_definitions,
     effective_fixture_format, external_fixture_table, extract_model_block, extract_unit_test_block,
     hook_operations, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
@@ -170,34 +170,45 @@ impl RunError {
 /// only on the `--baseline-manifest` path; the `--pr-diff`
 /// path needs no baseline. `gather_project_facts` runs before scope
 /// selection because a categorized `dbt_project.yml` config-tree edit
-/// widens the selection (cute-dbt#267). `?` short-circuits before
+/// widens the selection (cute-dbt#267) — and runs at all only when the
+/// `project-state` experiment is enabled (cute-dbt#291): the default
+/// run passes default-empty [`ProjectFacts`], so nothing project-state
+/// renders and nothing widens. `?` short-circuits before
 /// `render`, so a fail-closed manifest never produces a partial
 /// `report.html`.
 fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     let current = load_current(args)?;
     let scope_input = resolve_scope_input(args)?;
-    // Project-definition facts (cute-dbt#266): parse the working-tree
-    // dbt_project.yml whenever it is present — STANDING metadata, both
-    // scope arms (the founder's parse-always posture; the parsed model
-    // rides the payload for future consumers). The categorized
-    // "Project definition changed" panel is the diff-gated consumer: on
-    // the PrDiff arm, when dbt_project.yml is in the diff, the old side
-    // is reconstructed by reverse-applying the file's own hunks
-    // (drift-guarded) and the structural diff categorizes the change;
-    // every degrade arm falls back to the Shape-A raw-diff row.
-    // Fail-open: report generation NEVER fails because of this file.
+    // Experimental switch (cute-dbt#289, epic #288): the resolved
+    // TOML ∪ env opt-in set. Its first consumer is the project-state
+    // gate below (cute-dbt#291).
+    let experiments = resolve_enabled_experiments(args);
+    // Project-definition facts (cute-dbt#266), gated behind the
+    // `project-state` experiment (cute-dbt#291 — the epic #288
+    // default-OFF posture; founder 2026-06-12). Enabled: parse the
+    // working-tree dbt_project.yml whenever it is present — standing
+    // metadata, both scope arms; the categorized "Project definition
+    // changed" panel is the diff-gated consumer (PrDiff arm reconstructs
+    // the old side by reverse-applying the file's own hunks,
+    // drift-guarded; every degrade arm falls back to the Shape-A
+    // raw-diff row; fail-open — report generation NEVER fails because
+    // of this file). Default (off): default-empty `ProjectFacts` — the
+    // STANDING `definition` metadata is gated too, not kept (the
+    // cute-dbt#291 Discovery call): the default report is byte-identical
+    // to pre-#262 output and dbt_project.yml contributes zero bytes
+    // (pinned by `project_state_off_dbt_project_yml_contributes_zero_
+    // bytes` in tests/run_loop.rs), which also keeps the default path
+    // zero-compute (no file read, no YAML parse). Render reproduces the
+    // pre-#266 payload byte-for-byte on default facts and the empty
+    // attribution map makes the cute-dbt#267 widening below a no-op —
+    // the gate reuses both seams instead of forking the template.
     // Gathered BEFORE scope selection since cute-dbt#267: a categorized
     // config-tree edit carries per-model attributions that widen scope.
-    let project_facts = gather_project_facts(args, &current, &scope_input);
-    // Experimental switch (cute-dbt#289, epic #288): the resolved
-    // TOML ∪ env opt-in set, bound ahead of its first consumers — the
-    // project-state gate (cute-dbt#291) reads it HERE to gate the
-    // cute-dbt#267 widening below and the project-state facts handed to
-    // render. Mechanism-only in this slice (named no-op scaffolding,
-    // the `parse_ctes` precedent): nothing consumes the binding yet, so
-    // it is underscore-prefixed; resolution itself is unit-tested
-    // directly (`resolve_enabled_experiments`).
-    let _experiments = resolve_enabled_experiments(args);
+    let project_facts = if experiments.is_enabled(Experiment::ProjectState) {
+        gather_project_facts(args, &current, &scope_input)
+    } else {
+        ProjectFacts::default()
+    };
     // Config-tree scope widening (cute-dbt#267): models whose fqn falls
     // under an edited `models:` subtree (fusion's get_config_for_fqn
     // prefix descent — TOTAL tier, by-definition change) join the
@@ -752,6 +763,10 @@ const DBT_PROJECT_YML: &str = "dbt_project.yml";
 /// on the `PrDiff` arm, build the categorized project-change panel plus
 /// the per-model config-tree attributions (cute-dbt#267 — the scope
 /// widening input, computed only when the panel categorized).
+///
+/// Called by the run loop only when the `project-state` experiment is
+/// enabled (cute-dbt#291): the default run substitutes
+/// [`ProjectFacts::default()`] without reading the file at all.
 ///
 /// Same project-root resolution as [`gather_authoring_yaml`]. With no
 /// resolvable root nothing can be read: standing metadata stays `None`,

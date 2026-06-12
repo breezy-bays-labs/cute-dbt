@@ -60,6 +60,9 @@ jobs:
             baseline: tests/fixtures/jaffle-shop-baseline.json
             pr_diff: ""
             project_root: ""
+            # cute-dbt#291: default posture — project-state stays off
+            # (an empty CUTE_DBT_EXPERIMENTAL is a no-op by contract).
+            experimental: ""
           - name: playground
             current: tests/fixtures/playground-current.json
             baseline: tests/fixtures/playground-baseline.json
@@ -68,6 +71,9 @@ jobs:
             # Source YAML lives in-repo so the regenerated report
             # populates the Authoring-YAML drawer (cute-dbt#69).
             project_root: tests/fixtures/playground-source
+            # cute-dbt#291: default posture — the committed playground
+            # golden carries no project-state bytes.
+            experimental: ""
           # cute-dbt#134 — the durable diff-view showcase (a GOLDEN example,
           # committed + byte-identity gated — NOT the live dogfood preview),
           # mirrored from ci.yml's example-report-check. Renders in --pr-diff
@@ -78,6 +84,10 @@ jobs:
             baseline: ""
             pr_diff: tests/fixtures/playground-pr-diff.patch
             project_root: tests/fixtures/playground-source
+            # cute-dbt#291 — the showcase opts INTO the experimental
+            # project-state family (the epic #288 golden policy), mirrored
+            # from ci.yml's example-report-check diff-showcase row.
+            experimental: "1"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -95,6 +105,9 @@ jobs:
           BASELINE: ${{ matrix.baseline }}
           PR_DIFF: ${{ matrix.pr_diff }}
           PROJECT_ROOT: ${{ matrix.project_root }}
+          # cute-dbt#291: the report binary reads this directly (clap
+          # env-fallback); empty = every experiment off, by contract.
+          CUTE_DBT_EXPERIMENTAL: ${{ matrix.experimental }}
         run: |
           set -euo pipefail
           mkdir -p target/report-preview
@@ -266,6 +279,13 @@ jobs:
         # working-tree source — what makes the inline SQL diff (#111) and
         # block-precise updated-test detection (#96) trustworthy. The
         # `@`-prefix tells cute-dbt to read the diff from the file.
+        env:
+          # cute-dbt#291 — the live dogfood opts INTO the experimental
+          # project-state family (the epic #288 golden policy): a PR
+          # editing dbt-project/dbt_project.yml keeps its panel/chips
+          # visible on the sticky preview even though the family is
+          # default-OFF for consumers.
+          CUTE_DBT_EXPERIMENTAL: "1"
         run: |
           set -euo pipefail
           cargo run --quiet --locked --bin cute-dbt -- report \

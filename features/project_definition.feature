@@ -3,6 +3,13 @@
 # never silently invisible — the report categorizes the edit (vars /
 # config tree / dispatch / hooks / paths / identity / other) or shows the
 # explicit raw-diff fallback; report generation never fails on this file.
+#
+# cute-dbt#291 (epic #288): the whole project-state family is gated
+# behind the `project-state` experiment, default OFF — every scenario
+# asserting its surfaces opts in via the experimental-switch Given
+# (CUTE_DBT_EXPERIMENTAL on the subprocess); the switch-off scenarios at
+# the bottom pin the default posture (no panel, no chips, no standing
+# metadata, no widening).
 Feature: Project-definition changes are categorized, never silently invisible
   As a PR reviewer
   I want a dbt_project.yml edit called out and categorized in the report
@@ -14,6 +21,7 @@ Feature: Project-definition changes are categorized, never silently invisible
   Scenario: A vars edit renders a categorized vars row with the honest blast-radius copy
     Given the working tree carries the canonical dbt_project.yml
     And the PR diff edits the project var "dq_threshold" from 10 to 5
+    And the experimental switch enables project-state
     When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
     Then the exit code is 0
     And the report carries the project-definition panel
@@ -34,6 +42,7 @@ Feature: Project-definition changes are categorized, never silently invisible
     Given the current manifest carries models referencing the project var at every tier
     And the working tree carries the canonical dbt_project.yml
     And the PR diff edits the project var "dq_threshold" from 10 to 5
+    And the experimental switch enables project-state
     When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
     Then the exit code is 0
     And the panel's vars row lists "at least 1 model reads this var directly in SQL: mart_dq"
@@ -49,6 +58,7 @@ Feature: Project-definition changes are categorized, never silently invisible
     Given the current manifest carries models referencing the project var at every tier
     And the working tree carries the canonical dbt_project.yml
     And the PR diff edits the project var "dq_threshold" from 10 to 5 and the direct reader's SQL
+    And the experimental switch enables project-state
     When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
     Then the exit code is 0
     And the payload carries the model "mart_dq" in scope
@@ -60,6 +70,7 @@ Feature: Project-definition changes are categorized, never silently invisible
     And the manifest unit test "test_mart_dq_rows" pins the var "dq_threshold" in overrides
     And the working tree carries the canonical dbt_project.yml
     And the PR diff edits the project var "dq_threshold" from 10 to 5
+    And the experimental switch enables project-state
     When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
     Then the exit code is 0
     And the vars row notes "1 unit test pins this var in overrides.vars and is insulated from this edit (the override always wins): test_mart_dq_rows"
@@ -67,6 +78,7 @@ Feature: Project-definition changes are categorized, never silently invisible
   Scenario: A folder config edit renders a categorized config-tree row
     Given the working tree carries the canonical dbt_project.yml
     And the PR diff edits the marts folder materialization from "view" to "table"
+    And the experimental switch enables project-state
     When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
     Then the exit code is 0
     And the panel carries a "config tree" row for "models.bdd_project.marts: +materialized" showing "view" then "table"
@@ -74,6 +86,7 @@ Feature: Project-definition changes are categorized, never silently invisible
   Scenario: A stale dbt_project.yml hunk degrades to the explicit raw-diff fallback
     Given the working tree carries the canonical dbt_project.yml
     And the PR diff claims a dbt_project.yml line that does not match the working tree
+    And the experimental switch enables project-state
     When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
     Then the exit code is 0
     And the report carries the project-definition panel
@@ -82,13 +95,15 @@ Feature: Project-definition changes are categorized, never silently invisible
   Scenario: dbt_project.yml in the diff but absent from the project root renders the absence note
     Given the working tree has no dbt_project.yml
     And the PR diff edits the project var "dq_threshold" from 10 to 5
+    And the experimental switch enables project-state
     When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
     Then the exit code is 0
     And the report carries the project-definition panel
     And the panel shows the raw-diff fallback stating "could not be read from the project root"
 
-  Scenario: Baseline mode parses standing metadata and renders no panel
+  Scenario: Baseline mode with the switch on parses standing metadata and renders no panel
     Given the working tree carries the canonical dbt_project.yml
+    And the experimental switch enables project-state
     When I run cute-dbt report with --manifest current.json --baseline-manifest baseline.json --project-root . --out report.html
     Then the exit code is 0
     And the payload carries the parsed project definition
@@ -103,6 +118,7 @@ Feature: Project-definition changes are categorized, never silently invisible
     Given the current manifest carries a marts model "fct_daily" and a staging model "stg_raw" with fqns
     And the working tree carries the canonical dbt_project.yml
     And the PR diff edits the marts folder materialization from "view" to "table"
+    And the experimental switch enables project-state
     When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
     Then the exit code is 0
     And the payload carries the model "fct_daily" in scope
@@ -115,6 +131,7 @@ Feature: Project-definition changes are categorized, never silently invisible
     Given the current manifest carries a marts model "fct_daily" and a staging model "stg_raw" with fqns
     And the working tree carries the canonical dbt_project.yml
     And the PR diff edits the project-level materialization from "ephemeral" to "view"
+    And the experimental switch enables project-state
     When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
     Then the exit code is 0
     And the payload carries the model "stg_raw" in scope
@@ -130,6 +147,7 @@ Feature: Project-definition changes are categorized, never silently invisible
     Given the working tree carries the canonical dbt_project.yml
     And the current manifest carries the matching on-run-start operation node
     And the PR diff rewrites the on-run-start hook from a revoke statement
+    And the experimental switch enables project-state
     When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
     Then the exit code is 0
     And the panel carries a "hooks" row for "on-run-start" with the hook-diff slot
@@ -139,6 +157,7 @@ Feature: Project-definition changes are categorized, never silently invisible
   Scenario: A hook edit with no operation nodes states the absent-manifest note
     Given the working tree carries the canonical dbt_project.yml
     And the PR diff rewrites the on-run-start hook from a revoke statement
+    And the experimental switch enables project-state
     When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
     Then the exit code is 0
     And that row's note contains "no matching operation.* nodes in the manifest"
@@ -147,8 +166,33 @@ Feature: Project-definition changes are categorized, never silently invisible
   Scenario: A dispatch reorder renders the UNKNOWN-tier banner row
     Given the working tree carries the canonical dbt_project.yml
     And the PR diff reorders the dispatch search order
+    And the experimental switch enables project-state
     When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
     Then the exit code is 0
     And the panel carries the dispatch banner row at the UNKNOWN tier
     And that row's note contains "macro search order changed"
     And that row's note contains "no call-site resolution was attempted"
+
+  # cute-dbt#291 — the default posture (epic #288): without the
+  # experimental switch the SAME inputs render no panel, no provenance
+  # chips, no standing metadata — and crucially widen NOTHING into
+  # scope. The standing `definition` metadata is gated too (the
+  # gate-everything Discovery call): dbt_project.yml contributes zero
+  # bytes to the default report.
+  Scenario: With the switch off a config-tree edit renders no panel and widens nothing
+    Given the current manifest carries a marts model "fct_daily" and a staging model "stg_raw" with fqns
+    And the working tree carries the canonical dbt_project.yml
+    And the PR diff edits the marts folder materialization from "view" to "table"
+    When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the report carries no project-definition panel
+    And the payload carries no model "fct_daily"
+    And the payload carries no model "stg_raw"
+    And the payload carries no parsed project definition
+
+  Scenario: With the switch off baseline mode embeds no standing metadata
+    Given the working tree carries the canonical dbt_project.yml
+    When I run cute-dbt report with --manifest current.json --baseline-manifest baseline.json --project-root . --out report.html
+    Then the exit code is 0
+    And the report carries no project-definition panel
+    And the payload carries no parsed project definition

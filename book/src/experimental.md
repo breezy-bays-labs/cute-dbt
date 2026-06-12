@@ -66,3 +66,27 @@ Experiments graduate by becoming default behavior (the id then
 disappears from the vocabulary) — opting in early is how you preview
 them and how the feedback loop runs. Because v0.x is explicitly
 unstable, ids may appear and graduate between minor versions.
+
+### What `project-state` gates
+
+With the switch **off** (the default), the report behaves as if
+`dbt_project.yml` did not exist — the file is not read at all and
+contributes **zero bytes** to the output:
+
+- no "Project definition changed" panel (neither the categorized nor
+  the raw-diff fallback variant),
+- no per-model provenance chips, vars tiers, hooks rows, or dispatch
+  banner,
+- **no config-tree scope widening** — models under an edited
+  `models:` subtree do not join the report scope (widening is scope
+  *behavior*, not presentation: widened models render full cards and
+  participate in the compiled-SQL pre-flight, which is why this is a
+  generation-time gate and not a display toggle),
+- no standing `project_definition` metadata in the report payload —
+  the *standing metadata is gated with the rest of the family*, so a
+  default report is byte-identical whether or not the project root
+  carries a `dbt_project.yml`.
+
+With the switch **on**, all of the above render exactly as before the
+switch existed — opting in previews precisely what graduation would
+make default.

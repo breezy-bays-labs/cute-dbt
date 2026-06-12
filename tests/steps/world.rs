@@ -213,6 +213,13 @@ pub struct World {
     /// prepared; the explore `When` passes it verbatim as `@<path>`
     /// instead of synthesizing one.
     pub explore_explicit_patch: Option<PathBuf>,
+
+    /// cute-dbt#291: the `CUTE_DBT_EXPERIMENTAL` value the experimental-
+    /// switch Given arms for the subprocess run. `None` ⇒ the default
+    /// (every experiment off); the `When` arms always scrub the ambient
+    /// variable first so a developer's shell can never leak an opt-in
+    /// into a scenario.
+    pub experimental_env: Option<String>,
 }
 
 /// A cute-dbt#200 data-contract scenario plan — described/tagged models,
