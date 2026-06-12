@@ -46,7 +46,10 @@ path = "src/lib.rs"
 #   headless_chrome -> PR 9 (zero-egress test) — landed
 [dependencies]
 askama = { version = "0.16", features = ["serde_json"] }
-clap = { version = "4", features = ["derive"] }
+# `env` (cute-dbt#289): the CUTE_DBT_EXPERIMENTAL override is read via
+# clap's env-fallback on a hidden `report` arg, so an invalid value is
+# a clap usage error (exit 2) exactly like the `[experimental]` TOML arm.
+clap = { version = "4", features = ["derive", "env"] }
 # dbt_project.yml ingestion (cute-dbt#266): dbt Labs' published fork of
 # serde-yaml — the exact parser dbt-fusion ships (~31 fusion crates),
 # so anchor/alias resolution, merge-key (`<<:`) semantics, and

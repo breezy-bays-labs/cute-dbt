@@ -39,6 +39,18 @@ fn run(args: &[&str]) -> Output {
         .expect("the cute-dbt binary spawns")
 }
 
+/// Run the `cute-dbt` binary with `args` and `CUTE_DBT_EXPERIMENTAL`
+/// set to `value` (cute-dbt#289). Subprocess env is the only safe way
+/// to exercise clap's env-fallback — process env is global state and
+/// `unsafe_code = "forbid"` rules out `std::env::set_var` in-process.
+fn run_with_experimental_env(args: &[&str], value: &str) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_cute-dbt"))
+        .args(args)
+        .env("CUTE_DBT_EXPERIMENTAL", value)
+        .output()
+        .expect("the cute-dbt binary spawns")
+}
+
 /// Stringify a path argument (every test path is valid UTF-8).
 fn s(path: &Path) -> &str {
     path.to_str().expect("test paths are valid UTF-8")
@@ -91,6 +103,115 @@ fn a_non_empty_diff_writes_a_report() {
     assert!(
         html.contains("in scope"),
         "the diff-scope banner is present: {html}"
+    );
+}
+
+#[test]
+fn an_unknown_experimental_env_value_is_a_usage_error() {
+    // cute-dbt#289: CUTE_DBT_EXPERIMENTAL fails closed exactly like the
+    // [experimental] TOML arm — an unknown id is a clap usage error
+    // (exit 2) with remediation naming the closed vocabulary, raised
+    // before any manifest is read.
+    let baseline = fixture("jaffle-shop-baseline.json");
+    let out = tmp("experimental_bogus_env.html");
+    clear(&out);
+    let output = run_with_experimental_env(
+        &[
+            "report",
+            "--manifest",
+            s(&baseline),
+            "--baseline-manifest",
+            s(&baseline),
+            "--out",
+            s(&out),
+        ],
+        "projcet-state",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an unknown experiment id is a usage error: {output:?}"
+    );
+    assert!(!out.exists(), "no report.html is written on a usage error");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("projcet-state"),
+        "stderr names the offending entry: {stderr}",
+    );
+    assert!(
+        stderr.contains("project-state"),
+        "stderr names the known experiment ids: {stderr}",
+    );
+}
+
+#[test]
+fn an_enabled_experimental_env_value_changes_nothing_in_this_slice() {
+    // cute-dbt#289 is mechanism-only: the resolved set threads through
+    // the run loop but nothing consumes it yet, so an opted-in render
+    // is byte-identical to the default. The first consumer is the
+    // project-state gate (cute-dbt#291) — on fixtures that emit
+    // project-state surfaces this assertion legitimately flips there
+    // (the DEFAULT side will drop them); this fixture has no
+    // dbt_project.yml beside it, so the equality should outlive #291.
+    let baseline = fixture("jaffle-shop-baseline.json");
+    let default_out = tmp("experimental_default.html");
+    let opted_out_path = tmp("experimental_opted.html");
+    clear(&default_out);
+    clear(&opted_out_path);
+    let default_run = run(&[
+        "report",
+        "--manifest",
+        s(&baseline),
+        "--baseline-manifest",
+        s(&baseline),
+        "--out",
+        s(&default_out),
+    ]);
+    assert!(default_run.status.success(), "{default_run:?}");
+    let opted_run = run_with_experimental_env(
+        &[
+            "report",
+            "--manifest",
+            s(&baseline),
+            "--baseline-manifest",
+            s(&baseline),
+            "--out",
+            s(&opted_out_path),
+        ],
+        "1",
+    );
+    assert!(opted_run.status.success(), "{opted_run:?}");
+    let default_html = std::fs::read_to_string(&default_out).expect("default report written");
+    let opted_html = std::fs::read_to_string(&opted_out_path).expect("opted report written");
+    assert_eq!(
+        default_html, opted_html,
+        "the switch is mechanism-only in cute-dbt#289: no byte changes",
+    );
+}
+
+#[test]
+fn the_experimental_env_var_is_inert_on_explore() {
+    // The founder call (epic #288): explore ships ungated. The env var
+    // is read through a report-only clap arg, so even a bogus value
+    // must not fail the explore verb.
+    let out_dir = tmp("experimental_explore_out");
+    let output = run_with_experimental_env(
+        &[
+            "explore",
+            "--manifest",
+            s(&fixture("jaffle-shop-current.json")),
+            "--out-dir",
+            s(&out_dir),
+        ],
+        "definitely-not-an-experiment",
+    );
+    assert!(
+        output.status.success(),
+        "explore ignores CUTE_DBT_EXPERIMENTAL entirely: {output:?}"
+    );
+    assert!(
+        out_dir.join("dag.html").exists(),
+        "the explorer pages were written"
     );
 }
 

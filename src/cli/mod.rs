@@ -60,18 +60,18 @@ use crate::adapters::render::{
     render_report_with_externals,
 };
 use crate::domain::{
-    BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_REPORT_TITLE, FixtureTableDiff, HeuristicId,
-    InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex,
-    PreflightError, ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ScopeInput,
-    ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock,
-    VarReference, all_models, attach_hook_facts, attach_model_yaml_diffs, attach_var_facts,
-    attribute_config_tree_changes, attribute_var_changes, changed_models, check_by_id,
-    diff_project_definitions, effective_fixture_format, external_fixture_table,
-    extract_model_block, extract_unit_test_block, hook_operations, preflight_compiled,
-    raw_hunk_lines, reconstruct_block_diffs, reconstruct_external_fixture_diff,
-    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks,
-    resolve_check_policy, reverse_apply, scan_pragmas, select_in_scope,
-    widen_with_config_attributions,
+    BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_REPORT_TITLE, EnabledExperiments,
+    FixtureTableDiff, HeuristicId, InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome,
+    NamedTableDiff, NormalizedDiffIndex, PreflightError, ProjectChangePanel, ProjectFacts,
+    ProjectFallbackReason, ScopeInput, ScopeSelection, SuppressRule, SuppressionSource, UnitTest,
+    UnitTestDataDiff, UnitTestYamlBlock, VarReference, all_models, attach_hook_facts,
+    attach_model_yaml_diffs, attach_var_facts, attribute_config_tree_changes,
+    attribute_var_changes, changed_models, check_by_id, diff_project_definitions,
+    effective_fixture_format, external_fixture_table, extract_model_block, extract_unit_test_block,
+    hook_operations, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
+    reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
+    refine_changed_by_hunks, resolve_check_policy, resolve_experimental_config, reverse_apply,
+    scan_pragmas, select_in_scope, widen_with_config_attributions,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -189,6 +189,15 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     // Gathered BEFORE scope selection since cute-dbt#267: a categorized
     // config-tree edit carries per-model attributions that widen scope.
     let project_facts = gather_project_facts(args, &current, &scope_input);
+    // Experimental switch (cute-dbt#289, epic #288): the resolved
+    // TOML ∪ env opt-in set, bound ahead of its first consumers — the
+    // project-state gate (cute-dbt#291) reads it HERE to gate the
+    // cute-dbt#267 widening below and the project-state facts handed to
+    // render. Mechanism-only in this slice (named no-op scaffolding,
+    // the `parse_ctes` precedent): nothing consumes the binding yet, so
+    // it is underscore-prefixed; resolution itself is unit-tested
+    // directly (`resolve_enabled_experiments`).
+    let _experiments = resolve_enabled_experiments(args);
     // Config-tree scope widening (cute-dbt#267): models whose fqn falls
     // under an edited `models:` subtree (fusion's get_config_for_fqn
     // prefix descent — TOTAL tier, by-definition change) join the
@@ -1065,6 +1074,26 @@ fn build_check_policy(
     policy
 }
 
+/// Resolve the experimental opt-in set (cute-dbt#289, epic #288):
+/// enabled = `[experimental]` TOML set ∪ `CUTE_DBT_EXPERIMENTAL` env
+/// set.
+///
+/// Both arms were already validated at parse time — the TOML by the
+/// `--config` value-parser
+/// ([`crate::adapters::config_reader::load_config`]), the env value by
+/// the clap env-fallback value-parser on
+/// [`args::ReportArgs::experimental`] — so re-resolving here cannot
+/// fail; the `expect` pins that invariant for any future caller
+/// constructing [`Cli`] by hand (the [`build_check_policy`] posture).
+fn resolve_enabled_experiments(args: &ReportArgs) -> EnabledExperiments {
+    let toml = args.config.as_ref().map_or_else(Default::default, |c| {
+        resolve_experimental_config(&c.experimental)
+            .expect("[experimental] was validated by the --config value-parser at parse time")
+    });
+    let env = args.experimental.clone().unwrap_or_default();
+    EnabledExperiments::from_union(&toml, &env)
+}
+
 /// Emit a stderr note for an inline pragma naming an unknown check id
 /// (cute-dbt#171). The pragma is inert — without this note a typo'd id
 /// would silently suppress nothing while the author believes it does.
@@ -1247,6 +1276,7 @@ mod tests {
             project_root: None,
             pr_diff: None,
             modified_selectors: Vec::new(),
+            experimental: None,
         }
     }
 
@@ -1278,6 +1308,7 @@ mod tests {
                 subtitle: Some("PR 1234".to_owned()),
             },
             checks: crate::domain::ChecksConfig::default(),
+            experimental: crate::domain::ExperimentalConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, DEFAULT_REPORT_TITLE);
@@ -1293,6 +1324,7 @@ mod tests {
                 subtitle: Some("PR 1234 / staging diff".to_owned()),
             },
             checks: crate::domain::ChecksConfig::default(),
+            experimental: crate::domain::ExperimentalConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, "Q3 review");
@@ -1308,6 +1340,7 @@ mod tests {
                 subtitle: None,
             },
             checks: crate::domain::ChecksConfig::default(),
+            experimental: crate::domain::ExperimentalConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, "title-only");
@@ -1352,6 +1385,7 @@ mod tests {
         cli.config = Some(crate::domain::AnalysisConfig {
             report: crate::domain::ReportConfig::default(),
             checks,
+            experimental: crate::domain::ExperimentalConfig::default(),
         });
         cli
     }
@@ -1442,6 +1476,58 @@ mod tests {
             policy.suppressions
         );
         assert_eq!(policy.displayed, CheckPolicy::default().displayed);
+    }
+
+    // -----------------------------------------------------------------
+    // resolve_enabled_experiments (cute-dbt#289) — TOML ∪ env union at
+    // the run-loop seam. The pure resolution/parsing semantics live in
+    // domain::experimental; these pin the cli threading.
+    // -----------------------------------------------------------------
+
+    fn cli_with_experimental(enable: &[&str]) -> ReportArgs {
+        let mut cli = cli("report.html");
+        cli.config = Some(crate::domain::AnalysisConfig {
+            report: crate::domain::ReportConfig::default(),
+            checks: crate::domain::ChecksConfig::default(),
+            experimental: crate::domain::ExperimentalConfig {
+                enable: enable.iter().map(|s| (*s).to_owned()).collect(),
+            },
+        });
+        cli
+    }
+
+    #[test]
+    fn resolve_enabled_experiments_without_either_surface_is_empty() {
+        let resolved = resolve_enabled_experiments(&cli("report.html"));
+        assert_eq!(resolved, EnabledExperiments::default());
+        assert!(!resolved.is_enabled(crate::domain::Experiment::ProjectState));
+    }
+
+    #[test]
+    fn resolve_enabled_experiments_reads_the_toml_arm() {
+        let resolved = resolve_enabled_experiments(&cli_with_experimental(&["project-state"]));
+        assert!(resolved.is_enabled(crate::domain::Experiment::ProjectState));
+    }
+
+    #[test]
+    fn resolve_enabled_experiments_reads_the_env_arm() {
+        let mut args = cli("report.html");
+        args.experimental = Some([crate::domain::Experiment::ProjectState].into());
+        let resolved = resolve_enabled_experiments(&args);
+        assert!(resolved.is_enabled(crate::domain::Experiment::ProjectState));
+    }
+
+    #[test]
+    fn resolve_enabled_experiments_unions_both_arms() {
+        // With a one-experiment vocabulary the union is exercised
+        // exhaustively in domain::experimental; this pins that BOTH
+        // arms feed the cli-level union (either alone suffices, and
+        // together they dedup).
+        let mut args = cli_with_experimental(&["project-state"]);
+        args.experimental = Some([crate::domain::Experiment::ProjectState].into());
+        let resolved = resolve_enabled_experiments(&args);
+        assert_eq!(resolved.enabled.len(), 1);
+        assert!(resolved.is_enabled(crate::domain::Experiment::ProjectState));
     }
 
     #[test]

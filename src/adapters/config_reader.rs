@@ -18,7 +18,10 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::domain::{AnalysisConfig, CheckConfigError, HeuristicId, resolve_check_policy};
+use crate::domain::{
+    AnalysisConfig, CheckConfigError, ExperimentalError, HeuristicId, resolve_check_policy,
+    resolve_experimental_config,
+};
 
 /// Reasons a `--config <PATH>` file could not be loaded.
 ///
@@ -62,24 +65,40 @@ pub enum ConfigLoadError {
         #[source]
         source: CheckConfigError,
     },
+    /// The TOML parsed but the `[experimental]` section named an
+    /// experiment id outside the closed vocabulary (cute-dbt#289). The
+    /// underlying [`ExperimentalError`] carries the remediation text
+    /// (the registered experiment ids).
+    #[error("invalid [experimental] in config file {path}: {source}")]
+    Experimental {
+        /// The operator-supplied path, verbatim.
+        path: String,
+        /// Underlying validation failure, remediation-bearing.
+        #[source]
+        source: ExperimentalError,
+    },
 }
 
 /// Load + parse + validate the operator-supplied TOML config.
 ///
 /// Reads `path` as UTF-8, deserializes into [`AnalysisConfig`], then
 /// runs the `[checks]` fail-closed validation against the production
-/// [`HeuristicId`] registry ([`resolve_check_policy`], cute-dbt#171) so
-/// every config failure — syntax, schema, or check-registry — surfaces
-/// on the same clap usage-error path (exit 2). The resolved policy is
-/// discarded here; the run loop re-resolves it (infallibly, post
-/// validation) when building the render-time display policy.
+/// [`HeuristicId`] registry ([`resolve_check_policy`], cute-dbt#171)
+/// and the `[experimental]` closed-vocabulary validation
+/// ([`resolve_experimental_config`], cute-dbt#289) so every config
+/// failure — syntax, schema, check-registry, or experiment id —
+/// surfaces on the same clap usage-error path (exit 2). The resolved
+/// policy/set is discarded here; the run loop re-resolves it
+/// (infallibly, post validation) when building the render-time values.
 ///
 /// # Errors
 ///
 /// Returns [`ConfigLoadError::Io`] when the file cannot be read,
 /// [`ConfigLoadError::Toml`] when the content is not valid TOML or does
 /// not match the schema, [`ConfigLoadError::Checks`] when the
-/// `[checks]` section fails registry validation.
+/// `[checks]` section fails registry validation,
+/// [`ConfigLoadError::Experimental`] when the `[experimental]` section
+/// names an unregistered experiment id.
 pub fn load_config(path: &Path) -> Result<AnalysisConfig, ConfigLoadError> {
     let path_str = path.display().to_string();
     let bytes = fs::read_to_string(path).map_err(|source| ConfigLoadError::Io {
@@ -93,6 +112,12 @@ pub fn load_config(path: &Path) -> Result<AnalysisConfig, ConfigLoadError> {
         })?;
     resolve_check_policy::<HeuristicId>(&config.checks).map_err(|source| {
         ConfigLoadError::Checks {
+            path: path_str.clone(),
+            source,
+        }
+    })?;
+    resolve_experimental_config(&config.experimental).map_err(|source| {
+        ConfigLoadError::Experimental {
             path: path_str,
             source,
         }
@@ -263,6 +288,42 @@ reason = "duplicate grain accepted during backfill"
                 );
             }
             other => panic!("expected Checks error, got {other:?}"),
+        }
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn valid_experimental_section_loads() {
+        let path = write_fixture(
+            "experimental-valid",
+            "[experimental]\nenable = [\"project-state\"]\n",
+        );
+        let cfg = load_config(&path).expect("valid [experimental] loads");
+        assert_eq!(cfg.experimental.enable, vec!["project-state".to_owned()]);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unknown_experiment_id_is_an_experimental_error_with_remediation() {
+        let path = write_fixture(
+            "experimental-unknown-id",
+            "[experimental]\nenable = [\"projcet-state\"]\n",
+        );
+        let err = load_config(&path).expect_err("unknown experiment id errors");
+        match err {
+            ConfigLoadError::Experimental {
+                path: reported,
+                source,
+            } => {
+                assert!(reported.contains("experimental-unknown-id"), "{reported}");
+                let detail = source.to_string();
+                assert!(detail.contains("projcet-state"), "{detail}");
+                assert!(
+                    detail.contains("project-state"),
+                    "remediation names known experiments: {detail}"
+                );
+            }
+            other => panic!("expected Experimental error, got {other:?}"),
         }
         let _ = fs::remove_file(&path);
     }

@@ -40,6 +40,7 @@ pub mod check_config;
 pub mod checks;
 pub mod config;
 pub mod cte;
+pub mod experimental;
 pub mod grain;
 pub mod manifest;
 pub mod model_yaml;
@@ -73,6 +74,10 @@ pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{
     CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, Span, SubqueryFact,
     SubqueryKind,
+};
+pub use experimental::{
+    EnabledExperiments, Experiment, ExperimentalConfig, ExperimentalError, parse_experimental_env,
+    resolve_experimental_config,
 };
 pub use grain::{GrainKind, GrainSignal, model_grain_signals, test_is_enabled};
 pub use manifest::{
