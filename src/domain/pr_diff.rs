@@ -3169,28 +3169,26 @@ mod tests {
         }
     }
 
-    /// forward∘reverse == identity, exercised exhaustively over a
-    /// structured edit-script pool (the house property-test style — no
-    /// proptest dep): every single edit and every ordered pair of
-    /// non-overlapping edits over a fixed base file, with and without a
-    /// trailing newline. The forward side is constructed BY the edit
-    /// script (replace/insert/delete at a 1-based old line), so the test
-    /// derives `(new_text, hunks)` pairs exactly shaped like
-    /// `git diff --unified=0` output and asserts the reversal returns
-    /// the original old text.
-    #[test]
-    fn reverse_apply_inverts_forward_application_over_edit_script_pool() {
-        #[derive(Clone, Copy, Debug)]
-        enum Edit {
-            /// Replace old line `at` (1-based) with two new lines.
-            Replace { at: usize },
-            /// Insert one new line after old line `at` (0 ⇒ at top).
-            Insert { after: usize },
-            /// Delete old line `at`.
-            Delete { at: usize },
-        }
-        let base = ["name: playground", "version: '1.0'", "vars:", "  x: 1"];
-        let single: Vec<Vec<Edit>> = (1..=base.len())
+    /// One scripted edit over the property-test base file (1-based old
+    /// lines). Declared at module-test level so the pool builder and the
+    /// forward applier stay small, independently readable helpers
+    /// (CRAP-gate decomposition, cute-dbt#266 review).
+    #[derive(Clone, Copy, Debug)]
+    enum Edit {
+        /// Replace old line `at` with two new lines.
+        Replace { at: usize },
+        /// Insert one new line after old line `after` (0 ⇒ at top).
+        Insert { after: usize },
+        /// Delete old line `at`.
+        Delete { at: usize },
+    }
+
+    /// The structured edit-script pool: every single edit at every base
+    /// line, plus ordered pairs at non-adjacent old lines (1 and 3 /
+    /// 1 and 4 / 2 and 4) so the constructed hunks are trivially
+    /// non-overlapping.
+    fn edit_script_pool(base_len: usize) -> Vec<Vec<Edit>> {
+        let mut pool: Vec<Vec<Edit>> = (1..=base_len)
             .flat_map(|i| {
                 [
                     vec![Edit::Replace { at: i }],
@@ -3199,64 +3197,93 @@ mod tests {
                 ]
             })
             .collect();
-        // Ordered pairs at non-adjacent old lines (1 and 3 / 1 and 4)
-        // keep the constructed hunks trivially non-overlapping.
-        let pairs: Vec<Vec<Edit>> = [
+        pool.extend([
             vec![Edit::Replace { at: 1 }, Edit::Replace { at: 3 }],
             vec![Edit::Delete { at: 1 }, Edit::Insert { after: 3 }],
             vec![Edit::Insert { after: 0 }, Edit::Delete { at: 4 }],
             vec![Edit::Replace { at: 1 }, Edit::Delete { at: 4 }],
             vec![Edit::Delete { at: 2 }, Edit::Replace { at: 4 }],
-        ]
-        .into_iter()
-        .collect();
+        ]);
+        pool
+    }
 
-        for trailing in [true, false] {
-            for script in single.iter().chain(pairs.iter()) {
-                // Forward-apply the script over the OLD lines, recording
-                // the unified=0 hunks against NEW-side numbering.
-                let mut new_lines: Vec<String> = Vec::new();
-                let mut hunks: Vec<Hunk> = Vec::new();
-                let mut old_iter = base.iter().enumerate().peekable();
-                while let Some((idx0, old_line)) = old_iter.peek().copied() {
-                    let at = idx0 + 1; // 1-based old line
-                    let edit = script.iter().find(|e| match e {
-                        Edit::Replace { at: a } | Edit::Delete { at: a } => *a == at,
-                        Edit::Insert { .. } => false,
-                    });
-                    // Top-of-file insertion (after == 0) fires before line 1.
-                    if at == 1
-                        && script
-                            .iter()
-                            .any(|e| matches!(e, Edit::Insert { after: 0 }))
-                    {
-                        let inserted = "inserted-top: true".to_owned();
-                        hunks.push(full_hunk(new_lines.len() + 1, &[], &[&inserted]));
-                        new_lines.push(inserted);
-                    }
-                    match edit {
-                        Some(Edit::Replace { .. }) => {
-                            let r1 = format!("{old_line} # edited");
-                            let r2 = "extra: line".to_owned();
-                            hunks.push(full_hunk(new_lines.len() + 1, &[old_line], &[&r1, &r2]));
-                            new_lines.push(r1);
-                            new_lines.push(r2);
-                        }
-                        Some(Edit::Delete { .. }) => {
-                            hunks.push(full_hunk(new_lines.len(), &[old_line], &[]));
-                        }
-                        _ => new_lines.push((*old_line).to_owned()),
-                    }
-                    old_iter.next();
-                    if script
-                        .iter()
-                        .any(|e| matches!(e, Edit::Insert { after } if *after == at))
-                    {
-                        let inserted = format!("inserted-after-{at}: true");
-                        hunks.push(full_hunk(new_lines.len() + 1, &[], &[&inserted]));
-                        new_lines.push(inserted);
-                    }
+    /// Forward-apply one edit script over the OLD lines, returning the
+    /// NEW lines plus the `--unified=0` hunks recorded against new-side
+    /// numbering — exactly the `(new_text, hunks)` shape `git diff`
+    /// would emit for that edit.
+    fn forward_apply(base: &[&str], script: &[Edit]) -> (Vec<String>, Vec<Hunk>) {
+        let mut new_lines: Vec<String> = Vec::new();
+        let mut hunks: Vec<Hunk> = Vec::new();
+        for (idx0, old_line) in base.iter().enumerate() {
+            let at = idx0 + 1; // 1-based old line
+            // Top-of-file insertion (after == 0) fires before line 1.
+            if at == 1 && script_inserts_after(script, 0) {
+                push_insertion(&mut new_lines, &mut hunks, "inserted-top: true");
+            }
+            match line_edit(script, at) {
+                Some(Edit::Replace { .. }) => {
+                    let r1 = format!("{old_line} # edited");
+                    let r2 = "extra: line".to_owned();
+                    hunks.push(full_hunk(new_lines.len() + 1, &[old_line], &[&r1, &r2]));
+                    new_lines.push(r1);
+                    new_lines.push(r2);
                 }
+                Some(Edit::Delete { .. }) => {
+                    hunks.push(full_hunk(new_lines.len(), &[old_line], &[]));
+                }
+                _ => new_lines.push((*old_line).to_owned()),
+            }
+            if script_inserts_after(script, at) {
+                push_insertion(
+                    &mut new_lines,
+                    &mut hunks,
+                    &format!("inserted-after-{at}: true"),
+                );
+            }
+        }
+        (new_lines, hunks)
+    }
+
+    /// The Replace/Delete edit (if any) the script addresses at old line
+    /// `at`. Insertions anchor between lines and are handled separately.
+    fn line_edit(script: &[Edit], at: usize) -> Option<Edit> {
+        script
+            .iter()
+            .find(|e| match e {
+                Edit::Replace { at: a } | Edit::Delete { at: a } => *a == at,
+                Edit::Insert { .. } => false,
+            })
+            .copied()
+    }
+
+    /// Whether the script inserts a new line after old line `after`.
+    fn script_inserts_after(script: &[Edit], after: usize) -> bool {
+        script
+            .iter()
+            .any(|e| matches!(e, Edit::Insert { after: a } if *a == after))
+    }
+
+    /// Record one pure-insertion hunk and its new-side line.
+    fn push_insertion(new_lines: &mut Vec<String>, hunks: &mut Vec<Hunk>, line: &str) {
+        hunks.push(full_hunk(new_lines.len() + 1, &[], &[line]));
+        new_lines.push(line.to_owned());
+    }
+
+    /// forward∘reverse == identity, exercised exhaustively over a
+    /// structured edit-script pool (the house property-test style — no
+    /// proptest dep): every single edit and every ordered pair of
+    /// non-overlapping edits over a fixed base file, with and without a
+    /// trailing newline. The forward side is constructed BY the edit
+    /// script ([`forward_apply`] — replace/insert/delete at a 1-based
+    /// old line), so the test derives `(new_text, hunks)` pairs exactly
+    /// shaped like `git diff --unified=0` output and asserts the
+    /// reversal returns the original old text.
+    #[test]
+    fn reverse_apply_inverts_forward_application_over_edit_script_pool() {
+        let base = ["name: playground", "version: '1.0'", "vars:", "  x: 1"];
+        for trailing in [true, false] {
+            for script in edit_script_pool(base.len()) {
+                let (new_lines, hunks) = forward_apply(&base, &script);
                 let frame = if trailing { "\n" } else { "" };
                 let old_text = format!("{}{frame}", base.join("\n"));
                 let new_text = format!("{}{frame}", new_lines.join("\n"));

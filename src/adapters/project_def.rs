@@ -112,66 +112,91 @@ pub fn parse(text: &str) -> Result<ProjectDefinition, ProjectParseError> {
 fn definition_from_mapping(map: &Mapping) -> ProjectDefinition {
     let mut def = ProjectDefinition::default();
     for (key, value) in map {
-        let key_name = key_string(key);
-        match key_name.as_str() {
-            "name" => def.name = Some(scalar_display_string(value)),
-            "version" => def.version = Some(yaml_to_json(value)),
-            "require-dbt-version" | "require_dbt_version" => {
-                def.require_dbt_version = Some(yaml_to_json(value));
+        route_top_level_key(&mut def, key_string(key), value);
+    }
+    def
+}
+
+/// The per-key router: each `ProjectDefinition` family has its own
+/// small ingestion helper (CRAP-gate decomposition, cute-dbt#266
+/// review) so every branch is independently testable.
+fn route_top_level_key(def: &mut ProjectDefinition, key_name: String, value: &YamlValue) {
+    match key_name.as_str() {
+        "name" => def.name = Some(scalar_display_string(value)),
+        "version" => def.version = Some(yaml_to_json(value)),
+        "require-dbt-version" | "require_dbt_version" => {
+            def.require_dbt_version = Some(yaml_to_json(value));
+        }
+        "vars" => ingest_vars(def, key_name, value),
+        section if CONFIG_TREE_SECTIONS.contains(&section) => {
+            ingest_config_section(def, key_name, value);
+        }
+        "dispatch" => def.dispatch = Some(yaml_to_json(value)),
+        "on-run-start" | "on_run_start" => def.on_run_start = hook_entries(value),
+        "on-run-end" | "on_run_end" => def.on_run_end = hook_entries(value),
+        "flags" => def.flags = Some(yaml_to_json(value)),
+        _ if is_path_key(&key_name) => {
+            def.paths.insert(key_name, yaml_to_json(value));
+        }
+        _ => {
+            def.other.insert(key_name, yaml_to_json(value));
+        }
+    }
+}
+
+/// Ingest the `vars:` block: each entry's value plus its definition-site
+/// span. A non-mapping `vars:` is not a vars block — a null body is an
+/// empty block (dropped), any other shape is kept verbatim in `other`
+/// where it can still be diffed truthfully.
+fn ingest_vars(def: &mut ProjectDefinition, key_name: String, value: &YamlValue) {
+    match value.as_mapping() {
+        Some(vars) => {
+            for (var_key, var_value) in vars {
+                ingest_var_entry(def, var_key, var_value);
             }
-            "vars" => match value.as_mapping() {
-                Some(vars) => {
-                    for (var_key, var_value) in vars {
-                        let var_name = key_string(var_key);
-                        let start = &var_key.span().start;
-                        if start.line > 0 {
-                            def.vars_spans.insert(
-                                var_name.clone(),
-                                Span {
-                                    line: start.line,
-                                    column: start.column,
-                                },
-                            );
-                        }
-                        def.vars.insert(var_name, yaml_to_json(var_value));
-                    }
-                }
-                // A non-mapping `vars:` is not a vars block — keep it
-                // verbatim where it can still be diffed truthfully.
-                None => {
-                    if !value.is_null() {
-                        def.other.insert(key_name, yaml_to_json(value));
-                    }
-                }
-            },
-            section if CONFIG_TREE_SECTIONS.contains(&section) => match value.as_mapping() {
-                Some(tree) => {
-                    def.config_trees
-                        .insert(key_name, config_tree_from_mapping(tree));
-                }
-                None => {
-                    // `models:` with a null body is an empty tree; any
-                    // other scalar shape is kept verbatim in `other`.
-                    if value.is_null() {
-                        def.config_trees.insert(key_name, ConfigTree::default());
-                    } else {
-                        def.other.insert(key_name, yaml_to_json(value));
-                    }
-                }
-            },
-            "dispatch" => def.dispatch = Some(yaml_to_json(value)),
-            "on-run-start" | "on_run_start" => def.on_run_start = hook_entries(value),
-            "on-run-end" | "on_run_end" => def.on_run_end = hook_entries(value),
-            "flags" => def.flags = Some(yaml_to_json(value)),
-            _ if is_path_key(&key_name) => {
-                def.paths.insert(key_name, yaml_to_json(value));
-            }
-            _ => {
+        }
+        None => {
+            if !value.is_null() {
                 def.other.insert(key_name, yaml_to_json(value));
             }
         }
     }
-    def
+}
+
+/// Ingest one `vars:` entry — the value into
+/// [`ProjectDefinition::vars`], the key's source position (when the
+/// parser produced one) into [`ProjectDefinition::vars_spans`].
+fn ingest_var_entry(def: &mut ProjectDefinition, var_key: &YamlValue, var_value: &YamlValue) {
+    let var_name = key_string(var_key);
+    let start = &var_key.span().start;
+    if start.line > 0 {
+        def.vars_spans.insert(
+            var_name.clone(),
+            Span {
+                line: start.line,
+                column: start.column,
+            },
+        );
+    }
+    def.vars.insert(var_name, yaml_to_json(var_value));
+}
+
+/// Ingest one per-resource config-tree section (`models:` / `seeds:` /
+/// …): a mapping builds the tree, a null body is an empty tree, and any
+/// other scalar shape is kept verbatim in `other`.
+fn ingest_config_section(def: &mut ProjectDefinition, key_name: String, value: &YamlValue) {
+    match value.as_mapping() {
+        Some(tree) => {
+            def.config_trees
+                .insert(key_name, config_tree_from_mapping(tree));
+        }
+        None if value.is_null() => {
+            def.config_trees.insert(key_name, ConfigTree::default());
+        }
+        None => {
+            def.other.insert(key_name, yaml_to_json(value));
+        }
+    }
 }
 
 /// Whether a top-level key is path configuration: every `…-paths` /
@@ -535,5 +560,87 @@ mod tests {
             def.config_trees["models"].children.contains_key("2024"),
             "a numeric folder key is stringified, not dropped",
         );
+    }
+
+    // ----- per-family degrade arms (direct branch coverage) -----
+
+    #[test]
+    fn a_non_mapping_vars_block_is_kept_verbatim_in_other() {
+        // `vars: 5` is not a vars block — keep it where it can still be
+        // diffed truthfully, never silently dropped.
+        let def = parse("vars: 5\n").expect("parses tolerantly");
+        assert!(def.vars.is_empty());
+        assert_eq!(def.other.get("vars"), Some(&json!(5)));
+    }
+
+    #[test]
+    fn a_null_vars_block_is_an_empty_block() {
+        let def = parse("vars:\nname: p\n").expect("parses");
+        assert!(def.vars.is_empty(), "null vars ⇒ empty block");
+        assert!(!def.other.contains_key("vars"), "null is not noise");
+    }
+
+    #[test]
+    fn a_null_config_section_is_an_empty_tree() {
+        let def = parse("models:\nname: p\n").expect("parses");
+        let tree = def.config_trees.get("models").expect("models present");
+        assert!(tree.configs.is_empty() && tree.children.is_empty());
+    }
+
+    #[test]
+    fn a_scalar_config_section_is_kept_verbatim_in_other() {
+        let def = parse("models: 3\n").expect("parses tolerantly");
+        assert!(!def.config_trees.contains_key("models"));
+        assert_eq!(def.other.get("models"), Some(&json!(3)));
+    }
+
+    #[test]
+    fn a_null_hook_body_is_an_empty_hook_list() {
+        let def = parse("on-run-start:\non-run-end:\n").expect("parses");
+        assert!(def.on_run_start.is_empty());
+        assert!(def.on_run_end.is_empty());
+    }
+
+    #[test]
+    fn a_non_string_name_is_stringified() {
+        // `name: 123` — tolerant ingestion stringifies the scalar
+        // (scalar_display_string's non-string arm).
+        let def = parse("name: 123\n").expect("parses tolerantly");
+        assert_eq!(def.name.as_deref(), Some("123"));
+    }
+
+    #[test]
+    fn a_u64_beyond_i64_converts_losslessly() {
+        let def = parse("vars:\n  big: 18446744073709551615\n").expect("parses");
+        assert_eq!(
+            def.vars.get("big"),
+            Some(&json!(18_446_744_073_709_551_615_u64)),
+        );
+    }
+
+    #[test]
+    fn bool_and_null_mapping_keys_are_stringified() {
+        // YAML 1.1 scalar keys that are not strings — `true:` and `~:`
+        // — stringify deterministically (key_string's bool/null arms).
+        let def = parse("quoting:\n  true: 1\n  ~: 2\n").expect("parses");
+        let quoting = def.other.get("quoting").expect("routed to other");
+        assert_eq!(quoting.get("true"), Some(&json!(1)));
+        assert_eq!(quoting.get("null"), Some(&json!(2)));
+    }
+
+    #[test]
+    fn a_complex_mapping_key_degrades_to_its_yaml_serialization() {
+        // A sequence key (`? [a, b]`) has no JSON form — key_string
+        // degrades to the parser's own serialization, trimmed, so the
+        // entry is deterministic and visibly YAML-shaped, never dropped.
+        let def = parse("custom:\n  ? [a, b]\n  : 1\n").expect("parses");
+        let custom = def.other.get("custom").expect("routed to other");
+        let obj = custom.as_object().expect("a mapping converts");
+        let key = obj.keys().next().expect("the complex key survives");
+        assert!(
+            key.contains('a') && key.contains('b'),
+            "the serialized key names both elements: {key:?}",
+        );
+        assert_eq!(obj.values().next(), Some(&json!(1)));
     }
 }
