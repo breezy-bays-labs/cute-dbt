@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-47af43c6.js";
+            window.path_to_searchindex_js = "searchindex-ca477be5.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-f6d2c74b.js"></script>
+        <script src="toc-e08b96a6.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -1092,6 +1092,66 @@ stderr and has no effect. Source text warns; config fails closed.</li>
 </code></pre>
 <p>The report’s findings surface renders suppressed findings as a
 collapsed, acknowledged set rather than active recommendations.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="experimental-features"><a class="header" href="#experimental-features">Experimental features</a></h1>
+<p>Some cute-dbt surfaces keep shipping on <code>main</code> before they are stable
+enough for the default experience. They sit behind <strong>one named
+switch</strong> with two equivalent opt-in surfaces:</p>
+<ul>
+<li>the <code>[experimental]</code> table of the optional <code>--config &lt;PATH&gt;</code> TOML
+file, and</li>
+<li>the <code>CUTE_DBT_EXPERIMENTAL</code> environment variable.</li>
+</ul>
+<p>Opting in on <strong>either</strong> surface enables an experiment — the resolved
+set is the <strong>union</strong> of the two (neither surface can disable what the
+other enabled). With no opt-in at all, no experimental surface is
+enabled.</p>
+<p>The switch applies to <code>cute-dbt report</code>. The <code>explore</code> verb is itself
+experimental as a whole and ships <strong>ungated</strong> — it stays runnable with
+no opt-in, and <code>CUTE_DBT_EXPERIMENTAL</code> has no effect on it.</p>
+<h2 id="the-experimental-table"><a class="header" href="#the-experimental-table">The <code>[experimental]</code> table</a></h2>
+<p>One key: <code>enable</code>, a list of <strong>exact experiment ids</strong>.</p>
+<pre><code class="language-toml">[experimental]
+enable = ["project-state"]
+</code></pre>
+<p>No globs and no <code>"all"</code> shorthand here — authored config names
+experiments precisely.</p>
+<h2 id="the-cute_dbt_experimental-environment-variable"><a class="header" href="#the-cute_dbt_experimental-environment-variable">The <code>CUTE_DBT_EXPERIMENTAL</code> environment variable</a></h2>
+<p>Suited to CI, where exporting a variable on a step is cheaper than
+authoring a config file:</p>
+<pre><code class="language-yaml">- name: Render the report
+  env:
+    CUTE_DBT_EXPERIMENTAL: "1"
+  run: cute-dbt report --manifest target/manifest.json ...
+</code></pre>
+<p>Accepted values:</p>
+<ul>
+<li><code>1</code> or <code>all</code> — enable every registered experiment,</li>
+<li>a comma-separated list of exact experiment ids
+(<code>project-state</code>),</li>
+<li>an empty value — enables nothing (a no-op, not an error).</li>
+</ul>
+<h2 id="fail-closed-vocabulary"><a class="header" href="#fail-closed-vocabulary">Fail-closed vocabulary</a></h2>
+<p>The experiment vocabulary is <strong>closed and validated up front</strong>: an
+unknown id on either surface is a usage error (exit 2) before any
+manifest is read, with remediation text naming the registered ids —
+the same posture as the <code>[checks]</code> section (see
+<a href="#selecting--suppressing-checks">Selecting &amp; suppressing checks</a>).</p>
+<h2 id="registered-experiments"><a class="header" href="#registered-experiments">Registered experiments</a></h2>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>id</th><th>covers</th></tr>
+</thead>
+<tbody>
+<tr><td><code>project-state</code></td><td>The project-state surfaces: the “Project definition changed” panel, per-model config attributions, vars/hooks/dispatch change rows, and <code>dbt_project.yml</code> config-tree scope widening.</td></tr>
+</tbody>
+</table>
+</div>
+<p>Experiments graduate by becoming default behavior (the id then
+disappears from the vocabulary) — opting in early is how you preview
+them and how the feedback loop runs. Because v0.x is explicitly
+unstable, ids may appear and graduate between minor versions.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="examples"><a class="header" href="#examples">Examples</a></h1>
 <p>cute-dbt commits rendered example reports under
