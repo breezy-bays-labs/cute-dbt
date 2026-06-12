@@ -43,9 +43,9 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::domain::{
-    Checksum, ColumnFacts, Constraint, DependsOn, Exposure, Group, Manifest, ManifestMetadata,
-    Node, NodeConfig, NodeId, Owner, PreflightError, SourceNode, TestMetadata, UnitTest,
-    UnitTestExpect, UnitTestGiven, UnitTestOverrides,
+    Checksum, ColumnFacts, Constraint, DependsOn, DisabledEntry, Exposure, Group, Manifest,
+    ManifestMetadata, Node, NodeConfig, NodeId, Owner, PreflightError, SourceNode, TestMetadata,
+    UnitTest, UnitTestExpect, UnitTestGiven, UnitTestOverrides,
 };
 use crate::ports::ManifestSource;
 use serde_json::Value;
@@ -85,6 +85,16 @@ struct WireManifest {
     exposures: HashMap<String, WireExposure>,
     #[serde(default)]
     groups: HashMap<String, WireGroup>,
+    /// The top-level `disabled` map (cute-dbt#258) — `unique_id` →
+    /// ARRAY of whole node payloads (fusion `build_disabled_map`,
+    /// `dbt-schemas` `manifest/manifest.rs:648` @ `9977b6cb…`:
+    /// `BTreeMap<String, Vec<YmlValue>>`; dbt-core mirrors the shape,
+    /// live-verified 2026-06-12). Held as untyped [`Value`]s and folded
+    /// per entry by [`fold_disabled`] so one odd payload (heterogeneous
+    /// kinds: sources, exposures, future types) degrades to absence
+    /// instead of failing the whole manifest (ADR-5).
+    #[serde(default)]
+    disabled: HashMap<String, Value>,
 }
 
 /// Wire projection of one `nodes` entry.
@@ -232,6 +242,15 @@ struct WireNode {
     primary_key: Option<Vec<String>>,
     #[serde(default)]
     contract: Option<WireContract>,
+    /// The node's authored pre-Jinja config values (cute-dbt#258) —
+    /// fusion `NodeBaseAttributes.unrendered_config`, `dbt-schemas`
+    /// `nodes.rs:4536-4541` @ `9977b6cb…` (the dbt-core-compatible
+    /// `state:*` comparison surface; the #262 C3 provenance input).
+    /// Values pass through verbatim. `Option` for the #145 null-fill
+    /// tolerance; both engines emit `{}` when nothing is authored
+    /// (fusion's map is sparser — live-probed 2026-06-12).
+    #[serde(default)]
+    unrendered_config: Option<BTreeMap<String, Value>>,
 }
 
 /// Tolerant wire projection of a node's TOP-LEVEL `contract` block
@@ -865,7 +884,10 @@ impl WireManifest {
                     wire.primary_key.unwrap_or_default(),
                     wire.contract.and_then(WireContract::checksum_string),
                 )
-                .with_column_facts(column_facts);
+                .with_column_facts(column_facts)
+                // cute-dbt#258 — the authored pre-Jinja config values,
+                // verbatim (#145 null-fill tolerated).
+                .with_unrendered_config(wire.unrendered_config.unwrap_or_default());
                 (id, node)
             })
             .collect();
@@ -901,7 +923,64 @@ impl WireManifest {
             .with_sources(sources)
             .with_exposures(exposures)
             .with_groups(groups)
+            // cute-dbt#258 — the disabled map, folded entry-tolerantly.
+            .with_disabled(fold_disabled(self.disabled))
     }
+}
+
+/// Tolerant wire projection of ONE `disabled`-map entry (cute-dbt#258)
+/// — the light identity + test-linkage subset of the whole node payload
+/// dbt serializes there. Every field defaults, so any OBJECT shape
+/// ingests; reuses the domain [`TestMetadata`] / [`NodeId`] wire-verbatim
+/// (the [`Checksum`]/[`DependsOn`] precedent).
+#[derive(Debug, Default, Deserialize)]
+struct WireDisabledEntry {
+    #[serde(default)]
+    resource_type: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    original_file_path: Option<String>,
+    #[serde(default)]
+    column_name: Option<String>,
+    #[serde(default)]
+    attached_node: Option<NodeId>,
+    #[serde(default)]
+    test_metadata: Option<TestMetadata>,
+}
+
+impl WireDisabledEntry {
+    fn into_domain(self) -> DisabledEntry {
+        DisabledEntry::new(self.resource_type.unwrap_or_default())
+            .with_name(self.name)
+            .with_original_file_path(self.original_file_path)
+            .with_attachment(self.column_name, self.attached_node, self.test_metadata)
+    }
+}
+
+/// Fold the wire `disabled` map into per-id [`DisabledEntry`] arrays
+/// (cute-dbt#258). Degrade-don't-fail at every level (ADR-5): a
+/// non-array value or a non-object element drops; ids left with no
+/// surviving entries drop (both engines emit `{}` for "nothing
+/// disabled", so absence IS the empty shape).
+fn fold_disabled(disabled: HashMap<String, Value>) -> BTreeMap<String, Vec<DisabledEntry>> {
+    disabled
+        .into_iter()
+        .filter_map(|(id, value)| {
+            let Value::Array(elements) = value else {
+                return None;
+            };
+            let entries: Vec<DisabledEntry> = elements
+                .into_iter()
+                .filter_map(|element| {
+                    serde_json::from_value::<WireDisabledEntry>(element)
+                        .ok()
+                        .map(WireDisabledEntry::into_domain)
+                })
+                .collect();
+            (!entries.is_empty()).then_some((id, entries))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------
@@ -1023,7 +1102,7 @@ fn baseline_detail(err: &PreflightError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::ConstraintKind;
+    use crate::domain::{ConstraintKind, TestSeverity};
 
     const V12_URL: &str = "https://schemas.getdbt.com/dbt/manifest/v12.json";
 
@@ -3042,5 +3121,224 @@ mod tests {
             Some("models/schema.yml"),
             "a scheme-less path passes through verbatim",
         );
+    }
+
+    // ----- cute-dbt#258: disabled map + unrendered_config -------------
+
+    #[test]
+    fn parse_manifest_folds_disabled_map_entries_with_linkage() {
+        // Shapes trimmed verbatim from the 2026-06-12 dual-engine probe:
+        // a disabled model, a disabled GENERIC test (attachment kept),
+        // and a disabled SINGULAR test (no attachment, no linkage).
+        // One id carries TWO entries to pin the array semantics.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{}},
+              "disabled": {{
+                "model.shop.stg_archive": [
+                  {{
+                    "resource_type": "model",
+                    "name": "stg_archive",
+                    "original_file_path": "models/staging/stg_archive.sql",
+                    "config": {{ "enabled": false }},
+                    "unrendered_config": {{ "enabled": false }}
+                  }},
+                  {{ "resource_type": "model", "name": "stg_archive" }}
+                ],
+                "test.shop.accepted_values_dim_payers_payer_type.0fe18914c7": [
+                  {{
+                    "resource_type": "test",
+                    "name": "accepted_values_dim_payers_payer_type",
+                    "original_file_path": "models/marts/core/_core.yml",
+                    "attached_node": "model.shop.dim_payers",
+                    "column_name": "payer_type",
+                    "test_metadata": {{
+                      "name": "accepted_values",
+                      "kwargs": {{ "column_name": "payer_type" }},
+                      "namespace": null
+                    }}
+                  }}
+                ],
+                "test.shop.assert_amounts_reconcile": [
+                  {{
+                    "resource_type": "test",
+                    "name": "assert_amounts_reconcile",
+                    "original_file_path": "tests/assert_amounts_reconcile.sql",
+                    "depends_on": {{ "macros": [], "nodes": [] }}
+                  }}
+                ]
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        let disabled = manifest.disabled();
+        assert_eq!(disabled.len(), 3);
+        assert_eq!(
+            disabled["model.shop.stg_archive"].len(),
+            2,
+            "per-id arrays preserved — never flattened 1:1",
+        );
+        assert_eq!(
+            disabled["model.shop.stg_archive"][0].resource_type(),
+            "model"
+        );
+
+        let generic = &disabled["test.shop.accepted_values_dim_payers_payer_type.0fe18914c7"][0];
+        assert_eq!(
+            generic.attached_node().map(NodeId::as_str),
+            Some("model.shop.dim_payers"),
+            "a disabled generic test keeps its attachment (both engines)",
+        );
+        assert_eq!(generic.column_name(), Some("payer_type"));
+        assert_eq!(
+            generic.test_metadata().map(TestMetadata::name),
+            Some("accepted_values"),
+        );
+
+        let singular = &disabled["test.shop.assert_amounts_reconcile"][0];
+        assert_eq!(singular.resource_type(), "test");
+        assert!(singular.attached_node().is_none());
+        assert!(singular.test_metadata().is_none());
+        assert_eq!(
+            singular.original_file_path(),
+            Some("tests/assert_amounts_reconcile.sql"),
+        );
+    }
+
+    #[test]
+    fn parse_manifest_tolerates_degenerate_disabled_shapes() {
+        // ADR-5: the disabled map carries WHOLE heterogeneous node
+        // payloads (sources, exposures, future kinds) — one odd shape
+        // must never fail the manifest.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{}},
+              "disabled": {{
+                "model.shop.ok": [ {{ "resource_type": "model" }} ],
+                "model.shop.not_an_array": "garbage",
+                "model.shop.mixed": [ "not-an-object", {{ "resource_type": "seed" }} ],
+                "model.shop.empty": []
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("degenerate shapes never fail (ADR-5)");
+        let disabled = manifest.disabled();
+        assert_eq!(disabled["model.shop.ok"].len(), 1);
+        assert!(
+            !disabled.contains_key("model.shop.not_an_array"),
+            "a non-array value degrades to absence",
+        );
+        assert_eq!(
+            disabled["model.shop.mixed"].len(),
+            1,
+            "non-object elements drop; sibling objects survive",
+        );
+        assert_eq!(disabled["model.shop.mixed"][0].resource_type(), "seed");
+        assert!(!disabled.contains_key("model.shop.empty"));
+
+        // And the entirely-absent / empty-map shapes (every committed
+        // fixture pre-splice) stay empty.
+        let bare =
+            format!(r#"{{ "metadata": {{ "dbt_schema_version": "{V12_URL}" }}, "nodes": {{}} }}"#);
+        assert!(
+            parse_manifest(&bare)
+                .expect("absent disabled")
+                .disabled()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn parse_manifest_reads_unrendered_config_shapes() {
+        // dbt-core populates authored values (incl. nested objects like
+        // docs.node_color); both engines emit {} when nothing is
+        // authored; older fixtures omit; #145 null-fill tolerated.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "model.shop.authored": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "aa" }},
+                  "unrendered_config": {{
+                    "materialized": "table",
+                    "docs": {{ "node_color": "gold" }}
+                  }}
+                }},
+                "model.shop.unauthored": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "bb" }},
+                  "unrendered_config": {{}}
+                }},
+                "model.shop.null_filled": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "cc" }},
+                  "unrendered_config": null
+                }},
+                "model.shop.pre258": {{
+                  "resource_type": "model",
+                  "checksum": {{ "name": "sha256", "checksum": "dd" }}
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        let node = |id: &str| manifest.node(&NodeId::new(id)).expect("node present");
+
+        let authored = node("model.shop.authored").unrendered_config();
+        assert_eq!(
+            authored.get("materialized").and_then(Value::as_str),
+            Some("table"),
+        );
+        assert_eq!(
+            authored.get("docs"),
+            Some(&serde_json::json!({ "node_color": "gold" })),
+            "nested authored values pass through verbatim",
+        );
+        assert!(node("model.shop.unauthored").unrendered_config().is_empty());
+        assert!(
+            node("model.shop.null_filled")
+                .unrendered_config()
+                .is_empty()
+        );
+        assert!(node("model.shop.pre258").unrendered_config().is_empty());
+    }
+
+    #[test]
+    fn parse_manifest_passes_test_config_semantics_through_to_typed_reads() {
+        // The config dict has passed through whole since #17 — this
+        // pins the #258 typed accessors over a REAL-shaped test config
+        // (the live core probe's populated emission, 2026-06-12).
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{
+                "test.shop.not_null_dim_payers_payer_name.a4": {{
+                  "resource_type": "test",
+                  "checksum": {{ "name": "none", "checksum": "" }},
+                  "config": {{
+                    "enabled": true,
+                    "severity": "warn",
+                    "where": "payer_key != -1",
+                    "limit": 50,
+                    "store_failures": true,
+                    "store_failures_as": "table"
+                  }}
+                }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        let config = manifest
+            .node(&NodeId::new("test.shop.not_null_dim_payers_payer_name.a4"))
+            .expect("node present")
+            .config();
+        assert_eq!(config.severity(), Some(TestSeverity::Warn));
+        assert_eq!(config.where_filter(), Some("payer_key != -1"));
+        assert_eq!(config.limit(), Some(50));
+        assert_eq!(config.enabled(), Some(true));
+        assert_eq!(config.store_failures(), Some(true));
     }
 }
