@@ -1831,7 +1831,7 @@ fn var_entry_notes(entry: &VarAttribution) -> Vec<String> {
         };
         let (inline, overflow) = capped_names(var_display_names(&entry.dynamic));
         notes.push(if overflow.is_empty() {
-            format!("{count} {noun} var() with a computed name and cannot be ruled out: {inline}",)
+            format!("{count} {noun} var() with a computed name and cannot be ruled out: {inline}")
         } else {
             format!("{count} {noun} var() with a computed name and cannot be ruled out")
         });

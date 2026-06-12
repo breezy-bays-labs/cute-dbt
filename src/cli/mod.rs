@@ -851,6 +851,15 @@ fn gather_project_facts_with_reader(
 /// [`gather_project_facts_with_reader`] for the arm map; every fallback
 /// arm attributes nothing (no parsed pair ⇒ never a guessed widening).
 ///
+/// The diff-gated panel build's output (cute-dbt#268): the panel
+/// itself, the cute-dbt#267 per-model config-tree attributions, and the
+/// cute-dbt#268 per-model var-reference chips.
+type PanelFacts = (
+    ProjectChangePanel,
+    BTreeMap<String, Vec<ConfigAttribution>>,
+    BTreeMap<String, Vec<VarReference>>,
+);
+
 /// Hooks rows are enriched from the manifest's `operation.*` nodes
 /// (cute-dbt#269): the project name comes from the parsed file's own
 /// `name:` (the file IS the root project definition — no wire field
@@ -868,11 +877,7 @@ fn project_change_panel(
     definition: Option<&crate::domain::ProjectDefinition>,
     current: &Manifest,
     index: &NormalizedDiffIndex,
-) -> (
-    ProjectChangePanel,
-    BTreeMap<String, Vec<ConfigAttribution>>,
-    BTreeMap<String, Vec<VarReference>>,
-) {
+) -> PanelFacts {
     let hunks = index.hunks_for(DBT_PROJECT_YML);
     let fallback = |reason: ProjectFallbackReason| {
         (

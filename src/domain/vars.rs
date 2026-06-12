@@ -664,9 +664,11 @@ fn scan_models(manifest: &Manifest) -> (BTreeMap<String, ModelScan>, VarScanFoot
             continue;
         }
         let mut scan = ModelScan {
-            python: node
-                .original_file_path()
-                .is_some_and(|p| p.ends_with(".py")),
+            python: node.original_file_path().is_some_and(|p| {
+                std::path::Path::new(p)
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
+            }),
             ..ModelScan::default()
         };
         if !scan.python
