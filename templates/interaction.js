@@ -945,6 +945,28 @@
       .attr("aria-label", tierTip)
       .attr("data-tip", tierTip)
       .text(TIER_LABEL[f.tier] || f.tier));
+    // cute-dbt#259 — the degraded-backing chip: shown only when EVERY
+    // attributing test carries a weakening config (severity: warn, a
+    // where filter, or a limit cap), i.e. the construct has no
+    // full-strength backing at all. A partially degraded attribution
+    // (≥1 clean test) keeps the summary quiet — the per-test causes
+    // below carry the in-row honesty either way. Pure rendering: the
+    // domain computed `degraded` (causes per test); this only compares
+    // it against the attribution.
+    var degraded = f.degraded || [];
+    var coveredBy = (status === "covered" && f.verdict.by) || [];
+    if (degraded.length && coveredBy.length && degraded.length === coveredBy.length) {
+      var degTip = "Degraded backing — every test attributing this coverage carries a " +
+        "weakening config (severity: warn, a where row filter, or a limit cap). " +
+        "The construct is covered, but the guarantee is weaker than a default " +
+        "error-severity full-table test. Causes are enumerated below.";
+      $sum.append($("<span>")
+        .addClass("degraded-chip has-finding-tip")
+        .attr("tabindex", "0")
+        .attr("aria-label", degTip)
+        .attr("data-tip", degTip)
+        .text("degraded backing"));
+    }
     if (f.suppressed) {
       $sum.append($("<span>").addClass("suppress-chip")
         .text("suppressed · " + f.suppressed.source));
@@ -966,6 +988,23 @@
         $cov.append($("<code>").text(id));
       });
       $bd.append($cov);
+    }
+    // cute-dbt#259 — per-test degraded-backing causes, rendered beside
+    // the attribution (in-row honesty: enumerated causes, never a
+    // silent downgrade). Rust composed the copy; this only lays it out.
+    if (degraded.length) {
+      var $degList = $("<ul>").addClass("finding-degraded");
+      degraded.forEach(function (d) {
+        var $dli = $("<li>").addClass("finding-degraded-test")
+          .append($("<code>").text(d.by));
+        (d.causes || []).forEach(function (cause) {
+          $dli.append($("<div>").addClass("f-degraded-cause").text(cause));
+        });
+        $degList.append($dli);
+      });
+      $bd.append($("<p>").addClass("finding-degraded-label")
+        .append($("<span>").addClass("f-label").text("Degraded backing")));
+      $bd.append($degList);
     }
     if (f.evidence && f.evidence.length) {
       var $ev = $("<ul>").addClass("finding-evidence");

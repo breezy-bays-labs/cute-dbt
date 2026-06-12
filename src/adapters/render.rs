@@ -3279,6 +3279,76 @@ mod tests {
     }
 
     #[test]
+    fn build_payload_flattens_degraded_backing_onto_the_finding_wire() {
+        // cute-dbt#259 — FindingPayload flattens the domain Finding, so
+        // the `degraded` per-test cue list rides the wire beside the
+        // covered verdict's attribution (the findings panel renders the
+        // chip + cause list from exactly these keys).
+        let mut config = BTreeMap::new();
+        config.insert("unique_key".to_owned(), json!("order_id"));
+        let node = Node::new(
+            NodeId::new("model.shop.orders_rollup"),
+            "model",
+            checksum("body"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(config, false),
+            None,
+            BTreeMap::new(),
+        );
+        let mut test_config = BTreeMap::new();
+        test_config.insert("severity".to_owned(), json!("warn"));
+        let test = Node::new(
+            NodeId::new("test.shop.unique_orders_rollup_order_id"),
+            "test",
+            checksum("t"),
+            None,
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(test_config, false),
+            None,
+            BTreeMap::new(),
+        )
+        .with_test_attachment(
+            Some("order_id".to_owned()),
+            Some(NodeId::new("model.shop.orders_rollup")),
+            Some(TestMetadata::new(
+                "unique",
+                None,
+                json!({ "column_name": "order_id" }),
+            )),
+        );
+        let manifest = manifest_for(vec![node, test], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.orders_rollup")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        let json = serde_json::to_value(&payload.models[0]).expect("serialize");
+        assert_eq!(json["findings"][0]["verdict"]["status"], "covered");
+        assert_eq!(
+            json["findings"][0]["degraded"][0]["by"],
+            "test.shop.unique_orders_rollup_order_id"
+        );
+        assert!(
+            json["findings"][0]["degraded"][0]["causes"][0]
+                .as_str()
+                .is_some_and(|c| c.starts_with("severity: warn")),
+            "the domain-composed cause copy rides the wire: {json}"
+        );
+    }
+
+    #[test]
     fn build_payload_omits_the_findings_key_when_no_check_fires() {
         // The serde skip keeps every pre-#169 payload byte-stable: a
         // model tripping no check carries NO `findings` key at all.

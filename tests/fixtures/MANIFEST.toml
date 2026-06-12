@@ -323,7 +323,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "61cd7ef4f844de74ae5d5bc0772982919a8341073e04c7cf00160e36a496de6f"
+sha256 = "e2369e26a56d213eea0ba170c5f9322b82b9a0ad7ef593a3ccc50041a22a63d1"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -438,7 +438,25 @@ test-config/disabled/unrendered ingestion. Nothing reads these \
 surfaces at render time, so no rendered surface moves; every other \
 test keeps the real null-filled limit/store_failures and `{}` \
 unrendered_config unset shapes, and singular-test linkage was already \
-real committed wire (the assert_* tests).\
+real committed wire (the assert_* tests). \
+cute-dbt#259's truthfulness splice (current side only) makes the \
+coverage-truthfulness cues visible in the committed goldens: \
+unique_dim_payers_payer_key's config gains severity "warn" (+ the \
+matching authored unrendered_config) so dim_payers' grain verdict \
+renders Covered with the DEGRADED-backing chip + cause; \
+unique_fct_provider_metrics_provider_metrics_key gains where \
+("year_actual >= 2024") + limit 100 so the diff-showcase surfaces the \
+where/limit causes; int_patients__never_admitted's config gains \
+unique_key = "patient_id" plus a hand-authored synthetic SINGULAR \
+test node (assert_never_admitted_patients_distinct — cloned field-for- \
+field from the engine-emitted assert_patient_dates_valid shape, \
+depends_on-linked only, NOT engine-emitted) so the grain verdict \
+degrades to honest UNKNOWN with the singular tests enumerated; and \
+the disabled map gains a fourth entry (a disabled `unique` test on \
+mart_dq_summary.entity_type, cloned field-for-field from the \
+engine-emitted disabled-generic specimen above) so mart_dq_summary's \
+UNCOVERED grain row carries the `exists but disabled` evidence — \
+distinct from absent.\
 """
 
 [[fixture]]

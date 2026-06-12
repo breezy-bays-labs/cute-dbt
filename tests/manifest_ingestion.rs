@@ -552,10 +552,10 @@ fn real_fixtures_carry_the_test_config_disabled_singular_wire_family() {
         "dbt-core emits the authored pre-Jinja values",
     );
 
-    // --- the spliced disabled map: per-id arrays; the generic entry
-    // keeps its linkage; the singular + model entries carry none.
+    // --- the spliced disabled map: per-id arrays; the generic entries
+    // keep their linkage; the singular + model entries carry none.
     let disabled = playground.disabled();
-    assert_eq!(disabled.len(), 3);
+    assert_eq!(disabled.len(), 4);
     let archive = &disabled["model.healthcare_analytics.stg_synthea__claims_archive"][0];
     assert_eq!(archive.resource_type(), "model");
     assert_eq!(
@@ -577,6 +577,20 @@ fn real_fixtures_carry_the_test_config_disabled_singular_wire_family() {
         &disabled["test.healthcare_analytics.assert_payer_amounts_reconcile"][0];
     assert!(disabled_singular.attached_node().is_none());
     assert!(disabled_singular.test_metadata().is_none());
+    // The cute-dbt#259 splice: a disabled UNIQUENESS test on
+    // mart_dq_summary's declared grain — the exists-but-disabled
+    // specimen the grain check surfaces (distinct from absent).
+    let disabled_unique =
+        &disabled["test.healthcare_analytics.unique_mart_dq_summary_entity_type.4f2a9c7d10"][0];
+    assert_eq!(
+        disabled_unique.attached_node().map(NodeId::as_str),
+        Some("model.healthcare_analytics.mart_dq_summary"),
+    );
+    assert_eq!(disabled_unique.column_name(), Some("entity_type"));
+    assert_eq!(
+        disabled_unique.test_metadata().map(TestMetadata::name),
+        Some("unique"),
+    );
 
     // --- jaffle-shop: the real "nothing disabled" shape ({} on wire)
     // and a default-config generic test (null-filled semantics).

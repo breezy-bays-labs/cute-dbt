@@ -69,7 +69,65 @@ fn unique_data_test(world: &mut World, state: String, column: String, target: St
         combo: false,
         columns: vec![column],
         enabled: state == "enabled",
+        extra_config: Vec::new(),
     });
+}
+
+// cute-dbt#259 — truthfulness Givens: weakening test configs (severity
+// / where on the wire config dict), the disabled-MAP placement (where
+// both real engines put disabled tests), and singular (SQL-file) tests
+// linked through depends_on only.
+
+#[given(
+    regex = r#"^an enabled unique data test on column "([^"]+)" of "([^"]+)" with severity "([^"]+)"$"#
+)]
+fn unique_data_test_with_severity(
+    world: &mut World,
+    column: String,
+    target: String,
+    severity: String,
+) {
+    world.coverage_plan.tests.push(CoverageDataTest {
+        target,
+        combo: false,
+        columns: vec![column],
+        enabled: true,
+        extra_config: vec![("severity".to_owned(), Value::String(severity))],
+    });
+}
+
+#[given(
+    regex = r#"^an enabled unique data test on column "([^"]+)" of "([^"]+)" filtered by where "([^"]+)"$"#
+)]
+fn unique_data_test_with_where(world: &mut World, column: String, target: String, filter: String) {
+    world.coverage_plan.tests.push(CoverageDataTest {
+        target,
+        combo: false,
+        columns: vec![column],
+        enabled: true,
+        extra_config: vec![("where".to_owned(), Value::String(filter))],
+    });
+}
+
+#[given(
+    regex = r#"^the manifest disables a unique test "([^"]+)" on column "([^"]+)" of "([^"]+)"$"#
+)]
+fn disabled_map_unique_test(world: &mut World, name: String, column: String, target: String) {
+    world.coverage_plan.disabled_map_tests.push((
+        name,
+        CoverageDataTest {
+            target,
+            combo: false,
+            columns: vec![column],
+            enabled: false,
+            extra_config: Vec::new(),
+        },
+    ));
+}
+
+#[given(regex = r#"^an enabled singular test "([^"]+)" depending on "([^"]+)"$"#)]
+fn singular_test_depending_on(world: &mut World, name: String, target: String) {
+    world.coverage_plan.singular_tests.push((name, target));
 }
 
 #[given(
@@ -83,6 +141,7 @@ fn combo_data_test(world: &mut World, state: String, columns: String, target: St
         combo: true,
         columns,
         enabled: state == "enabled",
+        extra_config: Vec::new(),
     });
 }
 
@@ -178,7 +237,8 @@ fn test_node_id(test: &CoverageDataTest) -> String {
 /// The wire JSON for one generic-test node — the real fusion shape
 /// (`test_metadata` kwargs carry `column_name` for `unique` /
 /// `combination_of_columns` for the dbt_utils composite; `config` is the
-/// FLAT wire dict carrying `enabled`).
+/// FLAT wire dict carrying `enabled` plus any cute-dbt#259 weakening
+/// entries the scenario declared (`severity` / `where` / `limit`)).
 fn wire_test_node(test: &CoverageDataTest) -> Value {
     let test_metadata = if test.combo {
         json!({
@@ -193,13 +253,48 @@ fn wire_test_node(test: &CoverageDataTest) -> Value {
             "kwargs": { "column_name": test.columns[0] },
         })
     };
+    let mut config = serde_json::Map::new();
+    config.insert("enabled".to_owned(), Value::Bool(test.enabled));
+    for (key, value) in &test.extra_config {
+        config.insert(key.clone(), value.clone());
+    }
     json!({
         "resource_type": "test",
         "checksum": { "name": "none", "checksum": "" },
         "attached_node": model_id(&test.target).as_str(),
         "column_name": if test.combo { Value::Null } else { Value::from(test.columns[0].clone()) },
         "test_metadata": test_metadata,
-        "config": { "enabled": test.enabled },
+        "config": Value::Object(config),
+    })
+}
+
+/// The wire JSON for one SINGULAR (SQL-file) test node (cute-dbt#259):
+/// no `test_metadata`, no `attached_node` — linkage rides
+/// `depends_on.nodes` only (the cute-dbt#258 live-probed shape).
+fn wire_singular_test_node(target: &str) -> Value {
+    json!({
+        "resource_type": "test",
+        "checksum": { "name": "sha256", "checksum": "s" },
+        "config": { "enabled": true },
+        "depends_on": { "macros": [], "nodes": [model_id(target).as_str()] },
+    })
+}
+
+/// The wire JSON for one disabled-map entry (cute-dbt#259): real wire
+/// entries are whole node payloads; the reader's light projection keeps
+/// identity + the generic-test linkage triplet.
+fn wire_disabled_entry(name: &str, test: &CoverageDataTest) -> Value {
+    json!({
+        "resource_type": "test",
+        "name": name,
+        "column_name": test.columns[0],
+        "attached_node": model_id(&test.target).as_str(),
+        "test_metadata": {
+            "name": "unique",
+            "namespace": null,
+            "kwargs": { "column_name": test.columns[0] },
+        },
+        "config": { "enabled": false },
     })
 }
 
@@ -265,10 +360,26 @@ fn render_coverage_report(world: &mut World) {
         };
         configs.push((model.bare.as_str(), config));
     }
-    let test_nodes: Vec<(String, Value)> = plan
+    let mut test_nodes: Vec<(String, Value)> = plan
         .tests
         .iter()
         .map(|test| (test_node_id(test), wire_test_node(test)))
+        .collect();
+    for (name, target) in &plan.singular_tests {
+        test_nodes.push((
+            format!("test.jaffle_shop.{name}"),
+            wire_singular_test_node(target),
+        ));
+    }
+    let disabled: Vec<(String, Value)> = plan
+        .disabled_map_tests
+        .iter()
+        .map(|(name, test)| {
+            (
+                format!("test.jaffle_shop.{name}"),
+                wire_disabled_entry(name, test),
+            )
+        })
         .collect();
     let unit_test_overrides: Vec<(String, bool)> = plan
         .unit_tests
@@ -281,6 +392,7 @@ fn render_coverage_report(world: &mut World) {
         &configs,
         &test_nodes,
         &unit_test_overrides,
+        &disabled,
     );
     let baseline_path = serialize_to_tmp(&baseline, "coverage_baseline");
 
@@ -344,6 +456,76 @@ fn finding_attributes_coverage(world: &mut World, model: String, column: String)
         by,
         vec![expected.as_str()],
         "coverage attributed to exactly the satisfying test node"
+    );
+}
+
+// cute-dbt#259 — truthfulness Thens: degraded-backing marks beside the
+// attribution, exists-but-disabled evidence, and singular-test
+// enumeration on the honest-UNKNOWN arm.
+
+#[then(
+    regex = r#"^the finding for "([^"]+)" marks the unique data test on "([^"]+)" as degraded by "([^"]+)"$"#
+)]
+fn finding_marks_degraded(world: &mut World, model: String, column: String, cause: String) {
+    let finding = find_finding(world, "grain.unique-key-unbacked", &model);
+    let expected = format!("test.jaffle_shop.unique_{model}_{column}");
+    let entry = finding["degraded"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|d| d["by"].as_str() == Some(expected.as_str()))
+        .unwrap_or_else(|| panic!("a degraded entry names {expected:?}: {finding}"));
+    assert!(
+        entry["causes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|c| c.as_str().is_some_and(|c| c.contains(cause.as_str()))),
+        "the degraded entry enumerates the {cause:?} cause: {entry}"
+    );
+    // The in-row honesty contract: degraded ⊆ the covered attribution.
+    assert!(
+        finding["verdict"]["by"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|by| by.as_str() == Some(expected.as_str())),
+        "a degraded test still attributes (never dropped from `by`): {finding}"
+    );
+}
+
+#[then(
+    regex = r#"^the finding for "([^"]+)" carries exists-but-disabled evidence naming "([^"]+)"$"#
+)]
+fn finding_carries_disabled_evidence(world: &mut World, model: String, name: String) {
+    let finding = find_finding(world, "grain.unique-key-unbacked", &model);
+    assert!(
+        finding["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|e| e["label"].as_str() == Some("exists but disabled")
+                && e["value"].as_str().is_some_and(|v| v.contains(&name))),
+        "an exists-but-disabled evidence row names {name:?} (distinct from absent): {finding}"
+    );
+}
+
+#[then(regex = r#"^the finding for "([^"]+)" enumerates singular test "([^"]+)" in evidence$"#)]
+fn finding_enumerates_singular_test(world: &mut World, model: String, name: String) {
+    let finding = find_finding(world, "grain.unique-key-unbacked", &model);
+    let expected = format!("test.jaffle_shop.{name}");
+    assert!(
+        finding["evidence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|e| e["label"].as_str() == Some("singular test")
+                && e["value"].as_str().is_some_and(|v| v.contains(&expected))),
+        "a singular-test evidence row names {expected:?}: {finding}"
+    );
+    assert!(
+        finding.get("recommendation").is_none(),
+        "the honest-UNKNOWN arm never nags a recommendation: {finding}"
     );
 }
 

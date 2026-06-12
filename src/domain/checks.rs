@@ -98,7 +98,7 @@ use crate::domain::cte::{
     CteGraph, EdgeType, JoinKeyPair, LeftJoinFact, SubqueryFact, SubqueryKind,
 };
 use crate::domain::grain::test_is_enabled;
-use crate::domain::manifest::{Manifest, Node, NodeConfig, NodeId};
+use crate::domain::manifest::{Manifest, Node, NodeConfig, NodeId, TestMetadata, TestSeverity};
 use crate::domain::state::{resolve_target_model, resolve_tested_model};
 use crate::domain::unit_test::{UnitTest, UnitTestGiven};
 use crate::domain::unit_test_table::{CellValue, FixtureTable, table_from_manifest_rows};
@@ -275,6 +275,30 @@ pub enum Verdict {
     Unknown,
 }
 
+/// One attributed-but-degraded backing test riding beside a
+/// [`Verdict::Covered`] finding's attribution (cute-dbt#259).
+///
+/// The test satisfies the check's predicate — it is real backing and it
+/// attributes — but its own config weakens the guarantee below the
+/// default error-severity full-table contract: `severity: warn` (a
+/// failing run warns instead of failing), a `where` row filter (only a
+/// row subset is checked), or a `limit` cap (failure reporting is
+/// truncated). Deliberately **not** a fourth verdict: the three-valued
+/// covered/uncovered/unknown vocabulary is the epic cute-dbt#168 trust
+/// contract, and the cue rides in-row beside the attribution (the #262
+/// copy principles: in-row honesty, enumerated causes, never a silent
+/// downgrade, never a percentage).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DegradedBacking {
+    /// The attributed test node id — always one of the covered
+    /// verdict's `by` entries (the subset invariant is pinned in tests).
+    pub by: String,
+    /// The enumerated degradation causes, human-readable copy composed
+    /// in the domain (Rust computes, JS only renders). Never empty on
+    /// an emitted entry.
+    pub causes: Vec<String>,
+}
+
 /// One concrete evidence instance that tripped a check — a name (and, for
 /// future AST-zone checks, a span) the report can pin in-context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -331,6 +355,16 @@ pub struct Finding<Id: CheckId> {
     /// nothing to recommend). Omitted from JSON when `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recommendation: Option<String>,
+    /// Attributed tests whose backing is degraded (cute-dbt#259) —
+    /// per-test enumerated causes, set only by detectors whose
+    /// satisfying tests can carry weakening config (today:
+    /// `grain.unique-key-unbacked`). Non-empty only beside a
+    /// [`Verdict::Covered`], and every entry's `by` is one of the
+    /// verdict's attributed ids. Omitted from JSON when empty so every
+    /// pre-#259 payload (and the committed goldens whose backing is
+    /// full-strength) stays byte-stable.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub degraded: Vec<DegradedBacking>,
     /// An operator acknowledgement (cute-dbt#171), set by the
     /// display-layer policy stage (`apply_check_policy`) — never by a
     /// detector or by supersedes resolution. Omitted from JSON when
@@ -400,8 +434,17 @@ impl<Id: CheckId> Finding<Id> {
             verdict,
             evidence,
             recommendation,
+            degraded: Vec::new(),
             suppressed: None,
         }
+    }
+
+    /// Attach degraded-backing cues (cute-dbt#259) — detector-side only,
+    /// beside a [`Verdict::Covered`] attribution.
+    #[must_use]
+    pub fn with_degraded(mut self, degraded: Vec<DegradedBacking>) -> Self {
+        self.degraded = degraded;
+        self
     }
 }
 
@@ -636,10 +679,14 @@ heuristics! {
             conditions: [
                 "the model declares config.unique_key (a column name or a list of columns)",
                 "no enabled uniqueness data test (unique, or a composite unique_combination_of_columns) attached to the model has a column set that is a subset of the declared key",
+                "a covering test whose own config weakens the guarantee — severity: warn, a where row filter, or a limit cap — still attributes, marked as DEGRADED backing with every cause enumerated on the finding (in-row honesty: a cue beside the attribution, never a fourth verdict, never a percentage)",
+                "when no enabled generic uniqueness test covers the key but an enabled singular (SQL-file) test references the model through depends_on, the verdict degrades to UNKNOWN — a singular test may assert the declared grain, but its SQL is not statically classifiable (never a false Uncovered nag on singular-test shops)",
+                "a uniqueness test on the declared grain that exists but is disabled — config.enabled: false on a nodes-map test, or a generic-test entry in the manifest disabled map — never counts as coverage and surfaces as `exists but disabled` evidence, distinct from absent",
             ],
             exclusions: [
                 "a unique_key value that is not a literal column name / list of column names is reported UNKNOWN, never UNCOVERED (the declared grain is not statically recoverable)",
                 "a uniqueness test whose column set is WIDER than the key does not satisfy the check (uniqueness of a superset does not imply uniqueness at the declared grain)",
+                "a disabled SINGULAR test (and every non-generic-test disabled-map entry) carries no statically recoverable model linkage — both engines empty depends_on and omit attached_node on disabled nodes — so it is never attributed and never surfaced here",
             ],
             recommendation: "Add a uniqueness data test at the declared grain: `unique` on a single-column key, or `dbt_utils.unique_combination_of_columns` over the composite key columns.",
             rationale: "Incremental merge / delete+insert semantics silently depend on the declared unique_key actually being unique — a duplicate key corrupts the merge with no test to catch it. Declaring a grain without a test at that grain is an unverified load-bearing assumption.",
@@ -790,7 +837,8 @@ heuristics! {
 /// The construct discriminator for the unique-key grain check.
 const UNIQUE_KEY_CONSTRUCT: &str = "config.unique_key";
 
-/// Detector for `grain.unique-key-unbacked` (cute-dbt#169).
+/// Detector for `grain.unique-key-unbacked` (cute-dbt#169; truthfulness
+/// hardening cute-dbt#259).
 ///
 /// Trigger: a `model` node declaring `config.unique_key`
 /// ([`crate::domain::manifest::NodeConfig::unique_key`]). Satisfaction:
@@ -804,9 +852,20 @@ const UNIQUE_KEY_CONSTRUCT: &str = "config.unique_key";
 /// here: pair-uniqueness does not imply per-column uniqueness).
 ///
 /// Verdicts: satisfying tests found ⇒ [`Verdict::Covered`] attributing
-/// their node ids (sorted); none ⇒ [`Verdict::Uncovered`]; a declared
+/// their node ids (sorted), with per-test [`DegradedBacking`] cues when
+/// a covering test is warn-severity / where-filtered / limit-capped
+/// (cute-dbt#259 — attribution stays, the weakening is enumerated
+/// in-row); none, but ≥1 enabled singular test referencing the model
+/// via `depends_on` ⇒ [`Verdict::Unknown`] (a singular test may assert
+/// the grain; its SQL is not statically classifiable — never a false
+/// Uncovered nag); none at all ⇒ [`Verdict::Uncovered`]; a declared
 /// key whose columns are not statically recoverable ⇒
 /// [`Verdict::Unknown`]. No `unique_key` ⇒ no finding (trigger silent).
+///
+/// A declared-but-disabled uniqueness test on the grain (a nodes-map
+/// test with `config.enabled: false`, or a generic-test entry in the
+/// manifest `disabled` map) never counts as coverage and surfaces as
+/// `exists but disabled` evidence — distinct from absent (cute-dbt#259).
 fn detect_grain_unique_key_unbacked(ctx: &CheckContext<'_>) -> Vec<Finding<HeuristicId>> {
     let check = HeuristicId::GrainUniqueKeyUnbacked;
     if ctx.model.resource_type() != "model" {
@@ -833,31 +892,86 @@ fn detect_grain_unique_key_unbacked(ctx: &CheckContext<'_>) -> Vec<Finding<Heuri
             vec![Evidence::new("unique_key", raw)],
         )];
     };
-    let evidence = vec![Evidence::new("unique_key", columns.join(", "))];
+    let mut evidence = vec![Evidence::new("unique_key", columns.join(", "))];
     let key_set: BTreeSet<String> = columns
         .iter()
         .map(|column| column.to_ascii_lowercase())
         .collect();
-    let mut by: Vec<String> = ctx
+    // Borrowed scan: ids stay `&str` through the sort and only become
+    // owned at the POD ownership boundary (`by` / `DegradedBacking.by`).
+    let mut covering: Vec<(&str, &Node)> = ctx
         .manifest
         .nodes()
         .iter()
         .filter(|(_, node)| covers_grain(node, ctx.model.id(), &key_set))
-        .map(|(id, _)| id.as_str().to_owned())
+        .map(|(id, node)| (id.as_str(), node))
         .collect();
-    by.sort();
+    covering.sort_by_key(|(id, _)| *id);
+    // cute-dbt#259 — per-test degradation cues beside the attribution:
+    // a warn-severity / where-filtered / limit-capped test still backs
+    // the grain, but never silently as full-strength coverage.
+    let degraded: Vec<DegradedBacking> = covering
+        .iter()
+        .filter_map(|(id, node)| {
+            let causes = backing_degradations(node.config());
+            (!causes.is_empty()).then(|| DegradedBacking {
+                by: (*id).to_owned(),
+                causes,
+            })
+        })
+        .collect();
+    let by: Vec<String> = covering.into_iter().map(|(id, _)| id.to_owned()).collect();
+    evidence.extend(disabled_grain_evidence(
+        ctx.manifest,
+        ctx.model.id(),
+        &key_set,
+    ));
     let verdict = if by.is_empty() {
-        Verdict::Uncovered
+        grain_fallback_verdict(ctx.manifest, ctx.model.id(), &mut evidence)
     } else {
         Verdict::Covered { by }
     };
-    vec![Finding::new(
-        check,
-        ctx.model.id().clone(),
-        UNIQUE_KEY_CONSTRUCT,
-        verdict,
-        evidence,
-    )]
+    vec![
+        Finding::new(
+            check,
+            ctx.model.id().clone(),
+            UNIQUE_KEY_CONSTRUCT,
+            verdict,
+            evidence,
+        )
+        .with_degraded(degraded),
+    ]
+}
+
+/// The no-generic-backing arm of the grain verdict (cute-dbt#259):
+/// UNCOVERED only when nothing else could plausibly assert the grain.
+/// An enabled singular (SQL-file) test referencing the model via
+/// `depends_on` — the only wire linkage singular tests carry
+/// (cute-dbt#258, live-probed on both engines) — degrades the verdict
+/// to honest UNKNOWN with the singular tests enumerated in evidence,
+/// stating what WAS checked (the #262 copy principles).
+fn grain_fallback_verdict(
+    manifest: &Manifest,
+    model_id: &NodeId,
+    evidence: &mut Vec<Evidence>,
+) -> Verdict {
+    let singular = singular_tests_on(manifest, model_id);
+    if singular.is_empty() {
+        return Verdict::Uncovered;
+    }
+    evidence.push(Evidence::new(
+        "generic backing",
+        "no enabled generic uniqueness data test (unique / unique_combination_of_columns) covers a column subset of the declared key",
+    ));
+    for id in &singular {
+        evidence.push(Evidence::new(
+            "singular test",
+            format!(
+                "{id} — an enabled singular (SQL-file) test references this model via depends_on; whether its SQL asserts the declared grain is not statically decidable",
+            ),
+        ));
+    }
+    Verdict::Unknown
 }
 
 /// `true` when `node` is an enabled uniqueness data test attached to
@@ -872,14 +986,144 @@ fn covers_grain(node: &Node, model_id: &NodeId, key_set: &BTreeSet<String>) -> b
     let Some(columns) = uniqueness_test_columns(node) else {
         return false;
     };
+    covers_key(&columns, key_set)
+}
+
+/// `true` when a uniqueness test's `columns` ⊆ `key_set` (already
+/// lowercased) — non-empty subset direction only (cute-dbt#169).
+fn covers_key(columns: &[String], key_set: &BTreeSet<String>) -> bool {
     !columns.is_empty()
         && columns
             .iter()
             .all(|column| key_set.contains(&column.to_ascii_lowercase()))
 }
 
+/// The enumerated degradation causes a covering data test's own config
+/// carries (cute-dbt#259) — empty for the default full-strength
+/// contract (error severity, unfiltered, uncapped). Copy is composed
+/// here so the wording lives in one testable place (Rust computes, JS
+/// only renders).
+fn backing_degradations(config: &NodeConfig) -> Vec<String> {
+    let mut causes = Vec::new();
+    match config.severity() {
+        Some(TestSeverity::Warn) => causes.push(
+            "severity: warn — a failing run warns instead of failing, so this backing is advisory, not gating"
+                .to_owned(),
+        ),
+        Some(TestSeverity::Unrecognized) => {
+            let raw = config
+                .config()
+                .get("severity")
+                .map_or_else(String::new, Value::to_string);
+            causes.push(format!(
+                "severity: {raw} — not a recognized severity, so the gating behavior is unknown",
+            ));
+        }
+        Some(TestSeverity::Error) | None => {}
+    }
+    if let Some(filter) = config
+        .where_filter()
+        .map(str::trim)
+        .filter(|filter| !filter.is_empty())
+    {
+        causes.push(format!(
+            "where-filtered — only rows matching `{filter}` are checked; the grain is unverified outside the filter",
+        ));
+    }
+    if let Some(limit) = config.limit() {
+        causes.push(format!(
+            "limit: {limit} — failing-row reporting caps at {limit} rows; the test still trips on the first failure, but the failure surface is truncated",
+        ));
+    }
+    causes
+}
+
+/// `exists but disabled` evidence rows (cute-dbt#259): a disabled
+/// uniqueness test on the declared grain asserts nothing and never
+/// counts as coverage, but its existence is a different fact than NO
+/// test — the author wrote one and switched it off. Scans BOTH
+/// disabled surfaces: nodes-map test nodes carrying `config.enabled:
+/// false` (synthetic manifests keep disabled tests inline) and the
+/// manifest `disabled` map (where both real engines put them —
+/// cute-dbt#258). Deterministic: sorted by id, deduplicated.
+fn disabled_grain_evidence(
+    manifest: &Manifest,
+    model_id: &NodeId,
+    key_set: &BTreeSet<String>,
+) -> Vec<Evidence> {
+    let mut rows: Vec<(String, String)> = Vec::new();
+    for (id, node) in manifest.nodes() {
+        if node.resource_type() == "test"
+            && node.attached_node() == Some(model_id)
+            && !test_is_enabled(node)
+            && let Some(columns) = uniqueness_test_columns(node)
+            && covers_key(&columns, key_set)
+        {
+            rows.push((id.as_str().to_owned(), columns.join(", ")));
+        }
+    }
+    for (id, entries) in manifest.disabled() {
+        for entry in entries {
+            if entry.resource_type() == "test"
+                && entry.attached_node() == Some(model_id)
+                && let Some(test_metadata) = entry.test_metadata()
+                && let Some(columns) = uniqueness_columns(test_metadata, entry.column_name())
+                && covers_key(&columns, key_set)
+            {
+                rows.push((id.clone(), columns.join(", ")));
+            }
+        }
+    }
+    rows.sort();
+    rows.dedup();
+    rows.into_iter()
+        .map(|(id, columns)| {
+            Evidence::new(
+                "exists but disabled",
+                format!(
+                    "{id} — a uniqueness test on ({columns}) is declared but disabled (config.enabled: false); it asserts nothing and never counts as coverage",
+                ),
+            )
+        })
+        .collect()
+}
+
+/// The enabled singular (SQL-file) tests referencing `model_id`
+/// through `depends_on.nodes`, sorted by id (cute-dbt#259). Singular
+/// tests carry no `attached_node` / `test_metadata` on either engine
+/// (cute-dbt#258) — `depends_on` is the only statically recoverable
+/// linkage. Borrowed from the manifest: the sole consumer
+/// ([`grain_fallback_verdict`]) only formats the ids into evidence
+/// copy, so owning them here would allocate just to discard.
+fn singular_tests_on<'a>(manifest: &'a Manifest, model_id: &NodeId) -> Vec<&'a str> {
+    let mut ids: Vec<&str> = manifest
+        .nodes()
+        .iter()
+        .filter(|(_, node)| {
+            node.is_singular_test()
+                && test_is_enabled(node)
+                && node.depends_on().nodes().contains(model_id)
+        })
+        .map(|(id, _)| id.as_str())
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
 /// The column set a uniqueness test asserts, or `None` when `node` is
-/// not a uniqueness test.
+/// not a uniqueness test ([`uniqueness_columns`] over the node's
+/// linkage fields).
+fn uniqueness_test_columns(node: &Node) -> Option<Vec<String>> {
+    uniqueness_columns(node.test_metadata()?, node.column_name())
+}
+
+/// The column set a uniqueness test's `test_metadata` asserts, or
+/// `None` when it is not a uniqueness test. Shared by the nodes-map
+/// recognizer ([`uniqueness_test_columns`]) and the disabled-map
+/// recognizer (cute-dbt#259 —
+/// [`crate::domain::manifest::DisabledEntry`] keeps the same
+/// `test_metadata` / `column_name` linkage pair on disabled GENERIC
+/// tests).
 ///
 /// Extraction mirrors fusion's `extract_columns_from_metadata`
 /// (`primary_key_inference.rs`, `9977b6cb…`): `unique` reads
@@ -890,15 +1134,17 @@ fn covers_grain(node: &Node, model_id: &NodeId, key_set: &BTreeSet<String>) -> b
 /// returned **whole** (kept composite — never flattened per column). A
 /// combination array with non-string entries is not statically
 /// recoverable ⇒ `None` (the test simply does not count as coverage).
-fn uniqueness_test_columns(node: &Node) -> Option<Vec<String>> {
-    let test_metadata = node.test_metadata()?;
+fn uniqueness_columns(
+    test_metadata: &TestMetadata,
+    node_column_name: Option<&str>,
+) -> Option<Vec<String>> {
     match test_metadata.name() {
         "unique" => {
             let column = test_metadata
                 .kwargs()
                 .get("column_name")
                 .and_then(Value::as_str)
-                .or_else(|| node.column_name())?;
+                .or(node_column_name)?;
             Some(vec![column.to_owned()])
         }
         "unique_combination_of_columns" => {
@@ -3183,6 +3429,419 @@ mod tests {
             .node(&node_id("snapshot.shop.snp_patients"))
             .expect("node exists");
         assert!(model_findings(&manifest, node, None).is_empty());
+    }
+
+    // ===== cute-dbt#259 — degraded backing (severity / where / limit) =====
+
+    /// A covering unique test on `order_id` with the given flat config.
+    fn unique_order_id_test(config: &[(&str, Value)]) -> Node {
+        test_node(
+            "test.shop.unique_orders_order_id",
+            ORDERS,
+            Some("order_id"),
+            unique_metadata("order_id"),
+            config,
+        )
+    }
+
+    #[test]
+    fn warn_severity_backing_attributes_as_degraded() {
+        let manifest = manifest_of(vec![
+            orders_with_key(Value::from("order_id")),
+            unique_order_id_test(&[("severity", Value::from("warn"))]),
+        ]);
+        let finding = single_finding(run(&manifest, ORDERS));
+        assert_eq!(
+            finding.verdict,
+            Verdict::Covered {
+                by: vec!["test.shop.unique_orders_order_id".to_owned()],
+            },
+            "a warn-severity test still attributes — degraded, never dropped",
+        );
+        assert_eq!(finding.degraded.len(), 1);
+        assert_eq!(finding.degraded[0].by, "test.shop.unique_orders_order_id");
+        assert_eq!(finding.degraded[0].causes.len(), 1);
+        assert!(
+            finding.degraded[0].causes[0].starts_with("severity: warn"),
+            "the cause names the weakening config: {:?}",
+            finding.degraded[0].causes,
+        );
+        assert!(finding.recommendation.is_none());
+    }
+
+    #[test]
+    fn where_and_limit_causes_are_enumerated_together() {
+        let manifest = manifest_of(vec![
+            orders_with_key(Value::from("order_id")),
+            unique_order_id_test(&[
+                ("where", Value::from("order_date >= '2024-01-01'")),
+                ("limit", Value::from(100)),
+            ]),
+        ]);
+        let finding = single_finding(run(&manifest, ORDERS));
+        assert!(matches!(finding.verdict, Verdict::Covered { .. }));
+        assert_eq!(finding.degraded.len(), 1);
+        let causes = &finding.degraded[0].causes;
+        assert_eq!(causes.len(), 2, "every cause enumerated: {causes:?}");
+        assert!(
+            causes[0].contains("order_date >= '2024-01-01'"),
+            "the where cue quotes the filter: {causes:?}",
+        );
+        assert!(
+            causes[1].starts_with("limit: 100"),
+            "the limit cue names the cap: {causes:?}",
+        );
+    }
+
+    #[test]
+    fn unrecognized_severity_is_cued_with_the_raw_value() {
+        let manifest = manifest_of(vec![
+            orders_with_key(Value::from("order_id")),
+            unique_order_id_test(&[("severity", Value::from("loud"))]),
+        ]);
+        let finding = single_finding(run(&manifest, ORDERS));
+        assert_eq!(finding.degraded.len(), 1);
+        assert!(
+            finding.degraded[0].causes[0].contains("\"loud\"")
+                && finding.degraded[0].causes[0].contains("not a recognized severity"),
+            "the raw value is surfaced, never guessed at: {:?}",
+            finding.degraded[0].causes,
+        );
+    }
+
+    #[test]
+    fn full_strength_backing_carries_no_degradation() {
+        // Explicit error severity, null where/limit (the fusion
+        // null-fill shape) — the default contract, no cues.
+        let manifest = manifest_of(vec![
+            orders_with_key(Value::from("order_id")),
+            unique_order_id_test(&[
+                ("severity", Value::from("ERROR")),
+                ("where", Value::Null),
+                ("limit", Value::Null),
+            ]),
+        ]);
+        let finding = single_finding(run(&manifest, ORDERS));
+        assert!(matches!(finding.verdict, Verdict::Covered { .. }));
+        assert!(finding.degraded.is_empty());
+        // serde: the key is omitted entirely (payload byte-stability).
+        let json = serde_json::to_value(&finding).expect("finding serializes");
+        assert!(json.get("degraded").is_none());
+    }
+
+    #[test]
+    fn mixed_clean_and_degraded_backing_cues_only_the_degraded_test() {
+        let manifest = manifest_of(vec![
+            orders_with_key(serde_json::json!(["customer_id", "order_date"])),
+            test_node(
+                "test.shop.a_unique_customer_id",
+                ORDERS,
+                Some("customer_id"),
+                unique_metadata("customer_id"),
+                &[],
+            ),
+            test_node(
+                "test.shop.b_combo",
+                ORDERS,
+                None,
+                combo_metadata(&["customer_id", "order_date"]),
+                &[("severity", Value::from("warn"))],
+            ),
+        ]);
+        let finding = single_finding(run(&manifest, ORDERS));
+        let Verdict::Covered { by } = &finding.verdict else {
+            panic!("expected Covered, got {:?}", finding.verdict);
+        };
+        assert_eq!(by.len(), 2, "both tests attribute: {by:?}");
+        assert_eq!(finding.degraded.len(), 1, "only the warn test is cued");
+        assert_eq!(finding.degraded[0].by, "test.shop.b_combo");
+        // The subset invariant: every degraded id is an attributed id.
+        assert!(
+            finding.degraded.iter().all(|d| by.contains(&d.by)),
+            "degraded ⊆ by",
+        );
+    }
+
+    #[test]
+    fn degraded_serializes_per_test_with_causes() {
+        let manifest = manifest_of(vec![
+            orders_with_key(Value::from("order_id")),
+            unique_order_id_test(&[("severity", Value::from("warn"))]),
+        ]);
+        let finding = single_finding(run(&manifest, ORDERS));
+        let json = serde_json::to_value(&finding).expect("finding serializes");
+        assert_eq!(
+            json["degraded"][0]["by"],
+            "test.shop.unique_orders_order_id"
+        );
+        assert!(
+            json["degraded"][0]["causes"][0]
+                .as_str()
+                .is_some_and(|c| c.starts_with("severity: warn")),
+            "causes serialize as the composed copy: {json}",
+        );
+    }
+
+    // ===== cute-dbt#259 — exists but disabled, distinct from absent =====
+
+    #[test]
+    fn disabled_nodes_map_test_surfaces_exists_but_disabled() {
+        let manifest = manifest_of(vec![
+            orders_with_key(Value::from("order_id")),
+            unique_order_id_test(&[("enabled", Value::Bool(false))]),
+        ]);
+        let finding = single_finding(run(&manifest, ORDERS));
+        assert_eq!(
+            finding.verdict,
+            Verdict::Uncovered,
+            "never counts as coverage"
+        );
+        let disabled: Vec<&Evidence> = finding
+            .evidence
+            .iter()
+            .filter(|e| e.label == "exists but disabled")
+            .collect();
+        assert_eq!(disabled.len(), 1, "{:?}", finding.evidence);
+        assert!(
+            disabled[0]
+                .value
+                .contains("test.shop.unique_orders_order_id")
+                && disabled[0].value.contains("(order_id)"),
+            "the cue names the test and its columns: {}",
+            disabled[0].value,
+        );
+        assert!(
+            finding.degraded.is_empty(),
+            "disabled tests never attribute"
+        );
+    }
+
+    #[test]
+    fn disabled_map_uniqueness_test_surfaces_exists_but_disabled() {
+        use crate::domain::manifest::DisabledEntry;
+        let entry = DisabledEntry::new("test").with_attachment(
+            Some("order_id".to_owned()),
+            Some(node_id(ORDERS)),
+            Some(unique_metadata("order_id")),
+        );
+        let manifest = manifest_of(vec![orders_with_key(Value::from("order_id"))]).with_disabled(
+            BTreeMap::from([(
+                "test.shop.unique_orders_order_id.0123456789".to_owned(),
+                vec![entry],
+            )]),
+        );
+        let finding = single_finding(run(&manifest, ORDERS));
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .any(|e| e.label == "exists but disabled"
+                    && e.value
+                        .contains("test.shop.unique_orders_order_id.0123456789")),
+            "the disabled-map entry surfaces by id: {:?}",
+            finding.evidence,
+        );
+    }
+
+    #[test]
+    fn irrelevant_disabled_entries_never_surface() {
+        use crate::domain::manifest::DisabledEntry;
+        // A disabled accepted_values test (not a uniqueness signature), a
+        // disabled uniqueness test on ANOTHER model, a disabled test with
+        // a non-subset column, and a linkage-free disabled SINGULAR test
+        // — none of them concern this grain.
+        let other_check = DisabledEntry::new("test").with_attachment(
+            Some("status".to_owned()),
+            Some(node_id(ORDERS)),
+            Some(TestMetadata::new(
+                "accepted_values",
+                None,
+                serde_json::json!({ "column_name": "status" }),
+            )),
+        );
+        let other_model = DisabledEntry::new("test").with_attachment(
+            Some("order_id".to_owned()),
+            Some(node_id("model.shop.other")),
+            Some(unique_metadata("order_id")),
+        );
+        let wider = DisabledEntry::new("test").with_attachment(
+            Some("status".to_owned()),
+            Some(node_id(ORDERS)),
+            Some(unique_metadata("status")),
+        );
+        let singular = DisabledEntry::new("test");
+        let manifest = manifest_of(vec![orders_with_key(Value::from("order_id"))]).with_disabled(
+            BTreeMap::from([
+                ("test.shop.av".to_owned(), vec![other_check]),
+                ("test.shop.um".to_owned(), vec![other_model]),
+                ("test.shop.uw".to_owned(), vec![wider]),
+                ("test.shop.assert_x".to_owned(), vec![singular]),
+            ]),
+        );
+        let finding = single_finding(run(&manifest, ORDERS));
+        assert_eq!(finding.verdict, Verdict::Uncovered);
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .all(|e| e.label != "exists but disabled"),
+            "no irrelevant disabled entry surfaces: {:?}",
+            finding.evidence,
+        );
+    }
+
+    #[test]
+    fn exists_but_disabled_rides_a_covered_finding_too() {
+        // An enabled covering test AND a disabled twin: covered with
+        // attribution, and the disabled fact still surfaces (in-row
+        // honesty — the author should know the off switch exists).
+        use crate::domain::manifest::DisabledEntry;
+        let entry = DisabledEntry::new("test").with_attachment(
+            Some("order_id".to_owned()),
+            Some(node_id(ORDERS)),
+            Some(unique_metadata("order_id")),
+        );
+        let manifest = manifest_of(vec![
+            orders_with_key(Value::from("order_id")),
+            unique_order_id_test(&[]),
+        ])
+        .with_disabled(BTreeMap::from([(
+            "test.shop.unique_orders_order_id_v2.aa00".to_owned(),
+            vec![entry],
+        )]));
+        let finding = single_finding(run(&manifest, ORDERS));
+        assert!(matches!(finding.verdict, Verdict::Covered { .. }));
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .any(|e| e.label == "exists but disabled"),
+            "{:?}",
+            finding.evidence,
+        );
+    }
+
+    // ===== cute-dbt#259 — singular tests via depends_on linkage =====
+
+    /// An enabled singular (SQL-file) test node depending on `target`
+    /// — no `test_metadata`, no `attached_node` (the cute-dbt#258
+    /// linkage truth).
+    fn singular_test(full_id: &str, target: &str) -> Node {
+        Node::new(
+            NodeId::new(full_id),
+            "test",
+            Checksum::new("sha256", "s"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::new(Vec::new(), vec![NodeId::new(target)]),
+            None,
+            NodeConfig::new(BTreeMap::new(), false),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn singular_test_degrades_an_unbacked_key_to_unknown() {
+        let manifest = manifest_of(vec![
+            orders_with_key(Value::from("order_id")),
+            singular_test("test.shop.assert_orders_consistent", ORDERS),
+        ]);
+        let finding = single_finding(run(&manifest, ORDERS));
+        assert_eq!(
+            finding.verdict,
+            Verdict::Unknown,
+            "a singular test may assert the grain — never a false Uncovered nag",
+        );
+        assert!(finding.recommendation.is_none());
+        assert!(
+            finding
+                .evidence
+                .iter()
+                .any(|e| e.label == "generic backing"),
+            "the evidence states what WAS checked: {:?}",
+            finding.evidence,
+        );
+        assert!(
+            finding.evidence.iter().any(|e| e.label == "singular test"
+                && e.value.contains("test.shop.assert_orders_consistent")),
+            "the singular tests are enumerated: {:?}",
+            finding.evidence,
+        );
+    }
+
+    #[test]
+    fn singular_tests_never_attribute_when_generic_backing_exists() {
+        let manifest = manifest_of(vec![
+            orders_with_key(Value::from("order_id")),
+            unique_order_id_test(&[]),
+            singular_test("test.shop.assert_orders_consistent", ORDERS),
+        ]);
+        let finding = single_finding(run(&manifest, ORDERS));
+        assert_eq!(
+            finding.verdict,
+            Verdict::Covered {
+                by: vec!["test.shop.unique_orders_order_id".to_owned()],
+            },
+            "a singular test is never claimed as grain coverage",
+        );
+        assert!(
+            finding.evidence.iter().all(|e| e.label != "singular test"),
+            "covered findings stay quiet about singular tests: {:?}",
+            finding.evidence,
+        );
+    }
+
+    #[test]
+    fn disabled_or_unrelated_singular_tests_keep_uncovered() {
+        let mut disabled = singular_test("test.shop.assert_orders_consistent", ORDERS);
+        disabled = Node::new(
+            disabled.id().clone(),
+            "test",
+            Checksum::new("sha256", "s"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::new(Vec::new(), vec![node_id(ORDERS)]),
+            None,
+            NodeConfig::new(
+                BTreeMap::from([("enabled".to_owned(), Value::Bool(false))]),
+                false,
+            ),
+            None,
+            BTreeMap::new(),
+        );
+        let elsewhere = singular_test("test.shop.assert_other_consistent", "model.shop.other");
+        let manifest = manifest_of(vec![
+            orders_with_key(Value::from("order_id")),
+            disabled,
+            elsewhere,
+        ]);
+        let finding = single_finding(run(&manifest, ORDERS));
+        assert_eq!(
+            finding.verdict,
+            Verdict::Uncovered,
+            "a disabled singular test asserts nothing; an unrelated one is not linkage",
+        );
+    }
+
+    #[test]
+    fn singular_evidence_is_sorted_by_id() {
+        let manifest = manifest_of(vec![
+            orders_with_key(Value::from("order_id")),
+            singular_test("test.shop.b_assert", ORDERS),
+            singular_test("test.shop.a_assert", ORDERS),
+        ]);
+        let finding = single_finding(run(&manifest, ORDERS));
+        let singular: Vec<&str> = finding
+            .evidence
+            .iter()
+            .filter(|e| e.label == "singular test")
+            .map(|e| e.value.as_str())
+            .collect();
+        assert_eq!(singular.len(), 2);
+        assert!(singular[0].starts_with("test.shop.a_assert"));
+        assert!(singular[1].starts_with("test.shop.b_assert"));
     }
 
     #[test]

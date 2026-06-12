@@ -361,7 +361,11 @@ pub fn serialize_with_wire_config_to_tmp(manifest: &Manifest, name: &str) -> Pat
 /// 3. **unit-test `overrides.macros.is_incremental`** — each
 ///    `(unit-test key, bool)` entry injects the nested wire `overrides`
 ///    block (the cute-dbt#145 divergence: the domain stores the mode
-///    flat) for the cute-dbt#164 branch-rollup scenarios.
+///    flat) for the cute-dbt#164 branch-rollup scenarios;
+/// 4. **the top-level `disabled` map** (cute-dbt#259) — each
+///    `(unique_id, entry json)` pair injects one per-id ARRAY entry in
+///    the real wire shape (whole node payloads keyed by unique_id —
+///    where both engines put disabled tests).
 #[must_use]
 pub fn serialize_coverage_to_tmp(
     manifest: &Manifest,
@@ -369,6 +373,7 @@ pub fn serialize_coverage_to_tmp(
     model_configs: &[(&str, Value)],
     test_nodes: &[(String, Value)],
     unit_test_overrides: &[(String, bool)],
+    disabled: &[(String, Value)],
 ) -> PathBuf {
     let mut value: Value = serde_json::to_value(manifest).expect("manifest serializes to Value");
     for (bare, config) in model_configs {
@@ -381,6 +386,9 @@ pub fn serialize_coverage_to_tmp(
     for (key, is_incremental) in unit_test_overrides {
         value["unit_tests"][key.as_str()]["overrides"] =
             serde_json::json!({ "macros": { "is_incremental": is_incremental } });
+    }
+    for (id, entry) in disabled {
+        value["disabled"][id.as_str()] = Value::Array(vec![entry.clone()]);
     }
     let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.json"));
     std::fs::write(

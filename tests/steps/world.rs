@@ -420,6 +420,13 @@ pub struct CoveragePlan {
     /// Unit tests carrying literal given rows — the cute-dbt#196
     /// subquery-satisfaction scenarios.
     pub given_unit_tests: Vec<CoverageGivenUnitTest>,
+    /// Singular (SQL-file) tests — `(bare test name, bare target model)`
+    /// per test; linked through `depends_on` only (cute-dbt#259).
+    pub singular_tests: Vec<(String, String)>,
+    /// Uniqueness tests injected into the manifest's top-level
+    /// `disabled` map — where both real engines put disabled tests
+    /// (cute-dbt#259). `(bare test name, test)` per entry.
+    pub disabled_map_tests: Vec<(String, CoverageDataTest)>,
 }
 
 /// One unit test with literal dict given rows in a [`CoveragePlan`]
@@ -457,6 +464,9 @@ pub struct CoverageDataTest {
     pub columns: Vec<String>,
     /// `config.enabled` on the test node.
     pub enabled: bool,
+    /// Additional flat wire-config entries (cute-dbt#259 — `severity` /
+    /// `where` / `limit`), merged into the test node's `config` dict.
+    pub extra_config: Vec<(String, serde_json::Value)>,
 }
 
 /// A cute-dbt#171 check-selection scenario plan — models (each with an
