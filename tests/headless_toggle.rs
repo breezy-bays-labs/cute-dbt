@@ -10055,13 +10055,22 @@ fn fmt_tip_contained_at_pathological_viewport_height() {
     // cap + the post-flip top clamp must fully contain the box on the
     // height axis even here; contained beats clipped.
     //
-    // The ~111px window request floors at the platform's minimum
-    // (measured 232px innerHeight on macOS — Chrome refuses shorter
-    // windows; CDP setDeviceMetricsOverride is a documented no-op in
-    // headless_chrome 1.0.21, see the #157 viewport test). Every pin
-    // below therefore measures against the LIVE clientHeight, and the
-    // premise assert keeps the resulting viewport below the old 352px
-    // fold so the containment pin stays meaningful on every platform.
+    // Window-size → viewport mapping is PLATFORM-DEPENDENT (CDP
+    // setDeviceMetricsOverride is a documented no-op in headless_chrome
+    // 1.0.21, see the #157 viewport test, so the launch window is the
+    // only lever): macOS floors the outer window at ~375px and reserves
+    // ~143px of chrome (a ~111px request measured a 232px viewport),
+    // while the Linux CI runner HONORS tiny requests (the same ~111px
+    // request measured a 24px viewport — too short to even hold the
+    // 1-line budget floor plus the bubble chrome). A ~300px request
+    // lands BOTH platforms in a comparable pathological-but-sane band
+    // (macOS ≈232px via its floor; Linux ≈213-300px depending on chrome
+    // height). Every pin below therefore measures against the LIVE
+    // clientHeight, and the premise assert keeps the resulting viewport
+    // inside that band — well under the ~440px a full 20-line budget
+    // needs, so the height-axis pins are exercised for real (RED
+    // pre-fix here via the no-fold pin: the old fixed 222px box — 22rem
+    // at the Sakura 10px root + borders — folded 1178px of content).
     let url = render_to_file(
         "headless_246_fmt_tip_pathological.html",
         vec![model_node("model.shop.dim_x"), model_node("model.shop.src")],
@@ -10069,7 +10078,7 @@ fn fmt_tip_contained_at_pathological_viewport_height() {
         &["model.shop.dim_x"],
         &[],
     );
-    let browser = launch_browser_sized(Some((900, 111)));
+    let browser = launch_browser_sized(Some((900, 300)));
     let tab = browser.new_tab().expect("new tab");
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
@@ -10077,15 +10086,17 @@ fn fmt_tip_contained_at_pathological_viewport_height() {
 
     const BADGE: &str = "document.querySelector('.given-section .format-badge.has-fmt-tip')";
     const TIP: &str = "document.getElementById('fmt-tooltip')";
-    // Premise: the launch produced a viewport shorter than the old fixed
-    // 22rem (352px) bubble, so containment cannot pass vacuously.
+    // Premise: the launch produced a pathologically short viewport on
+    // this platform's window mapping, so the pins below cannot pass as
+    // a tall-viewport no-op.
     let vh = eval(&tab, "document.documentElement.clientHeight")
         .as_i64()
         .expect("clientHeight is a number");
     assert!(
-        (50..=352).contains(&vh),
+        (100..=352).contains(&vh),
         "premise: the pathological launch yields a short viewport \
-         (got {vh}px; the platform floor must stay below the old 352px fold)",
+         (got {vh}px; expected the ~300px request to land in the \
+         100..=352 band on every platform's window-chrome mapping)",
     );
     // focus() scrolls the trigger into the (tiny) viewport, so the
     // singleton positions off a real on-screen rect — the keyboard path.
