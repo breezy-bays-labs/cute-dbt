@@ -62,6 +62,42 @@ pub fn empty_manifest() -> Manifest {
     )
 }
 
+/// A manifest carrying one hook `operation.*` node in the dbt shape
+/// (cute-dbt#269; dbt-fusion `resolve_operations.rs:106-145` @
+/// `9977b6cb…`): id `operation.{project}.{project}-on-run-{kind}-{i}`,
+/// `raw_code` = the hook SQL verbatim, declaring path
+/// `./dbt_project.yml` VERBATIM (the `./` prefix is part of the wire
+/// shape the panel must resolve through the normalization authority).
+#[must_use]
+pub fn manifest_with_operation_node(
+    project: &str,
+    kind: &str,
+    index: usize,
+    sql: &str,
+) -> Manifest {
+    let name = format!("{project}-on-run-{kind}-{index}");
+    let id = NodeId::new(format!("operation.{project}.{name}"));
+    let node = Node::new(
+        id.clone(),
+        "operation",
+        Checksum::new("sha256", "hook"),
+        None,
+        Some(sql.to_owned()),
+        DependsOn::default(),
+        Some("./dbt_project.yml".to_owned()),
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+    .with_identity(Some(name), Some(project.to_owned()));
+    Manifest::new(
+        ManifestMetadata::new("https://schemas.getdbt.com/dbt/manifest/v12.json"),
+        HashMap::from([(id, node)]),
+        HashMap::new(),
+        HashMap::new(),
+    )
+}
+
 /// Construct a model `Node` with explicit checksum and (optional)
 /// compiled SQL. Resource type is fixed to `"model"`; the synthetic
 /// scenarios never need other resource types.

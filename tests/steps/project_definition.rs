@@ -20,10 +20,12 @@ use super::World;
 use super::builders::{empty_manifest, serialize_to_tmp};
 
 /// The canonical working-tree dbt_project.yml every happy-path scenario
-/// shares. Line 5 carries the var; line 10 carries the marts config —
-/// the patches below address exactly those lines (`concat!` keeps the
-/// authored indentation byte-exact — a `\`-continued literal would eat
-/// it).
+/// shares. Line 5 carries the var; line 10 the marts config; line 13
+/// the on-run-start hook; line 17 the dispatch search order
+/// (cute-dbt#269) — the patches below address exactly those lines
+/// (`concat!` keeps the authored indentation byte-exact — a
+/// `\`-continued literal would eat it). Lines 1–10 are pinned: the
+/// pre-#269 patches' line numbers depend on them.
 const PROJECT_YML: &str = concat!(
     "name: bdd_project\n",
     "version: \"1.0\"\n",
@@ -35,6 +37,13 @@ const PROJECT_YML: &str = concat!(
     "  bdd_project:\n",
     "    marts:\n",
     "      +materialized: table\n",
+    "\n",
+    "on-run-start:\n",
+    "  - \"grant usage on schema reporting to role analyst\"\n",
+    "\n",
+    "dispatch:\n",
+    "  - macro_namespace: dbt_utils\n",
+    "    search_order: [\"bdd_project\", \"dbt_utils\"]\n",
 );
 
 /// A one-hunk `--unified=0` patch against dbt_project.yml.
@@ -91,6 +100,44 @@ fn diff_edits_marts_config(world: &mut World, old: String, new: String) {
             10,
             &format!("      +materialized: {old}"),
             &format!("      +materialized: {new}"),
+        ),
+    );
+}
+
+#[given("the current manifest carries the matching on-run-start operation node")]
+fn manifest_carries_operation_node(world: &mut World) {
+    // The operation node's raw_code byte-matches canonical line 13's
+    // parsed value — the Matched arm (the same-revision contract).
+    world.current_manifest = Some(super::builders::manifest_with_operation_node(
+        "bdd_project",
+        "start",
+        0,
+        "grant usage on schema reporting to role analyst",
+    ));
+}
+
+#[given("the PR diff rewrites the on-run-start hook from a revoke statement")]
+fn diff_rewrites_hook(world: &mut World) {
+    // Line 13 of the canonical file: the `+` side must byte-match it.
+    write_patch(
+        world,
+        &project_patch(
+            13,
+            "  - \"revoke all on schema reporting from role analyst\"",
+            "  - \"grant usage on schema reporting to role analyst\"",
+        ),
+    );
+}
+
+#[given("the PR diff reorders the dispatch search order")]
+fn diff_reorders_dispatch(world: &mut World) {
+    // Line 17 of the canonical file (the search_order flow list).
+    write_patch(
+        world,
+        &project_patch(
+            17,
+            "    search_order: [\"dbt_utils\", \"bdd_project\"]",
+            "    search_order: [\"bdd_project\", \"dbt_utils\"]",
         ),
     );
 }
@@ -246,6 +293,82 @@ fn row_states(world: &mut World, note: String) {
     assert!(
         html(world).contains(&format!(r#"<span class="project-def-note">{note}</span>"#)),
         "the row's honesty note must render: {note:?}",
+    );
+}
+
+#[then(regex = r#"^that row's note contains "([^"]+)"$"#)]
+fn row_note_contains(world: &mut World, fragment: String) {
+    // The #269 hook/dispatch notes are full sentences — assert the
+    // load-bearing fragment inside a rendered note span. askama
+    // HTML-escapes the em dash's surrounding text verbatim, so a plain
+    // substring over the document body suffices once we know a note
+    // span exists.
+    let html = html(world);
+    assert!(
+        html.contains(r#"<span class="project-def-note">"#),
+        "a note span must render",
+    );
+    assert!(
+        html.contains(&fragment),
+        "the note must contain {fragment:?}",
+    );
+}
+
+#[then(regex = r#"^the panel carries a "hooks" row for "([^"]+)" with the hook-diff slot$"#)]
+fn panel_carries_hook_row_with_slot(world: &mut World, label: String) {
+    let html = html(world);
+    assert!(
+        html.contains(&format!(
+            r#"<code class="project-def-label">{label}</code>"#
+        )),
+        "panel must carry a hooks row labelled {label}",
+    );
+    assert!(
+        html.contains(&format!(r#"data-hook-slot="{label}""#)),
+        "the hooks row must emit the JS-fill diff slot",
+    );
+}
+
+#[then("the panel carries the dispatch banner row at the UNKNOWN tier")]
+fn panel_carries_dispatch_banner(world: &mut World) {
+    let html = html(world);
+    assert!(
+        html.contains(r#"class="project-def-row is-banner" data-category="dispatch""#),
+        "the dispatch row must render as a banner",
+    );
+    assert!(
+        html.contains(r#"<span class="tier-chip tier-unknown">UNKNOWN</span>"#),
+        "the dispatch banner must carry the UNKNOWN tier chip",
+    );
+}
+
+#[then(regex = r#"^the payload hooks row is matched and its sql diff adds "([^"]+)"$"#)]
+fn payload_hooks_row_matched(world: &mut World, added: String) {
+    let payload = payload(world);
+    let changes = payload["project_change_panel"]["changes"]
+        .as_array()
+        .expect("categorized changes ride the payload")
+        .clone();
+    let hooks = changes
+        .iter()
+        .find(|c| c["category"] == "hooks")
+        .expect("a hooks change in the payload");
+    assert_eq!(
+        hooks["hook"]["manifest"], "matched",
+        "the manifest-side presence verdict rides the wire: {hooks}",
+    );
+    assert_eq!(
+        hooks["hook"]["operation_ids"][0],
+        "operation.bdd_project.bdd_project-on-run-start-0",
+    );
+    let lines = hooks["hook"]["sql_diff"]["lines"]
+        .as_array()
+        .expect("the inline SQL diff rides the wire");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l["kind"] == "added" && l["text"] == added.as_str()),
+        "the diff must add {added:?}; got {lines:?}",
     );
 }
 

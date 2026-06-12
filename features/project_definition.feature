@@ -50,3 +50,34 @@ Feature: Project-definition changes are categorized, never silently invisible
     Then the exit code is 0
     And the payload carries the parsed project definition
     And the report carries no project-definition panel
+
+  # cute-dbt#269 — hooks + dispatch get purpose-built rows: the hook SQL
+  # diff renders from the manifest's operation.* nodes (TOTAL-tier text);
+  # dispatch gets the honest UNKNOWN-tier banner (project-wide effect,
+  # not statically attributable). Contextualize, never widen scope.
+  Scenario: A hook edit renders a hooks row with the operation-node SQL diff
+    Given the working tree carries the canonical dbt_project.yml
+    And the current manifest carries the matching on-run-start operation node
+    And the PR diff rewrites the on-run-start hook from a revoke statement
+    When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the panel carries a "hooks" row for "on-run-start" with the hook-diff slot
+    And that row's note contains "runs in the manifest as operation.bdd_project.bdd_project-on-run-start-0"
+    And the payload hooks row is matched and its sql diff adds "grant usage on schema reporting to role analyst"
+
+  Scenario: A hook edit with no operation nodes states the absent-manifest note
+    Given the working tree carries the canonical dbt_project.yml
+    And the PR diff rewrites the on-run-start hook from a revoke statement
+    When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
+    Then the exit code is 0
+    And that row's note contains "no matching operation.* nodes in the manifest"
+    And that row's note contains "the diff is read from dbt_project.yml itself"
+
+  Scenario: A dispatch reorder renders the UNKNOWN-tier banner row
+    Given the working tree carries the canonical dbt_project.yml
+    And the PR diff reorders the dispatch search order
+    When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the panel carries the dispatch banner row at the UNKNOWN tier
+    And that row's note contains "macro search order changed"
+    And that row's note contains "no call-site resolution was attempted"
