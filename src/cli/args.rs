@@ -58,9 +58,11 @@ pub enum Command {
     /// Render a diff-scoped, self-contained HTML report of a dbt
     /// project's unit tests (PR review; baseline-required, fail-closed).
     Report(ReportArgs),
-    /// Render the full manifest to a self-contained two-page explorer:
-    /// dag.html (model lineage) + tests.html (unit tests). No baseline;
-    /// uncompiled models render as "not compiled" instead of failing.
+    /// EXPERIMENTAL: render the full manifest to a self-contained
+    /// two-page explorer: dag.html (model lineage) + tests.html (unit
+    /// tests). No baseline; uncompiled models render as "not compiled"
+    /// instead of failing. Experimental means the surface and output may
+    /// change or be removed in any v0.x release (cute-dbt#290).
     Explore(ExploreArgs),
 }
 
@@ -382,6 +384,26 @@ mod tests {
     }
 
     // ----- subcommand restructure (cute-dbt#100) -----
+
+    #[test]
+    fn explore_help_text_leads_with_experimental() {
+        // cute-dbt#290: explore is experimental WITHOUT an access gate —
+        // it stays listed and runnable, but its help text must lead with
+        // "EXPERIMENTAL:" so `--help` sets expectations before first run.
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let explore = cmd
+            .find_subcommand("explore")
+            .expect("explore stays listed");
+        let about = explore
+            .get_about()
+            .expect("explore has about text")
+            .to_string();
+        assert!(
+            about.starts_with("EXPERIMENTAL:"),
+            "the explore about text leads with EXPERIMENTAL: — {about}"
+        );
+    }
 
     #[test]
     fn bare_invocation_is_a_missing_subcommand_usage_error_listing_both_verbs() {

@@ -333,6 +333,37 @@ fn no_arguments_is_a_usage_error_listing_both_subcommands() {
 }
 
 #[test]
+fn explore_emits_the_experimental_notice_on_stderr_never_stdout() {
+    // cute-dbt#290: explore is experimental WITHOUT an access gate — the
+    // verb stays runnable (exit 0 on a valid manifest), and every
+    // invocation emits a one-line stderr notice. stderr ONLY: stdout must
+    // stay clean so scripted flows consuming stdout are never corrupted.
+    let out_dir = tmp("explore_experimental_notice");
+    let _ = std::fs::remove_dir_all(&out_dir);
+    let output = run(&[
+        "explore",
+        "--manifest",
+        s(&fixture("jaffle-shop-current.json")),
+        "--out-dir",
+        s(&out_dir),
+    ]);
+    assert!(
+        output.status.success(),
+        "explore stays runnable — no access gate: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("experimental"),
+        "the experimental notice is on stderr: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("experimental"),
+        "the notice never reaches stdout: {stdout}"
+    );
+}
+
+#[test]
 fn flat_pre_verb_invocation_is_a_usage_error() {
     // The pre-#100 flat surface must not silently keep working: flags
     // without a verb are rejected at parse time (deliberate v0.x break).
