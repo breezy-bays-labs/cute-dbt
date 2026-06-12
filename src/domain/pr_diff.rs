@@ -135,6 +135,14 @@ pub struct Hunk {
 /// manifest `original_file_path` is already project-relative. Both sides
 /// therefore resolve to the same key — the property the
 /// `single_normalization_authority_*` tests pin.
+///
+/// The declaring-side normalization includes the leading-`./` strip
+/// (cute-dbt#269): hook operation nodes carry `original_file_path:
+/// "./dbt_project.yml"` **verbatim** (dbt-fusion
+/// `resolve_operations.rs:108-115` @ `9977b6cb…` — deliberate dbt-core
+/// parity), so `operation.*` lookups resolve here like any other node's;
+/// callers never strip the prefix themselves
+/// (`index_resolves_dot_slash_*` tests).
 #[derive(Debug, Clone)]
 pub struct NormalizedDiffIndex {
     /// Normalized (strip-applied) declaring path → that file's hunks.
@@ -986,6 +994,110 @@ pub(crate) fn block_diff_for(span: &BlockSpan, touching: &[&Hunk]) -> BlockDiff 
 }
 
 // ---------------------------------------------------------------------
+// Two-text line diff (cute-dbt#269 — hook bodies, no hunks in hand)
+// ---------------------------------------------------------------------
+
+/// Line-level diff of two owned texts into a [`BlockDiff`] (cute-dbt#269).
+///
+/// The hook rows of the project-change panel diff the OLD hook bodies
+/// (parsed from the reverse-applied `dbt_project.yml`) against the NEW
+/// bodies (the manifest's `operation.*` nodes) — two complete texts with
+/// **no hunks in hand**, so the hunk-splice path (`reconstruct_one`)
+/// does not apply. This is a classic longest-common-subsequence line diff,
+/// emitting the same [`DiffLine`] vocabulary the #111/#132 renderer
+/// consumes: Context for common lines, change blocks as Removed-then-Added
+/// groups, and — when a change block pairs equal counts (the aligned
+/// replacement, `is_aligned_replacement`'s analog) — per-pair intra-line
+/// [`emphasis`](DiffLine::emphasis) via [`intra_line_span`] on **both**
+/// sides, mirroring `removed_diff_lines` / `fold_hunk_edits`.
+///
+/// Inputs are slices of pre-split lines (callers own the `\r`/terminator
+/// framing). Quadratic LCS — hook bodies are a handful of lines; never
+/// fed whole files.
+#[must_use]
+pub fn diff_lines(old: &[String], new: &[String]) -> BlockDiff {
+    let common = lcs_table(old, new);
+    let mut lines = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < old.len() || j < new.len() {
+        if i < old.len() && j < new.len() && old[i] == new[j] {
+            lines.push(DiffLine {
+                kind: DiffLineKind::Context,
+                text: old[i].clone(),
+                emphasis: None,
+            });
+            i += 1;
+            j += 1;
+            continue;
+        }
+        // One maximal change block: consume the non-common lines on both
+        // sides (Removed first, then Added) up to the next common pair —
+        // equal heads always stop a block (matching equal lines is always
+        // on an optimal LCS path).
+        let (mut removed, mut added) = (Vec::new(), Vec::new());
+        while i < old.len()
+            && (j >= new.len() || (old[i] != new[j] && common[i + 1][j] >= common[i][j + 1]))
+        {
+            removed.push(old[i].clone());
+            i += 1;
+        }
+        while j < new.len()
+            && (i >= old.len() || (old[i] != new[j] && common[i][j + 1] > common[i + 1][j]))
+        {
+            added.push(new[j].clone());
+            j += 1;
+        }
+        push_change_block(&mut lines, &removed, &added);
+    }
+    BlockDiff { lines }
+}
+
+/// The LCS length table for [`diff_lines`]: `t[i][j]` = the LCS length of
+/// `old[i..]` vs `new[j..]`.
+fn lcs_table(old: &[String], new: &[String]) -> Vec<Vec<usize>> {
+    let mut t = vec![vec![0usize; new.len() + 1]; old.len() + 1];
+    for i in (0..old.len()).rev() {
+        for j in (0..new.len()).rev() {
+            t[i][j] = if old[i] == new[j] {
+                t[i + 1][j + 1] + 1
+            } else {
+                t[i + 1][j].max(t[i][j + 1])
+            };
+        }
+    }
+    t
+}
+
+/// Emit one change block (Removed lines first, then Added — the diff
+/// order [`reconstruct_one`] produces), with per-pair intra-line emphasis
+/// on both sides when the block is an aligned replacement.
+fn push_change_block(lines: &mut Vec<DiffLine>, removed: &[String], added: &[String]) {
+    // Aligned ⇒ equal counts, so `k` indexes the partner side in bounds.
+    let aligned = !removed.is_empty() && removed.len() == added.len();
+    let pair_span = |k: usize, a: &str, partner: &[String]| {
+        if aligned {
+            intra_line_span(a, &partner[k])
+        } else {
+            None
+        }
+    };
+    for (k, text) in removed.iter().enumerate() {
+        lines.push(DiffLine {
+            kind: DiffLineKind::Removed,
+            emphasis: pair_span(k, text, added),
+            text: text.clone(),
+        });
+    }
+    for (k, text) in added.iter().enumerate() {
+        lines.push(DiffLine {
+            kind: DiffLineKind::Added,
+            emphasis: pair_span(k, text, removed),
+            text: text.clone(),
+        });
+    }
+}
+
+// ---------------------------------------------------------------------
 // Reverse application — reconstruct a file's OLD side (cute-dbt#266)
 // ---------------------------------------------------------------------
 
@@ -1363,6 +1475,151 @@ mod tests {
         };
         let index = NormalizedDiffIndex::new(&diff, None);
         assert_eq!(index.hunks_for("models/_ut.yml").len(), 2);
+    }
+
+    // ----- NormalizedDiffIndex: `./`-prefixed declaring paths (cute-dbt#269) -----
+    //
+    // Hook operation nodes carry `original_file_path: "./dbt_project.yml"`
+    // VERBATIM (dbt-fusion `resolve_operations.rs:108-115` @ `9977b6cb…`:
+    // package-internal by deliberate dbt-core parity, never root-relative).
+    // The declaring-side lookups must resolve that shape through the single
+    // normalization authority — never a call-site strip.
+
+    #[test]
+    fn index_resolves_dot_slash_prefixed_declaring_path() {
+        // The operation-node shape: diff says `dbt_project.yml`, the
+        // manifest declares `./dbt_project.yml`.
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![FileHunks {
+                path: "dbt_project.yml".to_owned(),
+                hunks: vec![hunk(11, 1)],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        assert!(index.contains_changed("./dbt_project.yml"));
+        assert_eq!(index.hunks_for("./dbt_project.yml").len(), 1);
+    }
+
+    #[test]
+    fn index_resolves_dot_slash_declaring_path_under_a_project_root_strip() {
+        // Sub-tree workflow: the diff path carries the repo-root prefix;
+        // the operation node still says `./dbt_project.yml`. Both sides
+        // must meet at the same key.
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![FileHunks {
+                path: "dbt-project/dbt_project.yml".to_owned(),
+                hunks: vec![hunk(3, 1)],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, Some(Path::new("dbt-project")));
+        assert!(index.contains_changed("./dbt_project.yml"));
+        assert_eq!(index.hunks_for("./dbt_project.yml").len(), 1);
+        let paths: Vec<&str> = index.changed_paths().collect();
+        assert_eq!(paths, vec!["dbt_project.yml"]);
+    }
+
+    // ----- diff_lines (cute-dbt#269 — two-text LCS line diff) -----
+
+    fn owned(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn diff_lines_identical_inputs_are_all_context() {
+        let text = owned(&["grant usage", "to role reporter"]);
+        let diff = diff_lines(&text, &text);
+        assert!(diff.lines.iter().all(|l| l.kind == DiffLineKind::Context));
+        assert!(!diff.has_real_change());
+        assert_eq!(diff.lines.len(), 2);
+    }
+
+    #[test]
+    fn diff_lines_pure_insertion_marks_added_only() {
+        let old = owned(&["analyze table x"]);
+        let new = owned(&["analyze table x", "vacuum table x"]);
+        let diff = diff_lines(&old, &new);
+        let kinds: Vec<DiffLineKind> = diff.lines.iter().map(|l| l.kind).collect();
+        assert_eq!(kinds, vec![DiffLineKind::Context, DiffLineKind::Added]);
+        assert_eq!(diff.lines[1].text, "vacuum table x");
+        assert_eq!(
+            diff.lines[1].emphasis, None,
+            "a pure insertion has no pairing, hence no emphasis",
+        );
+    }
+
+    #[test]
+    fn diff_lines_pure_deletion_marks_removed_only() {
+        let old = owned(&["analyze table x", "vacuum table x"]);
+        let new = owned(&["analyze table x"]);
+        let diff = diff_lines(&old, &new);
+        let kinds: Vec<DiffLineKind> = diff.lines.iter().map(|l| l.kind).collect();
+        assert_eq!(kinds, vec![DiffLineKind::Context, DiffLineKind::Removed]);
+        assert_eq!(diff.lines[1].emphasis, None);
+    }
+
+    #[test]
+    fn diff_lines_aligned_replacement_carries_emphasis_on_both_sides() {
+        let old = owned(&["grant usage on schema analytics"]);
+        let new = owned(&["grant select on schema analytics"]);
+        let diff = diff_lines(&old, &new);
+        assert_eq!(diff.lines.len(), 2);
+        assert_eq!(diff.lines[0].kind, DiffLineKind::Removed);
+        assert_eq!(diff.lines[1].kind, DiffLineKind::Added);
+        // "grant " is the common prefix (6 codepoints); the changed word
+        // ends before " on schema analytics".
+        assert_eq!(diff.lines[0].emphasis, Some((6, 11)), "usage");
+        assert_eq!(diff.lines[1].emphasis, Some((6, 12)), "select");
+    }
+
+    #[test]
+    fn diff_lines_unaligned_change_block_has_no_emphasis() {
+        let old = owned(&["a"]);
+        let new = owned(&["b", "c"]);
+        let diff = diff_lines(&old, &new);
+        let kinds: Vec<DiffLineKind> = diff.lines.iter().map(|l| l.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                DiffLineKind::Removed,
+                DiffLineKind::Added,
+                DiffLineKind::Added
+            ],
+            "removed lines group before added within a change block",
+        );
+        assert!(diff.lines.iter().all(|l| l.emphasis.is_none()));
+    }
+
+    #[test]
+    fn diff_lines_change_blocks_stop_at_common_lines() {
+        // A common line between two edits must render as Context, never
+        // be swallowed into a change block.
+        let old = owned(&["x", "keep", "y"]);
+        let new = owned(&["x2", "keep", "y2"]);
+        let diff = diff_lines(&old, &new);
+        let kinds: Vec<(DiffLineKind, &str)> = diff
+            .lines
+            .iter()
+            .map(|l| (l.kind, l.text.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (DiffLineKind::Removed, "x"),
+                (DiffLineKind::Added, "x2"),
+                (DiffLineKind::Context, "keep"),
+                (DiffLineKind::Removed, "y"),
+                (DiffLineKind::Added, "y2"),
+            ],
+        );
+    }
+
+    #[test]
+    fn diff_lines_both_sides_empty_is_an_empty_diff() {
+        let diff = diff_lines(&[], &[]);
+        assert!(diff.lines.is_empty());
+        assert!(!diff.has_real_change());
     }
 
     // ----- NormalizedDiffIndex: rename pairs (cute-dbt#80) -----

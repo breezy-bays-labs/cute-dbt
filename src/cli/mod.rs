@@ -64,12 +64,13 @@ use crate::domain::{
     InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex,
     PreflightError, ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ScopeInput,
     ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock,
-    all_models, attach_model_yaml_diffs, attribute_config_tree_changes, changed_models,
-    check_by_id, diff_project_definitions, effective_fixture_format, external_fixture_table,
-    extract_model_block, extract_unit_test_block, preflight_compiled, raw_hunk_lines,
-    reconstruct_block_diffs, reconstruct_external_fixture_diff, reconstruct_model_sql_diffs,
-    reconstruct_table_diffs, refine_changed_by_hunks, resolve_check_policy, reverse_apply,
-    scan_pragmas, select_in_scope, widen_with_config_attributions,
+    all_models, attach_hook_facts, attach_model_yaml_diffs, attribute_config_tree_changes,
+    changed_models, check_by_id, diff_project_definitions, effective_fixture_format,
+    external_fixture_table, extract_model_block, extract_unit_test_block, hook_operations,
+    preflight_compiled, raw_hunk_lines, reconstruct_block_diffs, reconstruct_external_fixture_diff,
+    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks,
+    resolve_check_policy, reverse_apply, scan_pragmas, select_in_scope,
+    widen_with_config_attributions,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -845,6 +846,13 @@ fn gather_project_facts_with_reader(
 /// attributions (cute-dbt#267) when categorization succeeds. See
 /// [`gather_project_facts_with_reader`] for the arm map; every fallback
 /// arm attributes nothing (no parsed pair ⇒ never a guessed widening).
+///
+/// Hooks rows are enriched from the manifest's `operation.*` nodes
+/// (cute-dbt#269): the project name comes from the parsed file's own
+/// `name:` (the file IS the root project definition — no wire field
+/// needed; operation node names are built from exactly this name), and
+/// [`attach_hook_facts`] adds the inline SQL diff + the manifest-side
+/// presence verdict to each `Hooks` change.
 fn project_change_panel(
     new_text: &str,
     definition: Option<&crate::domain::ProjectDefinition>,
@@ -872,7 +880,9 @@ fn project_change_panel(
     let Ok(old_def) = parse_project_definition(&old_text) else {
         return fallback(ProjectFallbackReason::OldParseFailed);
     };
-    let changes = diff_project_definitions(&old_def, new_def);
+    let mut changes = diff_project_definitions(&old_def, new_def);
+    let ops = hook_operations(current, new_def.name.as_deref().unwrap_or_default());
+    attach_hook_facts(&mut changes, &ops);
     let attributions = attribute_config_tree_changes(current, &old_def, new_def, &changes);
     (ProjectChangePanel::Categorized { changes }, attributions)
 }
@@ -2460,6 +2470,66 @@ mod tests {
                 panic!("expected categorized-empty, got {reason:?}")
             }
         }
+    }
+
+    #[test]
+    fn project_facts_hook_edit_enriches_the_hooks_row_from_operation_nodes() {
+        // cute-dbt#269: a hooks edit + a manifest carrying the matching
+        // operation node (declaring path `./dbt_project.yml` VERBATIM,
+        // the fusion shape) ⇒ the hooks row carries HookChangeFacts:
+        // Matched presence, the operation id, and the inline SQL diff
+        // whose new side came from the manifest node.
+        let new_text = "name: playground\non-run-start:\n  - \"grant select on schema x\"\n";
+        let index = project_diff_index(vec![replacement_hunk(
+            3,
+            "  - \"grant usage on schema x\"",
+            "  - \"grant select on schema x\"",
+        )]);
+        let op_id = crate::domain::NodeId::new("operation.playground.playground-on-run-start-0");
+        let op = crate::domain::Node::new(
+            op_id.clone(),
+            "operation",
+            crate::domain::Checksum::new("sha256", "feed"),
+            None,
+            Some("grant select on schema x".to_owned()),
+            crate::domain::DependsOn::default(),
+            Some("./dbt_project.yml".to_owned()),
+            crate::domain::NodeConfig::default(),
+            None,
+            std::collections::BTreeMap::new(),
+        )
+        .with_identity(
+            Some("playground-on-run-start-0".to_owned()),
+            Some("playground".to_owned()),
+        );
+        let manifest = Manifest::new(
+            ManifestMetadata::new("v12"),
+            StdHashMap::from([(op_id, op)]),
+            StdHashMap::new(),
+            StdHashMap::new(),
+        );
+        let facts =
+            gather_project_facts_with_reader(&project_reader(new_text), &manifest, Some(&index));
+        let ProjectChangePanel::Categorized { changes } = facts.panel.expect("panel present")
+        else {
+            panic!("a clean hook edit categorizes");
+        };
+        let hooks_row = changes
+            .iter()
+            .find(|c| c.category == ProjectChangeCategory::Hooks)
+            .expect("a hooks row");
+        let hook = hooks_row.hook.as_ref().expect("hook facts attached");
+        assert_eq!(hook.manifest, crate::domain::HookManifestPresence::Matched);
+        assert_eq!(
+            hook.operation_ids,
+            vec!["operation.playground.playground-on-run-start-0"],
+        );
+        let diff = hook.sql_diff.as_ref().expect("inline SQL diff");
+        assert!(
+            diff.lines
+                .iter()
+                .any(|l| l.text == "grant select on schema x"),
+        );
     }
 
     // -----------------------------------------------------------------

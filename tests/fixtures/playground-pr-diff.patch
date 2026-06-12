@@ -46,3 +46,9 @@ diff --git a/dbt_project.yml b/dbt_project.yml
 @@ -18 +18 @@
 -      +materialized: view
 +      +materialized: table
+@@ -23 +23 @@
+-  - "grant usage on schema analytics to role reporting"
++  - "grant select on all tables in schema analytics to role reporting"
+@@ -27 +27 @@
+-    search_order: ["dbt_utils", "healthcare_analytics"]
++    search_order: ["healthcare_analytics", "dbt_utils"]

@@ -46,11 +46,12 @@ use cute_dbt::adapters::render::{
     ExternalFixtures, LoadedFixture, ScopeSource, render_report, render_report_with_externals,
 };
 use cute_dbt::domain::{
-    BlockDiff, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, FileHunks, Hunk,
-    InScopeSet, Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId,
-    NormalizedDiffIndex, PrDiff, ProjectChangePanel, ProjectFacts, ProjectFallbackReason,
-    SourceNode, TestMetadata, UnitTest, UnitTestDataDiff, UnitTestExpect, UnitTestGiven,
-    UnitTestYamlBlock, external_fixture_table, raw_hunk_lines, reconstruct_table_diffs,
+    BlockDiff, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, FileHunks,
+    HookChangeFacts, HookManifestPresence, Hunk, InScopeSet, Manifest, ManifestMetadata,
+    ModelInScopeSet, Node, NodeConfig, NodeId, NormalizedDiffIndex, PrDiff, ProjectChange,
+    ProjectChangeCategory, ProjectChangePanel, ProjectFacts, ProjectFallbackReason, SourceNode,
+    TestMetadata, UnitTest, UnitTestDataDiff, UnitTestExpect, UnitTestGiven, UnitTestYamlBlock,
+    external_fixture_table, raw_hunk_lines, reconstruct_table_diffs,
 };
 use cute_dbt::ports::ManifestSource;
 
@@ -7660,6 +7661,17 @@ const TIER_CHIP_CONTRAST_SWEEP_JS: &str = r#"(function () {
     sp.textContent = "advisory";
     document.querySelector(".finding-summary").appendChild(sp);
   }
+  /* cute-dbt#269 — the project panel's dispatch banner ships the fourth
+     tier class (.tier-chip.tier-unknown). This fixture renders no
+     project panel, so inject one the same way as advisory — the exact
+     shipped rules are exercised on the same --surface backdrop family
+     the real banner sits on. */
+  if (!document.querySelector(".tier-chip.tier-unknown")) {
+    var su = document.createElement("span");
+    su.className = "tier-chip tier-unknown";
+    su.textContent = "UNKNOWN";
+    document.querySelector(".finding-summary").appendChild(su);
+  }
   var root = document.documentElement;
   var out = [];
   for (var i = 0; i < THEMES.length; i++) {
@@ -7673,8 +7685,8 @@ const TIER_CHIP_CONTRAST_SWEEP_JS: &str = r#"(function () {
       var own = parseRgb(cs.backgroundColor);
       var bg = own && own.a === 1 ? own : backdropOf(chips[j].parentElement);
       var tier =
-        (/tier-(total|high|advisory)/.exec(chips[j].className) || [])[1]
-        || "unknown";
+        (/tier-(total|high|advisory|unknown)/.exec(chips[j].className) || [])[1]
+        || "unclassed";
       out.push({
         theme: THEMES[i], tier: tier,
         ratio: fg && bg ? ratio(fg, bg) : -1,
@@ -7709,8 +7721,8 @@ fn tier_chips_meet_aa_contrast_on_every_theme() {
         serde_json::from_str(&raw).expect("the contrast sweep returns valid JSON");
     assert_eq!(
         measured.len(),
-        24,
-        "8 themes x 3 tier chips (total/high/advisory) measured, got: {raw}",
+        32,
+        "8 themes x 4 tier chips (total/high/advisory/unknown) measured, got: {raw}",
     );
 
     let mut failures = Vec::new();
@@ -7720,7 +7732,7 @@ fn tier_chips_meet_aa_contrast_on_every_theme() {
         let ratio = m["ratio"].as_f64().expect("ratio is a number");
         let fg = m["fg"].as_str().unwrap_or("?");
         let bg = m["bg"].as_str().unwrap_or("?");
-        assert_ne!(tier, "unknown", "every chip carries a known tier class");
+        assert_ne!(tier, "unclassed", "every chip carries a known tier class");
         assert!(
             ratio > 0.0,
             "the {theme}/{tier} chip resolved no opaque backdrop — the \
@@ -11795,6 +11807,64 @@ fn project_panel_renders_categorized_on_the_committed_showcase() {
         "the vars row carries the locked interim honesty copy",
     );
 
+    // cute-dbt#269 — the purpose-built hooks + dispatch rows on the same
+    // committed golden (the showcase patch edits the on-run-start hook
+    // and reorders dispatch).
+    assert_eq!(
+        visible_count(&tab, ".project-def-row[data-category=\"hooks\"]"),
+        1,
+        "the hooks row (on-run-start rewrite) is visible",
+    );
+    assert_eq!(
+        visible_count(
+            &tab,
+            ".project-def-row.is-banner[data-category=\"dispatch\"]"
+        ),
+        1,
+        "the dispatch row renders as the banner",
+    );
+    let chip = eval_string(
+        &tab,
+        "document.querySelector('.project-def-row[data-category=\"dispatch\"] .tier-chip.tier-unknown').textContent",
+    );
+    assert_eq!(
+        chip, "UNKNOWN",
+        "the dispatch banner carries the UNKNOWN tier chip"
+    );
+    let hook_note = eval_string(
+        &tab,
+        "document.querySelector('.project-def-row[data-category=\"hooks\"] .project-def-note').textContent",
+    );
+    assert!(
+        hook_note.contains(
+            "runs in the manifest as \
+             operation.healthcare_analytics.healthcare_analytics-on-run-start-0"
+        ),
+        "the hooks row names the manifest operation node: {hook_note}",
+    );
+    // The JS fills the slot with the #111 renderer: diff rows + the SQL
+    // syntax palette inside the hook diff.
+    assert_eq!(
+        visible_count(&tab, ".project-hook-sql .diff-line.diff-added"),
+        1,
+        "the hook diff's added line renders via renderBlockDiff",
+    );
+    assert_eq!(
+        visible_count(&tab, ".project-hook-sql .diff-line.diff-removed"),
+        1,
+        "the hook diff's removed line renders via renderBlockDiff",
+    );
+    // (`eval` here is this file's headless-Chrome harness helper —
+    // JS evaluated in the sandboxed tab against our own report.)
+    let kw_count = eval(
+        &tab,
+        "document.querySelectorAll('.project-hook-sql .sql-keyword').length",
+    );
+    assert!(
+        kw_count.as_i64().unwrap_or(0) > 0,
+        "the hook diff is SQL-tokenized (got {kw_count:?} keywords)",
+    );
+
     // cute-dbt#267 — the config-tree row's affected-models listing (the
     // marts +materialized edit selects the 20 marts models, fusion's
     // fqn-prefix descent) with the R1b cap exercised: 20 > the inline
@@ -11950,6 +12020,81 @@ fn project_panel_fallback_row_renders_for_unparseable_yaml() {
         visible_count(&tab, ".project-def-raw-line.is-added"),
         1,
         "the added raw line is visible",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn project_panel_hook_diff_renders_with_emphasis_via_the_111_renderer() {
+    // cute-dbt#269 — a hooks row carrying HookChangeFacts.sql_diff gets
+    // its slot filled by renderProjectHookDiffs: renderBlockDiff +
+    // tokenizeSql, including the intra-line <strong> emphasis the
+    // Rust-side diff computed. Asserted off a synthetic panel (no
+    // showcase dependency) so the contract pins independent of fixture
+    // churn.
+    let facts = ProjectFacts {
+        definition: None,
+        panel: Some(ProjectChangePanel::Categorized {
+            changes: vec![ProjectChange {
+                category: ProjectChangeCategory::Hooks,
+                label: "on-run-end".to_owned(),
+                old: Some(serde_json::json!(["analyze table analytics.fct_x"])),
+                new: Some(serde_json::json!(["analyze table analytics.fct_y"])),
+                hook: Some(HookChangeFacts {
+                    sql_diff: Some(BlockDiff {
+                        lines: vec![
+                            DiffLine {
+                                kind: DiffLineKind::Removed,
+                                text: "analyze table analytics.fct_x".to_owned(),
+                                emphasis: Some((28, 29)),
+                            },
+                            DiffLine {
+                                kind: DiffLineKind::Added,
+                                text: "analyze table analytics.fct_y".to_owned(),
+                                emphasis: Some((28, 29)),
+                            },
+                        ],
+                    }),
+                    operation_ids: vec!["operation.shop.shop-on-run-end-0".to_owned()],
+                    manifest: HookManifestPresence::Matched,
+                }),
+                tree: None,
+            }],
+        }),
+        config_attributions: BTreeMap::new(),
+    };
+    let url = render_with_project_facts("headless_project_hook_diff.html", &facts);
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, ".project-def-hook-slot .project-hook-sql"),
+        1,
+        "the JS fills the hook slot with the rendered diff",
+    );
+    assert_eq!(
+        visible_count(&tab, ".project-hook-sql .diff-line.diff-removed"),
+        1,
+    );
+    assert_eq!(
+        visible_count(&tab, ".project-hook-sql .diff-line.diff-added"),
+        1,
+    );
+    // The intra-line emphasis overlays as <strong> inside the tokenized
+    // line (the #132 contract, reused verbatim).
+    // (`eval` = this file's headless-Chrome harness helper.)
+    let strong_count = eval(
+        &tab,
+        "document.querySelectorAll('.project-hook-sql .diff-line strong').length",
+    );
+    assert!(
+        strong_count.as_i64().unwrap_or(0) >= 2,
+        "both sides carry the intra-line emphasis overlay (got {strong_count:?})",
     );
     let _ = tab.close(true);
 }

@@ -464,6 +464,30 @@ mod tests {
     // ----- hooks / dispatch / flags / paths -----
 
     #[test]
+    fn crlf_authored_files_parse_to_lf_clean_hook_entries() {
+        // Gemini review on PR #285 (cute-dbt#269): empirical pin that
+        // dbt-yaml normalizes CRLF line breaks per the YAML spec —
+        // quoted scalars, plain scalars, AND block scalars all parse
+        // LF-clean (block scalars keep their clip-chomped trailing
+        // `\n`). The hook-comparison helpers in domain::project_def
+        // therefore see `\r`-free text from the parsed-file sides; the
+        // manifest raw_code side is the unguaranteed vector they defend
+        // against.
+        let text = "name: p\r\non-run-start:\r\n  - \"grant usage on x\"\r\n  - plain scalar hook\r\n  - |\r\n    line1\r\n    line2\r\non-run-end: single plain\r\n";
+        let def = parse(text).expect("CRLF input parses");
+        assert_eq!(
+            def.on_run_start,
+            vec![
+                json!("grant usage on x"),
+                json!("plain scalar hook"),
+                json!("line1\nline2\n"),
+            ],
+            "every scalar style normalizes CRLF away",
+        );
+        assert_eq!(def.on_run_end, vec![json!("single plain")]);
+    }
+
+    #[test]
     fn scalar_and_list_hooks_both_normalize_to_lists() {
         let def = parsed();
         assert_eq!(

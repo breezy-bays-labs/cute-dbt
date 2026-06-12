@@ -323,7 +323,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "e2369e26a56d213eea0ba170c5f9322b82b9a0ad7ef593a3ccc50041a22a63d1"
+sha256 = "e84ca39aa23a2d508728eeca68b255d9b472a7c407e9a1ff5067f2b1250ccbac"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -456,14 +456,22 @@ the disabled map gains a fourth entry (a disabled `unique` test on \
 mart_dq_summary.entity_type, cloned field-for-field from the \
 engine-emitted disabled-generic specimen above) so mart_dq_summary's \
 UNCOVERED grain row carries the `exists but disabled` evidence — \
-distinct from absent.\
+distinct from absent. \
+cute-dbt#269's hook-operation splice (current side only, hand-authored \
+synthetic JSON in the dbt-core HookNode shape): one `operation.*` node \
+(operation.healthcare_analytics.healthcare_analytics-on-run-start-0, \
+resource_type "operation", original_file_path "./dbt_project.yml" \
+VERBATIM — the fusion/core parity shape — raw_code byte-matching the \
+committed playground-source/dbt_project.yml on-run-start entry) so the \
+diff-showcase hooks row renders the Matched operation-node SQL diff; \
+no committed fixture carried any operation node before this.\
 """
 
 [[fixture]]
 path = "playground-pr-diff.patch"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/134"
-sha256 = "8f2b4fd8ca1198b0ea7efc21217332a7417952884c7ab68f271fc21a85d37501"
+sha256 = "8bd15de475b4875d06df3b1f214a98f300bfbdefe3965fe7e99806ada7485744"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"
@@ -492,7 +500,11 @@ dbt_project.yml hunks (a vars edit dq_quarantine_threshold 10→5 + a \
 folder +materialized view→table on models/healthcare_analytics/marts) \
 so the showcase renders the categorized "Project definition changed" \
 panel; their `+` sides are byte-aligned to the committed \
-playground-source/dbt_project.yml (same-revision contract). No \
+playground-source/dbt_project.yml (same-revision contract). \
+cute-dbt#269 appended two more dbt_project.yml hunks (an on-run-start \
+hook rewrite + a dispatch search_order reorder) so the showcase \
+renders the purpose-built hooks row (operation-node SQL diff) and the \
+UNKNOWN-tier dispatch banner. No \
 real data — a hypothetical PR against the synthetic Synthea playground.\
 """
 
@@ -516,7 +528,7 @@ design.\
 path = "playground-source/dbt_project.yml"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/266"
-sha256 = "9986151fbe2bd342c4ab6f344036434249a5f289365b1b946861bd06b28380ef"
+sha256 = "af58d37e9c8fd5ffc76c3db4b58c830aa2e27341a9e1013a3d3b59e1a40c58d7"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"
@@ -531,7 +543,13 @@ the ProjectFileReader port; the patch's two dbt_project.yml hunks \
 reverse-apply against it under the same-revision contract, so the \
 committed diff-showcase example renders categorized Vars + ConfigTree \
 rows. The baseline playground row parses it too (standing metadata in \
-the payload, no panel). Hand-authored to match the synthetic \
+the payload, no panel). cute-dbt#269 added an on-run-start hook + a \
+dispatch block (patched by the showcase's hook/dispatch hunks) so the \
+hooks row + UNKNOWN-tier dispatch banner render in the golden; the \
+hook's parsed value byte-matches the manifest's injected \
+operation.healthcare_analytics.healthcare_analytics-on-run-start-0 \
+raw_code (the Matched arm of the same-revision contract). \
+Hand-authored to match the synthetic \
 healthcare_analytics manifest identity — pure synthetic configuration, \
 no data rows.\
 """

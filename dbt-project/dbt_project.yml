@@ -24,3 +24,17 @@ models:
     +materialized: table
     staging:
       +materialized: view
+
+# cute-dbt#269 — live dogfood for the project-change panel's hooks +
+# dispatch rows: these materialize as operation.* nodes in the compiled
+# manifest (anchored at this file; fusion preview releases emit the
+# underscored node names + un-prefixed path, dbt-core the hyphenated +
+# "./"-prefixed twins — cute-dbt ingests both), so the sticky pr-diff
+# preview exercises the operation-node SQL diff whenever a PR edits
+# them.
+on-run-start:
+  - "create schema if not exists analytics_audit"
+
+dispatch:
+  - macro_namespace: dbt
+    search_order: ["jaffle_shop", "dbt"]
