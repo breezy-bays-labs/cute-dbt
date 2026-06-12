@@ -92,11 +92,15 @@ pub use preflight::{PreflightError, preflight_compiled};
 // already owns the bare name at the domain root; consumers address the
 // YAML source span as `project_def::Span`.
 pub use project_def::{
-    ConfigTree, HookChangeFacts, HookManifestPresence, HookOperation, HookOperations,
-    ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition, ProjectFacts,
-    ProjectFallbackReason, attach_hook_facts, diff_project_definitions, hook_operations,
+    ConfigAttribution, ConfigLeafPath, ConfigTree, HookChangeFacts, HookManifestPresence,
+    HookOperation, HookOperations, ProjectChange, ProjectChangeCategory, ProjectChangePanel,
+    ProjectDefinition, ProjectFacts, ProjectFallbackReason, attach_hook_facts,
+    attribute_config_tree_changes, diff_project_definitions, hook_operations,
 };
-pub use scope::{ScopeInput, ScopeSelection, all_models, changed_models, select_in_scope};
+pub use scope::{
+    ScopeInput, ScopeSelection, all_models, changed_models, select_in_scope,
+    widen_with_config_attributions,
+};
 pub use state::{
     BANNER_EMPTY_SCOPE, BodyChecksumModifier, ConfigsModifier, ContractModifier, InScopeSet,
     MacrosModifier, ModelInScopeSet, ModifiedSet, ModifierKind, RelationModifier, StateComparator,

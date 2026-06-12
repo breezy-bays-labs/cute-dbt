@@ -710,6 +710,16 @@ impl FromIterator<String> for InScopeSet {
     }
 }
 
+/// In-place union (cute-dbt#267 — the config-tree scope widening
+/// mutates the by-value [`crate::domain::scope::ScopeSelection`] instead
+/// of cloning every pre-existing member into a rebuilt set). The
+/// `FromIterator` companion; mirrors `BTreeSet::extend`.
+impl Extend<String> for InScopeSet {
+    fn extend<I: IntoIterator<Item = String>>(&mut self, iter: I) {
+        self.ids.extend(iter);
+    }
+}
+
 /// The set of model node ids in scope for the current diff.
 ///
 /// Explorer mode (#30): every model targeted by an in-scope unit test
@@ -760,6 +770,14 @@ impl FromIterator<NodeId> for ModelInScopeSet {
         Self {
             ids: iter.into_iter().collect(),
         }
+    }
+}
+
+/// In-place union (cute-dbt#267) — see the [`InScopeSet`] `Extend` impl;
+/// same rationale, model-id flavored.
+impl Extend<NodeId> for ModelInScopeSet {
+    fn extend<I: IntoIterator<Item = NodeId>>(&mut self, iter: I) {
+        self.ids.extend(iter);
     }
 }
 

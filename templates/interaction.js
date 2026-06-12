@@ -418,6 +418,25 @@
     }
   }
 
+  // cute-dbt#267 — config-tree provenance chips: why a config-widened
+  // model is in this report. One chip per attribution entry
+  // ("+materialized via dbt_project.yml · models.shop.marts"), rendered
+  // from the Rust-computed m.config_attributions (Rust computes, JS only
+  // renders). Hidden for models with no attribution — the element stays
+  // out of the accessibility tree (the #74 no-empty-landmark intent).
+  function renderModelAttribution(m) {
+    var $row = $('[data-testid="model-attribution"]').empty();
+    var list = (m && m.config_attributions) || [];
+    if (!list.length) { $row.prop("hidden", true); return; }
+    list.forEach(function (a) {
+      $row.append(
+        $("<span>").addClass("config-attribution-chip")
+          .text("+" + a.key + " via dbt_project.yml · " + a.path)
+      );
+    });
+    $row.prop("hidden", false);
+  }
+
   function renderForSelectedModel() {
     var m = currentModel();
     var t = currentTest();
@@ -441,6 +460,7 @@
     // DAG re-centers with no baked selection (the shelf's ✕ handler does
     // its own renderDag; this path lets the one below suffice).
     closeNodeShelf();
+    renderModelAttribution(m);
     renderTestDetails(t);
     renderModelSql(m);
     // cute-dbt#247 — the Model YAML section (peer of Model SQL): the

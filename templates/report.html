@@ -222,6 +222,20 @@
       {%- if !row.note.is_empty() %}
       <span class="project-def-note">{{ row.note }}</span>
       {%- endif %}
+      {#- cute-dbt#267 — the affected-models listing on models:-section
+          config-tree rows: counts always explicit (TOTAL tier — fusion's
+          own fqn resolution); names inline up to the R1b cap, past it
+          collapsed into the <details> below ("listed, not individually
+          rendered"). Other categories/sections render no listing. -#}
+      {%- if !row.affected_text.is_empty() %}
+      <span class="project-def-affected" data-testid="project-def-affected">{{ row.affected_text }}</span>
+      {%- if !row.affected_overflow.is_empty() %}
+      <details class="project-def-affected-list" data-testid="project-def-affected-list">
+        <summary>show affected models</summary>
+        <span class="project-def-affected-names">{% for name in row.affected_overflow %}<code>{{ name }}</code>{% if !loop.last %}, {% endif %}{% endfor %}</span>
+      </details>
+      {%- endif %}
+      {%- endif %}
       {%- if row.hook_slot %}
       {#- cute-dbt#269 — the report JS fills this slot with the hook
           bodies' inline SQL diff via the #111 renderer (renderBlockDiff
@@ -266,6 +280,11 @@
          JS-rendered from m.is_incremental. #}
     </div>
   </div>
+  {# cute-dbt#267 — config-tree provenance chips for the selected model:
+     why a config-widened model is in this report. JS-rendered per model
+     selection (renderModelAttribution, from m.config_attributions);
+     hidden whenever the selected model carries no attribution. -#}
+  <p class="model-attribution-row" data-testid="model-attribution" hidden></p>
   <p class="zero-updated-hint" data-testid="zero-updated-hint" hidden></p>
 </section>
 

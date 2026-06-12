@@ -29,7 +29,7 @@
 //! panel falls back to the Shape-A raw-diff row ([`ProjectChangePanel::
 //! Fallback`]) — fail-open display, never a failed report.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -136,6 +136,58 @@ pub struct ProjectDefinition {
     pub other: BTreeMap<String, Value>,
 }
 
+/// The `config_trees` section whose resolution targets **model** nodes —
+/// the one section cute-dbt#267's scope widening attributes (seeds /
+/// snapshots / tests trees resolve against non-model resource types,
+/// which host no unit tests in v0.1).
+const MODELS_SECTION: &str = "models";
+
+/// The dotted display path of a config-tree node: the section name alone
+/// at the root (`models`), else `section.seg1.seg2…`
+/// (`models.healthcare_analytics.marts`). One format authority for the
+/// panel labels and the cute-dbt#267 attribution chips — the two
+/// surfaces cannot drift.
+fn dotted_tree_path(section: &str, segments: &[String]) -> String {
+    if segments.is_empty() {
+        section.to_owned()
+    } else {
+        format!("{section}.{}", segments.join("."))
+    }
+}
+
+/// Structured identity of one changed config-tree leaf (cute-dbt#267):
+/// the section (`models` / `seeds` / …), the hierarchy segments under
+/// it, and the `+`-stripped config key. Carried on
+/// [`ProjectChange::tree`] for `ConfigTree`-category changes so the
+/// scope-widening attribution consumes the SAME change set the panel
+/// renders (never a re-derived parallel diff).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigLeafPath {
+    /// The authored section name (`models`, `seeds`, …).
+    pub section: String,
+    /// Hierarchy segments under the section root (package / folder /
+    /// node names) — empty for a section-root config key.
+    pub segments: Vec<String>,
+    /// The config key, `+` prefix stripped (`materialized`, `tags`, …).
+    pub key: String,
+}
+
+impl ConfigLeafPath {
+    /// The dotted tree path without the key — `models` /
+    /// `models.healthcare_analytics.marts`.
+    #[must_use]
+    pub fn dotted(&self) -> String {
+        dotted_tree_path(&self.section, &self.segments)
+    }
+
+    /// The panel row label — `models.healthcare_analytics.marts:
+    /// +materialized`.
+    #[must_use]
+    pub fn label(&self) -> String {
+        format!("{}: +{}", self.dotted(), self.key)
+    }
+}
+
 /// The category a project-definition change belongs to — the panel's
 /// row grouping. Declaration order is display order (`Ord` derives from
 /// it): vars first (the flagship blast-radius surface), then config
@@ -187,6 +239,14 @@ pub struct ProjectChange {
     /// ADR-5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hook: Option<HookChangeFacts>,
+    /// Structured leaf identity for [`ProjectChangeCategory::ConfigTree`]
+    /// changes (cute-dbt#267) — `None` for every other category. The
+    /// attribution matcher and the panel's affected-models listing both
+    /// key on this, so they consume the exact change set the row
+    /// displays. Omitted from JSON when absent (pre-#267 payloads stay
+    /// byte-stable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<ConfigLeafPath>,
 }
 
 /// One manifest `operation.*` node backing a project hook entry
@@ -324,6 +384,15 @@ pub struct ProjectFacts {
     /// when `dbt_project.yml` is in the PR diff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel: Option<ProjectChangePanel>,
+    /// Per-model config-tree attributions (cute-dbt#267) — node-id →
+    /// the subtree edits whose fqn-resolved value changed for that model
+    /// ([`attribute_config_tree_changes`]). Non-empty only when the
+    /// panel is [`ProjectChangePanel::Categorized`] on the pr-diff arm
+    /// (every degrade arm attributes nothing — never a guessed
+    /// widening). Drives the scope widening, the model-row provenance
+    /// chips, and the panel's affected-models listings.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub config_attributions: BTreeMap<String, Vec<ConfigAttribution>>,
 }
 
 /// Structurally diff two parsed project definitions into categorized
@@ -372,6 +441,7 @@ pub fn diff_project_definitions(
         diff_config_tree(
             &mut out,
             &section,
+            &mut Vec::new(),
             old.config_trees.get(&section),
             new.config_trees.get(&section),
         );
@@ -396,6 +466,7 @@ pub fn diff_project_definitions(
                 old: (!o.is_empty()).then(|| Value::Array(o.clone())),
                 new: (!n.is_empty()).then(|| Value::Array(n.clone())),
                 hook: None,
+                tree: None,
             });
         }
     }
@@ -440,6 +511,7 @@ fn push_if_changed(
             old,
             new,
             hook: None,
+            tree: None,
         });
     }
 }
@@ -463,12 +535,15 @@ fn diff_value_maps(
     }
 }
 
-/// Recursively diff one config-tree node — `path` is the dotted tree
-/// path so far (starting at the section name). Emits one `ConfigTree`
-/// change per differing `+key` leaf, labelled `"{path}: +{key}"`.
+/// Recursively diff one config-tree node — `segments` is the hierarchy
+/// path under `section` so far (empty at the section root). Emits one
+/// `ConfigTree` change per differing `+key` leaf, labelled via
+/// [`ConfigLeafPath::label`] and carrying the structured leaf on
+/// [`ProjectChange::tree`] (the cute-dbt#267 attribution input).
 fn diff_config_tree(
     out: &mut Vec<ProjectChange>,
-    path: &str,
+    section: &str,
+    segments: &mut Vec<String>,
     old: Option<&ConfigTree>,
     new: Option<&ConfigTree>,
 ) {
@@ -476,21 +551,36 @@ fn diff_config_tree(
     let old = old.unwrap_or(&empty);
     let new = new.unwrap_or(&empty);
     for key in union_keys(&old.configs, &new.configs) {
-        push_if_changed(
-            out,
-            ProjectChangeCategory::ConfigTree,
-            &format!("{path}: +{key}"),
+        let (old_v, new_v) = (
             old.configs.get(&key).cloned(),
             new.configs.get(&key).cloned(),
         );
+        if old_v != new_v {
+            let tree = ConfigLeafPath {
+                section: section.to_owned(),
+                segments: segments.clone(),
+                key,
+            };
+            out.push(ProjectChange {
+                category: ProjectChangeCategory::ConfigTree,
+                label: tree.label(),
+                old: old_v,
+                new: new_v,
+                hook: None,
+                tree: Some(tree),
+            });
+        }
     }
     for child in union_keys(&old.children, &new.children) {
+        segments.push(child.clone());
         diff_config_tree(
             out,
-            &format!("{path}.{child}"),
+            section,
+            segments,
             old.children.get(&child),
             new.children.get(&child),
         );
+        segments.pop();
     }
 }
 
@@ -680,6 +770,151 @@ fn entry_lines(entries: &[String]) -> Vec<String> {
         .collect()
 }
 
+// ---------------------------------------------------------------------
+// Config-tree change attribution (cute-dbt#267)
+// ---------------------------------------------------------------------
+
+/// One provenance fact for an affected model (cute-dbt#267): which
+/// `dbt_project.yml` subtree contributed a changed config key to it.
+/// Rendered as the model-row chip
+/// (`+materialized via dbt_project.yml · models.healthcare_analytics.marts`)
+/// and inverted into the panel's per-row affected-models listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigAttribution {
+    /// The `+`-stripped config key whose resolved value changed for this
+    /// model.
+    pub key: String,
+    /// Dotted path of the **contributing** subtree — the deepest edited
+    /// node that wins this key's resolution for the model's fqn (fusion's
+    /// deepest-match-wins), e.g. `models.healthcare_analytics.marts`;
+    /// bare `models` for a section-root key.
+    pub path: String,
+}
+
+/// fusion's `get_config_for_fqn` descent (dbt-parser
+/// `dbt_project_config.rs:109-122` @ 9977b6cbb1b761065536300037560d8e3c037011):
+/// walk the fqn's segments child-by-child from the section root, stopping
+/// at the first segment with no matching child, and resolve `key` to the
+/// **deepest** visited node that sets it. fusion's
+/// `recur_build_dbt_project_config` (`:297-336`, `default_to`) makes
+/// children inherit unset fields from their parent, so per key the
+/// deepest setter wins and shallower settings apply only where no deeper
+/// node sets the key — exactly what tracking the last hit reproduces.
+///
+/// Returns the winning `(depth, value)`: `depth` is the number of fqn
+/// segments consumed at the winning node (`0` = the section root).
+fn resolve_key_for_fqn<'t>(
+    tree: &'t ConfigTree,
+    fqn: &[String],
+    key: &str,
+) -> Option<(usize, &'t Value)> {
+    let mut node = tree;
+    let mut winner = node.configs.get(key).map(|v| (0, v));
+    for (i, segment) in fqn.iter().enumerate() {
+        let Some(child) = node.children.get(segment) else {
+            break;
+        };
+        node = child;
+        if let Some(v) = node.configs.get(key) {
+            winner = Some((i + 1, v));
+        }
+    }
+    winner
+}
+
+/// The config keys the structural diff changed under the `models:`
+/// section — the attribution's key universe. Reading them off the
+/// [`ProjectChange::tree`] entries guarantees the attribution and the
+/// panel categorize the SAME edit.
+fn changed_models_tree_keys(changes: &[ProjectChange]) -> BTreeSet<&String> {
+    changes
+        .iter()
+        .filter_map(|c| c.tree.as_ref())
+        .filter(|t| t.section == MODELS_SECTION)
+        .map(|t| &t.key)
+        .collect()
+}
+
+/// The attributions for ONE model's fqn across the changed keys: a key
+/// contributes when its fqn-resolved value differs between the old and
+/// new `models:` trees (fusion's deepest-match-wins, so an edit shadowed
+/// by a deeper unchanged setting contributes nothing). The chip path is
+/// the deeper of the two winning nodes — the edited leaf that caused the
+/// difference (value change / addition / removal alike).
+fn attribute_one_fqn(
+    old_tree: &ConfigTree,
+    new_tree: &ConfigTree,
+    fqn: &[String],
+    changed_keys: &BTreeSet<&String>,
+) -> Vec<ConfigAttribution> {
+    let mut out = Vec::new();
+    for key in changed_keys {
+        let old_win = resolve_key_for_fqn(old_tree, fqn, key);
+        let new_win = resolve_key_for_fqn(new_tree, fqn, key);
+        if old_win.map(|(_, v)| v) == new_win.map(|(_, v)| v) {
+            continue;
+        }
+        let depth = match (old_win, new_win) {
+            (Some((od, _)), Some((nd, _))) => od.max(nd),
+            (Some((od, _)), None) => od,
+            (None, Some((nd, _))) => nd,
+            // Both None compares equal above — unreachable here.
+            (None, None) => continue,
+        };
+        out.push(ConfigAttribution {
+            key: (*key).clone(),
+            path: dotted_tree_path(MODELS_SECTION, &fqn[..depth]),
+        });
+    }
+    out
+}
+
+/// Map a categorized `dbt_project.yml` diff onto the models it affects
+/// (cute-dbt#267 — the C2 slice of epic #262).
+///
+/// For every `model` node in `current` carrying a non-empty `fqn`, and
+/// for every config key the diff changed under the `models:` section,
+/// the key's value is resolved against the model's fqn in BOTH trees via
+/// fusion's own algorithm (the private `resolve_key_for_fqn` descent
+/// documented above). The model is
+/// affected exactly when the resolved values differ — **TOTAL tier**:
+/// the selection is fusion's resolution semantics, not a heuristic, so
+/// an edit shadowed by a deeper unchanged setting selects nothing and a
+/// package subtree (`models.dbt_utils.…`) never selects an own-project
+/// model (the fqn's first segment is its package name).
+///
+/// Returns node-id → attributions (sorted by key within each model;
+/// `BTreeMap` keys give deterministic model order). Empty when the diff
+/// touched no `models:` config key. A model with an empty `fqn`
+/// (pre-cute-dbt#278 manifests) is never selected — the matcher refuses
+/// to guess.
+#[must_use]
+pub fn attribute_config_tree_changes(
+    current: &Manifest,
+    old: &ProjectDefinition,
+    new: &ProjectDefinition,
+    changes: &[ProjectChange],
+) -> BTreeMap<String, Vec<ConfigAttribution>> {
+    let changed_keys = changed_models_tree_keys(changes);
+    if changed_keys.is_empty() {
+        return BTreeMap::new();
+    }
+    let empty = ConfigTree::default();
+    let old_tree = old.config_trees.get(MODELS_SECTION).unwrap_or(&empty);
+    let new_tree = new.config_trees.get(MODELS_SECTION).unwrap_or(&empty);
+    let mut out = BTreeMap::new();
+    for (id, node) in current.nodes() {
+        if node.resource_type() != "model" || node.fqn().is_empty() {
+            continue;
+        }
+        let attributions = attribute_one_fqn(old_tree, new_tree, node.fqn(), &changed_keys);
+        if !attributions.is_empty() {
+            out.insert(id.as_str().to_owned(), attributions);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -755,6 +990,7 @@ mod tests {
                 old: Some(json!("CT")),
                 new: Some(json!("VT")),
                 hook: None,
+                tree: None,
             }],
         };
         let fallback = ProjectChangePanel::Fallback {
@@ -835,6 +1071,7 @@ mod tests {
                 old: Some(json!("CT")),
                 new: Some(json!("VT")),
                 hook: None,
+                tree: None,
             }],
         );
     }
@@ -855,6 +1092,7 @@ mod tests {
                 old: None,
                 new: Some(json!(true)),
                 hook: None,
+                tree: None,
             },
         );
         assert_eq!(
@@ -865,6 +1103,7 @@ mod tests {
                 old: Some(json!(7)),
                 new: None,
                 hook: None,
+                tree: None,
             },
         );
     }
@@ -895,6 +1134,11 @@ mod tests {
                 old: Some(json!("table")),
                 new: Some(json!("incremental")),
                 hook: None,
+                tree: Some(ConfigLeafPath {
+                    section: "models".to_owned(),
+                    segments: vec!["playground".to_owned(), "marts".to_owned()],
+                    key: "materialized".to_owned(),
+                }),
             }],
         );
     }
@@ -938,6 +1182,11 @@ mod tests {
                 old: None,
                 new: Some(json!(false)),
                 hook: None,
+                tree: Some(ConfigLeafPath {
+                    section: "seeds".to_owned(),
+                    segments: Vec::new(),
+                    key: "quote_columns".to_owned(),
+                }),
             }],
         );
     }
@@ -1199,6 +1448,7 @@ mod tests {
             old,
             new,
             hook: None,
+            tree: None,
         }
     }
 
@@ -1429,6 +1679,7 @@ mod tests {
             old: Some(json!(10)),
             new: Some(json!(5)),
             hook: None,
+            tree: None,
         }];
         attach_hook_facts(&mut changes, &ops);
         assert_eq!(changes[0].hook, None);
@@ -1453,5 +1704,371 @@ mod tests {
         assert_eq!(facts, back);
         // The presence enum serializes snake_case for the JS consumer.
         assert!(json.contains(r#""manifest":"matched""#), "{json}");
+    }
+
+    // ----- cute-dbt#267: config-tree change attribution -----
+    // (manifest/Node/HashMap imports shared with the #269 hook tests above.)
+
+    #[test]
+    fn config_leaf_path_composes_dotted_path_and_label_from_one_authority() {
+        let root = ConfigLeafPath {
+            section: "models".to_owned(),
+            segments: Vec::new(),
+            key: "materialized".to_owned(),
+        };
+        assert_eq!(root.dotted(), "models");
+        assert_eq!(root.label(), "models: +materialized");
+        let nested = ConfigLeafPath {
+            section: "models".to_owned(),
+            segments: vec!["shop".to_owned(), "marts".to_owned()],
+            key: "tags".to_owned(),
+        };
+        assert_eq!(nested.dotted(), "models.shop.marts");
+        assert_eq!(nested.label(), "models.shop.marts: +tags");
+    }
+
+    #[test]
+    fn config_attribution_round_trips_through_json() {
+        let attribution = ConfigAttribution {
+            key: "materialized".to_owned(),
+            path: "models.shop.marts".to_owned(),
+        };
+        let json = serde_json::to_string(&attribution).expect("serialize");
+        let back: ConfigAttribution = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(attribution, back);
+    }
+
+    #[test]
+    fn project_facts_with_attributions_round_trip_and_empty_map_is_omitted() {
+        // ADR-5 pin: the attribution map rides ProjectFacts additively —
+        // absent it serializes to nothing (pre-#267 byte stability).
+        assert_eq!(
+            serde_json::to_string(&ProjectFacts::default()).expect("serialize"),
+            "{}",
+        );
+        let facts = ProjectFacts {
+            definition: None,
+            panel: None,
+            config_attributions: BTreeMap::from([(
+                "model.shop.dim_a".to_owned(),
+                vec![ConfigAttribution {
+                    key: "materialized".to_owned(),
+                    path: "models.shop".to_owned(),
+                }],
+            )]),
+        };
+        let json = serde_json::to_string(&facts).expect("serialize");
+        let back: ProjectFacts = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(facts, back);
+    }
+
+    /// A model node with the given full id and fqn.
+    fn fqn_model(id: &str, fqn: &[&str]) -> (NodeId, Node) {
+        let node_id = NodeId::new(id);
+        let node = Node::new(
+            node_id.clone(),
+            "model",
+            Checksum::new("sha256", "ck"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_fqn(fqn.iter().map(|s| (*s).to_owned()).collect());
+        (node_id, node)
+    }
+
+    /// A manifest holding exactly the given nodes.
+    fn manifest_of(nodes: Vec<(NodeId, Node)>) -> Manifest {
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes.into_iter().collect::<HashMap<_, _>>(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    /// A `models:` config tree from `(path-segments, key, value)` leaves.
+    fn models_tree(leaves: &[(&[&str], &str, Value)]) -> BTreeMap<String, ConfigTree> {
+        let mut root = ConfigTree::default();
+        for (segments, key, value) in leaves {
+            let mut node = &mut root;
+            for segment in *segments {
+                node = node.children.entry((*segment).to_owned()).or_default();
+            }
+            node.configs.insert((*key).to_owned(), value.clone());
+        }
+        BTreeMap::from([("models".to_owned(), root)])
+    }
+
+    /// A `ProjectDefinition` carrying only the given `models:` tree.
+    fn def_with_models_tree(leaves: &[(&[&str], &str, Value)]) -> ProjectDefinition {
+        ProjectDefinition {
+            config_trees: models_tree(leaves),
+            ..ProjectDefinition::default()
+        }
+    }
+
+    /// Run the full pipeline under test: structural diff → attribution.
+    fn attribute(
+        current: &Manifest,
+        old: &ProjectDefinition,
+        new: &ProjectDefinition,
+    ) -> BTreeMap<String, Vec<ConfigAttribution>> {
+        let changes = diff_project_definitions(old, new);
+        attribute_config_tree_changes(current, old, new, &changes)
+    }
+
+    #[test]
+    fn attribution_selects_models_under_the_edited_subtree_by_fqn_prefix() {
+        // The flagship case: a marts-folder edit selects exactly the
+        // models whose fqn descends through ["shop", "marts"].
+        let current = manifest_of(vec![
+            fqn_model("model.shop.fct_orders", &["shop", "marts", "fct_orders"]),
+            fqn_model("model.shop.stg_raw", &["shop", "staging", "stg_raw"]),
+        ]);
+        let old = def_with_models_tree(&[(&["shop", "marts"], "materialized", json!("view"))]);
+        let new = def_with_models_tree(&[(&["shop", "marts"], "materialized", json!("table"))]);
+        let map = attribute(&current, &old, &new);
+        assert_eq!(
+            map.keys().collect::<Vec<_>>(),
+            vec!["model.shop.fct_orders"],
+            "only the marts model is selected",
+        );
+        assert_eq!(
+            map["model.shop.fct_orders"],
+            vec![ConfigAttribution {
+                key: "materialized".to_owned(),
+                path: "models.shop.marts".to_owned(),
+            }],
+        );
+    }
+
+    #[test]
+    fn attribution_root_tree_edit_selects_all_own_project_models() {
+        // A section-root key applies to every model whose resolution is
+        // not shadowed deeper — with no deeper setters, that is ALL
+        // fqn-bearing models, own-project and package alike.
+        let current = manifest_of(vec![
+            fqn_model("model.shop.fct_orders", &["shop", "marts", "fct_orders"]),
+            fqn_model("model.shop.stg_raw", &["shop", "staging", "stg_raw"]),
+            fqn_model("model.dbt_utils.helper", &["dbt_utils", "helper"]),
+        ]);
+        let old = def_with_models_tree(&[]);
+        let new = def_with_models_tree(&[(&[], "persist_docs", json!({"relation": true}))]);
+        let map = attribute(&current, &old, &new);
+        assert_eq!(map.len(), 3, "the root tree reaches every model");
+        for attributions in map.values() {
+            assert_eq!(attributions[0].path, "models", "the chip names the root");
+        }
+    }
+
+    #[test]
+    fn attribution_package_subtree_never_selects_own_project_models() {
+        // models.dbt_utils.… is a package subtree: the fqn's first
+        // segment is the package name, so an own-project fqn can never
+        // descend into it.
+        let current = manifest_of(vec![
+            fqn_model("model.shop.fct_orders", &["shop", "marts", "fct_orders"]),
+            fqn_model("model.dbt_utils.helper", &["dbt_utils", "helper"]),
+        ]);
+        let old = def_with_models_tree(&[(&["dbt_utils"], "enabled", json!(true))]);
+        let new = def_with_models_tree(&[(&["dbt_utils"], "enabled", json!(false))]);
+        let map = attribute(&current, &old, &new);
+        assert_eq!(
+            map.keys().collect::<Vec<_>>(),
+            vec!["model.dbt_utils.helper"],
+            "only the package's own models are under its subtree",
+        );
+        assert_eq!(map["model.dbt_utils.helper"][0].path, "models.dbt_utils");
+    }
+
+    #[test]
+    fn attribution_deepest_match_wins_a_shadowed_edit_selects_nothing_under_the_shadow() {
+        // fusion's deepest-match-wins: editing the project-level value
+        // changes nothing for models under a subtree that (unchanged)
+        // sets the same key deeper — those models' resolved config did
+        // not change, so they are NOT selected (sound, not heuristic).
+        let current = manifest_of(vec![
+            fqn_model("model.shop.fct_orders", &["shop", "marts", "fct_orders"]),
+            fqn_model("model.shop.stg_raw", &["shop", "staging", "stg_raw"]),
+        ]);
+        let old = def_with_models_tree(&[
+            (&["shop"], "materialized", json!("view")),
+            (&["shop", "marts"], "materialized", json!("table")),
+        ]);
+        let new = def_with_models_tree(&[
+            (&["shop"], "materialized", json!("ephemeral")),
+            (&["shop", "marts"], "materialized", json!("table")),
+        ]);
+        let map = attribute(&current, &old, &new);
+        assert_eq!(
+            map.keys().collect::<Vec<_>>(),
+            vec!["model.shop.stg_raw"],
+            "the marts model is shadowed by its unchanged deeper setting",
+        );
+        assert_eq!(
+            map["model.shop.stg_raw"][0].path, "models.shop",
+            "the chip names the edited (winning) node",
+        );
+    }
+
+    #[test]
+    fn attribution_removal_attributes_to_the_removed_leaf() {
+        // Removing the deeper setting re-exposes the shallower one: the
+        // resolved value changes and the chip names the REMOVAL site
+        // (the deeper of the two winners).
+        let current = manifest_of(vec![fqn_model(
+            "model.shop.fct_orders",
+            &["shop", "marts", "fct_orders"],
+        )]);
+        let old = def_with_models_tree(&[
+            (&["shop"], "materialized", json!("view")),
+            (&["shop", "marts"], "materialized", json!("table")),
+        ]);
+        let new = def_with_models_tree(&[(&["shop"], "materialized", json!("view"))]);
+        let map = attribute(&current, &old, &new);
+        assert_eq!(
+            map["model.shop.fct_orders"],
+            vec![ConfigAttribution {
+                key: "materialized".to_owned(),
+                path: "models.shop.marts".to_owned(),
+            }],
+        );
+    }
+
+    #[test]
+    fn attribution_addition_attributes_to_the_added_leaf() {
+        // Adding a deeper setting shadows the shallower one: the chip
+        // names the ADDITION site (the new, deeper winner).
+        let current = manifest_of(vec![fqn_model(
+            "model.shop.fct_orders",
+            &["shop", "marts", "fct_orders"],
+        )]);
+        let old = def_with_models_tree(&[(&["shop"], "tags", json!(["all"]))]);
+        let new = def_with_models_tree(&[
+            (&["shop"], "tags", json!(["all"])),
+            (&["shop", "marts"], "tags", json!(["nightly"])),
+        ]);
+        let map = attribute(&current, &old, &new);
+        assert_eq!(
+            map["model.shop.fct_orders"],
+            vec![ConfigAttribution {
+                key: "tags".to_owned(),
+                path: "models.shop.marts".to_owned(),
+            }],
+        );
+    }
+
+    #[test]
+    fn attribution_of_a_non_config_tree_change_is_empty() {
+        // A vars-only diff changes no models: tree (reflexivity over the
+        // models tree: identical trees ⇒ identical resolution).
+        let current = manifest_of(vec![fqn_model(
+            "model.shop.fct_orders",
+            &["shop", "marts", "fct_orders"],
+        )]);
+        let mut old = def_with_models_tree(&[(&["shop"], "materialized", json!("view"))]);
+        let mut new = old.clone();
+        old.vars.insert("flag".to_owned(), json!(1));
+        new.vars.insert("flag".to_owned(), json!(2));
+        assert!(attribute(&current, &old, &new).is_empty());
+    }
+
+    #[test]
+    fn attribution_never_selects_an_empty_fqn_or_non_model_node() {
+        // A model with no fqn (pre-#278 manifest) cannot be matched —
+        // the matcher refuses to guess. A non-model node never matches.
+        let (seed_id, seed) = {
+            let node_id = NodeId::new("seed.shop.raw_payers");
+            let node = Node::new(
+                node_id.clone(),
+                "seed",
+                Checksum::new("sha256", "ck"),
+                None,
+                None,
+                DependsOn::default(),
+                None,
+                NodeConfig::default(),
+                None,
+                BTreeMap::new(),
+            )
+            .with_fqn(vec!["shop".to_owned(), "raw_payers".to_owned()]);
+            (node_id, node)
+        };
+        let current = manifest_of(vec![fqn_model("model.shop.legacy", &[]), (seed_id, seed)]);
+        let old = def_with_models_tree(&[(&[], "materialized", json!("view"))]);
+        let new = def_with_models_tree(&[(&[], "materialized", json!("table"))]);
+        assert!(attribute(&current, &old, &new).is_empty());
+    }
+
+    #[test]
+    fn attribution_ignores_non_models_sections() {
+        // A seeds: tree edit resolves against seed nodes, not models —
+        // this slice attributes (and widens) the models: section only.
+        let current = manifest_of(vec![fqn_model(
+            "model.shop.fct_orders",
+            &["shop", "marts", "fct_orders"],
+        )]);
+        let tree = |value: Value| {
+            let mut trees = BTreeMap::new();
+            trees.insert(
+                "seeds".to_owned(),
+                ConfigTree {
+                    configs: BTreeMap::from([("quote_columns".to_owned(), value)]),
+                    children: BTreeMap::new(),
+                },
+            );
+            ProjectDefinition {
+                config_trees: trees,
+                ..ProjectDefinition::default()
+            }
+        };
+        assert!(attribute(&current, &tree(json!(false)), &tree(json!(true))).is_empty());
+    }
+
+    #[test]
+    fn attribution_membership_is_exactly_contiguous_fqn_prefix_descent() {
+        // House property style (exhaustive structured space, no proptest):
+        // with a single edited key and no other setters, a model is
+        // selected IFF the edited path is a contiguous prefix of its fqn
+        // — fusion's get_config_for_fqn walk breaks on the first missing
+        // child, so a deeper segment match without its ancestors never
+        // fires.
+        let edit_paths: &[&[&str]] = &[
+            &[],
+            &["shop"],
+            &["shop", "marts"],
+            &["shop", "marts", "fct_orders"],
+            &["dbt_utils"],
+            &["marts"], // a bare folder name: never an fqn FIRST segment below
+        ];
+        let fqns: &[&[&str]] = &[
+            &["shop", "marts", "fct_orders"],
+            &["shop", "marts", "dim_x"],
+            &["shop", "staging", "stg_raw"],
+            &["shop", "one_file_model"],
+            &["dbt_utils", "helper"],
+        ];
+        for edit_path in edit_paths {
+            let old = def_with_models_tree(&[(edit_path, "materialized", json!("view"))]);
+            let new = def_with_models_tree(&[(edit_path, "materialized", json!("table"))]);
+            for (i, fqn) in fqns.iter().enumerate() {
+                let id = format!("model.p.m{i}");
+                let current = manifest_of(vec![fqn_model(&id, fqn)]);
+                let map = attribute(&current, &old, &new);
+                let expected = fqn.len() >= edit_path.len()
+                    && edit_path.iter().zip(fqn.iter()).all(|(a, b)| a == b);
+                assert_eq!(
+                    map.contains_key(&id),
+                    expected,
+                    "edit at {edit_path:?} vs fqn {fqn:?}: selection must equal \
+                     contiguous-prefix membership",
+                );
+            }
+        }
     }
 }

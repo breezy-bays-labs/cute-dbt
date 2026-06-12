@@ -51,6 +51,34 @@ Feature: Project-definition changes are categorized, never silently invisible
     And the payload carries the parsed project definition
     And the report carries no project-definition panel
 
+  # cute-dbt#267 — config-tree change attribution: the ONE widening
+  # category of epic #262 (by-DEFINITION change, TOTAL tier). A +config
+  # subtree edit selects the models whose fqn falls under the edited tree
+  # path (fusion's get_config_for_fqn prefix descent) into scope, with
+  # provenance chips; vars edits keep contextualize-don't-widen.
+  Scenario: A folder config edit widens the models under that subtree into scope with provenance chips
+    Given the current manifest carries a marts model "fct_daily" and a staging model "stg_raw" with fqns
+    And the working tree carries the canonical dbt_project.yml
+    And the PR diff edits the marts folder materialization from "view" to "table"
+    When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the payload carries the model "fct_daily" in scope
+    And the payload model "fct_daily" carries the config attribution "materialized" via "models.bdd_project.marts"
+    And the payload carries no model "stg_raw"
+    And the payload carries the unit test "test_fct_daily_rows" as context, not changed
+    And the panel's config-tree row states "affects 1 model — widened into report scope: fct_daily"
+
+  Scenario: A project-level config edit honors deepest-match-wins and skips shadowed models
+    Given the current manifest carries a marts model "fct_daily" and a staging model "stg_raw" with fqns
+    And the working tree carries the canonical dbt_project.yml
+    And the PR diff edits the project-level materialization from "ephemeral" to "view"
+    When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the payload carries the model "stg_raw" in scope
+    And the payload model "stg_raw" carries the config attribution "materialized" via "models.bdd_project"
+    And the payload carries no model "fct_daily"
+    And the panel's config-tree row states "affects 1 model — widened into report scope: stg_raw"
+
   # cute-dbt#269 — hooks + dispatch get purpose-built rows: the hook SQL
   # diff renders from the manifest's operation.* nodes (TOTAL-tier text);
   # dispatch gets the honest UNKNOWN-tier banner (project-wide effect,
