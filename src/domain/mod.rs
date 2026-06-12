@@ -46,6 +46,7 @@ pub mod model_yaml;
 pub mod path;
 pub mod pr_diff;
 pub mod preflight;
+pub mod project_def;
 pub mod scope;
 pub mod state;
 pub mod unit_test;
@@ -81,10 +82,17 @@ pub use model_yaml::ModelYamlOutcome;
 pub use path::{match_changed_path, normalize_path};
 pub use pr_diff::{
     BlockDiff, DiffLine, DiffLineKind, FileHunks, Hunk, NormalizedDiffIndex, PrDiff,
-    attach_model_yaml_diffs, reconstruct_block_diffs, reconstruct_model_sql_diffs,
-    refine_changed_by_hunks, ws_equal,
+    ReverseApplyError, attach_model_yaml_diffs, raw_hunk_lines, reconstruct_block_diffs,
+    reconstruct_model_sql_diffs, refine_changed_by_hunks, reverse_apply, ws_equal,
 };
 pub use preflight::{PreflightError, preflight_compiled};
+// `project_def::Span` is deliberately NOT re-exported here — `cte::Span`
+// already owns the bare name at the domain root; consumers address the
+// YAML source span as `project_def::Span`.
+pub use project_def::{
+    ConfigTree, ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition,
+    ProjectFacts, ProjectFallbackReason, diff_project_definitions,
+};
 pub use scope::{ScopeInput, ScopeSelection, all_models, changed_models, select_in_scope};
 pub use state::{
     BANNER_EMPTY_SCOPE, BodyChecksumModifier, ConfigsModifier, ContractModifier, InScopeSet,

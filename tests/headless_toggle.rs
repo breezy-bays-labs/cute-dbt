@@ -48,9 +48,9 @@ use cute_dbt::adapters::render::{
 use cute_dbt::domain::{
     BlockDiff, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, FileHunks, Hunk,
     InScopeSet, Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId,
-    NormalizedDiffIndex, PrDiff, SourceNode, TestMetadata, UnitTest, UnitTestDataDiff,
-    UnitTestExpect, UnitTestGiven, UnitTestYamlBlock, external_fixture_table,
-    reconstruct_table_diffs,
+    NormalizedDiffIndex, PrDiff, ProjectChangePanel, ProjectFacts, ProjectFallbackReason,
+    SourceNode, TestMetadata, UnitTest, UnitTestDataDiff, UnitTestExpect, UnitTestGiven,
+    UnitTestYamlBlock, external_fixture_table, raw_hunk_lines, reconstruct_table_diffs,
 };
 use cute_dbt::ports::ManifestSource;
 
@@ -4762,6 +4762,7 @@ fn render_with_external_fixtures(
         DEFAULT_REPORT_TITLE,
         None,
         &cute_dbt::domain::CheckPolicy::default(),
+        &cute_dbt::domain::ProjectFacts::default(),
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -7124,6 +7125,7 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
         DEFAULT_REPORT_TITLE,
         None,
         &policy,
+        &cute_dbt::domain::ProjectFacts::default(),
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -7656,6 +7658,7 @@ fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
         DEFAULT_REPORT_TITLE,
         None,
         &policy,
+        &cute_dbt::domain::ProjectFacts::default(),
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -11221,5 +11224,206 @@ fn report_aa_token_palette_matrix_on_every_theme() {
          the numbering)",
     );
 
+    let _ = tab.close(true);
+}
+
+// ===== cute-dbt#266 — the "Project definition changed" panel =============
+//
+// Three guards over the server-rendered panel:
+//   1. the COMMITTED diff-showcase golden carries the categorized panel
+//      (the dogfood surface — a regression dropping the panel from the
+//      downloadable artifact fails here, not months later);
+//   2. the Shape-A fallback row renders its explicit copy + raw diff
+//      lines (corrupt-YAML / unparseable-new-side state);
+//   3. the absence-note arm renders when dbt_project.yml is in the diff
+//      but unreadable from the project root.
+//
+// Measurement hygiene (the #242 lessons): transitions/animations are
+// killed before measuring, and visibility is asserted via
+// checkVisibility() over ALL matching instances — never rect>0, never
+// first-match sampling.
+
+/// Kill transitions/animations, then return how many elements matching
+/// `selector` are check-visible.
+fn visible_count(tab: &Tab, selector: &str) -> i64 {
+    let _ = eval(
+        tab,
+        "(() => { const s = document.createElement('style'); \
+           s.textContent = '* { transition: none !important; animation: none !important; }'; \
+           document.head.appendChild(s); return true; })()",
+    );
+    match eval(
+        tab,
+        &format!(
+            "Array.from(document.querySelectorAll('{selector}'))\
+               .filter(el => el.checkVisibility()).length"
+        ),
+    ) {
+        serde_json::Value::Number(n) => n.as_i64().expect("integer count"),
+        other => panic!("visible_count returned non-number: {other:?}"),
+    }
+}
+
+/// Render a minimal PR-diff report carrying the given project facts.
+fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
+    let m = manifest(vec![model_node("model.shop.dim_a")], Vec::new());
+    let models: ModelInScopeSet = [NodeId::new("model.shop.dim_a")].into_iter().collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &InScopeSet::new(),
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        facts,
+    )
+    .expect("render writes the report");
+    format!("file://{}", out.to_str().expect("UTF-8 path"))
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn project_panel_renders_categorized_on_the_committed_showcase() {
+    // The dogfood surface: the committed diff-showcase golden must carry
+    // the categorized panel — one vars row (with the locked
+    // blast-radius copy) + one config-tree row.
+    let showcase = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("diff-showcase-report.html");
+    let url = format!("file://{}", showcase.to_str().expect("UTF-8 path"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"project-def-panel\"]"),
+        1,
+        "the showcase renders exactly one visible project-definition panel",
+    );
+    assert_eq!(
+        visible_count(&tab, ".project-def-row[data-category=\"vars\"]"),
+        1,
+        "the vars row (dq_quarantine_threshold 10→5) is visible",
+    );
+    assert_eq!(
+        visible_count(&tab, ".project-def-row[data-category=\"config_tree\"]"),
+        1,
+        "the config-tree row (marts +materialized view→table) is visible",
+    );
+    let note = eval_string(
+        &tab,
+        "document.querySelector('.project-def-row[data-category=\"vars\"] .project-def-note').textContent",
+    );
+    assert_eq!(
+        note, "blast radius not attributed",
+        "the vars row carries the locked interim honesty copy",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn project_panel_fallback_row_renders_for_unparseable_yaml() {
+    // The Shape-A degrade: the new side could not be parsed → explicit
+    // "could not be categorized" copy + the raw diff lines, visible.
+    let hunks = vec![Hunk {
+        new_start: 1,
+        new_len: 1,
+        removed_lines: vec!["vars: {old: 1}".to_owned()],
+        added_lines: vec!["vars: [broken".to_owned()],
+    }];
+    let facts = ProjectFacts {
+        definition: None,
+        panel: Some(ProjectChangePanel::Fallback {
+            reason: ProjectFallbackReason::NewParseFailed,
+            raw: raw_hunk_lines(&hunks),
+        }),
+    };
+    let url = render_with_project_facts("headless_project_fallback.html", &facts);
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"project-def-fallback\"]"),
+        1,
+        "the fallback copy renders visibly",
+    );
+    let copy = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"project-def-fallback\"]').textContent",
+    );
+    assert!(
+        copy.contains("could not be categorized"),
+        "the copy states the degrade plainly: {copy}",
+    );
+    assert_eq!(
+        visible_count(&tab, ".project-def-raw-line.is-removed"),
+        1,
+        "the removed raw line is visible",
+    );
+    assert_eq!(
+        visible_count(&tab, ".project-def-raw-line.is-added"),
+        1,
+        "the added raw line is visible",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn project_panel_absence_note_renders_when_file_unreadable() {
+    let hunks = vec![Hunk {
+        new_start: 1,
+        new_len: 1,
+        removed_lines: vec!["name: old".to_owned()],
+        added_lines: vec!["name: new".to_owned()],
+    }];
+    let facts = ProjectFacts {
+        definition: None,
+        panel: Some(ProjectChangePanel::Fallback {
+            reason: ProjectFallbackReason::FileUnreadable,
+            raw: raw_hunk_lines(&hunks),
+        }),
+    };
+    let url = render_with_project_facts("headless_project_absence.html", &facts);
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"project-def-panel\"]"),
+        1,
+        "the panel still renders — the change is never silently invisible",
+    );
+    let copy = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"project-def-fallback\"]').textContent",
+    );
+    assert!(
+        copy.contains("could not be read from the project root"),
+        "the absence note names exactly what is missing: {copy}",
+    );
     let _ = tab.close(true);
 }

@@ -7,9 +7,12 @@ description = "Zero-compute Rust CLI: parse dbt manifest.json into one self-cont
 repository = "https://github.com/breezy-bays-labs/cute-dbt"
 homepage = "https://github.com/breezy-bays-labs/cute-dbt"
 authors = ["Christopher Bays <cmbays@breezybayslabs.com>"]
-# 1.88 since cute-dbt#276: the collapsible_if fixes use let-chains
-# (stabilized in rust 1.88, edition 2024). PR #275 (cute-dbt#266) carries
-# the same bump for dbt-yaml and the version-agnostic MSRV job rename.
+# 1.88 since cute-dbt#266 (dbt-yaml — dbt Labs' published serde-yaml
+# fork, the parser dbt-fusion itself ships — requires rust 1.88) and
+# cute-dbt#276 (the collapsible_if let-chain fixes need 1.88's
+# stabilization). The CI `MSRV` job + .github/branch-protection.json
+# carry the version-agnostic check name so future bumps touch only this
+# line and the toolchain pin.
 rust-version = "1.88"
 readme = "README.md"
 keywords = ["dbt", "unit-test", "cte", "analytics-engineering", "cli"]
@@ -44,6 +47,14 @@ path = "src/lib.rs"
 [dependencies]
 askama = { version = "0.16", features = ["serde_json"] }
 clap = { version = "4", features = ["derive"] }
+# dbt_project.yml ingestion (cute-dbt#266): dbt Labs' published fork of
+# serde-yaml — the exact parser dbt-fusion ships (~31 fusion crates),
+# so anchor/alias resolution, merge-key (`<<:`) semantics, and
+# duplicate-key policy match the source-of-truth engine by construction.
+# Default features only (no `filename`/`schemars`/`flatten_dunder` —
+# fusion-internal concerns). Requires MSRV 1.88. Fallback seam:
+# serde-saphyr swaps behind adapters::project_def::parse (plain fn).
+dbt-yaml = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlparser = "0.62"

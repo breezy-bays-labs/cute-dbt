@@ -119,19 +119,18 @@ jobs:
           retention-days: 7
 
   msrv:
-    # Toolchain follows Cargo.toml `rust-version` (1.88 since cute-dbt#276:
-    # the collapsible_if fixes use let-chains). The job NAME keeps the stale
-    # "(1.85)" suffix because branch protection requires that exact check
-    # name; the version-agnostic rename (+ branch-protection.json update)
-    # lands with PR #275 (cute-dbt#266).
-    name: MSRV (1.85)
+    # Version-agnostic job name (cute-dbt#266): the enforced version lives
+    # ONLY in Cargo.toml `rust-version` + the `toolchain:` pin below, so an
+    # MSRV bump never needs a branch-protection rename again. Currently
+    # 1.88 (dbt-yaml's MSRV; cute-dbt#276's let-chain fixes need it too).
+    name: MSRV
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@c56a35af9328d0bc581dc86c05e58f97f7c38a0e # 1.85
+      - uses: dtolnay/rust-toolchain@c56a35af9328d0bc581dc86c05e58f97f7c38a0e # 1.88
         with:
           toolchain: "1.88"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -336,6 +335,7 @@ jobs:
     #   - 20 after explore_model_detail (cute-dbt#104)
     #   - 21 after explore_js_contract (cute-dbt#105)
     #   - 22 after explore_change_context (cute-dbt#106)
+    #   - 23 after project_definition (cute-dbt#266)
     # The README is not a feature. The job name deliberately carries no
     # number (cute-dbt#68 — the old `==6` display label went stale across
     # several bumps): the enforced count lives ONLY in the `expected=`
@@ -353,7 +353,7 @@ jobs:
       - name: features/*.feature count matches expected
         run: |
           set -euo pipefail
-          expected=22
+          expected=23
           count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
           echo "feature-count: expected ${expected}, found ${count}"
           if [ "$count" != "$expected" ]; then

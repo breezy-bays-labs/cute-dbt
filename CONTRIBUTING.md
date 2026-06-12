@@ -91,7 +91,8 @@ before merge, in sync with `.github/workflows/ci.yml`:
 - `Clippy`
 - `Test (linux-x86)` / `Test (macos-arm)` / `Test (macos-x86)`
 - `Coverage`
-- `MSRV (1.85)`
+- `MSRV` (version-agnostic check name; the enforced version is
+  `Cargo.toml`'s `rust-version` — currently 1.88, dbt-yaml's MSRV)
 - `cargo-deny (advisories + licenses + bans)`
 - `cargo doc (warnings as errors)`
 - `Non-mirror guard (no workspace / no deny.wrappers / no API shim)`

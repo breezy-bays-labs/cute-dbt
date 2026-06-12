@@ -9,8 +9,7 @@
 //! contents without touching the filesystem — an in-memory impl backed
 //! by a `HashMap<String, String>`.
 //!
-//! It has **two consumers**, both reading project-relative files keyed
-//! off a manifest path:
+//! It has **four consumers**, all reading project-relative files:
 //!
 //! - the **authoring-YAML drawer** (cute-dbt#69) — reads each in-scope
 //!   unit test's source `.yml` (`original_file_path`) to slice the
@@ -18,7 +17,15 @@
 //! - the **external fixture reader** (cute-dbt#126) — reads each external
 //!   `given[i].fixture` / `expect.fixture` CSV/SQL file (the
 //!   fully-resolved project-relative path) so a `fixture:`-sourced input
-//!   renders a real cell grid instead of a silently-empty one.
+//!   renders a real cell grid instead of a silently-empty one;
+//! - the **Model-YAML section** (cute-dbt#247) — reads the schema file
+//!   each in-scope model's `patch_path` names to slice its authored
+//!   `models:` entry;
+//! - the **project-definition reader** (cute-dbt#266) — reads
+//!   `dbt_project.yml` (a fixed project-relative name, not a manifest
+//!   path) for the standing-metadata parse
+//!   (`adapters::project_def::parse`) and the categorized
+//!   project-change panel.
 //!
 //! Reading is intentionally **soft-failing**: the run loop continues
 //! the report even if no project-file pipeline is wired or a specific

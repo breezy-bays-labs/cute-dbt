@@ -37,3 +37,12 @@ diff --git a/tests/fixtures/mart_date_state_grid_patients.csv b/tests/fixtures/m
 -a00000aa-0000-0000-0000-000000000003,Vermont
 +a00000aa-0000-0000-0000-000000000002,Connecticut
 +a00000aa-0000-0000-0000-000000000003,
+diff --git a/dbt_project.yml b/dbt_project.yml
+--- a/dbt_project.yml
++++ b/dbt_project.yml
+@@ -11 +11 @@
+-  dq_quarantine_threshold: 10
++  dq_quarantine_threshold: 5
+@@ -18 +18 @@
+-      +materialized: view
++      +materialized: table

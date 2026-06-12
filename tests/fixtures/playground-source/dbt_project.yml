@@ -1,0 +1,20 @@
+name: healthcare_analytics
+version: "1.0.0"
+profile: healthcare_analytics
+require-dbt-version: ">=1.8.0"
+
+model-paths: ["models"]
+test-paths: ["tests"]
+clean-targets: [target, dbt_packages]
+
+vars:
+  dq_quarantine_threshold: 5
+  default_state_grid_density: monthly
+
+models:
+  healthcare_analytics:
+    +materialized: view
+    marts:
+      +materialized: table
+    staging:
+      +materialized: view

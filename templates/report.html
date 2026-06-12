@@ -191,6 +191,45 @@
   </div>
 </div>
 
+{# cute-dbt#266 — the "Project definition changed" panel. Server-rendered
+   (no JS dependency) whenever dbt_project.yml is in the PR diff: the
+   categorized rows (vars / config tree / dispatch / hooks / paths /
+   identity / other) come from the Rust-side structural diff of the
+   reverse-applied old side vs the working tree; every degrade arm shows
+   the Shape-A raw-diff fallback with explicit copy instead — the change
+   is NEVER silently invisible (fail-open display). Absent (None) the
+   match emits zero bytes, so baseline-mode and panel-free reports stay
+   byte-identical to the pre-#266 shape (this comment's closing trim and
+   the endmatch's trailing trim keep the surrounding newlines exact). -#}
+{% match project_panel %}{% when Some with (panel) %}<section class="project-def-panel" aria-label="Project definition changes" data-testid="project-def-panel">
+  <h2>Project definition changed</h2>
+  <p class="project-def-subtitle"><code>dbt_project.yml</code> is part of this PR&rsquo;s diff.</p>
+{%- if panel.is_empty_change %}
+  <p class="project-def-empty" data-testid="project-def-empty">No semantic configuration change detected &mdash; the edit touches formatting or comments only.</p>
+{%- endif %}
+{%- if !panel.rows.is_empty() %}
+  <ul class="project-def-rows">
+{%- for row in panel.rows %}
+    <li class="project-def-row" data-category="{{ row.category_key }}">
+      <span class="project-def-chip project-def-chip-{{ row.category_key }}">{{ row.category_label }}</span>
+      <code class="project-def-label">{{ row.label }}</code>
+      <span class="project-def-detail">{{ row.detail }}</span>
+      {%- if !row.note.is_empty() %}
+      <span class="project-def-note">{{ row.note }}</span>
+      {%- endif %}
+    </li>
+{%- endfor %}
+  </ul>
+{%- endif %}
+{%- if !panel.fallback_copy.is_empty() %}
+  <p class="project-def-fallback-copy" data-testid="project-def-fallback">{{ panel.fallback_copy }}</p>
+{%- if !panel.fallback_lines.is_empty() %}
+  <pre class="project-def-raw-diff">{% for line in panel.fallback_lines %}<span class="project-def-raw-line is-{{ line.kind }}">{{ line.text }}</span>
+{% endfor %}</pre>
+{%- endif %}
+{%- endif %}
+</section>
+{% when None %}{% endmatch -%}
 <section class="error-card" role="alert" aria-label="Manifest error">
   <h2>This manifest can't be visualized</h2>
   <div class="error-node-id">node: <code>—</code></div>
