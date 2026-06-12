@@ -1775,16 +1775,59 @@
   }
   // Format tip: the fixture reconstructed in its authored format, in a
   // framed mini code-surface (sql/yaml ride the #132 highlighters).
+  //
+  // cute-dbt#246 — the bubble is pointer-events:none and hides on
+  // mouseleave/blur, so anything laid below a height fold could never be
+  // scrolled to or read (the old fixed 22rem + overflow:auto pairing left
+  // below-fold rows silently unreachable for EVERY input modality). Bound
+  // the content instead of folding it: show at most FMT_TIP_MAX_LINES
+  // lines — the tip is a glance surface; the grid below the badge
+  // carries the full data — then trim by REAL MEASUREMENT (PR #286
+  // review): remove rendered lines until the laid-out content fits the
+  // bubble's viewport-capped box. Measuring the live layout (never a
+  // px-per-line estimate) keeps the bound correct under browser zoom, a
+  // forced minimum font size (a11y), wrapped long lines, and any future
+  // rem-based sizing — and the truthful elision row counts exactly what
+  // was trimmed, however it was trimmed.
+  var FMT_TIP_MAX_LINES = 20;
+  function fmtTipMoreText(more) {
+    return "… +" + more + " more line" + (more === 1 ? "" : "s");
+  }
   function showFmtTip(trigger) {
     var fmt = trigger.getAttribute("data-fmt"), lang = trigger.getAttribute("data-fmt-lang");
     var block = trigger.getAttribute("data-fmt-block") || "";
-    var code = lang === "sql" ? highlightLinesSql(block)
-             : lang === "yaml" ? highlightLinesYaml(block)
-             : highlightLinesPlain(block);
+    var lines = String(block).replace(/\n+$/, "").split("\n");
+    var shown = Math.min(lines.length, FMT_TIP_MAX_LINES);
+    var more = lines.length - shown;
+    var code = lang === "sql" ? highlightLinesSql(lines.slice(0, shown).join("\n"))
+             : lang === "yaml" ? highlightLinesYaml(lines.slice(0, shown).join("\n"))
+             : highlightLinesPlain(lines.slice(0, shown).join("\n"));
     var el = ensureTip("fmt-tooltip", "fmt-tooltip");
     el.innerHTML = '<div class="code-header"><span class="code-filename">format: ' + escapeHtml(fmt)
-      + '</span></div><pre class="sql-block"><code>' + code + "</code></pre>";
+      + '</span></div><pre class="sql-block"><code>' + code + "</code></pre>"
+      + (more > 0 ? '<div class="fmt-more">' + fmtTipMoreText(more) + "</div>" : "");
     el.hidden = false;
+    // Measure the live layout at full width (reset a stale edge-clamped
+    // left BEFORE measuring — the #232 D18 lesson: a squeezed box wraps
+    // differently and mis-measures).
+    el.style.left = "0px";
+    // The elision row participates in the measured height, so it must
+    // exist before trimming starts (created here if the ceiling alone
+    // didn't already call for one).
+    var moreEl = el.querySelector(".fmt-more");
+    if (!moreEl && el.scrollHeight > el.clientHeight + 1) {
+      moreEl = document.createElement("div");
+      moreEl.className = "fmt-more";
+      el.appendChild(moreEl);
+    }
+    var rows = el.querySelectorAll(".code-line");
+    var keep = rows.length;
+    while (keep > 1 && el.scrollHeight > el.clientHeight + 1) {
+      keep -= 1;
+      rows[keep].parentNode.removeChild(rows[keep]);
+      more += 1;
+    }
+    if (moreEl) moreEl.textContent = fmtTipMoreText(more);
     positionTipNear(el, trigger);
   }
   // Overrides tip: key = value rows grouped by macros / vars / env_vars.
