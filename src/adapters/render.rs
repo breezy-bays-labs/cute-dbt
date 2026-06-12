@@ -2561,6 +2561,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             "b",
             ScopeSource::Baseline,
             DEFAULT_REPORT_TITLE,
