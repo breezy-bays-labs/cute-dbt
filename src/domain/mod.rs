@@ -63,9 +63,10 @@ pub use check_config::{
     SuppressRule, apply_check_policy, check_by_id, resolve_check_policy, scan_pragmas,
 };
 pub use checks::{
-    CheckContext, CheckId, Evidence, Finding, HeuristicId, HeuristicSpec, Instrument, Suppression,
-    SuppressionSource, Tier, Verdict, check_page_markdown, checks_index_markdown, evaluate_all,
-    filter_for_display, model_findings, registry_toml, resolve_supersedes, supersedes_is_acyclic,
+    CheckContext, CheckId, DegradedBacking, Evidence, Finding, HeuristicId, HeuristicSpec,
+    Instrument, Suppression, SuppressionSource, Tier, Verdict, check_page_markdown,
+    checks_index_markdown, evaluate_all, filter_for_display, model_findings, registry_toml,
+    resolve_supersedes, supersedes_is_acyclic,
 };
 pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
 pub use cte::{
