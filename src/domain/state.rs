@@ -622,14 +622,11 @@ fn leaf_segment(id: &str) -> &str {
 /// for dbt-core and older manifests.
 #[must_use]
 pub fn resolve_tested_model<'m>(manifest: &'m Manifest, unit_test: &UnitTest) -> Option<&'m Node> {
-    if let Some(node) = unit_test
+    unit_test
         .tested_node_unique_id()
         .and_then(|id| manifest.node(id))
         .filter(|node| node.resource_type() == "model")
-    {
-        return Some(node);
-    }
-    resolve_target_model(manifest, unit_test.model())
+        .or_else(|| resolve_target_model(manifest, unit_test.model()))
 }
 
 /// Build a map from resolved model node id to the unit-test ids in
