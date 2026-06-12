@@ -19,8 +19,24 @@ use std::path::{Path, PathBuf};
 
 /// Imports forbidden in the `domain` layer. ADR-1's inward-dependency
 /// discipline forbids `domain` reaching outward to *either* `adapters`
-/// or `cli`; the guard checks both.
-const FORBIDDEN: [&str; 2] = ["use crate::adapters", "use crate::cli"];
+/// or `cli` — and forbids the adapter-layer parser/render/CLI crates
+/// outright (cute-dbt#266, per ADR-3's planned table): `dbt_yaml` (the
+/// YAML parser lives in `adapters::project_def`; its types never enter
+/// domain), `sqlparser`, `askama`, `clap`. The crate names are checked
+/// as BARE substrings (not `use `-anchored) so a fully-qualified path
+/// like `dbt_yaml::Value::from_str(..)` — no `use` statement at all —
+/// still trips the guard (the cargo-pup spike lesson). Bare-substring
+/// matching is safe here because no domain identifier legitimately
+/// contains any of these names; a future false positive is a rename
+/// prompt, not a reason to weaken the guard.
+const FORBIDDEN: [&str; 6] = [
+    "use crate::adapters",
+    "use crate::cli",
+    "dbt_yaml",
+    "sqlparser",
+    "askama",
+    "clap",
+];
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).expect("read_dir on src/domain succeeded") {

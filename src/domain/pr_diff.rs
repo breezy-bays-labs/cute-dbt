@@ -985,6 +985,196 @@ pub(crate) fn block_diff_for(span: &BlockSpan, touching: &[&Hunk]) -> BlockDiff 
     reconstruct_one(span, touching)
 }
 
+// ---------------------------------------------------------------------
+// Reverse application — reconstruct a file's OLD side (cute-dbt#266)
+// ---------------------------------------------------------------------
+
+/// Why [`reverse_apply`] refused to reconstruct the old side.
+///
+/// Every variant is a **fail-closed degrade signal**: the caller falls
+/// back to the Shape-A raw-diff row ("could not reconstruct the previous
+/// version") — never a silently wrong old text. `new_start` names the
+/// offending hunk's 1-based new-side anchor for diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReverseApplyError {
+    /// A hunk's recorded `+` body does not match the supplied new text at
+    /// its claimed footprint — the diff is stale relative to the working
+    /// tree (the same drift notion as [`block_aligns_with_hunks`]).
+    Drift {
+        /// The drifting hunk's 1-based new-side start line.
+        new_start: usize,
+    },
+    /// A hunk is not `--unified=0`-shaped (`new_len != added_lines.len()`,
+    /// see [`NormalizedDiffIndex::context_bearing_hunk_count`]) — its `+`
+    /// body under-describes its footprint, so reversal is untrustworthy.
+    ContextBearing {
+        /// The context-bearing hunk's 1-based new-side start line.
+        new_start: usize,
+    },
+    /// A hunk's new-side footprint lies (partly) outside the supplied
+    /// text — the diff describes a different revision.
+    OutOfBounds {
+        /// The out-of-bounds hunk's 1-based new-side start line.
+        new_start: usize,
+    },
+    /// Two hunks overlap (or regress) on the new side — a malformed diff
+    /// `git diff` never emits.
+    Overlapping {
+        /// The overlapping hunk's 1-based new-side start line.
+        new_start: usize,
+    },
+}
+
+/// Reverse-apply `--unified=0` hunks to a file's NEW text, reconstructing
+/// the OLD (pre-change) text (cute-dbt#266).
+///
+/// The inverse of `git apply`: each hunk's new-side footprint
+/// (`new_start..new_start + new_len`, 1-based) is replaced by its
+/// `removed_lines`; a pure-deletion hunk (`new_len == 0`) re-inserts its
+/// removed lines immediately **after** new-side line `new_start`
+/// (`new_start == 0` ⇒ before line 1 — the `@@ -1,N +0,0 @@` shape).
+/// A file-creation diff (one hunk covering the whole file, no removed
+/// lines) reverses to the empty string — the caller treats empty old
+/// text as "the file did not exist".
+///
+/// **Drift-guarded, fail-closed**: before anything is applied, every
+/// hunk's `added_lines` must match the new text at its claimed footprint
+/// (trailing `\r` trimmed on both sides — the parser strips it, a CRLF
+/// working tree keeps it, same tolerance as [`block_aligns_with_hunks`]).
+/// Any mismatch, context-bearing hunk, out-of-bounds footprint, or
+/// overlap returns an [`Err`] and the caller degrades to the raw-diff
+/// fallback — NEVER a silently wrong old text.
+///
+/// Trailing-newline framing: the old text inherits the new text's
+/// trailing-newline presence (the `\ No newline at end of file` marker is
+/// dropped at parse time, so the old framing is unrecoverable; for the
+/// YAML consumer the framing is semantically inert). Properties pinned by
+/// the unit suite: `reverse_apply(t, &[]) == t` (empty-hunks identity)
+/// and forward∘reverse == identity over a structured edit-script pool.
+///
+/// # Errors
+///
+/// See [`ReverseApplyError`] — every arm is a degrade signal, never a
+/// panic ("cute-dbt never panics on a bad diff").
+pub fn reverse_apply(new_text: &str, hunks: &[Hunk]) -> Result<String, ReverseApplyError> {
+    let had_trailing_newline = new_text.ends_with('\n');
+    let mut lines: Vec<&str> = if new_text.is_empty() {
+        Vec::new() // an empty file has zero lines, not one phantom ""
+    } else {
+        new_text.split('\n').collect()
+    };
+    if had_trailing_newline {
+        lines.pop(); // drop the terminator's empty tail
+    }
+
+    let mut sorted: Vec<&Hunk> = hunks.iter().collect();
+    sorted.sort_by_key(|h| (h.new_start, h.new_len));
+    validate_reversible(&lines, &sorted)?;
+
+    let mut old_lines: Vec<&str> = Vec::new();
+    let mut cursor = 1usize; // next 1-based new-side line to copy
+    for h in &sorted {
+        // Copy untouched new-side lines up to the hunk's anchor: a pure
+        // deletion re-inserts AFTER line `new_start` (inclusive copy); a
+        // replacement/insertion starts AT `new_start` (exclusive copy).
+        let copy_through = if h.new_len == 0 {
+            h.new_start
+        } else {
+            h.new_start - 1
+        };
+        while cursor <= copy_through {
+            old_lines.push(lines[cursor - 1]);
+            cursor += 1;
+        }
+        old_lines.extend(h.removed_lines.iter().map(String::as_str));
+        cursor += h.new_len; // skip the hunk's added lines
+    }
+    while cursor <= lines.len() {
+        old_lines.push(lines[cursor - 1]);
+        cursor += 1;
+    }
+
+    // A pure file-creation reversal leaves zero old lines: the join of an
+    // empty vec is "" and the trailing terminator would fabricate a blank
+    // line — return the canonical empty string instead.
+    if old_lines.is_empty() {
+        return Ok(String::new());
+    }
+    let mut old = old_lines.join("\n");
+    if had_trailing_newline {
+        old.push('\n');
+    }
+    Ok(old)
+}
+
+/// The [`reverse_apply`] pre-flight: every hunk `--unified=0`-shaped, in
+/// bounds, non-overlapping (in `(new_start, new_len)` order), and its `+`
+/// body matching the new text at its footprint (`\r`-trimmed both sides).
+fn validate_reversible(lines: &[&str], sorted: &[&Hunk]) -> Result<(), ReverseApplyError> {
+    // The highest new-side line already claimed by an earlier hunk (0 ⇒
+    // none). A replacement must start strictly after it; a pure deletion
+    // anchors after `new_start`, so it may equal it.
+    let mut claimed_through = 0usize;
+    for h in sorted {
+        let new_start = h.new_start;
+        if h.new_len != h.added_lines.len() {
+            return Err(ReverseApplyError::ContextBearing { new_start });
+        }
+        if h.new_len == 0 {
+            if new_start > lines.len() {
+                return Err(ReverseApplyError::OutOfBounds { new_start });
+            }
+            if new_start < claimed_through {
+                return Err(ReverseApplyError::Overlapping { new_start });
+            }
+            claimed_through = claimed_through.max(new_start);
+            continue;
+        }
+        if new_start == 0 || new_start + h.new_len - 1 > lines.len() {
+            return Err(ReverseApplyError::OutOfBounds { new_start });
+        }
+        if new_start <= claimed_through {
+            return Err(ReverseApplyError::Overlapping { new_start });
+        }
+        for (k, added) in h.added_lines.iter().enumerate() {
+            let actual = lines[new_start - 1 + k];
+            if actual.trim_end_matches('\r') != added.trim_end_matches('\r') {
+                return Err(ReverseApplyError::Drift { new_start });
+            }
+        }
+        claimed_through = new_start + h.new_len - 1;
+    }
+    Ok(())
+}
+
+/// Render a file's hunks directly as raw diff lines — removed (`-`) then
+/// added (`+`) bodies per hunk, in diff order, `\r`-trimmed, no context,
+/// no emphasis (cute-dbt#266).
+///
+/// The Shape-A fallback row's content: when the semantic dbt_project.yml
+/// categorization degrades (parse failure / un-reconstructable old side /
+/// unreadable working-tree file) the panel still shows the *diff itself*,
+/// truthfully, without needing the working-tree text or any alignment
+/// guarantee — the bodies come straight from the parsed hunks.
+#[must_use]
+pub fn raw_hunk_lines(hunks: &[Hunk]) -> Vec<DiffLine> {
+    let mut out = Vec::new();
+    for h in hunks {
+        out.extend(h.removed_lines.iter().map(|l| DiffLine {
+            kind: DiffLineKind::Removed,
+            text: trim_cr(l),
+            emphasis: None,
+        }));
+        out.extend(h.added_lines.iter().map(|l| DiffLine {
+            kind: DiffLineKind::Added,
+            text: trim_cr(l),
+            emphasis: None,
+        }));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2940,5 +3130,277 @@ mod tests {
         let scope = ModelInScopeSet::from_iter([NodeId::new("model.s.ctx")]);
         // No panic; degrades to plain SQL view (no entry).
         assert!(reconstruct_model_sql_diffs(&current, &scope, &index).is_empty());
+    }
+
+    // =================================================================
+    // reverse_apply (cute-dbt#266) — OLD-side reconstruction
+    // =================================================================
+
+    /// A fully-specified hunk (bodies + footprint).
+    fn full_hunk(new_start: usize, removed: &[&str], added: &[&str]) -> Hunk {
+        Hunk {
+            new_start,
+            new_len: added.len(),
+            removed_lines: removed.iter().map(|s| (*s).to_owned()).collect(),
+            added_lines: added.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    // ----- the two locked properties -----
+
+    #[test]
+    fn reverse_apply_with_empty_hunks_is_identity() {
+        // Identity over every framing shape: trailing newline, none,
+        // empty file, interior blank lines, CRLF.
+        for text in [
+            "a\nb\nc\n",
+            "a\nb\nc",
+            "",
+            "\n",
+            "a\n\nb\n",
+            "a\r\nb\r\n",
+            "single",
+        ] {
+            assert_eq!(
+                reverse_apply(text, &[]).expect("empty hunks always apply"),
+                text,
+                "identity must hold for {text:?}",
+            );
+        }
+    }
+
+    /// forward∘reverse == identity, exercised exhaustively over a
+    /// structured edit-script pool (the house property-test style — no
+    /// proptest dep): every single edit and every ordered pair of
+    /// non-overlapping edits over a fixed base file, with and without a
+    /// trailing newline. The forward side is constructed BY the edit
+    /// script (replace/insert/delete at a 1-based old line), so the test
+    /// derives (new_text, hunks) pairs exactly shaped like
+    /// `git diff --unified=0` output and asserts the reversal returns
+    /// the original old text.
+    #[test]
+    fn reverse_apply_inverts_forward_application_over_edit_script_pool() {
+        #[derive(Clone, Copy, Debug)]
+        enum Edit {
+            /// Replace old line `at` (1-based) with two new lines.
+            Replace { at: usize },
+            /// Insert one new line after old line `at` (0 ⇒ at top).
+            Insert { after: usize },
+            /// Delete old line `at`.
+            Delete { at: usize },
+        }
+        let base = ["name: playground", "version: '1.0'", "vars:", "  x: 1"];
+        let single: Vec<Vec<Edit>> = (1..=base.len())
+            .flat_map(|i| {
+                [
+                    vec![Edit::Replace { at: i }],
+                    vec![Edit::Insert { after: i - 1 }],
+                    vec![Edit::Delete { at: i }],
+                ]
+            })
+            .collect();
+        // Ordered pairs at non-adjacent old lines (1 and 3 / 1 and 4)
+        // keep the constructed hunks trivially non-overlapping.
+        let pairs: Vec<Vec<Edit>> = [
+            vec![Edit::Replace { at: 1 }, Edit::Replace { at: 3 }],
+            vec![Edit::Delete { at: 1 }, Edit::Insert { after: 3 }],
+            vec![Edit::Insert { after: 0 }, Edit::Delete { at: 4 }],
+            vec![Edit::Replace { at: 1 }, Edit::Delete { at: 4 }],
+            vec![Edit::Delete { at: 2 }, Edit::Replace { at: 4 }],
+        ]
+        .into_iter()
+        .collect();
+
+        for trailing in [true, false] {
+            for script in single.iter().chain(pairs.iter()) {
+                // Forward-apply the script over the OLD lines, recording
+                // the unified=0 hunks against NEW-side numbering.
+                let mut new_lines: Vec<String> = Vec::new();
+                let mut hunks: Vec<Hunk> = Vec::new();
+                let mut old_iter = base.iter().enumerate().peekable();
+                while let Some((idx0, old_line)) = old_iter.peek().copied() {
+                    let at = idx0 + 1; // 1-based old line
+                    let edit = script.iter().find(|e| match e {
+                        Edit::Replace { at: a } | Edit::Delete { at: a } => *a == at,
+                        Edit::Insert { .. } => false,
+                    });
+                    // Top-of-file insertion (after == 0) fires before line 1.
+                    if at == 1
+                        && script
+                            .iter()
+                            .any(|e| matches!(e, Edit::Insert { after: 0 }))
+                    {
+                        let inserted = "inserted-top: true".to_owned();
+                        hunks.push(full_hunk(new_lines.len() + 1, &[], &[&inserted]));
+                        new_lines.push(inserted);
+                    }
+                    match edit {
+                        Some(Edit::Replace { .. }) => {
+                            let r1 = format!("{old_line} # edited");
+                            let r2 = "extra: line".to_owned();
+                            hunks.push(full_hunk(new_lines.len() + 1, &[old_line], &[&r1, &r2]));
+                            new_lines.push(r1);
+                            new_lines.push(r2);
+                        }
+                        Some(Edit::Delete { .. }) => {
+                            hunks.push(full_hunk(new_lines.len(), &[old_line], &[]));
+                        }
+                        _ => new_lines.push((*old_line).to_owned()),
+                    }
+                    old_iter.next();
+                    if script
+                        .iter()
+                        .any(|e| matches!(e, Edit::Insert { after } if *after == at))
+                    {
+                        let inserted = format!("inserted-after-{at}: true");
+                        hunks.push(full_hunk(new_lines.len() + 1, &[], &[&inserted]));
+                        new_lines.push(inserted);
+                    }
+                }
+                let frame = if trailing { "\n" } else { "" };
+                let old_text = format!("{}{frame}", base.join("\n"));
+                let new_text = format!("{}{frame}", new_lines.join("\n"));
+                let reversed = reverse_apply(&new_text, &hunks)
+                    .unwrap_or_else(|e| panic!("script {script:?} must reverse: {e:?}"));
+                assert_eq!(
+                    reversed, old_text,
+                    "forward∘reverse must be identity for {script:?} (trailing={trailing})",
+                );
+            }
+        }
+    }
+
+    // ----- drift guard: fail-closed, never silently wrong -----
+
+    #[test]
+    fn reverse_apply_rejects_a_hunk_whose_added_body_does_not_match() {
+        let new_text = "a\nb\nc\n";
+        let stale = full_hunk(2, &["was"], &["NOT b"]);
+        assert_eq!(
+            reverse_apply(new_text, &[stale]),
+            Err(ReverseApplyError::Drift { new_start: 2 }),
+            "a stale + body must refuse, never fabricate old text",
+        );
+    }
+
+    #[test]
+    fn reverse_apply_rejects_a_context_bearing_hunk() {
+        // new_len 3 with one + body — the default-`git diff` shape.
+        let h = Hunk {
+            new_start: 1,
+            new_len: 3,
+            removed_lines: vec!["was".to_owned()],
+            added_lines: vec!["a".to_owned()],
+        };
+        assert_eq!(
+            reverse_apply("a\nb\nc\n", &[h]),
+            Err(ReverseApplyError::ContextBearing { new_start: 1 }),
+        );
+    }
+
+    #[test]
+    fn reverse_apply_rejects_an_out_of_bounds_footprint() {
+        let h = full_hunk(9, &[], &["z"]);
+        assert_eq!(
+            reverse_apply("a\nb\n", &[h]),
+            Err(ReverseApplyError::OutOfBounds { new_start: 9 }),
+        );
+    }
+
+    #[test]
+    fn reverse_apply_rejects_overlapping_hunks() {
+        let a = full_hunk(1, &["old-a"], &["a", "b"]);
+        let b = full_hunk(2, &["old-b"], &["b", "c"]);
+        assert_eq!(
+            reverse_apply("a\nb\nc\n", &[a, b]),
+            Err(ReverseApplyError::Overlapping { new_start: 2 }),
+        );
+    }
+
+    // ----- edge cases: creation / deletion / trailing newline / CRLF -----
+
+    #[test]
+    fn reverse_apply_of_a_file_creation_yields_the_empty_string() {
+        // `git diff` for a new file: one hunk covering the whole file,
+        // no removed lines (`@@ -0,0 +1,N @@`). The caller treats empty
+        // old text as "the file did not exist".
+        let new_text = "name: playground\nversion: '1.0'\n";
+        let h = full_hunk(1, &[], &["name: playground", "version: '1.0'"]);
+        assert_eq!(reverse_apply(new_text, &[h]).expect("reverses"), "");
+    }
+
+    #[test]
+    fn reverse_apply_reinserts_a_pure_deletion_after_its_anchor() {
+        // Old: a / gone-1 / gone-2 / b — the deletion sits after new line 1.
+        let h = full_hunk(1, &["gone-1", "gone-2"], &[]);
+        assert_eq!(
+            reverse_apply("a\nb\n", &[h]).expect("reverses"),
+            "a\ngone-1\ngone-2\nb\n",
+        );
+    }
+
+    #[test]
+    fn reverse_apply_reinserts_a_top_of_file_deletion_before_line_one() {
+        // `@@ -1,1 +0,0 @@` — new_start 0: the removed line led the file.
+        let h = full_hunk(0, &["gone-first"], &[]);
+        assert_eq!(
+            reverse_apply("a\nb\n", &[h]).expect("reverses"),
+            "gone-first\na\nb\n",
+        );
+    }
+
+    #[test]
+    fn reverse_apply_preserves_the_new_texts_trailing_newline_framing() {
+        let h = full_hunk(2, &["was-b"], &["b"]);
+        assert_eq!(reverse_apply("a\nb\n", &[h.clone()]).unwrap(), "a\nwas-b\n");
+        assert_eq!(reverse_apply("a\nb", &[h]).unwrap(), "a\nwas-b");
+    }
+
+    #[test]
+    fn reverse_apply_tolerates_a_crlf_working_tree() {
+        // The diff parser strips `\r` from bodies; the working-tree text
+        // keeps it. The drift guard must not report spurious drift.
+        let h = full_hunk(1, &["old-a"], &["a"]);
+        let reversed = reverse_apply("a\r\nb\r\n", &[h]).expect("CRLF must not read as drift");
+        assert_eq!(reversed, "old-a\nb\r\n");
+    }
+
+    #[test]
+    fn reverse_apply_emptying_a_file_restores_the_removed_lines() {
+        // `@@ -1,2 +0,0 @@` against an empty new text.
+        let h = full_hunk(0, &["a", "b"], &[]);
+        assert_eq!(reverse_apply("", &[h]).expect("reverses"), "a\nb");
+    }
+
+    // ----- raw_hunk_lines (the Shape-A fallback content) -----
+
+    #[test]
+    fn raw_hunk_lines_renders_removed_then_added_per_hunk_in_order() {
+        let hunks = vec![
+            full_hunk(1, &["old-1"], &["new-1"]),
+            full_hunk(5, &[], &["new-5\r"]),
+        ];
+        let lines = raw_hunk_lines(&hunks);
+        assert_eq!(
+            lines,
+            vec![
+                DiffLine {
+                    kind: DiffLineKind::Removed,
+                    text: "old-1".to_owned(),
+                    emphasis: None,
+                },
+                DiffLine {
+                    kind: DiffLineKind::Added,
+                    text: "new-1".to_owned(),
+                    emphasis: None,
+                },
+                DiffLine {
+                    kind: DiffLineKind::Added,
+                    text: "new-5".to_owned(),
+                    emphasis: None,
+                },
+            ],
+            "removed→added per hunk, \\r-trimmed, no emphasis",
+        );
     }
 }
