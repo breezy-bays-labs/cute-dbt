@@ -44,6 +44,33 @@
    | Tokyo     | 8.81              | 6.08                 | 5.22              | 4.99                 |
    | Gruvbox   | 6.74              | 4.85                 | 4.86              | 5.47                 |
    | Dracula   | 9.83              | 4.95                 | 4.96              | 5.03                 |
+
+   cute-dbt#251 — the per-theme AA token repair (the #206 deepening
+   pattern, applied at TOKEN level — since #264 the tokens live in ONE
+   place, so deepening here repairs the report AND explore pages
+   simultaneously; the older surface-scoped overrides in report.css
+   predate this and stay). The #264 adversarial verification measured
+   the shared palette sub-AA on 5 of 8 themes; the values below were
+   adjusted minimally (lightness-only shifts, hue/saturation kept) so
+   EVERY combo clears 4.5:1 — pinned by the report + explore AA matrix
+   guards in tests/headless_toggle.rs (universal: all 8 themes,
+   effective composited backdrops). Do not re-brighten:
+     · --text-muted on the worst of bg/bg-alt/surface/surface-2/
+       code-header-bg/code-bg (solarized 4.58, latte 5.14,
+       rosepine 4.82, tokyo 4.58, gruvbox 4.59);
+     · --accent (and --accent-hover) on the worst of bg/bg-alt/surface
+       (accent: solarized 4.57, latte 4.77, rosepine 4.59; hover:
+       latte 4.55, rosepine 4.56);
+     · --code-add/rem-sigil on their composited add/rem rows (all
+       themes >= 4.55 at FULL opacity — `.diff-sigil` opacity dimming
+       was removed at #251 per the #227 composited-opacity rule);
+     · body --text on --code-add/rem-word composited over row + code-bg
+       (all themes >= 4.56; the dark themes' word-tint alphas were
+       lowered, the light themes' rem-word hexes lightened).
+   Latte/rosepine muted + latte accent adopt the themes' OWN deeper
+   steps already established by the #198/#227 scoped stand-ins
+   (Catppuccin subtext1 #5c5f77, latte blue #1a5cdd, rosepine #5d5780).
+   Light and Dark are untouched (they already passed everywhere).
    ========================================================================== */
 
 /* ============================================================================
@@ -208,7 +235,7 @@
    ========================================================================== */
 :root[data-theme="tokyo"] {
   --bg:#1a1b26; --bg-alt:#1f2335; --surface:#1e2030; --surface-2:#292e42;
-  --text:#c0caf5; --text-muted:#8b92b8; --text-faint:#565f89;
+  --text:#c0caf5; --text-muted:#8e95ba; --text-faint:#565f89;
   --border:#2c3150; --border-strong:#3b4261;
   --accent:#7aa2f7; --accent-hover:#9cb8fb; --accent-tint:#212d4f; --accent-on:#0d1020;
   --control-bg:#292e42; --control-active-bg:#7aa2f7; --control-active-fg:#0d1020;
@@ -224,8 +251,8 @@
   --tooltip-bg:#0d1020; --tooltip-fg:#c0caf5;
   --code-bg:#1a1b26; --code-header-bg:#1f2335; --code-gutter-bg:#1a1b26; --code-gutter-fg:#565f89;
   --code-line-hover:rgba(255,255,255,0.04);
-  --code-add-bg:rgba(158,206,106,0.15); --code-add-gutter:rgba(158,206,106,0.28); --code-add-word:rgba(158,206,106,0.40);
-  --code-rem-bg:rgba(247,118,142,0.15); --code-rem-gutter:rgba(247,118,142,0.28); --code-rem-word:rgba(247,118,142,0.40);
+  --code-add-bg:rgba(158,206,106,0.15); --code-add-gutter:rgba(158,206,106,0.28); --code-add-word:rgba(158,206,106,0.24);
+  --code-rem-bg:rgba(247,118,142,0.15); --code-rem-gutter:rgba(247,118,142,0.28); --code-rem-word:rgba(247,118,142,0.35);
   --code-hunk-bg:rgba(122,162,247,0.15); --code-hunk-fg:#7aa2f7;
   --code-add-sigil:#9ece6a; --code-rem-sigil:#f7768e;
 }
@@ -235,9 +262,9 @@
    ========================================================================== */
 :root[data-theme="solarized"] {
   --bg:#fdf6e3; --bg-alt:#f3ecd6; --surface:#fdf6e3; --surface-2:#eee8d5;
-  --text:#4f5b62; --text-muted:#5e6e73; --text-faint:#9aa8ab;
+  --text:#4f5b62; --text-muted:#566b72; --text-faint:#9aa8ab;
   --border:#ddd6c1; --border-strong:#c6bfa8;
-  --accent:#268bd2; --accent-hover:#1d6fa8; --accent-tint:#e3eedd; --accent-on:#ffffff;
+  --accent:#1d6fa8; --accent-hover:#155a8a; --accent-tint:#e3eedd; --accent-on:#ffffff;
   --control-bg:#eee8d5; --control-active-bg:#586e75; --control-active-fg:#fdf6e3;
   --diff-add-fg:#4a6600; --diff-remove-fg:#b82d18;
   --diff-add-row:rgba(133,153,0,0.12); --diff-remove-row:rgba(220,50,47,0.10);
@@ -252,9 +279,9 @@
   --code-bg:#fdf6e3; --code-header-bg:#f3ecd6; --code-gutter-bg:#fdf6e3; --code-gutter-fg:#93a1a1;
   --code-line-hover:rgba(0,43,54,0.035);
   --code-add-bg:#eef3d4; --code-add-gutter:#dde6b0; --code-add-word:#c8d98a;
-  --code-rem-bg:#fbe3da; --code-rem-gutter:#f5cdbf; --code-rem-word:#eda88f;
+  --code-rem-bg:#fbe3da; --code-rem-gutter:#f5cdbf; --code-rem-word:#f4c8b8;
   --code-hunk-bg:#e3ecdd; --code-hunk-fg:#586e75;
-  --code-add-sigil:#859900; --code-rem-sigil:#dc322f;
+  --code-add-sigil:#647300; --code-rem-sigil:#c82522;
 }
 
 /* ==========================================================================
@@ -262,7 +289,7 @@
    ========================================================================== */
 :root[data-theme="gruvbox"] {
   --bg:#282828; --bg-alt:#32302f; --surface:#2e2c2a; --surface-2:#3c3836;
-  --text:#ebdbb2; --text-muted:#a89984; --text-faint:#7c6f64;
+  --text:#ebdbb2; --text-muted:#afa18d; --text-faint:#7c6f64;
   --border:#3c3836; --border-strong:#504945;
   --accent:#83a598; --accent-hover:#a3c4b7; --accent-tint:#2c3a36; --accent-on:#1d2021;
   --control-bg:#3c3836; --control-active-bg:#83a598; --control-active-fg:#1d2021;
@@ -278,10 +305,10 @@
   --tooltip-bg:#1d2021; --tooltip-fg:#ebdbb2;
   --code-bg:#282828; --code-header-bg:#32302f; --code-gutter-bg:#282828; --code-gutter-fg:#7c6f64;
   --code-line-hover:rgba(255,255,255,0.04);
-  --code-add-bg:rgba(184,187,38,0.15); --code-add-gutter:rgba(184,187,38,0.28); --code-add-word:rgba(184,187,38,0.40);
+  --code-add-bg:rgba(184,187,38,0.15); --code-add-gutter:rgba(184,187,38,0.28); --code-add-word:rgba(184,187,38,0.30);
   --code-rem-bg:rgba(251,73,52,0.15); --code-rem-gutter:rgba(251,73,52,0.28); --code-rem-word:rgba(251,73,52,0.40);
   --code-hunk-bg:rgba(131,165,152,0.18); --code-hunk-fg:#83a598;
-  --code-add-sigil:#b8bb26; --code-rem-sigil:#fb6a5d;
+  --code-add-sigil:#b8bb26; --code-rem-sigil:#fb7164;
 }
 
 /* ==========================================================================
@@ -305,10 +332,10 @@
   --tooltip-bg:#21222c; --tooltip-fg:#f8f8f2;
   --code-bg:#282a36; --code-header-bg:#21222c; --code-gutter-bg:#282a36; --code-gutter-fg:#6272a4;
   --code-line-hover:rgba(255,255,255,0.04);
-  --code-add-bg:rgba(80,250,123,0.12); --code-add-gutter:rgba(80,250,123,0.26); --code-add-word:rgba(80,250,123,0.38);
+  --code-add-bg:rgba(80,250,123,0.12); --code-add-gutter:rgba(80,250,123,0.26); --code-add-word:rgba(80,250,123,0.32);
   --code-rem-bg:rgba(255,85,85,0.13); --code-rem-gutter:rgba(255,85,85,0.28); --code-rem-word:rgba(255,85,85,0.40);
   --code-hunk-bg:rgba(189,147,249,0.16); --code-hunk-fg:#bd93f9;
-  --code-add-sigil:#50fa7b; --code-rem-sigil:#ff6e6e;
+  --code-add-sigil:#50fa7b; --code-rem-sigil:#ff7171;
 }
 
 /* ==========================================================================
@@ -316,9 +343,9 @@
    ========================================================================== */
 :root[data-theme="latte"] {
   --bg:#eff1f5; --bg-alt:#e6e9ef; --surface:#eff1f5; --surface-2:#e6e9ef;
-  --text:#4c4f69; --text-muted:#6c6f85; --text-faint:#9ca0b0;
+  --text:#4c4f69; --text-muted:#5c5f77; --text-faint:#9ca0b0;
   --border:#ccd0da; --border-strong:#acb0be;
-  --accent:#1e66f5; --accent-hover:#7287fd; --accent-tint:#dce4fb; --accent-on:#ffffff;
+  --accent:#1a5cdd; --accent-hover:#3553fc; --accent-tint:#dce4fb; --accent-on:#ffffff;
   --control-bg:#e6e9ef; --control-active-bg:#1e66f5; --control-active-fg:#ffffff;
   --diff-add-fg:#2a7016; --diff-remove-fg:#bd1331;
   --diff-add-row:#e3f0db; --diff-remove-row:#f6dde0;
@@ -333,7 +360,7 @@
   --code-bg:#eff1f5; --code-header-bg:#e6e9ef; --code-gutter-bg:#eff1f5; --code-gutter-fg:#9ca0b0;
   --code-line-hover:rgba(76,79,105,0.04);
   --code-add-bg:#e3f0db; --code-add-gutter:#cfe6c0; --code-add-word:#bfe0a8;
-  --code-rem-bg:#f6dde0; --code-rem-gutter:#efc3c8; --code-rem-word:#e8a9b0;
+  --code-rem-bg:#f6dde0; --code-rem-gutter:#efc3c8; --code-rem-word:#ecb6bc;
   --code-hunk-bg:#dce4fb; --code-hunk-fg:#5c5f77;
   --code-add-sigil:#2a7016; --code-rem-sigil:#bd1331;
 }
@@ -343,9 +370,9 @@
    ========================================================================== */
 :root[data-theme="rosepine"] {
   --bg:#e6d9c9; --bg-alt:#f7f1ea; --surface:#fbf6ef; --surface-2:#ece0d3;
-  --text:#544f74; --text-muted:#726d8d; --text-faint:#938ea1;
+  --text:#544f74; --text-muted:#5d5780; --text-faint:#938ea1;
   --border:#cdbfb1; --border-strong:#b3a596;
-  --accent:#286983; --accent-hover:#56949f; --accent-tint:#dde7ea; --accent-on:#ffffff;
+  --accent:#276680; --accent-hover:#3c666e; --accent-tint:#dde7ea; --accent-on:#ffffff;
   --control-bg:#f2e9e1; --control-active-bg:#286983; --control-active-fg:#ffffff;
   --diff-add-fg:#45700f; --diff-remove-fg:#b01b43;
   --diff-add-row:#e6ebdd; --diff-remove-row:#f6dde1;
@@ -360,7 +387,7 @@
   --code-bg:#faf4ed; --code-header-bg:#f2e9e1; --code-gutter-bg:#faf4ed; --code-gutter-fg:#9893a5;
   --code-line-hover:rgba(87,82,121,0.04);
   --code-add-bg:#e6ebdd; --code-add-gutter:#d3ddbd; --code-add-word:#c2d3a0;
-  --code-rem-bg:#f6dde1; --code-rem-gutter:#eec3cb; --code-rem-word:#e3a7b2;
+  --code-rem-bg:#f6dde1; --code-rem-gutter:#eec3cb; --code-rem-word:#eabdc5;
   --code-hunk-bg:#dde7ea; --code-hunk-fg:#575279;
   --code-add-sigil:#45700f; --code-rem-sigil:#b01b43;
 }

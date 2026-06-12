@@ -2659,11 +2659,14 @@
   // (+ a responsive fallback), so BOTH are emitted and exactly one is shown.
   // Consumes the same BlockDiff lines verbatim — the Rust diff engine is
   // unchanged.
+  // cute-dbt#251 — the split-view line-number cells carry aria-hidden in
+  // PARITY with the unified .diff-gutter (decorative positional metadata;
+  // screen readers read the code, not the numbering — the #178 idiom).
   function splitCell(side) {
     if (!side) {
-      return '<td class="ds-num ds-empty"></td><td class="ds-code ds-empty"></td>';
+      return '<td class="ds-num ds-empty" aria-hidden="true"></td><td class="ds-code ds-empty"></td>';
     }
-    return '<td class="ds-num ds-' + side.cls + '">' + (side.num == null ? "" : side.num) + '</td>'
+    return '<td class="ds-num ds-' + side.cls + '" aria-hidden="true">' + (side.num == null ? "" : side.num) + '</td>'
          + '<td class="ds-code ds-' + side.cls + '"><div class="ds-codewrap">'
          + '<span class="diff-sigil">' + side.sigil + '</span>'
          + '<span class="diff-code">' + side.body + '</span></div></td>';
