@@ -11,15 +11,58 @@ Feature: Project-definition changes are categorized, never silently invisible
   Background:
     Given an empty current manifest
 
-  Scenario: A vars edit renders a categorized vars row with the honest blast-radius note
+  Scenario: A vars edit renders a categorized vars row with the honest blast-radius copy
     Given the working tree carries the canonical dbt_project.yml
     And the PR diff edits the project var "dq_threshold" from 10 to 5
     When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
     Then the exit code is 0
     And the report carries the project-definition panel
     And the panel carries a "vars" row for "dq_threshold" showing "10 → 5"
-    And that row states "blast radius not attributed"
+    And that row's note contains "Blast radius is not fully attributable statically"
+    And that row's note contains "SQL and configs plus 0 macro bodies"
+    And the vars row notes "no referencing models found by the static scan"
     And the payload carries the parsed project definition
+
+  # cute-dbt#268 — vars attribution tiers: per changed var the panel
+  # resolves old→new by fusion's precedence (CLI --vars > package vars >
+  # global vars > inline default) and lists affected models at honest
+  # evidence tiers — DIRECT (raw_code scan) / CONFIG (unrendered_config)
+  # / MACRO (depends_on.macros closure) — with "at least N" framing and
+  # the enumerated UNKNOWN residual in-row. Contextualize-don't-widen:
+  # a vars edit NEVER widens the in-scope set.
+  Scenario: A vars edit renders tiered attribution and never widens scope
+    Given the current manifest carries models referencing the project var at every tier
+    And the working tree carries the canonical dbt_project.yml
+    And the PR diff edits the project var "dq_threshold" from 10 to 5
+    When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the panel's vars row lists "at least 1 model reads this var directly in SQL: mart_dq"
+    And the panel's vars row lists "at least 1 model carries config driven by this var: grid_model"
+    And the panel's vars row lists "at least 1 model reads this var through its macro closure: stg_enc (via add_dq_flags)"
+    And that row's note contains "SQL and configs plus 1 macro body"
+    And that row's note contains "never widened into report scope"
+    And the payload carries no model "mart_dq"
+    And the payload carries no model "grid_model"
+    And the payload carries no model "stg_enc"
+
+  Scenario: An in-scope model referencing the edited var carries the reference chip
+    Given the current manifest carries models referencing the project var at every tier
+    And the working tree carries the canonical dbt_project.yml
+    And the PR diff edits the project var "dq_threshold" from 10 to 5 and the direct reader's SQL
+    When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the payload carries the model "mart_dq" in scope
+    And the payload model "mart_dq" carries the var reference "dq_threshold" at tier "direct"
+    And the payload carries no model "grid_model"
+
+  Scenario: A unit test pinning the edited var in overrides is reported insulated
+    Given the current manifest carries models referencing the project var at every tier
+    And the manifest unit test "test_mart_dq_rows" pins the var "dq_threshold" in overrides
+    And the working tree carries the canonical dbt_project.yml
+    And the PR diff edits the project var "dq_threshold" from 10 to 5
+    When I run cute-dbt report with --manifest current.json --pr-diff @project.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the vars row notes "1 unit test pins this var in overrides.vars and is insulated from this edit (the override always wins): test_mart_dq_rows"
 
   Scenario: A folder config edit renders a categorized config-tree row
     Given the working tree carries the canonical dbt_project.yml

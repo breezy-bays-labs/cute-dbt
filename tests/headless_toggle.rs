@@ -11935,6 +11935,7 @@ fn config_attribution_chip_renders_for_the_widened_model_and_hides_otherwise() {
                 path: "models.shop.marts".to_owned(),
             }],
         )]),
+        var_references: BTreeMap::new(),
     };
     let url = render_with_project_facts("headless_project_chip.html", &facts);
 
@@ -11989,6 +11990,7 @@ fn project_panel_fallback_row_renders_for_unparseable_yaml() {
             raw: raw_hunk_lines(&hunks),
         }),
         config_attributions: BTreeMap::new(),
+        var_references: BTreeMap::new(),
     };
     let url = render_with_project_facts("headless_project_fallback.html", &facts);
 
@@ -12060,9 +12062,11 @@ fn project_panel_hook_diff_renders_with_emphasis_via_the_111_renderer() {
                     manifest: HookManifestPresence::Matched,
                 }),
                 tree: None,
+                vars: None,
             }],
         }),
         config_attributions: BTreeMap::new(),
+        var_references: BTreeMap::new(),
     };
     let url = render_with_project_facts("headless_project_hook_diff.html", &facts);
 
@@ -12115,6 +12119,7 @@ fn project_panel_absence_note_renders_when_file_unreadable() {
             raw: raw_hunk_lines(&hunks),
         }),
         config_attributions: BTreeMap::new(),
+        var_references: BTreeMap::new(),
     };
     let url = render_with_project_facts("headless_project_absence.html", &facts);
 

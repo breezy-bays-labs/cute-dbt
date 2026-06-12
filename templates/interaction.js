@@ -424,14 +424,28 @@
   // from the Rust-computed m.config_attributions (Rust computes, JS only
   // renders). Hidden for models with no attribution — the element stays
   // out of the accessibility tree (the #74 no-empty-landmark intent).
+  // cute-dbt#268 — var-reference chips ride the same row: this in-scope
+  // model references an edited dbt_project.yml var at the named tier
+  // ("reads var 'dq_threshold' · direct" / "· via add_dq_flags").
+  // Context only — a var edit never widened this model into scope.
   function renderModelAttribution(m) {
     var $row = $('[data-testid="model-attribution"]').empty();
     var list = (m && m.config_attributions) || [];
-    if (!list.length) { $row.prop("hidden", true); return; }
+    var vars = (m && m.var_references) || [];
+    if (!list.length && !vars.length) { $row.prop("hidden", true); return; }
     list.forEach(function (a) {
       $row.append(
         $("<span>").addClass("config-attribution-chip")
           .text("+" + a.key + " via dbt_project.yml · " + a.path)
+      );
+    });
+    vars.forEach(function (v) {
+      var how = v.tier === "macro" && v.via
+        ? "via " + v.via.split(".").pop()
+        : v.tier;
+      $row.append(
+        $("<span>").addClass("var-reference-chip")
+          .text("reads var '" + v.name + "' · " + how)
       );
     });
     $row.prop("hidden", false);

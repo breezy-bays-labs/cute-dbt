@@ -87,6 +87,12 @@ pub struct World {
     /// synthesizing one. `None` ⇒ synthesize from `changed_files`.
     pub explicit_patch: Option<PathBuf>,
 
+    /// cute-dbt#268: wire-shaped `macros` entries `(id, macro_sql)` the
+    /// serializing When step injects into the manifest JSON (the domain
+    /// `Manifest` stores macros as bare body strings, which the wire
+    /// reader does not accept — the cute-dbt#160 wire-config precedent).
+    pub wire_macros: Vec<(String, String)>,
+
     /// cute-dbt#96 Step 2: block-targeting directives for the synthesized
     /// diff. Empty ⇒ the synthesizer uses the whole-file footprint
     /// (slice-A behavior — every declared block touched). When a YAML file

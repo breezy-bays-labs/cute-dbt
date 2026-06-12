@@ -222,6 +222,39 @@
       {%- if !row.note.is_empty() %}
       <span class="project-def-note">{{ row.note }}</span>
       {%- endif %}
+      {#- cute-dbt#268 — per-var attribution entries on vars rows: each
+          effective edit (global, or expanded per package-scoped inner
+          var) with its precedence-resolved old→new, tiered
+          affected-model lines (DIRECT / CONFIG / MACRO chips, "at least
+          N" framing, R1b cap with <details> overflow), and the masked /
+          insulated / dynamic statements. Contextualize-don't-widen: the
+          lists name models, they never pull them into scope. -#}
+      {%- for entry in row.var_entries %}
+      <div class="project-def-var-entry" data-testid="project-def-var-entry">
+        <code class="project-def-var-name">{{ entry.name }}</code>
+        {%- if !entry.scope.is_empty() %}
+        <span class="project-def-var-scope">{{ entry.scope }}</span>
+        {%- endif %}
+        {%- if !entry.detail.is_empty() %}
+        <span class="project-def-detail">{{ entry.detail }}</span>
+        {%- endif %}
+        {%- for line in entry.tier_lines %}
+        <p class="project-def-var-tier" data-testid="project-def-var-tier">
+          <span class="tier-chip tier-{{ line.tier_key }}">{{ line.tier_label }}</span>
+          <span class="project-def-var-tier-text">{{ line.text }}</span>
+          {%- if !line.overflow.is_empty() %}
+          <details class="project-def-affected-list" data-testid="project-def-var-overflow">
+            <summary>show referencing models</summary>
+            <span class="project-def-affected-names">{% for name in line.overflow %}<code>{{ name }}</code>{% if !loop.last %}, {% endif %}{% endfor %}</span>
+          </details>
+          {%- endif %}
+        </p>
+        {%- endfor %}
+        {%- for var_note in entry.notes %}
+        <p class="project-def-var-note" data-testid="project-def-var-note">{{ var_note }}</p>
+        {%- endfor %}
+      </div>
+      {%- endfor %}
       {#- cute-dbt#267 — the affected-models listing on models:-section
           config-tree rows: counts always explicit (TOTAL tier — fusion's
           own fqn resolution); names inline up to the R1b cap, past it
