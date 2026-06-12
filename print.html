@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-ca477be5.js";
+            window.path_to_searchindex_js = "searchindex-e3975c07.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-e08b96a6.js"></script>
@@ -1152,6 +1152,28 @@ the same posture as the <code>[checks]</code> section (see
 disappears from the vocabulary) — opting in early is how you preview
 them and how the feedback loop runs. Because v0.x is explicitly
 unstable, ids may appear and graduate between minor versions.</p>
+<h3 id="what-project-state-gates"><a class="header" href="#what-project-state-gates">What <code>project-state</code> gates</a></h3>
+<p>With the switch <strong>off</strong> (the default), the report behaves as if
+<code>dbt_project.yml</code> did not exist — the file is not read at all and
+contributes <strong>zero bytes</strong> to the output:</p>
+<ul>
+<li>no “Project definition changed” panel (neither the categorized nor
+the raw-diff fallback variant),</li>
+<li>no per-model provenance chips, vars tiers, hooks rows, or dispatch
+banner,</li>
+<li><strong>no config-tree scope widening</strong> — models under an edited
+<code>models:</code> subtree do not join the report scope (widening is scope
+<em>behavior</em>, not presentation: widened models render full cards and
+participate in the compiled-SQL pre-flight, which is why this is a
+generation-time gate and not a display toggle),</li>
+<li>no standing <code>project_definition</code> metadata in the report payload —
+the <em>standing metadata is gated with the rest of the family</em>, so a
+default report is byte-identical whether or not the project root
+carries a <code>dbt_project.yml</code>.</li>
+</ul>
+<p>With the switch <strong>on</strong>, all of the above render exactly as before the
+switch existed — opting in previews precisely what graduation would
+make default.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="examples"><a class="header" href="#examples">Examples</a></h1>
 <p>cute-dbt commits rendered example reports under
