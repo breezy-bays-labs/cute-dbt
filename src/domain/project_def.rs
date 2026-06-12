@@ -34,7 +34,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::pr_diff::DiffLine;
+use crate::domain::manifest::Manifest;
+use crate::domain::path::normalize_path;
+use crate::domain::pr_diff::{BlockDiff, DiffLine, diff_lines};
 
 /// A source position in the authored `dbt_project.yml` — 1-based line and
 /// column.
@@ -178,6 +180,80 @@ pub struct ProjectChange {
     /// The new value (`None` ⇒ the key was removed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new: Option<Value>,
+    /// Hook-row enrichment (cute-dbt#269) — `Some` exactly on `Hooks`
+    /// rows after [`attach_hook_facts`]: the inline SQL diff of the hook
+    /// bodies plus the manifest-side `operation.*` reality. `None` on
+    /// every other category (and on pre-#269 payloads — additive,
+    /// ADR-5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hook: Option<HookChangeFacts>,
+}
+
+/// One manifest `operation.*` node backing a project hook entry
+/// (cute-dbt#269).
+///
+/// dbt materializes each `on-run-start:` / `on-run-end:` entry as a node
+/// `operation.{project}.{project}-on-run-{start|end}-{i}` whose
+/// `raw_code` is the hook SQL verbatim and whose `original_file_path`
+/// is `./dbt_project.yml` (dbt-fusion `resolve_operations.rs:106-145` @
+/// `9977b6cb…`; dbt-core emits the same shape).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookOperation {
+    /// The full node id (`operation.{project}.{project}-on-run-start-0`).
+    pub id: String,
+    /// The hook SQL (`raw_code`), empty when the node carries none.
+    pub sql: String,
+}
+
+/// The manifest-side reality of the project's run hooks (cute-dbt#269):
+/// the `operation.*` nodes for each hook kind, in hook-index order.
+/// Transient (extracted per run, consumed by [`attach_hook_facts`]) —
+/// the payload-riding facts live in [`HookChangeFacts`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HookOperations {
+    /// `on-run-start` operations, ordered by their `-{i}` suffix.
+    pub on_run_start: Vec<HookOperation>,
+    /// `on-run-end` operations, same ordering.
+    pub on_run_end: Vec<HookOperation>,
+}
+
+/// How the manifest's `operation.*` nodes relate to the working-tree
+/// hook entries (cute-dbt#269) — the hook row's honesty verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookManifestPresence {
+    /// The operation bodies byte-match the parsed working-tree entries
+    /// (single-trailing-newline frame tolerated) — the diff's new side
+    /// IS the manifest's operation nodes. Also the verdict when both
+    /// sides are empty (hooks removed, manifest agrees).
+    Matched,
+    /// The manifest carries no `operation.*` nodes for this hook while
+    /// the working tree declares entries — the manifest may predate the
+    /// edit; the diff falls back to the parsed file.
+    Absent,
+    /// Operation nodes exist but do not match the working-tree entries
+    /// — manifest and working tree are out of sync; the diff falls back
+    /// to the parsed file.
+    Diverged,
+}
+
+/// Hook-row facts attached to a `Hooks` [`ProjectChange`]
+/// (cute-dbt#269). Additive POD (ADR-5) — rides the inlined payload so
+/// the report JS can render the SQL diff with the #111 renderer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HookChangeFacts {
+    /// Inline line diff of the hook bodies, old → new (the #111
+    /// [`BlockDiff`] vocabulary). `None` when the change carries no
+    /// substantive line difference (the row falls back to its plain
+    /// detail).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sql_diff: Option<BlockDiff>,
+    /// The manifest's `operation.*` node ids for this hook kind, in
+    /// hook-index order (empty when the manifest carries none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operation_ids: Vec<String>,
+    /// The manifest-side honesty verdict.
+    pub manifest: HookManifestPresence,
 }
 
 /// Why the panel degraded to the Shape-A raw-diff row instead of
@@ -319,6 +395,7 @@ pub fn diff_project_definitions(
                 label: label.to_owned(),
                 old: (!o.is_empty()).then(|| Value::Array(o.clone())),
                 new: (!n.is_empty()).then(|| Value::Array(n.clone())),
+                hook: None,
             });
         }
     }
@@ -362,6 +439,7 @@ fn push_if_changed(
             label: label.to_owned(),
             old,
             new,
+            hook: None,
         });
     }
 }
@@ -422,6 +500,162 @@ fn union_keys<V>(a: &BTreeMap<String, V>, b: &BTreeMap<String, V>) -> Vec<String
     keys.sort();
     keys.dedup();
     keys
+}
+
+// ---------------------------------------------------------------------
+// Hook operation nodes + hook-row enrichment (cute-dbt#269)
+// ---------------------------------------------------------------------
+
+/// Collect the manifest's hook `operation.*` nodes for `project_name`
+/// (cute-dbt#269).
+///
+/// Selection mirrors dbt's own naming contract: a node with
+/// `resource_type == "operation"` whose bare name is
+/// `{project_name}-on-run-{start|end}-{i}` — the name prefix partitions
+/// the ROOT project's hooks from any installed package's (both anchor at
+/// the package-internal `dbt_project.yml`, so the path alone cannot).
+/// **Both engine spellings of the kind segment are accepted** (verified
+/// against real manifests 2026-06-12): dbt-core and fusion-at-source
+/// (`resolve_operations.rs:120-122` @ `9977b6cb…`) hyphenate
+/// (`-on-run-start-`), while the released dbt-fusion 2.0.0-preview.177
+/// emits underscores (`-on_run_start-`) and drops the `./` path prefix
+/// — ingest both, never validate. The `original_file_path` is checked
+/// **through the normalization authority's leaf** ([`normalize_path`],
+/// which owns the `./` strip) — never a call-site strip — and
+/// tolerantly: an absent path is accepted. Results sort by the `-{i}`
+/// suffix, dbt's hook order. An empty `project_name` selects nothing
+/// (no project to partition by).
+#[must_use]
+pub fn hook_operations(manifest: &Manifest, project_name: &str) -> HookOperations {
+    let mut out = HookOperations::default();
+    if project_name.is_empty() {
+        return out;
+    }
+    let mut start: Vec<(usize, HookOperation)> = Vec::new();
+    let mut end: Vec<(usize, HookOperation)> = Vec::new();
+    for (id, node) in manifest.nodes() {
+        if node.resource_type() != "operation" || !hook_path_is_project_file(node) {
+            continue;
+        }
+        let name = node.bare_name();
+        for (kind, bucket) in [("on-run-start", &mut start), ("on-run-end", &mut end)] {
+            if let Some(index) = hook_name_index(name, project_name, kind) {
+                bucket.push((
+                    index,
+                    HookOperation {
+                        id: id.as_str().to_owned(),
+                        sql: node.raw_code().unwrap_or_default().to_owned(),
+                    },
+                ));
+            }
+        }
+    }
+    start.sort_by_key(|(index, _)| *index);
+    end.sort_by_key(|(index, _)| *index);
+    out.on_run_start = start.into_iter().map(|(_, op)| op).collect();
+    out.on_run_end = end.into_iter().map(|(_, op)| op).collect();
+    out
+}
+
+/// Parse the `-{i}` suffix of `{project}-{kind}-{i}`, accepting both
+/// engine spellings of the kind segment (`on-run-start` hyphenated —
+/// dbt-core + fusion @ `9977b6cb…` — and `on_run_start` underscored —
+/// released fusion 2.0.0-preview.177, real-manifest-verified).
+fn hook_name_index(name: &str, project_name: &str, kind: &str) -> Option<usize> {
+    let underscored = kind.replace('-', "_");
+    name.strip_prefix(&format!("{project_name}-{kind}-"))
+        .or_else(|| name.strip_prefix(&format!("{project_name}-{underscored}-")))
+        .and_then(|suffix| suffix.parse::<usize>().ok())
+}
+
+/// Whether an operation node's declaring path is the project file —
+/// `./dbt_project.yml` resolves through [`normalize_path`]'s `./` strip
+/// (the single normalization authority's leaf); an absent path is
+/// tolerated (ingest, never validate).
+fn hook_path_is_project_file(node: &crate::domain::manifest::Node) -> bool {
+    node.original_file_path()
+        .is_none_or(|p| normalize_path(p, None) == "dbt_project.yml")
+}
+
+/// Attach [`HookChangeFacts`] to every `Hooks` row of a categorized
+/// change list (cute-dbt#269).
+///
+/// Mirrors the #111 model-SQL-diff architecture: the diff's **new side
+/// comes from the manifest's operation nodes** when they byte-match the
+/// parsed working-tree entries (the same-revision contract, with the
+/// single-trailing-newline frame tolerated — the dbt-core/fusion
+/// divergence precedent), guarded exactly like `block_aligns_with_hunks`
+/// guards the model diff: on any mismatch ([`HookManifestPresence::Absent`]
+/// / [`Diverged`](HookManifestPresence::Diverged)) the new side falls
+/// back to the parsed file — never a silently wrong diff. The old side
+/// is always the reverse-applied file's parsed entries (there is no old
+/// manifest on the PR-diff arm).
+pub fn attach_hook_facts(changes: &mut [ProjectChange], ops: &HookOperations) {
+    for change in changes
+        .iter_mut()
+        .filter(|c| c.category == ProjectChangeCategory::Hooks)
+    {
+        let kind_ops = if change.label == "on-run-start" {
+            &ops.on_run_start
+        } else {
+            &ops.on_run_end
+        };
+        let old_entries = hook_entry_texts(change.old.as_ref());
+        let new_entries = hook_entry_texts(change.new.as_ref());
+        let op_bodies: Vec<String> = kind_ops
+            .iter()
+            .map(|op| trim_one_newline(&op.sql).to_owned())
+            .collect();
+        let presence = if op_bodies == new_entries {
+            HookManifestPresence::Matched
+        } else if op_bodies.is_empty() {
+            HookManifestPresence::Absent
+        } else {
+            HookManifestPresence::Diverged
+        };
+        let new_side = if presence == HookManifestPresence::Matched {
+            &op_bodies
+        } else {
+            &new_entries
+        };
+        let diff = diff_lines(&entry_lines(&old_entries), &entry_lines(new_side));
+        change.hook = Some(HookChangeFacts {
+            sql_diff: diff.has_real_change().then_some(diff),
+            operation_ids: kind_ops.iter().map(|op| op.id.clone()).collect(),
+            manifest: presence,
+        });
+    }
+}
+
+/// A hooks change's entries as display texts: a string entry verbatim
+/// (the dbt shape), anything else as compact JSON (tolerant ingestion
+/// keeps exotic YAML); each frame-normalized by [`trim_one_newline`].
+fn hook_entry_texts(side: Option<&Value>) -> Vec<String> {
+    let Some(Value::Array(entries)) = side else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .map(|v| match v {
+            Value::String(s) => trim_one_newline(s).to_owned(),
+            other => serde_json::to_string(other).unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// Strip exactly one trailing `\n` (the engine frame divergence
+/// precedent from the #111 model SQL diff — never `trim_end_matches`).
+fn trim_one_newline(s: &str) -> &str {
+    s.strip_suffix('\n').unwrap_or(s)
+}
+
+/// Flatten hook entries into diffable lines (an entry may be a
+/// multi-line block scalar).
+fn entry_lines(entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .flat_map(|e| e.split('\n').map(str::to_owned))
+        .collect()
 }
 
 #[cfg(test)]
@@ -498,6 +732,7 @@ mod tests {
                 label: "default_state".to_owned(),
                 old: Some(json!("CT")),
                 new: Some(json!("VT")),
+                hook: None,
             }],
         };
         let fallback = ProjectChangePanel::Fallback {
@@ -577,6 +812,7 @@ mod tests {
                 label: "default_state".to_owned(),
                 old: Some(json!("CT")),
                 new: Some(json!("VT")),
+                hook: None,
             }],
         );
     }
@@ -596,6 +832,7 @@ mod tests {
                 label: "brand_new".to_owned(),
                 old: None,
                 new: Some(json!(true)),
+                hook: None,
             },
         );
         assert_eq!(
@@ -605,6 +842,7 @@ mod tests {
                 label: "grid_density".to_owned(),
                 old: Some(json!(7)),
                 new: None,
+                hook: None,
             },
         );
     }
@@ -634,6 +872,7 @@ mod tests {
                 label: "models.playground.marts: +materialized".to_owned(),
                 old: Some(json!("table")),
                 new: Some(json!("incremental")),
+                hook: None,
             }],
         );
     }
@@ -676,6 +915,7 @@ mod tests {
                 label: "seeds: +quote_columns".to_owned(),
                 old: None,
                 new: Some(json!(false)),
+                hook: None,
             }],
         );
     }
@@ -745,5 +985,365 @@ mod tests {
         let mut sorted = changes.clone();
         sorted.sort_by(|a, b| (a.category, &a.label).cmp(&(b.category, &b.label)));
         assert_eq!(changes, sorted, "diff output arrives pre-sorted");
+    }
+
+    // ----- hook operation nodes (cute-dbt#269) -----
+
+    use std::collections::HashMap;
+
+    use crate::domain::manifest::{
+        Checksum, DependsOn, ManifestMetadata, Node, NodeConfig, NodeId,
+    };
+
+    /// A synthetic `operation.*` node in the dbt shape (fusion
+    /// `resolve_operations.rs:106-145` @ `9977b6cb…`): id
+    /// `operation.{project}.{project}-on-run-{kind}-{i}`, the name as
+    /// its last segment, `raw_code` = the hook SQL, declaring path
+    /// `./dbt_project.yml` VERBATIM.
+    fn operation_node(project: &str, kind: &str, index: usize, sql: &str) -> (NodeId, Node) {
+        let name = format!("{project}-on-run-{kind}-{index}");
+        let id = NodeId::new(format!("operation.{project}.{name}"));
+        let node = Node::new(
+            id.clone(),
+            "operation",
+            Checksum::new("sha256", "feed"),
+            None,
+            Some(sql.to_owned()),
+            DependsOn::default(),
+            Some("./dbt_project.yml".to_owned()),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(Some(name), Some(project.to_owned()));
+        (id, node)
+    }
+
+    fn manifest_with(nodes: Vec<(NodeId, Node)>) -> Manifest {
+        Manifest::new(
+            ManifestMetadata::new("https://schemas.getdbt.com/dbt/manifest/v12.json"),
+            nodes.into_iter().collect::<HashMap<_, _>>(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn hook_operations_collects_per_kind_in_index_order() {
+        let m = manifest_with(vec![
+            operation_node("playground", "start", 1, "vacuum t"),
+            operation_node("playground", "start", 0, "grant usage"),
+            operation_node("playground", "end", 0, "analyze t"),
+        ]);
+        let ops = hook_operations(&m, "playground");
+        let start: Vec<(&str, &str)> = ops
+            .on_run_start
+            .iter()
+            .map(|o| (o.id.as_str(), o.sql.as_str()))
+            .collect();
+        assert_eq!(
+            start,
+            vec![
+                (
+                    "operation.playground.playground-on-run-start-0",
+                    "grant usage",
+                ),
+                ("operation.playground.playground-on-run-start-1", "vacuum t"),
+            ],
+            "start hooks sort by the -i suffix",
+        );
+        assert_eq!(ops.on_run_end.len(), 1);
+        assert_eq!(ops.on_run_end[0].sql, "analyze t");
+    }
+
+    #[test]
+    fn hook_operations_partitions_by_project_name() {
+        // An installed package's hooks also anchor at ./dbt_project.yml —
+        // only the ROOT project's name prefix selects.
+        let m = manifest_with(vec![
+            operation_node("playground", "start", 0, "grant usage"),
+            operation_node("dbt_utils", "start", 0, "package hook"),
+        ]);
+        let ops = hook_operations(&m, "playground");
+        assert_eq!(ops.on_run_start.len(), 1);
+        assert_eq!(ops.on_run_start[0].sql, "grant usage");
+        assert!(
+            hook_operations(&m, "").on_run_start.is_empty(),
+            "an empty project name selects nothing",
+        );
+    }
+
+    #[test]
+    fn hook_operations_ignores_non_operation_nodes_and_foreign_paths() {
+        // A model node whose name happens to match, and an operation
+        // anchored at some other file, are both rejected.
+        let (mid, model) = operation_node("playground", "start", 0, "select 1");
+        let model = Node::new(
+            mid.clone(),
+            "model",
+            Checksum::new("sha256", "feed"),
+            None,
+            model.raw_code().map(str::to_owned),
+            DependsOn::default(),
+            Some("./dbt_project.yml".to_owned()),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(
+            Some("playground-on-run-start-0".to_owned()),
+            Some("playground".to_owned()),
+        );
+        let (oid, op) = operation_node("playground", "start", 1, "elsewhere");
+        let op_foreign = Node::new(
+            oid.clone(),
+            "operation",
+            Checksum::new("sha256", "feed"),
+            None,
+            Some("elsewhere".to_owned()),
+            DependsOn::default(),
+            Some("macros/helpers.sql".to_owned()),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(op.name().map(str::to_owned), Some("playground".to_owned()));
+        let m = manifest_with(vec![(mid, model), (oid, op_foreign)]);
+        assert!(hook_operations(&m, "playground").on_run_start.is_empty());
+    }
+
+    #[test]
+    fn hook_operations_accepts_the_fusion_underscore_dialect() {
+        // Real-manifest-verified (2026-06-12, dbt-fusion
+        // 2.0.0-preview.177 compile of the dogfood jaffle_shop):
+        // name `jaffle_shop-on_run_start-0` (UNDERSCORED kind segment)
+        // and original_file_path `dbt_project.yml` (no `./` prefix) —
+        // both diverge from the pinned fusion source @ `9977b6cb…` and
+        // from dbt-core. Ingest both dialects, never validate.
+        let id = NodeId::new("operation.jaffle_shop.jaffle_shop-on_run_start-0");
+        let node = Node::new(
+            id.clone(),
+            "operation",
+            Checksum::new("sha256", "feed"),
+            None,
+            Some("create schema if not exists analytics_audit".to_owned()),
+            DependsOn::default(),
+            Some("dbt_project.yml".to_owned()),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(
+            Some("jaffle_shop-on_run_start-0".to_owned()),
+            Some("jaffle_shop".to_owned()),
+        );
+        let m = manifest_with(vec![(id, node)]);
+        let ops = hook_operations(&m, "jaffle_shop");
+        assert_eq!(ops.on_run_start.len(), 1);
+        assert_eq!(
+            ops.on_run_start[0].sql,
+            "create schema if not exists analytics_audit",
+        );
+    }
+
+    #[test]
+    fn hook_operations_tolerates_a_missing_declaring_path() {
+        // Ingest, never validate: an operation node without
+        // original_file_path still selects by name pattern.
+        let (id, node) = operation_node("playground", "end", 0, "analyze t");
+        let node = Node::new(
+            id.clone(),
+            "operation",
+            Checksum::new("sha256", "feed"),
+            None,
+            Some("analyze t".to_owned()),
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(node.name().map(str::to_owned), None);
+        let m = manifest_with(vec![(id, node)]);
+        assert_eq!(hook_operations(&m, "playground").on_run_end.len(), 1);
+    }
+
+    // ----- attach_hook_facts (cute-dbt#269) -----
+
+    fn hooks_change(label: &str, old: Option<Value>, new: Option<Value>) -> ProjectChange {
+        ProjectChange {
+            category: ProjectChangeCategory::Hooks,
+            label: label.to_owned(),
+            old,
+            new,
+            hook: None,
+        }
+    }
+
+    #[test]
+    fn attach_marks_matched_when_operations_byte_match_the_new_entries() {
+        let m = manifest_with(vec![operation_node(
+            "playground",
+            "start",
+            0,
+            "grant select on schema x",
+        )]);
+        let ops = hook_operations(&m, "playground");
+        let mut changes = vec![hooks_change(
+            "on-run-start",
+            Some(json!(["grant usage on schema x"])),
+            Some(json!(["grant select on schema x"])),
+        )];
+        attach_hook_facts(&mut changes, &ops);
+        let facts = changes[0].hook.as_ref().expect("hook facts attached");
+        assert_eq!(facts.manifest, HookManifestPresence::Matched);
+        assert_eq!(
+            facts.operation_ids,
+            vec!["operation.playground.playground-on-run-start-0"],
+        );
+        let diff = facts.sql_diff.as_ref().expect("a real change diffs");
+        let kinds: Vec<crate::domain::pr_diff::DiffLineKind> =
+            diff.lines.iter().map(|l| l.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                crate::domain::pr_diff::DiffLineKind::Removed,
+                crate::domain::pr_diff::DiffLineKind::Added,
+            ],
+        );
+        assert_eq!(diff.lines[1].text, "grant select on schema x");
+    }
+
+    #[test]
+    fn attach_matched_tolerates_the_single_trailing_newline_frame() {
+        // The engine-frame divergence precedent (#111): an operation
+        // body retaining the trailing newline still matches the parsed
+        // entry.
+        let m = manifest_with(vec![operation_node(
+            "playground",
+            "start",
+            0,
+            "grant select on schema x\n",
+        )]);
+        let ops = hook_operations(&m, "playground");
+        let mut changes = vec![hooks_change(
+            "on-run-start",
+            None,
+            Some(json!(["grant select on schema x"])),
+        )];
+        attach_hook_facts(&mut changes, &ops);
+        assert_eq!(
+            changes[0].hook.as_ref().unwrap().manifest,
+            HookManifestPresence::Matched,
+        );
+    }
+
+    #[test]
+    fn attach_marks_absent_and_falls_back_to_file_entries() {
+        let ops = HookOperations::default();
+        let mut changes = vec![hooks_change(
+            "on-run-end",
+            Some(json!(["analyze table x"])),
+            Some(json!(["analyze table y"])),
+        )];
+        attach_hook_facts(&mut changes, &ops);
+        let facts = changes[0].hook.as_ref().expect("hook facts attached");
+        assert_eq!(facts.manifest, HookManifestPresence::Absent);
+        assert!(facts.operation_ids.is_empty());
+        let diff = facts.sql_diff.as_ref().expect("file-side diff");
+        assert!(diff.lines.iter().any(|l| l.text == "analyze table y"));
+    }
+
+    #[test]
+    fn attach_marks_diverged_and_never_renders_a_silently_wrong_diff() {
+        // The manifest's operation body disagrees with the working tree
+        // (stale manifest): the diff must come from the FILE entries —
+        // using the stale op body would show "no change".
+        let m = manifest_with(vec![operation_node(
+            "playground",
+            "start",
+            0,
+            "grant usage on schema x",
+        )]);
+        let ops = hook_operations(&m, "playground");
+        let mut changes = vec![hooks_change(
+            "on-run-start",
+            Some(json!(["grant usage on schema x"])),
+            Some(json!(["grant select on schema x"])),
+        )];
+        attach_hook_facts(&mut changes, &ops);
+        let facts = changes[0].hook.as_ref().expect("hook facts attached");
+        assert_eq!(facts.manifest, HookManifestPresence::Diverged);
+        assert_eq!(
+            facts.operation_ids,
+            vec!["operation.playground.playground-on-run-start-0"],
+            "the diverged ops are still named, so the row copy can audit them",
+        );
+        let diff = facts.sql_diff.as_ref().expect("file-side diff");
+        assert!(
+            diff.lines
+                .iter()
+                .any(|l| l.kind == crate::domain::pr_diff::DiffLineKind::Added
+                    && l.text == "grant select on schema x"),
+            "the new side comes from the file, never the stale manifest",
+        );
+    }
+
+    #[test]
+    fn attach_hook_removal_with_a_fresh_manifest_is_matched() {
+        // Hooks removed in the PR + recompiled manifest carries no ops:
+        // both sides empty — the manifest AGREES with the working tree.
+        let ops = HookOperations::default();
+        let mut changes = vec![hooks_change(
+            "on-run-start",
+            Some(json!(["grant usage on schema x"])),
+            None,
+        )];
+        attach_hook_facts(&mut changes, &ops);
+        let facts = changes[0].hook.as_ref().expect("hook facts attached");
+        assert_eq!(facts.manifest, HookManifestPresence::Matched);
+        assert!(facts.operation_ids.is_empty());
+        let diff = facts.sql_diff.as_ref().expect("removal diff");
+        assert!(
+            diff.lines
+                .iter()
+                .all(|l| l.kind == crate::domain::pr_diff::DiffLineKind::Removed),
+        );
+    }
+
+    #[test]
+    fn attach_leaves_non_hook_rows_untouched() {
+        let m = manifest_with(vec![operation_node("playground", "start", 0, "grant x")]);
+        let ops = hook_operations(&m, "playground");
+        let mut changes = vec![ProjectChange {
+            category: ProjectChangeCategory::Vars,
+            label: "dq_threshold".to_owned(),
+            old: Some(json!(10)),
+            new: Some(json!(5)),
+            hook: None,
+        }];
+        attach_hook_facts(&mut changes, &ops);
+        assert_eq!(changes[0].hook, None);
+    }
+
+    #[test]
+    fn hook_change_facts_round_trip_through_json() {
+        // ADR-5: the payload-riding POD must survive the wire.
+        let facts = HookChangeFacts {
+            sql_diff: Some(BlockDiff {
+                lines: vec![DiffLine {
+                    kind: crate::domain::pr_diff::DiffLineKind::Added,
+                    text: "grant select".to_owned(),
+                    emphasis: Some((6, 12)),
+                }],
+            }),
+            operation_ids: vec!["operation.p.p-on-run-start-0".to_owned()],
+            manifest: HookManifestPresence::Matched,
+        };
+        let json = serde_json::to_string(&facts).expect("serialize");
+        let back: HookChangeFacts = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(facts, back);
+        // The presence enum serializes snake_case for the JS consumer.
+        assert!(json.contains(r#""manifest":"matched""#), "{json}");
     }
 }
