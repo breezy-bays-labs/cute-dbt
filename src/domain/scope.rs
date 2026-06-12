@@ -1051,7 +1051,7 @@ mod tests {
     }
 
     /// A two-model manifest (`dim_payers` with one unit test, `stg_x`
-    /// with none) and a PrDiff selection scoped to NOTHING (the diff
+    /// with none) and a `PrDiff` selection scoped to NOTHING (the diff
     /// touches only extraneous paths).
     fn widening_fixture() -> (Manifest, ScopeSelection) {
         let dim_payers = NodeId::new("model.shop.dim_payers");

@@ -1882,7 +1882,7 @@ pub fn build_payload_with_externals(
         // cute-dbt#267 — the model-row provenance chips: which
         // dbt_project.yml subtree edit put (or kept) this model in scope.
         if let Some(attributions) = project_facts.config_attributions.get(model_id.as_str()) {
-            model_payload.config_attributions = attributions.clone();
+            model_payload.config_attributions.clone_from(attributions);
         }
         models.push(model_payload);
     }
