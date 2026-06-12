@@ -1,6 +1,5 @@
 ---
 source: tests/golden_report.rs
-assertion_line: 115
 expression: skeleton
 ---
 <!DOCTYPE html>
@@ -96,14 +95,19 @@ expression: skeleton
       </div>
     </div>
     
-    <div class="settings-section coverage-section">
+    <div class="settings-section experimental-section">
+      <div class="settings-row settings-row-stack">
+        <label>Experimental
+          <span class="settings-hint">unstable surfaces &mdash; defaults may change between versions</span>
+        </label>
+      </div>
       <div class="settings-row">
         <label for="settings-coverage-input">Coverage intelligence
           <span class="settings-hint">show or hide the coverage-checks surface</span>
         </label>
         <span class="settings-switch">
           <input type="checkbox" id="settings-coverage-input"
-                 aria-label="Show coverage-intelligence checks" checked>
+                 aria-label="Show coverage-intelligence checks">
           <span class="switch-track" aria-hidden="true"></span>
         </span>
       </div>

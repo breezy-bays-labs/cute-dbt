@@ -76,9 +76,14 @@
       b.setAttribute("aria-pressed", b.getAttribute("data-engine") === pref.engine ? "true" : "false");
     });
     // cute-dbt#219 — the coverage switch mirrors the pref (a checkbox owns
-    // its checked state natively; no aria-pressed on an <input>).
+    // its checked state natively; no aria-pressed on an <input>). Default
+    // OFF since cute-dbt#292: only the explicit "on" checks it.
     var cov = document.getElementById("settings-coverage-input");
-    if (cov) cov.checked = pref.coverage !== "off";
+    if (cov) cov.checked = pref.coverage === "on";
+    // cute-dbt#292 — the project-state display switch mirrors the pref
+    // (the row exists only when the report emitted project-state content).
+    var proj = document.getElementById("settings-project-input");
+    if (proj) proj.checked = pref.project !== "off";
   }
 
   function wire() {
@@ -108,6 +113,12 @@
     var cov = document.getElementById("settings-coverage-input");
     if (cov) {
       cov.addEventListener("change", function () { appearance.applyCoverage(cov.checked ? "on" : "off"); appearance.save(); });
+    }
+    // cute-dbt#292 — the project-state display switch: the same
+    // display-only contract as the coverage switch.
+    var proj = document.getElementById("settings-project-input");
+    if (proj) {
+      proj.addEventListener("change", function () { appearance.applyProject(proj.checked ? "on" : "off"); appearance.save(); });
     }
   }
 

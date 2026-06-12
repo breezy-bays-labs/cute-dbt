@@ -2083,6 +2083,14 @@ struct ReportTemplate<'a> {
     /// (cute-dbt#266) — `Some` exactly when `dbt_project.yml` is in the
     /// PR diff; `None` keeps the section out of the DOM entirely.
     project_panel: Option<ProjectPanelView>,
+    /// `true` when this report emitted any VISIBLE project-state surface
+    /// (cute-dbt#292): the panel, per-model config-provenance chips, or
+    /// var-reference chips. Gates the settings panel's project-state
+    /// display-toggle row (the `is_pr_diff` askama-conditional
+    /// precedent) — a report with nothing to toggle renders no row.
+    /// Standing `definition` metadata alone stays `false`: it is
+    /// payload-only (no DOM), so a display toggle would be inert.
+    has_project_state: bool,
 }
 
 /// Serialize `payload` to JSON for safe embedding inside an HTML
@@ -2423,6 +2431,9 @@ pub fn render_report_with_externals(
             .panel
             .as_ref()
             .map(|panel| project_panel_view(panel, &project_facts.config_attributions)),
+        has_project_state: project_facts.panel.is_some()
+            || !project_facts.config_attributions.is_empty()
+            || !project_facts.var_references.is_empty(),
     };
     let html = template
         .render()

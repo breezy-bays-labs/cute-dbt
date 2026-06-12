@@ -131,29 +131,61 @@
         </div>
       </div>
     </div>
-    {# cute-dbt#219 — the viewer-side coverage-intelligence display toggle.
-       Default ON; OFF hides every check-engine-derived surface (the #170
-       findings panel: checklist, tier chips, suppressed count) via
+    {# cute-dbt#292 — the Experimental settings group (epic #288): the
+       viewer-side display toggles for experimental surfaces. Functional
+       copy only — badge/copy polish is a later design pass.
+
+       Coverage intelligence (cute-dbt#219; default flipped OFF here at
+       cute-dbt#292): OFF hides every check-engine-derived surface (the
+       #170 findings panel: checklist, tier chips, suppressed count) via
        html[data-coverage=off] + one CSS rule (report.css §7) — purely a
-       DISPLAY toggle: the payload and the rendered DOM stay untouched, so ON
-       restores in place with no re-render. Wired + persisted by theme.js as
-       the `coverage` field of cute-dbt.appearance.v1 ("on"/"off", absent =
-       "on") — the cross-page contract the explorer arm (#103/#104) reads
-       when check-derived content lands there. Distinct from the
-       producer-side [checks] selection/suppression (#171): checks stay
-       computed; an individual viewer hides the surface. Rendered in BOTH
-       modes (findings are current-state facts, not diff artifacts). #}
-    <div class="settings-section coverage-section">
+       DISPLAY toggle: the payload and the rendered DOM stay untouched, so
+       ON restores in place with no re-render. Wired + persisted by
+       theme.js as the `coverage` field of cute-dbt.appearance.v1
+       ("on"/"off", absent = "off") — the cross-page contract the explorer
+       arm (#103/#104) reads when check-derived content lands there.
+       Distinct from the producer-side [checks] selection/suppression
+       (#171): checks stay computed; an individual viewer hides the
+       surface. Rendered in BOTH modes (findings are current-state facts,
+       not diff artifacts).
+
+       Project state (cute-dbt#292): a display toggle over the
+       cute-dbt#291 render-time emission. The row exists only when this
+       report actually emitted project-state content (the askama
+       conditional, the is_pr_diff precedent below); OFF hides the
+       project-definition panel + the per-model provenance/var chips via
+       html[data-project=off] (report.css §7). Default ON — emission was
+       already an explicit opt-in (CUTE_DBT_EXPERIMENTAL /
+       [experimental]), so the viewer default shows what the producer
+       chose to emit. #}
+    <div class="settings-section experimental-section">
+      <div class="settings-row settings-row-stack">
+        <label>Experimental
+          <span class="settings-hint">unstable surfaces &mdash; defaults may change between versions</span>
+        </label>
+      </div>
       <div class="settings-row">
         <label for="settings-coverage-input">Coverage intelligence
           <span class="settings-hint">show or hide the coverage-checks surface</span>
         </label>
         <span class="settings-switch">
           <input type="checkbox" id="settings-coverage-input"
-                 aria-label="Show coverage-intelligence checks" checked>
+                 aria-label="Show coverage-intelligence checks">
           <span class="switch-track" aria-hidden="true"></span>
         </span>
       </div>
+      {%- if has_project_state %}
+      <div class="settings-row">
+        <label for="settings-project-input">Project state
+          <span class="settings-hint">show or hide the project-definition surfaces</span>
+        </label>
+        <span class="settings-switch">
+          <input type="checkbox" id="settings-project-input"
+                 aria-label="Show project-state surfaces" checked>
+          <span class="switch-track" aria-hidden="true"></span>
+        </span>
+      </div>
+      {%- endif %}
     </div>
     {%- if is_pr_diff %}
     <div class="settings-section">

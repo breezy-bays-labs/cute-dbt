@@ -1114,6 +1114,19 @@ th.has-col-meta:focus-visible { outline: 2px solid var(--accent); outline-offset
    check-engine-derived surface. The panel's rendered content stays in the
    DOM (display-only — payload untouched), so ON restores without re-render. */
 html[data-coverage="off"] .model-findings { display: none; }
+/* cute-dbt#292 — the viewer-side project-state display toggle: the settings
+   switch sets html[data-project=off] (theme.js, persisted as the `project`
+   field of cute-dbt.appearance.v1) and these rules hide every project-state
+   surface: the project-definition panel (its categorized rows — vars /
+   config tree / hooks / dispatch / paths / identity — and the raw-diff
+   fallback live inside it), the per-model config-provenance chips, and the
+   per-model var-reference chips. Display-only, the data-coverage twin:
+   content stays in the DOM, ON restores without re-render. The toggle row
+   itself only renders when the report emitted project-state content
+   (cute-dbt#291's render-time experimental gate). */
+html[data-project="off"] .project-def-panel,
+html[data-project="off"] .model-attribution-row,
+html[data-project="off"] .var-reference-chip { display: none; }
 .findings-header { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.45rem; flex-wrap: wrap; }
 .findings-header h2 {
   font-size: var(--fs-label); text-transform: uppercase;
