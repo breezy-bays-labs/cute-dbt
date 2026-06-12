@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use cute_dbt::adapters::manifest::{FileManifestSource, load_baseline};
-use cute_dbt::domain::{Manifest, NodeId, PreflightError, UnitTest};
+use cute_dbt::domain::{ConstraintKind, Manifest, NodeId, PreflightError, UnitTest};
 use cute_dbt::ports::ManifestSource;
 
 /// Absolute path to a committed fixture under `tests/fixtures/`.
@@ -390,6 +390,87 @@ fn real_fixtures_carry_the_governance_identity_wire_family() {
         group_owner.email(),
         ["clinical-quality@example.com".to_owned()]
     );
+}
+
+#[test]
+fn real_fixtures_carry_the_contract_column_structure_wire_family() {
+    // cute-dbt#257 verified against BOTH committed real fixtures
+    // (dbt-core 1.11.9 / 1.11.11; populated constraint + column-fact
+    // specimens are the #257 splice — verbatim dbt-core 1.11.2 compile
+    // output, see tests/fixtures/MANIFEST.toml).
+
+    // --- structure: fqn is populated on every node of real wire; the
+    // folder components are the #262 C2 config-tree prefix input.
+    let jaffle = FileManifestSource
+        .load(&fixture("jaffle-shop-current.json"))
+        .expect("the current fixture is a valid compiled v12 manifest");
+    let customers = jaffle
+        .node(&NodeId::new("model.jaffle_shop.customers"))
+        .expect("customers model present");
+    assert_eq!(
+        customers.fqn(),
+        ["jaffle_shop".to_owned(), "customers".to_owned()]
+    );
+    // The real unset shapes: empty constraints, no contract checksum —
+    // and the engine-INFERRED primary_key is POPULATED real wire.
+    assert!(customers.constraints().is_empty());
+    assert_eq!(customers.contract_checksum(), None);
+    assert_eq!(customers.primary_key(), ["customer_id".to_owned()]);
+    assert!(customers.column_facts().is_empty());
+
+    let playground = FileManifestSource
+        .load(&fixture("playground-current.json"))
+        .expect("the playground fixture is a valid compiled v12 manifest");
+    let dim_payers = playground
+        .node(&NodeId::new("model.healthcare_analytics.dim_payers"))
+        .expect("dim_payers present");
+    assert_eq!(
+        dim_payers.fqn(),
+        [
+            "healthcare_analytics".to_owned(),
+            "marts".to_owned(),
+            "core".to_owned(),
+            "dim_payers".to_owned()
+        ],
+        "fqn carries the folder path (the config-tree prefix input)",
+    );
+    assert_eq!(dim_payers.primary_key(), ["payer_key".to_owned()]);
+
+    // --- the spliced engine-emitted specimens: model-level PK + FK
+    // constraints (core RESOLVES the FK `to` to the quoted relation)
+    // and the payer_key column facts.
+    let fct = playground
+        .node(&NodeId::new("model.healthcare_analytics.fct_encounters"))
+        .expect("fct_encounters present");
+    assert_eq!(fct.constraints().len(), 2);
+    assert_eq!(fct.constraints()[0].kind(), ConstraintKind::PrimaryKey);
+    assert_eq!(fct.constraints()[0].columns(), ["encounter_key".to_owned()]);
+    let fk = &fct.constraints()[1];
+    assert_eq!(fk.kind(), ConstraintKind::ForeignKey);
+    assert_eq!(
+        fk.to(),
+        Some("\"memory\".\"main_marts\".\"dim_payers\""),
+        "dbt-core resolves the FK target relation (fusion keeps the authored ref())",
+    );
+    assert_eq!(fk.to_columns(), ["payer_key".to_owned()]);
+
+    let payer_facts = dim_payers
+        .column_facts()
+        .get("payer_key")
+        .expect("the spliced column facts ingest");
+    assert_eq!(
+        payer_facts.meta().and_then(|m| m.get("owner")),
+        Some(&serde_json::json!("clinical-quality"))
+    );
+    assert_eq!(payer_facts.tags(), ["dimension_key".to_owned()]);
+    assert_eq!(payer_facts.constraints()[0].kind(), ConstraintKind::NotNull);
+    assert!(
+        payer_facts.policy_tags().is_empty(),
+        "dbt-core never serializes policy_tags (a fusion first-class field)",
+    );
+    // Every OTHER column of the model is fact-free — the real
+    // empty-{}/[] shapes store nothing.
+    assert_eq!(dim_payers.column_facts().len(), 1);
 }
 
 #[test]
