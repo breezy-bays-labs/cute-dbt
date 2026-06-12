@@ -29,10 +29,11 @@
 //! `+++` header and no hunks) still scopes the current node at its new
 //! path — no scope-level code is rename-aware.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::domain::manifest::{Manifest, NodeId};
 use crate::domain::pr_diff::NormalizedDiffIndex;
+use crate::domain::project_def::ConfigAttribution;
 use crate::domain::state::{
     InScopeSet, ModelInScopeSet, ModifierKind, StateComparator, resolve_tested_model,
 };
@@ -185,6 +186,70 @@ pub fn changed_models(current: &Manifest, index: &NormalizedDiffIndex) -> ModelI
         })
         .map(|(id, _)| id.clone())
         .collect()
+}
+
+/// Config-tree scope widening (cute-dbt#267 — the one widening category
+/// of epic #262, by-DEFINITION change): union the models a
+/// `dbt_project.yml` config-tree edit selected
+/// ([`crate::domain::project_def::attribute_config_tree_changes`] — fqn
+/// prefix descent, fusion's own resolution) into the selection.
+///
+/// Union semantics, never replacement:
+///
+/// - every attributed model joins `models_in_scope` (it renders a model
+///   card with its provenance chip);
+/// - every unit test whose resolved target model was widened joins
+///   `in_scope` as **context** — the same `target_modified ⇒ test
+///   in-scope` OR-arm both existing scope sources apply;
+/// - `changed` is untouched (a config-tree edit updates no test
+///   definition), and since the function only ever ADDS to `in_scope`,
+///   `changed ⊆ in_scope` is preserved by construction.
+///
+/// The attribution map is keyed by model node id
+/// ([`attribute_config_tree_changes`] already filtered to `model` nodes
+/// of the same manifest); an id that no longer resolves is skipped
+/// (belt-and-braces). An empty map returns the selection unchanged —
+/// baseline mode and panel-degrade arms widen nothing.
+///
+/// [`attribute_config_tree_changes`]: crate::domain::project_def::attribute_config_tree_changes
+#[must_use]
+pub fn widen_with_config_attributions(
+    selection: ScopeSelection,
+    current: &Manifest,
+    attributions: &BTreeMap<String, Vec<ConfigAttribution>>,
+) -> ScopeSelection {
+    if attributions.is_empty() {
+        return selection;
+    }
+    let widened: BTreeSet<NodeId> = attributions
+        .keys()
+        .filter(|id| current.node(&NodeId::new((*id).clone())).is_some())
+        .map(|id| NodeId::new(id.clone()))
+        .collect();
+    let models_in_scope: ModelInScopeSet = selection
+        .models_in_scope
+        .iter()
+        .cloned()
+        .chain(widened.iter().cloned())
+        .collect();
+    let widened_tests = current
+        .unit_tests()
+        .iter()
+        .filter(|(_, ut)| {
+            resolve_tested_model(current, ut).is_some_and(|model| widened.contains(model.id()))
+        })
+        .map(|(id, _)| id.clone());
+    let in_scope: InScopeSet = selection
+        .in_scope
+        .iter()
+        .map(str::to_owned)
+        .chain(widened_tests)
+        .collect();
+    ScopeSelection {
+        in_scope,
+        models_in_scope,
+        changed: selection.changed,
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -960,6 +1025,159 @@ mod tests {
         assert!(
             !selection.changed.contains(ctx_id),
             "test_ctx is context (in scope via its model's SQL, YAML unchanged)",
+        );
+    }
+
+    // ----- widen_with_config_attributions (cute-dbt#267) -----
+
+    use crate::domain::project_def::ConfigAttribution;
+    use std::collections::BTreeMap as StdBTreeMap;
+
+    /// An attribution map selecting the given model ids (one
+    /// `+materialized` chip each — the chip content is irrelevant to
+    /// widening membership).
+    fn attributions_for(ids: &[&str]) -> StdBTreeMap<String, Vec<ConfigAttribution>> {
+        ids.iter()
+            .map(|id| {
+                (
+                    (*id).to_owned(),
+                    vec![ConfigAttribution {
+                        key: "materialized".to_owned(),
+                        path: "models.shop.marts".to_owned(),
+                    }],
+                )
+            })
+            .collect()
+    }
+
+    /// A two-model manifest (`dim_payers` with one unit test, `stg_x`
+    /// with none) and a PrDiff selection scoped to NOTHING (the diff
+    /// touches only extraneous paths).
+    fn widening_fixture() -> (Manifest, ScopeSelection) {
+        let dim_payers = NodeId::new("model.shop.dim_payers");
+        let stg_x = NodeId::new("model.shop.stg_x");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim_payers.clone(),
+            model_node_with_path(&dim_payers, "ck1", "models/marts/dim_payers.sql"),
+        );
+        nodes.insert(
+            stg_x.clone(),
+            model_node_with_path(&stg_x, "ck2", "models/staging/stg_x.sql"),
+        );
+        let mut tests = HashMap::new();
+        tests.insert(
+            "unit_test.shop.dim_payers.injects_unknown".to_owned(),
+            test_with_path(
+                "injects_unknown",
+                "dim_payers",
+                Some("models/marts/_models.yml"),
+            ),
+        );
+        let current = Manifest::new(ManifestMetadata::new("v12"), nodes, tests, HashMap::new());
+        let selection = select_in_scope(&current, &pr_diff_input(&["README.md"], None));
+        assert!(selection.models_in_scope.is_empty(), "fixture precondition");
+        (current, selection)
+    }
+
+    #[test]
+    fn widen_adds_attributed_models_and_their_tests_as_context() {
+        let (current, selection) = widening_fixture();
+        let widened = widen_with_config_attributions(
+            selection,
+            &current,
+            &attributions_for(&["model.shop.dim_payers"]),
+        );
+        assert!(
+            widened
+                .models_in_scope
+                .contains(&NodeId::new("model.shop.dim_payers")),
+            "the attributed model joins the model scope",
+        );
+        assert!(
+            widened
+                .in_scope
+                .contains("unit_test.shop.dim_payers.injects_unknown"),
+            "the widened model's unit test joins in_scope (target-modified OR-arm)",
+        );
+        assert!(
+            widened.changed.is_empty(),
+            "a config-tree edit updates no test definition — context, never changed",
+        );
+        assert!(
+            !widened
+                .models_in_scope
+                .contains(&NodeId::new("model.shop.stg_x")),
+            "unattributed models stay out",
+        );
+    }
+
+    #[test]
+    fn widen_with_empty_attributions_is_identity() {
+        let (current, selection) = widening_fixture();
+        let widened =
+            widen_with_config_attributions(selection.clone(), &current, &StdBTreeMap::new());
+        assert_eq!(widened, selection, "an empty map widens nothing");
+    }
+
+    #[test]
+    fn widen_unions_with_an_existing_selection_never_replaces() {
+        // dim_payers is already in scope via its changed SQL; widening
+        // stg_x must ADD it while every pre-existing member (including
+        // the changed subset) survives untouched.
+        let (current, _) = widening_fixture();
+        let selection = select_in_scope(
+            &current,
+            &pr_diff_input(
+                &["models/marts/dim_payers.sql", "models/marts/_models.yml"],
+                None,
+            ),
+        );
+        let before_in_scope: Vec<String> = selection.in_scope.iter().map(str::to_owned).collect();
+        let before_changed = selection.changed.clone();
+        let widened = widen_with_config_attributions(
+            selection,
+            &current,
+            &attributions_for(&["model.shop.stg_x"]),
+        );
+        assert!(
+            widened
+                .models_in_scope
+                .contains(&NodeId::new("model.shop.dim_payers")),
+            "pre-existing members survive",
+        );
+        assert!(
+            widened
+                .models_in_scope
+                .contains(&NodeId::new("model.shop.stg_x")),
+            "the widened model joins",
+        );
+        for id in &before_in_scope {
+            assert!(widened.in_scope.contains(id), "{id} must survive the union");
+        }
+        assert_eq!(
+            widened.changed, before_changed,
+            "the changed subset is never touched by widening",
+        );
+        for id in widened.changed.iter() {
+            assert!(
+                widened.in_scope.contains(id),
+                "changed ⊆ in_scope holds after widening",
+            );
+        }
+    }
+
+    #[test]
+    fn widen_skips_an_attribution_for_a_node_absent_from_the_manifest() {
+        let (current, selection) = widening_fixture();
+        let widened = widen_with_config_attributions(
+            selection,
+            &current,
+            &attributions_for(&["model.shop.gone"]),
+        );
+        assert!(
+            widened.models_in_scope.is_empty(),
+            "an unresolvable id widens nothing (belt-and-braces)",
         );
     }
 

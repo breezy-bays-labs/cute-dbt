@@ -8,7 +8,8 @@
 //! functions, never an if-branch inside one run loop.
 //!
 //! **`execute_report`** is composed as named stages —
-//! `load_current` → `resolve_scope_input` → `select_in_scope` →
+//! `load_current` → `resolve_scope_input` → `gather_project_facts` →
+//! `select_in_scope` (+ the cute-dbt#267 config-tree widening) →
 //! `preflight_compiled` → `parse_ctes` → `gather_authoring_yaml` →
 //! `render` (`ARCHITECTURE.md` §3, §6). `resolve_scope_input` picks
 //! between the `--baseline-manifest` and `--pr-diff` scope
@@ -43,7 +44,7 @@ mod args;
 mod exit;
 mod pr_diff;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -59,15 +60,16 @@ use crate::adapters::render::{
     render_report_with_externals,
 };
 use crate::domain::{
-    BlockDiff, CheckPolicy, DEFAULT_REPORT_TITLE, FixtureTableDiff, HeuristicId, InScopeSet,
-    Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex,
+    BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_REPORT_TITLE, FixtureTableDiff, HeuristicId,
+    InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex,
     PreflightError, ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ScopeInput,
     ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock,
-    all_models, attach_model_yaml_diffs, changed_models, check_by_id, diff_project_definitions,
-    effective_fixture_format, external_fixture_table, extract_model_block, extract_unit_test_block,
-    preflight_compiled, raw_hunk_lines, reconstruct_block_diffs, reconstruct_external_fixture_diff,
-    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks,
-    resolve_check_policy, reverse_apply, scan_pragmas, select_in_scope,
+    all_models, attach_model_yaml_diffs, attribute_config_tree_changes, changed_models,
+    check_by_id, diff_project_definitions, effective_fixture_format, external_fixture_table,
+    extract_model_block, extract_unit_test_block, preflight_compiled, raw_hunk_lines,
+    reconstruct_block_diffs, reconstruct_external_fixture_diff, reconstruct_model_sql_diffs,
+    reconstruct_table_diffs, refine_changed_by_hunks, resolve_check_policy, reverse_apply,
+    scan_pragmas, select_in_scope, widen_with_config_attributions,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -158,23 +160,50 @@ impl RunError {
 }
 
 /// The named `report` run loop — `load_current` → `resolve_scope_input`
-/// → `select_in_scope` → `preflight_compiled` → `parse_ctes` →
+/// → `gather_project_facts` → `select_in_scope` (+ the cute-dbt#267
+/// config-tree widening) → `preflight_compiled` → `parse_ctes` →
 /// `gather_authoring_yaml` → `render`.
 ///
 /// `resolve_scope_input` runs Stage-1 pre-flight on the baseline manifest
 /// only on the `--baseline-manifest` path; the `--pr-diff`
-/// path needs no baseline. `?` short-circuits before `render`, so a
-/// fail-closed manifest never produces a partial `report.html`.
+/// path needs no baseline. `gather_project_facts` runs before scope
+/// selection because a categorized `dbt_project.yml` config-tree edit
+/// widens the selection (cute-dbt#267). `?` short-circuits before
+/// `render`, so a fail-closed manifest never produces a partial
+/// `report.html`.
 fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     let current = load_current(args)?;
     let scope_input = resolve_scope_input(args)?;
+    // Project-definition facts (cute-dbt#266): parse the working-tree
+    // dbt_project.yml whenever it is present — STANDING metadata, both
+    // scope arms (the founder's parse-always posture; the parsed model
+    // rides the payload for future consumers). The categorized
+    // "Project definition changed" panel is the diff-gated consumer: on
+    // the PrDiff arm, when dbt_project.yml is in the diff, the old side
+    // is reconstructed by reverse-applying the file's own hunks
+    // (drift-guarded) and the structural diff categorizes the change;
+    // every degrade arm falls back to the Shape-A raw-diff row.
+    // Fail-open: report generation NEVER fails because of this file.
+    // Gathered BEFORE scope selection since cute-dbt#267: a categorized
+    // config-tree edit carries per-model attributions that widen scope.
+    let project_facts = gather_project_facts(args, &current, &scope_input);
+    // Config-tree scope widening (cute-dbt#267): models whose fqn falls
+    // under an edited `models:` subtree (fusion's get_config_for_fqn
+    // prefix descent — TOTAL tier, by-definition change) join the
+    // selection by union; their unit tests ride in as context. The one
+    // widening category of epic #262 — vars stay contextualize-only.
     let ScopeSelection {
         in_scope,
         models_in_scope,
         changed,
-    } = select_in_scope(&current, &scope_input);
+    } = widen_with_config_attributions(
+        select_in_scope(&current, &scope_input),
+        &current,
+        &project_facts.config_attributions,
+    );
     // Stage-2 fail-closed reads the TRUE in-scope set (cute-dbt#91): the
-    // widened render set is only for what the report displays.
+    // widened render set is only for what the report displays. Config-tree
+    // widened tests (cute-dbt#267) ARE the true scope, so they preflight.
     preflight_compiled(&current, &in_scope, &models_in_scope)?;
     parse_ctes();
     // The widened render set — every unit test on an in-scope model, not
@@ -268,17 +297,6 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     if let ScopeInput::PrDiff { index } = &scope_input {
         warn_if_not_unified_zero(index);
     }
-    // Project-definition facts (cute-dbt#266): parse the working-tree
-    // dbt_project.yml whenever it is present — STANDING metadata, both
-    // scope arms (the founder's parse-always posture; the parsed model
-    // rides the payload for future consumers). The categorized
-    // "Project definition changed" panel is the diff-gated consumer: on
-    // the PrDiff arm, when dbt_project.yml is in the diff, the old side
-    // is reconstructed by reverse-applying the file's own hunks
-    // (drift-guarded) and the structural diff categorizes the change;
-    // every degrade arm falls back to the Shape-A raw-diff row.
-    // Fail-open: report generation NEVER fails because of this file.
-    let project_facts = gather_project_facts(args, &scope_input);
     let (report_title, report_subtitle) = resolve_report_strings(args);
     let (baseline_label, scope_source) = scope_banner(args, &scope_input);
     // Check selection + suppression (cute-dbt#171): the `[checks]` config
@@ -712,14 +730,20 @@ const DBT_PROJECT_YML: &str = "dbt_project.yml";
 
 /// The `gather_project_facts` stage (cute-dbt#266) — parse the
 /// working-tree `dbt_project.yml` (standing metadata, both scope arms) and,
-/// on the `PrDiff` arm, build the categorized project-change panel.
+/// on the `PrDiff` arm, build the categorized project-change panel plus
+/// the per-model config-tree attributions (cute-dbt#267 — the scope
+/// widening input, computed only when the panel categorized).
 ///
 /// Same project-root resolution as [`gather_authoring_yaml`]. With no
 /// resolvable root nothing can be read: standing metadata stays `None`,
 /// and when `dbt_project.yml` IS in the diff the panel degrades to the
 /// absence-note fallback (the hunks are still in hand) — the change is
 /// never silently invisible.
-fn gather_project_facts(args: &ReportArgs, scope_input: &ScopeInput) -> ProjectFacts {
+fn gather_project_facts(
+    args: &ReportArgs,
+    current: &Manifest,
+    scope_input: &ScopeInput,
+) -> ProjectFacts {
     let index = match scope_input {
         ScopeInput::PrDiff { index } => Some(index),
         ScopeInput::Baseline { .. } => None,
@@ -730,10 +754,11 @@ fn gather_project_facts(args: &ReportArgs, scope_input: &ScopeInput) -> ProjectF
         return ProjectFacts {
             definition: None,
             panel: project_panel_without_file(index),
+            config_attributions: BTreeMap::new(),
         };
     };
     let reader = FsProjectFileReader::new(project_root);
-    gather_project_facts_with_reader(&reader, index)
+    gather_project_facts_with_reader(&reader, current, index)
 }
 
 /// The absence-note panel arm: `Some(Fallback{FileUnreadable})` exactly
@@ -768,6 +793,7 @@ fn project_panel_without_file(index: Option<&NormalizedDiffIndex>) -> Option<Pro
 ///   the default definition, so every entry reports as added).
 fn gather_project_facts_with_reader(
     reader: &dyn ProjectFileReader,
+    current: &Manifest,
     index: Option<&NormalizedDiffIndex>,
 ) -> ProjectFacts {
     let new_text = match reader.read(DBT_PROJECT_YML) {
@@ -787,6 +813,7 @@ fn gather_project_facts_with_reader(
         return ProjectFacts {
             definition: None,
             panel: project_panel_without_file(index),
+            config_attributions: BTreeMap::new(),
         };
     };
     let definition = match parse_project_definition(&new_text) {
@@ -799,24 +826,40 @@ fn gather_project_facts_with_reader(
             None
         }
     };
-    let panel = index
+    let (panel, config_attributions) = index
         .filter(|index| index.contains_changed(DBT_PROJECT_YML))
-        .map(|index| project_change_panel(&new_text, definition.as_ref(), index));
-    ProjectFacts { definition, panel }
+        .map_or((None, BTreeMap::new()), |index| {
+            let (panel, attributions) =
+                project_change_panel(&new_text, definition.as_ref(), current, index);
+            (Some(panel), attributions)
+        });
+    ProjectFacts {
+        definition,
+        panel,
+        config_attributions,
+    }
 }
 
 /// Build the diff-gated panel content for an in-diff `dbt_project.yml`
-/// whose working-tree text is in hand. See
-/// [`gather_project_facts_with_reader`] for the arm map.
+/// whose working-tree text is in hand, plus the per-model config-tree
+/// attributions (cute-dbt#267) when categorization succeeds. See
+/// [`gather_project_facts_with_reader`] for the arm map; every fallback
+/// arm attributes nothing (no parsed pair ⇒ never a guessed widening).
 fn project_change_panel(
     new_text: &str,
     definition: Option<&crate::domain::ProjectDefinition>,
+    current: &Manifest,
     index: &NormalizedDiffIndex,
-) -> ProjectChangePanel {
+) -> (ProjectChangePanel, BTreeMap<String, Vec<ConfigAttribution>>) {
     let hunks = index.hunks_for(DBT_PROJECT_YML);
-    let fallback = |reason: ProjectFallbackReason| ProjectChangePanel::Fallback {
-        reason,
-        raw: raw_hunk_lines(hunks),
+    let fallback = |reason: ProjectFallbackReason| {
+        (
+            ProjectChangePanel::Fallback {
+                reason,
+                raw: raw_hunk_lines(hunks),
+            },
+            BTreeMap::new(),
+        )
     };
     let Some(new_def) = definition else {
         return fallback(ProjectFallbackReason::NewParseFailed);
@@ -829,9 +872,9 @@ fn project_change_panel(
     let Ok(old_def) = parse_project_definition(&old_text) else {
         return fallback(ProjectFallbackReason::OldParseFailed);
     };
-    ProjectChangePanel::Categorized {
-        changes: diff_project_definitions(&old_def, new_def),
-    }
+    let changes = diff_project_definitions(&old_def, new_def);
+    let attributions = attribute_config_tree_changes(current, &old_def, new_def, &changes);
+    (ProjectChangePanel::Categorized { changes }, attributions)
 }
 
 /// Merge external fixture FILE cell diffs (cute-dbt#126 AC#3) into the
@@ -2203,6 +2246,13 @@ mod tests {
         StubReader { entries }
     }
 
+    /// An empty current manifest — the gather stage's manifest input for
+    /// the scenarios that exercise no attribution (cute-dbt#267 added
+    /// the parameter; with no model nodes nothing can attribute).
+    fn empty_current() -> Manifest {
+        manifest_with_models(Vec::new())
+    }
+
     /// An index whose only changed file is `dbt_project.yml` with the
     /// given hunks.
     fn project_diff_index(hunks: Vec<Hunk>) -> NormalizedDiffIndex {
@@ -2231,7 +2281,8 @@ mod tests {
     fn project_facts_parse_standing_metadata_with_no_diff() {
         // Baseline arm (no index): the file still parses — the founder's
         // parse-always posture; the panel stays absent.
-        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), None);
+        let facts =
+            gather_project_facts_with_reader(&project_reader(PROJECT_NEW), &empty_current(), None);
         let def = facts.definition.expect("standing metadata parsed");
         assert_eq!(def.name.as_deref(), Some("playground"));
         assert!(facts.panel.is_none(), "no diff, no panel");
@@ -2247,7 +2298,11 @@ mod tests {
             }],
         };
         let index = NormalizedDiffIndex::new(&diff, None);
-        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), Some(&index));
+        let facts = gather_project_facts_with_reader(
+            &project_reader(PROJECT_NEW),
+            &empty_current(),
+            Some(&index),
+        );
         assert!(facts.definition.is_some(), "standing metadata still rides");
         assert!(
             facts.panel.is_none(),
@@ -2265,7 +2320,11 @@ mod tests {
             "  default_state: CT",
             "  default_state: VT",
         )]);
-        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), Some(&index));
+        let facts = gather_project_facts_with_reader(
+            &project_reader(PROJECT_NEW),
+            &empty_current(),
+            Some(&index),
+        );
         match facts.panel.expect("panel present") {
             ProjectChangePanel::Categorized { changes } => {
                 assert_eq!(changes.len(), 1);
@@ -2289,7 +2348,11 @@ mod tests {
             "  default_state: CT",
             "  default_state: SOMETHING-ELSE",
         )]);
-        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), Some(&index));
+        let facts = gather_project_facts_with_reader(
+            &project_reader(PROJECT_NEW),
+            &empty_current(),
+            Some(&index),
+        );
         match facts.panel.expect("panel present") {
             ProjectChangePanel::Fallback { reason, raw } => {
                 assert_eq!(reason, ProjectFallbackReason::OldNotReconstructable);
@@ -2305,7 +2368,11 @@ mod tests {
     fn project_facts_unparseable_new_side_degrades_to_new_parse_failed() {
         let broken = "models:\n  - [unclosed\n";
         let index = project_diff_index(vec![replacement_hunk(2, "  ok: 1", "  - [unclosed")]);
-        let facts = gather_project_facts_with_reader(&project_reader(broken), Some(&index));
+        let facts = gather_project_facts_with_reader(
+            &project_reader(broken),
+            &empty_current(),
+            Some(&index),
+        );
         assert!(facts.definition.is_none(), "no standing metadata");
         match facts.panel.expect("panel present") {
             ProjectChangePanel::Fallback { reason, .. } => {
@@ -2325,7 +2392,7 @@ mod tests {
             entries: StdHashMap::new(),
         };
         let index = project_diff_index(vec![replacement_hunk(1, "name: a", "name: b")]);
-        let facts = gather_project_facts_with_reader(&reader, Some(&index));
+        let facts = gather_project_facts_with_reader(&reader, &empty_current(), Some(&index));
         assert!(facts.definition.is_none());
         match facts
             .panel
@@ -2354,7 +2421,11 @@ mod tests {
             added_lines: lines,
         };
         let index = project_diff_index(vec![hunk]);
-        let facts = gather_project_facts_with_reader(&project_reader(PROJECT_NEW), Some(&index));
+        let facts = gather_project_facts_with_reader(
+            &project_reader(PROJECT_NEW),
+            &empty_current(),
+            Some(&index),
+        );
         match facts.panel.expect("panel present") {
             ProjectChangePanel::Categorized { changes } => {
                 assert!(!changes.is_empty());
@@ -2376,7 +2447,11 @@ mod tests {
         let new_text = "# a comment\nname: playground\n";
         let index =
             project_diff_index(vec![replacement_hunk(1, "# an old comment", "# a comment")]);
-        let facts = gather_project_facts_with_reader(&project_reader(new_text), Some(&index));
+        let facts = gather_project_facts_with_reader(
+            &project_reader(new_text),
+            &empty_current(),
+            Some(&index),
+        );
         match facts.panel.expect("panel present") {
             ProjectChangePanel::Categorized { changes } => {
                 assert!(changes.is_empty(), "no semantic change to report");
@@ -2385,5 +2460,85 @@ mod tests {
                 panic!("expected categorized-empty, got {reason:?}")
             }
         }
+    }
+
+    // -----------------------------------------------------------------
+    // cute-dbt#267 — config-tree attribution wiring through the gather
+    // stage: a categorized models-tree edit attributes the fqn-matched
+    // models; every degrade arm attributes nothing.
+    // -----------------------------------------------------------------
+
+    /// The canonical project body whose marts subtree the #267 tests
+    /// edit (line 4 carries the `+materialized` leaf).
+    const PROJECT_TREE: &str = concat!(
+        "name: shop\n",
+        "models:\n",
+        "  shop:\n",
+        "    marts:\n",
+        "      +materialized: table\n",
+    );
+
+    /// A manifest holding one marts model and one staging model, fqn
+    /// populated (the cute-dbt#278 wire).
+    fn fqn_manifest() -> Manifest {
+        let with_fqn = |id: &str, fqn: &[&str]| {
+            model_node_with_patch(id, None).with_fqn(fqn.iter().map(|s| (*s).to_owned()).collect())
+        };
+        manifest_with_models(vec![
+            with_fqn("model.shop.fct_orders", &["shop", "marts", "fct_orders"]),
+            with_fqn("model.shop.stg_raw", &["shop", "staging", "stg_raw"]),
+        ])
+    }
+
+    #[test]
+    fn project_facts_attribute_a_categorized_config_tree_edit_to_fqn_matched_models() {
+        // Line 5 of PROJECT_TREE: `      +materialized: table` (the `+`
+        // side must byte-match the working tree).
+        let index = project_diff_index(vec![replacement_hunk(
+            5,
+            "      +materialized: view",
+            "      +materialized: table",
+        )]);
+        let facts = gather_project_facts_with_reader(
+            &project_reader(PROJECT_TREE),
+            &fqn_manifest(),
+            Some(&index),
+        );
+        assert!(matches!(
+            facts.panel,
+            Some(ProjectChangePanel::Categorized { .. })
+        ));
+        assert_eq!(
+            facts.config_attributions.keys().collect::<Vec<_>>(),
+            vec!["model.shop.fct_orders"],
+            "only the marts model attributes",
+        );
+        let attribution = &facts.config_attributions["model.shop.fct_orders"][0];
+        assert_eq!(attribution.key, "materialized");
+        assert_eq!(attribution.path, "models.shop.marts");
+    }
+
+    #[test]
+    fn project_facts_attribute_nothing_on_a_fallback_arm() {
+        // The same fqn-bearing manifest, but the hunk drifts (stale diff)
+        // — no parsed old/new pair, so no attribution may be guessed.
+        let index = project_diff_index(vec![replacement_hunk(
+            5,
+            "      +materialized: view",
+            "      +materialized: DRIFTED",
+        )]);
+        let facts = gather_project_facts_with_reader(
+            &project_reader(PROJECT_TREE),
+            &fqn_manifest(),
+            Some(&index),
+        );
+        assert!(matches!(
+            facts.panel,
+            Some(ProjectChangePanel::Fallback { .. })
+        ));
+        assert!(
+            facts.config_attributions.is_empty(),
+            "a degrade arm never widens",
+        );
     }
 }

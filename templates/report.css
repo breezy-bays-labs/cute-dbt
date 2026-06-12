@@ -1346,4 +1346,26 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
 .project-def-raw-line.is-removed::before { content: "- "; }
 .project-def-raw-line.is-added::before { content: "+ "; }
 
+/* cute-dbt#267 — config-tree attribution: the panel rows' affected-models
+   listing (R1b: names inline up to the cap, past it the collapsed
+   <details> below) + the per-model provenance chip row beside the model
+   selector. */
+.project-def-affected { color: var(--text-muted); font-size: 0.9em; overflow-wrap: anywhere; }
+.project-def-affected-list { flex-basis: 100%; margin: 0; font-size: 0.9em; }
+.project-def-affected-list summary { cursor: pointer; color: var(--text-muted); }
+.project-def-affected-names code {
+  font-family: var(--font-mono); background: var(--bg-alt); color: var(--text);
+  padding: 0.05rem 0.35rem; border-radius: var(--radius-sm);
+}
+.model-attribution-row {
+  margin: 0.4rem 0 0; display: flex; flex-wrap: wrap; gap: 0.35rem;
+}
+.config-attribution-chip {
+  font-family: var(--font-mono); font-size: 0.8em;
+  background: var(--bg-alt); color: var(--text);
+  border: var(--rule-w) solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm); padding: 0.1rem 0.45rem;
+  overflow-wrap: anywhere;
+}
+
 /* end of cute-dbt report chassis v1 (cute-dbt#177) */
