@@ -371,7 +371,7 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     // policy plus inline SQL pragmas scanned from each in-scope model's
     // manifest `raw_code`. Display-layer only — applied inside payload
     // assembly strictly after supersedes resolution.
-    let check_policy = build_check_policy(args, &current, &models_in_scope);
+    let check_policy = build_check_policy(args, &current, &models_in_scope, &experiments);
     render(
         &args.out,
         &current,
@@ -1118,11 +1118,23 @@ fn build_check_policy(
     args: &ReportArgs,
     current: &Manifest,
     models_in_scope: &ModelInScopeSet,
+    experiments: &EnabledExperiments,
 ) -> CheckPolicy<HeuristicId> {
     let mut policy = args.config.as_ref().map_or_else(CheckPolicy::default, |c| {
         resolve_check_policy::<HeuristicId>(&c.checks)
             .expect("[checks] was validated by the --config value-parser at parse time")
     });
+    // cute-dbt#260 Slice 3 — reconcile the experiment-gated `enforcement`
+    // group with the governance flag, AFTER either policy arm (the
+    // `CheckPolicy::default()` arm already filters experimental checks;
+    // the `[checks]` config arm resolves from `Id::ALL` and does not). So
+    // this single post-step is the one authority: governance OFF removes
+    // every experimental check from the display set (byte-identical to
+    // pre-#260 output, and the gate-free `explore` page already uses the
+    // filtered default); governance ON re-adds them in registry order.
+    // The detector still EVALUATES regardless (the suppression-hierarchy
+    // invariant) — this is a display filter only.
+    reconcile_experimental_checks(&mut policy.displayed, experiments);
     // Model order is deterministic (the scope set iterates in node-id
     // order), so pragma rule order — and warning order — is stable.
     for model_id in models_in_scope.iter() {
@@ -1142,6 +1154,37 @@ fn build_check_policy(
         }
     }
     policy
+}
+
+/// Reconcile the experiment-gated checks (the `enforcement` group, gated
+/// behind `Experiment::Governance`) in `displayed` with the active
+/// experiment set (cute-dbt#260 Slice 3). Governance OFF ⇒ drop every
+/// experimental check; governance ON ⇒ ensure every experimental check is
+/// present, re-inserted in registry (`HeuristicId::ALL`) order so the
+/// display set stays deterministic. The single authority over both
+/// policy arms (default + `[checks]` config).
+fn reconcile_experimental_checks(
+    displayed: &mut Vec<HeuristicId>,
+    experiments: &EnabledExperiments,
+) {
+    use crate::domain::CheckId as _;
+    // For Slice 3 the only experiment-gated group is `enforcement`,
+    // gated behind `Experiment::Governance`. Future gated groups join
+    // this predicate.
+    let gated_enabled = experiments.is_enabled(Experiment::Governance);
+    if gated_enabled {
+        // Rebuild from the registry, keeping declaration order: a
+        // non-experimental check stays iff it was displayed; an
+        // experimental check is shown.
+        let keep: std::collections::BTreeSet<HeuristicId> = displayed.iter().copied().collect();
+        *displayed = HeuristicId::ALL
+            .iter()
+            .copied()
+            .filter(|id| id.is_experimental() || keep.contains(id))
+            .collect();
+    } else {
+        displayed.retain(|id| !id.is_experimental());
+    }
 }
 
 /// Resolve the experimental opt-in set (cute-dbt#289, epic #288):
@@ -1464,21 +1507,80 @@ mod tests {
     }
 
     #[test]
-    fn build_check_policy_without_config_or_pragmas_is_the_default() {
+    fn build_check_policy_without_config_or_pragmas_is_the_default_minus_enforcement() {
+        // cute-dbt#260 Slice 3 — governance OFF (the default): the
+        // `enforcement` group is filtered out of the displayed set, so the
+        // policy is the default minus the enforcement check(s). Everything
+        // else (grain/union/join/incremental) stays displayed; no
+        // suppressions.
+        use crate::domain::CheckId as _;
         let manifest = manifest_of_models(vec![model_with_raw("model.shop.orders", None)]);
         let policy = build_check_policy(
             &cli("report.html"),
             &manifest,
             &scope_of(&["model.shop.orders"]),
+            &EnabledExperiments::default(),
         );
-        assert_eq!(policy, CheckPolicy::default());
+        let expected: Vec<HeuristicId> = CheckPolicy::default()
+            .displayed
+            .into_iter()
+            .filter(|id: &HeuristicId| id.spec().group != "enforcement")
+            .collect();
+        assert_eq!(policy.displayed, expected);
+        assert!(policy.suppressions.is_empty());
+        assert!(
+            !policy
+                .displayed
+                .contains(&HeuristicId::EnforcementConstraintUnbacked),
+            "enforcement is gated off by default",
+        );
+    }
+
+    /// Governance-enabled experiment set (so the enforcement group is
+    /// not filtered out — for the registry-shape policy tests).
+    fn governance_on() -> EnabledExperiments {
+        EnabledExperiments::from_union(
+            &std::collections::BTreeSet::from([Experiment::Governance]),
+            &std::collections::BTreeSet::new(),
+        )
+    }
+
+    #[test]
+    fn build_check_policy_with_governance_keeps_the_enforcement_group() {
+        // Governance ON ⇒ EVERY registered check displays, including the
+        // experiment-gated `enforcement` group (which `CheckPolicy::default`
+        // excludes). No config/pragmas ⇒ no suppressions.
+        use crate::domain::CheckId as _;
+        let manifest = manifest_of_models(vec![model_with_raw("model.shop.orders", None)]);
+        let policy = build_check_policy(
+            &cli("report.html"),
+            &manifest,
+            &scope_of(&["model.shop.orders"]),
+            &governance_on(),
+        );
+        assert_eq!(policy.displayed, HeuristicId::ALL.to_vec());
+        assert!(policy.suppressions.is_empty());
+        assert!(
+            policy
+                .displayed
+                .contains(&HeuristicId::EnforcementConstraintUnbacked),
+        );
+        // And the default policy (governance off) does NOT carry it.
+        assert!(
+            !CheckPolicy::<HeuristicId>::default()
+                .displayed
+                .contains(&HeuristicId::EnforcementConstraintUnbacked),
+            "the experiment-gated check is off in the default policy",
+        );
     }
 
     #[test]
     fn build_check_policy_resolves_the_config_selection() {
+        use crate::domain::CheckId as _;
         // Registry-shape-robust: `grain.*` removes exactly the grain
         // group; every other registered check (e.g. union.arm-coverage,
-        // cute-dbt#172) stays displayed.
+        // cute-dbt#172) stays displayed. Governance ON so the enforcement
+        // group is not also filtered (Slice 3 gating tested separately).
         let manifest = manifest_of_models(vec![model_with_raw("model.shop.orders", None)]);
         let policy = build_check_policy(
             &cli_with_checks(crate::domain::ChecksConfig {
@@ -1487,14 +1589,14 @@ mod tests {
             }),
             &manifest,
             &scope_of(&["model.shop.orders"]),
+            &governance_on(),
         );
-        let expected: Vec<HeuristicId> = CheckPolicy::default()
-            .displayed
-            .into_iter()
-            .filter(|id: &HeuristicId| {
-                use crate::domain::CheckId as _;
-                id.spec().group != "grain"
-            })
+        // Governance ON ⇒ start from the FULL registry (enforcement
+        // included); `grain.*` removes only the grain group.
+        let expected: Vec<HeuristicId> = HeuristicId::ALL
+            .iter()
+            .copied()
+            .filter(|id: &HeuristicId| id.spec().group != "grain")
             .collect();
         assert_eq!(policy.displayed, expected, "grain.* removes only grain");
         assert!(
@@ -1513,6 +1615,7 @@ mod tests {
             &cli("report.html"),
             &manifest,
             &scope_of(&["model.shop.orders"]),
+            &EnabledExperiments::default(),
         );
         assert_eq!(
             policy.suppressions,
@@ -1527,6 +1630,7 @@ mod tests {
 
     #[test]
     fn build_check_policy_skips_unknown_pragma_ids_and_out_of_scope_models() {
+        use crate::domain::CheckId as _;
         let manifest = manifest_of_models(vec![
             model_with_raw(
                 "model.shop.orders",
@@ -1542,13 +1646,16 @@ mod tests {
             &cli("report.html"),
             &manifest,
             &scope_of(&["model.shop.orders"]),
+            &governance_on(),
         );
         assert!(
             policy.suppressions.is_empty(),
             "unknown id warns + stays inert; out-of-scope models are not scanned: {:?}",
             policy.suppressions
         );
-        assert_eq!(policy.displayed, CheckPolicy::default().displayed);
+        // Governance ON ⇒ the full registry displays (enforcement
+        // included), unaffected by the inert unknown pragma.
+        assert_eq!(policy.displayed, HeuristicId::ALL.to_vec());
     }
 
     // -----------------------------------------------------------------

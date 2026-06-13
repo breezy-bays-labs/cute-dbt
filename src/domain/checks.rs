@@ -97,8 +97,11 @@ use serde_json::Value;
 use crate::domain::cte::{
     CteGraph, EdgeType, JoinKeyPair, LeftJoinFact, SubqueryFact, SubqueryKind,
 };
+use crate::domain::governance::{ConstraintSupport, backing_test_for, constraint_support};
 use crate::domain::grain::test_is_enabled;
-use crate::domain::manifest::{Manifest, Node, NodeConfig, NodeId, TestMetadata, TestSeverity};
+use crate::domain::manifest::{
+    Constraint, ConstraintKind, Manifest, Node, NodeConfig, NodeId, TestMetadata, TestSeverity,
+};
 use crate::domain::state::{resolve_target_model, resolve_tested_model};
 use crate::domain::unit_test::{UnitTest, UnitTestGiven};
 use crate::domain::unit_test_table::{CellValue, FixtureTable, table_from_manifest_rows};
@@ -222,11 +225,30 @@ pub trait CheckId: Copy + Eq + Ord + std::fmt::Debug + Sized + 'static {
         self.spec().id_str
     }
 
+    /// Whether this check belongs to an **experiment-gated** group
+    /// (cute-dbt#260 Slice 3) — a check that is OFF in the default policy
+    /// and only displayed when its experiment is explicitly enabled. The
+    /// `enforcement` group is gated behind `Experiment::Governance`. A
+    /// gated check still **evaluates** (the suppression-hierarchy
+    /// invariant) — it is excluded from the default *display* set, so the
+    /// non-experimental report AND the gate-free `explore` page never
+    /// surface it. Keyed on the spec's group so synthetic test registries
+    /// (which carry no `enforcement` group) are unaffected.
+    #[must_use]
+    fn is_experimental(self) -> bool {
+        EXPERIMENT_GATED_GROUPS.contains(&self.spec().group)
+    }
+
     /// Run this check's detector — the macro-generated **exhaustive,
     /// no-wildcard** id→detector dispatch.
     #[must_use]
     fn detect(self, ctx: &CheckContext<'_>) -> Vec<Finding<Self>>;
 }
+
+/// Check groups that are OFF in the default display policy — gated behind
+/// an experiment and only shown when it is enabled (cute-dbt#260 Slice 3).
+/// `enforcement` is gated behind `Experiment::Governance`.
+pub const EXPERIMENT_GATED_GROUPS: &[&str] = &["enforcement"];
 
 /// The evidence a detector pattern-matches over: the whole parsed
 /// [`Manifest`] plus the one model node under evaluation, plus the
@@ -827,6 +849,39 @@ heuristics! {
             rationale: "An incremental model is two programs in one body: the initial full build, and the incremental run that filters on the high-water mark and merges by key. Each unit test compiles only one of them, so a suite living entirely on one branch ships the other untested — exactly where incremental models silently drop, duplicate, or re-process rows.",
             detector: detect_incremental_branch_coverage,
         },
+        /// `enforcement.constraint-unbacked` — a DECLARED primary-key /
+        /// unique constraint that the warehouse does not enforce
+        /// (metadata-only on the adapter) AND has no backing data test
+        /// (cute-dbt#260 Slice 3, governance-gated). The enforcement-reality
+        /// surface: a parallel of `grain.unique-key-unbacked`, keyed on
+        /// declared `constraints` rather than `config.unique_key`.
+        EnforcementConstraintUnbacked {
+            id: "enforcement.constraint-unbacked",
+            name: "Declared constraint without a backing test",
+            group: "enforcement",
+            tier: Total,
+            instrument: DataTest,
+            supersedes: [],
+            evidence: [
+                "manifest.constraints",
+                "manifest.metadata.adapter-type",
+                "manifest.test-nodes",
+            ],
+            conditions: [
+                "the model declares a primary_key or unique constraint (model-level constraints[] or a column-level constraint) whose enforcement on the manifest's adapter is metadata-only (NotEnforced) — the warehouse accepts the declaration but does not enforce uniqueness at write time",
+                "no enabled generic uniqueness data test (unique, attached to the model) backs the constrained column — the constraint→test edge is INFERRED by column + test-name match, since the manifest never links a constraint to its test",
+                "the verdict is UNCOVERED only when the constraint is declared, metadata-only, AND has no inferred backing test; a backing test (even one cute-dbt could miss) keeps it silent",
+            ],
+            exclusions: [
+                "a constraint the adapter ENFORCES at write time (e.g. not_null / foreign_key on Postgres/DuckDB) is never a gap — the warehouse guarantees it",
+                "a constraint kind with no column-level generic-test backing (check / custom / foreign_key) is out of this inference and never reported here",
+                "the inferred edge can MISS a renamed test or a singular/custom test asserting the same uniqueness — the copy says \"backing test\" (an authoring-discipline cue), never that the warehouse lacks an index; columns are authored-YAML-only, so this is never a warehouse-truth claim",
+                "the whole `enforcement` group is gated behind the governance experiment — off by default, it never fires on a non-governance report",
+            ],
+            recommendation: "Add a uniqueness data test on the declared-but-unenforced constraint column (`unique` for a single column), so the grain the contract DECLARES is actually verified by a test on every run. The warehouse will not enforce it for you on this adapter.",
+            rationale: "A primary-key / unique constraint that the warehouse treats as metadata-only is a DECLARED guarantee with nothing checking it: duplicate rows load silently, and any downstream join or incremental merge that trusts the declared grain corrupts. A backing data test is the only thing that actually verifies the declared uniqueness on this adapter.",
+            detector: detect_enforcement_constraint_unbacked,
+        },
     }
 }
 
@@ -941,6 +996,152 @@ fn detect_grain_unique_key_unbacked(ctx: &CheckContext<'_>) -> Vec<Finding<Heuri
         )
         .with_degraded(degraded),
     ]
+}
+
+/// The construct id for an enforcement-reality finding (cute-dbt#260
+/// Slice 3) — the declared constraint column it annotates.
+fn enforcement_construct(column: &str, kind: ConstraintKind) -> String {
+    let kind_label = match kind {
+        ConstraintKind::PrimaryKey => "primary_key",
+        ConstraintKind::Unique => "unique",
+        _ => "constraint",
+    };
+    format!("constraint.{kind_label}[{column}]")
+}
+
+/// `enforcement.constraint-unbacked` (cute-dbt#260 Slice 3) — a DECLARED
+/// PK/unique constraint that the adapter does not enforce (metadata-only)
+/// and no inferred backing test covers. Governance-gated: the
+/// `enforcement` group is filtered out of a non-governance report's
+/// policy, so this never fires unless the experiment is on.
+fn detect_enforcement_constraint_unbacked(ctx: &CheckContext<'_>) -> Vec<Finding<HeuristicId>> {
+    if ctx.model.resource_type() != "model" {
+        return Vec::new();
+    }
+    let Some(adapter) = ctx.manifest.metadata().adapter_type() else {
+        // No adapter type ⇒ the enforcement matrix can't be applied. Stay
+        // silent (never a false claim about a warehouse we can't name).
+        return Vec::new();
+    };
+    declared_unique_constraints(ctx.model)
+        .into_iter()
+        .filter_map(|(column, kind)| enforcement_finding(ctx, adapter, &column, kind))
+        .collect()
+}
+
+/// The declared primary-key / unique constraint columns on a model
+/// (cute-dbt#260 Slice 3) — model-level `constraints[]` of PK/unique kind
+/// (one entry per constrained column) plus column-level PK/unique
+/// constraints. Deduplicated by `(column, kind)`, deterministic order.
+fn declared_unique_constraints(model: &Node) -> Vec<(String, ConstraintKind)> {
+    let mut seen: BTreeSet<(String, &'static str)> = BTreeSet::new();
+    model_level_unique_columns(model)
+        .into_iter()
+        .chain(column_level_unique_columns(model))
+        .filter(|(column, kind)| seen.insert((column.clone(), kind_tag(*kind))))
+        .collect()
+}
+
+/// Model-level `constraints[]` of PK/unique kind, as `(column, kind)`.
+///
+/// Only SINGLE-column model-level constraints are emitted. A COMPOSITE
+/// model-level PK/unique asserts the *tuple* is unique (backed by
+/// `unique_combination_of_columns`, not per-column `unique`); flattening
+/// it to per-column findings would be a FALSE "this column is unbacked"
+/// claim — the check's own never-a-false-claim invariant. So composite
+/// keys are filtered OUT here; the column-level constraints + single-column
+/// model-level constraints remain.
+fn model_level_unique_columns(model: &Node) -> Vec<(String, ConstraintKind)> {
+    model
+        .constraints()
+        .iter()
+        .filter_map(|c| unique_constraint_kind(c).map(|kind| (c, kind)))
+        // tracked: cute-dbt#341 — composite-key enforcement inference
+        // deferred (one tuple-keyed finding + unique_combination_of_columns
+        // join, reusing the #259 grain matching). For Slice 3, silence
+        // over a per-column falsehood on composite keys.
+        .filter(|(c, _)| c.columns().len() == 1)
+        .flat_map(|(c, kind)| c.columns().iter().map(move |col| (col.clone(), kind)))
+        .collect()
+}
+
+/// Column-level PK/unique constraints, as `(column, kind)`.
+fn column_level_unique_columns(model: &Node) -> Vec<(String, ConstraintKind)> {
+    model
+        .column_facts()
+        .iter()
+        .flat_map(|(column, facts)| {
+            facts
+                .constraints()
+                .iter()
+                .filter_map(move |c| unique_constraint_kind(c).map(|kind| (column.clone(), kind)))
+        })
+        .collect()
+}
+
+/// The PK/unique kind of a constraint, or `None` for any other kind
+/// (only PK + unique are in the column-uniqueness inference).
+fn unique_constraint_kind(constraint: &Constraint) -> Option<ConstraintKind> {
+    match constraint.kind() {
+        kind @ (ConstraintKind::PrimaryKey | ConstraintKind::Unique) => Some(kind),
+        _ => None,
+    }
+}
+
+/// A stable string tag for a PK/unique kind (the dedup key half).
+fn kind_tag(kind: ConstraintKind) -> &'static str {
+    match kind {
+        ConstraintKind::PrimaryKey => "primary_key",
+        _ => "unique",
+    }
+}
+
+/// Emit the enforcement finding for one declared constraint column, or
+/// `None` when the warehouse enforces it (no gap) or a backing test
+/// covers it (the inference found one). The copy says "declared" +
+/// "backing test" — authoring discipline, never a warehouse-truth claim.
+fn enforcement_finding(
+    ctx: &CheckContext<'_>,
+    adapter: &str,
+    column: &str,
+    kind: ConstraintKind,
+) -> Option<Finding<HeuristicId>> {
+    // Only metadata-only (NotEnforced) declarations are a gap — an
+    // enforced one is guaranteed by the warehouse; a NotSupported one was
+    // never accepted.
+    if constraint_support(adapter, kind) != ConstraintSupport::NotEnforced {
+        return None;
+    }
+    // The REAL backing-test node id (None ⇒ no inferred backing) — so a
+    // Covered verdict attributes the actual test node, like every other
+    // Covered.by in this registry (never a synthetic label).
+    let backing = backing_test_for(ctx.manifest, ctx.model.id(), column, kind);
+    let kind_label = kind_tag(kind);
+    let evidence = vec![
+        Evidence::new("constraint", format!("{kind_label} on {column}")),
+        Evidence::new("adapter", format!("{adapter} (metadata-only)")),
+        Evidence::new(
+            "backing-test",
+            if backing.is_some() {
+                "present"
+            } else {
+                "missing"
+            },
+        ),
+    ];
+    let verdict = match backing {
+        Some(test_id) => Verdict::Covered {
+            by: vec![test_id.as_str().to_owned()],
+        },
+        None => Verdict::Uncovered,
+    };
+    Some(Finding::new(
+        HeuristicId::EnforcementConstraintUnbacked,
+        ctx.model.id().clone(),
+        enforcement_construct(column, kind),
+        verdict,
+        evidence,
+    ))
 }
 
 /// The no-generic-backing arm of the grain verdict (cute-dbt#259):
@@ -5910,5 +6111,235 @@ mod tests {
         );
         assert_eq!(toml_escape("line\nbreak\ttab"), "line\\nbreak\\ttab");
         assert_eq!(toml_escape("bell\u{7}"), "bell\\u0007");
+    }
+
+    // ===== cute-dbt#260 Slice 3: enforcement.constraint-unbacked =====
+
+    /// A model with a model-level constraint of `kind` on `column`.
+    fn model_with_constraint(full_id: &str, kind: &str, column: &str) -> Node {
+        let constraint = crate::domain::manifest::Constraint::new(
+            kind,
+            vec![column.to_owned()],
+            None,
+            None,
+            None,
+            Vec::new(),
+        );
+        model_with_config(full_id, &[]).with_contract_facts(vec![constraint], Vec::new(), None)
+    }
+
+    /// A manifest with an adapter type set on its metadata.
+    fn manifest_on_adapter(adapter: &str, nodes: Vec<Node>) -> Manifest {
+        Manifest::new(
+            ManifestMetadata::new("v12").with_adapter_type(Some(adapter.to_owned())),
+            nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn enforcement_fires_for_a_declared_unbacked_pk_on_a_metadata_only_adapter() {
+        // duckdb: PK is NotEnforced → a declared PK with no unique test
+        // is UNCOVERED.
+        let manifest = manifest_on_adapter(
+            "duckdb",
+            vec![model_with_constraint(
+                "model.shop.orders",
+                "primary_key",
+                "id",
+            )],
+        );
+        let findings = run(&manifest, "model.shop.orders");
+        let enforcement: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == HeuristicId::EnforcementConstraintUnbacked)
+            .collect();
+        assert_eq!(enforcement.len(), 1);
+        assert_eq!(enforcement[0].verdict, Verdict::Uncovered);
+        assert_eq!(enforcement[0].construct, "constraint.primary_key[id]");
+    }
+
+    #[test]
+    fn enforcement_silent_when_a_backing_unique_test_exists() {
+        let manifest = manifest_on_adapter(
+            "duckdb",
+            vec![
+                model_with_constraint("model.shop.orders", "primary_key", "id"),
+                test_node(
+                    "test.shop.u",
+                    "model.shop.orders",
+                    Some("id"),
+                    unique_metadata("id"),
+                    &[],
+                ),
+            ],
+        );
+        let findings = run(&manifest, "model.shop.orders");
+        let enforcement: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == HeuristicId::EnforcementConstraintUnbacked)
+            .collect();
+        assert_eq!(enforcement.len(), 1);
+        // Backed ⇒ Covered, attributing the REAL backing test node id
+        // (never a synthetic label — CodeRabbit on #339).
+        assert_eq!(
+            enforcement[0].verdict,
+            Verdict::Covered {
+                by: vec!["test.shop.u".to_owned()],
+            },
+        );
+    }
+
+    #[test]
+    fn enforcement_silent_when_the_adapter_enforces_the_constraint() {
+        // not_null on duckdb is Enforced → never a gap.
+        let manifest = manifest_on_adapter(
+            "duckdb",
+            vec![model_with_constraint("model.shop.orders", "not_null", "id")],
+        );
+        let findings = run(&manifest, "model.shop.orders");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.check == HeuristicId::EnforcementConstraintUnbacked),
+            "an enforced constraint is never an enforcement gap",
+        );
+    }
+
+    #[test]
+    fn enforcement_silent_without_an_adapter_type() {
+        // No adapter_type ⇒ the matrix can't be applied ⇒ stay silent.
+        let manifest = manifest_of(vec![model_with_constraint(
+            "model.shop.orders",
+            "primary_key",
+            "id",
+        )]);
+        let findings = run(&manifest, "model.shop.orders");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.check == HeuristicId::EnforcementConstraintUnbacked),
+        );
+    }
+
+    #[test]
+    fn enforcement_silent_for_a_model_with_no_declared_constraint() {
+        let manifest =
+            manifest_on_adapter("duckdb", vec![model_with_config("model.shop.orders", &[])]);
+        let findings = run(&manifest, "model.shop.orders");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.check == HeuristicId::EnforcementConstraintUnbacked),
+        );
+    }
+
+    #[test]
+    fn enforcement_fires_for_a_column_level_unique_constraint() {
+        // A COLUMN-level unique constraint (rides ColumnFacts) —
+        // exercises column_level_unique_columns.
+        use crate::domain::manifest::{ColumnFacts, Constraint};
+        let unique = Constraint::new("unique", Vec::new(), None, None, None, Vec::new());
+        let mut column_facts = BTreeMap::new();
+        column_facts.insert(
+            "email".to_owned(),
+            ColumnFacts::new(None, Vec::new(), Vec::new(), vec![unique]),
+        );
+        let model = model_with_config("model.shop.users", &[]).with_column_facts(column_facts);
+        let manifest = manifest_on_adapter("snowflake", vec![model]);
+        let findings = run(&manifest, "model.shop.users");
+        let enforcement: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == HeuristicId::EnforcementConstraintUnbacked)
+            .collect();
+        assert_eq!(enforcement.len(), 1);
+        assert_eq!(enforcement[0].construct, "constraint.unique[email]");
+        assert_eq!(enforcement[0].verdict, Verdict::Uncovered);
+    }
+
+    #[test]
+    fn enforcement_skips_a_check_constraint() {
+        // A check constraint is out of the unique/not_null inference.
+        use crate::domain::manifest::Constraint;
+        let check = Constraint::new(
+            "check",
+            vec!["amount".to_owned()],
+            Some("amount > 0".to_owned()),
+            None,
+            None,
+            Vec::new(),
+        );
+        let model = model_with_config("model.shop.orders", &[]).with_contract_facts(
+            vec![check],
+            Vec::new(),
+            None,
+        );
+        let manifest = manifest_on_adapter("duckdb", vec![model]);
+        let findings = run(&manifest, "model.shop.orders");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.check == HeuristicId::EnforcementConstraintUnbacked),
+        );
+    }
+
+    #[test]
+    fn enforcement_does_not_emit_per_column_findings_for_a_composite_key() {
+        // A COMPOSITE model-level PK asserts the TUPLE is unique (backed
+        // by unique_combination_of_columns, not per-column unique). Emitting
+        // a per-column "unbacked" finding for each column would be a FALSE
+        // claim — the check's never-a-false-claim invariant. Composite
+        // model-level keys are filtered out (tracked: cute-dbt#341).
+        use crate::domain::manifest::Constraint;
+        let composite = Constraint::new(
+            "primary_key",
+            vec!["order_id".to_owned(), "line_id".to_owned()],
+            None,
+            None,
+            None,
+            Vec::new(),
+        );
+        let model = model_with_config("model.shop.lines", &[]).with_contract_facts(
+            vec![composite],
+            Vec::new(),
+            None,
+        );
+        let manifest = manifest_on_adapter("duckdb", vec![model]);
+        let findings = run(&manifest, "model.shop.lines");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.check == HeuristicId::EnforcementConstraintUnbacked),
+            "a composite key emits no per-column enforcement finding (cute-dbt#341)",
+        );
+    }
+
+    #[test]
+    fn enforcement_still_fires_for_a_single_column_model_level_pk() {
+        // The single-column model-level case still works (only composite
+        // keys are filtered).
+        use crate::domain::manifest::Constraint;
+        let single = Constraint::new(
+            "primary_key",
+            vec!["id".to_owned()],
+            None,
+            None,
+            None,
+            Vec::new(),
+        );
+        let model = model_with_config("model.shop.orders", &[]).with_contract_facts(
+            vec![single],
+            Vec::new(),
+            None,
+        );
+        let manifest = manifest_on_adapter("duckdb", vec![model]);
+        let findings = run(&manifest, "model.shop.orders");
+        let enforcement: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == HeuristicId::EnforcementConstraintUnbacked)
+            .collect();
+        assert_eq!(enforcement.len(), 1);
+        assert_eq!(enforcement[0].construct, "constraint.primary_key[id]");
     }
 }

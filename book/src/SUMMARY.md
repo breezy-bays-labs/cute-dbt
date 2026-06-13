@@ -18,6 +18,7 @@
   - [join.left-null-propagation](./checks/join.left-null-propagation.md)
   - [join.anti-join](./checks/join.anti-join.md)
   - [incremental.branch-coverage](./checks/incremental.branch-coverage.md)
+  - [enforcement.constraint-unbacked](./checks/enforcement.constraint-unbacked.md)
 - [Selecting & suppressing checks](./check-selection.md)
 - [Experimental features](./experimental.md)
 - [Examples](./examples.md)
