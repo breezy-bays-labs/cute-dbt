@@ -862,12 +862,16 @@ fn the_cloud_cli_is_rejected_with_remediation() {
 #[test]
 fn a_missing_dbt_gets_the_install_remediation() {
     let repo = repo_with_branch_change("dbt-missing");
-    // Remove the scaffold's default shim: the controlled PATH now has
-    // no dbt at all (a developer's real dbt can never leak in).
+    // Remove the scaffold's default shim, then run hermetically: dbt
+    // (and gh) must be genuinely absent. A plain controlled PATH that
+    // includes /usr/bin would let a host dbt/gh leak in on some runners;
+    // `review_hermetic` excludes the system dirs (git/sh symlinked in),
+    // so the binary sees io::ErrorKind::NotFound — the only trigger for
+    // the dbt-MISSING install remediation.
     std::fs::remove_file(repo.root.parent().expect("base").join("bin/dbt"))
         .expect("remove the default shim");
 
-    let output = repo.review(&["--no-open"]);
+    let output = repo.review_hermetic(&["--no-open"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let stderr = stderr_of(&output);
     assert!(stderr.contains("`dbt` was not found on PATH"), "{stderr}");
@@ -1225,9 +1229,13 @@ fn pr_with_missing_gh_errors_with_the_install_remediation() {
     repo.git(&["checkout", "-q", "-b", "feature"]);
     repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
     repo.commit_all("edit");
-    // (no gh shim — gh genuinely absent)
-
-    let output = repo.review(&["--pr", "--no-open"]);
+    // No gh shim — gh must be genuinely absent. `review_hermetic` runs
+    // on a PATH that excludes /usr/bin, so a host gh (GitHub-hosted
+    // Linux runners pre-install /usr/bin/gh) cannot answer; the binary
+    // sees io::ErrorKind::NotFound, the only trigger for the gh-MISSING
+    // install remediation (a non-zero-exit shim is "present but failed",
+    // a different branch).
+    let output = repo.review_hermetic(&["--pr", "--no-open"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(
         stderr_of(&output).contains("cli.github.com"),

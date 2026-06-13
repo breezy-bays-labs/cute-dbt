@@ -285,6 +285,68 @@ impl TestRepo {
     pub fn review(&self, args: &[&str]) -> Output {
         self.review_in(".", args)
     }
+
+    /// Spawn `cute-dbt review <args>` on a **hermetic PATH** that
+    /// contains ONLY the shim dir — `/usr/bin` and `/bin` are excluded,
+    /// so `gh` is genuinely `NotFound` even on hosts (GitHub-hosted
+    /// Linux runners) that pre-install `/usr/bin/gh`. The tools review
+    /// shells out to are symlinked into the shim dir first, so they
+    /// still resolve: `git` (every stage), plus `sh`/`env` for any shell
+    /// shim a test may have installed. `dbt`/`gh` are reachable ONLY if
+    /// a test installed their shims — never the host binaries.
+    ///
+    /// This is the only way to exercise the `--pr` gh-MISSING branch
+    /// (`ReviewError::DbtMissing`/`GhMissing` fire on
+    /// `io::ErrorKind::NotFound`, the genuine-missing-binary case — a
+    /// non-zero-exit shim is "present but failed", a different branch).
+    pub fn review_hermetic(&self, args: &[&str]) -> Output {
+        self.symlink_host_tools(&["git", "sh", "env"]);
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
+        cmd.arg("review").args(args).current_dir(&self.root);
+        let empty = self.home.join("gitconfig");
+        scrub_git_env(&mut cmd);
+        cmd.env("GIT_CONFIG_GLOBAL", &empty)
+            .env("GIT_CONFIG_SYSTEM", &empty)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", &self.home)
+            .env("GIT_AUTHOR_NAME", "cute-dbt-test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "cute-dbt-test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            // HERMETIC: the shim dir ONLY. No /usr/bin, so a host
+            // /usr/bin/gh (GitHub runners) is unreachable; git/sh resolve
+            // via the symlinks created above.
+            .env("PATH", self.bin.display().to_string())
+            .env_remove("CUTE_DBT_EXPERIMENTAL")
+            .env_remove("DBT_TARGET_PATH");
+        cmd.output().expect("the cute-dbt binary spawns")
+    }
+
+    /// Symlink each named host tool into the shim dir (resolved from the
+    /// real PATH), so it resolves on the hermetic PATH that excludes the
+    /// system dirs. A tool already present (a real binary, a prior
+    /// symlink, or a test shim) is left untouched; an unresolvable tool
+    /// is skipped (the hermetic run will surface its own NotFound).
+    fn symlink_host_tools(&self, tools: &[&str]) {
+        for tool in tools {
+            let target = self.bin.join(tool);
+            if target.exists() {
+                continue;
+            }
+            if let Some(src) = resolve_on_host_path(tool) {
+                let _ = std::os::unix::fs::symlink(&src, &target);
+            }
+        }
+    }
+}
+
+/// Resolve a bare tool name to its absolute path by searching the test
+/// process's real `PATH` (the host PATH, before any harness override).
+fn resolve_on_host_path(tool: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(tool))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Scaffold a minimal dbt project at `project_rel` (`"."` = the repo
