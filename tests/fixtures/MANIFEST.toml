@@ -154,6 +154,21 @@ reflected in the rendered HTML. No real data.\
 """
 
 [[fixture]]
+path = "config-pr-showcase.toml"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/346"
+sha256 = "f5772bfdee7f7488c196eb9e89673f38d4bee0453b4ec715f3bc7f84db0f6b99"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "Apache-2.0"
+description = """
+Synthetic config fixture for cute-dbt#346 — the change-context banner PR \
+link. Carries a SYNTHETIC `[pr]` section (fictional acme/shop url + title) \
+so the committed `diff-showcase` golden showcases the linked \
+`PR #<n> — <title>` banner clause. Never a real PR.\
+"""
+
+[[fixture]]
 path = "external-fixture-reader.json"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/126"

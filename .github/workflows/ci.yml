@@ -645,6 +645,11 @@ jobs:
             # (categorized panel, provenance chips, vars tiers,
             # hooks/dispatch rows) which are default-OFF everywhere else.
             experimental: "1"
+            # cute-dbt#346 — the showcase supplies a SYNTHETIC `[pr]` config
+            # so the golden carries the linked `PR #<n> — <title>` banner
+            # clause (fictional acme/shop url; never a real PR — the
+            # synthetic-only fixture invariant).
+            config: tests/fixtures/config-pr-showcase.toml
           # cute-dbt#265 Slice D — the GOLDEN macro-lens cap showcase. A
           # synthetic heavy macro (`mask_pii`) reaches 14 root-project
           # models (> the default inline-body cap of 10), so the committed
@@ -695,6 +700,9 @@ jobs:
           # cute-dbt#291: the report binary reads this directly (clap
           # env-fallback); empty = every experiment off, by contract.
           CUTE_DBT_EXPERIMENTAL: ${{ matrix.experimental }}
+          # cute-dbt#346: optional --config (the diff-showcase row's
+          # synthetic [pr] section); empty = no --config arg.
+          CONFIG: ${{ matrix.config }}
         run: |
           set -euo pipefail
           mkdir -p target/example-check
@@ -756,14 +764,23 @@ jobs:
             scope_args=(--baseline-manifest "$BASELINE_MANIFEST")
             scope_hint=" --baseline-manifest $BASELINE_MANIFEST"
           fi
+          # cute-dbt#346: the optional --config arg (the diff-showcase row's
+          # synthetic [pr] section). Built only when the matrix row sets one.
+          config_args=()
+          config_hint=""
+          if [ -n "$CONFIG" ]; then
+            config_args=(--config "$CONFIG")
+            config_hint=" --config $CONFIG"
+          fi
           cargo run --quiet --locked --bin cute-dbt -- report \
             --manifest "$CURRENT_MANIFEST" \
             "${scope_args[@]}" \
             "${project_root_args[@]}" \
+            "${config_args[@]}" \
             --out "$rendered"
           if ! diff -q "$rendered" "$OUTPUT_PATH" >/dev/null; then
             echo "::error::example-report-up-to-date: $OUTPUT_PATH does not match the renderer output ($EXAMPLE_NAME). Regenerate with:"
-            echo "  ${regen_env}cargo run --bin cute-dbt -- report --manifest $CURRENT_MANIFEST$scope_hint$regen_hint --out $OUTPUT_PATH"
+            echo "  ${regen_env}cargo run --bin cute-dbt -- report --manifest $CURRENT_MANIFEST$scope_hint$regen_hint$config_hint --out $OUTPUT_PATH"
             echo "Sizes:"
             ls -l "$rendered" "$OUTPUT_PATH"
             exit 1

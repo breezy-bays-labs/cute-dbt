@@ -236,6 +236,35 @@ pub struct ReportArgs {
     /// meaningful with the `macro-lens` experiment on; inert otherwise.
     #[arg(long, value_name = "N")]
     pub macro_body_cap: Option<usize>,
+
+    /// The source PR's GitHub URL (cute-dbt#346) — the `<a href>` the
+    /// `--pr-diff` change-context banner links to
+    /// (`https://github.com/<owner>/<repo>/pull/<n>`).
+    ///
+    /// Pairs with `--pr-title`; both are needed for the banner to render
+    /// the `PR #<n> — <title>` link (a url with no title, or vice-versa,
+    /// renders no link — graceful degradation, the banner is unchanged).
+    /// The `<a href>` is navigation on click, NOT a resource load: the
+    /// report still makes zero requests when opened offline. The PR number
+    /// is derived from the url's `/pull/<n>` segment unless `--pr-number`
+    /// overrides it.
+    ///
+    /// Overrides `[pr].url` in `--config` (CLI-over-TOML). Inert on the
+    /// `--baseline-manifest` arm (the banner names no PR there).
+    #[arg(long, value_name = "URL")]
+    pub pr_url: Option<String>,
+
+    /// The source PR's title (cute-dbt#346) — rendered as askama-escaped
+    /// text beside the linked `PR #<n>` in the change-context banner. Pairs
+    /// with `--pr-url`. Overrides `[pr].title` in `--config`.
+    #[arg(long, value_name = "TITLE")]
+    pub pr_title: Option<String>,
+
+    /// The source PR's number (cute-dbt#346), shown as `PR #<n>`. Optional —
+    /// derived from the `--pr-url` `/pull/<n>` segment when omitted.
+    /// Overrides `[pr].number` in `--config`.
+    #[arg(long, value_name = "N")]
+    pub pr_number: Option<u64>,
 }
 
 /// Arguments for `cute-dbt explore` (cute-dbt#100) — full-manifest,

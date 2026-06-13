@@ -65,17 +65,17 @@ use crate::domain::{
     BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_MACRO_BODY_CAP, DEFAULT_REPORT_TITLE,
     DepDate, EnabledExperiments, Experiment, FixtureTableDiff, GovernanceFacts, HeuristicId,
     InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex,
-    PreflightError, ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ScopeInput,
-    ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock,
-    VarReference, all_models, attach_hook_facts, attach_model_yaml_diffs, attach_var_facts,
-    attribute_config_tree_changes, attribute_var_changes, changed_macros_baseline,
-    changed_macros_pr_diff, changed_models, check_by_id, diff_project_definitions,
-    effective_fixture_format, external_fixture_table, extract_model_block, extract_unit_test_block,
-    gather_governance, hook_operations, preflight_compiled, raw_hunk_lines,
-    reconstruct_block_diffs, reconstruct_external_fixture_diff, reconstruct_model_sql_diffs,
-    reconstruct_table_diffs, refine_changed_by_hunks, resolve_check_policy,
-    resolve_experimental_config, reverse_apply, scan_pragmas, select_in_scope,
-    widen_with_config_attributions,
+    PrConfig, PrRef, PreflightError, ProjectChangePanel, ProjectFacts, ProjectFallbackReason,
+    ScopeInput, ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff,
+    UnitTestYamlBlock, VarReference, all_models, attach_hook_facts, attach_model_yaml_diffs,
+    attach_var_facts, attribute_config_tree_changes, attribute_var_changes,
+    changed_macros_baseline, changed_macros_pr_diff, changed_models, check_by_id,
+    diff_project_definitions, effective_fixture_format, external_fixture_table,
+    extract_model_block, extract_unit_test_block, gather_governance, hook_operations,
+    preflight_compiled, raw_hunk_lines, reconstruct_block_diffs, reconstruct_external_fixture_diff,
+    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks,
+    resolve_check_policy, resolve_experimental_config, reverse_apply, scan_pragmas,
+    select_in_scope, widen_with_config_attributions,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -390,6 +390,10 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
         warn_if_not_unified_zero(index);
     }
     let (report_title, report_subtitle) = resolve_report_strings(args);
+    // cute-dbt#346 — the source-PR ref for the change-context banner link.
+    // Merges `--pr-*` flags over `[pr]` config; `None` unless both a url and
+    // a title resolve. The renderer further gates it to the PR-diff arm.
+    let pr_ref = resolve_pr_ref(args);
     let (baseline_label, scope_source) = scope_banner(args, &scope_input);
     // Check selection + suppression (cute-dbt#171): the `[checks]` config
     // policy plus inline SQL pragmas scanned from each in-scope model's
@@ -416,6 +420,7 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
         &project_facts,
         &governance_facts,
         macro_lens.as_ref(),
+        pr_ref.as_ref(),
     )
     .map_err(|err| RunError::output(&args.out, err))?;
     Ok(())
@@ -1166,6 +1171,31 @@ fn resolve_report_strings(args: &ReportArgs) -> (String, Option<String>) {
     (title, subtitle)
 }
 
+/// Resolve the source-PR reference (cute-dbt#346) for the change-context
+/// banner link, merging the `--pr-url` / `--pr-title` / `--pr-number`
+/// flags over the `[pr]` config section (the CLI-over-TOML precedence the
+/// `[experimental] macro_body_cap` knob already follows). Each flag, when
+/// supplied, overrides the matching config key; the merged
+/// [`PrConfig`] is then
+/// [`resolve`](crate::domain::PrConfig::resolve)d — yielding `Some` only
+/// when both a url and a title are present (graceful degradation otherwise).
+///
+/// `review` supplies the same shape via `--pr-url`/`--pr-title`/`--pr-number`
+/// in its composed [`ReportArgs`], derived from `gh pr view`.
+fn resolve_pr_ref(args: &ReportArgs) -> Option<PrRef> {
+    let cfg = args
+        .config
+        .as_ref()
+        .map(|c| c.pr.clone())
+        .unwrap_or_default();
+    let merged = PrConfig {
+        url: args.pr_url.clone().or(cfg.url),
+        title: args.pr_title.clone().or(cfg.title),
+        number: args.pr_number.or(cfg.number),
+    };
+    merged.resolve()
+}
+
 /// Build the resolved check display policy (cute-dbt#171): the
 /// `[checks]` config selection + suppress entries, extended with the
 /// inline `-- cute-dbt: ignore(check-id, "reason")` pragmas scanned
@@ -1529,6 +1559,7 @@ fn render(
     project_facts: &ProjectFacts,
     governance: &GovernanceFacts,
     macro_lens: Option<&MacroLensPayload>,
+    pr_ref: Option<&PrRef>,
 ) -> Result<(), io::Error> {
     render_report_with_externals(
         out,
@@ -1550,6 +1581,7 @@ fn render(
         project_facts,
         governance,
         macro_lens,
+        pr_ref,
     )
 }
 
@@ -1568,6 +1600,9 @@ mod tests {
             modified_selectors: Vec::new(),
             experimental: None,
             macro_body_cap: None,
+            pr_url: None,
+            pr_title: None,
+            pr_number: None,
         }
     }
 
@@ -1600,6 +1635,7 @@ mod tests {
             },
             checks: crate::domain::ChecksConfig::default(),
             experimental: crate::domain::ExperimentalConfig::default(),
+            pr: crate::domain::PrConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, DEFAULT_REPORT_TITLE);
@@ -1616,6 +1652,7 @@ mod tests {
             },
             checks: crate::domain::ChecksConfig::default(),
             experimental: crate::domain::ExperimentalConfig::default(),
+            pr: crate::domain::PrConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, "Q3 review");
@@ -1632,10 +1669,82 @@ mod tests {
             },
             checks: crate::domain::ChecksConfig::default(),
             experimental: crate::domain::ExperimentalConfig::default(),
+            pr: crate::domain::PrConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, "title-only");
         assert!(subtitle.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // resolve_pr_ref (cute-dbt#346) — the change-context banner PR link,
+    // merging --pr-* flags over the [pr] config section.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn resolve_pr_ref_is_none_without_flags_or_config() {
+        assert!(resolve_pr_ref(&cli("report.html")).is_none());
+    }
+
+    #[test]
+    fn resolve_pr_ref_from_flags_alone() {
+        let mut cli = cli("report.html");
+        cli.pr_url = Some("https://github.com/o/r/pull/42".to_owned());
+        cli.pr_title = Some("Add churn".to_owned());
+        let pr = resolve_pr_ref(&cli).expect("flags resolve a ref");
+        assert_eq!(pr.number, 42);
+        assert_eq!(pr.title, "Add churn");
+        assert_eq!(pr.url, "https://github.com/o/r/pull/42");
+    }
+
+    #[test]
+    fn resolve_pr_ref_url_without_title_is_none() {
+        let mut cli = cli("report.html");
+        cli.pr_url = Some("https://github.com/o/r/pull/42".to_owned());
+        assert!(resolve_pr_ref(&cli).is_none(), "no title ⇒ no link");
+    }
+
+    #[test]
+    fn resolve_pr_ref_from_config_section() {
+        let mut cli = cli("report.html");
+        cli.config = Some(crate::domain::AnalysisConfig {
+            report: crate::domain::ReportConfig::default(),
+            checks: crate::domain::ChecksConfig::default(),
+            experimental: crate::domain::ExperimentalConfig::default(),
+            pr: crate::domain::PrConfig {
+                url: Some("https://github.com/o/r/pull/9".to_owned()),
+                title: Some("from config".to_owned()),
+                number: None,
+            },
+        });
+        let pr = resolve_pr_ref(&cli).expect("config resolves a ref");
+        assert_eq!(pr.number, 9);
+        assert_eq!(pr.title, "from config");
+    }
+
+    #[test]
+    fn resolve_pr_ref_flags_override_config_per_key() {
+        let mut cli = cli("report.html");
+        cli.config = Some(crate::domain::AnalysisConfig {
+            report: crate::domain::ReportConfig::default(),
+            checks: crate::domain::ChecksConfig::default(),
+            experimental: crate::domain::ExperimentalConfig::default(),
+            pr: crate::domain::PrConfig {
+                url: Some("https://github.com/o/r/pull/9".to_owned()),
+                title: Some("config title".to_owned()),
+                number: Some(9),
+            },
+        });
+        // The flag overrides the matching config key (CLI-over-TOML).
+        cli.pr_title = Some("flag title".to_owned());
+        cli.pr_number = Some(99);
+        let pr = resolve_pr_ref(&cli).expect("merged ref");
+        assert_eq!(pr.title, "flag title", "flag title wins");
+        assert_eq!(pr.number, 99, "flag number wins");
+        assert_eq!(
+            pr.url, "https://github.com/o/r/pull/9",
+            "config url retained"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1652,6 +1761,7 @@ mod tests {
                 enable: vec!["macro-lens".to_owned()],
                 macro_body_cap: cap,
             },
+            pr: crate::domain::PrConfig::default(),
         });
         cli
     }
@@ -1728,6 +1838,7 @@ mod tests {
             report: crate::domain::ReportConfig::default(),
             checks,
             experimental: crate::domain::ExperimentalConfig::default(),
+            pr: crate::domain::PrConfig::default(),
         });
         cli
     }
@@ -1899,6 +2010,7 @@ mod tests {
                 enable: enable.iter().map(|s| (*s).to_owned()).collect(),
                 macro_body_cap: None,
             },
+            pr: crate::domain::PrConfig::default(),
         });
         cli
     }

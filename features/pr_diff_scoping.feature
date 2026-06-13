@@ -55,6 +55,33 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the rendered report contains a CTE diagram for "dim_payers"
     And the rendered report contains a CTE diagram for "mart_dq_summary"
 
+  # cute-dbt#346 — the change-context banner links to the source PR.
+  Scenario: A supplied PR url + title renders a linked banner clause
+    Given a PR diff that changes "models/marts/core/dim_payers.sql"
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel"
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --pr-url "https://github.com/acme/shop/pull/77" --pr-title "Add unknown-payer sentinel" --out report.html
+    Then the exit code is 0
+    And the change-context banner links to "https://github.com/acme/shop/pull/77" as "PR #77"
+
+  # cute-dbt#346 — an untrusted PR title is escaped, never injected as HTML.
+  Scenario: A PR title with HTML metacharacters is escaped in the banner
+    Given a PR diff that changes "models/marts/core/dim_payers.sql"
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel"
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --pr-url "https://github.com/acme/shop/pull/9" --pr-title "<script>alert(1)</script>" --out report.html
+    Then the exit code is 0
+    And the banner shows the title "<script>alert(1)</script>" as escaped text
+
+  # cute-dbt#346 — graceful degradation: no PR context ⇒ no link.
+  Scenario: A PR-diff report without PR context shows no banner link
+    Given a PR diff that changes "models/marts/core/dim_payers.sql"
+    And the manifest contains a model with original_file_path "models/marts/core/dim_payers.sql"
+    And the model "dim_payers" has a unit test "test_dim_payers_injects_unknown_sentinel"
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the change-context banner shows no PR link
+
   # CPO finding — proves SCOPING, not just selection.
   Scenario: An unchanged sibling model is NOT in the rendered report
     Given a PR diff that changes "models/marts/core/dim_payers.sql"
