@@ -376,17 +376,33 @@
     explorer, #345); the fidelity chip above already states the per-arm
     confidence honestly (S2). -#}
     <div class="macro-lens-models" data-testid="macro-lens-models" data-macro="{{ mac.name }}">
+{#- cute-dbt#265 Slice D (founder D5) — the inline-body cap. The selector
+    lists EVERY impacted model (cheap), but only the first
+    `mac.inlined_count` (= min(gen-time cap, impacted_count)) carry a
+    server-rendered SQL panel; past the cap the panel is identity-only. When
+    the cap is exceeded the "showing N of M bodies" line states it honestly,
+    bounding a widely-used macro's (single, frozen) report size. -#}
+{%- if mac.inlined_count < mac.impacted_count %}
+      <p class="macro-lens-body-cap" data-testid="macro-lens-body-cap" data-inlined="{{ mac.inlined_count }}" data-total="{{ mac.impacted_count }}">Showing {{ mac.inlined_count }} of {{ mac.impacted_count }} model bodies inline &mdash; the rest are listed in the directory tree above (raise <code>macro_body_cap</code> to inline more).</p>
+{%- endif %}
       <div class="macro-lens-model-selector-row">
         <label for="macro-lens-model-select-{{ loop.index0 }}">Impacted model</label>
         <select id="macro-lens-model-select-{{ loop.index0 }}" class="macro-lens-model-select" data-testid="macro-lens-model-select">
 {%- for im in mac.impacted_models %}
-          <option value="{{ im.model_id }}">{{ im.name }}{% if im.call_site_total > 0 %}  ({{ im.call_site_total }}){% endif %}</option>
+          <option value="{{ im.model_id }}">{{ im.name }}{% if im.call_site_total > 0 %}  ({{ im.call_site_total }}){% endif %}{% if !im.inline_body %}  &mdash; body not inlined{% endif %}</option>
 {%- endfor %}
         </select>
       </div>
 {%- for im in mac.impacted_models %}
-      <div class="macro-lens-model-panel" data-testid="macro-lens-model-panel" data-model="{{ im.model_id }}"{% if !loop.first %} hidden{% endif %}>
+      <div class="macro-lens-model-panel" data-testid="macro-lens-model-panel" data-model="{{ im.model_id }}" data-inline-body="{{ im.inline_body }}"{% if !loop.first %} hidden{% endif %}>
         <p class="macro-lens-model-head"><code class="macro-lens-model-name">{{ im.name }}</code>{% if !im.path.is_empty() %} <code class="macro-lens-model-path">{{ im.path }}</code>{% endif %}</p>
+{#- Slice D — past the gen-time cap the heavy surface (inline SQL +
+    call sites) is intentionally not server-rendered; show a compact
+    affordance instead so the report stays bounded for a widely-used
+    macro. The model still appears in the selector + the directory tree. -#}
+{%- if !im.inline_body %}
+        <p class="macro-lens-model-uninlined" data-testid="macro-lens-model-uninlined">Body not inlined (over the <code>macro_body_cap</code> limit) &mdash; this model is listed in the directory tree above.</p>
+{%- else %}
 {#- First-order call sites: the lines of THIS model's body that invoke the
     changed macro. Shown up to the cap; the remainder fold behind a
     <details> "more" disclosure so a heavily-calling model stays compact. -#}
@@ -407,6 +423,7 @@
 {% endfor %}</pre>
 {%- else %}
         <p class="macro-lens-model-sql-none" data-testid="macro-lens-model-sql-none">No raw SQL recorded for this model in the manifest.</p>
+{%- endif %}
 {%- endif %}
       </div>
 {%- endfor %}

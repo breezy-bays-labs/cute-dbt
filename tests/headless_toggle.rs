@@ -12323,8 +12323,11 @@ fn render_macro_lens_to_file(filename: &str) -> String {
     };
     let index = NormalizedDiffIndex::new(&diff, None);
     let changed = [macro_id.to_owned()].into_iter().collect();
+    // A high cap so the 2-model Slice B/C tests inline both bodies (the cap
+    // never bites here; the dedicated Slice D test exercises the cap).
     let lens: MacroLensPayload =
-        build_macro_lens(&m, &changed, ScopeSource::PrDiff, Some(&index)).expect("lens builds");
+        build_macro_lens(&m, &changed, ScopeSource::PrDiff, Some(&index), usize::MAX)
+            .expect("lens builds");
 
     let models: ModelInScopeSet = [
         NodeId::new("model.shop.stg_orders"),
@@ -12496,6 +12499,212 @@ fn macro_lens_model_selector_switches_the_shown_model_in_a_real_browser() {
         visible_after, "model.shop.stg_orders",
         "selecting the second model shows ITS panel",
     );
+    let _ = tab.close(true);
+}
+
+/// cute-dbt#265 Slice D — render a macro-lens report where the changed
+/// macro reaches `model_count` root-project models, capped at `body_cap`
+/// inline bodies, to a temp file. The genuine `build_macro_lens` output so
+/// the cap affordance is proven in a real browser with the full asset
+/// bundle loaded.
+fn render_capped_macro_lens_to_file(filename: &str, model_count: usize, body_cap: usize) -> String {
+    let macro_id = "macro.shop.add_dq_flags";
+    let body = "{% macro add_dq_flags(col) %}\n  case when {{ col }} then 1 end\n{% endmacro %}";
+    let mut macros = HashMap::new();
+    macros.insert(macro_id.to_owned(), body.to_owned());
+    let mut identity = std::collections::BTreeMap::new();
+    identity.insert(
+        macro_id.to_owned(),
+        MacroIdentity::new(
+            Some("macros/dq.sql".to_owned()),
+            Some("add_dq_flags".to_owned()),
+            Some("shop".to_owned()),
+        ),
+    );
+    let raw = "select *\nfrom upstream\n  {{ add_dq_flags() }}";
+    let nodes: Vec<Node> = (0..model_count)
+        .map(|i| {
+            Node::new(
+                NodeId::new(format!("model.shop.m{i:02}")),
+                "model",
+                Checksum::new("sha256", format!("m{i:02}")),
+                Some("select 1".to_owned()),
+                Some(raw.to_owned()),
+                DependsOn::new(vec![macro_id.to_owned()], Vec::new()),
+                Some(format!("models/marts/m{i:02}.sql")),
+                NodeConfig::default(),
+                None,
+                BTreeMap::new(),
+            )
+            .with_identity(None, Some("shop".to_owned()))
+        })
+        .collect();
+    let m = Manifest::new(
+        ManifestMetadata::new("v12").with_project_name(Some("shop".to_owned())),
+        nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+        HashMap::new(),
+        macros,
+    )
+    .with_macro_identity(identity);
+    let changed = [macro_id.to_owned()].into_iter().collect();
+    let lens: MacroLensPayload =
+        build_macro_lens(&m, &changed, ScopeSource::PrDiff, None, body_cap).expect("lens builds");
+    let models: ModelInScopeSet = (0..model_count)
+        .map(|i| NodeId::new(format!("model.shop.m{i:02}")))
+        .collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &InScopeSet::new(),
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        &cute_dbt::domain::ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
+        Some(&lens),
+    )
+    .expect("render writes the report");
+    format!("file://{}", out.to_str().expect("UTF-8 path"))
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn macro_lens_inline_body_cap_bounds_the_panels_in_a_real_browser() {
+    // cute-dbt#265 Slice D — the gen-time inline-body cap, proven in a real
+    // browser: 14 impacted models capped at 10. The selector lists all 14
+    // (cheap), but only the first 10 (id order) carry a server-rendered SQL
+    // panel; the 4 over-cap models show a "body not inlined" affordance, and
+    // the "showing 10 of 14 model bodies" notice renders. This bounds a
+    // widely-used macro's report — file://, network-blocked.
+    let url = render_capped_macro_lens_to_file("cute_dbt_macro_lens_cap.html", 14, 10);
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // The selector lists ALL 14 impacted models (the cheap surface).
+    let option_count = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"macro-lens-model-select\"] option').length",
+    );
+    assert_eq!(option_count.as_i64(), Some(14), "selector lists all 14");
+
+    // Exactly 10 inline SQL panels are server-rendered (the bounded heavy
+    // surface). The remaining 4 models carry the uninlined affordance.
+    let sql_panels = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"macro-lens-model-sql\"]').length",
+    );
+    assert_eq!(sql_panels.as_i64(), Some(10), "exactly the cap inlines SQL");
+    let uninlined = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"macro-lens-model-uninlined\"]').length",
+    );
+    assert_eq!(uninlined.as_i64(), Some(4), "4 over-cap models uninlined");
+
+    // The "showing 10 of 14 model bodies" notice renders with the honest
+    // counts.
+    let inlined_attr = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"macro-lens-body-cap\"]').getAttribute('data-inlined')",
+    );
+    assert_eq!(inlined_attr, "10", "the body-cap notice reads 10 inlined");
+    let total_attr = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"macro-lens-body-cap\"]').getAttribute('data-total')",
+    );
+    assert_eq!(total_attr, "14", "the body-cap notice reads 14 total");
+
+    // The selector still drives panel visibility for an over-cap model: at
+    // boot the first panel is visible; selecting an over-cap model shows its
+    // (uninlined) panel — the cap does not break the selector contract.
+    let _ = eval(
+        &tab,
+        "(function(){var s=document.querySelector('[data-testid=\"macro-lens-model-select\"]');\
+           s.value='model.shop.m13';s.dispatchEvent(new Event('change'));})()",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"macro-lens-model-panel\"]"),
+        1,
+        "exactly one panel visible after selecting an over-cap model",
+    );
+    let visible_uninlined = eval(
+        &tab,
+        "(() => { const p = Array.from(document.querySelectorAll('[data-testid=\"macro-lens-model-panel\"]'))\
+           .find(el => el.checkVisibility()); return p && p.getAttribute('data-inline-body') === 'false'; })()",
+    );
+    assert_eq!(
+        visible_uninlined.as_bool(),
+        Some(true),
+        "the visible over-cap panel is the uninlined one",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn macro_lens_cap_renders_on_the_committed_heavy_golden_in_a_real_browser() {
+    // cute-dbt#265 Slice D — the COMMITTED macro-heavy golden
+    // (examples/macro-heavy-report.html, experimental:"1") has `mask_pii`
+    // reaching 14 root-project models with the default cap of 10, so it is
+    // the dogfood proof the cap renders: "showing 10 of 14 model bodies",
+    // exactly 10 inlined SQL panels, and the over-cap affordance — proven
+    // in a real browser, file://, network-blocked (the same job that runs
+    // headless_zero_egress, which structurally guarantees zero egress for
+    // every committed example built by the same renderer).
+    let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("macro-heavy-report.html");
+    let url = format!("file://{}", golden.to_str().expect("UTF-8 path"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"macro-lens-panel\"]"),
+        1,
+        "the committed heavy golden carries the macro-lens section",
+    );
+    // The selector lists all 14 impacted models.
+    let option_count = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"macro-lens-model-select\"] option').length",
+    );
+    assert_eq!(option_count.as_i64(), Some(14), "selector lists all 14");
+    // The cap bounds the inlined SQL panels at the default (10).
+    let sql_panels = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"macro-lens-model-sql\"]').length",
+    );
+    assert_eq!(sql_panels.as_i64(), Some(10), "the default cap inlines 10");
+    // The over-cap affordance + the "10 of 14" notice render.
+    let uninlined = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"macro-lens-model-uninlined\"]').length",
+    );
+    assert_eq!(uninlined.as_i64(), Some(4), "4 over-cap models uninlined");
+    let inlined_attr = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"macro-lens-body-cap\"]').getAttribute('data-inlined')",
+    );
+    assert_eq!(inlined_attr, "10", "the committed golden reads 10 inlined");
     let _ = tab.close(true);
 }
 

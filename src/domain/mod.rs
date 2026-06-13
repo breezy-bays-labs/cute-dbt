@@ -79,8 +79,8 @@ pub use cte::{
     SubqueryKind,
 };
 pub use experimental::{
-    EnabledExperiments, Experiment, ExperimentalConfig, ExperimentalError, parse_experimental_env,
-    resolve_experimental_config,
+    DEFAULT_MACRO_BODY_CAP, EnabledExperiments, Experiment, ExperimentalConfig, ExperimentalError,
+    parse_experimental_env, resolve_experimental_config,
 };
 pub use governance::{
     BlastRadius, BreakingReason, ColumnMetaTags, ConstraintSupport, ContractChange, ContractClass,

@@ -92,14 +92,37 @@ impl Experiment {
     }
 }
 
+/// The default number of impacted-model bodies the macro lens inlines
+/// before falling back to the lightweight tree-only affordance
+/// (cute-dbt#265 Slice D, founder D5).
+///
+/// A widely-used macro can reach 50+ models; server-rendering every
+/// impacted model's SQL panel would bloat the (frozen, single-file)
+/// report. The cap bounds the heavy surface — the first
+/// `DEFAULT_MACRO_BODY_CAP` impacted models (in id order) carry a
+/// server-rendered inline SQL + call-site panel; the rest show a
+/// "body not inlined — showing N of M" affordance (the model-selector
+/// still lists ALL impacted models — that list is cheap). The cap is a
+/// **gen-time knob**, not a post-gen HTML toggle: the report is static
+/// once rendered, so the number of inlined bodies is fixed at
+/// generation time via `[experimental] macro_body_cap` (or the
+/// `--macro-body-cap` flag).
+pub const DEFAULT_MACRO_BODY_CAP: usize = 10;
+
 /// `[experimental]` table of the `--config` TOML — an additive POD
 /// section on [`crate::domain::AnalysisConfig`].
 ///
-/// One key: `enable`, a list of exact experiment ids
-/// (`enable = ["project-state"]`). No globs, no `"all"` — the TOML is
-/// authored config, so it names experiments precisely; the `1`/`all`
-/// shorthand is env-var-only ergonomics. An absent table (or an empty
-/// list) enables nothing.
+/// Keys:
+/// - `enable`, a list of exact experiment ids
+///   (`enable = ["project-state"]`). No globs, no `"all"` — the TOML is
+///   authored config, so it names experiments precisely; the `1`/`all`
+///   shorthand is env-var-only ergonomics. An absent table (or an empty
+///   list) enables nothing.
+/// - `macro_body_cap`, an optional positive integer bounding how many
+///   impacted-model bodies the macro lens inlines (cute-dbt#265 Slice D,
+///   founder D5). Absent ⇒ [`DEFAULT_MACRO_BODY_CAP`] (resolved at the
+///   cli I/O boundary). Only meaningful with the `macro-lens` experiment
+///   on; inert otherwise.
 #[derive(Debug, Default, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExperimentalConfig {
@@ -107,6 +130,13 @@ pub struct ExperimentalConfig {
     /// `--config` parse time ([`resolve_experimental_config`]).
     #[serde(default)]
     pub enable: Vec<String>,
+    /// The macro-lens inline-body cap (cute-dbt#265 Slice D, founder D5).
+    /// `None` (the key omitted) ⇒ [`DEFAULT_MACRO_BODY_CAP`] at the cli
+    /// boundary. A `usize` so a negative or non-integer value is a clap
+    /// usage error at `--config` parse time (exit 2) — the
+    /// fail-closed-config posture, never a [`crate::domain::PreflightError`].
+    #[serde(default)]
+    pub macro_body_cap: Option<usize>,
 }
 
 /// An `[experimental]` / `CUTE_DBT_EXPERIMENTAL` resolution failure.
@@ -324,6 +354,7 @@ mod tests {
     fn enable_project_state_resolves_to_the_singleton_set() {
         let config = ExperimentalConfig {
             enable: vec!["project-state".to_owned()],
+            macro_body_cap: None,
         };
         let set = resolve_experimental_config(&config).expect("known id resolves");
         assert_eq!(set, BTreeSet::from([Experiment::ProjectState]));
@@ -333,6 +364,7 @@ mod tests {
     fn duplicate_enable_entries_dedup() {
         let config = ExperimentalConfig {
             enable: vec!["project-state".to_owned(), "project-state".to_owned()],
+            macro_body_cap: None,
         };
         let set = resolve_experimental_config(&config).expect("duplicates resolve");
         assert_eq!(set.len(), 1);
@@ -342,6 +374,7 @@ mod tests {
     fn unknown_enable_entry_fails_closed_with_remediation() {
         let config = ExperimentalConfig {
             enable: vec!["projcet-state".to_owned()],
+            macro_body_cap: None,
         };
         let err = resolve_experimental_config(&config).expect_err("unknown id fails");
         let msg = err.to_string();
@@ -351,12 +384,33 @@ mod tests {
     }
 
     #[test]
+    fn default_config_has_no_macro_body_cap_override() {
+        // cute-dbt#265 Slice D: an absent `macro_body_cap` key means the
+        // cli boundary applies DEFAULT_MACRO_BODY_CAP — the POD carries
+        // None, not the literal default (the default lives at the I/O
+        // boundary, the same posture as the report title fallback).
+        assert!(ExperimentalConfig::default().macro_body_cap.is_none());
+    }
+
+    #[test]
+    fn macro_body_cap_zero_is_a_valid_override() {
+        // 0 is a legal cap (inline nothing — tree-only). A `usize` accepts
+        // it; the render side treats 0 as "no inline bodies".
+        let config = ExperimentalConfig {
+            enable: vec![],
+            macro_body_cap: Some(0),
+        };
+        assert_eq!(config.macro_body_cap, Some(0));
+    }
+
+    #[test]
     fn toml_does_not_accept_the_env_only_all_shorthand() {
         // "all"/"1" are env-var ergonomics; authored TOML names
         // experiments precisely.
         for shorthand in ["all", "1"] {
             let config = ExperimentalConfig {
                 enable: vec![shorthand.to_owned()],
+                macro_body_cap: None,
             };
             let err =
                 resolve_experimental_config(&config).expect_err("TOML rejects the env shorthand");
