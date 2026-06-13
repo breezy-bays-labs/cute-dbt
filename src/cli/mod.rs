@@ -1576,6 +1576,7 @@ mod tests {
 
     #[test]
     fn build_check_policy_resolves_the_config_selection() {
+        use crate::domain::CheckId as _;
         // Registry-shape-robust: `grain.*` removes exactly the grain
         // group; every other registered check (e.g. union.arm-coverage,
         // cute-dbt#172) stays displayed. Governance ON so the enforcement
@@ -1592,7 +1593,6 @@ mod tests {
         );
         // Governance ON ⇒ start from the FULL registry (enforcement
         // included); `grain.*` removes only the grain group.
-        use crate::domain::CheckId as _;
         let expected: Vec<HeuristicId> = HeuristicId::ALL
             .iter()
             .copied()
@@ -1630,6 +1630,7 @@ mod tests {
 
     #[test]
     fn build_check_policy_skips_unknown_pragma_ids_and_out_of_scope_models() {
+        use crate::domain::CheckId as _;
         let manifest = manifest_of_models(vec![
             model_with_raw(
                 "model.shop.orders",
@@ -1654,7 +1655,6 @@ mod tests {
         );
         // Governance ON ⇒ the full registry displays (enforcement
         // included), unaffected by the inert unknown pragma.
-        use crate::domain::CheckId as _;
         assert_eq!(policy.displayed, HeuristicId::ALL.to_vec());
     }
 

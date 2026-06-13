@@ -870,32 +870,39 @@ pub fn constraint_support(adapter: &str, kind: ConstraintKind) -> ConstraintSupp
     }
 }
 
-/// Whether an enabled data test backs a `kind` constraint on `column` of
-/// `model` (cute-dbt#260 Slice 3) — the INFERRED constraint→test edge.
+/// The id of the first enabled data test that backs a `kind` constraint
+/// on `column` of `model` (cute-dbt#260 Slice 3), or `None` when the
+/// constraint has no inferable backing — the INFERRED constraint→test
+/// edge.
 ///
 /// The manifest never links a constraint to its backing test, so cute-dbt
 /// joins: a `test.*` node `attached_node`'d to `model`, enabled, whose
 /// `test_metadata.name` is the generic test that backs `kind`
 /// (`unique` ⇒ `"unique"`, `not_null` ⇒ `"not_null"`), and whose target
 /// column (the `column_name` kwarg, falling back to the node-level
-/// `column_name`) equals `column` (case-insensitive). The inference can
-/// MISS a renamed test or a custom/singular test that asserts the same
-/// thing — the surface copy admits this (authoring discipline, never a
-/// warehouse-truth claim).
+/// `column_name`) equals `column` (case-insensitive). Returns the real
+/// test node id so a Covered finding can attribute it (the
+/// `Verdict::Covered.by` contract — never a synthetic label). The
+/// inference can MISS a renamed test or a custom/singular test that
+/// asserts the same thing — the surface copy admits this (authoring
+/// discipline, never a warehouse-truth claim).
+///
+/// Iteration order is the `HashMap`'s, so the chosen id among multiple
+/// backing tests is unspecified — but the finding's presence (Covered vs
+/// Uncovered) is order-independent, which is the load-bearing property.
 #[must_use]
-pub fn backing_test_for(
-    manifest: &Manifest,
+pub fn backing_test_for<'m>(
+    manifest: &'m Manifest,
     model: &NodeId,
     column: &str,
     kind: ConstraintKind,
-) -> bool {
-    let Some(test_name) = backing_test_name(kind) else {
-        return false;
-    };
+) -> Option<&'m NodeId> {
+    let test_name = backing_test_name(kind)?;
     manifest
         .nodes()
-        .values()
-        .any(|node| test_backs(node, model, column, test_name))
+        .iter()
+        .find(|(_, node)| test_backs(node, model, column, test_name))
+        .map(|(id, _)| id)
 }
 
 /// The generic data-test name that backs a constraint kind, or `None`
@@ -2313,24 +2320,23 @@ mod tests {
     }
 
     #[test]
-    fn backing_test_present_for_a_matching_unique_test() {
+    fn backing_test_present_returns_the_real_test_node_id() {
+        // The id is the REAL test node — so a Covered finding attributes
+        // the actual test, never a synthetic label (the Verdict::Covered.by
+        // contract; CodeRabbit on #339).
         let model_id = NodeId::new("model.pkg.m");
         let manifest = manifest_with_nodes(vec![
             model("model.pkg.m", None),
             test_node("test.pkg.u", "model.pkg.m", "unique", "id"),
         ]);
-        assert!(backing_test_for(
-            &manifest,
-            &model_id,
-            "id",
-            ConstraintKind::PrimaryKey
-        ));
-        assert!(backing_test_for(
-            &manifest,
-            &model_id,
-            "id",
-            ConstraintKind::Unique
-        ));
+        assert_eq!(
+            backing_test_for(&manifest, &model_id, "id", ConstraintKind::PrimaryKey),
+            Some(&NodeId::new("test.pkg.u")),
+        );
+        assert_eq!(
+            backing_test_for(&manifest, &model_id, "id", ConstraintKind::Unique),
+            Some(&NodeId::new("test.pkg.u")),
+        );
     }
 
     #[test]
@@ -2340,12 +2346,7 @@ mod tests {
             model("model.pkg.m", None),
             test_node("test.pkg.u", "model.pkg.m", "unique", "other_col"),
         ]);
-        assert!(!backing_test_for(
-            &manifest,
-            &model_id,
-            "id",
-            ConstraintKind::PrimaryKey
-        ));
+        assert!(backing_test_for(&manifest, &model_id, "id", ConstraintKind::PrimaryKey).is_none());
     }
 
     #[test]
@@ -2359,7 +2360,7 @@ mod tests {
             test_node("test.pkg.x", "model.pkg.m", "my_custom_unique", "id"),
         ]);
         assert!(
-            !backing_test_for(&manifest, &model_id, "id", ConstraintKind::PrimaryKey),
+            backing_test_for(&manifest, &model_id, "id", ConstraintKind::PrimaryKey).is_none(),
             "the inferred edge can miss a renamed test (the hedge)",
         );
     }
@@ -2379,12 +2380,7 @@ mod tests {
             )),
         );
         let manifest = manifest_with_nodes(vec![model("model.pkg.m", None), t]);
-        assert!(backing_test_for(
-            &manifest,
-            &model_id,
-            "id",
-            ConstraintKind::Unique
-        ));
+        assert!(backing_test_for(&manifest, &model_id, "id", ConstraintKind::Unique).is_some());
     }
 
     #[test]
@@ -2394,16 +2390,11 @@ mod tests {
             model("model.pkg.m", None),
             test_node("test.pkg.u", "model.pkg.other", "unique", "id"),
         ]);
-        assert!(!backing_test_for(
-            &manifest,
-            &model_id,
-            "id",
-            ConstraintKind::Unique
-        ));
+        assert!(backing_test_for(&manifest, &model_id, "id", ConstraintKind::Unique).is_none());
     }
 
     #[test]
-    fn backing_test_for_non_unique_kinds_is_always_false() {
+    fn backing_test_for_non_unique_kinds_is_always_none() {
         let model_id = NodeId::new("model.pkg.m");
         let manifest = manifest_with_nodes(vec![model("model.pkg.m", None)]);
         for kind in [
@@ -2411,7 +2402,7 @@ mod tests {
             ConstraintKind::Check,
             ConstraintKind::Custom,
         ] {
-            assert!(!backing_test_for(&manifest, &model_id, "id", kind));
+            assert!(backing_test_for(&manifest, &model_id, "id", kind).is_none());
         }
     }
 
@@ -2422,12 +2413,7 @@ mod tests {
             model("model.pkg.m", None),
             test_node("test.pkg.nn", "model.pkg.m", "not_null", "id"),
         ]);
-        assert!(backing_test_for(
-            &manifest,
-            &model_id,
-            "id",
-            ConstraintKind::NotNull
-        ));
+        assert!(backing_test_for(&manifest, &model_id, "id", ConstraintKind::NotNull).is_some());
     }
 
     #[test]
@@ -2454,12 +2440,7 @@ mod tests {
             Some(TestMetadata::new("unique", None, serde_json::json!({}))),
         );
         let manifest = manifest_with_nodes(vec![model("model.pkg.m", None), disabled]);
-        assert!(!backing_test_for(
-            &manifest,
-            &model_id,
-            "id",
-            ConstraintKind::Unique
-        ));
+        assert!(backing_test_for(&manifest, &model_id, "id", ConstraintKind::Unique).is_none());
     }
 
     #[test]
@@ -2467,11 +2448,6 @@ mod tests {
         // No test node at all ⇒ no backing.
         let model_id = NodeId::new("model.pkg.m");
         let manifest = manifest_with_nodes(vec![model("model.pkg.m", None)]);
-        assert!(!backing_test_for(
-            &manifest,
-            &model_id,
-            "id",
-            ConstraintKind::Unique
-        ));
+        assert!(backing_test_for(&manifest, &model_id, "id", ConstraintKind::Unique).is_none());
     }
 }
