@@ -198,6 +198,16 @@ mod tests {
     }
 
     #[test]
+    fn normalize_path_keeps_single_slashes_while_collapsing_a_run() {
+        // A path with BOTH a single separator and a `//` run: the single
+        // `/` must survive, only the run collapses. Pins the collapse
+        // loop's per-run dedup (`if !prev_slash`) — a path with a `//`
+        // run but no lone separator (e.g. `models//x.sql`) cannot tell
+        // the dedup apart from dropping every first-of-run slash.
+        assert_eq!(normalize_path("a/b//c/d", None), "a/b/c/d");
+    }
+
+    #[test]
     fn normalize_path_leaves_unrelated_paths_unchanged() {
         assert_eq!(normalize_path("README.md", None), "README.md");
     }
