@@ -855,20 +855,32 @@ fn split_quote_aware(s: &str, sep: char) -> Vec<String> {
                     quote = None;
                 }
             }
-            None => {
-                if c == '\'' || c == '"' {
-                    quote = Some(c);
-                    cur.push(c);
-                } else if c == sep {
-                    parts.push(std::mem::take(&mut cur));
-                } else {
-                    cur.push(c);
-                }
-            }
+            None => step_unquoted(c, sep, &mut cur, &mut parts, &mut quote),
         }
     }
     parts.push(cur);
     parts
+}
+
+/// Handle one character outside any quoted run in [`split_quote_aware`]:
+/// a quote opens a run (kept verbatim), the separator flushes the current
+/// part, anything else accumulates. Splits this branch out of the
+/// `match quote` ladder so the function stays under the strict CRAP bar.
+fn step_unquoted(
+    c: char,
+    sep: char,
+    cur: &mut String,
+    parts: &mut Vec<String>,
+    quote: &mut Option<char>,
+) {
+    if c == '\'' || c == '"' {
+        *quote = Some(c);
+        cur.push(c);
+    } else if c == sep {
+        parts.push(std::mem::take(cur));
+    } else {
+        cur.push(c);
+    }
 }
 
 // ---------------------------------------------------------------------
