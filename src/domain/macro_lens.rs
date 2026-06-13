@@ -38,9 +38,13 @@
 //!    reverse over *all* nodes would flood the radius with hundreds of
 //!    test nodes. Only models surface.
 //! 2. **`package_name == metadata().project_name()`** — root-project
-//!    models only. A vendor-package model that happens to call a
-//!    root-project macro is not the reviewer's concern, and the project
-//!    name is free + pr-diff-available (cute-dbt#256).
+//!    models only. A *vendor*-package model (`Some(other)`) that happens to
+//!    call a root-project macro is not the reviewer's concern; but a model
+//!    with **no recorded package** (`None`, fusion-unset) fails **open** and
+//!    surfaces — it is a root-project model, not a vendor one, and dropping
+//!    it would under-claim the blast radius. This shares null-package
+//!    semantics with the macro-side `is_root_project_macro` fail-open
+//!    (cute-dbt#256, cute-dbt#366).
 //!
 //! ## Known fidelity limits (named, not silently dropped)
 //!
@@ -92,7 +96,13 @@ pub fn macro_blast_radius(manifest: &Manifest, changed_macro_id: &str) -> BTreeS
         .nodes()
         .iter()
         .filter(|(_, node)| node.resource_type() == "model")
-        .filter(|(_, node)| node.package_name() == Some(project))
+        // Fail-open on a null/unset package: a root-project model whose
+        // package fusion left unset must still surface — only a *vendor*
+        // package (`Some(other)`) is dropped. Mirrors the macro-side
+        // `is_root_project_macro` fail-open so both filters for this feature
+        // share null-package semantics; strict `== Some(project)` would
+        // under-claim the blast radius (cute-dbt#366).
+        .filter(|(_, node)| node.package_name().is_none_or(|pkg| pkg == project))
         .filter(|(_, node)| {
             direct_set_reaches(
                 manifest,
@@ -446,6 +456,26 @@ mod tests {
         .with_identity(None, Some(pkg.to_owned()))
     }
 
+    /// A root-project `model` node with **no recorded package** (`None`) —
+    /// the fusion-unset shape the wire degrades from `"package_name": null`
+    /// (cute-dbt#366).
+    fn model_with_macros_null_pkg(full_id: &str, direct_macros: &[&str]) -> Node {
+        let macros = direct_macros.iter().map(|m| (*m).to_owned()).collect();
+        Node::new(
+            NodeId::new(full_id),
+            "model",
+            Checksum::new("sha256", "abc"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::new(macros, vec![]),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(None, None)
+    }
+
     /// A non-model node (`resource_type` filter test) carrying macro deps.
     fn typed_node_with_macros(full_id: &str, resource_type: &str, direct_macros: &[&str]) -> Node {
         let macros = direct_macros.iter().map(|m| (*m).to_owned()).collect();
@@ -736,6 +766,33 @@ mod tests {
         );
         let radius = macro_blast_radius(&m, "macro.shop.add_dq_flags");
         assert_eq!(radius.len(), 1, "only the root-project model surfaces");
+        assert!(radius.contains(&id("model.shop.orders")));
+    }
+
+    #[test]
+    fn blast_radius_includes_a_null_package_root_project_model() {
+        // A model whose package fusion left unset (`None`) is a root-project
+        // model, NOT a vendor one — it must surface (fail-open), or the blast
+        // radius under-claims (cute-dbt#366). The mirror of the vendor-exclude
+        // test: the null-package model is kept, the vendor one is dropped.
+        let m = manifest_with(
+            vec![
+                model_with_macros_null_pkg("model.shop.orders", &["macro.shop.add_dq_flags"]),
+                model_with_macros_in_pkg(
+                    "model.dbt_utils.helper",
+                    &["macro.shop.add_dq_flags"],
+                    "dbt_utils",
+                ),
+            ],
+            &[],
+            &[],
+        );
+        let radius = macro_blast_radius(&m, "macro.shop.add_dq_flags");
+        assert_eq!(
+            radius.len(),
+            1,
+            "the null-package root-project model surfaces; the vendor one does not"
+        );
         assert!(radius.contains(&id("model.shop.orders")));
     }
 
