@@ -421,7 +421,18 @@ fn resolve_list<Id: CheckId>(
 pub fn resolve_check_policy<Id: CheckId>(
     config: &ChecksConfig,
 ) -> Result<CheckPolicy<Id>, CheckConfigError> {
-    let displayed = match config.mode {
+    Ok(CheckPolicy {
+        displayed: resolve_displayed::<Id>(config)?,
+        suppressions: resolve_suppressions::<Id>(config)?,
+    })
+}
+
+/// Resolve the `[checks]` `mode` + `enable`/`disable` lists into the set of
+/// displayed check ids. Enforces the cross-field mode legality gate:
+/// `enable` requires opt-in, `disable` requires opt-out, opt-in requires a
+/// non-empty `enable` list.
+fn resolve_displayed<Id: CheckId>(config: &ChecksConfig) -> Result<Vec<Id>, CheckConfigError> {
+    match config.mode {
         ChecksMode::OptOut => {
             if config.enable.is_some() {
                 return Err(CheckConfigError::EnableRequiresOptIn);
@@ -430,11 +441,11 @@ pub fn resolve_check_policy<Id: CheckId>(
                 Some(entries) => resolve_list::<Id>("disable", entries)?,
                 None => Vec::new(),
             };
-            Id::ALL
+            Ok(Id::ALL
                 .iter()
                 .copied()
                 .filter(|id| !disabled.contains(id))
-                .collect()
+                .collect())
         }
         ChecksMode::OptIn => {
             if config.disable.is_some() {
@@ -443,9 +454,17 @@ pub fn resolve_check_policy<Id: CheckId>(
             let Some(entries) = &config.enable else {
                 return Err(CheckConfigError::OptInRequiresEnable);
             };
-            resolve_list::<Id>("enable", entries)?
+            resolve_list::<Id>("enable", entries)
         }
-    };
+    }
+}
+
+/// Resolve the `[[suppress]]` entries into [`SuppressRule`]s. Each entry is
+/// exact-id-only (no glob), resolves against the registry, and requires a
+/// non-empty reason — any violation is a fail-closed config error.
+fn resolve_suppressions<Id: CheckId>(
+    config: &ChecksConfig,
+) -> Result<Vec<SuppressRule<Id>>, CheckConfigError> {
     let mut suppressions = Vec::new();
     for entry in &config.suppress {
         if entry.check.contains('*') {
@@ -473,10 +492,7 @@ pub fn resolve_check_policy<Id: CheckId>(
             source: SuppressionSource::Config,
         });
     }
-    Ok(CheckPolicy {
-        displayed,
-        suppressions,
-    })
+    Ok(suppressions)
 }
 
 // ---------------------------------------------------------------------
