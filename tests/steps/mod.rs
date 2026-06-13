@@ -31,6 +31,7 @@ pub mod pr_diff_scoping;
 pub mod project_definition;
 pub mod report_generation;
 pub mod review_compile;
+pub mod review_scope_variants;
 pub mod unit_test_format_coverage;
 pub mod unit_test_yaml;
 pub mod world;

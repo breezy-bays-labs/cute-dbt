@@ -70,7 +70,9 @@ use super::pr_diff::parse_diff;
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Args)]
 #[command(
-    group = ArgGroup::new("review_scope").multiple(false).args(["committed_only"]),
+    group = ArgGroup::new("review_scope")
+        .multiple(false)
+        .args(["committed_only", "staged", "unstaged"]),
     after_long_help = REVIEW_EXAMPLES,
 )]
 pub struct ReviewArgs {
@@ -93,6 +95,26 @@ pub struct ReviewArgs {
     /// inline diffs sound.
     #[arg(long)]
     pub committed_only: bool,
+
+    /// Review only staged changes (HEAD → the index, `git diff
+    /// --cached`).
+    ///
+    /// Honest caveat: the manifest is always compiled from the working
+    /// tree, so if a file you have staged also has *unstaged* edits, the
+    /// diff (index) and the manifest (working tree) disagree — review
+    /// detects that, warns, and the existing drift-guard degrades the
+    /// inline diffs gracefully rather than rendering wrong ones.
+    #[arg(long)]
+    pub staged: bool,
+
+    /// Review only unstaged changes (the index → the working tree,
+    /// bare `git diff`).
+    ///
+    /// This is the working-tree-vs-index slice; the manifest is
+    /// compiled from the working tree, so it lines up with this diff's
+    /// new side.
+    #[arg(long)]
+    pub unstaged: bool,
 
     /// Render the zero-scope report even when the diff is empty.
     ///
@@ -181,6 +203,10 @@ Examples:
 
   # Exactly what a PR would show — committed changes only.
   cute-dbt review --committed-only
+
+  # Only what is staged (HEAD -> index), or only unstaged edits.
+  cute-dbt review --staged
+  cute-dbt review --unstaged
 
   # Trust an already-compiled manifest; dbt is not invoked (or needed).
   cute-dbt review --no-compile
@@ -1007,15 +1033,51 @@ pub enum DiffScope {
     /// `--committed-only`: merge-base → HEAD (`$MB..HEAD`) — PR-exact
     /// parity.
     CommittedOnly,
+    /// `--staged`: HEAD → the index (`git diff --cached`) — what is
+    /// staged for commit. Revision-independent of the merge-base.
+    Staged,
+    /// `--unstaged`: the index → the working tree (bare `git diff`) —
+    /// edits not yet staged. Revision-independent of the merge-base.
+    Unstaged,
 }
 
 impl DiffScope {
-    /// The revision argument(s) for `git diff` under this scope.
+    /// The revision/selector argument(s) for `git diff` under this scope
+    /// — slotted in after the config-proof flags and before `--`. The
+    /// staged/unstaged forms carry no merge-base (they are index-
+    /// relative); `--staged` adds `--cached`, `--unstaged` adds nothing.
     fn rev_args(self, merge_base: &str) -> Vec<String> {
         match self {
             Self::WorkingTree => vec![merge_base.to_owned()],
             Self::CommittedOnly => vec![format!("{merge_base}..HEAD")],
+            Self::Staged => vec!["--cached".to_owned()],
+            Self::Unstaged => Vec::new(),
         }
+    }
+
+    /// Resolve the scope from the parsed flags. The `review_scope`
+    /// `ArgGroup` guarantees at most one is set, so the order here is a
+    /// formality; the default (none set) is the working-tree endpoint.
+    #[must_use]
+    pub fn from_flags(committed_only: bool, staged: bool, unstaged: bool) -> Self {
+        if committed_only {
+            Self::CommittedOnly
+        } else if staged {
+            Self::Staged
+        } else if unstaged {
+            Self::Unstaged
+        } else {
+            Self::WorkingTree
+        }
+    }
+
+    /// Whether this scope diffs the index rather than the working tree.
+    /// `--staged` is the one variant that can disagree with the
+    /// compiled manifest (always built from the working tree), so it is
+    /// the only scope that runs the same-revision drift check.
+    #[must_use]
+    pub fn diffs_the_index(self) -> bool {
+        matches!(self, Self::Staged)
     }
 }
 
@@ -1094,6 +1156,47 @@ pub fn status_plan(toplevel: &Path, project_rel: &str) -> CommandPlan {
         cwd: toplevel.to_path_buf(),
         env: vec![("LC_ALL", "C")],
     }
+}
+
+/// Parse `git status --porcelain` output for the same-revision drift
+/// signal on `--staged`: files whose **index** status AND **worktree**
+/// status are both non-blank — i.e. they are staged *and* carry further
+/// unstaged edits. For such a file the `--staged` diff (HEAD → index)
+/// and the manifest (compiled from the working tree) disagree, so the
+/// inline diff would mislead.
+///
+/// Porcelain v1 format: two status columns `XY` then a space then the
+/// path (`XY path`, or `XY orig -> path` for renames — the post-rename
+/// path is the one that matters and is taken). Untracked `??` and
+/// ignored `!!` lines have a blank index column, so they never count as
+/// drift. Pure — the I/O lives in the caller.
+#[must_use]
+pub fn staged_files_with_unstaged_edits(porcelain: &str) -> Vec<String> {
+    porcelain.lines().filter_map(porcelain_drift_path).collect()
+}
+
+/// One porcelain line → the drifting path, if it is staged-with-unstaged
+/// edits. `None` otherwise.
+fn porcelain_drift_path(line: &str) -> Option<String> {
+    // A status line is `XY<space>path`; anything shorter is noise.
+    if line.len() < 4 {
+        return None;
+    }
+    let bytes = line.as_bytes();
+    let index = bytes[0] as char;
+    let worktree = bytes[1] as char;
+    // Both columns must be a real status (not blank, not `?`/`!`): an
+    // unstaged-only or staged-only change is fine; the drift is the
+    // BOTH case (e.g. `MM`, `AM`, `MD`).
+    let drifting = index != ' ' && index != '?' && index != '!' && worktree != ' ';
+    if !drifting {
+        return None;
+    }
+    let path = line[3..].trim();
+    // Rename/copy form `orig -> new`: the post-rename path is what the
+    // diff names.
+    let resolved = path.rsplit(" -> ").next().unwrap_or(path);
+    Some(resolved.to_owned())
 }
 
 /// Build the `dbt --version` detection plan (cwd = the project dir, so
@@ -1269,107 +1372,178 @@ pub fn opener_invocation(path: &Path) -> (&'static str, Vec<String>) {
 /// Any [`ReviewError`] from the wrapper stages, or the composed
 /// report's own [`RunError`] passing through.
 pub fn execute_review(args: &ReviewArgs) -> Result<(), ReviewFailure> {
-    let cwd = env::current_dir().map_err(|err| ReviewError::StageFailed {
-        context: "reading the working directory",
-        detail: err.to_string(),
-    })?;
-    ensure_git_repo(&cwd)?;
-    let toplevel = git_toplevel(&cwd)?;
-    let project_dir = resolve_project_dir(args.project_dir.as_deref(), &cwd)?;
-    let project_rel = project_rel_to_toplevel(&project_dir, &toplevel)?;
-    eprintln!("cute-dbt: dbt project: {}", project_dir.display());
+    let cwd = current_dir()?;
+    let layout = resolve_review_layout(args, &cwd)?;
+    let merge_base = resolve_base(args, &layout.toplevel)?;
 
-    let facts = gather_base_facts(&toplevel, args.base.as_deref())?;
-    let (base_ref, rung) = decide_base(&facts)?;
-    let merge_base = find_merge_base(&toplevel, &base_ref)?;
-    eprintln!(
-        "cute-dbt: base: {base_ref} (via {}; merge-base {})",
-        rung.describe(),
-        short_sha(&merge_base),
-    );
-
-    let scope = if args.committed_only {
-        DiffScope::CommittedOnly
-    } else {
-        DiffScope::WorkingTree
-    };
-    let diff = diff_plan(&toplevel, &project_rel, &merge_base, scope);
-    let target_dir = resolve_target_dir(
-        &project_dir,
-        args.target_path.as_deref(),
-        env::var("DBT_TARGET_PATH").ok().as_deref(),
-    );
+    let scope = DiffScope::from_flags(args.committed_only, args.staged, args.unstaged);
+    let diff = diff_plan(&layout.toplevel, &layout.project_rel, &merge_base, scope);
     // The compile plan exists exactly when the run would compile —
     // `--dry-run` prints it from the SAME value a real run executes.
     let compile =
-        (!args.no_compile).then(|| compile_plan(&project_dir, args.target_path.as_deref()));
-    let compose = ComposeInputs {
-        manifest: target_dir.join("manifest.json"),
-        project_root: rel_or_dot(&project_rel),
-        out: resolve_out_path(args.out.as_deref(), &cwd, &target_dir),
-        config: args.config.clone(),
-    };
+        (!args.no_compile).then(|| compile_plan(&layout.project_dir, args.target_path.as_deref()));
+    let compose = build_compose_inputs(args, &cwd, &layout);
 
     if args.dry_run {
         print_dry_run(&diff, compile.as_ref(), &compose);
         return Ok(());
     }
 
-    warn_untracked(&toplevel, &project_rel);
+    warn_untracked(&layout.toplevel, &layout.project_rel);
 
     // Diff before compile: an empty diff exits here without spending
     // the (potentially slow) compile on nothing to review.
-    let patch = run_diff(&diff)?;
+    let Some(pr_diff) = scope_diff(args, &diff, &merge_base)? else {
+        return Ok(()); // "nothing to review" — already announced.
+    };
+
+    // Same-revision drift (--staged only): the diff is HEAD → index, but
+    // the manifest is compiled from the working tree. A file that is
+    // both staged AND further edited unstaged makes the two disagree —
+    // warn (the drift-guard degrades those inline diffs gracefully).
+    if scope.diffs_the_index() {
+        warn_staged_drift(&layout.toplevel, &layout.project_rel);
+    }
+
+    ensure_manifest(args, &layout.project_dir, &compose.manifest)?;
+    compose_and_render(args, &layout.toplevel, &compose, pr_diff)
+}
+
+/// The directory + project layout a review run resolves once up front:
+/// the operator's cwd, the repo toplevel, the dbt project dir, and the
+/// project's path relative to the toplevel.
+struct ReviewLayout {
+    toplevel: PathBuf,
+    project_dir: PathBuf,
+    project_rel: String,
+}
+
+/// The current working directory, mapped to a review-stage error.
+fn current_dir() -> Result<PathBuf, ReviewError> {
+    env::current_dir().map_err(|err| ReviewError::StageFailed {
+        context: "reading the working directory",
+        detail: err.to_string(),
+    })
+}
+
+/// Resolve + announce the directory layout (git preconditions, the dbt
+/// project, the toplevel-relative path).
+fn resolve_review_layout(args: &ReviewArgs, cwd: &Path) -> Result<ReviewLayout, ReviewError> {
+    ensure_git_repo(cwd)?;
+    let toplevel = git_toplevel(cwd)?;
+    let project_dir = resolve_project_dir(args.project_dir.as_deref(), cwd)?;
+    let project_rel = project_rel_to_toplevel(&project_dir, &toplevel)?;
+    eprintln!("cute-dbt: dbt project: {}", project_dir.display());
+    Ok(ReviewLayout {
+        toplevel,
+        project_dir,
+        project_rel,
+    })
+}
+
+/// Walk the base-detection ladder, announce the answering rung, and
+/// return the merge-base SHA.
+fn resolve_base(args: &ReviewArgs, toplevel: &Path) -> Result<String, ReviewError> {
+    let facts = gather_base_facts(toplevel, args.base.as_deref())?;
+    let (base_ref, rung) = decide_base(&facts)?;
+    let merge_base = find_merge_base(toplevel, &base_ref)?;
+    eprintln!(
+        "cute-dbt: base: {base_ref} (via {}; merge-base {})",
+        rung.describe(),
+        short_sha(&merge_base),
+    );
+    Ok(merge_base)
+}
+
+/// Build the in-process report composition inputs from the resolved
+/// layout (manifest location, project root, out path, config).
+fn build_compose_inputs(args: &ReviewArgs, cwd: &Path, layout: &ReviewLayout) -> ComposeInputs {
+    let target_dir = resolve_target_dir(
+        &layout.project_dir,
+        args.target_path.as_deref(),
+        env::var("DBT_TARGET_PATH").ok().as_deref(),
+    );
+    ComposeInputs {
+        manifest: target_dir.join("manifest.json"),
+        project_root: rel_or_dot(&layout.project_rel),
+        out: resolve_out_path(args.out.as_deref(), cwd, &target_dir),
+        config: args.config.clone(),
+    }
+}
+
+/// Run the diff plan and parse it. `Ok(None)` is the deliberate
+/// empty-diff exit ("nothing to review", announced here, exit 0 —
+/// unless `--force` renders the zero-scope report).
+fn scope_diff(
+    args: &ReviewArgs,
+    diff: &CommandPlan,
+    merge_base: &str,
+) -> Result<Option<crate::domain::PrDiff>, ReviewError> {
+    let patch = run_diff(diff)?;
     if patch.trim().is_empty() && !args.force {
         eprintln!(
-            "cute-dbt: nothing to review — no changes vs {base_ref} (merge-base {}). \
+            "cute-dbt: nothing to review — no changes vs the base (merge-base {}). \
              No report written; pass --force to render the zero-scope report anyway.",
-            short_sha(&merge_base),
+            short_sha(merge_base),
         );
-        return Ok(());
+        return Ok(None);
     }
     let pr_diff = parse_diff(&patch).map_err(|detail| ReviewError::StageFailed {
         context: "parsing the diff git produced",
         detail,
     })?;
+    Ok(Some(pr_diff))
+}
 
-    // The manifest stage: run the user's own dbt compile (exit code is
-    // the success signal — fusion writes manifest.json even on failed
-    // compiles), or on --no-compile trust the existing manifest after
-    // a staleness warning.
-    if let Some(plan) = &compile {
-        run_compile_stage(&project_dir, plan)?;
-        if !compose.manifest.is_file() {
+/// The manifest stage: run the user's own `dbt compile` (exit code is
+/// the success signal — fusion writes manifest.json even on failed
+/// compiles), or on `--no-compile` trust the existing manifest after a
+/// staleness warning. Either way the manifest must exist afterward.
+fn ensure_manifest(
+    args: &ReviewArgs,
+    project_dir: &Path,
+    manifest: &Path,
+) -> Result<(), ReviewError> {
+    if args.no_compile {
+        if !manifest.is_file() {
             return Err(ReviewError::ManifestMissing {
-                path: compose.manifest.clone(),
-                after_compile: true,
-            }
-            .into());
-        }
-    } else {
-        if !compose.manifest.is_file() {
-            return Err(ReviewError::ManifestMissing {
-                path: compose.manifest.clone(),
+                path: manifest.to_path_buf(),
                 after_compile: false,
-            }
-            .into());
+            });
         }
-        warn_if_stale(&compose.manifest, &project_dir);
+        warn_if_stale(manifest, project_dir);
+        return Ok(());
     }
+    run_compile_stage(
+        project_dir,
+        &compile_plan(project_dir, args.target_path.as_deref()),
+    )?;
+    if manifest.is_file() {
+        Ok(())
+    } else {
+        Err(ReviewError::ManifestMissing {
+            path: manifest.to_path_buf(),
+            after_compile: true,
+        })
+    }
+}
 
-    // The composed run loop resolves the relative `--project-root`
-    // (diff-side path strip + working-tree YAML reads) against the
-    // process cwd, so move to the repo toplevel — the CI recipe's
-    // exact shape (cwd = checkout root, relative --project-root).
-    // Every path the operator supplied was absolutized above, before
-    // this point.
-    env::set_current_dir(&toplevel).map_err(|err| ReviewError::StageFailed {
+/// Compose the existing report run loop in-process and finish: move to
+/// the repo toplevel (the CI recipe's cwd = checkout root + relative
+/// `--project-root` shape; every operator path was absolutized
+/// already), render, print the path, auto-open on a TTY.
+fn compose_and_render(
+    args: &ReviewArgs,
+    toplevel: &Path,
+    compose: &ComposeInputs,
+    pr_diff: crate::domain::PrDiff,
+) -> Result<(), ReviewFailure> {
+    env::set_current_dir(toplevel).map_err(|err| ReviewError::StageFailed {
         context: "moving to the repository toplevel",
         detail: err.to_string(),
     })?;
     let report_args = compose.report_args(pr_diff, args.experimental.clone());
     super::execute_report(&report_args).map_err(ReviewFailure::Run)?;
-
     println!("report written to {}", compose.out.display());
     maybe_open(&compose.out, args.no_open);
     Ok(())
@@ -1495,84 +1669,96 @@ fn project_rel_to_toplevel(project_dir: &Path, toplevel: &Path) -> Result<String
     Ok(rel.to_string_lossy().replace('\\', "/"))
 }
 
-/// Gather every ladder fact with read-only git queries (each rung's
-/// candidate verified to resolve where the ladder requires it).
+/// Gather every ladder fact with read-only git queries. One helper per
+/// rung keeps each piece small + directly testable (the CRAP < 15 lane
+/// rule): [`probe_explicit_ref`], [`probe_configured_base`],
+/// [`probe_origin_head`], and [`probe_name_refs`].
 fn gather_base_facts(toplevel: &Path, explicit: Option<&str>) -> Result<BaseFacts, ReviewError> {
-    let verify = |name: &str| -> Result<bool, ReviewError> {
-        let probe = git_query(
-            toplevel,
-            &["rev-parse", "-q", "--verify", &format!("{name}^{{commit}}")],
-        )?;
-        Ok(probe.status.success())
-    };
-    let explicit = match explicit {
-        Some(name) => Some(RefProbe {
-            name: name.to_owned(),
-            resolves: verify(name)?,
-        }),
-        None => None,
-    };
-    let configured = {
-        let out = git_query(toplevel, &["config", "--get", "cute-dbt.base"])?;
-        let name = stdout_line(&out);
-        if out.status.success() && !name.is_empty() {
-            let resolves = verify(&name)?;
-            Some(RefProbe { name, resolves })
-        } else {
-            None
-        }
-    };
-    let origin_head = {
-        let out = git_query(
-            toplevel,
-            &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
-        )?;
-        let name = stdout_line(&out);
-        if out.status.success() && !name.is_empty() && verify(&name)? {
-            Some(name)
-        } else {
-            None
-        }
-    };
-    let mut remote_probe = None;
-    let mut local_probe = None;
-    for candidate in ["main", "master", "trunk"] {
-        if remote_probe.is_none() {
-            let r = git_query(
-                toplevel,
-                &[
-                    "show-ref",
-                    "--verify",
-                    "-q",
-                    &format!("refs/remotes/origin/{candidate}"),
-                ],
-            )?;
-            if r.status.success() {
-                remote_probe = Some(format!("origin/{candidate}"));
-            }
-        }
-        if local_probe.is_none() {
-            let l = git_query(
-                toplevel,
-                &[
-                    "show-ref",
-                    "--verify",
-                    "-q",
-                    &format!("refs/heads/{candidate}"),
-                ],
-            )?;
-            if l.status.success() {
-                local_probe = Some(candidate.to_owned());
-            }
-        }
-    }
+    let (remote_probe, local_probe) = probe_name_refs(toplevel)?;
     Ok(BaseFacts {
-        explicit,
-        configured,
-        origin_head,
+        explicit: probe_explicit_ref(toplevel, explicit)?,
+        configured: probe_configured_base(toplevel)?,
+        origin_head: probe_origin_head(toplevel)?,
         remote_probe,
         local_probe,
     })
+}
+
+/// Whether `name^{commit}` resolves in the repo at `toplevel`.
+fn ref_resolves(toplevel: &Path, name: &str) -> Result<bool, ReviewError> {
+    let probe = git_query(
+        toplevel,
+        &["rev-parse", "-q", "--verify", &format!("{name}^{{commit}}")],
+    )?;
+    Ok(probe.status.success())
+}
+
+/// Rung 0: the `--base` flag, verified (an unresolvable explicit base is
+/// kept as a non-resolving probe so [`decide_base`] can error on it
+/// rather than fall through).
+fn probe_explicit_ref(
+    toplevel: &Path,
+    explicit: Option<&str>,
+) -> Result<Option<RefProbe>, ReviewError> {
+    match explicit {
+        Some(name) => Ok(Some(RefProbe {
+            name: name.to_owned(),
+            resolves: ref_resolves(toplevel, name)?,
+        })),
+        None => Ok(None),
+    }
+}
+
+/// Rung 1: the persisted `git config cute-dbt.base`, verified.
+fn probe_configured_base(toplevel: &Path) -> Result<Option<RefProbe>, ReviewError> {
+    let out = git_query(toplevel, &["config", "--get", "cute-dbt.base"])?;
+    let name = stdout_line(&out);
+    if out.status.success() && !name.is_empty() {
+        let resolves = ref_resolves(toplevel, &name)?;
+        Ok(Some(RefProbe { name, resolves }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Rung 2: the `origin/HEAD` symref target — kept only when it both
+/// exists and resolves (a stale symref falls through to the probes).
+fn probe_origin_head(toplevel: &Path) -> Result<Option<String>, ReviewError> {
+    let out = git_query(
+        toplevel,
+        &["symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+    )?;
+    let name = stdout_line(&out);
+    if out.status.success() && !name.is_empty() && ref_resolves(toplevel, &name)? {
+        Ok(Some(name))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Rung 3: probe `main`/`master`/`trunk` as remote-tracking refs and as
+/// local heads, first hit each. Remote-tracking first is the jj
+/// `trunk()` order (a local `main` may be months stale).
+fn probe_name_refs(toplevel: &Path) -> Result<(Option<String>, Option<String>), ReviewError> {
+    let mut remote_probe = None;
+    let mut local_probe = None;
+    for candidate in ["main", "master", "trunk"] {
+        if remote_probe.is_none()
+            && ref_exists(toplevel, &format!("refs/remotes/origin/{candidate}"))?
+        {
+            remote_probe = Some(format!("origin/{candidate}"));
+        }
+        if local_probe.is_none() && ref_exists(toplevel, &format!("refs/heads/{candidate}"))? {
+            local_probe = Some(candidate.to_owned());
+        }
+    }
+    Ok((remote_probe, local_probe))
+}
+
+/// Whether a fully-qualified ref exists (`show-ref --verify`).
+fn ref_exists(toplevel: &Path, fqref: &str) -> Result<bool, ReviewError> {
+    let out = git_query(toplevel, &["show-ref", "--verify", "-q", fqref])?;
+    Ok(out.status.success())
 }
 
 /// `git merge-base HEAD <base>`, with the shallow-vs-disjoint diagnosis
@@ -1792,37 +1978,73 @@ fn fold_newest(newest: &mut Option<(PathBuf, SystemTime)>, path: PathBuf, mtime:
     }
 }
 
+/// Run the project `git status --porcelain` scan and return its stdout,
+/// or `None` when git could not be spawned / exited non-zero (both
+/// warnings built on it are advisory — a failed scan just stays silent).
+fn project_status_porcelain(toplevel: &Path, project_rel: &str) -> Option<String> {
+    let output = status_plan(toplevel, project_rel).execute().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Format a capped, comma-joined file list for a warning: at most five
+/// names, then `, …` when more were elided.
+fn format_capped_file_list(files: &[String]) -> String {
+    let shown = files
+        .iter()
+        .take(5)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let suffix = if files.len() > 5 { ", …" } else { "" };
+    format!("{shown}{suffix}")
+}
+
 /// Soft warning for untracked files under the project: invisible to
 /// `git diff`, so a brand-new model would silently miss the report.
 /// Never a failure — and never an index mutation (`git add -N` is the
 /// operator's call).
 fn warn_untracked(toplevel: &Path, project_rel: &str) {
-    let plan = status_plan(toplevel, project_rel);
-    let Ok(output) = plan.execute() else {
+    let Some(porcelain) = project_status_porcelain(toplevel, project_rel) else {
         return;
     };
-    if !output.status.success() {
-        return;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let untracked: Vec<&str> = stdout
+    let untracked: Vec<String> = porcelain
         .lines()
-        .filter_map(|line| line.strip_prefix("?? "))
+        .filter_map(|line| line.strip_prefix("?? ").map(str::to_owned))
         .collect();
     if untracked.is_empty() {
         return;
     }
-    let shown = untracked
-        .iter()
-        .take(5)
-        .copied()
-        .collect::<Vec<_>>()
-        .join(", ");
-    let suffix = if untracked.len() > 5 { ", …" } else { "" };
     eprintln!(
         "cute-dbt: warning: {} untracked file(s) under the project are invisible to the \
-         diff: {shown}{suffix} — track them with `git add -N <file>` to include them.",
+         diff: {} — track them with `git add -N <file>` to include them.",
         untracked.len(),
+        format_capped_file_list(&untracked),
+    );
+}
+
+/// Soft warning for the `--staged` same-revision drift: files that are
+/// staged AND further edited unstaged. The diff is HEAD → index but the
+/// manifest is compiled from the working tree, so those files' inline
+/// diffs would mislead — the drift-guard degrades them gracefully.
+/// Never a failure (exit stays 0).
+fn warn_staged_drift(toplevel: &Path, project_rel: &str) {
+    let Some(porcelain) = project_status_porcelain(toplevel, project_rel) else {
+        return;
+    };
+    let drifted = staged_files_with_unstaged_edits(&porcelain);
+    if drifted.is_empty() {
+        return;
+    }
+    eprintln!(
+        "cute-dbt: warning: {} file(s) are staged but also have unstaged edits: {} — \
+         --staged diffs the index, but the manifest is compiled from the working tree, \
+         so the inline diffs for these files degrade to the plain view (the report is \
+         still correct about WHICH tests changed).",
+        drifted.len(),
+        format_capped_file_list(&drifted),
     );
 }
 
@@ -2214,6 +2436,139 @@ mod tests {
             "no bare single-rev arg remains: {:?}",
             plan.args,
         );
+    }
+
+    #[test]
+    fn staged_diffs_the_index_with_cached_and_no_merge_base() {
+        let plan = diff_plan(Path::new("/repo"), "proj", "abc123", DiffScope::Staged);
+        assert!(
+            plan.args.contains(&"--cached".to_owned()),
+            "--staged adds --cached (HEAD -> index): {:?}",
+            plan.args,
+        );
+        assert!(
+            !plan.args.iter().any(|a| a.contains("abc123")),
+            "the staged form carries no merge-base: {:?}",
+            plan.args,
+        );
+        // The config-proof flags survive on the variant.
+        assert!(plan.args.contains(&"--unified=0".to_owned()));
+        assert!(plan.args.contains(&"--find-renames".to_owned()));
+    }
+
+    #[test]
+    fn unstaged_is_a_bare_diff_index_to_working_tree() {
+        let plan = diff_plan(Path::new("/repo"), "proj", "abc123", DiffScope::Unstaged);
+        assert!(
+            !plan.args.contains(&"--cached".to_owned()),
+            "--unstaged is NOT --cached: {:?}",
+            plan.args,
+        );
+        assert!(
+            !plan.args.iter().any(|a| a.contains("abc123")),
+            "the unstaged form carries no merge-base: {:?}",
+            plan.args,
+        );
+        // The selector args slot is empty, so `--` immediately follows
+        // the last config-proof flag (`--submodule=short`).
+        let dashdash = plan
+            .args
+            .iter()
+            .position(|a| a == "--")
+            .expect("-- present");
+        assert_eq!(
+            plan.args[dashdash - 1],
+            "--submodule=short",
+            "no rev/selector arg precedes the pathspec: {:?}",
+            plan.args,
+        );
+        assert!(plan.args.contains(&"--unified=0".to_owned()));
+    }
+
+    #[test]
+    fn scope_from_flags_maps_each_selector() {
+        assert_eq!(
+            DiffScope::from_flags(false, false, false),
+            DiffScope::WorkingTree,
+            "no flag is the working-tree default",
+        );
+        assert_eq!(
+            DiffScope::from_flags(true, false, false),
+            DiffScope::CommittedOnly,
+        );
+        assert_eq!(DiffScope::from_flags(false, true, false), DiffScope::Staged);
+        assert_eq!(
+            DiffScope::from_flags(false, false, true),
+            DiffScope::Unstaged,
+        );
+    }
+
+    #[test]
+    fn only_staged_diffs_the_index() {
+        // The drift check runs ONLY on --staged (the one scope whose
+        // diff endpoint disagrees with the compiled working tree).
+        assert!(DiffScope::Staged.diffs_the_index());
+        assert!(!DiffScope::Unstaged.diffs_the_index());
+        assert!(!DiffScope::WorkingTree.diffs_the_index());
+        assert!(!DiffScope::CommittedOnly.diffs_the_index());
+    }
+
+    // ----- staged same-revision drift parser ------------------------
+
+    #[test]
+    fn staged_drift_flags_only_files_with_both_index_and_worktree_changes() {
+        // Porcelain v1: column 1 = index, column 2 = worktree.
+        let porcelain = "\
+MM models/staging/stg_customers.sql
+M  models/orders.sql
+ M models/customers.sql
+A  models/new.sql
+?? models/untracked.sql
+AM models/added_then_edited.sql
+";
+        let drifted = staged_files_with_unstaged_edits(porcelain);
+        assert_eq!(
+            drifted,
+            vec![
+                "models/staging/stg_customers.sql".to_owned(),
+                "models/added_then_edited.sql".to_owned(),
+            ],
+            "only the both-columns-dirty files drift (MM, AM); \
+             staged-only (M␠/A␠), unstaged-only (␠M), and untracked (??) do not",
+        );
+    }
+
+    #[test]
+    fn staged_drift_takes_the_post_rename_path() {
+        // A staged rename further edited unstaged: `RM orig -> new`.
+        let drifted = staged_files_with_unstaged_edits("RM models/old.sql -> models/new.sql\n");
+        assert_eq!(drifted, vec!["models/new.sql".to_owned()]);
+    }
+
+    #[test]
+    fn staged_drift_is_empty_on_a_clean_or_staged_only_tree() {
+        assert!(staged_files_with_unstaged_edits("").is_empty());
+        assert!(
+            staged_files_with_unstaged_edits("M  models/a.sql\nA  models/b.sql\n").is_empty(),
+            "staged-only changes are not drift",
+        );
+        assert!(
+            staged_files_with_unstaged_edits(" M models/c.sql\n?? d.sql\n").is_empty(),
+            "unstaged-only and untracked are not drift",
+        );
+        // A too-short malformed line is ignored, never panics.
+        assert!(staged_files_with_unstaged_edits("M\n").is_empty());
+    }
+
+    #[test]
+    fn capped_file_list_truncates_after_five() {
+        let many: Vec<String> = (0..7).map(|i| format!("f{i}.sql")).collect();
+        let listed = format_capped_file_list(&many);
+        assert!(listed.contains("f0.sql") && listed.contains("f4.sql"));
+        assert!(listed.ends_with(", …"), "elision marker present: {listed}");
+        assert!(!listed.contains("f5.sql"), "the sixth is elided: {listed}");
+        let few = vec!["only.sql".to_owned()];
+        assert_eq!(format_capped_file_list(&few), "only.sql");
     }
 
     #[test]
@@ -2964,6 +3319,34 @@ mod tests {
         assert!(review.no_open);
         assert!(review.dry_run);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn review_parses_the_staged_and_unstaged_scope_flags() {
+        let staged = parse_review(&["cute-dbt", "review", "--staged"]).expect("--staged parses");
+        assert!(staged.staged && !staged.unstaged && !staged.committed_only);
+        let unstaged =
+            parse_review(&["cute-dbt", "review", "--unstaged"]).expect("--unstaged parses");
+        assert!(unstaged.unstaged && !unstaged.staged && !unstaged.committed_only);
+    }
+
+    #[test]
+    fn the_scope_flags_are_mutually_exclusive() {
+        // Every conflicting pair across the review_scope ArgGroup is a
+        // clap usage error (exit 2), not a silent precedence.
+        for pair in [
+            ["--staged", "--unstaged"],
+            ["--staged", "--committed-only"],
+            ["--unstaged", "--committed-only"],
+        ] {
+            let err = parse_review(&["cute-dbt", "review", pair[0], pair[1]])
+                .expect_err("conflicting scope flags are a usage error");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{pair:?} must conflict",
+            );
+        }
     }
 
     #[test]
