@@ -372,6 +372,29 @@
 {%- for chip in governance.lifecycle_chips %}
   <span class="gov-chip" data-testid="gov-chip" data-chip-kind="{{ chip.kind }}"{% match chip.severity %}{% when Some with (s) %} data-chip-severity="{{ s }}"{% when None %}{% endmatch %}>{{ chip.label }}</span>
 {%- endfor %}
+{#- cute-dbt#260 / cute-dbt#348 — config-driven meta + tags. Per in-scope
+    model: one chip per model-level `config.tags` entry (categorical/few),
+    then ONE aggregate "meta" chip carrying a focusable-tooltip bubble that
+    enumerates every model-level `config.meta` key:value pair. Column-level
+    meta/tags ride a per-column drawer (NOT the model header). The tooltip
+    is the load-bearing focusable-button + CSS :hover/:focus bubble pattern
+    (.expect-tooltip / .expect-tooltip-bubble — reused, never a native
+    `title`): aria-label summarizes for AT, the bubble is aria-hidden so it
+    is not announced twice. All values are auto-escaped text (askama escapes
+    by default — meta/tags are never trusted as markup). -#}
+{%- for m in governance.meta_tags %}
+  <div class="gov-meta" data-testid="gov-meta" data-model="{{ m.model }}">
+{%- for tag in m.tags %}
+    <span class="gov-tag-chip" data-testid="gov-tag-chip" data-tag="{{ tag }}">🏷 {{ tag }}</span>
+{%- endfor %}
+{%- if !m.meta.is_empty() %}
+    <button type="button" class="expect-tooltip gov-meta-chip" data-testid="gov-meta-chip" aria-label="{{ m.meta.len() }} meta {% if m.meta.len() == 1 %}entry{% else %}entries{% endif %}: {% for p in m.meta %}{{ p.key }}{% if !loop.last %}, {% endif %}{% endfor %}">meta ({{ m.meta.len() }})<span class="expect-tooltip-bubble gov-meta-bubble" data-testid="gov-meta-bubble" aria-hidden="true">{%- for p in m.meta %}<span class="gov-meta-row" data-testid="gov-meta-row"><code class="gov-meta-key">{{ p.key }}</code>: <span class="gov-meta-val">{{ p.value }}</span></span>{% endfor %}</span></button>
+{%- endif %}
+{%- for col in m.columns %}
+    <div class="gov-meta-col" data-testid="gov-meta-col" data-column="{{ col.column }}"><code class="gov-meta-col-name">{{ col.column }}</code>{% for tag in col.tags %} <span class="gov-tag-chip gov-col-tag-chip" data-testid="gov-col-tag-chip" data-tag="{{ tag }}">🏷 {{ tag }}</span>{% endfor %}{% for p in col.meta %} <span class="gov-meta-row gov-col-meta-row" data-testid="gov-col-meta-row"><code class="gov-meta-key">{{ p.key }}</code>: <span class="gov-meta-val">{{ p.value }}</span></span>{% endfor %}</div>
+{%- endfor %}
+  </div>
+{%- endfor %}
 </section>
 {% endif -%}
 <section class="error-card" role="alert" aria-label="Manifest error">
