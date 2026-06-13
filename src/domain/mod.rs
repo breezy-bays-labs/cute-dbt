@@ -52,6 +52,7 @@ pub mod pr_diff;
 pub mod preflight;
 pub mod project_def;
 pub mod scope;
+pub mod seed_card;
 pub mod state;
 pub mod unit_test;
 pub mod unit_test_table;
@@ -121,10 +122,11 @@ pub use scope::{
     ScopeInput, ScopeSelection, all_models, changed_models, select_in_scope,
     widen_with_config_attributions,
 };
+pub use seed_card::SeedCard;
 pub use state::{
     BANNER_EMPTY_SCOPE, BodyChecksumModifier, ConfigsModifier, ContractModifier, InScopeSet,
-    MacrosModifier, ModelInScopeSet, ModifiedSet, ModifierKind, RelationModifier, StateComparator,
-    StateModifier, resolve_target_model, resolve_tested_model,
+    MacrosModifier, ModelInScopeSet, ModifiedSet, ModifierKind, RelationModifier, SeedInScopeSet,
+    StateComparator, StateModifier, resolve_target_model, resolve_tested_model,
 };
 pub use unit_test::{UnitTest, UnitTestExpect, UnitTestGiven, UnitTestOverrides};
 pub use unit_test_table::{
