@@ -2432,9 +2432,11 @@ pub fn render_report_with_externals(
         check_policy,
         project_facts,
     );
-    // cute-dbt#260 — the gated governance facts. Empty (the off-gate
-    // default) ⇒ omitted from JSON + zero DOM via `{%- if has_governance
-    // %}`, keeping the non-experimental golden byte-identical.
+    // cute-dbt#260 — the gated governance facts (group chips + blast
+    // radius + Slice 2's contract classifications, all built in
+    // `gather_governance`). Empty (the off-gate default) ⇒ omitted from
+    // JSON + zero DOM via `{%- if has_governance %}`, keeping the
+    // non-experimental golden byte-identical.
     payload.governance = governance.clone();
     // The empty-scope banner contract reads the TRUE in-scope set, not the
     // widened render set or the changed subset (cute-dbt#91).
@@ -3064,9 +3066,10 @@ fn leaf_segment(id: &str) -> &str {
 mod tests {
     use super::*;
     use crate::domain::{
-        BlastRadius, Checksum, CteEdge, CteNode, DEFAULT_REPORT_TITLE, DependsOn, DiffLine,
-        DiffLineKind, EdgeType, Group, GroupChip, Manifest, ManifestMetadata, NodeConfig, NodeId,
-        Owner, UnitTest, UnitTestExpect, UnitTestGiven,
+        BlastRadius, Checksum, ContractClass, ContractColumnDiff, CteEdge, CteNode,
+        DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, EdgeType, Group, GroupChip,
+        Manifest, ManifestMetadata, NodeConfig, NodeId, Owner, UnitTest, UnitTestExpect,
+        UnitTestGiven,
     };
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
@@ -6438,6 +6441,88 @@ mod tests {
             &GovernanceFacts::default(),
         );
         assert!(!html.contains(r#"data-testid="gov-blast""#));
+    }
+
+    // ----- cute-dbt#260 Slice 2: contract-class drawer -----
+
+    #[test]
+    fn governance_breaking_contract_renders_the_drawer() {
+        let facts = GovernanceFacts {
+            contract_classes: vec![ContractClass {
+                model: "dim_orders".to_owned(),
+                verdict: "breaking".to_owned(),
+                chip: "Contract: enforced · v2 of 3 · access: public · group finance".to_owned(),
+                column_diffs: vec![ContractColumnDiff {
+                    name: "amount".to_owned(),
+                    old: "int".to_owned(),
+                    new: "string".to_owned(),
+                    verdict: "breaking".to_owned(),
+                }],
+                reasons: vec!["Columns removed: legacy_id.".to_owned()],
+            }],
+            ..GovernanceFacts::default()
+        };
+        let html = render_html_with_governance("cute_dbt_render_contract_breaking.html", &facts);
+        assert!(
+            html.contains(r#"<section class="governance-panel""#),
+            "the governance section renders for a contract class",
+        );
+        // DOM-node-targeted (the #334 hardening pattern): the drawer + its
+        // verdict, the chip, the column-diff row + its verdict, the reason.
+        assert!(
+            html.contains(
+                r#"<div class="gov-contract" data-testid="gov-contract" data-model="dim_orders" data-verdict="breaking">"#
+            ),
+            "the drawer carries the model + breaking verdict: {html}",
+        );
+        assert!(
+            html.contains(
+                r#"<span class="gov-contract-chip" data-testid="gov-contract-chip">dim_orders &middot; Contract: enforced · v2 of 3 · access: public · group finance</span>"#
+            ),
+            "the chip names the model + contract metadata",
+        );
+        assert!(
+            html.contains(
+                r#"<div class="gov-contract-col" data-testid="gov-contract-col" data-verdict="breaking">amount: int &rarr; string [breaking]</div>"#
+            ),
+            "the column-diff row renders old → new + the verdict tag",
+        );
+        assert!(
+            html.contains(
+                r#"<p class="gov-contract-reason" data-testid="gov-contract-reason">Columns removed: legacy_id.</p>"#
+            ),
+            "the non-column reason line renders",
+        );
+    }
+
+    #[test]
+    fn governance_safe_contract_renders_the_safe_verdict() {
+        let facts = GovernanceFacts {
+            contract_classes: vec![ContractClass {
+                model: "dim_orders".to_owned(),
+                verdict: "safe".to_owned(),
+                chip: "Contract: enforced".to_owned(),
+                column_diffs: Vec::new(),
+                reasons: vec!["Contract is now enforced (newly contracted).".to_owned()],
+            }],
+            ..GovernanceFacts::default()
+        };
+        let html = render_html_with_governance("cute_dbt_render_contract_safe.html", &facts);
+        assert!(
+            html.contains(
+                r#"data-testid="gov-contract" data-model="dim_orders" data-verdict="safe""#
+            ),
+            "the drawer carries the safe verdict: {html}",
+        );
+    }
+
+    #[test]
+    fn governance_off_emits_no_contract_drawer_dom() {
+        let html = render_html_with_governance(
+            "cute_dbt_render_governance_no_contract.html",
+            &GovernanceFacts::default(),
+        );
+        assert!(!html.contains(r#"data-testid="gov-contract""#));
     }
 
     // ===== project panel: hooks + dispatch rows (cute-dbt#269) =====

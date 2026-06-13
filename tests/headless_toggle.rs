@@ -12109,6 +12109,138 @@ fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
     format!("file://{}", out.to_str().expect("UTF-8 path"))
 }
 
+/// cute-dbt#260 Slice 2 — render a minimal report carrying a custom
+/// `GovernanceFacts` (the server-rendered governance section) to a temp
+/// file, returning its file:// URL. Used by the contract-drawer headless
+/// guard: the drawer is static server-rendered HTML in the
+/// `{%- if has_governance %}` block, so this proves it survives in a real
+/// browser with the full asset bundle loaded.
+fn render_governance_to_file(
+    filename: &str,
+    governance: &cute_dbt::domain::GovernanceFacts,
+) -> String {
+    let node = model_node("model.shop.dim_orders");
+    let m = manifest(vec![node], vec![]);
+    let models: ModelInScopeSet = [NodeId::new("model.shop.dim_orders")].into_iter().collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &InScopeSet::new(),
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "baseline.json",
+        ScopeSource::Baseline,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        &cute_dbt::domain::ProjectFacts::default(),
+        governance,
+    )
+    .expect("render writes the report");
+    format!("file://{}", out.to_str().expect("UTF-8 path"))
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn governance_contract_drawer_renders_in_a_real_browser() {
+    // cute-dbt#260 Slice 2 — a baseline-mode governance render carrying a
+    // breaking contract class surfaces the drawer (server-rendered);
+    // assert the real DOM node + its verdict + the column-diff row.
+    use cute_dbt::domain::{ContractClass, ContractColumnDiff, GovernanceFacts};
+    let facts = GovernanceFacts {
+        contract_classes: vec![ContractClass {
+            model: "dim_orders".to_owned(),
+            verdict: "breaking".to_owned(),
+            chip: "Contract: enforced · v2 of 3 · access: public · group finance".to_owned(),
+            column_diffs: vec![ContractColumnDiff {
+                name: "amount".to_owned(),
+                old: "int".to_owned(),
+                new: "string".to_owned(),
+                verdict: "breaking".to_owned(),
+            }],
+            reasons: vec!["Columns removed: legacy_id.".to_owned()],
+        }],
+        ..GovernanceFacts::default()
+    };
+    let url = render_governance_to_file("cute_dbt_contract_drawer.html", &facts);
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"gov-contract\"]"),
+        1,
+        "the breaking contract drawer renders",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"gov-contract-col\"]"),
+        1,
+        "the column-diff row renders",
+    );
+    let verdict = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"gov-contract\"]').getAttribute('data-verdict')",
+    );
+    assert_eq!(
+        verdict, "breaking",
+        "the drawer carries the breaking verdict"
+    );
+    let col = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"gov-contract-col\"]').textContent",
+    );
+    assert!(
+        col.contains("amount: int → string [breaking]"),
+        "the column-diff row names old → new + verdict: {col}",
+    );
+    let reason = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"gov-contract-reason\"]').textContent",
+    );
+    assert!(
+        reason.contains("Columns removed: legacy_id."),
+        "the reason line renders: {reason}",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn governance_contract_drawer_absent_without_a_class_in_a_real_browser() {
+    // The off path: an empty GovernanceFacts (no contract class) renders
+    // no drawer in the real DOM.
+    let url = render_governance_to_file(
+        "cute_dbt_contract_drawer_off.html",
+        &cute_dbt::domain::GovernanceFacts::default(),
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    let count = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"gov-contract\"]').length",
+    );
+    assert_eq!(
+        count.as_i64(),
+        Some(0),
+        "no drawer without a contract class"
+    );
+    let _ = tab.close(true);
+}
+
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn project_panel_renders_categorized_on_the_committed_showcase() {

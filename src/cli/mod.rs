@@ -248,8 +248,24 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     // resolved in-scope MODEL set, and governance never widens scope. The
     // diff-showcase golden row sets `experimental:"1"` (every experiment),
     // so the grouped playground model surfaces a chip there.
+    // cute-dbt#260 Slice 2 — the OLD manifest for per-model contract
+    // classification. Available ONLY in `--baseline-manifest` mode (the
+    // `ScopeInput::Baseline` arm carries the parsed old `Manifest`); the
+    // `--pr-diff` path has NO old manifest — it reconstructs the old side
+    // from per-file TEXT hunks, which cannot rebuild the structured
+    // contract fields (`classify_contract` needs columns/constraints/
+    // config, not text). So contract classification is gated to baseline
+    // mode (and, by `gather_governance`'s caller, the `governance`
+    // experiment). `None` ⇒ no contract classes ⇒ byte-identical pr-diff
+    // goldens + released report. (Slice 2 finding: the diff-showcase
+    // `--pr-diff` golden renders no contract drawer — Slice 6 adds a
+    // contracted baseline-mode example.)
+    let old_manifest = match &scope_input {
+        ScopeInput::Baseline { manifest, .. } => Some(manifest.as_ref()),
+        ScopeInput::PrDiff { .. } => None,
+    };
     let governance_facts = if experiments.is_enabled(Experiment::Governance) {
-        gather_governance(&current, &models_in_scope)
+        gather_governance(&current, &models_in_scope, old_manifest)
     } else {
         GovernanceFacts::default()
     };
