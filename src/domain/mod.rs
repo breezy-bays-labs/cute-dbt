@@ -43,6 +43,7 @@ pub mod cte;
 pub mod experimental;
 pub mod governance;
 pub mod grain;
+pub mod macro_lens;
 pub mod manifest;
 pub mod model_yaml;
 pub mod path;
@@ -86,10 +87,11 @@ pub use governance::{
     classify_contract, constraint_support, exposures_reachable_from, gather_governance,
 };
 pub use grain::{GrainKind, GrainSignal, model_grain_signals, test_is_enabled};
+pub use macro_lens::{changed_macros_baseline, changed_macros_pr_diff, macro_blast_radius};
 pub use manifest::{
     Checksum, ColumnFacts, Constraint, ConstraintKind, DependsOn, DisabledEntry, Exposure, Group,
-    Manifest, ManifestMetadata, Node, NodeConfig, NodeId, Owner, SourceNode, TestMetadata,
-    TestSeverity, UniqueKey,
+    MacroIdentity, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, Owner, SourceNode,
+    TestMetadata, TestSeverity, UniqueKey,
 };
 pub use model_yaml::ModelYamlOutcome;
 pub use path::{match_changed_path, normalize_path};

@@ -43,9 +43,9 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::domain::{
-    Checksum, ColumnFacts, Constraint, DependsOn, DisabledEntry, Exposure, Group, Manifest,
-    ManifestMetadata, Node, NodeConfig, NodeId, Owner, PreflightError, SourceNode, TestMetadata,
-    UnitTest, UnitTestExpect, UnitTestGiven, UnitTestOverrides,
+    Checksum, ColumnFacts, Constraint, DependsOn, DisabledEntry, Exposure, Group, MacroIdentity,
+    Manifest, ManifestMetadata, Node, NodeConfig, NodeId, Owner, PreflightError, SourceNode,
+    TestMetadata, UnitTest, UnitTestExpect, UnitTestGiven, UnitTestOverrides,
 };
 use crate::ports::ManifestSource;
 use serde_json::Value;
@@ -562,6 +562,55 @@ struct WireMacro {
     macro_sql: String,
     #[serde(default)]
     depends_on: Option<DependsOn>,
+    /// The macro identity triple (cute-dbt#265) — `original_file_path` /
+    /// `name` / `package_name` of the fusion `DbtMacro` (`dbt-schemas`
+    /// `macros.rs:20-42` @ `9977b6cb…`). Each `#[serde(default)]` per the
+    /// #145 null-fill rule: fusion's `skip_serializing_none` omits unset
+    /// keys, dbt-core emits explicit `null`; both ingest as `None`.
+    #[serde(default)]
+    original_file_path: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    package_name: Option<String>,
+}
+
+/// The three parallel domain macro maps [`fold_macros`] produces: id →
+/// body string, id → `depends_on.macros`, id → identity triple.
+type FoldedMacros = (
+    HashMap<String, String>,
+    BTreeMap<String, Vec<String>>,
+    BTreeMap<String, MacroIdentity>,
+);
+
+/// Fold the wire `macros` map into the three parallel domain maps in one
+/// pass: id → body string (the pre-#271 reduction); id →
+/// `depends_on.macros` for macros that reference others (cute-dbt#271,
+/// drop-empty — real wire from both engines populates the list densely, an
+/// empty list is the leaf shape); and id → the identity triple
+/// (cute-dbt#265 — `original_file_path` / `name` / `package_name`, ALWAYS
+/// inserted so every macro resolves, null-fill-tolerant per #145). The
+/// [`fold_disabled`] helper precedent — keeps `into_domain` under the
+/// `too_many_lines` budget.
+fn fold_macros(wire_macros: HashMap<String, WireMacro>) -> FoldedMacros {
+    let mut macros = HashMap::with_capacity(wire_macros.len());
+    let mut macro_depends_on = BTreeMap::new();
+    let mut macro_identity = BTreeMap::new();
+    for (key, wire) in wire_macros {
+        let referenced = wire
+            .depends_on
+            .map(|depends_on| depends_on.macros().to_vec())
+            .unwrap_or_default();
+        if !referenced.is_empty() {
+            macro_depends_on.insert(key.clone(), referenced);
+        }
+        macro_identity.insert(
+            key.clone(),
+            MacroIdentity::new(wire.original_file_path, wire.name, wire.package_name),
+        );
+        macros.insert(key, wire.macro_sql);
+    }
+    (macros, macro_depends_on, macro_identity)
 }
 
 /// Wire projection of one top-level `sources` entry (cute-dbt#57).
@@ -905,23 +954,7 @@ impl WireManifest {
             .into_iter()
             .map(|(key, wire)| (key, wire.into_domain()))
             .collect();
-        // One pass over the wire macros feeds two domain maps: id →
-        // body string (the pre-#271 reduction, unchanged) and id →
-        // depends_on.macros for macros that reference others
-        // (cute-dbt#271, drop-empty — real wire from both engines
-        // populates the list densely; an empty list is the leaf shape).
-        let mut macros = HashMap::with_capacity(self.macros.len());
-        let mut macro_depends_on = BTreeMap::new();
-        for (key, wire) in self.macros {
-            let referenced = wire
-                .depends_on
-                .map(|depends_on| depends_on.macros().to_vec())
-                .unwrap_or_default();
-            if !referenced.is_empty() {
-                macro_depends_on.insert(key.clone(), referenced);
-            }
-            macros.insert(key, wire.macro_sql);
-        }
+        let (macros, macro_depends_on, macro_identity) = fold_macros(self.macros);
         let sources = self
             .sources
             .into_iter()
@@ -948,6 +981,8 @@ impl WireManifest {
             .with_disabled(fold_disabled(self.disabled))
             // cute-dbt#271 — the macro reference family.
             .with_macro_depends_on(macro_depends_on)
+            // cute-dbt#265 — the macro identity triple.
+            .with_macro_identity(macro_identity)
     }
 }
 
@@ -3390,6 +3425,69 @@ mod tests {
         assert_eq!(
             manifest.macro_refs("macro.shop.null_filled"),
             &[] as &[String],
+        );
+    }
+
+    #[test]
+    fn parse_manifest_reads_macro_identity_triple() {
+        // cute-dbt#265 — the macro identity triple. Real fusion wire
+        // carries original_file_path / name / package_name on every
+        // macro (DbtMacro, dbt-schemas macros.rs:20-42 @ 9977b6cb; the
+        // spike verified original_file_path non-null 510/510). Each
+        // field is null-fill-tolerant (#145): a missing key (fusion
+        // skip_serializing_none) or explicit null (dbt-core) ingests as
+        // None, never failing the whole parse.
+        let json = format!(
+            r#"{{
+              "metadata": {{ "dbt_schema_version": "{V12_URL}" }},
+              "nodes": {{}},
+              "macros": {{
+                "macro.shop.add_dq_flags": {{
+                  "macro_sql": "{{% macro add_dq_flags() %}}{{% endmacro %}}",
+                  "original_file_path": "macros/add_dq_flags.sql",
+                  "name": "add_dq_flags",
+                  "package_name": "shop"
+                }},
+                "macro.dbt.create_table_as": {{
+                  "macro_sql": "/* vendor */",
+                  "original_file_path": "macros/materializations/create_table_as.sql",
+                  "name": "create_table_as",
+                  "package_name": "dbt"
+                }},
+                "macro.shop.null_filled": {{
+                  "macro_sql": "/* fusion unset triple */",
+                  "original_file_path": null,
+                  "name": null,
+                  "package_name": null
+                }},
+                "macro.shop.pre265": {{ "macro_sql": "/* old fixture */" }}
+              }}
+            }}"#
+        );
+        let manifest = parse_manifest(&json).expect("valid manifest");
+        let identity = manifest.macro_identity();
+        assert_eq!(identity.len(), 4, "every macro gets an identity entry");
+        let dq = identity.get("macro.shop.add_dq_flags").expect("present");
+        assert_eq!(dq.original_file_path(), Some("macros/add_dq_flags.sql"));
+        assert_eq!(dq.name(), Some("add_dq_flags"));
+        assert_eq!(dq.package_name(), Some("shop"));
+        // Null-filled triple ingests as all-None (no parse failure).
+        let nf = identity.get("macro.shop.null_filled").expect("present");
+        assert_eq!(nf.original_file_path(), None);
+        assert_eq!(nf.name(), None);
+        assert_eq!(nf.package_name(), None);
+        // Pre-#265 fixture (no triple keys) — all-None, still present.
+        let old = identity.get("macro.shop.pre265").expect("present");
+        assert_eq!(old.original_file_path(), None);
+        assert_eq!(old.name(), None);
+        // Resolution helpers wire through the adapter end-to-end.
+        assert_eq!(
+            manifest.macro_id_for_path("macros/add_dq_flags.sql"),
+            Some("macro.shop.add_dq_flags"),
+        );
+        assert_eq!(
+            manifest.macro_id_for_name("shop", "add_dq_flags"),
+            Some("macro.shop.add_dq_flags"),
         );
     }
 
