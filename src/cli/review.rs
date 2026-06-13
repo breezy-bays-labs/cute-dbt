@@ -298,6 +298,9 @@ pub enum BaseSource {
     Flag,
     /// The persisted `git config cute-dbt.base` answer.
     GitConfig,
+    /// The open PR's base branch (the `--pr` / gh path) — its base ref
+    /// is not present locally.
+    PullRequest,
 }
 
 /// A review-stage failure (git / detection / discovery), each carrying
@@ -406,6 +409,30 @@ pub enum ReviewError {
     },
 }
 
+/// `(description, remediation)` for [`ReviewError::BaseRefMissing`],
+/// attributing the ref to its real source — the PR path must NOT claim
+/// the ref came from `--base` (cute-dbt#303 bot review).
+fn base_ref_missing_message(ref_name: &str, source: BaseSource) -> (String, String) {
+    let from = match source {
+        BaseSource::Flag => "--base",
+        BaseSource::GitConfig => "git config cute-dbt.base",
+        BaseSource::PullRequest => "the open PR's base branch",
+    };
+    let fix = match source {
+        BaseSource::PullRequest => format!(
+            "Fetch the PR's base (`git fetch origin {ref_name}`) and re-run — \
+             or pass `--base <ref>` instead of `--pr`."
+        ),
+        BaseSource::Flag | BaseSource::GitConfig => {
+            format!("Fetch it (`git fetch origin {ref_name}`) or pass a different `--base <ref>`.")
+        }
+    };
+    (
+        format!("the base ref `{ref_name}` (from {from}) does not resolve to a commit."),
+        fix,
+    )
+}
+
 impl ReviewError {
     /// The operator-facing stderr message: what is wrong, then what to
     /// do about it. Same description-plus-remediation shape as
@@ -458,19 +485,7 @@ impl ReviewError {
                     .to_owned(),
             ),
             Self::BaseRefMissing { ref_name, source } => {
-                let from = match source {
-                    BaseSource::Flag => "--base",
-                    BaseSource::GitConfig => "git config cute-dbt.base",
-                };
-                (
-                    format!(
-                        "the base ref `{ref_name}` (from {from}) does not resolve to a commit."
-                    ),
-                    format!(
-                        "Fetch it (`git fetch origin {ref_name}`) or pass a different \
-                         `--base <ref>`."
-                    ),
-                )
+                base_ref_missing_message(ref_name, *source)
             }
             Self::ShallowClone { base } => (
                 format!("no merge-base with `{base}`: this clone is shallow."),
@@ -1649,7 +1664,7 @@ fn resolve_pr_anchor_base(
     let base = resolve_pr_base_ref(toplevel, &pr.base_ref)?.ok_or_else(|| {
         ReviewError::BaseRefMissing {
             ref_name: pr.base_ref.clone(),
-            source: BaseSource::Flag,
+            source: BaseSource::PullRequest,
         }
     })?;
     Ok((base, Rung::GhPr))
@@ -2693,6 +2708,8 @@ mod tests {
                 },
                 "git fetch origin rel",
             ),
+            // (the PullRequest BaseRefMissing variant is covered in full
+            // by `a_pr_path_missing_base_is_not_attributed_to_the_base_flag`)
             (
                 ReviewError::ShallowClone {
                     base: "main".to_owned(),
@@ -2795,6 +2812,30 @@ mod tests {
                 "messages identify the verb: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn a_pr_path_missing_base_is_not_attributed_to_the_base_flag() {
+        // cute-dbt#303 bot review: on the `--pr` path a base ref that is
+        // missing locally came from the PR, not `--base` — the message
+        // must say so (never "(from --base)").
+        let err = ReviewError::BaseRefMissing {
+            ref_name: "release-2".to_owned(),
+            source: BaseSource::PullRequest,
+        };
+        let msg = err.message();
+        assert!(
+            msg.contains("the open PR's base branch") && msg.contains("release-2"),
+            "the message attributes the ref to the PR: {msg}",
+        );
+        assert!(
+            !msg.contains("(from --base)"),
+            "the message must NOT claim the ref came from --base: {msg}",
+        );
+        assert!(
+            msg.contains("git fetch origin release-2"),
+            "the remediation suggests fetching the PR's base: {msg}",
+        );
     }
 
     #[test]
