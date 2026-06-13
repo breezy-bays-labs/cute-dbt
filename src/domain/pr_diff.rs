@@ -904,16 +904,19 @@ fn record_aligned_emphasis(edits: &mut HunkEdits, h: &Hunk, bs: usize, be: usize
     }
     for k in 0..h.added_lines.len() {
         let line_no = h.new_start + k;
-        if pair_is_ws_only(h, k) || !(bs..=be).contains(&line_no) {
-            continue;
-        }
-        // `&str` trim (no allocation) — see removed_diff_lines
-        // (gemini review on cute-dbt#132).
-        if let Some(e) = intra_line_span(
-            h.added_lines[k].trim_end_matches('\r'),
-            h.removed_lines[k].trim_end_matches('\r'),
-        ) {
-            edits.added_emphasis.insert(line_no, e);
+        // Substantive (non-ws-only) pairs whose added line falls within the
+        // block are the only ones rendered as Added — `added_emphasis` is
+        // read solely for those (`block_line_diff`), so the positive
+        // `&&` guard mirrors the membership condition `added_real` uses.
+        if !pair_is_ws_only(h, k) && (bs..=be).contains(&line_no) {
+            // `&str` trim (no allocation) — see removed_diff_lines
+            // (gemini review on cute-dbt#132).
+            if let Some(e) = intra_line_span(
+                h.added_lines[k].trim_end_matches('\r'),
+                h.removed_lines[k].trim_end_matches('\r'),
+            ) {
+                edits.added_emphasis.insert(line_no, e);
+            }
         }
     }
 }
