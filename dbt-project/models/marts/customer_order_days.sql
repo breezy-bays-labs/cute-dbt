@@ -5,6 +5,9 @@
 -- level (the report findings surface lands with cute-dbt#170). The
 -- not_null test on customer_id (see _incremental__models.yml) is there
 -- to prove a non-uniqueness test never satisfies the grain check.
+-- cute-dbt#320 dogfood — a no-op source touch so this PR's own sticky
+-- preview lights up the LIVE explore rows (the `dbt-project/` touched
+-- gate), exercising the new Explore section end to end on its own PR.
 {{ config(materialized='incremental', unique_key=['customer_id', 'order_date'], incremental_strategy='delete+insert') }}
 
 with orders as (

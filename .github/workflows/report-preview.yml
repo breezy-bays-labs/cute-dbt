@@ -155,6 +155,54 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+  regenerate-explore:
+    # GOLDEN explore pages (cute-dbt#320). Renders the committed
+    # `examples/explore/` playground golden (the full synthetic playground
+    # manifest → `dag.html` lineage + `tests.html` unit-test viewer) and
+    # uploads both as ONE artifact, so the sticky comment can offer the
+    # golden Explore section alongside the golden report rows. Mirrors the
+    # `explore` arm of ci.yml's `example-report-check` matrix — explore is
+    # full-manifest by design (NO baseline, NO scope source, NO
+    # `--project-root`: that arg is clap-illegal without `--pr-diff`). The
+    # byte-identity GATE for `examples/explore/` lives in ci.yml; this job
+    # is the human-validation affordance only (never blocks merge).
+    name: Regenerate golden explore pages
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - name: Regenerate golden explore pages
+        run: |
+          set -euo pipefail
+          out_dir="target/report-preview/explore-golden"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir"
+          # Full-manifest explore: no baseline, no scope source, no
+          # --project-root (clap-illegal without --pr-diff). Same
+          # invocation as ci.yml's example-report-check explore arm.
+          cargo run --quiet --locked --bin cute-dbt -- explore \
+            --manifest tests/fixtures/playground-current.json \
+            --out-dir "$out_dir"
+          # Size breadcrumbs so the sticky-comment builder needs no probe.
+          ls -l "$out_dir/dag.html" "$out_dir/tests.html"
+      - name: Upload golden explore artifact
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          # Globbed by the sticky-comment + publish-previews
+          # `report-preview-*` selectors; the `-explore-golden` suffix
+          # partitions it out of the report golden/live buckets.
+          name: report-preview-explore-golden
+          path: |
+            target/report-preview/explore-golden/dag.html
+            target/report-preview/explore-golden/tests.html
+          retention-days: 7
+          if-no-files-found: warn
+
   prdiff-preview:
     # Self-dogfood the --pr-diff flow on THIS PR's own changes
     # (cute-dbt#118). Distinct from the baseline `regenerate` matrix
@@ -310,6 +358,51 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+      - name: Render live explore pages
+        if: steps.diff.outputs.touched == 'true'
+        # LIVE per-PR explore (cute-dbt#320): the same EPHEMERAL fusion
+        # manifest just compiled above, rendered into the two-page
+        # explorer (`dag.html` lineage + `tests.html` unit-test viewer) —
+        # the live self-dogfood of the explorer on THIS PR's dbt-project,
+        # every push. Full-manifest by design: NO baseline, NO scope
+        # source, and NO `--project-root` (that arg is clap-illegal
+        # without `--pr-diff`, which explore never takes here). Manifest is
+        # EPHEMERAL (bakes `metadata.root_path`) → these pages are CI
+        # artifacts ONLY, never committed (same posture as the live report
+        # preview; the committed golden explore stays `examples/explore/`).
+        env:
+          # explore has no env access gate, but the issue #320 contract
+          # sets CUTE_DBT_EXPERIMENTAL=1 to match the live report
+          # preview's experimental opt-in posture (the verb is marked
+          # experimental for v0.x).
+          CUTE_DBT_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          out_dir="target/report-preview/explore-live"
+          rm -rf "$out_dir"
+          mkdir -p "$out_dir"
+          cargo run --quiet --locked --bin cute-dbt -- explore \
+            --manifest dbt-project/target/manifest.json \
+            --out-dir "$out_dir"
+          ls -l "$out_dir/dag.html" "$out_dir/tests.html"
+
+      - name: Upload live explore artifact
+        # Same guard rationale as the PrDiff report upload: only present
+        # when the PR touched dbt-project/, so the live Explore section
+        # never claims a row that wasn't rendered.
+        if: always() && steps.diff.outputs.touched == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          # Globbed by the `report-preview-*` selector; the
+          # `-explore-live` suffix partitions it out of the report
+          # golden/live buckets and into the live Explore row.
+          name: report-preview-explore-live
+          path: |
+            target/report-preview/explore-live/dag.html
+            target/report-preview/explore-live/tests.html
+          retention-days: 7
+          if-no-files-found: warn
+
   publish-previews:
     # Publish each rendered report to the repo's gh-pages branch under a
     # per-PR namespace (gh-pages/pr-<N>/<slug>/report.html), so the sticky
@@ -325,7 +418,7 @@ jobs:
     # for the Open link there.
     name: Publish per-PR Pages previews
     runs-on: ubuntu-latest
-    needs: [regenerate, prdiff-preview]
+    needs: [regenerate, regenerate-explore, prdiff-preview]
     if: always() && github.event_name == 'pull_request'
     permissions:
       actions: read       # `gh run download` reads this run's artifacts
@@ -428,6 +521,29 @@ jobs:
               echo "arranged: _site/$slug/report.html"
             fi
           done
+          # Explore pages (cute-dbt#320) carry TWO files (dag.html +
+          # tests.html), not a single <slug>-report.html, so the report
+          # loop above skips them. Map each explore artifact's namespace:
+          # the golden → _site/explore/, the live → _site/explore-live/,
+          # so the published URLs are .../pr-<N>/explore/{dag,tests}.html
+          # and .../pr-<N>/explore-live/{dag,tests}.html.
+          declare -A explore_ns=(
+            [report-preview-explore-golden]=explore
+            [report-preview-explore-live]=explore-live
+          )
+          for artifact in "${!explore_ns[@]}"; do
+            ns="${explore_ns[$artifact]}"
+            src="artifacts/$artifact"
+            if [ -d "$src" ]; then
+              mkdir -p "_site/$ns"
+              for page in dag.html tests.html; do
+                if [ -f "$src/$page" ]; then
+                  cp "$src/$page" "_site/$ns/$page"
+                  echo "arranged: _site/$ns/$page"
+                fi
+              done
+            fi
+          done
           echo "site tree:"; find _site -type f 2>/dev/null || echo "(empty)"
       - name: Publish to gh-pages/pr-<N>/
         if: github.event.pull_request.head.repo.full_name == github.repository
@@ -450,7 +566,7 @@ jobs:
     # indicates a real permission misconfig that should surface).
     name: Post sticky preview comment
     runs-on: ubuntu-latest
-    needs: [regenerate, prdiff-preview, publish-previews]
+    needs: [regenerate, regenerate-explore, prdiff-preview, publish-previews]
     if: always() && github.event_name == 'pull_request'
     permissions:
       # actions: read — GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts
@@ -466,6 +582,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           MATRIX_RESULT: ${{ needs.regenerate.result }}
+          EXPLORE_RESULT: ${{ needs.regenerate-explore.result }}
           PRDIFF_RESULT: ${{ needs.prdiff-preview.result }}
           PRDIFF_TOUCHED: ${{ needs.prdiff-preview.outputs.touched }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -503,7 +620,12 @@ jobs:
                   if $isfork == "true" then "🚫 N/A (fork)"
                   else "[▶ Open ↗](" + $pages + "/pr-" + $pr + "/" + $slug + "/report.html)"
                   end;
-                [.[] | select((.name | sub("^report-preview-"; "")) != "dbt-project")]
+                # Report golden bucket: every report artifact EXCEPT the
+                # live dbt-project row and the explore artifacts (cute-dbt#320 —
+                # explore-golden/explore-live render two pages, not a
+                # <slug>-report.html, and surface in their own Explore section).
+                [.[] | (.name | sub("^report-preview-"; "")) as $slug
+                       | select($slug != "dbt-project" and ($slug | startswith("explore-") | not))]
                 | if length == 0 then
                     "| _(none uploaded — see [run log](https://github.com/\($repo)/actions/runs/\($run)))_ | — | — |"
                   else
@@ -529,6 +651,51 @@ jobs:
                     + " | [⬇ Download](https://github.com/" + $repo + "/actions/runs/" + $run + "/artifacts/" + (.id | tostring) + ") |"
                   ) | join("\n")
               ')
+          # Explore rows (cute-dbt#320). Each explore artifact bundles TWO
+          # pages (dag.html lineage + tests.html unit-test viewer), so emit
+          # one row per page with its own Pages View link
+          # (pr-<N>/<namespace>/<page>) sharing a single artifact Download.
+          # The `$ns` arg names the published namespace: `explore` for the
+          # committed golden, `explore-live` for the ephemeral per-PR
+          # render. The jq program is inlined per call (not hoisted to a
+          # shell var) so its `$ns`/`$page`/`$slug` stay jq positional args,
+          # never shell expansions — matching the golden/live blocks above.
+          explore_golden_rows=$(printf '%s' "$artifacts_json" \
+            | jq -r --arg repo "$REPO" --arg run "$RUN_ID" \
+                   --arg pages "$PAGES_BASE" --arg pr "$PR_NUMBER" --arg isfork "$IS_FORK" \
+                   --arg slug "explore-golden" --arg ns "explore" '
+                def viewcell($ns; $page):
+                  if $isfork == "true" then "🚫 N/A (fork)"
+                  else "[▶ Open ↗](" + $pages + "/pr-" + $pr + "/" + $ns + "/" + $page + ")"
+                  end;
+                [.[] | select((.name | sub("^report-preview-"; "")) == $slug)]
+                | map(
+                    .id as $id
+                    | (["dag.html","tests.html"] | map(
+                        "| `" + $ns + "/" + . + "`"
+                        + " | " + viewcell($ns; .)
+                        + " | [⬇ Download](https://github.com/" + $repo + "/actions/runs/" + $run + "/artifacts/" + ($id|tostring) + ") |"
+                      ) | join("\n"))
+                  ) | join("\n")
+              ')
+          explore_live_rows=$(printf '%s' "$artifacts_json" \
+            | jq -r --arg repo "$REPO" --arg run "$RUN_ID" \
+                   --arg pages "$PAGES_BASE" --arg pr "$PR_NUMBER" --arg isfork "$IS_FORK" \
+                   --arg slug "explore-live" --arg ns "explore-live" '
+                def viewcell($ns; $page):
+                  if $isfork == "true" then "🚫 N/A (fork)"
+                  else "[▶ Open ↗](" + $pages + "/pr-" + $pr + "/" + $ns + "/" + $page + ")"
+                  end;
+                [.[] | select((.name | sub("^report-preview-"; "")) == $slug)]
+                | map(
+                    .id as $id
+                    | (["dag.html","tests.html"] | map(
+                        "| `" + $ns + "/" + . + "`"
+                        + " | " + viewcell($ns; .)
+                        + " | [⬇ Download](https://github.com/" + $repo + "/actions/runs/" + $run + "/artifacts/" + ($id|tostring) + ") |"
+                      ) | join("\n"))
+                  ) | join("\n")
+              ')
           # Surface the regenerate result so the reviewer knows whether
           # the byte-identity gate (in ci.yml) is independently passing.
           status_line=$(case "$MATRIX_RESULT" in
@@ -552,6 +719,37 @@ jobs:
           else
             live_section="_This PR doesn't touch \`dbt-project/\`, so there's no live dogfood preview._"
           fi
+          # Build the EXPLORE section (cute-dbt#320) — the two-page explorer
+          # (dag.html lineage + tests.html unit-test viewer), surfaced just
+          # like the report with a golden (committed) + live (per-PR) split.
+          # The `| Page | View | Download |` header + `|---|---|---|`
+          # separator are emitted inline via printf with NO leading
+          # indentation (mirrors the live_section block above) so the
+          # interpolated table stays a valid GitHub markdown table.
+          if [ -n "$explore_golden_rows" ]; then
+            explore_golden_section=$(printf '%s\n\n| Page | View | Download |\n|---|---|---|\n%s' \
+              "_The committed \`examples/explore/\` playground golden (the full synthetic playground manifest). Byte-identity gated in \`Example report check\`. Stable across PRs._" \
+              "$explore_golden_rows")
+          else
+            explore_golden_section=$(case "$EXPLORE_RESULT" in
+              failure) echo "⚠️ The golden explore job failed — see the [run log](${RUN_URL})." ;;
+              cancelled) echo "_Run cancelled (likely superseded by a newer push)._" ;;
+              *) echo "_(no golden explore pages uploaded — see the [run log](${RUN_URL}))_" ;;
+            esac)
+          fi
+          # Live explore mirrors the live report dogfood: present only when
+          # the PR touched dbt-project/ (the same prdiff-preview.touched gate).
+          if [ "${PRDIFF_TOUCHED}" = "true" ] && [ -n "$explore_live_rows" ]; then
+            if [ "${PRDIFF_RESULT}" = "failure" ]; then
+              explore_live_section="⚠️ The live explore preview job failed — see the [run log](${RUN_URL})."
+            else
+              explore_live_section=$(printf '%s\n\n| Page | View | Download |\n|---|---|---|\n%s' \
+                "_This PR's own \`dbt-project/\`, freshly compiled by fusion into an **ephemeral** manifest (never committed) and rendered with \`explore\` — the full-manifest two-page explorer. Regenerated every PR — the live self-dogfood, not a committed example._" \
+                "$explore_live_rows")
+            fi
+          else
+            explore_live_section="_This PR doesn't touch \`dbt-project/\`, so there's no live explore preview._"
+          fi
           cat > target/sticky/body.md <<MARKDOWN
           ## 📄 Rendered report preview
 
@@ -567,8 +765,18 @@ jobs:
           ### 🐶 Live dogfood preview
           ${live_section}
 
-          **▶ Open ↗** opens the report in your browser in one click —
-          published to this repo's GitHub Pages under \`/pr-${PR_NUMBER}/\`.
+          ## 🧭 Explore preview
+          _The two-page \`cute-dbt explore\` explorer — \`dag.html\` (model lineage) + \`tests.html\` (unit-test viewer). Same golden/live split as the report._
+
+          ### 🟡 Golden explore
+          ${explore_golden_section}
+
+          ### 🐶 Live explore
+          ${explore_live_section}
+
+          **▶ Open ↗** opens the report or explorer in your browser in one
+          click — published to this repo's GitHub Pages under
+          \`/pr-${PR_NUMBER}/\`.
           **⬇ Download** fetches the same self-contained HTML as a workflow
           artifact (auth-gated; works fully offline). Either way the report
           makes zero external resource requests.

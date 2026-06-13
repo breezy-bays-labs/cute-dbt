@@ -20,6 +20,8 @@
 - [Selecting & suppressing checks](./check-selection.md)
 - [Experimental features](./experimental.md)
 - [Examples](./examples.md)
+  - [Reports examples](./examples/reports.md)
+  - [Explore examples](./examples/explore.md)
 - [Explorer external-drive contract](./explore-contract.md)
 - [Release discipline](./release-discipline.md)
 
