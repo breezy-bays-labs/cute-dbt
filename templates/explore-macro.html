@@ -93,8 +93,11 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
 <header class="explore-header">
   <div>
     <h1>Macro focus</h1>
-    {# cute-dbt#345 Slice 3 — the focus counts: the macro-calling models
-       (emphasized) and their full ref()-downstream closure (dimmed). #}
+    {# cute-dbt#345 Slice 3 — the focus counts. These are the RENDERED
+       node counts (the macro-role tally of the focused payload), not the
+       domain closure size: the closure crosses test nodes that are not
+       lineage vertices, so the page must count what actually draws or it
+       over-claims (qodo #4, never-a-false-claim). #}
     <p class="explore-counts">{{ user_count }} calling model{% if user_count != 1 %}s{% endif %}, {{ downstream_count }} downstream node{% if downstream_count != 1 %}s{% endif %}, {{ edge_count }} edge{% if edge_count != 1 %}s{% endif %}</p>
   </div>
   <nav class="explore-nav" aria-label="Explore pages">

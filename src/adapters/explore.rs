@@ -1386,6 +1386,24 @@ pub fn render_explore(
     // cytoscape-dagre engine `dag.html` uses.
     if let Some(focus) = macro_focus {
         let macro_lineage = build_macro_lineage_payload(current, focus);
+        // The displayed counts must reflect what RENDERS, not the domain
+        // closure: `focus.downstream` crosses every consumer node type
+        // (incl. `test` nodes), but `focused_typed_node_map` keeps only
+        // lineage-vertex types (model/snapshot/seed/source/exposure). A
+        // closure with N test nodes would inflate `focus.downstream.len()`
+        // far above the rendered vertex count — an over-claim (the
+        // never-a-false-claim invariant). So count the roles that actually
+        // materialized in the focused payload (qodo #4, cute-dbt#345).
+        let user_count = macro_lineage
+            .nodes
+            .iter()
+            .filter(|n| n.macro_role == Some(MacroRole::User))
+            .count();
+        let downstream_count = macro_lineage
+            .nodes
+            .iter()
+            .filter(|n| n.macro_role == Some(MacroRole::Downstream))
+            .count();
         let macro_dag_json = json_for_html_script(&macro_lineage)
             .map_err(|err| io::Error::other(format!("macro dag payload serialization: {err}")))?;
         let macro_html = ExploreMacroTemplate {
@@ -1396,8 +1414,8 @@ pub fn render_explore(
             explore_lineage_js: EXPLORE_LINEAGE_JS,
             favicon_data_uri: FAVICON_DATA_URI,
             dag_json: &macro_dag_json,
-            user_count: focus.users.len(),
-            downstream_count: focus.downstream.len(),
+            user_count,
+            downstream_count,
             edge_count: macro_lineage.edges.len(),
         }
         .render()
@@ -3194,6 +3212,87 @@ mod tests {
         assert!(
             !dir.join("macro.html").exists(),
             "the no-focus path must not emit macro.html",
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn macro_page_downstream_count_excludes_non_vertex_closure_nodes() {
+        // qodo #4 — the displayed downstream count must reflect what
+        // RENDERS, not the domain closure. The `MacroFocusSet` closure
+        // (correctly) crosses `test` nodes, but `focused_typed_node_map`
+        // keeps only lineage vertices — so a `focus.downstream.len()`
+        // count would over-claim. The page must count the rendered
+        // `Downstream`-role nodes.
+        //
+        // stg (user, model) -> dim (downstream, model) -> a `test` node
+        // consuming dim. The test is in the closure (so `focus.downstream`
+        // = {dim, test}, len 2) but is NOT a lineage vertex — only `dim`
+        // renders, so the page must say "1 downstream node", not 2.
+        let current = manifest_of(vec![
+            model("model.shop.stg", Some("select 1"), &[]),
+            model("model.shop.dim", Some("select 1"), &["model.shop.stg"]),
+            data_test(
+                "test.shop.assert_dim",
+                Some("model.shop.dim"),
+                &["model.shop.dim"],
+                Some("tests/assert_dim.sql"),
+            ),
+        ]);
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        // The focus a real run would produce: users = {stg}, downstream =
+        // the full closure minus users = {dim, test.shop.assert_dim}.
+        let focus = MacroFocusSet {
+            users: [NodeId::new("model.shop.stg")].into_iter().collect(),
+            downstream: [
+                NodeId::new("model.shop.dim"),
+                NodeId::new("test.shop.assert_dim"),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        // Precondition: the domain closure includes the non-vertex test —
+        // the over-claim source if counted directly.
+        assert_eq!(focus.downstream.len(), 2, "closure includes the test node");
+
+        let dir = tmp_dir("macro-count-vertex");
+        render_explore(&dir, &current, &models, None, &payload, Some(&focus))
+            .expect("explore renders");
+        let macro_html = fs::read_to_string(dir.join("macro.html")).expect("macro.html");
+
+        // The rendered focused DAG carries exactly 2 vertices (stg + dim);
+        // the test node is not a vertex.
+        let dom = tl::parse(&macro_html, tl::ParserOptions::default()).expect("parse");
+        let parser = dom.parser();
+        let carrier = dom
+            .get_element_by_id("explore-dag-data")
+            .expect("carrier present")
+            .get(parser)
+            .expect("resolves")
+            .inner_text(parser);
+        let payload_json: serde_json::Value = serde_json::from_str(&carrier).expect("carrier JSON");
+        assert_eq!(
+            payload_json["nodes"].as_array().map_or(0, Vec::len),
+            2,
+            "only the two model vertices render — the test is not a vertex",
+        );
+
+        // The displayed count reflects the RENDERED downstream vertices
+        // (1: dim), never the domain closure size (2). The over-claim
+        // would read "2 downstream nodes".
+        assert!(
+            macro_html.contains("1 calling model, 1 downstream node, 1 edge"),
+            "the header must count rendered vertices, not the closure \
+             (which includes the non-rendering test node): {}",
+            macro_html
+                .lines()
+                .find(|l| l.contains("explore-counts"))
+                .unwrap_or("<no counts line>"),
+        );
+        assert!(
+            !macro_html.contains("2 downstream node"),
+            "the count must NOT over-claim the test node as a downstream vertex",
         );
         let _ = fs::remove_dir_all(&dir);
     }
