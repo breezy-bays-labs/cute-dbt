@@ -72,10 +72,14 @@ struct FakeToolSpec {
 #[must_use]
 pub fn requested() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let stem = exe.file_stem()?.to_str()?;
-    if stem == "cute-dbt" {
+    let stem = exe.file_stem()?;
+    // Case-insensitive: Windows executable names are case-insensitive, so
+    // a `Cute-Dbt.exe` launch must still be recognized as the real CLI and
+    // never fall into the fake-tool branch.
+    if stem.eq_ignore_ascii_case("cute-dbt") {
         return None;
     }
+    let stem = stem.to_str()?;
     let spec = exe.with_file_name(format!("{stem}.spec.toml"));
     spec.is_file().then_some(spec)
 }
@@ -155,7 +159,13 @@ fn log_invocation(spec_path: &Path, args: &[String]) {
         .ok()
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "tool".to_owned());
+    // Log the CANONICAL cwd so the planned-vs-executed assertions, which
+    // compare against `canonicalize(repo.root)`, match on every platform:
+    // macOS tmpdirs traverse the /var symlink, and Windows canonicalize
+    // emits a `\\?\` verbatim prefix — canonicalizing both sides aligns
+    // them. Fall back to the raw cwd if canonicalize fails.
     let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     let line = format!("cwd={} args={}\n", cwd.display(), args.join(" "));
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)

@@ -874,12 +874,11 @@ fn a_missing_dbt_gets_the_install_remediation() {
     let repo = repo_with_branch_change("dbt-missing");
     // Remove the scaffold's default shim, then run hermetically: dbt
     // (and gh) must be genuinely absent. A plain controlled PATH that
-    // includes /usr/bin would let a host dbt/gh leak in on some runners;
-    // `review_hermetic` excludes the system dirs (git/sh symlinked in),
+    // includes the system dirs would let a host dbt/gh leak in on some
+    // runners; `review_hermetic` excludes them (only git is linked in),
     // so the binary sees io::ErrorKind::NotFound — the only trigger for
     // the dbt-MISSING install remediation.
-    std::fs::remove_file(repo.root.parent().expect("base").join("bin/dbt"))
-        .expect("remove the default shim");
+    repo.remove_shim("dbt");
 
     let output = repo.review_hermetic(&["--no-open"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -894,8 +893,7 @@ fn a_missing_dbt_gets_the_install_remediation() {
 #[test]
 fn no_compile_needs_no_dbt_at_all() {
     let repo = repo_with_branch_change("nocompile-nodbt");
-    std::fs::remove_file(repo.root.parent().expect("base").join("bin/dbt"))
-        .expect("remove the default shim");
+    repo.remove_shim("dbt");
 
     let output = repo.review(&["--no-compile", "--no-open"]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
