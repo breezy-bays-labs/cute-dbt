@@ -100,6 +100,189 @@ fn committed_only_excludes_the_uncommitted_edit() {
 }
 
 // ===================================================================
+// Scope variants: --staged / --unstaged (V3, cute-dbt#302)
+// ===================================================================
+
+#[test]
+fn staged_reviews_only_staged_changes() {
+    let repo = TestRepo::init("staged-only");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    // Stage the edit that pulls the unit test into scope.
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- staged\n");
+    repo.git(&["add", "-A"]);
+
+    let output = repo.review(&["--staged", "--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let html = std::fs::read_to_string(repo.root.join("target/cute-dbt-report.html"))
+        .expect("the staged change renders a report");
+    assert!(
+        html.contains(STG_CUSTOMERS_TEST),
+        "the staged edit scopes its unit test",
+    );
+    // The git diff plan for --staged is index-relative.
+    let log = repo.dbt_log_contents();
+    assert!(log.contains("args=compile"), "compile still runs: {log}");
+}
+
+#[test]
+fn staged_ignores_a_purely_unstaged_edit() {
+    let repo = TestRepo::init("staged-ignores-unstaged");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    // Edit but DO NOT stage: --staged (HEAD -> index) sees nothing.
+    repo.write(
+        STG_CUSTOMERS_SQL,
+        "select 1 as customer_id -- unstaged only\n",
+    );
+
+    let output = repo.review(&["--staged", "--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        stderr_of(&output).contains("nothing to review"),
+        "an unstaged-only edit is empty under --staged: {}",
+        stderr_of(&output),
+    );
+    assert!(
+        !repo.root.join("target/cute-dbt-report.html").exists(),
+        "no report for an empty staged diff",
+    );
+}
+
+#[test]
+fn unstaged_reviews_only_unstaged_edits() {
+    let repo = TestRepo::init("unstaged-only");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- unstaged\n");
+    // NOT staged — bare `git diff` (index -> working tree) sees it.
+
+    let output = repo.review(&["--unstaged", "--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let html = std::fs::read_to_string(repo.root.join("target/cute-dbt-report.html"))
+        .expect("the unstaged edit renders a report");
+    assert!(
+        html.contains(STG_CUSTOMERS_TEST),
+        "the unstaged edit scopes its unit test",
+    );
+}
+
+#[test]
+fn unstaged_ignores_a_purely_staged_edit() {
+    let repo = TestRepo::init("unstaged-ignores-staged");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.write(
+        STG_CUSTOMERS_SQL,
+        "select 1 as customer_id -- staged only\n",
+    );
+    repo.git(&["add", "-A"]);
+
+    let output = repo.review(&["--unstaged", "--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        stderr_of(&output).contains("nothing to review"),
+        "a staged-only edit is empty under --unstaged (index == working tree): {}",
+        stderr_of(&output),
+    );
+}
+
+#[test]
+fn staged_with_unstaged_edits_on_the_same_file_warns_about_drift() {
+    // The same-revision contract: --staged diffs HEAD -> index, but the
+    // manifest is compiled from the working tree. A file that is staged
+    // AND further edited unstaged makes them disagree — warn, never
+    // block, exit 0.
+    let repo = TestRepo::init("staged-drift");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    // Stage one version…
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- staged v1\n");
+    repo.git(&["add", "-A"]);
+    // …then edit again WITHOUT staging: the file now has both index and
+    // worktree changes (porcelain `MM`).
+    repo.write(
+        STG_CUSTOMERS_SQL,
+        "select 1 as customer_id -- staged v1 then unstaged v2\n",
+    );
+
+    let output = repo.review(&["--staged", "--no-open"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "drift warns but never blocks: {output:?}",
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("staged but also have unstaged edits")
+            && stderr.contains("stg_customers.sql"),
+        "the drift warning names the file: {stderr}",
+    );
+    assert!(
+        repo.root.join("target/cute-dbt-report.html").exists(),
+        "the report still renders (graceful degrade, not a block)",
+    );
+}
+
+#[test]
+fn staged_without_drift_emits_no_drift_warning() {
+    // The negative pin: a file staged with NO further unstaged edits
+    // must not trip the drift warning (porcelain `M␠`, not `MM`).
+    let repo = TestRepo::init("staged-no-drift");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.write(
+        STG_CUSTOMERS_SQL,
+        "select 1 as customer_id -- cleanly staged\n",
+    );
+    repo.git(&["add", "-A"]);
+
+    let output = repo.review(&["--staged", "--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        !stderr_of(&output).contains("staged but also have unstaged edits"),
+        "a cleanly-staged file does not drift: {}",
+        stderr_of(&output),
+    );
+}
+
+#[test]
+fn unstaged_never_emits_a_drift_warning() {
+    // Drift is a --staged-only concern: --unstaged diffs the working
+    // tree, which is exactly what the manifest compiled.
+    let repo = TestRepo::init("unstaged-no-drift");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- staged\n");
+    repo.git(&["add", "-A"]);
+    repo.write(
+        STG_CUSTOMERS_SQL,
+        "select 1 as customer_id -- staged then unstaged\n",
+    );
+
+    let output = repo.review(&["--unstaged", "--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        !stderr_of(&output).contains("staged but also have unstaged edits"),
+        "the drift check never runs on --unstaged: {}",
+        stderr_of(&output),
+    );
+}
+
+#[test]
+fn dry_run_reflects_the_staged_variant_command() {
+    let repo = TestRepo::init("dryrun-staged");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- staged\n");
+    repo.git(&["add", "-A"]);
+
+    let dry = repo.review(&["--staged", "--dry-run", "--no-open"]);
+    assert_eq!(dry.status.code(), Some(0), "{dry:?}");
+    let stdout = stdout_of(&dry);
+    assert!(
+        stdout.contains("[git diff]") && stdout.contains("--cached"),
+        "the dry-run git plan shows the --cached (staged) form: {stdout}",
+    );
+    assert!(
+        repo.dbt_log_contents().is_empty(),
+        "--dry-run spawns nothing",
+    );
+}
+
+// ===================================================================
 // Empty diff posture
 // ===================================================================
 
