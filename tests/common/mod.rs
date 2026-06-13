@@ -163,7 +163,7 @@ impl TestRepo {
     }
 
     /// Apply the git-environment isolation to any command (git itself
-    /// or the spawned `cute-dbt`, which shells out to git).
+    /// or the spawned `cute-dbt`, which shells out to git/dbt/gh).
     pub fn isolate(&self, cmd: &mut Command) {
         let empty = self.home.join("gitconfig");
         scrub_git_env(cmd);
@@ -183,19 +183,19 @@ impl TestRepo {
             .env_remove("DBT_TARGET_PATH");
     }
 
-    /// Install an executable `dbt` shim into the controlled PATH. The
-    /// body is `#!/bin/sh` script text; every invocation's cwd + argv is
-    /// appended to [`TestRepo::dbt_log`] before the body runs, so tests
-    /// can assert exactly what review executed (the planned-argv ==
-    /// executed-argv pin at the subprocess level).
-    pub fn install_dbt_shim(&self, body: &str) {
+    /// Install an executable shim named `name` into the controlled PATH.
+    /// The body is `#!/bin/sh` script text; every invocation's cwd + argv
+    /// is appended to `<bin>/<name>-invocations.log` before the body
+    /// runs, so tests can assert exactly what review executed (the
+    /// planned-argv == executed-argv pin at the subprocess level).
+    pub fn install_shim(&self, name: &str, body: &str) {
         use std::os::unix::fs::PermissionsExt;
-        let path = self.bin.join("dbt");
+        let path = self.bin.join(name);
         let script = format!(
             "#!/bin/sh\nprintf 'cwd=%s args=%s\\n' \"$(pwd)\" \"$*\" >> \"{log}\"\n{body}\n",
-            log = self.dbt_log().display(),
+            log = self.shim_log(name).display(),
         );
-        std::fs::write(&path, script).expect("write dbt shim");
+        std::fs::write(&path, script).expect("write shim");
         let mut perms = std::fs::metadata(&path)
             .expect("shim metadata")
             .permissions();
@@ -203,14 +203,41 @@ impl TestRepo {
         std::fs::set_permissions(&path, perms).expect("chmod shim");
     }
 
-    /// The shim invocation log (one `cwd=… args=…` line per call).
-    pub fn dbt_log(&self) -> PathBuf {
-        self.bin.join("dbt-invocations.log")
+    /// Install an executable `dbt` shim (the common case).
+    pub fn install_dbt_shim(&self, body: &str) {
+        self.install_shim("dbt", body);
     }
 
-    /// The shim log contents — empty when dbt never ran.
+    /// Install an executable `gh` shim (cute-dbt#303 — the PR-anchor +
+    /// gh-rung tests).
+    pub fn install_gh_shim(&self, body: &str) {
+        self.install_shim("gh", body);
+    }
+
+    /// Remove a shim from the controlled PATH so the binary is genuinely
+    /// "not found" (the gh-missing / dbt-missing scenarios).
+    pub fn remove_shim(&self, name: &str) {
+        let _ = std::fs::remove_file(self.bin.join(name));
+    }
+
+    /// A named shim's invocation log (one `cwd=… args=…` line per call).
+    pub fn shim_log(&self, name: &str) -> PathBuf {
+        self.bin.join(format!("{name}-invocations.log"))
+    }
+
+    /// The `dbt` shim invocation log path.
+    pub fn dbt_log(&self) -> PathBuf {
+        self.shim_log("dbt")
+    }
+
+    /// The `dbt` shim log contents — empty when dbt never ran.
     pub fn dbt_log_contents(&self) -> String {
         std::fs::read_to_string(self.dbt_log()).unwrap_or_default()
+    }
+
+    /// The `gh` shim log contents — empty when gh never ran.
+    pub fn gh_log_contents(&self) -> String {
+        std::fs::read_to_string(self.shim_log("gh")).unwrap_or_default()
     }
 
     /// Run a git command in the repo, asserting success.
@@ -258,6 +285,68 @@ impl TestRepo {
     pub fn review(&self, args: &[&str]) -> Output {
         self.review_in(".", args)
     }
+
+    /// Spawn `cute-dbt review <args>` on a **hermetic PATH** that
+    /// contains ONLY the shim dir — `/usr/bin` and `/bin` are excluded,
+    /// so `gh` is genuinely `NotFound` even on hosts (GitHub-hosted
+    /// Linux runners) that pre-install `/usr/bin/gh`. The tools review
+    /// shells out to are symlinked into the shim dir first, so they
+    /// still resolve: `git` (every stage), plus `sh`/`env` for any shell
+    /// shim a test may have installed. `dbt`/`gh` are reachable ONLY if
+    /// a test installed their shims — never the host binaries.
+    ///
+    /// This is the only way to exercise the `--pr` gh-MISSING branch
+    /// (`ReviewError::DbtMissing`/`GhMissing` fire on
+    /// `io::ErrorKind::NotFound`, the genuine-missing-binary case — a
+    /// non-zero-exit shim is "present but failed", a different branch).
+    pub fn review_hermetic(&self, args: &[&str]) -> Output {
+        self.symlink_host_tools(&["git", "sh", "env"]);
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
+        cmd.arg("review").args(args).current_dir(&self.root);
+        let empty = self.home.join("gitconfig");
+        scrub_git_env(&mut cmd);
+        cmd.env("GIT_CONFIG_GLOBAL", &empty)
+            .env("GIT_CONFIG_SYSTEM", &empty)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", &self.home)
+            .env("GIT_AUTHOR_NAME", "cute-dbt-test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "cute-dbt-test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            // HERMETIC: the shim dir ONLY. No /usr/bin, so a host
+            // /usr/bin/gh (GitHub runners) is unreachable; git/sh resolve
+            // via the symlinks created above.
+            .env("PATH", self.bin.display().to_string())
+            .env_remove("CUTE_DBT_EXPERIMENTAL")
+            .env_remove("DBT_TARGET_PATH");
+        cmd.output().expect("the cute-dbt binary spawns")
+    }
+
+    /// Symlink each named host tool into the shim dir (resolved from the
+    /// real PATH), so it resolves on the hermetic PATH that excludes the
+    /// system dirs. A tool already present (a real binary, a prior
+    /// symlink, or a test shim) is left untouched; an unresolvable tool
+    /// is skipped (the hermetic run will surface its own NotFound).
+    fn symlink_host_tools(&self, tools: &[&str]) {
+        for tool in tools {
+            let target = self.bin.join(tool);
+            if target.exists() {
+                continue;
+            }
+            if let Some(src) = resolve_on_host_path(tool) {
+                let _ = std::os::unix::fs::symlink(&src, &target);
+            }
+        }
+    }
+}
+
+/// Resolve a bare tool name to its absolute path by searching the test
+/// process's real `PATH` (the host PATH, before any harness override).
+fn resolve_on_host_path(tool: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(tool))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Scaffold a minimal dbt project at `project_rel` (`"."` = the repo

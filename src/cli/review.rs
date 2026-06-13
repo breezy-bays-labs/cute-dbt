@@ -72,7 +72,7 @@ use super::pr_diff::parse_diff;
 #[command(
     group = ArgGroup::new("review_scope")
         .multiple(false)
-        .args(["committed_only", "staged", "unstaged"]),
+        .args(["committed_only", "staged", "unstaged", "pr"]),
     after_long_help = REVIEW_EXAMPLES,
 )]
 pub struct ReviewArgs {
@@ -80,11 +80,31 @@ pub struct ReviewArgs {
     /// `origin/release-2.4`).
     ///
     /// Without it, review walks the detection ladder: `git config
-    /// cute-dbt.base` → the `origin/HEAD` symref → probing
-    /// `origin/{main,master,trunk}` then local heads. The answering
-    /// rung is announced on stderr.
+    /// cute-dbt.base` → the open PR's base via `gh` → the `origin/HEAD`
+    /// symref → probing `origin/{main,master,trunk}` then local heads.
+    /// The answering rung is announced on stderr.
     #[arg(long, value_name = "REF")]
     pub base: Option<String>,
+
+    /// Anchor the review to the repo's open pull request: its base
+    /// branch becomes the review base.
+    ///
+    /// Bare `--pr` uses the current branch's open PR (error with
+    /// remediation if there is none). `--pr <N>` additionally asserts
+    /// that the current HEAD *is* PR #N's head branch — if it is not,
+    /// review tells you to `gh pr checkout <N>` first and stops; it
+    /// NEVER checks out or mutates your working tree itself. Requires
+    /// `gh` on PATH (the GitHub CLI). Mutually exclusive with `--base`
+    /// and the other scope selectors.
+    ///
+    /// `Option<Option<u64>>` is clap's standard shape for a flag that
+    /// optionally takes a value: `None` = flag absent, `Some(None)` =
+    /// bare `--pr`, `Some(Some(n))` = `--pr n`. The nested option is
+    /// load-bearing here (the three states are distinct), so the
+    /// `option_option` lint is suppressed at this one field.
+    #[allow(clippy::option_option)]
+    #[arg(long, value_name = "N", num_args = 0..=1, conflicts_with = "base")]
+    pub pr: Option<Option<u64>>,
 
     /// Review only committed changes (`<merge-base>..HEAD`) — exact
     /// parity with what a PR would show.
@@ -278,6 +298,9 @@ pub enum BaseSource {
     Flag,
     /// The persisted `git config cute-dbt.base` answer.
     GitConfig,
+    /// The open PR's base branch (the `--pr` / gh path) — its base ref
+    /// is not present locally.
+    PullRequest,
 }
 
 /// A review-stage failure (git / detection / discovery), each carrying
@@ -314,6 +337,25 @@ pub enum ReviewError {
     DisjointHistories {
         /// The detected/explicit base ref.
         base: String,
+    },
+    /// `--pr` was passed but `gh` (the GitHub CLI) is not on PATH.
+    GhMissing,
+    /// `--pr` was passed but no open PR resolves for the current branch
+    /// (or `gh` failed for an unrelated reason).
+    NoPullRequest {
+        /// The current branch (for the message), when known.
+        branch: Option<String>,
+    },
+    /// `--pr <n>` was passed but the current HEAD is not that PR's head
+    /// branch. Review never checks out for you — it stops and tells you
+    /// to do it.
+    PrHeadMismatch {
+        /// The PR number the operator named.
+        number: u64,
+        /// The PR's actual head branch.
+        head_ref: String,
+        /// The branch (or detached-HEAD note) currently checked out.
+        current: String,
     },
     /// No `dbt_project.yml` was found.
     ProjectNotFound {
@@ -365,6 +407,30 @@ pub enum ReviewError {
         /// The underlying detail (stderr / io error).
         detail: String,
     },
+}
+
+/// `(description, remediation)` for [`ReviewError::BaseRefMissing`],
+/// attributing the ref to its real source — the PR path must NOT claim
+/// the ref came from `--base` (cute-dbt#303 bot review).
+fn base_ref_missing_message(ref_name: &str, source: BaseSource) -> (String, String) {
+    let from = match source {
+        BaseSource::Flag => "--base",
+        BaseSource::GitConfig => "git config cute-dbt.base",
+        BaseSource::PullRequest => "the open PR's base branch",
+    };
+    let fix = match source {
+        BaseSource::PullRequest => format!(
+            "Fetch the PR's base (`git fetch origin {ref_name}`) and re-run — \
+             or pass `--base <ref>` instead of `--pr`."
+        ),
+        BaseSource::Flag | BaseSource::GitConfig => {
+            format!("Fetch it (`git fetch origin {ref_name}`) or pass a different `--base <ref>`.")
+        }
+    };
+    (
+        format!("the base ref `{ref_name}` (from {from}) does not resolve to a commit."),
+        fix,
+    )
 }
 
 impl ReviewError {
@@ -419,19 +485,7 @@ impl ReviewError {
                     .to_owned(),
             ),
             Self::BaseRefMissing { ref_name, source } => {
-                let from = match source {
-                    BaseSource::Flag => "--base",
-                    BaseSource::GitConfig => "git config cute-dbt.base",
-                };
-                (
-                    format!(
-                        "the base ref `{ref_name}` (from {from}) does not resolve to a commit."
-                    ),
-                    format!(
-                        "Fetch it (`git fetch origin {ref_name}`) or pass a different \
-                         `--base <ref>`."
-                    ),
-                )
+                base_ref_missing_message(ref_name, *source)
             }
             Self::ShallowClone { base } => (
                 format!("no merge-base with `{base}`: this clone is shallow."),
@@ -441,6 +495,36 @@ impl ReviewError {
             Self::DisjointHistories { base } => (
                 format!("no merge-base with `{base}`: the histories share no common ancestor."),
                 "Pass `--base <ref>` naming a branch that shares history with HEAD.".to_owned(),
+            ),
+            Self::GhMissing => (
+                "`--pr` needs the GitHub CLI (`gh`), which was not found on PATH.".to_owned(),
+                "Install `gh` (https://cli.github.com) and `gh auth login` — or drop `--pr` \
+                 and pass `--base <ref>` instead."
+                    .to_owned(),
+            ),
+            Self::NoPullRequest { branch } => {
+                let on = branch
+                    .as_deref()
+                    .map_or_else(String::new, |b| format!(" for `{b}`"));
+                (
+                    format!("`--pr` found no open pull request{on}."),
+                    "Open a PR first (`gh pr create`), or pass `--base <ref>` to review \
+                     against a branch without a PR."
+                        .to_owned(),
+                )
+            }
+            Self::PrHeadMismatch {
+                number,
+                head_ref,
+                current,
+            } => (
+                format!(
+                    "`--pr {number}` is for head branch `{head_ref}`, but you are on `{current}`."
+                ),
+                format!(
+                    "Run `gh pr checkout {number}` first, then `cute-dbt review --pr` — \
+                     review never checks out for you."
+                ),
             ),
             // Explicit (never `_`): a new variant must fail to compile
             // here AND in describe_dbt/describe_project, forcing a
@@ -516,6 +600,9 @@ impl ReviewError {
             | Self::BaseRefMissing { .. }
             | Self::ShallowClone { .. }
             | Self::DisjointHistories { .. }
+            | Self::GhMissing
+            | Self::NoPullRequest { .. }
+            | Self::PrHeadMismatch { .. }
             | Self::ProjectNotFound { .. }
             | Self::ProjectAmbiguous { .. }
             | Self::ProjectOutsideRepo { .. }
@@ -590,6 +677,9 @@ impl ReviewError {
             | Self::BaseRefMissing { .. }
             | Self::ShallowClone { .. }
             | Self::DisjointHistories { .. }
+            | Self::GhMissing
+            | Self::NoPullRequest { .. }
+            | Self::PrHeadMismatch { .. }
             | Self::ManifestMissing { .. }
             | Self::DbtMissing
             | Self::EngineUnsupported(_)
@@ -803,6 +893,11 @@ pub struct BaseFacts {
     pub explicit: Option<RefProbe>,
     /// `git config cute-dbt.base`, verified.
     pub configured: Option<RefProbe>,
+    /// The open PR's base, resolved to a verified local ref via `gh`
+    /// (e.g. `origin/main`). Fail-soft: `None` whenever `gh` is absent,
+    /// HEAD is detached, there is no open PR, the call times out, or the
+    /// resolved ref is not present locally — the ladder falls through.
+    pub pr_base: Option<String>,
     /// The `origin/HEAD` symref target (e.g. `origin/main`), present
     /// only when the symref exists **and** resolves (a stale symref
     /// falls through to the probes).
@@ -821,11 +916,13 @@ pub enum Rung {
     ExplicitFlag,
     /// Rung 1: the persisted `git config cute-dbt.base`.
     GitConfig,
-    /// Rung 2: the `origin/HEAD` symref.
+    /// Rung 2: the open PR's base, via `gh pr view`.
+    GhPr,
+    /// Rung 3: the `origin/HEAD` symref.
     OriginHead,
-    /// Rung 3a: probing `origin/{main,master,trunk}`.
+    /// Rung 4a: probing `origin/{main,master,trunk}`.
     RemoteProbe,
-    /// Rung 3b: probing local `{main,master,trunk}` heads.
+    /// Rung 4b: probing local `{main,master,trunk}` heads.
     LocalProbe,
 }
 
@@ -836,6 +933,7 @@ impl Rung {
         match self {
             Self::ExplicitFlag => "--base",
             Self::GitConfig => "git config cute-dbt.base",
+            Self::GhPr => "gh pr view (open PR base)",
             Self::OriginHead => "origin/HEAD",
             Self::RemoteProbe => "origin/{main,master,trunk} probe",
             Self::LocalProbe => "local main/master/trunk probe",
@@ -871,6 +969,9 @@ pub fn decide_base(facts: &BaseFacts) -> Result<(String, Rung), ReviewError> {
             source: BaseSource::GitConfig,
         });
     }
+    if let Some(name) = &facts.pr_base {
+        return Ok((name.clone(), Rung::GhPr));
+    }
     if let Some(name) = &facts.origin_head {
         return Ok((name.clone(), Rung::OriginHead));
     }
@@ -897,6 +998,93 @@ pub fn diagnose_no_merge_base(base: &str, is_shallow: bool) -> ReviewError {
             base: base.to_owned(),
         }
     }
+}
+
+// ===================================================================
+// `gh pr view` — the open-PR base rung + the --pr anchor
+// (research-294 sweep-scope-detection §1)
+// ===================================================================
+
+/// The fields review reads from `gh pr view --json
+/// baseRefName,headRefName,number`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrInfo {
+    /// The PR's base branch (e.g. `main`) — becomes the review base.
+    pub base_ref: String,
+    /// The PR's head branch — `--pr <n>` asserts HEAD is on this.
+    pub head_ref: String,
+    /// The PR number.
+    pub number: u64,
+}
+
+/// Parse the `gh pr view --json baseRefName,headRefName,number` payload.
+/// `None` for any shape review cannot use (not an object, missing /
+/// blank `baseRefName`) — the caller treats `None` as "no usable PR".
+#[must_use]
+pub fn parse_pr_info(json: &str) -> Option<PrInfo> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let base_ref = value.get("baseRefName")?.as_str()?.trim().to_owned();
+    if base_ref.is_empty() {
+        return None;
+    }
+    let head_ref = value
+        .get("headRefName")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    let number = value
+        .get("number")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    Some(PrInfo {
+        base_ref,
+        head_ref,
+        number,
+    })
+}
+
+/// Resolve a PR base branch name to a verified local ref. A `gh`
+/// `baseRefName` is a bare branch (`main`); the review base must be the
+/// remote-tracking ref (`origin/main`) so the diff matches what the PR
+/// shows. Returns `None` (fall through) if neither the remote-tracking
+/// nor a local ref resolves.
+fn resolve_pr_base_ref(toplevel: &Path, base_ref: &str) -> Result<Option<String>, ReviewError> {
+    let remote = format!("origin/{base_ref}");
+    if ref_resolves(toplevel, &remote)? {
+        return Ok(Some(remote));
+    }
+    if ref_resolves(toplevel, base_ref)? {
+        return Ok(Some(base_ref.to_owned()));
+    }
+    Ok(None)
+}
+
+/// Decide whether `--pr <n>` is satisfied by the current checkout:
+/// pure. `Ok(())` when the PR's head branch is the current branch;
+/// otherwise the mismatch error (review never checks out for you).
+/// Bare `--pr` (`requested = None`) imposes no head assertion.
+///
+/// # Errors
+///
+/// [`ReviewError::PrHeadMismatch`] when an explicit `--pr <n>`'s head
+/// branch is not the currently checked-out branch.
+pub fn check_pr_head(
+    requested: Option<u64>,
+    pr: &PrInfo,
+    current_branch: Option<&str>,
+) -> Result<(), ReviewError> {
+    let Some(number) = requested else {
+        return Ok(()); // bare --pr: no head assertion.
+    };
+    if current_branch == Some(pr.head_ref.as_str()) {
+        return Ok(());
+    }
+    Err(ReviewError::PrHeadMismatch {
+        number,
+        head_ref: pr.head_ref.clone(),
+        current: current_branch.unwrap_or("a detached HEAD").to_owned(),
+    })
 }
 
 // ===================================================================
@@ -1444,8 +1632,14 @@ fn resolve_review_layout(args: &ReviewArgs, cwd: &Path) -> Result<ReviewLayout, 
 /// Walk the base-detection ladder, announce the answering rung, and
 /// return the merge-base SHA.
 fn resolve_base(args: &ReviewArgs, toplevel: &Path) -> Result<String, ReviewError> {
-    let facts = gather_base_facts(toplevel, args.base.as_deref())?;
-    let (base_ref, rung) = decide_base(&facts)?;
+    let (base_ref, rung) = if let Some(requested) = args.pr {
+        // `--pr [<n>]`: anchor to the open PR (gh failures surfaced).
+        resolve_pr_anchor_base(toplevel, requested)?
+    } else {
+        // The auto-ladder (the gh rung is one fail-soft step within).
+        let facts = gather_base_facts(toplevel, args.base.as_deref())?;
+        decide_base(&facts)?
+    };
     let merge_base = find_merge_base(toplevel, &base_ref)?;
     eprintln!(
         "cute-dbt: base: {base_ref} (via {}; merge-base {})",
@@ -1453,6 +1647,27 @@ fn resolve_base(args: &ReviewArgs, toplevel: &Path) -> Result<String, ReviewErro
         short_sha(&merge_base),
     );
     Ok(merge_base)
+}
+
+/// The explicit `--pr [<n>]` base: require an open PR (gh failures are
+/// surfaced, not silenced), assert the head branch on `--pr <n>` (never
+/// checking out), then resolve the PR's base to a verified local ref.
+fn resolve_pr_anchor_base(
+    toplevel: &Path,
+    requested: Option<u64>,
+) -> Result<(String, Rung), ReviewError> {
+    // Query PR #requested explicitly (bare `--pr` ⇒ None ⇒ the current
+    // branch's PR), so `--pr <n>` resolves PR #n's base — not whatever
+    // PR the current branch happens to have (cute-dbt#303 bot review).
+    let pr = require_gh_pr(toplevel, requested)?;
+    check_pr_head(requested, &pr, current_branch(toplevel)?.as_deref())?;
+    let base = resolve_pr_base_ref(toplevel, &pr.base_ref)?.ok_or_else(|| {
+        ReviewError::BaseRefMissing {
+            ref_name: pr.base_ref.clone(),
+            source: BaseSource::PullRequest,
+        }
+    })?;
+    Ok((base, Rung::GhPr))
 }
 
 /// Build the in-process report composition inputs from the resolved
@@ -1672,16 +1887,35 @@ fn project_rel_to_toplevel(project_dir: &Path, toplevel: &Path) -> Result<String
 /// Gather every ladder fact with read-only git queries. One helper per
 /// rung keeps each piece small + directly testable (the CRAP < 15 lane
 /// rule): [`probe_explicit_ref`], [`probe_configured_base`],
-/// [`probe_origin_head`], and [`probe_name_refs`].
+/// [`probe_gh_pr_base`], [`probe_origin_head`], and [`probe_name_refs`].
 fn gather_base_facts(toplevel: &Path, explicit: Option<&str>) -> Result<BaseFacts, ReviewError> {
     let (remote_probe, local_probe) = probe_name_refs(toplevel)?;
     Ok(BaseFacts {
         explicit: probe_explicit_ref(toplevel, explicit)?,
         configured: probe_configured_base(toplevel)?,
+        pr_base: probe_gh_pr_base(toplevel)?,
         origin_head: probe_origin_head(toplevel)?,
         remote_probe,
         local_probe,
     })
+}
+
+/// The auto-ladder gh rung: the open PR's base, resolved to a verified
+/// local ref. **Fail-soft** — `None` whenever `gh` is absent, HEAD is
+/// detached, no PR resolves, the call times out, or the base ref is not
+/// present locally. Only the local-ref resolution can surface a real
+/// error (a git probe failure); everything `gh`-side degrades to `None`
+/// so `gh` is never a hard dependency of the auto-ladder.
+fn probe_gh_pr_base(toplevel: &Path) -> Result<Option<String>, ReviewError> {
+    // Branch-only: `gh pr view` needs a branch, and the rung must never
+    // run on a detached HEAD.
+    if current_branch(toplevel)?.is_none() {
+        return Ok(None);
+    }
+    match gh_pr_view(toplevel) {
+        Some(pr) => resolve_pr_base_ref(toplevel, &pr.base_ref),
+        None => Ok(None),
+    }
 }
 
 /// Whether `name^{commit}` resolves in the repo at `toplevel`.
@@ -1691,6 +1925,87 @@ fn ref_resolves(toplevel: &Path, name: &str) -> Result<bool, ReviewError> {
         &["rev-parse", "-q", "--verify", &format!("{name}^{{commit}}")],
     )?;
     Ok(probe.status.success())
+}
+
+/// The currently checked-out branch short name, or `None` on a detached
+/// HEAD (`git symbolic-ref -q --short HEAD`).
+fn current_branch(toplevel: &Path) -> Result<Option<String>, ReviewError> {
+    let out = git_query(toplevel, &["symbolic-ref", "-q", "--short", "HEAD"])?;
+    let name = stdout_line(&out);
+    Ok((out.status.success() && !name.is_empty()).then_some(name))
+}
+
+/// Run `gh pr view` for the **current branch's** PR, returning the
+/// parsed PR — or `None` on **any** failure (`gh` missing, non-zero
+/// exit, unparseable JSON). Fail-soft by contract: this is the
+/// auto-ladder rung, where `gh` is a convenience, never a dependency.
+/// The explicit `--pr` path uses [`require_gh_pr`] instead, which
+/// distinguishes the failure modes (and can target a specific number).
+fn gh_pr_view(toplevel: &Path) -> Option<PrInfo> {
+    let output = run_gh_pr_view(toplevel, None).ok()??;
+    if !output.status.success() {
+        return None;
+    }
+    parse_pr_info(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Spawn `gh pr view [<number>]` and collect its output. `Ok(None)`
+/// means `gh` is not on PATH; `Ok(Some(output))` is a completed run
+/// (success or not).
+///
+/// `number` selects the PR: `Some(n)` queries PR #n explicitly
+/// (`gh pr view <n> …`); `None` queries the current branch's PR (the
+/// auto-ladder rung). Threading the number is load-bearing — without
+/// it `--pr <n>` would query the current branch's PR and silently
+/// review the wrong PR's base (cute-dbt#303 bot review).
+///
+/// The hang bound is structural rather than a wall-clock timer:
+/// `stdin(Stdio::null())` denies `gh` an interactive prompt, so it
+/// fails fast (non-zero exit) when it cannot answer — auth, network, no
+/// PR — instead of blocking on a TTY question. (An earlier explicit
+/// thread-based timeout was removed: every variant of it flaked under
+/// concurrent test fork pressure — scheduler races on the result
+/// channel, or the watchdog's own `kill` spawn stalling — while adding
+/// no real safety over the null-stdin guarantee.)
+fn run_gh_pr_view(toplevel: &Path, number: Option<u64>) -> Result<Option<Output>, ReviewError> {
+    let mut command = Command::new("gh");
+    command.arg("pr").arg("view");
+    if let Some(n) = number {
+        command.arg(n.to_string());
+    }
+    let result = command
+        .args(["--json", "baseRefName,headRefName,number"])
+        .current_dir(toplevel)
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .output();
+    match result {
+        Ok(output) => Ok(Some(output)),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(ReviewError::StageFailed {
+            context: "spawning gh",
+            detail: err.to_string(),
+        }),
+    }
+}
+
+/// The explicit `--pr [<n>]` path's gh resolution: unlike the fail-soft
+/// auto-rung, the operator asked for the PR, so failures are surfaced.
+/// `number` is `Some(n)` for `--pr <n>` (query PR #n) or `None` for bare
+/// `--pr` (the current branch's PR). `gh` missing ⇒
+/// [`ReviewError::GhMissing`]; no usable PR ⇒
+/// [`ReviewError::NoPullRequest`] (carrying the current branch); a
+/// read failure surfaces as the underlying [`ReviewError`].
+fn require_gh_pr(toplevel: &Path, number: Option<u64>) -> Result<PrInfo, ReviewError> {
+    let branch = current_branch(toplevel)?;
+    let Some(output) = run_gh_pr_view(toplevel, number)? else {
+        return Err(ReviewError::GhMissing);
+    };
+    if !output.status.success() {
+        return Err(ReviewError::NoPullRequest { branch });
+    }
+    parse_pr_info(&String::from_utf8_lossy(&output.stdout))
+        .ok_or(ReviewError::NoPullRequest { branch })
 }
 
 /// Rung 0: the `--base` flag, verified (an unresolvable explicit base is
@@ -2123,6 +2438,7 @@ mod tests {
         let facts = BaseFacts {
             explicit: Some(probe("release-2.4", true)),
             configured: Some(probe("develop", true)),
+            pr_base: Some("origin/dev".to_owned()),
             origin_head: Some("origin/main".to_owned()),
             remote_probe: Some("origin/main".to_owned()),
             local_probe: Some("main".to_owned()),
@@ -2178,6 +2494,35 @@ mod tests {
             }
             other => panic!("expected BaseRefMissing, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_gh_pr_rung_outranks_origin_head_and_the_probes() {
+        // Rung 2: after --base and persisted config, before origin/HEAD.
+        let facts = BaseFacts {
+            pr_base: Some("origin/release-3".to_owned()),
+            origin_head: Some("origin/main".to_owned()),
+            remote_probe: Some("origin/main".to_owned()),
+            local_probe: Some("main".to_owned()),
+            ..BaseFacts::default()
+        };
+        let (base, rung) = decide_base(&facts).expect("the gh rung answers");
+        assert_eq!(base, "origin/release-3");
+        assert_eq!(rung, Rung::GhPr);
+    }
+
+    #[test]
+    fn configured_base_outranks_the_gh_rung() {
+        // The persisted answer is rung 1 — it wins over the gh rung so a
+        // user who set cute-dbt.base is never surprised by a PR base.
+        let facts = BaseFacts {
+            configured: Some(probe("develop", true)),
+            pr_base: Some("origin/main".to_owned()),
+            ..BaseFacts::default()
+        };
+        let (base, rung) = decide_base(&facts).expect("config wins");
+        assert_eq!(base, "develop");
+        assert_eq!(rung, Rung::GitConfig);
     }
 
     #[test]
@@ -2247,11 +2592,110 @@ mod tests {
         );
     }
 
-    // ----- remediation messages -------------------------------------
+    // ----- gh PR parsing + --pr anchor (research §1) ----------------
 
     #[test]
-    fn every_review_error_message_carries_a_remediation() {
-        let samples: Vec<(ReviewError, &str)> = vec![
+    fn parse_pr_info_reads_the_three_fields() {
+        let pr = parse_pr_info(r#"{"baseRefName":"main","headRefName":"feature/x","number":42}"#)
+            .expect("a complete payload parses");
+        assert_eq!(pr.base_ref, "main");
+        assert_eq!(pr.head_ref, "feature/x");
+        assert_eq!(pr.number, 42);
+    }
+
+    #[test]
+    fn parse_pr_info_rejects_unusable_shapes() {
+        // No base ref ⇒ unusable; blank base ref ⇒ unusable; non-object
+        // / non-JSON ⇒ None. Each is "no usable PR", never a panic.
+        assert!(parse_pr_info(r#"{"headRefName":"x","number":1}"#).is_none());
+        assert!(parse_pr_info(r#"{"baseRefName":"  ","number":1}"#).is_none());
+        assert!(parse_pr_info("not json at all").is_none());
+        assert!(parse_pr_info("[]").is_none());
+        assert!(parse_pr_info("").is_none());
+    }
+
+    #[test]
+    fn parse_pr_info_tolerates_a_missing_head_or_number() {
+        // gh always sends the requested fields, but be defensive: a
+        // present base ref is enough to anchor (head defaults blank,
+        // number to 0).
+        let pr = parse_pr_info(r#"{"baseRefName":"release-2"}"#).expect("base alone is usable");
+        assert_eq!(pr.base_ref, "release-2");
+        assert_eq!(pr.head_ref, "");
+        assert_eq!(pr.number, 0);
+    }
+
+    fn pr(base: &str, head: &str, number: u64) -> PrInfo {
+        PrInfo {
+            base_ref: base.to_owned(),
+            head_ref: head.to_owned(),
+            number,
+        }
+    }
+
+    #[test]
+    fn bare_pr_imposes_no_head_assertion() {
+        // `--pr` with no number: any checked-out branch is fine.
+        let info = pr("main", "feature/x", 42);
+        assert!(check_pr_head(None, &info, Some("a-totally-different-branch")).is_ok());
+        assert!(
+            check_pr_head(None, &info, None).is_ok(),
+            "even detached HEAD"
+        );
+    }
+
+    #[test]
+    fn pr_with_a_number_passes_when_head_matches() {
+        let info = pr("main", "feature/x", 42);
+        assert!(check_pr_head(Some(42), &info, Some("feature/x")).is_ok());
+    }
+
+    #[test]
+    fn pr_with_a_number_errors_on_a_head_mismatch_naming_checkout() {
+        // The never-mutate contract: the remediation tells the operator
+        // to check out themselves — review does not.
+        let info = pr("main", "feature/x", 42);
+        let err = check_pr_head(Some(42), &info, Some("some-other-branch"))
+            .expect_err("a head mismatch errors");
+        match &err {
+            ReviewError::PrHeadMismatch {
+                number,
+                head_ref,
+                current,
+            } => {
+                assert_eq!(*number, 42);
+                assert_eq!(head_ref, "feature/x");
+                assert_eq!(current, "some-other-branch");
+            }
+            other => panic!("expected PrHeadMismatch, got {other:?}"),
+        }
+        let msg = err.message();
+        assert!(
+            msg.contains("gh pr checkout 42") && msg.contains("never checks out"),
+            "the remediation names checkout + the never-mutate contract: {msg}",
+        );
+    }
+
+    #[test]
+    fn pr_with_a_number_on_detached_head_is_a_mismatch() {
+        let info = pr("main", "feature/x", 7);
+        let err =
+            check_pr_head(Some(7), &info, None).expect_err("detached HEAD is not the PR head");
+        assert!(
+            err.message().contains("detached HEAD"),
+            "the message names the detached state: {}",
+            err.message(),
+        );
+    }
+
+    // ----- remediation messages -------------------------------------
+
+    /// `(error, a substring its message must contain)` — every
+    /// `ReviewError` variant, exercised by
+    /// `every_review_error_message_carries_a_remediation`. Split out of
+    /// the test body so the table can grow past the line-count lint.
+    fn remediation_samples() -> Vec<(ReviewError, &'static str)> {
+        vec![
             (ReviewError::GitMissing, "PATH"),
             (ReviewError::NoGitRepo, "--pr-diff"),
             (ReviewError::BareRepo, "working tree"),
@@ -2264,6 +2708,8 @@ mod tests {
                 },
                 "git fetch origin rel",
             ),
+            // (the PullRequest BaseRefMissing variant is covered in full
+            // by `a_pr_path_missing_base_is_not_attributed_to_the_base_flag`)
             (
                 ReviewError::ShallowClone {
                     base: "main".to_owned(),
@@ -2275,6 +2721,21 @@ mod tests {
                     base: "main".to_owned(),
                 },
                 "--base",
+            ),
+            (ReviewError::GhMissing, "cli.github.com"),
+            (
+                ReviewError::NoPullRequest {
+                    branch: Some("feature/x".to_owned()),
+                },
+                "gh pr create",
+            ),
+            (
+                ReviewError::PrHeadMismatch {
+                    number: 9,
+                    head_ref: "feature/y".to_owned(),
+                    current: "main".to_owned(),
+                },
+                "gh pr checkout 9",
             ),
             (
                 ReviewError::ProjectNotFound {
@@ -2335,8 +2796,12 @@ mod tests {
                 },
                 "--dry-run",
             ),
-        ];
-        for (err, needle) in samples {
+        ]
+    }
+
+    #[test]
+    fn every_review_error_message_carries_a_remediation() {
+        for (err, needle) in remediation_samples() {
             let msg = err.message();
             assert!(
                 msg.contains(needle),
@@ -2347,6 +2812,30 @@ mod tests {
                 "messages identify the verb: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn a_pr_path_missing_base_is_not_attributed_to_the_base_flag() {
+        // cute-dbt#303 bot review: on the `--pr` path a base ref that is
+        // missing locally came from the PR, not `--base` — the message
+        // must say so (never "(from --base)").
+        let err = ReviewError::BaseRefMissing {
+            ref_name: "release-2".to_owned(),
+            source: BaseSource::PullRequest,
+        };
+        let msg = err.message();
+        assert!(
+            msg.contains("the open PR's base branch") && msg.contains("release-2"),
+            "the message attributes the ref to the PR: {msg}",
+        );
+        assert!(
+            !msg.contains("(from --base)"),
+            "the message must NOT claim the ref came from --base: {msg}",
+        );
+        assert!(
+            msg.contains("git fetch origin release-2"),
+            "the remediation suggests fetching the PR's base: {msg}",
+        );
     }
 
     #[test]
@@ -3338,6 +3827,8 @@ AM models/added_then_edited.sql
             ["--staged", "--unstaged"],
             ["--staged", "--committed-only"],
             ["--unstaged", "--committed-only"],
+            ["--pr", "--staged"],
+            ["--pr", "--committed-only"],
         ] {
             let err = parse_review(&["cute-dbt", "review", pair[0], pair[1]])
                 .expect_err("conflicting scope flags are a usage error");
@@ -3347,6 +3838,33 @@ AM models/added_then_edited.sql
                 "{pair:?} must conflict",
             );
         }
+    }
+
+    #[test]
+    fn pr_parses_bare_and_with_a_number() {
+        // `Option<Option<u64>>`: absent / bare / numbered.
+        let absent = parse_review(&["cute-dbt", "review"]).expect("no --pr parses");
+        assert_eq!(absent.pr, None);
+        let bare = parse_review(&["cute-dbt", "review", "--pr"]).expect("bare --pr parses");
+        assert_eq!(bare.pr, Some(None), "bare --pr is Some(None)");
+        let numbered = parse_review(&["cute-dbt", "review", "--pr", "42"]).expect("--pr 42 parses");
+        assert_eq!(numbered.pr, Some(Some(42)));
+    }
+
+    #[test]
+    fn pr_conflicts_with_an_explicit_base() {
+        // Two base sources: --pr derives the base from the PR, --base
+        // names it directly. Supplying both is a usage error.
+        let err = parse_review(&["cute-dbt", "review", "--pr", "--base", "main"])
+            .expect_err("--pr and --base conflict");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn pr_rejects_a_non_numeric_value() {
+        let err = parse_review(&["cute-dbt", "review", "--pr", "not-a-number"])
+            .expect_err("--pr takes a number");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
