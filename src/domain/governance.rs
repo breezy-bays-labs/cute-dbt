@@ -147,13 +147,19 @@ pub fn gather_governance(
     // exposure id (deterministic exposure-id order); the value carries
     // the exposure ref + the running count.
     let mut blast_by_exposure: BTreeMap<&NodeId, (&Exposure, usize)> = BTreeMap::new();
+    // Precompute the two reverse maps ONCE (O(N + E)); the per-model BFS
+    // below reads them via the helper instead of rebuilding them per
+    // model (gemini on #336 — the loop was O(M × (N + E)); now it is
+    // O(N + E + Σ reachable), linear).
+    let consumers_of = reverse_node_adjacency(manifest);
+    let exposure_sinks = exposure_sinks_by_producer(manifest);
     for model_id in models_in_scope.iter() {
         if let Some(group_name) = manifest.node(model_id).and_then(|node| node.group()) {
             by_group
                 .entry(group_name)
                 .or_insert_with(|| group_chip(manifest, group_name));
         }
-        for exposure in exposures_reachable_from(manifest, model_id) {
+        for exposure in exposures_reachable_from_helper(model_id, &consumers_of, &exposure_sinks) {
             blast_by_exposure
                 .entry(exposure.id())
                 .and_modify(|(_, count)| *count += 1)
@@ -233,6 +239,13 @@ fn owner_copy(owner: Option<&Owner>) -> (Option<String>, Option<String>) {
 /// visited set makes the walk acyclic-safe (a cyclic manifest cannot
 /// loop forever) and the result deterministic (exposure-id order).
 /// Returns each reachable exposure once.
+///
+/// Standalone convenience: builds the two reverse maps then delegates to
+/// the private `exposures_reachable_from_helper`. The map construction is
+/// O(N + E) (a full-manifest scan), so a per-model loop must NOT call
+/// this — it precomputes the maps once and calls the helper directly
+/// ([`gather_governance`] does exactly that). This wrapper exists for the
+/// single-model callers + the property tests.
 #[must_use]
 pub fn exposures_reachable_from<'m>(
     manifest: &'m Manifest,
@@ -240,7 +253,21 @@ pub fn exposures_reachable_from<'m>(
 ) -> Vec<&'m Exposure> {
     let consumers_of = reverse_node_adjacency(manifest);
     let exposure_sinks = exposure_sinks_by_producer(manifest);
+    exposures_reachable_from_helper(model_id, &consumers_of, &exposure_sinks)
+}
 
+/// The reverse-reachability BFS core (cute-dbt#260 Slice 1) — reads the
+/// PRECOMPUTED reverse maps instead of rebuilding them, so a per-model
+/// caller pays the O(N + E) map construction ONCE, not per model. The
+/// walk itself is O(reachable from `model_id`); the [`BTreeSet`] visited
+/// set keeps it acyclic-safe and the [`BTreeMap`] `hit` keeps the result
+/// deduplicated + exposure-id-ordered.
+#[must_use]
+fn exposures_reachable_from_helper<'m>(
+    model_id: &NodeId,
+    consumers_of: &BTreeMap<&NodeId, Vec<&NodeId>>,
+    exposure_sinks: &BTreeMap<&NodeId, Vec<&'m Exposure>>,
+) -> Vec<&'m Exposure> {
     let mut reached: BTreeSet<&NodeId> = BTreeSet::new();
     let mut queue: VecDeque<&NodeId> = VecDeque::new();
     queue.push_back(model_id);
@@ -699,6 +726,43 @@ mod tests {
     fn reachability_model_feeding_no_exposure_is_empty() {
         let manifest = manifest_lineage(vec![model_with_deps("model.pkg.lonely", &[])], vec![]);
         assert!(reachable_names(&manifest, "model.pkg.lonely").is_empty());
+    }
+
+    #[test]
+    fn wrapper_and_precomputed_helper_agree() {
+        // The wrapper (builds the maps then delegates) and the helper
+        // (reads precomputed maps — the gather_governance path) must
+        // return identical exposures (gemini on #336: the O(M×(N+E)) →
+        // O(N+E) refactor is behavior-preserving).
+        let manifest = manifest_lineage(
+            vec![
+                model_with_deps("model.pkg.a", &[]),
+                model_with_deps("model.pkg.b", &["model.pkg.a"]),
+                model_with_deps("model.pkg.fct", &["model.pkg.b"]),
+            ],
+            vec![exposure(
+                "exposure.pkg.dash",
+                "dash",
+                Some("dashboard"),
+                None,
+                &["model.pkg.fct"],
+            )],
+        );
+        let consumers_of = reverse_node_adjacency(&manifest);
+        let exposure_sinks = exposure_sinks_by_producer(&manifest);
+        for model in ["model.pkg.a", "model.pkg.b", "model.pkg.fct"] {
+            let id = NodeId::new(model);
+            let via_wrapper: Vec<&NodeId> = exposures_reachable_from(&manifest, &id)
+                .into_iter()
+                .map(Exposure::id)
+                .collect();
+            let via_helper: Vec<&NodeId> =
+                exposures_reachable_from_helper(&id, &consumers_of, &exposure_sinks)
+                    .into_iter()
+                    .map(Exposure::id)
+                    .collect();
+            assert_eq!(via_wrapper, via_helper, "wrapper == helper for {model}");
+        }
     }
 
     // ---- owner-shape unit tests (StringOrArrayOfStrings + None) ----
