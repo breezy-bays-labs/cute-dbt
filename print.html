@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-8edef322.js";
+            window.path_to_searchindex_js = "searchindex-bc6a72ef.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-aa34fb98.js"></script>
@@ -1348,6 +1348,7 @@ the same posture as the <code>[checks]</code> section (see
 </thead>
 <tbody>
 <tr><td><code>project-state</code></td><td>The project-state surfaces: the “Project definition changed” panel, per-model config attributions, vars/hooks/dispatch change rows, and <code>dbt_project.yml</code> config-tree scope widening.</td></tr>
+<tr><td><code>macro-lens</code></td><td>The “Macro changed” section: a changed <code>macros/*.sql</code> macro’s body diff, the count + collapsible directory tree of the root-project models it reaches, a per-model SQL selector with first-order call sites, and a per-arm fidelity chip. A macro edit is otherwise invisible to model/unit-test scope selection — this surfaces it.</td></tr>
 </tbody>
 </table>
 </div>
@@ -1377,6 +1378,31 @@ carries a <code>dbt_project.yml</code>.</li>
 <p>With the switch <strong>on</strong>, all of the above render exactly as before the
 switch existed — opting in previews precisely what graduation would
 make default.</p>
+<h3 id="tuning-the-macro-lens-inline-body-cap"><a class="header" href="#tuning-the-macro-lens-inline-body-cap">Tuning the macro-lens inline-body cap</a></h3>
+<p>When <code>macro-lens</code> is on, the “Macro changed” section can server-render
+each impacted model’s SQL inline so a reviewer reads the call sites
+without leaving the report. A <em>widely-used</em> macro can reach dozens of
+models, though, and the report is a single self-contained file frozen at
+generation time — inlining every body would bloat it. So the inlined
+bodies are <strong>capped</strong>.</p>
+<p>The model-selector always lists <strong>every</strong> impacted model (that list is
+cheap); only the first <strong>N</strong> (in id order) carry a server-rendered inline
+SQL panel. Past the cap, a model shows a compact “body not inlined”
+affordance and the section states “showing N of M model bodies”. The
+default cap is <strong>10</strong>.</p>
+<p>The cap is a <strong>generation-time knob</strong>, not a post-render toggle (the
+report is static once written). Set it on either surface:</p>
+<pre><code class="language-toml">[experimental]
+enable = ["macro-lens"]
+# Inline up to 25 impacted-model bodies (default: 10).
+macro_body_cap = 25
+</code></pre>
+<p>or with the CLI flag, which takes precedence over the config key:</p>
+<pre><code class="language-bash">cute-dbt report --manifest target/manifest.json \
+  --pr-diff @pr.diff --macro-body-cap 25 ...
+</code></pre>
+<p>A cap of <code>0</code> inlines nothing (the directory tree + selector only) — the
+maximally-bounded report. The cap is inert when <code>macro-lens</code> is off.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="examples"><a class="header" href="#examples">Examples</a></h1>
 <p>cute-dbt commits rendered example output under
