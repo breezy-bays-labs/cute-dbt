@@ -760,7 +760,11 @@ fn exposures_reachable_from_helper<'m>(
 
 /// The reversed node-dependency adjacency: producer id → the node ids
 /// that consume it (the reverse of every `depends_on.nodes` edge).
-fn reverse_node_adjacency(manifest: &Manifest) -> BTreeMap<&NodeId, Vec<&NodeId>> {
+///
+/// `pub(crate)` so the sibling [`crate::domain::macro_lens`] downstream
+/// closure (cute-dbt#345) reuses this one reverse-edge primitive instead
+/// of inventing a second walker. Both files are domain (inward-only).
+pub(crate) fn reverse_node_adjacency(manifest: &Manifest) -> BTreeMap<&NodeId, Vec<&NodeId>> {
     let mut consumers_of: BTreeMap<&NodeId, Vec<&NodeId>> = BTreeMap::new();
     for (consumer_id, node) in manifest.nodes() {
         for producer_id in node.depends_on().nodes() {
@@ -771,6 +775,48 @@ fn reverse_node_adjacency(manifest: &Manifest) -> BTreeMap<&NodeId, Vec<&NodeId>
         }
     }
     consumers_of
+}
+
+/// Every node id reachable **downstream** from any id in `seed`, over the
+/// reversed `depends_on.nodes` edges (producer→consumer) — the
+/// transitive `ref()`-downstream closure (cute-dbt#345 macro focus set).
+///
+/// The seed ids are **included** in the returned set (a seed is downstream
+/// of itself at distance 0). The walk crosses every consumer node type in
+/// `manifest.nodes()` (models, snapshots, seeds, tests), and additionally
+/// folds in every **exposure** that consumes a reached node — exposures
+/// live in a separate map (`manifest.exposures()`), so the node
+/// reverse-adjacency alone never reaches them; the
+/// [`exposure_sinks_by_producer`] fold makes the closure the complete
+/// lineage-DAG vertex set the explore macro page renders.
+///
+/// Same frontier-BFS shape as [`exposures_reachable_from_helper`]: a
+/// [`BTreeSet`] visited set makes the walk acyclic-safe (a cyclic
+/// manifest terminates) and the result deterministic (node-id order).
+/// O(N + E) to build the two reverse maps, then O(reachable) to walk.
+#[must_use]
+pub(crate) fn downstream_node_closure(
+    manifest: &Manifest,
+    seed: &BTreeSet<NodeId>,
+) -> BTreeSet<NodeId> {
+    let consumers_of = reverse_node_adjacency(manifest);
+    let exposure_sinks = exposure_sinks_by_producer(manifest);
+    let mut reached: BTreeSet<NodeId> = BTreeSet::new();
+    let mut queue: VecDeque<&NodeId> = seed.iter().collect();
+    while let Some(current) = queue.pop_front() {
+        if !reached.insert(current.clone()) {
+            continue;
+        }
+        // An exposure consuming `current` is a downstream terminus — it
+        // has no further consumers, so it is collected but not enqueued.
+        for exposure in exposure_sinks.get(current).into_iter().flatten() {
+            reached.insert(exposure.id().clone());
+        }
+        for consumer in consumers_of.get(current).into_iter().flatten() {
+            queue.push_back(consumer);
+        }
+    }
+    reached
 }
 
 /// Exposure sinks keyed by producer: producer id → the exposures that
