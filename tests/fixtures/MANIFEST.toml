@@ -323,7 +323,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "4ce442d5c07fbdb3ce6ccf0b9ad3b964be892c50d2114bdc889c748204cbc98b"
+sha256 = "35edfe6423fccbb9e0072bf5ff53b3ace1d9c849572c2010df1fbf28db5d174a"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -464,7 +464,15 @@ resource_type "operation", original_file_path "./dbt_project.yml" \
 VERBATIM — the fusion/core parity shape — raw_code byte-matching the \
 committed playground-source/dbt_project.yml on-run-start entry) so the \
 diff-showcase hooks row renders the Matched operation-node SQL diff; \
-no committed fixture carried any operation node before this.\
+no committed fixture carried any operation node before this. cute-dbt#341: \
+a hand-authored synthetic COMPOSITE primary_key constraint on \
+model.healthcare_analytics.fct_patient_summary over columns \
+["patient_id", "year_actual"] — matching the model's already-present \
+dbt_utils.unique_combination_of_columns test on the same set — so the \
+diff-showcase surfaces the composite-key enforcement annotation \
+(Covered: a metadata-only PK on duckdb backed by a combination test). \
+The constraint is spliced into this snapshot only; the playground source \
+is unchanged.\
 """
 
 [[fixture]]

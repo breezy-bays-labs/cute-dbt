@@ -282,8 +282,15 @@ fn playground_combination_test_stays_composite_on_real_data() {
     // fusion's PK inference flattens that combo per column; cute-dbt
     // must not: coverage is attributed ONLY to the `unique` test on the
     // key column, never to the wider combo.
+    // (cute-dbt#341 added a declared composite PK on this same model that
+    // the experiment-gated `enforcement` group also fires on — scope this
+    // assertion to the `grain` group it's actually about.)
     let manifest = load("playground-current.json");
-    let findings = findings_for(&manifest, "model.healthcare_analytics.fct_patient_summary");
+    let findings: Vec<Finding<HeuristicId>> =
+        findings_for(&manifest, "model.healthcare_analytics.fct_patient_summary")
+            .into_iter()
+            .filter(|f| f.check.spec().group == "grain")
+            .collect();
     assert_eq!(findings.len(), 1);
     let Verdict::Covered { by } = &findings[0].verdict else {
         panic!("expected Covered, got {:?}", findings[0].verdict);
