@@ -29,7 +29,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
 
-use crate::domain::manifest::{Exposure, Manifest, NodeId, Owner};
+use crate::domain::manifest::{
+    Constraint, ConstraintKind, Exposure, Manifest, Node, NodeId, Owner,
+};
 use crate::domain::state::ModelInScopeSet;
 
 /// The governance render payload (cute-dbt#260) — a POD section on
@@ -318,13 +320,316 @@ fn exposure_sinks_by_producer(manifest: &Manifest) -> BTreeMap<&NodeId, Vec<&Exp
     exposure_sinks
 }
 
+// ===== cute-dbt#260 Slice 5: structural contract breaking-change =====
+//
+// The shared primitive for surface 2 (the classified contract-diff
+// drawer). Mirrors fusion's `DbtModel::same_contract`
+// (`dbt-schemas/src/schemas/nodes.rs:4911` @ dbt-labs/dbt-core main) —
+// the authoritative engine source for what a contract breaking change
+// IS. Verified against that source 2026-06-13.
+//
+// Load-bearing rules from the engine:
+// - Do NOT key on `contract.checksum` alone — it is
+//   `skip_serializing_if = Option::is_none`, frequently null on fusion,
+//   and has a known upstream bug (dbt-core#8030). The engine uses it
+//   ONLY as a fast-path equality short-circuit
+//   (`enforced && checksum == checksum ⇒ unchanged`); the verdict is
+//   otherwise structural (column sets + types + constraints).
+// - A column ADD is never breaking (engine: "present in self.columns …
+//   not a breaking change").
+// - The enforced-constraint-removed + materialization-changed categories
+//   are evaluated ONLY when the OLD materialization enforces constraints
+//   (`Table | Incremental`) — views never enforce, so removing a
+//   constraint on a view is not breaking.
+// - `ConstraintType` has six kinds incl. `Custom`; column-level drops
+//   `Custom` (dbt convention — custom column constraints are free-form).
+
+/// The structural verdict of comparing a model's contract across a change
+/// (cute-dbt#260 Slice 5). Mirrors fusion's `same_contract` outcome
+/// space: identical / changed-but-safe / breaking (with the engine's six
+/// reason categories).
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContractChange {
+    /// No contract-relevant change: neither side enforces, or the
+    /// enforced checksums are identical, or the structural diff is empty.
+    Unchanged,
+    /// A change that is NOT breaking — the only such transition the
+    /// engine recognizes: an unenforced→enforced contract (newly
+    /// contracted, nothing downstream relied on the contract before).
+    ChangedNotBreaking,
+    /// A breaking change, carrying every reason that fired (engine OR
+    /// semantics — any one reason makes it breaking).
+    Breaking(Vec<BreakingReason>),
+}
+
+/// One category of contract breaking change (cute-dbt#260 Slice 5) — the
+/// engine's six verbatim categories (`same_contract_both_present`).
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BreakingReason {
+    /// The contract was enforced and no longer is (engine:
+    /// `contract_enforced_disabled`).
+    ContractEnforcedDisabled,
+    /// Contracted columns were removed (engine: `columns_removed`).
+    ColumnsRemoved(Vec<String>),
+    /// A contracted column's `data_type` changed (engine:
+    /// `column_type_changes`). Alias-equal types (`string`↔`varchar`
+    /// under `alias_types`) are NOT reported.
+    ColumnTypeChanged {
+        /// The column whose type changed.
+        col: String,
+        /// The previous data type (`"unknown"` when undeclared, the
+        /// engine's fallback).
+        prev: String,
+        /// The current data type.
+        current: String,
+    },
+    /// An enforced COLUMN-level constraint was removed (engine:
+    /// `enforced_column_constraint_removed`) — only on a `Table` /
+    /// `Incremental` old materialization.
+    EnforcedColumnConstraintRemoved,
+    /// An enforced MODEL-level constraint was removed (engine:
+    /// `enforced_model_constraint_removed`) — only on a `Table` /
+    /// `Incremental` old materialization.
+    EnforcedModelConstraintRemoved,
+    /// The materialization moved off a constraint-enforcing strategy
+    /// while constraints existed (engine: `materialization_changed`).
+    MaterializationChanged,
+}
+
+/// Classify the contract change between an `old` and `current` model node
+/// (cute-dbt#260 Slice 5) — the structural mirror of fusion's
+/// `same_contract`.
+///
+/// Composition root: the top-level transition gate
+/// (`classify_top_level_transition`) handles the enforced-flag +
+/// checksum-fast-path cases; when neither short-circuits, the structural
+/// diff (`diff_columns` + `diff_constraints`) builds the breaking
+/// reason set. An empty reason set is [`ContractChange::Unchanged`]
+/// (the founder-taste call: NO "changed-investigate" bucket — surface
+/// nothing when the structure is identical, the plan's §5 risk-#5).
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+#[must_use]
+pub fn classify_contract(old: &Node, current: &Node) -> ContractChange {
+    if let Some(decided) = classify_top_level_transition(old, current) {
+        return decided;
+    }
+    // Both enforce + checksums differ (or a checksum is absent): run the
+    // structural diff. Constraint-level + materialization reasons are
+    // gated on the OLD materialization enforcing constraints.
+    let old_enforces_constraints = materialization_enforces(old.config().materialized());
+    let mut reasons = diff_columns(old, current, old_enforces_constraints);
+    reasons.extend(diff_constraints(old, current, old_enforces_constraints));
+    if reasons.is_empty() {
+        ContractChange::Unchanged
+    } else {
+        ContractChange::Breaking(reasons)
+    }
+}
+
+/// The enforced-flag + checksum top-level gate (engine:
+/// `same_contract` + the head of `same_contract_both_present`). Returns
+/// `Some(verdict)` when the transition decides the outcome without a
+/// structural diff; `None` when both sides enforce and the structure must
+/// be compared.
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+fn classify_top_level_transition(old: &Node, current: &Node) -> Option<ContractChange> {
+    let old_enforced = old.config().contract_enforced();
+    let current_enforced = current.config().contract_enforced();
+    match (old_enforced, current_enforced) {
+        // Neither enforces ⇒ no contract change.
+        (false, false) => Some(ContractChange::Unchanged),
+        // Newly enforced ⇒ a change, but NOT breaking (engine).
+        (false, true) => Some(ContractChange::ChangedNotBreaking),
+        // Enforcement dropped ⇒ breaking.
+        (true, false) => Some(ContractChange::Breaking(vec![
+            BreakingReason::ContractEnforcedDisabled,
+        ])),
+        // Both enforce: fast-path on identical, non-null checksums
+        // (engine's happy path), else fall through to the structural
+        // diff. A null checksum (fusion's frequent omission, dbt-core#8030)
+        // never short-circuits — the structure decides.
+        (true, true) => match (old.contract_checksum(), current.contract_checksum()) {
+            (Some(o), Some(c)) if o == c => Some(ContractChange::Unchanged),
+            _ => None,
+        },
+    }
+}
+
+/// Whether a materialization enforces constraints (engine:
+/// `materialization_enforces_constraints` ⇒ `Table | Incremental`). A
+/// view never enforces, so a constraint removed on a view is not
+/// breaking. `None` (unset materialization) is treated as non-enforcing.
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+fn materialization_enforces(materialized: Option<&str>) -> bool {
+    matches!(materialized, Some("table" | "incremental"))
+}
+
+/// The per-column half of the structural diff (engine: the
+/// `for old_value in old.columns` loop). Reports removed columns,
+/// alias-aware type changes, and — only when `old_enforces_constraints` —
+/// removed enforced column-level constraints.
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+fn diff_columns(old: &Node, current: &Node, old_enforces_constraints: bool) -> Vec<BreakingReason> {
+    let mut reasons = Vec::new();
+    let mut removed = Vec::new();
+    let current_columns = current.columns();
+    for (name, old_type) in old.columns() {
+        let Some(current_type) = current_columns.get(name) else {
+            // Column removed (a column ADD is the inverse — never breaking).
+            removed.push(name.clone());
+            continue;
+        };
+        if !data_types_equal(old_type.as_deref(), current_type.as_deref()) {
+            reasons.push(BreakingReason::ColumnTypeChanged {
+                col: name.clone(),
+                prev: old_type.clone().unwrap_or_else(|| "unknown".to_owned()),
+                current: current_type.clone().unwrap_or_else(|| "unknown".to_owned()),
+            });
+        }
+    }
+    if !removed.is_empty() {
+        reasons.push(BreakingReason::ColumnsRemoved(removed));
+    }
+    if old_enforces_constraints && column_constraint_removed(old, current) {
+        reasons.push(BreakingReason::EnforcedColumnConstraintRemoved);
+    }
+    reasons
+}
+
+/// The model-level constraint + materialization half of the structural
+/// diff (engine: the model-constraint loop + the materialization-changed
+/// check). Both are gated on the OLD materialization enforcing
+/// constraints.
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+fn diff_constraints(
+    old: &Node,
+    current: &Node,
+    old_enforces_constraints: bool,
+) -> Vec<BreakingReason> {
+    let mut reasons = Vec::new();
+    if !old_enforces_constraints {
+        return reasons;
+    }
+    if constraints_removed(old.constraints(), current.constraints()) {
+        reasons.push(BreakingReason::EnforcedModelConstraintRemoved);
+    }
+    // Materialization moved OFF a constraint-enforcing strategy while
+    // constraints existed (engine: `materialization_changed`).
+    let current_enforces = materialization_enforces(current.config().materialized());
+    let had_constraints = !old.constraints().is_empty() || any_column_constraint(old);
+    if !current_enforces && had_constraints {
+        reasons.push(BreakingReason::MaterializationChanged);
+    }
+    reasons
+}
+
+/// Whether any old column-level constraint was removed in `current`
+/// (engine: the inner `old_value.constraints != current_column.constraints`
+/// loop). Custom column-level constraints are dropped (dbt convention).
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+fn column_constraint_removed(old: &Node, current: &Node) -> bool {
+    let current_facts = current.column_facts();
+    for (name, facts) in old.column_facts() {
+        let old_constraints = relevant_column_constraints(facts.constraints());
+        let current_constraints = current_facts
+            .get(name)
+            .map(|f| relevant_column_constraints(f.constraints()))
+            .unwrap_or_default();
+        if constraints_removed(&old_constraints, &current_constraints) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Column-level constraints minus `Custom` (dbt convention: custom
+/// column constraints are free-form and not contract-structural).
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+fn relevant_column_constraints(constraints: &[Constraint]) -> Vec<Constraint> {
+    constraints
+        .iter()
+        .filter(|c| c.kind() != ConstraintKind::Custom)
+        .cloned()
+        .collect()
+}
+
+/// Whether `old` has any column-level constraint at all (the
+/// `column_constraints_exist` flag in the engine's materialization gate).
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+fn any_column_constraint(old: &Node) -> bool {
+    old.column_facts()
+        .values()
+        .any(|facts| !relevant_column_constraints(facts.constraints()).is_empty())
+}
+
+/// Whether any constraint present in `old` is absent from `current`
+/// (engine: `!current.contains(old_constraint)`). A constraint ADD is not
+/// a removal.
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+fn constraints_removed(old: &[Constraint], current: &[Constraint]) -> bool {
+    old.iter().any(|c| !current.contains(c))
+}
+
+/// Data-type equality with `alias_types` honored (default-on dbt
+/// behavior): two declared types are equal when they are byte-equal OR
+/// canonicalize to the same alias family (`string`/`varchar`/`text`,
+/// `int`/`integer`, `bool`/`boolean`). Two undeclared types (`None`) are
+/// equal; a declared-vs-undeclared pair is not.
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+fn data_types_equal(old: Option<&str>, current: Option<&str>) -> bool {
+    match (old, current) {
+        (None, None) => true,
+        (Some(o), Some(c)) => o.eq_ignore_ascii_case(c) || canonical_type(o) == canonical_type(c),
+        _ => false,
+    }
+}
+
+/// Canonicalize a declared SQL type to its `alias_types` family, so
+/// `string`↔`varchar`↔`text` (etc.) compare equal. An unknown type
+/// canonicalizes to its lowercased self (so two distinct unknowns stay
+/// distinct).
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+fn canonical_type(declared: &str) -> String {
+    // Strip a length/precision suffix: `varchar(255)` → `varchar`.
+    let base = declared
+        .split('(')
+        .next()
+        .unwrap_or(declared)
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "string" | "varchar" | "text" | "char" | "character varying" => "string".to_owned(),
+        "int" | "integer" | "int4" => "integer".to_owned(),
+        "bigint" | "int8" => "bigint".to_owned(),
+        "bool" | "boolean" => "boolean".to_owned(),
+        "float" | "float8" | "double" | "double precision" => "double".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use super::*;
     use crate::domain::manifest::{
-        Checksum, DependsOn, Group, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, Owner,
+        Checksum, ColumnFacts, DependsOn, Group, Manifest, ManifestMetadata, Node, NodeConfig,
+        NodeId, Owner,
     };
 
     fn sample_checksum() -> Checksum {
@@ -926,5 +1231,417 @@ mod tests {
         assert!(!facts.blast_radius.is_empty());
         assert!(facts.has_content());
         assert!(!facts.is_empty());
+    }
+
+    // ===== Slice 5: structural contract breaking-change classifier =====
+
+    /// A contracted model-node builder. `cols` is `(name, type)` pairs;
+    /// `mat` the materialization; `enforced` the `contract.enforced`
+    /// flag; `checksum` the (optional) `contract.checksum`; `model_cons`
+    /// the model-level constraints; `col_cons` the per-column constraints.
+    struct ContractNode {
+        cols: Vec<(&'static str, Option<&'static str>)>,
+        mat: &'static str,
+        enforced: bool,
+        checksum: Option<&'static str>,
+        model_cons: Vec<Constraint>,
+        col_cons: Vec<(&'static str, Vec<Constraint>)>,
+    }
+
+    impl ContractNode {
+        fn base(mat: &'static str, enforced: bool) -> Self {
+            Self {
+                cols: Vec::new(),
+                mat,
+                enforced,
+                checksum: None,
+                model_cons: Vec::new(),
+                col_cons: Vec::new(),
+            }
+        }
+
+        fn cols(mut self, cols: &[(&'static str, Option<&'static str>)]) -> Self {
+            self.cols = cols.to_vec();
+            self
+        }
+
+        fn checksum(mut self, checksum: &'static str) -> Self {
+            self.checksum = Some(checksum);
+            self
+        }
+
+        fn model_cons(mut self, cons: Vec<Constraint>) -> Self {
+            self.model_cons = cons;
+            self
+        }
+
+        fn col_cons(mut self, col: &'static str, cons: Vec<Constraint>) -> Self {
+            self.col_cons.push((col, cons));
+            self
+        }
+
+        fn build(self) -> Node {
+            let mut config = BTreeMap::new();
+            config.insert("materialized".to_owned(), serde_json::json!(self.mat));
+            let columns: BTreeMap<String, Option<String>> = self
+                .cols
+                .iter()
+                .map(|(n, t)| ((*n).to_owned(), t.map(str::to_owned)))
+                .collect();
+            let column_facts: BTreeMap<String, ColumnFacts> = self
+                .col_cons
+                .iter()
+                .map(|(col, cons)| {
+                    (
+                        (*col).to_owned(),
+                        ColumnFacts::new(None, Vec::new(), Vec::new(), cons.clone()),
+                    )
+                })
+                .collect();
+            Node::new(
+                NodeId::new("model.pkg.m"),
+                "model",
+                sample_checksum(),
+                Some("select 1".to_owned()),
+                None,
+                DependsOn::default(),
+                None,
+                NodeConfig::new(config, self.enforced),
+                None,
+                columns,
+            )
+            .with_contract_facts(
+                self.model_cons.clone(),
+                Vec::new(),
+                self.checksum.map(str::to_owned),
+            )
+            .with_column_facts(column_facts)
+        }
+    }
+
+    fn pk(col: &str) -> Constraint {
+        Constraint::new(
+            "primary_key",
+            vec![col.to_owned()],
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+    }
+
+    fn not_null() -> Constraint {
+        Constraint::new("not_null", Vec::new(), None, None, None, Vec::new())
+    }
+
+    fn custom() -> Constraint {
+        Constraint::new("custom", Vec::new(), None, None, None, Vec::new())
+    }
+
+    // ---- table-driven transitions (one per Intel-C category) ----
+
+    #[test]
+    fn unenforced_both_sides_is_unchanged() {
+        let old = ContractNode::base("table", false).build();
+        let current = ContractNode::base("table", false).build();
+        assert_eq!(classify_contract(&old, &current), ContractChange::Unchanged);
+    }
+
+    #[test]
+    fn newly_enforced_is_changed_not_breaking() {
+        let old = ContractNode::base("table", false).build();
+        let current = ContractNode::base("table", true).build();
+        assert_eq!(
+            classify_contract(&old, &current),
+            ContractChange::ChangedNotBreaking,
+        );
+    }
+
+    #[test]
+    fn enforcement_dropped_is_breaking() {
+        let old = ContractNode::base("table", true).build();
+        let current = ContractNode::base("table", false).build();
+        assert_eq!(
+            classify_contract(&old, &current),
+            ContractChange::Breaking(vec![BreakingReason::ContractEnforcedDisabled]),
+        );
+    }
+
+    #[test]
+    fn identical_enforced_checksums_short_circuit_unchanged() {
+        // The fast path: both enforce + identical non-null checksums ⇒
+        // unchanged WITHOUT a structural diff (even if columns differ —
+        // proving the short-circuit fires).
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .checksum("abc")
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("string"))]) // would be a type change…
+            .checksum("abc") // …but the checksum short-circuits
+            .build();
+        assert_eq!(classify_contract(&old, &current), ContractChange::Unchanged);
+    }
+
+    #[test]
+    fn column_added_is_not_breaking() {
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("int")), ("b", Some("string"))])
+            .build();
+        assert_eq!(classify_contract(&old, &current), ContractChange::Unchanged);
+    }
+
+    #[test]
+    fn column_removed_is_breaking() {
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int")), ("b", Some("string"))])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        assert_eq!(
+            classify_contract(&old, &current),
+            ContractChange::Breaking(vec![BreakingReason::ColumnsRemoved(vec!["b".to_owned()])]),
+        );
+    }
+
+    #[test]
+    fn column_type_changed_is_breaking() {
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("string"))])
+            .build();
+        assert_eq!(
+            classify_contract(&old, &current),
+            ContractChange::Breaking(vec![BreakingReason::ColumnTypeChanged {
+                col: "a".to_owned(),
+                prev: "int".to_owned(),
+                current: "string".to_owned(),
+            }]),
+        );
+    }
+
+    #[test]
+    fn alias_type_change_is_not_breaking() {
+        // string ↔ varchar under alias_types ⇒ unchanged.
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("string"))])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("varchar(255)"))])
+            .build();
+        assert_eq!(classify_contract(&old, &current), ContractChange::Unchanged);
+    }
+
+    #[test]
+    fn both_undeclared_column_types_are_equal() {
+        // (None, None) ⇒ equal: a column untyped on both sides is no
+        // change.
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", None)])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", None)])
+            .build();
+        assert_eq!(classify_contract(&old, &current), ContractChange::Unchanged);
+    }
+
+    #[test]
+    fn declared_to_undeclared_type_is_breaking() {
+        // (Some, None) ⇒ not equal: dropping a declared type is a type
+        // change (engine fallback labels the current side "unknown").
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", None)])
+            .build();
+        assert_eq!(
+            classify_contract(&old, &current),
+            ContractChange::Breaking(vec![BreakingReason::ColumnTypeChanged {
+                col: "a".to_owned(),
+                prev: "int".to_owned(),
+                current: "unknown".to_owned(),
+            }]),
+        );
+    }
+
+    #[test]
+    fn model_constraint_removed_is_breaking_on_table() {
+        let old = ContractNode::base("table", true)
+            .model_cons(vec![pk("id")])
+            .build();
+        let current = ContractNode::base("table", true).build();
+        assert_eq!(
+            classify_contract(&old, &current),
+            ContractChange::Breaking(vec![BreakingReason::EnforcedModelConstraintRemoved]),
+        );
+    }
+
+    #[test]
+    fn model_constraint_removed_on_view_is_not_breaking() {
+        // A view never enforces constraints — removing one is not
+        // breaking (the materialization gate).
+        let old = ContractNode::base("view", true)
+            .model_cons(vec![pk("id")])
+            .build();
+        let current = ContractNode::base("view", true).build();
+        assert_eq!(classify_contract(&old, &current), ContractChange::Unchanged);
+    }
+
+    #[test]
+    fn column_constraint_removed_is_breaking_on_incremental() {
+        let old = ContractNode::base("incremental", true)
+            .cols(&[("id", Some("int"))])
+            .col_cons("id", vec![not_null()])
+            .build();
+        let current = ContractNode::base("incremental", true)
+            .cols(&[("id", Some("int"))])
+            .build();
+        assert_eq!(
+            classify_contract(&old, &current),
+            ContractChange::Breaking(vec![BreakingReason::EnforcedColumnConstraintRemoved]),
+        );
+    }
+
+    #[test]
+    fn custom_column_constraint_removed_is_not_breaking() {
+        // Custom column-level constraints are dropped (dbt convention).
+        let old = ContractNode::base("table", true)
+            .cols(&[("id", Some("int"))])
+            .col_cons("id", vec![custom()])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("id", Some("int"))])
+            .build();
+        assert_eq!(classify_contract(&old, &current), ContractChange::Unchanged);
+    }
+
+    #[test]
+    fn materialization_off_table_with_constraints_is_breaking() {
+        // table → view while a model constraint existed ⇒ both the
+        // constraint-removed-style reason AND MaterializationChanged.
+        let old = ContractNode::base("table", true)
+            .model_cons(vec![pk("id")])
+            .build();
+        let current = ContractNode::base("view", true)
+            .model_cons(vec![pk("id")])
+            .build();
+        let ContractChange::Breaking(reasons) = classify_contract(&old, &current) else {
+            panic!("expected breaking");
+        };
+        assert!(reasons.contains(&BreakingReason::MaterializationChanged));
+    }
+
+    #[test]
+    fn materialization_change_with_no_constraints_is_not_breaking() {
+        // table → view but no constraints existed ⇒ not breaking (the
+        // had_constraints guard).
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        let current = ContractNode::base("view", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        assert_eq!(classify_contract(&old, &current), ContractChange::Unchanged);
+    }
+
+    // ---- property-shaped tests ----
+
+    #[test]
+    fn classify_is_reflexive_unchanged() {
+        // classify(n, n) == Unchanged for a rich contracted node.
+        let node = ContractNode::base("table", true)
+            .cols(&[("id", Some("int")), ("name", Some("varchar"))])
+            .model_cons(vec![pk("id")])
+            .col_cons("id", vec![not_null()])
+            .checksum("xyz")
+            .build();
+        assert_eq!(classify_contract(&node, &node), ContractChange::Unchanged);
+    }
+
+    #[test]
+    fn alias_symmetry_holds_for_known_families() {
+        // string ↔ varchar ↔ text (and int ↔ integer, bool ↔ boolean)
+        // canonicalize equal under alias_types in both directions.
+        for (a, b) in [
+            ("string", "varchar"),
+            ("varchar", "text"),
+            ("int", "integer"),
+            ("bool", "boolean"),
+            ("float", "double precision"),
+        ] {
+            let old = ContractNode::base("table", true)
+                .cols(&[("c", Some(a))])
+                .build();
+            let current = ContractNode::base("table", true)
+                .cols(&[("c", Some(b))])
+                .build();
+            assert_eq!(
+                classify_contract(&old, &current),
+                ContractChange::Unchanged,
+                "{a} ↔ {b} should be alias-equal",
+            );
+            // Symmetric the other direction.
+            assert_eq!(
+                classify_contract(&current, &old),
+                ContractChange::Unchanged,
+                "{b} ↔ {a} (reverse) should be alias-equal",
+            );
+        }
+    }
+
+    #[test]
+    fn null_checksum_does_not_short_circuit_falls_through_to_structure() {
+        // fusion frequently null-fills contract.checksum (dbt-core#8030);
+        // a None checksum must NOT short-circuit — the structure decides.
+        // Here the structure is identical ⇒ Unchanged via the diff, not
+        // the checksum fast path.
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        assert_eq!(classify_contract(&old, &current), ContractChange::Unchanged);
+        // …and a real type change with null checksums is still caught.
+        let changed = ContractNode::base("table", true)
+            .cols(&[("a", Some("date"))])
+            .build();
+        assert_eq!(
+            classify_contract(&old, &changed),
+            ContractChange::Breaking(vec![BreakingReason::ColumnTypeChanged {
+                col: "a".to_owned(),
+                prev: "int".to_owned(),
+                current: "date".to_owned(),
+            }]),
+        );
+    }
+
+    #[test]
+    fn multiple_breaking_reasons_accumulate() {
+        // A column removed AND a type changed AND a model constraint
+        // removed (on table) ⇒ all three reasons fire.
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int")), ("b", Some("string"))])
+            .model_cons(vec![pk("a")])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("date"))]) // b removed, a retyped
+            .build();
+        let ContractChange::Breaking(reasons) = classify_contract(&old, &current) else {
+            panic!("expected breaking");
+        };
+        assert!(reasons.contains(&BreakingReason::ColumnsRemoved(vec!["b".to_owned()])));
+        assert!(reasons.iter().any(|r| matches!(
+            r,
+            BreakingReason::ColumnTypeChanged { col, .. } if col == "a"
+        )));
+        assert!(reasons.contains(&BreakingReason::EnforcedModelConstraintRemoved));
     }
 }
