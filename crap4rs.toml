@@ -82,6 +82,16 @@ threshold = 15
 pattern ="src/domain/cell_diff.rs"
 threshold = 15
 
+[[overrides]]
+# PR-scope lineage mini-DAG domain core (cute-dbt#352 Slice A). The
+# multi-source BFS connector computation (descendants ∩ ancestors of the
+# modified set, differing-seed predicate) + the induced-edge filter are
+# correctness-load-bearing: a silent connector mis-classification or
+# induced-edge bug yields a wrong/misleading PR-shape graph, never a
+# crash. Pure-domain graph walks — comfortably under 15.
+pattern ="src/domain/pr_dag.rs"
+threshold = 15
+
 # crap4rs v0.4.0's [[overrides]] schema accepts only `pattern` and
 # `threshold`. There is no top-level `exclude` array; to exclude a file
 # from gating, add an [[overrides]] entry with a very high threshold
