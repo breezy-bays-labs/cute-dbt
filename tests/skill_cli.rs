@@ -7,13 +7,12 @@
 //! --show-toplevel` boundary, fully isolated from the developer's git
 //! environment.
 //!
-//! tracked: cute-dbt#331 — the install tests drive `cute-dbt` through
-//! the Unix-only shim harness (`common::TestRepo`), so the crate is
-//! `#[cfg(unix)]`-gated and absent on the windows-latest job
-//! (cute-dbt#308/#316). The skill's portable invariants (embedded
-//! version mirror, base-spec frontmatter, install-path mapping) are
-//! unit-tested in `src/cli/skill.rs`, which runs everywhere.
-#![cfg(unix)]
+//! cute-dbt#331 — the install tests drive `cute-dbt` through the shim
+//! harness's git-isolated temp repos (`common::TestRepo`), now
+//! cross-platform, so the crate is no longer `#[cfg(unix)]`-gated and
+//! runs everywhere. The one genuinely Unix-specific case — the
+//! `--print | true` BrokenPipe/`pipefail` pipeline — keeps its own
+//! `#[cfg(unix)]` gate (Unix pipe semantics by design).
 
 #[path = "common/mod.rs"]
 mod common;
@@ -59,6 +58,12 @@ fn skill_print_is_byte_identical_to_the_repo_file() {
     );
 }
 
+// Unix-by-design: this case exercises EPIPE/BrokenPipe through a bash
+// `pipefail` pipeline — Unix pipe semantics with no portable Windows
+// analogue. It stays gated (like the symlink tests in review.rs); the
+// BrokenPipe handling it pins is platform-agnostic Rust, exercised here
+// on Unix runners.
+#[cfg(unix)]
 #[test]
 fn skill_print_into_a_closed_pipe_exits_clean() {
     // `cute-dbt skill --print | head` closes stdout early; the
