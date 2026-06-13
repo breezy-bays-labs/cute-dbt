@@ -101,8 +101,8 @@ pub use pr_dag::{PrDagEdge, PrDagGraph, PrDagNode, PrDagState, compute_pr_dag};
 pub use pr_diff::{
     BlockDiff, DiffLine, DiffLineKind, FileHunks, Hunk, NormalizedDiffIndex, PrDiff,
     ReverseApplyError, attach_model_yaml_diffs, diff_lines, raw_hunk_lines,
-    reconstruct_block_diffs, reconstruct_model_sql_diffs, refine_changed_by_hunks, reverse_apply,
-    ws_equal,
+    reconstruct_block_diffs, reconstruct_macro_sql_diff, reconstruct_model_sql_diffs,
+    refine_changed_by_hunks, reverse_apply, ws_equal,
 };
 pub use preflight::{PreflightError, preflight_compiled};
 // `project_def::Span` is deliberately NOT re-exported here — `cte::Span`

@@ -479,7 +479,7 @@ is unchanged.\
 path = "playground-pr-diff.patch"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/134"
-sha256 = "0dd17d61b9ac656f262b37580fbb87b51c3684487d32291e1b2004c34ba5079b"
+sha256 = "65489edf84ab4ebdf66a0bfdcdade1a9b86c79c17565fa4c1d8c4620ddf887aa"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"
@@ -512,7 +512,13 @@ playground-source/dbt_project.yml (same-revision contract). \
 cute-dbt#269 appended two more dbt_project.yml hunks (an on-run-start \
 hook rewrite + a dispatch search_order reorder) so the showcase \
 renders the purpose-built hooks row (operation-node SQL diff) and the \
-UNKNOWN-tier dispatch banner. No \
+UNKNOWN-tier dispatch banner. cute-dbt#265 prepended a macro edit hunk \
+(`macros/data_quality/quarantine_filter.sql` line 3, \
+`is true`→`= true`) so the showcase renders the macro perspective lens \
+(Slice B): the macro body diff + the reverse blast-radius directory \
+tree of the 3 root-project models that reach the macro; its `+` side is \
+byte-aligned to the committed playground-source macro file \
+(same-revision contract). No \
 real data — a hypothetical PR against the synthetic Synthea playground.\
 """
 
@@ -675,6 +681,28 @@ golden diff-showcase renders the external old→new cell diff. Resolved by \
 the ProjectFileReader under `--project-root tests/fixtures/playground-source` \
 (file lives at `<project-root>/tests/fixtures/...`, the dbt convention). \
 Pure synthetic data — fictitious patient ids, no real records.\
+"""
+
+[[fixture]]
+path = "playground-source/macros/data_quality/quarantine_filter.sql"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/265"
+sha256 = "c2908efeda52706648392679973fb2525d9ac65150547ae4d809e1354aa7f8bb"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+Synthetic root-project macro for the cute-dbt#265 macro perspective lens \
+(Slice B). Its body is byte-aligned to the committed \
+`macro.healthcare_analytics.quarantine_filter` `macro_sql` in \
+playground-current.json (the same-revision contract), so reading it through \
+`--project-root tests/fixtures/playground-source` matches the manifest. The \
+diff-showcase pr-diff patch carries an EDIT hunk against this file (a \
+`where {{ field_name }} is true`→`= true` change), so the golden \
+diff-showcase renders the macro body diff plus the reverse blast-radius \
+directory tree of the 3 root-project models that reach this macro \
+(`fct_clinical_events`, `fct_encounters`, `int_encounters__enriched`). \
+Pure synthetic Jinja — no real data.\
 """
 
 [[fixture]]

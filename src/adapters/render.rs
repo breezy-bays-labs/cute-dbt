@@ -69,11 +69,12 @@ use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
     BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, ConfigAttribution, CteGraph, DiffLine,
     DiffLineKind, EdgeType, Finding, FixtureTable, GovernanceFacts, HeuristicId, HookChangeFacts,
-    HookManifestPresence, InScopeSet, Instrument, Manifest, ModelInScopeSet, ModelYamlOutcome,
-    Node, NodeId, ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition,
-    ProjectFacts, ProjectFallbackReason, SourceNode, TestMetadata, Tier, UnitTest,
-    UnitTestDataDiff, UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock, VarAttribution,
-    VarChangeFacts, VarReference, VarScanFootprint, apply_check_policy, model_findings,
+    HookManifestPresence, InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet,
+    ModelYamlOutcome, Node, NodeId, NormalizedDiffIndex, ProjectChange, ProjectChangeCategory,
+    ProjectChangePanel, ProjectDefinition, ProjectFacts, ProjectFallbackReason, SourceNode,
+    TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
+    UnitTestYamlBlock, VarAttribution, VarChangeFacts, VarReference, VarScanFootprint,
+    apply_check_policy, macro_blast_radius, model_findings, reconstruct_macro_sql_diff,
     resolve_target_model, resolve_tested_model, table_from_manifest_rows,
 };
 
@@ -1384,6 +1385,106 @@ pub struct ReportPayload {
     /// (`experimental: ""`) goldens stay byte-identical.
     #[serde(skip_serializing_if = "GovernanceFacts::is_empty")]
     pub governance: GovernanceFacts,
+    /// The macro perspective lens facts (cute-dbt#265, Slice B) — the
+    /// changed root-project macros, each with its body diff, its
+    /// blast-radius impacted-model directory tree, and the count. Gated
+    /// behind [`Experiment::MacroLens`](crate::domain::Experiment::MacroLens):
+    /// the cli layer passes `None` when the experiment is off, so the key
+    /// is omitted from the JSON and the `{%- if macro_lens %}` template
+    /// section emits zero bytes — keeping the non-macro goldens
+    /// byte-identical. The same struct rides the JSON payload (downstream
+    /// consumers + headless assertions) and is server-rendered into the
+    /// section.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub macro_lens: Option<MacroLensPayload>,
+}
+
+/// The macro perspective lens (cute-dbt#265, Slice B) — the "macro changed"
+/// section facts.
+///
+/// Present (`Some`) exactly when the [`Experiment::MacroLens`](crate::domain::Experiment::MacroLens)
+/// experiment is on AND at least one root-project macro changed in the PR.
+/// Carries one [`ChangedMacroView`] per changed macro plus the per-arm
+/// [`fidelity`](Self::fidelity) chip. Server-rendered into the template +
+/// serialized into the JSON payload (the [`GovernanceFacts`] both-surfaces
+/// precedent).
+#[derive(Debug, Clone, Serialize)]
+pub struct MacroLensPayload {
+    /// Each changed root-project macro, in deterministic id order.
+    pub macros: Vec<ChangedMacroView>,
+    /// The fidelity of the change signal for THIS report's scope arm:
+    /// `"exact"` on the `--baseline-manifest` arm (a direct `macro_sql`
+    /// body comparison — fusion's `check_modified_macros` semantics) or
+    /// `"heuristic"` on the `--pr-diff` arm (path-primary + name-fallback
+    /// resolution against the diff). The chip states this plainly so the
+    /// reviewer reads the section's confidence honestly (critique S2 — no
+    /// `state:` borrowing, no false certainty).
+    pub fidelity: &'static str,
+}
+
+/// One changed root-project macro in the [`MacroLensPayload`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ChangedMacroView {
+    /// The macro's bare name (the `X` of `{% macro X(...) %}`), or the
+    /// macro `unique_id` leaf when no identity name is recorded.
+    pub name: String,
+    /// The macro's owning package — always the root project here (the
+    /// blast radius and changed-macro detection both filter to it), shown
+    /// for parity with the governance chips.
+    pub package: String,
+    /// The macro's declaring file, project-relative (e.g.
+    /// `macros/data_quality/quarantine_filter.sql`). Empty when the
+    /// manifest carries no `original_file_path` for this macro (the rare
+    /// fusion null-fill).
+    pub path: String,
+    /// The reconstructed inline body diff (cute-dbt#111
+    /// [`reconstruct_macro_sql_diff`]),
+    /// present only on the `--pr-diff` arm when this macro's file was
+    /// touched + aligned + substantively changed. `None` ⇒ the section
+    /// shows the plain current body (`body_lines`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<BlockDiff>,
+    /// The macro's CURRENT body as plain context lines — the fallback the
+    /// section renders when [`diff`](Self::diff) is `None` (baseline arm,
+    /// or a pr-diff macro whose body the diff did not substantively touch).
+    /// Never empty when the macro has a body.
+    pub body_lines: Vec<DiffLine>,
+    /// The number of root-project models impacted by this macro change —
+    /// the [`macro_blast_radius`] cardinality. Stated as a count first
+    /// (critique S3 — the lightweight
+    /// surface is the count + tree, never inline bodies in Slice B).
+    pub impacted_count: usize,
+    /// The impacted models as a flattened collapsible directory tree
+    /// (founder D3), grouped by `original_file_path` directory structure.
+    /// Pre-order traversal with explicit [`depth`](MacroTreeRow::depth) so
+    /// the askama template renders the nesting without recursion. Empty
+    /// when the blast radius is empty (a materialization macro, or an
+    /// edit reaching no root-project model — the section states the
+    /// honest zero).
+    pub tree: Vec<MacroTreeRow>,
+}
+
+/// One row of a [`ChangedMacroView`]'s flattened impacted-model directory
+/// tree (cute-dbt#265 founder D3).
+///
+/// The tree is grouped by the impacted models' `original_file_path`
+/// directory segments; each directory is a `dir` row and each model is a
+/// `model` leaf. Flattened pre-order with a 0-based [`depth`](Self::depth)
+/// (the askama template indents by depth — recursion-free rendering).
+#[derive(Debug, Clone, Serialize)]
+pub struct MacroTreeRow {
+    /// `"dir"` for a directory grouping row, `"model"` for an impacted
+    /// model leaf — the template's per-kind CSS hook + `data-kind`.
+    pub kind: &'static str,
+    /// The display label: the bare directory segment for a `dir` row, the
+    /// bare model name for a `model` leaf.
+    pub label: String,
+    /// 0-based nesting depth — the template's indent driver (`dir` rows at
+    /// each path segment, the model leaf one level past its directory).
+    pub depth: usize,
+    /// The model's full node id for a `model` leaf (the stable selector
+    /// hook); empty for a `dir` row.
+    pub model_id: String,
 }
 
 /// Which scope source produced this report — selects the diff-scope
@@ -2014,6 +2115,207 @@ fn project_panel_view(
     }
 }
 
+/// Build the macro perspective lens (cute-dbt#265, Slice B) from the
+/// changed-macro set + the manifest.
+///
+/// `changed_macros` is the resolved set of changed root-project macro
+/// `unique_id`s (the cli picks the `changed_macros_pr_diff` /
+/// `changed_macros_baseline` arm by scope source). For each changed macro
+/// this resolves its name/package/path/body from the manifest, reconstructs
+/// the body diff on the `--pr-diff` arm (`index = Some(...)`), and walks the
+/// reverse [`macro_blast_radius`] into a collapsible directory tree of the
+/// impacted root-project models. `scope_source` selects the fidelity chip
+/// (`Baseline` = exact body comparison, `PrDiff` = path/name heuristic).
+///
+/// Returns `None` when `changed_macros` is empty — the cli only calls this
+/// when [`Experiment::MacroLens`](crate::domain::Experiment::MacroLens) is
+/// on, so `None` (no macro changed) and the off-gate (the cli passes the
+/// `None` directly) both omit the section, keeping the non-macro goldens
+/// byte-identical.
+#[must_use]
+pub fn build_macro_lens(
+    current: &Manifest,
+    changed_macros: &BTreeSet<String>,
+    scope_source: ScopeSource,
+    index: Option<&NormalizedDiffIndex>,
+) -> Option<MacroLensPayload> {
+    // Root-project filter: the lens is the REVIEWER's macros, never a
+    // vendor package's. The pr-diff path-primary channel resolves any macro
+    // whose file the PR touched regardless of package (a PR can vendor a
+    // dependency), so a vendor macro edit can reach the changed set — drop
+    // it here. A macro with no recorded `package_name` (the rare null-fill)
+    // is kept (fail-open: the diff resolved it to a real id), unless a
+    // project name is set and the macro's package explicitly differs.
+    let project = current.metadata().project_name();
+    let macros = changed_macros
+        .iter()
+        .filter(|macro_id| is_root_project_macro(current, macro_id, project))
+        .map(|macro_id| changed_macro_view(current, macro_id, index))
+        .collect::<Vec<_>>();
+    if macros.is_empty() {
+        return None;
+    }
+    let fidelity = match scope_source {
+        ScopeSource::Baseline => "exact",
+        ScopeSource::PrDiff => "heuristic",
+    };
+    Some(MacroLensPayload { macros, fidelity })
+}
+
+/// Whether a changed macro belongs to the root project — the lens filter
+/// (vendor-package macros are not the reviewer's concern). A macro whose
+/// recorded `package_name` matches `project` passes; a macro with no
+/// recorded package passes (fail-open — the diff resolved it to a real id);
+/// a macro whose package explicitly differs from a known project name is
+/// dropped.
+fn is_root_project_macro(current: &Manifest, macro_id: &str, project: Option<&str>) -> bool {
+    match (
+        current
+            .macro_identity()
+            .get(macro_id)
+            .and_then(MacroIdentity::package_name),
+        project,
+    ) {
+        (Some(pkg), Some(proj)) => pkg == proj,
+        // No recorded package, or no project name to compare against:
+        // fail-open (keep) — the changed-macro detection already resolved
+        // this id from the diff/baseline.
+        _ => true,
+    }
+}
+
+/// Resolve one changed macro into its [`ChangedMacroView`] — identity, body
+/// (diff on the pr-diff arm, plain context lines otherwise), and the
+/// flattened impacted-model directory tree.
+fn changed_macro_view(
+    current: &Manifest,
+    macro_id: &str,
+    index: Option<&NormalizedDiffIndex>,
+) -> ChangedMacroView {
+    let identity = current.macro_identity().get(macro_id);
+    // Name: the recorded identity name, else the unique_id leaf.
+    let name = identity
+        .and_then(|i| i.name())
+        .map_or_else(|| leaf_segment(macro_id).to_owned(), str::to_owned);
+    let package = identity
+        .and_then(|i| i.package_name())
+        .or_else(|| current.metadata().project_name())
+        .unwrap_or_default()
+        .to_owned();
+    let path = identity
+        .and_then(|i| i.original_file_path())
+        .unwrap_or_default()
+        .to_owned();
+    let body = current.macros().get(macro_id).map_or("", String::as_str);
+    // The pr-diff arm reconstructs the body diff when the macro's file was
+    // touched + aligned + substantively changed; baseline (no index) and an
+    // untouched/stale macro fall back to the plain body context lines.
+    let diff = index
+        .filter(|_| !path.is_empty())
+        .and_then(|idx| reconstruct_macro_sql_diff(body, &path, idx));
+    let body_lines = macro_body_context_lines(body);
+    let radius = macro_blast_radius(current, macro_id);
+    let impacted_count = radius.len();
+    let tree = impacted_model_tree(current, &radius);
+    ChangedMacroView {
+        name,
+        package,
+        path,
+        diff,
+        body_lines,
+        impacted_count,
+        tree,
+    }
+}
+
+/// The macro's current body as plain context [`DiffLine`]s — the fallback
+/// the section renders when no inline diff applies. One terminator stripped
+/// (the engine-divergent normalization), then one Context line per `\n`-split
+/// line. Empty body ⇒ no lines.
+fn macro_body_context_lines(body: &str) -> Vec<DiffLine> {
+    if body.is_empty() {
+        return Vec::new();
+    }
+    let normalized = body.strip_suffix('\n').unwrap_or(body);
+    normalized
+        .split('\n')
+        .map(|line| DiffLine {
+            kind: DiffLineKind::Context,
+            text: line.to_owned(),
+            emphasis: None,
+        })
+        .collect()
+}
+
+/// Flatten the impacted-model blast radius into a collapsible directory
+/// tree (founder D3), grouped by each model's `original_file_path`
+/// directory segments.
+///
+/// Pre-order: every distinct directory prefix is a `dir` row (deepest level
+/// per its segment depth), then the model leaf one level past its directory.
+/// Deterministic — the radius is a [`BTreeSet`] (id order) and the directory
+/// grouping is built over a sorted path key, so the same radius always
+/// flattens to the same row sequence (golden-stable). A model with no
+/// `original_file_path` groups under a synthetic `(unknown path)` directory
+/// rather than being dropped (fail-open display).
+fn impacted_model_tree(current: &Manifest, radius: &BTreeSet<NodeId>) -> Vec<MacroTreeRow> {
+    // Sort by (directory-path, model-name) so the directory grouping is
+    // stable and adjacent models in the same directory cluster.
+    let mut entries: Vec<(Vec<String>, String, String)> = radius
+        .iter()
+        .map(|id| {
+            let node = current.node(id);
+            let ofp = node.and_then(Node::original_file_path);
+            let (dirs, _file) = split_dir_path(ofp);
+            let name = leaf_segment(id.as_str()).to_owned();
+            (dirs, name, id.as_str().to_owned())
+        })
+        .collect();
+    entries.sort();
+
+    let mut rows = Vec::new();
+    let mut open_dirs: Vec<String> = Vec::new();
+    for (dirs, name, model_id) in entries {
+        // Find the shared prefix with the currently-open directory stack;
+        // close (drop) the divergent tail, then open the new segments.
+        let shared = open_dirs
+            .iter()
+            .zip(dirs.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        open_dirs.truncate(shared);
+        for segment in &dirs[shared..] {
+            rows.push(MacroTreeRow {
+                kind: "dir",
+                label: segment.clone(),
+                depth: open_dirs.len(),
+                model_id: String::new(),
+            });
+            open_dirs.push(segment.clone());
+        }
+        rows.push(MacroTreeRow {
+            kind: "model",
+            label: name,
+            depth: open_dirs.len(),
+            model_id,
+        });
+    }
+    rows
+}
+
+/// Split a model `original_file_path` into its directory segments and file
+/// leaf. A `None` / empty path groups under a synthetic `(unknown path)`
+/// directory (fail-open — an impacted model is never silently dropped).
+fn split_dir_path(ofp: Option<&str>) -> (Vec<String>, String) {
+    let path = ofp.unwrap_or("").trim_matches('/');
+    if path.is_empty() {
+        return (vec!["(unknown path)".to_owned()], String::new());
+    }
+    let mut segments: Vec<String> = path.split('/').map(str::to_owned).collect();
+    let file = segments.pop().unwrap_or_default();
+    (segments, file)
+}
+
 /// askama template binding for the v0.1 report.
 ///
 /// Asset values are pinned `&'static str` constants from
@@ -2113,6 +2415,15 @@ struct ReportTemplate<'a> {
     /// the same struct rides the JSON payload for downstream consumers +
     /// headless assertions.
     governance: GovernanceFacts,
+    /// The macro perspective lens (cute-dbt#265, Slice B) — `Some` exactly
+    /// when [`Experiment::MacroLens`](crate::domain::Experiment::MacroLens)
+    /// is on AND a root-project macro changed. The `{% if macro_lens %}`
+    /// section reads each `macros[i]` view (the body diff/lines + the
+    /// impacted-model directory tree + the count + the fidelity chip);
+    /// `None` emits zero bytes (the off-gate default), keeping the
+    /// non-macro goldens byte-identical. Rides the JSON payload too (the
+    /// `governance` both-surfaces precedent).
+    macro_lens: Option<MacroLensPayload>,
 }
 
 /// Serialize `payload` to JSON for safe embedding inside an HTML
@@ -2326,6 +2637,11 @@ pub fn build_payload_with_externals(
         // group chips are payload-level, not per-model, so they assemble
         // at the composition root, not inside the per-model walk).
         governance: GovernanceFacts::default(),
+        // cute-dbt#265 — macro lens defaults `None` here; the gated value
+        // is threaded in by `render_report_with_externals` (the macro
+        // section is payload-level, not per-model — it assembles at the
+        // composition root from the changed-macro set + blast radius).
+        macro_lens: None,
     }
 }
 
@@ -2385,6 +2701,7 @@ pub fn render_report(
         &CheckPolicy::default(),
         &ProjectFacts::default(),
         &GovernanceFacts::default(),
+        None,
     )
 }
 
@@ -2417,6 +2734,7 @@ pub fn render_report_with_externals(
     check_policy: &CheckPolicy<HeuristicId>,
     project_facts: &ProjectFacts,
     governance: &GovernanceFacts,
+    macro_lens: Option<&MacroLensPayload>,
 ) -> io::Result<()> {
     let mut payload = build_payload_with_externals(
         current,
@@ -2438,6 +2756,11 @@ pub fn render_report_with_externals(
     // JSON + zero DOM via `{%- if has_governance %}`, keeping the
     // non-experimental golden byte-identical.
     payload.governance = governance.clone();
+    // cute-dbt#265 — the gated macro lens (changed macros + body diffs +
+    // impacted-model trees, all built in `build_macro_lens`). `None` (the
+    // off-gate default, or no macro changed) ⇒ omitted from JSON + zero DOM
+    // via `{% if macro_lens %}`, keeping the non-macro goldens byte-identical.
+    payload.macro_lens = macro_lens.cloned();
     // The empty-scope banner contract reads the TRUE in-scope set, not the
     // widened render set or the changed subset (cute-dbt#91).
     let banner_text = compose_banner_text(in_scope);
@@ -2471,6 +2794,7 @@ pub fn render_report_with_externals(
             || !project_facts.var_references.is_empty(),
         has_governance: governance.has_content(),
         governance: governance.clone(),
+        macro_lens: macro_lens.cloned(),
     };
     let html = template
         .render()
@@ -3067,12 +3391,12 @@ mod tests {
     use super::*;
     use crate::domain::{
         BlastRadius, Checksum, ColumnMetaTags, ContractClass, ContractColumnDiff, CteEdge, CteNode,
-        DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, EdgeType, GovChip, Group,
-        GroupChip, Manifest, ManifestMetadata, MetaPair, ModelMetaTags, NodeConfig, NodeId, Owner,
-        UnitTest, UnitTestExpect, UnitTestGiven,
+        DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, EdgeType, FileHunks, GovChip,
+        Group, GroupChip, Hunk, Manifest, ManifestMetadata, MetaPair, ModelMetaTags, NodeConfig,
+        NodeId, Owner, PrDiff, UnitTest, UnitTestExpect, UnitTestGiven,
     };
     use serde_json::json;
-    use std::collections::{BTreeMap, HashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     // ===== parse_ref_name =====
 
@@ -6106,6 +6430,7 @@ mod tests {
             project_definition: None,
             project_change_panel: None,
             governance: GovernanceFacts::default(),
+            macro_lens: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6128,6 +6453,7 @@ mod tests {
             project_definition: None,
             project_change_panel: None,
             governance: GovernanceFacts::default(),
+            macro_lens: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6152,6 +6478,7 @@ mod tests {
             project_definition: None,
             project_change_panel: None,
             governance: GovernanceFacts::default(),
+            macro_lens: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(serialized.contains("a < b"), "bare `<` is preserved");
@@ -6171,6 +6498,7 @@ mod tests {
             project_definition: None,
             project_change_panel: None,
             governance: GovernanceFacts::default(),
+            macro_lens: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6203,6 +6531,7 @@ mod tests {
             project_definition: None,
             project_change_panel: None,
             governance: GovernanceFacts::default(),
+            macro_lens: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6233,6 +6562,7 @@ mod tests {
             project_definition: None,
             project_change_panel: None,
             governance: GovernanceFacts::default(),
+            macro_lens: None,
         };
         let serialized = payload_json_for_html_script(&original).unwrap();
         let parsed: serde_json::Value =
@@ -6286,6 +6616,7 @@ mod tests {
             &CheckPolicy::default(),
             &ProjectFacts::default(),
             governance,
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -6746,6 +7077,338 @@ mod tests {
         assert!(!html.contains(r#"data-testid="gov-meta-chip""#));
     }
 
+    // ===== macro lens (cute-dbt#265, Slice B) =====
+
+    /// A root-project `model` node calling `direct_macros`, declaring file
+    /// `ofp`. Package = `shop` (the blast-radius root-project filter).
+    fn macro_model(id: &str, ofp: &str, direct_macros: &[&str]) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "model",
+            Checksum::new("sha256", "abc"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::new(
+                direct_macros.iter().map(|m| (*m).to_owned()).collect(),
+                vec![],
+            ),
+            Some(ofp.to_owned()),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(None, Some("shop".to_owned()))
+    }
+
+    /// A manifest with `shop` root project, the given macro-calling models,
+    /// and ONE macro (`macro.shop.add_dq_flags`, file `macros/dq.sql`).
+    fn macro_lens_manifest(models: Vec<Node>) -> Manifest {
+        let mut macros = HashMap::new();
+        macros.insert(
+            "macro.shop.add_dq_flags".to_owned(),
+            "{% macro add_dq_flags(col) %}\n  case when {{ col }} then 1 end\n{% endmacro %}"
+                .to_owned(),
+        );
+        let mut identity = BTreeMap::new();
+        identity.insert(
+            "macro.shop.add_dq_flags".to_owned(),
+            crate::domain::MacroIdentity::new(
+                Some("macros/dq.sql".to_owned()),
+                Some("add_dq_flags".to_owned()),
+                Some("shop".to_owned()),
+            ),
+        );
+        Manifest::new(
+            ManifestMetadata::new("v12").with_project_name(Some("shop".to_owned())),
+            models.into_iter().map(|n| (n.id().clone(), n)).collect(),
+            HashMap::new(),
+            macros,
+        )
+        .with_macro_identity(identity)
+    }
+
+    #[test]
+    fn build_macro_lens_empty_changed_set_is_none() {
+        // The off-gate / no-macro-changed contract: an empty set ⇒ None ⇒
+        // the section omits entirely (byte-identical non-macro golden).
+        let manifest = macro_lens_manifest(vec![macro_model(
+            "model.shop.orders",
+            "models/staging/orders.sql",
+            &["macro.shop.add_dq_flags"],
+        )]);
+        assert!(build_macro_lens(&manifest, &BTreeSet::new(), ScopeSource::PrDiff, None).is_none());
+    }
+
+    #[test]
+    fn build_macro_lens_baseline_arm_is_exact_fidelity() {
+        let manifest = macro_lens_manifest(vec![macro_model(
+            "model.shop.orders",
+            "models/staging/orders.sql",
+            &["macro.shop.add_dq_flags"],
+        )]);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None)
+            .expect("a changed macro builds the lens");
+        assert_eq!(lens.fidelity, "exact");
+        assert_eq!(lens.macros.len(), 1);
+        let mac = &lens.macros[0];
+        assert_eq!(mac.name, "add_dq_flags");
+        assert_eq!(mac.package, "shop");
+        assert_eq!(mac.impacted_count, 1);
+        // Baseline arm: no diff index ⇒ plain body context lines.
+        assert!(mac.diff.is_none());
+        assert!(!mac.body_lines.is_empty());
+        assert!(
+            mac.body_lines
+                .iter()
+                .all(|l| l.kind == DiffLineKind::Context)
+        );
+    }
+
+    #[test]
+    fn build_macro_lens_pr_diff_arm_is_heuristic_with_body_diff() {
+        let manifest = macro_lens_manifest(vec![macro_model(
+            "model.shop.orders",
+            "models/staging/orders.sql",
+            &["macro.shop.add_dq_flags"],
+        )]);
+        // The diff touches the macro file's line 2; the `+` matches the
+        // working-tree body so the reconstruction splices the old line.
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![FileHunks {
+                path: "macros/dq.sql".to_owned(),
+                hunks: vec![Hunk {
+                    new_start: 2,
+                    new_len: 1,
+                    removed_lines: vec!["  case when {{ col }} then 0 end".to_owned()],
+                    added_lines: vec!["  case when {{ col }} then 1 end".to_owned()],
+                }],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, Some(&index))
+            .expect("a changed macro builds the lens");
+        assert_eq!(lens.fidelity, "heuristic");
+        let mac = &lens.macros[0];
+        let body_diff = mac.diff.as_ref().expect("the touched macro body diffs");
+        assert!(body_diff.has_real_change());
+        assert!(
+            body_diff
+                .lines
+                .iter()
+                .any(|l| l.kind == DiffLineKind::Removed),
+            "the old macro line is spliced in",
+        );
+    }
+
+    #[test]
+    fn build_macro_lens_groups_impacted_models_into_a_directory_tree() {
+        // Two models in DIFFERENT directory subtrees both reach the macro:
+        // the tree must group each under its directory segments (founder D3).
+        let manifest = macro_lens_manifest(vec![
+            macro_model(
+                "model.shop.stg_orders",
+                "models/staging/stg_orders.sql",
+                &["macro.shop.add_dq_flags"],
+            ),
+            macro_model(
+                "model.shop.fct_orders",
+                "models/marts/core/fct_orders.sql",
+                &["macro.shop.add_dq_flags"],
+            ),
+        ]);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None)
+            .expect("lens builds");
+        let mac = &lens.macros[0];
+        assert_eq!(mac.impacted_count, 2);
+        // Directory rows: models/, marts/, core/, staging/ — and 2 model
+        // leaves. Every model leaf carries its full node id.
+        let dirs: Vec<&str> = mac
+            .tree
+            .iter()
+            .filter(|r| r.kind == "dir")
+            .map(|r| r.label.as_str())
+            .collect();
+        assert!(
+            dirs.contains(&"models"),
+            "models/ dir row present: {dirs:?}"
+        );
+        assert!(dirs.contains(&"marts"), "marts/ dir row present: {dirs:?}");
+        assert!(
+            dirs.contains(&"staging"),
+            "staging/ dir row present: {dirs:?}"
+        );
+        let model_leaves: Vec<&str> = mac
+            .tree
+            .iter()
+            .filter(|r| r.kind == "model")
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(model_leaves.len(), 2);
+        assert!(model_leaves.contains(&"fct_orders"));
+        assert!(model_leaves.contains(&"stg_orders"));
+        // A model leaf nests one level deeper than its deepest directory.
+        let fct_leaf = mac
+            .tree
+            .iter()
+            .find(|r| r.kind == "model" && r.label == "fct_orders")
+            .expect("fct leaf");
+        assert_eq!(fct_leaf.depth, 3, "models/marts/core/<model> → depth 3");
+        assert_eq!(fct_leaf.model_id, "model.shop.fct_orders");
+    }
+
+    #[test]
+    fn build_macro_lens_filters_out_vendor_package_macros() {
+        // A changed macro whose recorded package differs from the root
+        // project is dropped (vendor macros are not the reviewer's concern,
+        // even when the pr-diff path channel resolved one). With only a
+        // vendor macro in the set, the lens is None.
+        let manifest = macro_lens_manifest(vec![macro_model(
+            "model.shop.orders",
+            "models/staging/orders.sql",
+            &["macro.dbt_utils.helper"],
+        )])
+        .with_macro_identity({
+            let mut id = BTreeMap::new();
+            id.insert(
+                "macro.dbt_utils.helper".to_owned(),
+                crate::domain::MacroIdentity::new(
+                    Some("macros/u.sql".to_owned()),
+                    Some("helper".to_owned()),
+                    Some("dbt_utils".to_owned()),
+                ),
+            );
+            id
+        });
+        let changed = BTreeSet::from(["macro.dbt_utils.helper".to_owned()]);
+        assert!(
+            build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None).is_none(),
+            "a vendor-only changed set yields no lens",
+        );
+    }
+
+    #[test]
+    fn build_macro_lens_empty_blast_radius_yields_an_empty_tree() {
+        // A macro no model calls (e.g. a materialization macro) ⇒ count 0 +
+        // empty tree (the template states the honest zero, never a false
+        // claim).
+        let manifest = macro_lens_manifest(vec![macro_model(
+            "model.shop.orders",
+            "models/staging/orders.sql",
+            &["macro.shop.unrelated"],
+        )]);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None)
+            .expect("lens builds");
+        assert_eq!(lens.macros[0].impacted_count, 0);
+        assert!(lens.macros[0].tree.is_empty());
+    }
+
+    #[test]
+    fn macro_lens_none_contributes_zero_payload_bytes() {
+        // The byte-identity invariant: serializing a payload with
+        // macro_lens == None must add ZERO bytes vs the same payload — the
+        // `skip_serializing_if = Option::is_none` contract that keeps
+        // non-macro goldens byte-identical.
+        let manifest = macro_lens_manifest(vec![macro_model(
+            "model.shop.orders",
+            "models/staging/orders.sql",
+            &["macro.shop.add_dq_flags"],
+        )]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.orders")]);
+        let mut payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+        );
+        payload.macro_lens = None;
+        let without = serde_json::to_string(&payload).expect("serialize");
+        assert!(
+            !without.contains("macro_lens"),
+            "macro_lens == None must not appear in the JSON: {without}",
+        );
+    }
+
+    /// Render a one-model PR-diff report carrying `macro_lens`, returning the
+    /// HTML — the macro-section render-integration harness.
+    fn render_html_with_macro_lens(
+        filename: &str,
+        macro_lens: Option<&MacroLensPayload>,
+    ) -> String {
+        let node = macro_model(
+            "model.shop.orders",
+            "models/staging/orders.sql",
+            &["macro.shop.add_dq_flags"],
+        );
+        let manifest = macro_lens_manifest(vec![node]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.orders")]);
+        let tmp = std::env::temp_dir().join(filename);
+        let _ = std::fs::remove_file(&tmp);
+        render_report_with_externals(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &InScopeSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+            ScopeSource::PrDiff,
+            "t",
+            None,
+            &CheckPolicy::default(),
+            &ProjectFacts::default(),
+            &GovernanceFacts::default(),
+            macro_lens,
+        )
+        .expect("report renders");
+        std::fs::read_to_string(&tmp).expect("read rendered report")
+    }
+
+    #[test]
+    fn macro_lens_off_emits_zero_macro_dom() {
+        // The off-gate render: macro_lens == None must add NO macro section
+        // markup — the byte-identity-with-non-macro-goldens contract.
+        let html = render_html_with_macro_lens("macro_off.html", None);
+        assert!(!html.contains(r#"data-testid="macro-lens-panel""#));
+        assert!(!html.contains("Macro changed"));
+    }
+
+    #[test]
+    fn macro_lens_on_renders_the_section_with_tree_and_count() {
+        let manifest = macro_lens_manifest(vec![macro_model(
+            "model.shop.orders",
+            "models/staging/orders.sql",
+            &["macro.shop.add_dq_flags"],
+        )]);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens =
+            build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None).expect("lens builds");
+        let html = render_html_with_macro_lens("macro_on.html", Some(&lens));
+        assert!(html.contains(r#"data-testid="macro-lens-panel""#));
+        assert!(html.contains("Macro changed"));
+        assert!(html.contains(r#"data-testid="macro-lens-experimental""#));
+        assert!(html.contains(r#"data-testid="macro-lens-tree""#));
+        assert!(html.contains(r#"data-testid="macro-lens-count""#));
+        // Honest naming (critique S2): never a `state:` selector name.
+        assert!(!html.contains("state:modified.macros"));
+        // The macro section is ABOVE the (absent) governance region — it
+        // simply renders; the placement is pinned by the template order.
+    }
+
     // ===== project panel: hooks + dispatch rows (cute-dbt#269) =====
 
     /// Render a one-model PR-diff report carrying `facts`, returning the
@@ -6775,6 +7438,7 @@ mod tests {
             &CheckPolicy::default(),
             facts,
             &GovernanceFacts::default(),
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
