@@ -12318,6 +12318,46 @@ fn composite_enforcement_finding_renders_on_the_committed_showcase_in_a_real_bro
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn governance_lifecycle_chip_renders_on_the_committed_showcase_in_a_real_browser() {
+    // cute-dbt#260 Slice 4 — the committed diff-showcase golden has the
+    // grouped, owned dim_payers model in scope, so the group-owner-touch
+    // lifecycle chip surfaces in the gated governance section. Assert the
+    // real chip node + its kind + label in a live browser.
+    let showcase = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("diff-showcase-report.html");
+    let url = format!("file://{}", showcase.to_str().expect("UTF-8 path"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"gov-chip\"]"),
+        1,
+        "exactly one lifecycle chip (group-owner-touch on the grouped model)",
+    );
+    let chip = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"gov-chip\"]').textContent",
+    );
+    assert!(
+        chip.contains("Touches group clinical_quality")
+            && chip.contains("clinical-quality@example.com"),
+        "the chip names the group + owner email: {chip}",
+    );
+    let kind = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"gov-chip\"]').getAttribute('data-chip-kind')",
+    );
+    assert_eq!(kind, "group-owner-touch", "the chip carries its kind hook");
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn project_panel_renders_categorized_on_the_committed_showcase() {
     // The dogfood surface: the committed diff-showcase golden must carry
     // the categorized panel — two vars rows (cute-dbt#268: tiered

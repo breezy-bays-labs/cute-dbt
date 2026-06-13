@@ -3067,8 +3067,8 @@ mod tests {
     use super::*;
     use crate::domain::{
         BlastRadius, Checksum, ContractClass, ContractColumnDiff, CteEdge, CteNode,
-        DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, EdgeType, Group, GroupChip,
-        Manifest, ManifestMetadata, NodeConfig, NodeId, Owner, UnitTest, UnitTestExpect,
+        DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, EdgeType, GovChip, Group,
+        GroupChip, Manifest, ManifestMetadata, NodeConfig, NodeId, Owner, UnitTest, UnitTestExpect,
         UnitTestGiven,
     };
     use serde_json::json;
@@ -6523,6 +6523,69 @@ mod tests {
             &GovernanceFacts::default(),
         );
         assert!(!html.contains(r#"data-testid="gov-contract""#));
+    }
+
+    // ----- cute-dbt#260 Slice 4: lifecycle chips -----
+
+    #[test]
+    fn governance_lifecycle_chip_renders_with_kind_and_label() {
+        let facts = GovernanceFacts {
+            lifecycle_chips: vec![GovChip {
+                kind: "group-owner-touch".to_owned(),
+                label: "Touches group finance (owner: fin@corp.example)".to_owned(),
+                severity: None,
+            }],
+            ..GovernanceFacts::default()
+        };
+        let html = render_html_with_governance("cute_dbt_render_chip_basic.html", &facts);
+        // DOM-targeted (the #334 hardening pattern): the real <span> node +
+        // the kind hook + the label; no severity attr when severity is None.
+        assert!(
+            html.contains(
+                r#"<span class="gov-chip" data-testid="gov-chip" data-chip-kind="group-owner-touch">Touches group finance (owner: fin@corp.example)</span>"#
+            ),
+            "the chip renders its kind + label, no severity attr: {html}",
+        );
+    }
+
+    #[test]
+    fn governance_dual_state_chip_renders_severity_attr() {
+        let facts = GovernanceFacts {
+            lifecycle_chips: vec![
+                GovChip {
+                    kind: "ref-to-deprecated".to_owned(),
+                    label: "Refs deprecated old_dim (deprecated 2020-01-01)".to_owned(),
+                    severity: Some("danger".to_owned()),
+                },
+                GovChip {
+                    kind: "ref-to-deprecated".to_owned(),
+                    label: "Refs deprecated future_dim (deprecated 2099-01-01)".to_owned(),
+                    severity: Some("info".to_owned()),
+                },
+            ],
+            ..GovernanceFacts::default()
+        };
+        let html = render_html_with_governance("cute_dbt_render_chip_dual.html", &facts);
+        assert!(
+            html.contains(
+                r#"<span class="gov-chip" data-testid="gov-chip" data-chip-kind="ref-to-deprecated" data-chip-severity="danger">Refs deprecated old_dim (deprecated 2020-01-01)</span>"#
+            ),
+            "the elapsed chip carries data-chip-severity=danger: {html}",
+        );
+        assert!(
+            html.contains(r#"data-chip-severity="info""#),
+            "the scheduled chip carries data-chip-severity=info",
+        );
+    }
+
+    #[test]
+    fn governance_off_emits_no_lifecycle_chip_dom() {
+        let html = render_html_with_governance(
+            "cute_dbt_render_no_chip.html",
+            &GovernanceFacts::default(),
+        );
+        assert!(!html.contains(r#"data-testid="gov-chip""#));
+        assert!(!html.contains("data-chip-kind"));
     }
 
     // ===== project panel: hooks + dispatch rows (cute-dbt#269) =====
