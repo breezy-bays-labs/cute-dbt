@@ -362,11 +362,90 @@
 {%- endfor %}
       </ul>
     </details>
+{#- cute-dbt#265 Slice C (founder D4 + D6) — the impacted-model selector
+    + the per-model inline SQL and first-order call-site panels. ALL
+    panels are server-rendered (every model's SQL + call sites composed in
+    Rust — the "display strings composed in Rust" house rule + the
+    server-render-everything zero-egress posture); the gated inline script
+    below the loop is a pure renderer that toggles which model's panel is
+    visible on a <select> change — never a recompute, never a fetch. The
+    selector reuses the #91 changed-models <select> idiom. With
+    JS off the FIRST panel is the static fallback (the others carry
+    `hidden`), so the section degrades gracefully. The call sites are
+    first-order only (founder D6 — full ref()-lineage downstream is the
+    explorer, #345); the fidelity chip above already states the per-arm
+    confidence honestly (S2). -#}
+    <div class="macro-lens-models" data-testid="macro-lens-models" data-macro="{{ mac.name }}">
+      <div class="macro-lens-model-selector-row">
+        <label for="macro-lens-model-select-{{ loop.index0 }}">Impacted model</label>
+        <select id="macro-lens-model-select-{{ loop.index0 }}" class="macro-lens-model-select" data-testid="macro-lens-model-select">
+{%- for im in mac.impacted_models %}
+          <option value="{{ im.model_id }}">{{ im.name }}{% if im.call_site_total > 0 %}  ({{ im.call_site_total }}){% endif %}</option>
+{%- endfor %}
+        </select>
+      </div>
+{%- for im in mac.impacted_models %}
+      <div class="macro-lens-model-panel" data-testid="macro-lens-model-panel" data-model="{{ im.model_id }}"{% if !loop.first %} hidden{% endif %}>
+        <p class="macro-lens-model-head"><code class="macro-lens-model-name">{{ im.name }}</code>{% if !im.path.is_empty() %} <code class="macro-lens-model-path">{{ im.path }}</code>{% endif %}</p>
+{#- First-order call sites: the lines of THIS model's body that invoke the
+    changed macro. Shown up to the cap; the remainder fold behind a
+    <details> "more" disclosure so a heavily-calling model stays compact. -#}
+{%- if im.call_site_total > 0 %}
+        <p class="macro-lens-callsite-count" data-testid="macro-lens-callsite-count" data-total="{{ im.call_site_total }}">{% if im.call_site_total > im.call_site_cap %}Showing {{ im.call_sites.len() }} of {{ im.call_site_total }} call {% if im.call_site_total == 1 %}site{% else %}sites{% endif %}.{% else %}{{ im.call_site_total }} call {% if im.call_site_total == 1 %}site{% else %}sites{% endif %}.{% endif %}</p>
+        <ul class="macro-lens-callsites" data-testid="macro-lens-callsites">
+{%- for cs in im.call_sites %}
+          <li class="macro-lens-callsite" data-testid="macro-lens-callsite" data-line="{{ cs.line }}"><span class="macro-lens-callsite-line">{{ cs.line }}</span> <code class="macro-lens-callsite-text">{{ cs.text }}</code></li>
+{%- endfor %}
+        </ul>
+{%- else %}
+        <p class="macro-lens-callsite-none" data-testid="macro-lens-callsite-none">No first-order call site in this model's body &mdash; the macro is reached transitively (through another macro).</p>
+{%- endif %}
+{#- The model's inline raw SQL (manifest raw_code), server-rendered as
+    plain context lines — the same fallback shape the macro body uses. -#}
+{%- if !im.sql_lines.is_empty() %}
+        <pre class="macro-lens-model-sql" data-testid="macro-lens-model-sql">{% for line in im.sql_lines %}<span class="macro-lens-line is-context">{{ line.text }}</span>
+{% endfor %}</pre>
+{%- else %}
+        <p class="macro-lens-model-sql-none" data-testid="macro-lens-model-sql-none">No raw SQL recorded for this model in the manifest.</p>
+{%- endif %}
+      </div>
+{%- endfor %}
+    </div>
 {%- else %}
     <p class="macro-lens-empty" data-testid="macro-lens-empty">No root-project models reach this macro &mdash; a materialization macro, or a macro this PR added/removed rather than edited in place.</p>
 {%- endif %}
   </div>
 {%- endfor %}
+{#- cute-dbt#265 Slice C — the impacted-model selector behaviour, inlined
+    in the GATED section (not the shared interaction.js engine) so the
+    non-macro goldens stay byte-identical: when the macro experiment is off
+    this whole `{% match %}` arm — script included — emits zero bytes. The
+    panels are all server-rendered (every model's SQL + call sites in the
+    DOM, only the first visible); this is a PURE renderer that flips
+    `hidden` on a <select> change — never a recompute, never a fetch (the
+    zero-egress posture, no `src`). Plain DOM (no jQuery dependency) so it
+    runs whether or not the model-bearing interaction engine booted (a
+    macro-only PR has zero in-scope models). Each `.macro-lens-models`
+    wrapper scopes its own selector + panels. -#}
+  <script>
+  (function () {
+    var wraps = document.querySelectorAll(".macro-lens-models");
+    for (var i = 0; i < wraps.length; i++) {
+      (function (wrap) {
+        var sel = wrap.querySelector(".macro-lens-model-select");
+        var panels = wrap.querySelectorAll(".macro-lens-model-panel");
+        if (!sel || !panels.length) return;
+        function show(modelId) {
+          for (var j = 0; j < panels.length; j++) {
+            panels[j].hidden = panels[j].getAttribute("data-model") !== modelId;
+          }
+        }
+        show(sel.value);
+        sel.addEventListener("change", function () { show(sel.value); });
+      })(wraps[i]);
+    }
+  })();
+  </script>
 </section>
 {% when None %}{% endmatch -%}
 {#- cute-dbt#260 (Slice 0 — the walking skeleton) — the governance

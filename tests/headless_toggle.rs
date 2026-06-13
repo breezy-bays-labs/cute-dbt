@@ -12271,13 +12271,15 @@ fn render_macro_lens_to_file(filename: &str) -> String {
             Some("shop".to_owned()),
         ),
     );
-    let model = |bare: &str, ofp: &str| {
+    // Slice C: each model carries a real raw_code body calling the macro
+    // inline, so the model-selector + the first-order call sites render.
+    let model = |bare: &str, ofp: &str, raw: &str| {
         Node::new(
             NodeId::new(format!("model.shop.{bare}")),
             "model",
             Checksum::new("sha256", bare),
             Some("select 1".to_owned()),
-            None,
+            Some(raw.to_owned()),
             DependsOn::new(vec![macro_id.to_owned()], Vec::new()),
             Some(format!("models/{ofp}")),
             NodeConfig::default(),
@@ -12287,8 +12289,16 @@ fn render_macro_lens_to_file(filename: &str) -> String {
         .with_identity(None, Some("shop".to_owned()))
     };
     let nodes = [
-        model("stg_orders", "staging/stg_orders.sql"),
-        model("fct_orders", "marts/core/fct_orders.sql"),
+        model(
+            "stg_orders",
+            "staging/stg_orders.sql",
+            "select *\nfrom raw_orders\n  {{ add_dq_flags() }}",
+        ),
+        model(
+            "fct_orders",
+            "marts/core/fct_orders.sql",
+            "select *\nfrom stg_orders\n  {{ add_dq_flags(amount) }}",
+        ),
     ];
     let m = Manifest::new(
         ManifestMetadata::new("v12").with_project_name(Some("shop".to_owned())),
@@ -12403,6 +12413,88 @@ fn macro_lens_section_renders_with_tree_in_a_real_browser() {
         toggled_open.as_bool(),
         Some(true),
         "the impacted-model tree <details> expands",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn macro_lens_model_selector_switches_the_shown_model_in_a_real_browser() {
+    // cute-dbt#265 Slice C — the impacted-model selector (founder D4) is a
+    // pure renderer over server-rendered panels: every model's SQL +
+    // call-site panel is in the DOM; the <select> change just flips which
+    // is visible. This proves (a) the call sites render, (b) at boot only
+    // the first model's panel is visible, and (c) selecting the second
+    // model swaps the visible panel — all in a real browser, file://,
+    // network-blocked (the same job that runs headless_zero_egress).
+    let url = render_macro_lens_to_file("cute_dbt_macro_lens_selector.html");
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // The selector renders with both models as options.
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"macro-lens-model-select\"]"),
+        1,
+        "the impacted-model selector renders",
+    );
+    let option_count = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"macro-lens-model-select\"] option').length",
+    );
+    assert_eq!(option_count.as_i64(), Some(2), "two model options");
+
+    // First-order call sites render (at least one per visible panel).
+    let callsites = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"macro-lens-callsite\"]').length",
+    );
+    assert!(
+        callsites.as_i64().unwrap_or(0) >= 2,
+        "call sites render for the impacted models",
+    );
+
+    // At boot exactly one model panel is VISIBLE (the first); the others
+    // carry `hidden`. The selector is a pure renderer toggling visibility.
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"macro-lens-model-panel\"]"),
+        1,
+        "exactly one model panel is visible at boot",
+    );
+    // The visible panel is the first option's model (BTreeSet id order:
+    // fct_orders sorts before stg_orders).
+    let visible_model_at_boot = eval_string(
+        &tab,
+        "Array.from(document.querySelectorAll('[data-testid=\"macro-lens-model-panel\"]'))\
+           .filter(el => el.checkVisibility()).map(el => el.getAttribute('data-model'))[0]",
+    );
+    assert_eq!(
+        visible_model_at_boot, "model.shop.fct_orders",
+        "the first (id-order) model panel is shown at boot",
+    );
+
+    // Select the OTHER model — the visible panel swaps in place.
+    let _ = eval(
+        &tab,
+        "(function(){var s=document.querySelector('[data-testid=\"macro-lens-model-select\"]');\
+           s.value='model.shop.stg_orders';s.dispatchEvent(new Event('change'));})()",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"macro-lens-model-panel\"]"),
+        1,
+        "still exactly one panel visible after the switch",
+    );
+    let visible_after = eval_string(
+        &tab,
+        "Array.from(document.querySelectorAll('[data-testid=\"macro-lens-model-panel\"]'))\
+           .filter(el => el.checkVisibility()).map(el => el.getAttribute('data-model'))[0]",
+    );
+    assert_eq!(
+        visible_after, "model.shop.stg_orders",
+        "selecting the second model shows ITS panel",
     );
     let _ = tab.close(true);
 }
