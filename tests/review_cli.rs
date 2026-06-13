@@ -1260,6 +1260,134 @@ fn pr_number_on_the_matching_head_branch_runs() {
         repo.root.join("target/cute-dbt-report.html").exists(),
         "the head matches, so the review runs",
     );
+    // The number must reach gh: `--pr 9` => `gh pr view 9 …`, never the
+    // argless current-branch query (cute-dbt#303 bot review).
+    assert!(
+        repo.gh_log_contents().contains("pr view 9"),
+        "gh was queried for PR #9 explicitly: {}",
+        repo.gh_log_contents(),
+    );
+}
+
+/// A `gh` shim that answers `pr view <n>` with PR #n's own info and the
+/// argless `pr view` (bare --pr / the auto-rung) with a DIFFERENT PR —
+/// so a test can prove the number actually selected the PR. `numbered_*`
+/// is PR #`number`; `current_*` is the current-branch PR.
+fn gh_pr_view_number_aware_shim(
+    number: u64,
+    numbered_base: &str,
+    numbered_head: &str,
+    current_base: &str,
+    current_head: &str,
+) -> String {
+    // `$3` is the first arg after `pr view`: the PR number on the
+    // numbered path, `--json` on the argless path.
+    format!(
+        "if [ \"$1 $2\" = 'pr view' ] && [ \"$3\" = '{number}' ]; then\n  \
+         printf '{{\"baseRefName\":\"{numbered_base}\",\"headRefName\":\"{numbered_head}\",\
+         \"number\":{number}}}\\n'; exit 0\n\
+         elif [ \"$1 $2\" = 'pr view' ]; then\n  \
+         printf '{{\"baseRefName\":\"{current_base}\",\"headRefName\":\"{current_head}\",\
+         \"number\":0}}\\n'; exit 0\n\
+         fi\nexit 0",
+    )
+}
+
+#[test]
+fn pr_number_queries_that_pr_not_the_current_branch_pr() {
+    // The core cute-dbt#303 fix: `--pr 9` must resolve PR #9's base,
+    // even when the current branch has a DIFFERENT open PR. PR #9 → base
+    // `release`; the argless current-branch query → base `main`.
+    // Reviewing must use PR #9's base (`release`).
+    let repo = TestRepo::init_with_branch("pr-num-targets", "main");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.git(&["branch", "-q", "release"]); // a distinct base ref
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+    repo.install_gh_shim(&gh_pr_view_number_aware_shim(
+        9, "release", "feature", "main", "feature",
+    ));
+
+    let output = repo.review(&["--pr", "9", "--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("base: release"),
+        "the base came from PR #9 (`release`), not the current-branch PR (`main`): {stderr}",
+    );
+    assert!(
+        repo.gh_log_contents().contains("pr view 9")
+            && !repo.gh_log_contents().contains("pr view --json"),
+        "gh was queried as `pr view 9`, never the argless current-branch form: {}",
+        repo.gh_log_contents(),
+    );
+}
+
+#[test]
+fn pr_number_for_a_pr_whose_head_is_a_different_branch_is_a_mismatch() {
+    // cute-dbt#303 failure #2: `--pr 9` where PR #9's head is a branch
+    // we are NOT on must surface PrHeadMismatch — never silently review
+    // it. Before the fix the argless query returned the current branch's
+    // PR, whose head trivially matched, so this case passed wrongly.
+    let repo = TestRepo::init_with_branch("pr-num-real-mismatch", "main");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+    // On `feature` (which itself has a PR, head=`feature`), but PR #9's
+    // head is `colleague-fix` — a branch we are not on.
+    repo.install_gh_shim(&gh_pr_view_number_aware_shim(
+        9,
+        "main",
+        "colleague-fix",
+        "main",
+        "feature",
+    ));
+
+    let output = repo.review(&["--pr", "9", "--no-open"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("colleague-fix") && stderr.contains("gh pr checkout 9"),
+        "the mismatch names PR #9's real head and remediates with checkout: {stderr}",
+    );
+    assert!(
+        !repo.root.join("target/cute-dbt-report.html").exists(),
+        "no report on a head mismatch",
+    );
+}
+
+#[test]
+fn pr_number_resolves_even_when_the_current_branch_has_no_pr() {
+    // cute-dbt#303 failure #1: `--pr 9` must work when the CURRENT branch
+    // has no PR but PR #9 exists. The numbered query succeeds; the
+    // argless query (current branch) fails. With the number threaded,
+    // the numbered query is the one that runs.
+    let repo = TestRepo::init_with_branch("pr-num-no-current-pr", "main");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+    // `pr view 9` → PR #9 (head `feature`, base `main`); the argless
+    // `pr view` → exit 1 (no PR for the current branch).
+    repo.install_gh_shim(
+        "if [ \"$1 $2\" = 'pr view' ] && [ \"$3\" = '9' ]; then\n  \
+         printf '{\"baseRefName\":\"main\",\"headRefName\":\"feature\",\"number\":9}\\n'; \
+         exit 0\nelif [ \"$1 $2\" = 'pr view' ]; then\n  \
+         echo 'no pull requests found' >&2; exit 1\nfi\nexit 0",
+    );
+
+    let output = repo.review(&["--pr", "9", "--no-open"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--pr 9 resolves PR #9 even with no current-branch PR: {output:?}",
+    );
+    assert!(
+        repo.root.join("target/cute-dbt-report.html").exists(),
+        "the PR-#9-anchored review renders",
+    );
 }
 
 #[test]

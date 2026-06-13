@@ -1641,7 +1641,10 @@ fn resolve_pr_anchor_base(
     toplevel: &Path,
     requested: Option<u64>,
 ) -> Result<(String, Rung), ReviewError> {
-    let pr = require_gh_pr(toplevel)?;
+    // Query PR #requested explicitly (bare `--pr` ⇒ None ⇒ the current
+    // branch's PR), so `--pr <n>` resolves PR #n's base — not whatever
+    // PR the current branch happens to have (cute-dbt#303 bot review).
+    let pr = require_gh_pr(toplevel, requested)?;
     check_pr_head(requested, &pr, current_branch(toplevel)?.as_deref())?;
     let base = resolve_pr_base_ref(toplevel, &pr.base_ref)?.ok_or_else(|| {
         ReviewError::BaseRefMissing {
@@ -1917,22 +1920,29 @@ fn current_branch(toplevel: &Path) -> Result<Option<String>, ReviewError> {
     Ok((out.status.success() && !name.is_empty()).then_some(name))
 }
 
-/// Run `gh pr view --json baseRefName,headRefName,number`, returning the
+/// Run `gh pr view` for the **current branch's** PR, returning the
 /// parsed PR — or `None` on **any** failure (`gh` missing, non-zero
 /// exit, unparseable JSON). Fail-soft by contract: this is the
 /// auto-ladder rung, where `gh` is a convenience, never a dependency.
 /// The explicit `--pr` path uses [`require_gh_pr`] instead, which
-/// distinguishes the failure modes.
+/// distinguishes the failure modes (and can target a specific number).
 fn gh_pr_view(toplevel: &Path) -> Option<PrInfo> {
-    let output = run_gh_pr_view(toplevel).ok()??;
+    let output = run_gh_pr_view(toplevel, None).ok()??;
     if !output.status.success() {
         return None;
     }
     parse_pr_info(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Spawn `gh pr view` and collect its output. `Ok(None)` means `gh` is
-/// not on PATH; `Ok(Some(output))` is a completed run (success or not).
+/// Spawn `gh pr view [<number>]` and collect its output. `Ok(None)`
+/// means `gh` is not on PATH; `Ok(Some(output))` is a completed run
+/// (success or not).
+///
+/// `number` selects the PR: `Some(n)` queries PR #n explicitly
+/// (`gh pr view <n> …`); `None` queries the current branch's PR (the
+/// auto-ladder rung). Threading the number is load-bearing — without
+/// it `--pr <n>` would query the current branch's PR and silently
+/// review the wrong PR's base (cute-dbt#303 bot review).
 ///
 /// The hang bound is structural rather than a wall-clock timer:
 /// `stdin(Stdio::null())` denies `gh` an interactive prompt, so it
@@ -1942,9 +1952,14 @@ fn gh_pr_view(toplevel: &Path) -> Option<PrInfo> {
 /// concurrent test fork pressure — scheduler races on the result
 /// channel, or the watchdog's own `kill` spawn stalling — while adding
 /// no real safety over the null-stdin guarantee.)
-fn run_gh_pr_view(toplevel: &Path) -> Result<Option<Output>, ReviewError> {
-    let result = Command::new("gh")
-        .args(["pr", "view", "--json", "baseRefName,headRefName,number"])
+fn run_gh_pr_view(toplevel: &Path, number: Option<u64>) -> Result<Option<Output>, ReviewError> {
+    let mut command = Command::new("gh");
+    command.arg("pr").arg("view");
+    if let Some(n) = number {
+        command.arg(n.to_string());
+    }
+    let result = command
+        .args(["--json", "baseRefName,headRefName,number"])
         .current_dir(toplevel)
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
@@ -1959,14 +1974,16 @@ fn run_gh_pr_view(toplevel: &Path) -> Result<Option<Output>, ReviewError> {
     }
 }
 
-/// The explicit `--pr` path's gh resolution: unlike the fail-soft
+/// The explicit `--pr [<n>]` path's gh resolution: unlike the fail-soft
 /// auto-rung, the operator asked for the PR, so failures are surfaced.
-/// `gh` missing ⇒ [`ReviewError::GhMissing`]; no usable PR ⇒
+/// `number` is `Some(n)` for `--pr <n>` (query PR #n) or `None` for bare
+/// `--pr` (the current branch's PR). `gh` missing ⇒
+/// [`ReviewError::GhMissing`]; no usable PR ⇒
 /// [`ReviewError::NoPullRequest`] (carrying the current branch); a
-/// timeout / read failure surfaces as the underlying [`ReviewError`].
-fn require_gh_pr(toplevel: &Path) -> Result<PrInfo, ReviewError> {
+/// read failure surfaces as the underlying [`ReviewError`].
+fn require_gh_pr(toplevel: &Path, number: Option<u64>) -> Result<PrInfo, ReviewError> {
     let branch = current_branch(toplevel)?;
-    let Some(output) = run_gh_pr_view(toplevel)? else {
+    let Some(output) = run_gh_pr_view(toplevel, number)? else {
         return Err(ReviewError::GhMissing);
     };
     if !output.status.success() {
