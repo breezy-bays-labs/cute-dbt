@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e3975c07.js";
+            window.path_to_searchindex_js = "searchindex-d67135e0.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-e08b96a6.js"></script>
+        <script src="toc-ae0e7ef2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -1176,9 +1176,26 @@ switch existed — opting in previews precisely what graduation would
 make default.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="examples"><a class="header" href="#examples">Examples</a></h1>
-<p>cute-dbt commits rendered example reports under
+<p>cute-dbt commits rendered example output under
 <a href="https://github.com/breezy-bays-labs/cute-dbt/tree/main/examples"><code>examples/</code></a>.
-Open one to see exactly what the CLI emits.</p>
+Open one to see exactly what the CLI emits. There are two families:</p>
+<ul>
+<li><strong><a href="#reports-examples">Reports examples</a></strong> — the <code>report</code> verb’s
+single-page PR-review report (baseline mode and <code>--pr-diff</code> mode):
+<code>jaffle-shop</code>, <code>dbt-playground</code>, and the <code>--pr-diff</code> diff-view showcase.</li>
+<li><strong><a href="#explore-examples">Explore examples</a></strong> — the <code>explore</code> verb’s
+two-page full-manifest explorer: the interactive lineage DAG
+(<code>dag.html</code>) and the unit-test index (<code>tests.html</code>).</li>
+</ul>
+<p>Every page makes <strong>zero</strong> outbound requests when opened offline — every
+asset (Sakura CSS, jQuery, DataTables, Mermaid, Cytoscape) is inlined.
+See <a href="#zero-egress--the-privacy-property">the zero-egress page</a> for how it works.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="reports-examples"><a class="header" href="#reports-examples">Reports examples</a></h1>
+<p>The <code>report</code> verb renders one self-contained HTML page per run. These are
+the <strong>golden</strong> reports — committed and byte-identity gated in CI, the
+canonical artifacts a consumer browses. Every page makes <strong>zero</strong> outbound
+requests when opened offline; see <a href="#zero-egress--the-privacy-property">the zero-egress page</a>.</p>
 <h2 id="jaffle-shop"><a class="header" href="#jaffle-shop">jaffle-shop</a></h2>
 <p>👉 <strong><a href="examples/jaffle-shop-report.html">Open the rendered jaffle-shop report</a></strong>
 (<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/jaffle-shop-report.html">source</a>)</p>
@@ -1233,6 +1250,37 @@ controls you can expand <strong>and re-collapse</strong>, per-hunk or all at onc
 <p>It’s rendered from a synthetic hand-crafted patch against the playground
 fixtures (so it stays committable + zero-egress), and it’s byte-identity-gated
 in CI like the others.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="explore-examples"><a class="header" href="#explore-examples">Explore examples</a></h1>
+<p>The <code>explore</code> verb renders the full manifest into a <strong>two-page</strong> explorer —
+no baseline, no scope source, the whole project at once. Both pages are
+committed goldens (byte-identity gated like the reports), rendered from the
+synthetic <code>playground-current.json</code> fixture, and each holds the zero-egress
+property independently. See <a href="#zero-egress--the-privacy-property">the zero-egress page</a>.</p>
+<blockquote>
+<p><strong>Experimental.</strong> The <code>explore</code> verb (and its page output) may change or
+be removed in any v0.x release while it iterates toward the design
+overhaul. See <a href="#experimental-features">Experimental features</a> and the
+<a href="#explorer-external-drive-contract">Explorer external-drive contract</a>.</p>
+</blockquote>
+<h2 id="lineage-dag-daghtml"><a class="header" href="#lineage-dag-daghtml">Lineage DAG (<code>dag.html</code>)</a></h2>
+<p>👉 <strong><a href="examples/explore/dag.html">Open the rendered explore lineage DAG</a></strong>
+(<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/explore/dag.html">source</a>)</p>
+<p>The full-manifest, <strong>interactive</strong> model-lineage DAG — every model plus
+typed snapshot / seed / source / exposure nodes, edges from
+<code>depends_on.nodes</code>, laid out left-to-right by the vendored Cytoscape core +
+the <code>cytoscape-dagre</code> layout extension. Pan / zoom / drag, fuzzy search,
+and click-to-highlight a node with its full transitive lineage (the
+complement dims). Fail-open: an uncompiled model renders as a “not
+compiled” node rather than raising an error.</p>
+<h2 id="unit-test-index-testshtml"><a class="header" href="#unit-test-index-testshtml">Unit-test index (<code>tests.html</code>)</a></h2>
+<p>👉 <strong><a href="examples/explore/tests.html">Open the rendered explore unit-test index</a></strong>
+(<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/explore/tests.html">source</a>)</p>
+<p>One section per model with its unit tests, plus the full engine-agnostic
+payload embedded as a JSON carrier — the same <code>build_payload</code> output the
+report renders. A server-rendered static page (no Mermaid, no DataTables);
+the two explore pages link to each other (<code>dag.html</code> ⇄ <code>tests.html</code>) with
+same-directory anchors that load nothing until clicked.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="explorer-external-drive-contract"><a class="header" href="#explorer-external-drive-contract">Explorer external-drive contract</a></h1>
 <blockquote>

@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-e3975c07.js";
+            window.path_to_searchindex_js = "searchindex-d67135e0.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-e08b96a6.js"></script>
+        <script src="toc-ae0e7ef2.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -181,63 +181,20 @@
                 <div id="mdbook-content" class="content">
                     <main>
                         <h1 id="examples"><a class="header" href="#examples">Examples</a></h1>
-<p>cute-dbt commits rendered example reports under
+<p>cute-dbt commits rendered example output under
 <a href="https://github.com/breezy-bays-labs/cute-dbt/tree/main/examples"><code>examples/</code></a>.
-Open one to see exactly what the CLI emits.</p>
-<h2 id="jaffle-shop"><a class="header" href="#jaffle-shop">jaffle-shop</a></h2>
-<p>👉 <strong><a href="./examples/jaffle-shop-report.html">Open the rendered jaffle-shop report</a></strong>
-(<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/jaffle-shop-report.html">source</a>)</p>
-<p>The structural minimum: one in-scope model, one unit test, a 3-node CTE
-DAG. Good for “what does the output look like?”</p>
-<p><strong>See the privacy property for yourself.</strong> Open the page, then open
-DevTools → Network and reload: <strong>zero outbound requests</strong> — every asset is
-inlined, so your data never leaves your machine. The audit-grade version is
-an automated headless-browser proof that opens the report via <code>file://</code>
-with all network access denied:</p>
-<pre><code class="language-sh">git clone https://github.com/breezy-bays-labs/cute-dbt
-cd cute-dbt
-cargo test --test headless_zero_egress -- --ignored
-</code></pre>
-<p>See <a href="./zero-egress.html">the zero-egress page</a> for how it works.</p>
-<h2 id="dbt-playground"><a class="header" href="#dbt-playground">dbt-playground</a></h2>
-<p>👉 <strong><a href="./examples/playground-report.html">Open the rendered playground report</a></strong>
-(<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/playground-report.html">source</a>)</p>
-<p>The richer example — cute-dbt run against a real dbt project
-(<a href="https://github.com/cmbays/dbt-playground"><code>cmbays/dbt-playground</code></a>, built
-on synthetic <a href="https://synthetichealth.github.io/synthea/">Synthea</a> patient
-data). One diff puts multiple models in scope, so the report shows off:</p>
+Open one to see exactly what the CLI emits. There are two families:</p>
 <ul>
-<li><strong>multiple model cards</strong> side by side,</li>
-<li><strong>UNION arm rendering</strong> in the CTE DAG (the dashed-orange edge + legend),</li>
-<li><strong>cross-join rendering</strong> in the CTE DAG (<code>mart_date_state_grid</code> builds a
-dense months × states grid with an explicit <code>CROSS JOIN</code> CTE — the pink
-<code>cross</code> edge + its legend entry), exercised by a unit test that <strong>mixes
-dict and csv givens</strong> in a single test,</li>
-<li>a <strong><code>source()</code>-given unit test</strong> (<code>stg_synthea__patients</code> mocks
-<code>source('synthea_raw', 'patients')</code> instead of a <code>ref()</code>),</li>
-<li>an <strong>empty-state card</strong> (a model in scope with no unit tests wired).</li>
+<li><strong><a href="./examples/reports.html">Reports examples</a></strong> — the <code>report</code> verb’s
+single-page PR-review report (baseline mode and <code>--pr-diff</code> mode):
+<code>jaffle-shop</code>, <code>dbt-playground</code>, and the <code>--pr-diff</code> diff-view showcase.</li>
+<li><strong><a href="./examples/explore.html">Explore examples</a></strong> — the <code>explore</code> verb’s
+two-page full-manifest explorer: the interactive lineage DAG
+(<code>dag.html</code>) and the unit-test index (<code>tests.html</code>).</li>
 </ul>
-<p>Open it and click around — the fastest way to get a feel for a real-world
-report.</p>
-<h2 id="diff-view-showcase-pr-diff-mode"><a class="header" href="#diff-view-showcase-pr-diff-mode">diff-view showcase (PR-diff mode)</a></h2>
-<p>👉 <strong><a href="./examples/diff-showcase-report.html">Open the rendered diff-view showcase</a></strong>
-(<a href="https://github.com/breezy-bays-labs/cute-dbt/blob/main/examples/diff-showcase-report.html">source</a>)</p>
-<p>The two reports above run in <strong>baseline</strong> mode. This one runs in <strong><code>--pr-diff</code>
-mode</strong> — the way cute-dbt runs inside a CI PR review — so it shows the diff-view
-feature set in action:</p>
-<ul>
-<li>an <strong>inline SQL diff</strong> with <strong>hunk contraction</strong> (three separated mid-file
-changes in a 158-line model collapse the long unchanged runs — including a
-folded section <em>between</em> each change — behind “Show N unchanged lines”
-controls you can expand <strong>and re-collapse</strong>, per-hunk or all at once),</li>
-<li>the <strong>SQL/Jinja syntax palette</strong> overlaid on the diff lines,</li>
-<li>a <strong>YAML block diff</strong> of the changed unit test, and</li>
-<li>a <strong>cell-level data diff</strong> across both expect rows, including a real <strong>NULL</strong>
-(rendered as muted italic, distinct from a string <code>"null"</code>).</li>
-</ul>
-<p>It’s rendered from a synthetic hand-crafted patch against the playground
-fixtures (so it stays committable + zero-egress), and it’s byte-identity-gated
-in CI like the others.</p>
+<p>Every page makes <strong>zero</strong> outbound requests when opened offline — every
+asset (Sakura CSS, jQuery, DataTables, Mermaid, Cytoscape) is inlined.
+See <a href="./zero-egress.html">the zero-egress page</a> for how it works.</p>
 
                     </main>
 
@@ -247,7 +204,7 @@ in CI like the others.</p>
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
-                            <a rel="next prefetch" href="explore-contract.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                            <a rel="next prefetch" href="examples/reports.html" class="mobile-nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                             </a>
 
@@ -261,7 +218,7 @@ in CI like the others.</p>
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 
-                    <a rel="next prefetch" href="explore-contract.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
+                    <a rel="next prefetch" href="examples/reports.html" class="nav-chapters next" title="Next chapter" aria-label="Next chapter" aria-keyshortcuts="Right">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M278.6 233.4c12.5 12.5 12.5 32.8 0 45.3l-160 160c-12.5 12.5-32.8 12.5-45.3 0s-12.5-32.8 0-45.3L210.7 256 73.4 118.6c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l160 160z"/></svg></span>
                     </a>
             </nav>
