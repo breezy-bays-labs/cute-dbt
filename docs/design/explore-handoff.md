@@ -67,8 +67,8 @@ It writes **`dag.html` then `tests.html`** into `--out-dir`. Key seams:
 
 | File | Role |
 |---|---|
-| `templates/explore-dag.html` | `dag.html` chrome — search combobox, focusable canvas host, legend, model-detail card, CTE⇄model view toggle. The page `<style>` blocks live here (≈ lines 22–90). |
-| `templates/explore-tests.html` | `tests.html` chrome — per-model index + the shared test-card viewer. Page `<style>` ≈ lines 22–60. |
+| `templates/explore-dag.html` | `dag.html` chrome — search combobox, focusable canvas host, legend, model-detail card, CTE⇄model view toggle. The page `<style>` blocks live here (≈ lines 22–130). |
+| `templates/explore-tests.html` | `tests.html` chrome — per-model index + the shared test-card viewer. Page `<style>` ≈ lines 22–82. |
 | `templates/partials/tokens.css` | **The design-system ROOT** (≈ 23 KB): the semantic token layer + all eight `[data-theme]` blocks. Extracted from `report.css` at cute-dbt#242, **identical bytes** to the report's include. Shared verbatim by both page families via askama `{% include %}`. |
 | `templates/partials/base.css` | The minimal cross-family page chassis (token-consuming page-level rules both families share). |
 | `templates/partials/test-card.html` | The one shared test-card DOM partial — identical markup in `report.html` and `explore-tests.html` (proves the partial mechanism). |
