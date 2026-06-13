@@ -976,6 +976,11 @@ struct ExploreDagTemplate<'a> {
     /// Number of lineage nodes the change context marked (0 is honest:
     /// a diff touching no model files still renders the count).
     changed_count: usize,
+    /// `true` iff the run emitted `macro.html` (cute-dbt#345 — a
+    /// `--pr-diff` that changed a root-project macro). Gates the third
+    /// nav anchor so the no-macro goldens stay byte-identical (the
+    /// conditional-anchor contract, mirrored on every explore page).
+    has_macro_focus: bool,
 }
 
 /// askama binding for `templates/explore-tests.html`.
@@ -998,6 +1003,27 @@ struct ExploreTestsTemplate<'a> {
     /// Pre-escaped JSON for the `cute-dbt-data` carrier (the full
     /// [`ReportPayload`] — the `build_payload` reuse seam).
     payload_json: &'a str,
+    /// `true` iff the run emitted `macro.html` (cute-dbt#345). Gates the
+    /// third nav anchor — see [`ExploreDagTemplate::has_macro_focus`].
+    has_macro_focus: bool,
+}
+
+/// askama binding for `templates/explore-macro.html`.
+///
+/// The third explore sub-page (cute-dbt#345, epic cute-dbt#99). Slice 1
+/// is the walking skeleton: an empty, real, zero-egress-clean shell that
+/// only the `--pr-diff`-changed-root-macro path emits, carrying the page
+/// chassis and the nav round-trip back to `dag.html`/`tests.html`. The
+/// focused macro DAG (Slice 3) and the filtered model+test directory
+/// (Slice 4) render into this shell in later slices.
+#[derive(Template)]
+#[template(path = "explore-macro.html", escape = "html")]
+struct ExploreMacroTemplate<'a> {
+    sakura_css: &'a str,
+    /// SHARED appearance engine (cute-dbt#242) — the page honors the
+    /// saved `cute-dbt.appearance.v1` appearance (read-only).
+    appearance_js: &'a str,
+    favicon_data_uri: &'a str,
 }
 
 /// Serialize `value` for safe embedding inside an HTML
@@ -1072,13 +1098,14 @@ fn explore_models(
         .collect()
 }
 
-/// Render the two explore pages into `out_dir` (created if absent).
+/// Render the explore pages into `out_dir` (created if absent).
 ///
-/// Writes `dag.html` then `tests.html`; a failure on either write (or
-/// on directory creation) surfaces the underlying [`io::Error`] —
-/// the cli layer names `--out-dir` in the operator message. Template
-/// rendering itself is compile-time-checked askama (the same
-/// infallible-at-runtime posture as the report renderer).
+/// Writes `dag.html` then `tests.html`, and — when `has_macro_focus` —
+/// the third sub-page `macro.html` (cute-dbt#345). A failure on any
+/// write (or on directory creation) surfaces the underlying
+/// [`io::Error`] — the cli layer names `--out-dir` in the operator
+/// message. Template rendering itself is compile-time-checked askama
+/// (the same infallible-at-runtime posture as the report renderer).
 ///
 /// `changed` is the optional `--pr-diff` change context (cute-dbt#106):
 /// `Some(set)` marks the member lineage nodes and renders the header
@@ -1086,16 +1113,25 @@ fn explore_models(
 /// page. Either way the full `models` set renders — context never
 /// narrows scope.
 ///
+/// `has_macro_focus` (cute-dbt#345) is the resolved signal that the run
+/// carried a `--pr-diff` changing a root-project macro: `true` emits
+/// `macro.html` and renders the third nav anchor on every page; `false`
+/// keeps the two-page output (and its byte-identical goldens) unchanged.
+/// The renderer takes the pre-resolved flag, not the raw changed-macro
+/// id set — scope resolution stays in `cli/mod.rs`, so this layer is a
+/// pure renderer (the explore-lane posture).
+///
 /// # Errors
 ///
 /// Returns the underlying [`io::Error`] when `out_dir` cannot be
-/// created or either page cannot be written.
+/// created or any page cannot be written.
 pub fn render_explore(
     out_dir: &Path,
     current: &Manifest,
     models: &ModelInScopeSet,
     changed: Option<&ModelInScopeSet>,
     payload: &ReportPayload,
+    has_macro_focus: bool,
 ) -> io::Result<()> {
     fs::create_dir_all(out_dir)?;
 
@@ -1136,6 +1172,7 @@ pub fn render_explore(
         contract_version: EXPLORE_CONTRACT_VERSION,
         has_change_context: changed.is_some(),
         changed_count,
+        has_macro_focus,
     }
     .render()
     .map_err(|err| io::Error::other(format!("render dag.html: {err}")))?;
@@ -1154,10 +1191,28 @@ pub fn render_explore(
         test_count,
         explore_tests_js: EXPLORE_TESTS_JS,
         payload_json: &payload_json,
+        has_macro_focus,
     }
     .render()
     .map_err(|err| io::Error::other(format!("render tests.html: {err}")))?;
     fs::write(out_dir.join("tests.html"), tests_html)?;
+
+    // cute-dbt#345 Slice 1 — the third explore sub-page. Emitted only
+    // when the run carried a `--pr-diff` changing a root-project macro;
+    // the no-macro path writes just dag.html/tests.html (the goldens'
+    // shape). Slice 1 renders the walking-skeleton empty shell — the
+    // focused macro DAG (Slice 3) and the filtered directory (Slice 4)
+    // fill it in later.
+    if has_macro_focus {
+        let macro_html = ExploreMacroTemplate {
+            sakura_css: SAKURA_CSS,
+            appearance_js: APPEARANCE_JS,
+            favicon_data_uri: FAVICON_DATA_URI,
+        }
+        .render()
+        .map_err(|err| io::Error::other(format!("render macro.html: {err}")))?;
+        fs::write(out_dir.join("macro.html"), macro_html)?;
+    }
 
     Ok(())
 }
@@ -1817,7 +1872,7 @@ mod tests {
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("both-pages");
 
-        render_explore(&dir, &current, &models, None, &payload).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload, false).expect("explore renders");
 
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html written");
         let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html written");
@@ -1870,8 +1925,8 @@ mod tests {
         let payload = payload_for(&current, &models);
         let dir_a = tmp_dir("det-a");
         let dir_b = tmp_dir("det-b");
-        render_explore(&dir_a, &current, &models, None, &payload).expect("first render");
-        render_explore(&dir_b, &current, &models, None, &payload).expect("second render");
+        render_explore(&dir_a, &current, &models, None, &payload, false).expect("first render");
+        render_explore(&dir_b, &current, &models, None, &payload, false).expect("second render");
         for page in ["dag.html", "tests.html"] {
             let a = fs::read(dir_a.join(page)).expect("page a");
             let b = fs::read(dir_b.join(page)).expect("page b");
@@ -1887,7 +1942,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("nested").join("deeper");
-        render_explore(&dir, &current, &models, None, &payload).expect("creates out-dir");
+        render_explore(&dir, &current, &models, None, &payload, false).expect("creates out-dir");
         assert!(dir.join("dag.html").exists());
         assert!(dir.join("tests.html").exists());
         let _ = fs::remove_dir_all(dir.parent().expect("parent"));
@@ -1899,7 +1954,8 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("empty");
-        render_explore(&dir, &current, &models, None, &payload).expect("empty manifest renders");
+        render_explore(&dir, &current, &models, None, &payload, false)
+            .expect("empty manifest renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
             dag.contains("\"nodes\":[]"),
@@ -1975,7 +2031,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("cte-toggle");
-        render_explore(&dir, &current, &models, None, &payload).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload, false).expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         // The carrier embeds the per-model CTE DAG map.
         assert!(dag.contains("\"cte_dags\":{"), "cte_dags carrier present");
@@ -2030,7 +2086,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("tests-viewer");
-        render_explore(&dir, &current, &models, None, &payload).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload, false).expect("explore renders");
         let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html");
         // The shared askama partial (report.html's test card) renders.
         assert!(
@@ -2601,7 +2657,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("contract-version");
-        render_explore(&dir, &current, &models, None, &payload).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload, false).expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
             dag.contains(&format!(
@@ -2706,7 +2762,8 @@ mod tests {
         let payload = payload_for(&current, &models);
         let changed = changed_set(&["model.shop.dim_orders"]);
         let dir = tmp_dir("change-context");
-        render_explore(&dir, &current, &models, Some(&changed), &payload).expect("explore renders");
+        render_explore(&dir, &current, &models, Some(&changed), &payload, false)
+            .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
             dag.contains("1 changed in this diff"),
@@ -2739,7 +2796,8 @@ mod tests {
         let payload = payload_for(&current, &models);
         let empty = ModelInScopeSet::new();
         let dir = tmp_dir("change-context-zero");
-        render_explore(&dir, &current, &models, Some(&empty), &payload).expect("explore renders");
+        render_explore(&dir, &current, &models, Some(&empty), &payload, false)
+            .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(dag.contains("0 changed in this diff"), "honest zero");
         assert!(
@@ -2760,7 +2818,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("no-change-context");
-        render_explore(&dir, &current, &models, None, &payload).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload, false).expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
             !dag.contains("<span class=\"legend-chip changed\">"),

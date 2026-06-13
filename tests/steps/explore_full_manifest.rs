@@ -268,6 +268,24 @@ pub fn serialize_plan_manifest(world: &World, stem: &str) -> std::path::PathBuf 
             }),
         ));
     }
+    // cute-dbt#345 — root-project macros in the REAL fusion wire shape so
+    // the `--pr-diff` changed-macro detection (`macro_id_for_path`)
+    // resolves a changed file to the macro `unique_id` (the
+    // macro_perspective.rs `serialize_with_wire_macro` precedent). The
+    // `macros` top-level map keys on `macro.<package>.<name>`.
+    for (bare, path) in &plan.macros {
+        top_map_entries.push((
+            "macros".to_owned(),
+            format!("macro.jaffle_shop.{bare}"),
+            serde_json::json!({
+                "macro_sql": format!("{{% macro {bare}() %}}select 1{{% endmacro %}}"),
+                "depends_on": { "macros": [] },
+                "original_file_path": path,
+                "name": bare,
+                "package_name": "jaffle_shop",
+            }),
+        ));
+    }
     serialize_explore_to_tmp(&manifest, stem, &node_patches, &raw_nodes, &top_map_entries)
 }
 
