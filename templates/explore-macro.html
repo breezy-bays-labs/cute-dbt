@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cute-dbt explore — macro focus</title>
+<link rel="icon" href="{{ favicon_data_uri }}">
+<style>
+{{ sakura_css|safe }}
+</style>
+<style>
+{# cute-dbt#242 — the SHARED design system: the semantic token layer + all
+   eight [data-theme] blocks (partials/tokens.css — the design-system root,
+   extracted from report.css, identical bytes to the report's include) and
+   the minimal cross-family page chassis (partials/base.css). The page
+   styles below key on these tokens; the shared appearance engine
+   (appearance.js, end of body) applies the saved cute-dbt.appearance.v1
+   attributes the token layer reacts to. #}
+{% include "partials/tokens.css" %}
+{% include "partials/base.css" %}
+</style>
+<style>
+{# cute-dbt#345 — the explorer macro view (epic cute-dbt#99). Slice 1 is
+   the walking skeleton: the third explore sub-page, wired into the
+   existing dag.html ⇄ tests.html nav, carrying only the page chassis and
+   an empty "no focused macro" placeholder. The focused macro DAG
+   (cute-dbt#345 Slice 3) and the filtered model+test directory (Slice 4)
+   render into this shell in later slices. Like the sibling explore pages
+   this embeds no Mermaid, no DataTables, no jQuery — the chassis re-uses
+   the shared semantic tokens (cute-dbt#242) so all eight themes apply. #}
+body { max-width: 72rem; }
+/* generic code/kbd surfaces re-skin with theme tokens (the report's
+   .td-defined-in idiom, cute-dbt#240): Sakura's constant #f1f1f1 fill is
+   illegible under the dark themes' near-white --text. */
+code, kbd { background: var(--bg-alt); color: var(--text); }
+.explore-header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.explore-header h1 { margin-bottom: 0.25rem; }
+.explore-nav a { font-size: 0.95rem; }
+.explore-counts { color: var(--text-muted); font-size: 0.9rem; }
+.explore-empty { color: var(--text-muted); font-style: italic; }
+</style>
+</head>
+<body>
+
+<header class="explore-header">
+  <div>
+    <h1>Macro focus</h1>
+    <p class="explore-counts">focused macro blast radius</p>
+  </div>
+  <nav class="explore-nav" aria-label="Explore pages">
+    <a href="dag.html">&larr; Model lineage</a>
+    <a href="tests.html">Unit tests</a>
+  </nav>
+</header>
+
+{# cute-dbt#345 Slice 1 — the walking-skeleton placeholder. The focused
+   macro DAG + filtered directory land here in Slices 3–4; until then the
+   page renders only when --pr-diff carries a changed root-project macro
+   (the conditional emission in render_explore), and shows this honest
+   empty state. #}
+<p class="explore-empty">No focused macro view yet — this page is the
+explorer macro-view walking skeleton (cute-dbt#345).</p>
+
+<script>
+{# cute-dbt#242 — the SHARED appearance engine: reads the saved
+   cute-dbt.appearance.v1 appearance and applies the html-level attributes
+   the shared token partial keys on, so this page honors the same saved
+   theme as the report. Read-only here — the explore-side settings
+   affordance is cute-dbt#219's lane. #}
+{{ appearance_js|safe }}
+</script>
+</body>
+</html>

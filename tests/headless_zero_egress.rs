@@ -569,7 +569,7 @@ fn render_explore_pages(
     );
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
     let _ = std::fs::remove_dir_all(&dir);
-    render_explore(&dir, &manifest, &models, changed, &payload).expect("explore renders");
+    render_explore(&dir, &manifest, &models, changed, &payload, false).expect("explore renders");
     dir
 }
 
@@ -600,7 +600,7 @@ fn render_explore_dag_manifest(stem: &str, manifest: &Manifest) -> String {
     );
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
     let _ = std::fs::remove_dir_all(&dir);
-    render_explore(&dir, manifest, &models, None, &payload).expect("explore renders");
+    render_explore(&dir, manifest, &models, None, &payload, false).expect("explore renders");
     let p = dir.join("dag.html");
     format!("file://{}", p.to_str().expect("page path is valid UTF-8"))
 }
@@ -1756,6 +1756,129 @@ fn explore_tests_viewer_renders_fixture_grids_offline() {
     assert!(
         captured.is_empty(),
         "the tests.html viewer must make zero external requests; got:\n{}",
+        captured
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+
+    let _ = tab.close(true);
+}
+
+/// Render the explore pages with `has_macro_focus = true` (cute-dbt#345
+/// Slice 1 — the third sub-page emitted) and return the `file://` URL of
+/// the emitted `macro.html`. The in-process render discipline matches
+/// `render_explore_pages`, but threads the macro-focus flag so the walking
+/// skeleton actually writes `macro.html`.
+fn render_explore_macro_page(stem: &str, nodes: Vec<Node>) -> String {
+    let manifest = Manifest::new(
+        ManifestMetadata::new("v12"),
+        nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+        HashMap::new(),
+        HashMap::new(),
+    );
+    let models = all_models(&manifest);
+    let payload = build_payload(
+        &manifest,
+        &InScopeSet::new(),
+        &models,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+    );
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
+    let _ = std::fs::remove_dir_all(&dir);
+    render_explore(&dir, &manifest, &models, None, &payload, true).expect("explore renders");
+    let p = dir.join("macro.html");
+    format!("file://{}", p.to_str().expect("page path is valid UTF-8"))
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_macro_page_makes_zero_external_requests_when_opened_via_file_url() {
+    // cute-dbt#345 Slice 1 — the explorer macro view walking skeleton.
+    // The third explore sub-page (`macro.html`) is opened via a real
+    // file:// origin with all DNS denied; it must make ZERO external
+    // requests and render its empty-state placeholder (the focused macro
+    // DAG + filtered directory land in Slices 3–4). Uniform with the
+    // dag.html/tests.html arms of the primary gate.
+    let url = render_explore_macro_page(
+        "explore-macro-skeleton",
+        vec![
+            explore_model("model.shop.stg_orders", &[]),
+            explore_model("model.shop.dim_orders", &["model.shop.stg_orders"]),
+        ],
+    );
+    assert!(
+        url.starts_with("file://"),
+        "zero-egress proof MUST run against a real file:// origin; got {url}",
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.call_method(Network::Enable {
+        max_total_buffer_size: None,
+        max_resource_buffer_size: None,
+        max_post_data_size: None,
+        report_direct_socket_traffic: None,
+        enable_durable_messages: None,
+    })
+    .expect("enable Network domain");
+    let external = Arc::new(Mutex::new(Vec::<ExternalRequest>::new()));
+    let external_recorder = external.clone();
+    tab.add_event_listener(Arc::new(move |event: &Event| {
+        if let Event::NetworkRequestWillBeSent(e) = event {
+            let req_url = e.params.request.url.clone();
+            if scheme_is_external(&req_url) {
+                external_recorder.lock().unwrap().push(ExternalRequest {
+                    url: req_url,
+                    initiator_type: format!("{:?}", e.params.initiator.Type),
+                    initiator_url: e.params.initiator.url.clone(),
+                    initiator_line: e.params.initiator.line_number,
+                });
+            }
+        }
+    }))
+    .expect("subscribe Network.requestWillBeSent");
+
+    tab.navigate_to(&url).expect("navigate to file:// URL");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // The page renders its heading and the walking-skeleton empty state.
+    assert_eq!(
+        eval(&tab, "document.querySelector('h1').textContent"),
+        serde_json::Value::String("Macro focus".to_owned()),
+        "macro.html renders the macro-focus heading",
+    );
+    assert_eq!(
+        eval(&tab, "document.querySelector('.explore-empty') !== null"),
+        serde_json::Value::Bool(true),
+        "the Slice 1 skeleton renders its empty-state placeholder",
+    );
+    // The nav round-trips back to the sibling pages.
+    assert_eq!(
+        eval(
+            &tab,
+            "document.querySelector('.explore-nav a[href=\"dag.html\"]') !== null"
+        ),
+        serde_json::Value::Bool(true),
+        "macro.html navigates back to dag.html",
+    );
+    // No graph engine on the skeleton page.
+    assert_eq!(
+        eval(&tab, "typeof window.cytoscape"),
+        serde_json::Value::String("undefined".to_owned()),
+        "the Slice 1 macro.html skeleton ships no Cytoscape global",
+    );
+
+    let captured = external.lock().unwrap().clone();
+    assert!(
+        captured.is_empty(),
+        "macro.html must make zero external requests; got:\n{}",
         captured
             .iter()
             .map(ToString::to_string)

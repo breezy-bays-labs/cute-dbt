@@ -307,6 +307,14 @@ pub struct ExplorePlan {
     /// Declared `exposures`-map entries (cute-dbt#253):
     /// `(name, depended-on bare model names)`.
     pub exposures: Vec<(String, Vec<String>)>,
+    /// Declared root-project macros (cute-dbt#345 — the explorer
+    /// macro-view scenarios): `(bare macro name, original_file_path)`.
+    /// Spliced into the serialized manifest's `macros` map in the REAL
+    /// fusion wire shape (`macro_sql`, `depends_on.macros`,
+    /// `original_file_path`, `name`, `package_name`) so the
+    /// `--pr-diff` changed-macro detection (`macro_id_for_path`)
+    /// resolves the changed file to the macro's `unique_id`.
+    pub macros: Vec<(String, String)>,
 }
 
 /// One path-bearing unit test in an [`ExplorePlan`] (cute-dbt#105).

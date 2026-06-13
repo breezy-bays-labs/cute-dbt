@@ -453,7 +453,7 @@ fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
     );
     let current = load_explore_manifest(args)?;
     let models = all_models(&current);
-    let changed = resolve_change_context(args, &current);
+    let context = resolve_change_context(args, &current);
     // Stage-2 fail-OPEN: no preflight_compiled here, by design.
     let payload = build_payload(
         &current,
@@ -466,26 +466,70 @@ fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
         &HashMap::new(),
         "",
     );
-    render_explore(&args.out_dir, &current, &models, changed.as_ref(), &payload)
-        .map_err(|err| RunError::output(&args.out_dir, err))?;
+    // cute-dbt#345 — the macro view emits its third sub-page only when the
+    // `--pr-diff` changed a root-project macro. The flag is RESOLVED here
+    // (the scope-resolution lane) and handed to the renderer, which stays
+    // a pure renderer (it never calls a domain walker).
+    let has_macro_focus = !context.changed_macros.is_empty();
+    render_explore(
+        &args.out_dir,
+        &current,
+        &models,
+        context.changed_models.as_ref(),
+        &payload,
+        has_macro_focus,
+    )
+    .map_err(|err| RunError::output(&args.out_dir, err))?;
     Ok(())
 }
 
-/// The `resolve_change_context` stage (cute-dbt#106): map the optional
-/// `--pr-diff` onto the changed-model set.
+/// The resolved `--pr-diff` change context for the `explore` verb
+/// (cute-dbt#106 + cute-dbt#345): both the changed-model set (the
+/// lineage decoration) and the changed-root-project-macro set (the
+/// cute-dbt#345 macro-view trigger), derived from ONE
+/// [`NormalizedDiffIndex`] build so the diff is parsed once.
 ///
-/// `None` — no `--pr-diff` — means **no change context** (the renderer
-/// emits the unchanged no-context page shape), which is distinct from
-/// `Some(empty)` — a diff that touched no model files still renders the
-/// honest "0 changed in this diff" banner. The [`NormalizedDiffIndex`]
-/// is built exactly like the report arm's (`resolve_scope_input`):
-/// the `--project-root` strip rebases the diff's repo-relative paths
-/// onto the manifest's project-relative `original_file_path` entries.
-fn resolve_change_context(args: &ExploreArgs, current: &Manifest) -> Option<ModelInScopeSet> {
-    args.pr_diff.as_ref().map(|diff| {
-        let index = NormalizedDiffIndex::new(diff, args.project_root.as_deref());
-        changed_models(current, &index)
-    })
+/// `changed_models` is `None` when no `--pr-diff` was supplied (the
+/// renderer emits the pre-#106 no-context page shape) and `Some` —
+/// possibly empty — when a diff was present. `changed_macros` is empty
+/// without a diff and otherwise holds the root-project macro ids the
+/// diff's hunks/paths resolved to (the macro-view emission gate).
+struct ExploreChangeContext {
+    changed_models: Option<ModelInScopeSet>,
+    changed_macros: BTreeSet<String>,
+}
+
+/// The `resolve_change_context` stage (cute-dbt#106 + cute-dbt#345): map
+/// the optional `--pr-diff` onto the changed-model set AND the
+/// changed-root-project-macro set, from one [`NormalizedDiffIndex`]
+/// build (the diff is parsed once and both derivations read it).
+///
+/// `changed_models` is `None` — no `--pr-diff` — meaning **no change
+/// context** (the renderer emits the unchanged no-context page shape),
+/// which is distinct from `Some(empty)` — a diff that touched no model
+/// files still renders the honest "0 changed in this diff" banner. The
+/// [`NormalizedDiffIndex`] is built exactly like the report arm's
+/// (`resolve_scope_input`): the `--project-root` strip rebases the
+/// diff's repo-relative paths onto the manifest's project-relative
+/// `original_file_path` entries.
+///
+/// `changed_macros` (cute-dbt#345) is the root-project macro ids the
+/// same diff resolved to via [`changed_macros_pr_diff`] — empty without
+/// a diff, the macro-view emission gate when present.
+fn resolve_change_context(args: &ExploreArgs, current: &Manifest) -> ExploreChangeContext {
+    match args.pr_diff.as_ref() {
+        None => ExploreChangeContext {
+            changed_models: None,
+            changed_macros: BTreeSet::new(),
+        },
+        Some(diff) => {
+            let index = NormalizedDiffIndex::new(diff, args.project_root.as_deref());
+            ExploreChangeContext {
+                changed_models: Some(changed_models(current, &index)),
+                changed_macros: changed_macros_pr_diff(current, &index),
+            }
+        }
+    }
 }
 
 /// Stage-1 pre-flight for the `explore` verb: load `--manifest` through
