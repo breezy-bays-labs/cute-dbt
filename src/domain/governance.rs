@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use serde::Serialize;
 
 use crate::domain::manifest::{
-    Constraint, ConstraintKind, Exposure, Manifest, Node, NodeId, Owner,
+    ColumnFacts, Constraint, ConstraintKind, Exposure, Manifest, Node, NodeId, Owner,
 };
 use crate::domain::state::ModelInScopeSet;
 
@@ -488,10 +488,12 @@ fn diff_columns(old: &Node, current: &Node, old_enforces_constraints: bool) -> V
             continue;
         };
         if !data_types_equal(old_type.as_deref(), current_type.as_deref()) {
+            // Borrow + convert only on the breaking path (no Option<String>
+            // clone on the happy path; the engine's "unknown" fallback).
             reasons.push(BreakingReason::ColumnTypeChanged {
                 col: name.clone(),
-                prev: old_type.clone().unwrap_or_else(|| "unknown".to_owned()),
-                current: current_type.clone().unwrap_or_else(|| "unknown".to_owned()),
+                prev: old_type.as_deref().unwrap_or("unknown").to_owned(),
+                current: current_type.as_deref().unwrap_or("unknown").to_owned(),
             });
         }
     }
@@ -535,43 +537,47 @@ fn diff_constraints(
 /// Whether any old column-level constraint was removed in `current`
 /// (engine: the inner `old_value.constraints != current_column.constraints`
 /// loop). Custom column-level constraints are dropped (dbt convention).
+/// Iterates references — no temp `Vec` allocation.
 // wired into the contract-diff drawer in #260 Slice 2
 #[allow(dead_code)]
 fn column_constraint_removed(old: &Node, current: &Node) -> bool {
     let current_facts = current.column_facts();
-    for (name, facts) in old.column_facts() {
-        let old_constraints = relevant_column_constraints(facts.constraints());
-        let current_constraints = current_facts
-            .get(name)
-            .map(|f| relevant_column_constraints(f.constraints()))
-            .unwrap_or_default();
-        if constraints_removed(&old_constraints, &current_constraints) {
-            return true;
-        }
-    }
-    false
+    old.column_facts().iter().any(|(name, facts)| {
+        let current_constraints = current_facts.get(name).map(ColumnFacts::constraints);
+        facts
+            .constraints()
+            .iter()
+            .filter(|c| is_structural_constraint(c))
+            .any(|old_c| !current_has(current_constraints, old_c))
+    })
 }
 
-/// Column-level constraints minus `Custom` (dbt convention: custom
-/// column constraints are free-form and not contract-structural).
+/// Whether `current_constraints` (the slice, or `None` when the column is
+/// gone) contains `old_c` — the constraint-removal predicate over a
+/// borrowed slice (no temp `Vec`).
 // wired into the contract-diff drawer in #260 Slice 2
 #[allow(dead_code)]
-fn relevant_column_constraints(constraints: &[Constraint]) -> Vec<Constraint> {
-    constraints
-        .iter()
-        .filter(|c| c.kind() != ConstraintKind::Custom)
-        .cloned()
-        .collect()
+fn current_has(current_constraints: Option<&[Constraint]>, old_c: &Constraint) -> bool {
+    current_constraints.is_some_and(|cs| cs.contains(old_c))
+}
+
+/// Whether a column-level constraint is contract-structural — i.e. not
+/// `Custom` (dbt convention: custom column constraints are free-form).
+// wired into the contract-diff drawer in #260 Slice 2
+#[allow(dead_code)]
+fn is_structural_constraint(constraint: &Constraint) -> bool {
+    constraint.kind() != ConstraintKind::Custom
 }
 
 /// Whether `old` has any column-level constraint at all (the
 /// `column_constraints_exist` flag in the engine's materialization gate).
+/// Iterates references — no temp `Vec`.
 // wired into the contract-diff drawer in #260 Slice 2
 #[allow(dead_code)]
 fn any_column_constraint(old: &Node) -> bool {
     old.column_facts()
         .values()
-        .any(|facts| !relevant_column_constraints(facts.constraints()).is_empty())
+        .any(|facts| facts.constraints().iter().any(is_structural_constraint))
 }
 
 /// Whether any constraint present in `old` is absent from `current`
