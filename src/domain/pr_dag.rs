@@ -302,9 +302,21 @@ fn has_distinct_pair(
     forward_seeds: &BTreeSet<&NodeId>,
     backward_seeds: &BTreeSet<&NodeId>,
 ) -> bool {
-    forward_seeds
-        .iter()
-        .any(|&f| backward_seeds.iter().any(|&b| f != b))
+    // O(1) instead of the O(|forward| × |backward|) nested scan (gemini on
+    // #357), provably equivalent:
+    // - either side empty ⇒ no pair exists;
+    // - both singletons ⇒ a distinct pair iff the lone elements differ
+    //   (for singletons, set inequality ⟺ element inequality);
+    // - otherwise one side has ≥2 elements, so a distinct pair is
+    //   guaranteed (the other side has ≥1 element, which cannot equal
+    //   both of two distinct elements).
+    if forward_seeds.is_empty() || backward_seeds.is_empty() {
+        return false;
+    }
+    if forward_seeds.len() == 1 && backward_seeds.len() == 1 {
+        return forward_seeds != backward_seeds;
+    }
+    true
 }
 
 /// Assemble the node list: modified seeds (New / Modified) ∪ connectors
@@ -952,6 +964,34 @@ mod tests {
             }
         }
         visited == graph.nodes.len()
+    }
+
+    // ---- unit: has_distinct_pair (the O(1) connector predicate) ---------
+
+    #[test]
+    fn has_distinct_pair_covers_empty_singleton_and_multi_cases() {
+        let a = NodeId::new("model.s.a");
+        let b = NodeId::new("model.s.b");
+        let empty: BTreeSet<&NodeId> = BTreeSet::new();
+        let only_a: BTreeSet<&NodeId> = BTreeSet::from([&a]);
+        let only_b: BTreeSet<&NodeId> = BTreeSet::from([&b]);
+        let a_and_b: BTreeSet<&NodeId> = BTreeSet::from([&a, &b]);
+
+        // Either side empty ⇒ no pair.
+        assert!(!has_distinct_pair(&empty, &only_a));
+        assert!(!has_distinct_pair(&only_a, &empty));
+        assert!(!has_distinct_pair(&empty, &empty));
+
+        // Both singletons, SAME element ⇒ no distinct pair ({a} vs {a}).
+        assert!(!has_distinct_pair(&only_a, &only_a));
+        // Both singletons, DIFFERENT element ⇒ distinct pair ({a} vs {b}).
+        assert!(has_distinct_pair(&only_a, &only_b));
+
+        // One side ≥2 elements ⇒ a distinct pair is guaranteed, regardless
+        // of which lone element the other side holds ({a,b} vs {a}).
+        assert!(has_distinct_pair(&a_and_b, &only_a));
+        assert!(has_distinct_pair(&only_a, &a_and_b));
+        assert!(has_distinct_pair(&a_and_b, &a_and_b));
     }
 
     // ---- property: multi-source BFS == per-seed single-source union -----
