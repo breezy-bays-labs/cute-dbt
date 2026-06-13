@@ -16,6 +16,16 @@ this before touching code.
   never leaves your machine. The core privacy property is *trivially
   auditable* zero data exfiltration: the generated report makes zero
   outbound requests when opened offline via `file://`.
+- Consumer agent skill (cute-dbt#304): `skills/dbt-pr-review/SKILL.md` is
+  the canonical [Agent Skills](https://agentskills.io) artifact teaching
+  any agent to drive `cute-dbt review`. The **same** file is
+  `include_str!`-embedded behind `cute-dbt skill --print | --install`
+  (zero drift by construction). Install one-liners and the AGENTS.md /
+  CLAUDE.md paste-in fallback (for repos without skills tooling) live in
+  the [one-command review book page](book/src/one-command-review.md) and
+  the [PR-review recipe](book/src/recipes/github-actions-pr-review.md#agent-skill).
+  This bullet is repo-meta for contributors; the consumer-facing fallback
+  snippet is the one in the recipe page, not this file.
 
 ## Release discipline
 
