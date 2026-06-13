@@ -7,6 +7,13 @@
 //! exercise exactly that guard). The git environment is fully isolated
 //! per repo (`TestRepo::isolate`): a developer's `commit.gpgsign`,
 //! `diff.noprefix`, or global `cute-dbt.base` can never steer a test.
+//!
+//! tracked: cute-dbt#331 — this whole suite drives `cute-dbt` through
+//! the Unix-only shim harness (`common::TestRepo`), so the crate is
+//! `#[cfg(unix)]`-gated and is simply absent on the windows-latest job
+//! (cute-dbt#308/#316). The portable path/git logic is unit-tested in
+//! `src/cli/review.rs`, which runs everywhere.
+#![cfg(unix)]
 
 #[path = "common/mod.rs"]
 mod common;

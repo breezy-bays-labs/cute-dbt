@@ -222,20 +222,30 @@ pub struct World {
     pub experimental_env: Option<String>,
 
     // --- One-command review (one_command_review, cute-dbt#300) -----------
+    //
+    // tracked: cute-dbt#331 — these fields back the review/skill bdd
+    // steps, which drive `cute-dbt` through the Unix-only shim harness
+    // (`common::TestRepo`), so they are `#[cfg(unix)]`-gated alongside
+    // those step modules. The `World` derives still hold on Windows (the
+    // fields are simply absent).
     /// The temp git repo the review scenario built (real `git init`,
     /// environment-isolated — see `common::TestRepo`).
+    #[cfg(unix)]
     pub review_repo: Option<crate::common::TestRepo>,
 
     /// A bare (non-git) project directory for the not-a-repository
     /// scenario.
+    #[cfg(unix)]
     pub review_plain_dir: Option<PathBuf>,
 
     /// Captured stdout of the last review invocation (review prints the
     /// report path / the `--dry-run` plan listing on stdout).
+    #[cfg(unix)]
     pub last_stdout: String,
 
     /// Where the review scenario expects the report
     /// (`<project>/target/cute-dbt-report.html`).
+    #[cfg(unix)]
     pub review_report_path: Option<PathBuf>,
 }
 
