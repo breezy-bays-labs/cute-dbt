@@ -81,8 +81,9 @@ pub use experimental::{
     resolve_experimental_config,
 };
 pub use governance::{
-    BlastRadius, BreakingReason, ContractChange, ContractClass, ContractColumnDiff,
-    GovernanceFacts, GroupChip, classify_contract, exposures_reachable_from, gather_governance,
+    BlastRadius, BreakingReason, ConstraintSupport, ContractChange, ContractClass,
+    ContractColumnDiff, GovernanceFacts, GroupChip, backing_test_for, classify_contract,
+    constraint_support, exposures_reachable_from, gather_governance,
 };
 pub use grain::{GrainKind, GrainSignal, model_grain_signals, test_is_enabled};
 pub use manifest::{

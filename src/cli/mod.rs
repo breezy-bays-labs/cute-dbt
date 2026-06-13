@@ -371,7 +371,7 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     // policy plus inline SQL pragmas scanned from each in-scope model's
     // manifest `raw_code`. Display-layer only — applied inside payload
     // assembly strictly after supersedes resolution.
-    let check_policy = build_check_policy(args, &current, &models_in_scope);
+    let check_policy = build_check_policy(args, &current, &models_in_scope, &experiments);
     render(
         &args.out,
         &current,
@@ -1118,11 +1118,24 @@ fn build_check_policy(
     args: &ReportArgs,
     current: &Manifest,
     models_in_scope: &ModelInScopeSet,
+    experiments: &EnabledExperiments,
 ) -> CheckPolicy<HeuristicId> {
     let mut policy = args.config.as_ref().map_or_else(CheckPolicy::default, |c| {
         resolve_check_policy::<HeuristicId>(&c.checks)
             .expect("[checks] was validated by the --config value-parser at parse time")
     });
+    // cute-dbt#260 Slice 3 — the `enforcement` group is governance-gated:
+    // drop it from the displayed set unless the governance experiment is
+    // on, so a non-governance report filters the enforcement findings out
+    // (byte-identical to pre-#260 output). The detector still EVALUATES
+    // (the suppression-hierarchy invariant — a gated check could still
+    // supersede), it just never displays.
+    if !experiments.is_enabled(Experiment::Governance) {
+        use crate::domain::CheckId as _;
+        policy
+            .displayed
+            .retain(|id| id.spec().group != "enforcement");
+    }
     // Model order is deterministic (the scope set iterates in node-id
     // order), so pragma rule order — and warning order — is stable.
     for model_id in models_in_scope.iter() {
@@ -1464,21 +1477,72 @@ mod tests {
     }
 
     #[test]
-    fn build_check_policy_without_config_or_pragmas_is_the_default() {
+    fn build_check_policy_without_config_or_pragmas_is_the_default_minus_enforcement() {
+        // cute-dbt#260 Slice 3 — governance OFF (the default): the
+        // `enforcement` group is filtered out of the displayed set, so the
+        // policy is the default minus the enforcement check(s). Everything
+        // else (grain/union/join/incremental) stays displayed; no
+        // suppressions.
+        use crate::domain::CheckId as _;
         let manifest = manifest_of_models(vec![model_with_raw("model.shop.orders", None)]);
         let policy = build_check_policy(
             &cli("report.html"),
             &manifest,
             &scope_of(&["model.shop.orders"]),
+            &EnabledExperiments::default(),
         );
+        let expected: Vec<HeuristicId> = CheckPolicy::default()
+            .displayed
+            .into_iter()
+            .filter(|id: &HeuristicId| id.spec().group != "enforcement")
+            .collect();
+        assert_eq!(policy.displayed, expected);
+        assert!(policy.suppressions.is_empty());
+        assert!(
+            !policy
+                .displayed
+                .contains(&HeuristicId::EnforcementConstraintUnbacked),
+            "enforcement is gated off by default",
+        );
+    }
+
+    #[test]
+    fn build_check_policy_with_governance_keeps_the_enforcement_group() {
+        let manifest = manifest_of_models(vec![model_with_raw("model.shop.orders", None)]);
+        let governance_on = EnabledExperiments::from_union(
+            &std::collections::BTreeSet::from([Experiment::Governance]),
+            &std::collections::BTreeSet::new(),
+        );
+        let policy = build_check_policy(
+            &cli("report.html"),
+            &manifest,
+            &scope_of(&["model.shop.orders"]),
+            &governance_on,
+        );
+        // Governance ON ⇒ the full default policy (enforcement included).
         assert_eq!(policy, CheckPolicy::default());
+        assert!(
+            policy
+                .displayed
+                .contains(&HeuristicId::EnforcementConstraintUnbacked),
+        );
+    }
+
+    /// Governance-enabled experiment set (so the enforcement group is
+    /// not filtered out — for the registry-shape policy tests).
+    fn governance_on() -> EnabledExperiments {
+        EnabledExperiments::from_union(
+            &std::collections::BTreeSet::from([Experiment::Governance]),
+            &std::collections::BTreeSet::new(),
+        )
     }
 
     #[test]
     fn build_check_policy_resolves_the_config_selection() {
         // Registry-shape-robust: `grain.*` removes exactly the grain
         // group; every other registered check (e.g. union.arm-coverage,
-        // cute-dbt#172) stays displayed.
+        // cute-dbt#172) stays displayed. Governance ON so the enforcement
+        // group is not also filtered (Slice 3 gating tested separately).
         let manifest = manifest_of_models(vec![model_with_raw("model.shop.orders", None)]);
         let policy = build_check_policy(
             &cli_with_checks(crate::domain::ChecksConfig {
@@ -1487,6 +1551,7 @@ mod tests {
             }),
             &manifest,
             &scope_of(&["model.shop.orders"]),
+            &governance_on(),
         );
         let expected: Vec<HeuristicId> = CheckPolicy::default()
             .displayed
@@ -1513,6 +1578,7 @@ mod tests {
             &cli("report.html"),
             &manifest,
             &scope_of(&["model.shop.orders"]),
+            &EnabledExperiments::default(),
         );
         assert_eq!(
             policy.suppressions,
@@ -1542,6 +1608,7 @@ mod tests {
             &cli("report.html"),
             &manifest,
             &scope_of(&["model.shop.orders"]),
+            &governance_on(),
         );
         assert!(
             policy.suppressions.is_empty(),

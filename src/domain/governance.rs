@@ -29,6 +29,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
 
+use crate::domain::grain::test_is_enabled;
 use crate::domain::manifest::{
     ColumnFacts, Constraint, ConstraintKind, Exposure, Manifest, Node, NodeId, Owner,
 };
@@ -786,6 +787,144 @@ fn canonical_type(declared: &str) -> String {
     }
 }
 
+// ===== cute-dbt#260 Slice 3: enforcement reality + backing-test join ===
+//
+// The enforcement-reality surface answers "this PK/unique is DECLARED —
+// is it actually enforced by the warehouse, and does a data test back
+// it?". Two pure pieces:
+//
+// 1. `constraint_support(adapter, kind)` — the hardcoded
+//    adapter × constraint matrix, a verbatim mirror of fusion's
+//    `get_constraint_support` (`dbt-adapter/src/adapter/adapter_impl.rs:2328`
+//    @ dbt-labs/dbt-core main, verified 2026-06-13). NOTE the source
+//    corrects two common assumptions: Postgres does NOT enforce
+//    PK/Unique (only NotNull + FK); DuckDB (the committed fixtures'
+//    adapter) "follows Postgres".
+// 2. `backing_test_for(manifest, model, column, kind)` — the INFERRED
+//    constraint→test edge. The manifest never links a constraint to its
+//    backing test; cute-dbt infers it: a `test.*` node `attached_node`'d
+//    to the model whose `test_metadata.name ∈ {unique, not_null}` and
+//    whose column matches. The inference can MISS renamed/custom tests —
+//    the copy must say "backing test" (authoring discipline), never
+//    imply the warehouse lacks the index.
+
+/// Whether a constraint kind is enforced by a given warehouse adapter
+/// (cute-dbt#260 Slice 3) — mirrors fusion's `ConstraintSupport`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ConstraintSupport {
+    /// The warehouse enforces this constraint at write time.
+    Enforced,
+    /// The warehouse accepts the declaration but does NOT enforce it
+    /// (metadata-only) — the common PK/unique case on analytics
+    /// warehouses.
+    NotEnforced,
+    /// The warehouse does not support this constraint kind at all.
+    NotSupported,
+}
+
+/// The adapter × constraint-kind enforcement matrix (cute-dbt#260
+/// Slice 3) — a verbatim mirror of fusion's `get_constraint_support`.
+/// A flat lookup table (low CRAP). `adapter` is matched
+/// case-insensitively; an unknown adapter (or one fusion leaves
+/// `unimplemented!`, e.g. Athena/Spark/Trino) returns `NotEnforced` —
+/// the honest "declared, enforcement unknown" default, never a false
+/// `Enforced` claim. `Other`/unknown constraint kinds also degrade to
+/// `NotEnforced`.
+#[must_use]
+pub fn constraint_support(adapter: &str, kind: ConstraintKind) -> ConstraintSupport {
+    use ConstraintKind::{Check, Custom, ForeignKey, NotNull, PrimaryKey, Unique};
+    use ConstraintSupport::{Enforced, NotEnforced, NotSupported};
+    match (adapter.to_ascii_lowercase().as_str(), kind) {
+        // Postgres + DuckDB ("follows Postgres" — the fixtures' adapter).
+        ("postgres" | "duckdb", NotNull | ForeignKey) => Enforced,
+        ("postgres" | "duckdb", Unique | PrimaryKey) => NotEnforced,
+        ("postgres" | "duckdb", Check | Custom) => NotSupported,
+        // Snowflake.
+        ("snowflake", NotNull | ForeignKey) => Enforced,
+        ("snowflake", Unique | PrimaryKey) => NotEnforced,
+        ("snowflake", Check | Custom) => NotSupported,
+        // BigQuery.
+        ("bigquery", NotNull) => Enforced,
+        ("bigquery", PrimaryKey | ForeignKey) => NotEnforced,
+        ("bigquery", Unique | Check | Custom) => NotSupported,
+        // Databricks (+ Spark shares the metadata adapter; Check is
+        // enforced there).
+        ("databricks", NotNull | Check) => Enforced,
+        ("databricks", PrimaryKey | ForeignKey) => NotEnforced,
+        ("databricks", Unique | Custom) => NotSupported,
+        // Redshift.
+        ("redshift", NotNull) => Enforced,
+        ("redshift", Unique | PrimaryKey | ForeignKey) => NotEnforced,
+        ("redshift", Check | Custom) => NotSupported,
+        // Unknown / fusion-unimplemented adapters: honest "declared,
+        // enforcement unknown" — never a false Enforced, never invents
+        // NotSupported.
+        _ => NotEnforced,
+    }
+}
+
+/// Whether an enabled data test backs a `kind` constraint on `column` of
+/// `model` (cute-dbt#260 Slice 3) — the INFERRED constraint→test edge.
+///
+/// The manifest never links a constraint to its backing test, so cute-dbt
+/// joins: a `test.*` node `attached_node`'d to `model`, enabled, whose
+/// `test_metadata.name` is the generic test that backs `kind`
+/// (`unique` ⇒ `"unique"`, `not_null` ⇒ `"not_null"`), and whose target
+/// column (the `column_name` kwarg, falling back to the node-level
+/// `column_name`) equals `column` (case-insensitive). The inference can
+/// MISS a renamed test or a custom/singular test that asserts the same
+/// thing — the surface copy admits this (authoring discipline, never a
+/// warehouse-truth claim).
+#[must_use]
+pub fn backing_test_for(
+    manifest: &Manifest,
+    model: &NodeId,
+    column: &str,
+    kind: ConstraintKind,
+) -> bool {
+    let Some(test_name) = backing_test_name(kind) else {
+        return false;
+    };
+    manifest
+        .nodes()
+        .values()
+        .any(|node| test_backs(node, model, column, test_name))
+}
+
+/// The generic data-test name that backs a constraint kind, or `None`
+/// for kinds with no column-level generic backing (FK/check/custom/etc.
+/// are out of the unique/not_null inference).
+fn backing_test_name(kind: ConstraintKind) -> Option<&'static str> {
+    match kind {
+        ConstraintKind::Unique | ConstraintKind::PrimaryKey => Some("unique"),
+        ConstraintKind::NotNull => Some("not_null"),
+        _ => None,
+    }
+}
+
+/// Whether `node` is an enabled `test_name` data test attached to `model`
+/// targeting `column` (case-insensitive).
+fn test_backs(node: &Node, model: &NodeId, column: &str, test_name: &str) -> bool {
+    if node.resource_type() != "test" || node.attached_node() != Some(model) {
+        return false;
+    }
+    if !test_is_enabled(node) {
+        return false;
+    }
+    let Some(metadata) = node.test_metadata() else {
+        return false;
+    };
+    if metadata.name() != test_name {
+        return false;
+    }
+    let target = metadata
+        .kwargs()
+        .get("column_name")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| node.column_name());
+    target.is_some_and(|t| t.eq_ignore_ascii_case(column))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, HashMap};
@@ -793,7 +932,7 @@ mod tests {
     use super::*;
     use crate::domain::manifest::{
         Checksum, ColumnFacts, DependsOn, Group, Manifest, ManifestMetadata, Node, NodeConfig,
-        NodeId, Owner,
+        NodeId, Owner, TestMetadata,
     };
 
     fn sample_checksum() -> Checksum {
@@ -2048,5 +2187,284 @@ mod tests {
         );
         let facts = gather_governance(&current_m, &in_scope(&["model.pkg.m"]), Some(&old_m));
         assert!(facts.contract_classes.is_empty());
+    }
+
+    // ===== Slice 3: enforcement matrix + backing-test join =====
+
+    use crate::domain::manifest::ConstraintKind;
+
+    #[test]
+    fn enforcement_matrix_matches_the_fusion_source() {
+        use ConstraintKind::{Check, Custom, ForeignKey, NotNull, PrimaryKey, Unique};
+        use ConstraintSupport::{Enforced, NotEnforced, NotSupported};
+        // One assertion per (adapter, kind) cell, verbatim from fusion's
+        // get_constraint_support (dbt-adapter adapter_impl.rs:2328).
+        let cases = [
+            // Postgres (and DuckDB "follows Postgres").
+            ("postgres", NotNull, Enforced),
+            ("postgres", ForeignKey, Enforced),
+            ("postgres", Unique, NotEnforced),
+            ("postgres", PrimaryKey, NotEnforced),
+            ("postgres", Check, NotSupported),
+            ("duckdb", PrimaryKey, NotEnforced),
+            ("duckdb", NotNull, Enforced),
+            // Snowflake.
+            ("snowflake", NotNull, Enforced),
+            ("snowflake", PrimaryKey, NotEnforced),
+            ("snowflake", Unique, NotEnforced),
+            ("snowflake", Check, NotSupported),
+            // BigQuery — unique is NOT supported; PK not enforced.
+            ("bigquery", NotNull, Enforced),
+            ("bigquery", PrimaryKey, NotEnforced),
+            ("bigquery", Unique, NotSupported),
+            // Databricks — unique not supported; check IS enforced.
+            ("databricks", PrimaryKey, NotEnforced),
+            ("databricks", Unique, NotSupported),
+            ("databricks", Check, Enforced),
+            ("databricks", NotNull, Enforced),
+            // Redshift.
+            ("redshift", NotNull, Enforced),
+            ("redshift", PrimaryKey, NotEnforced),
+            ("redshift", Unique, NotEnforced),
+            // Custom is never enforced anywhere we model.
+            ("postgres", Custom, NotSupported),
+        ];
+        for (adapter, kind, expected) in cases {
+            assert_eq!(
+                constraint_support(adapter, kind),
+                expected,
+                "{adapter} × {kind:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn enforcement_matrix_is_case_insensitive_on_adapter() {
+        assert_eq!(
+            constraint_support("Postgres", ConstraintKind::PrimaryKey),
+            ConstraintSupport::NotEnforced,
+        );
+        assert_eq!(
+            constraint_support("DUCKDB", ConstraintKind::NotNull),
+            ConstraintSupport::Enforced,
+        );
+    }
+
+    #[test]
+    fn unknown_adapter_degrades_to_not_enforced_never_a_false_claim() {
+        // An adapter outside the matrix (or fusion-unimplemented like
+        // athena/spark) is the honest "declared, enforcement unknown" —
+        // never a false Enforced, never invents NotSupported.
+        assert_eq!(
+            constraint_support("athena", ConstraintKind::PrimaryKey),
+            ConstraintSupport::NotEnforced,
+        );
+        assert_eq!(
+            constraint_support("some-future-warehouse", ConstraintKind::NotNull),
+            ConstraintSupport::NotEnforced,
+        );
+        // An Other/unknown constraint kind also degrades.
+        assert_eq!(
+            constraint_support("postgres", ConstraintKind::Other),
+            ConstraintSupport::NotEnforced,
+        );
+    }
+
+    // ---- backing_test_for: the inferred constraint→test edge ----
+
+    /// A generic data-test node attached to `model`, asserting `test_name`
+    /// on `column`.
+    fn test_node(id: &str, model: &str, test_name: &str, column: &str) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "test",
+            sample_checksum(),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_test_attachment(
+            Some(column.to_owned()),
+            Some(NodeId::new(model)),
+            Some(TestMetadata::new(test_name, None, serde_json::json!({}))),
+        )
+    }
+
+    fn manifest_with_nodes(nodes: Vec<Node>) -> Manifest {
+        let node_map: HashMap<NodeId, Node> =
+            nodes.into_iter().map(|n| (n.id().clone(), n)).collect();
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            node_map,
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    #[test]
+    fn backing_test_present_for_a_matching_unique_test() {
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            test_node("test.pkg.u", "model.pkg.m", "unique", "id"),
+        ]);
+        assert!(backing_test_for(
+            &manifest,
+            &model_id,
+            "id",
+            ConstraintKind::PrimaryKey
+        ));
+        assert!(backing_test_for(
+            &manifest,
+            &model_id,
+            "id",
+            ConstraintKind::Unique
+        ));
+    }
+
+    #[test]
+    fn backing_test_missing_when_no_test_targets_the_column() {
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            test_node("test.pkg.u", "model.pkg.m", "unique", "other_col"),
+        ]);
+        assert!(!backing_test_for(
+            &manifest,
+            &model_id,
+            "id",
+            ConstraintKind::PrimaryKey
+        ));
+    }
+
+    #[test]
+    fn backing_test_inference_misses_a_renamed_or_singular_test() {
+        // The HEDGE case: a test that asserts the same uniqueness but
+        // under a different test_metadata.name (e.g. a custom/renamed
+        // generic test) is NOT matched — the surface copy admits this.
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            test_node("test.pkg.x", "model.pkg.m", "my_custom_unique", "id"),
+        ]);
+        assert!(
+            !backing_test_for(&manifest, &model_id, "id", ConstraintKind::PrimaryKey),
+            "the inferred edge can miss a renamed test (the hedge)",
+        );
+    }
+
+    #[test]
+    fn backing_test_reads_the_column_name_kwarg_over_the_node_field() {
+        // The test's column comes from the column_name kwarg when present.
+        let model_id = NodeId::new("model.pkg.m");
+        let mut t = test_node("test.pkg.u", "model.pkg.m", "unique", "wrong");
+        t = t.with_test_attachment(
+            Some("wrong".to_owned()),
+            Some(NodeId::new("model.pkg.m")),
+            Some(TestMetadata::new(
+                "unique",
+                None,
+                serde_json::json!({"column_name": "id"}),
+            )),
+        );
+        let manifest = manifest_with_nodes(vec![model("model.pkg.m", None), t]);
+        assert!(backing_test_for(
+            &manifest,
+            &model_id,
+            "id",
+            ConstraintKind::Unique
+        ));
+    }
+
+    #[test]
+    fn backing_test_ignores_a_test_attached_to_a_different_model() {
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            test_node("test.pkg.u", "model.pkg.other", "unique", "id"),
+        ]);
+        assert!(!backing_test_for(
+            &manifest,
+            &model_id,
+            "id",
+            ConstraintKind::Unique
+        ));
+    }
+
+    #[test]
+    fn backing_test_for_non_unique_kinds_is_always_false() {
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![model("model.pkg.m", None)]);
+        for kind in [
+            ConstraintKind::ForeignKey,
+            ConstraintKind::Check,
+            ConstraintKind::Custom,
+        ] {
+            assert!(!backing_test_for(&manifest, &model_id, "id", kind));
+        }
+    }
+
+    #[test]
+    fn not_null_constraint_matches_a_not_null_test() {
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            test_node("test.pkg.nn", "model.pkg.m", "not_null", "id"),
+        ]);
+        assert!(backing_test_for(
+            &manifest,
+            &model_id,
+            "id",
+            ConstraintKind::NotNull
+        ));
+    }
+
+    #[test]
+    fn a_disabled_backing_test_does_not_count() {
+        // config.enabled: false ⇒ the test asserts nothing ⇒ not backing.
+        let model_id = NodeId::new("model.pkg.m");
+        let mut config = BTreeMap::new();
+        config.insert("enabled".to_owned(), serde_json::json!(false));
+        let disabled = Node::new(
+            NodeId::new("test.pkg.u"),
+            "test",
+            sample_checksum(),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(config, false),
+            None,
+            BTreeMap::new(),
+        )
+        .with_test_attachment(
+            Some("id".to_owned()),
+            Some(NodeId::new("model.pkg.m")),
+            Some(TestMetadata::new("unique", None, serde_json::json!({}))),
+        );
+        let manifest = manifest_with_nodes(vec![model("model.pkg.m", None), disabled]);
+        assert!(!backing_test_for(
+            &manifest,
+            &model_id,
+            "id",
+            ConstraintKind::Unique
+        ));
+    }
+
+    #[test]
+    fn a_non_test_node_is_never_a_backing_test() {
+        // No test node at all ⇒ no backing.
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![model("model.pkg.m", None)]);
+        assert!(!backing_test_for(
+            &manifest,
+            &model_id,
+            "id",
+            ConstraintKind::Unique
+        ));
     }
 }

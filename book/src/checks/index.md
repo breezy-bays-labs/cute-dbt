@@ -11,3 +11,4 @@ The coverage-intelligence check registry. Each check pairs a construct trigger w
 | [`join.left-null-propagation`](./join.left-null-propagation.md) | LEFT JOIN null propagation untested | `high` | `both` |
 | [`join.anti-join`](./join.anti-join.md) | Anti-join exclusion untested | `high` | `unit-test` |
 | [`incremental.branch-coverage`](./incremental.branch-coverage.md) | Unexercised is_incremental() branch | `high` | `unit-test` |
+| [`enforcement.constraint-unbacked`](./enforcement.constraint-unbacked.md) | Declared constraint without a backing test | `total` | `data-test` |

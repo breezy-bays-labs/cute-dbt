@@ -12243,6 +12243,45 @@ fn governance_contract_drawer_absent_without_a_class_in_a_real_browser() {
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn enforcement_finding_renders_on_the_committed_showcase_in_a_real_browser() {
+    // cute-dbt#260 Slice 3 — the committed diff-showcase golden
+    // (experimental:"1") has fct_encounters declaring a PK on duckdb
+    // (metadata-only) with a backing unique test, so the enforcement
+    // annotation surfaces through the EXISTING findings panel. Assert the
+    // real finding row renders + names the adapter/backing-test evidence.
+    let showcase = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("diff-showcase-report.html");
+    let url = format!("file://{}", showcase.to_str().expect("UTF-8 path"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    enable_coverage_display(&tab);
+    select_model(&tab, "fct_encounters");
+
+    const ROW: &str =
+        "document.querySelector('.finding-row[data-check=\"enforcement.constraint-unbacked\"]')";
+    assert!(
+        eval_bool(&tab, &format!("{ROW} !== null")),
+        "the enforcement finding row renders for the contracted model",
+    );
+    let text = eval_string(&tab, &format!("{ROW}.textContent"));
+    assert!(
+        text.contains("duckdb"),
+        "the finding names the adapter (metadata-only enforcement): {text}",
+    );
+    assert!(
+        text.to_lowercase().contains("backing"),
+        "the finding names the backing-test reality: {text}",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn project_panel_renders_categorized_on_the_committed_showcase() {
     // The dogfood surface: the committed diff-showcase golden must carry
     // the categorized panel — two vars rows (cute-dbt#268: tiered

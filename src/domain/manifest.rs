@@ -1221,6 +1221,15 @@ pub struct ManifestMetadata {
     /// keeps pre-#256 serializations byte-stable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     project_name: Option<String>,
+    /// `metadata.adapter_type` (cute-dbt#260) — the warehouse adapter the
+    /// manifest was compiled against (`"duckdb"` / `"postgres"` /
+    /// `"snowflake"` / `"bigquery"` / …), a HEADER-level field (not a
+    /// node). The enforcement-reality surface keys the
+    /// adapter × constraint support matrix on it. `None` on pre-#260
+    /// fixtures (both committed real fixtures populate it as `"duckdb"`).
+    /// `skip_serializing_if` keeps pre-#260 serializations byte-stable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adapter_type: Option<String>,
 }
 
 impl ManifestMetadata {
@@ -1230,6 +1239,7 @@ impl ManifestMetadata {
         Self {
             dbt_schema_version: dbt_schema_version.into(),
             project_name: None,
+            adapter_type: None,
         }
     }
 
@@ -1239,6 +1249,14 @@ impl ManifestMetadata {
     #[must_use]
     pub fn with_project_name(mut self, project_name: Option<String>) -> Self {
         self.project_name = project_name;
+        self
+    }
+
+    /// Attach the warehouse adapter type (cute-dbt#260) — builder, the
+    /// [`Self::with_project_name`] precedent (no constructor churn).
+    #[must_use]
+    pub fn with_adapter_type(mut self, adapter_type: Option<String>) -> Self {
+        self.adapter_type = adapter_type;
         self
     }
 
@@ -1253,6 +1271,15 @@ impl ManifestMetadata {
     #[must_use]
     pub fn project_name(&self) -> Option<&str> {
         self.project_name.as_deref().filter(|name| !name.is_empty())
+    }
+
+    /// The warehouse adapter type (cute-dbt#260) — `"duckdb"` /
+    /// `"postgres"` / `"snowflake"` / `"bigquery"` / … . `None` when the
+    /// manifest omitted it or carried an empty-string unset shape (the
+    /// [`Self::project_name`] precedent).
+    #[must_use]
+    pub fn adapter_type(&self) -> Option<&str> {
+        self.adapter_type.as_deref().filter(|t| !t.is_empty())
     }
 }
 
