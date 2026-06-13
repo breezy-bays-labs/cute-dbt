@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-d67135e0.js";
+            window.path_to_searchindex_js = "searchindex-dd1c0c38.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-ae0e7ef2.js"></script>
+        <script src="toc-c5a54955.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -194,6 +194,13 @@ source via <code>cargo install --git https://github.com/breezy-bays-labs/cute-db
 <p>Verify:</p>
 <pre><code class="language-sh">cute-dbt --help
 </code></pre>
+<blockquote>
+<p><strong>Want one command instead?</strong> <a href="./one-command-review.html"><code>cute-dbt review</code></a>
+automates everything on this page — it detects the base, runs <code>dbt compile</code>, produces the diff, and renders the report for you. This page
+walks the <strong>manual <code>report</code> flow</strong> <code>review</code> wraps, so you understand
+what it does (and so CI and scripts, which call <code>report</code> directly, have
+a reference).</p>
+</blockquote>
 <h2 id="generate-a-report"><a class="header" href="#generate-a-report">Generate a report</a></h2>
 <p><code>cute-dbt report</code> always reads a <strong>current</strong> <code>manifest.json</code>, plus
 exactly one <strong>scope source</strong> telling it what changed:</p>
@@ -305,8 +312,12 @@ cute-dbt report \
     --out               report.html
 </code></pre>
 <p>Wrapping this in a make target / shell function is a common
-ergonomic. cute-dbt itself is intentionally unopinionated about how
-you produce the two manifests.</p>
+ergonomic — and it is exactly what
+<a href="./one-command-review.html"><code>cute-dbt review</code></a> does for you: detect the
+base, compile, diff, render, in one command. The manual flow above is
+useful when you want a baseline-mode comparison (review is the
+working-tree pr-diff twin) or precise control over how the manifests are
+produced; cute-dbt itself is intentionally unopinionated there.</p>
 <h2 id="what-youll-see"><a class="header" href="#what-youll-see">What you’ll see</a></h2>
 <p>If the diff has at least one in-scope unit test:</p>
 <ul>
@@ -345,7 +356,7 @@ a non-zero exit explaining what’s missing.</p>
 
                     <nav class="nav-wrapper" aria-label="Page navigation">
                         <!-- Mobile navigation buttons -->
-                            <a rel="prev" href="the-solution.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                            <a rel="prev" href="one-command-review.html" class="mobile-nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                                 <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                             </a>
 
@@ -359,7 +370,7 @@ a non-zero exit explaining what’s missing.</p>
             </div>
 
             <nav class="nav-wide-wrapper" aria-label="Page navigation">
-                    <a rel="prev" href="the-solution.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
+                    <a rel="prev" href="one-command-review.html" class="nav-chapters previous" title="Previous chapter" aria-label="Previous chapter" aria-keyshortcuts="Left">
                         <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M41.4 233.4c-12.5 12.5-12.5 32.8 0 45.3l160 160c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L109.3 256 246.6 118.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0l-160 160z"/></svg></span>
                     </a>
 

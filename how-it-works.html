@@ -35,10 +35,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-d67135e0.js";
+            window.path_to_searchindex_js = "searchindex-dd1c0c38.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-ae0e7ef2.js"></script>
+        <script src="toc-c5a54955.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -221,6 +221,11 @@ in the repo.)</p>
 <p>cute-dbt’s first-class workflow is reviewing a <strong>diff</strong>, not the whole
 project. You give it the current manifest plus <strong>one scope source</strong>
 naming which models the diff touched. There are two.</p>
+<blockquote>
+<p>This page describes the <code>report</code> plumbing verb’s explicit scope
+sources. For local work, <a href="./one-command-review.html"><code>cute-dbt review</code></a>
+picks the scope for you (and produces the diff itself).</p>
+</blockquote>
 <h3 id="source-1--baseline-manifest---baseline-manifest"><a class="header" href="#source-1--baseline-manifest---baseline-manifest">Source 1 — baseline manifest (<code>--baseline-manifest</code>)</a></h3>
 <p>For local dev. cute-dbt diffs the current manifest against a baseline
 you supply and selects models whose SQL <strong>body checksum</strong> differs —

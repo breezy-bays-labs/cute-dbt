@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-d67135e0.js";
+            window.path_to_searchindex_js = "searchindex-dd1c0c38.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-ae0e7ef2.js"></script>
+        <script src="toc-c5a54955.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -309,6 +309,160 @@ count, so what the report covers is unambiguous. The
 <a href="#ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback">GitHub Actions PR-review recipe</a>
 wires this into any dbt repo with a copy-paste workflow.</p>
 <div style="break-before: page; page-break-before: always;"></div>
+<h1 id="one-command-review"><a class="header" href="#one-command-review">One-command review</a></h1>
+<p><code>cute-dbt review</code> is the <strong>first-contact path</strong>: from a checked-out dbt
+repo with branch changes, one command produces the PR-review report —
+no flags, no flag archaeology.</p>
+<pre><code class="language-sh">cute-dbt review
+</code></pre>
+<p>It finds the dbt project, detects the base branch, runs <em>your</em> <code>dbt compile</code>, diffs the working tree against the merge-base, renders the
+report to <code>&lt;project&gt;/target/cute-dbt-report.html</code>, and — when run from an
+interactive terminal — opens it in your default browser (<code>--no-open</code>
+skips this). Everything <code>report</code> needs explicitly, <code>review</code> figures out
+for you.</p>
+<h2 id="two-verbs-porcelain-and-plumbing"><a class="header" href="#two-verbs-porcelain-and-plumbing">Two verbs: porcelain and plumbing</a></h2>
+<p>cute-dbt’s PR-review surface is split the way git splits <code>pull</code> from
+<code>fetch</code>+<code>merge</code> — a convenience verb that composes a precise one.</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Verb</th><th>Role</th><th>Audience</th></tr>
+</thead>
+<tbody>
+<tr><td><code>cute-dbt review</code></td><td><strong>Porcelain.</strong> “Review my work.” Auto-detects the base, runs your dbt, diffs, renders. Zero required flags.</td><td>Humans at a desk; agents via the <a href="#agent-skill">skill</a>.</td></tr>
+<tr><td><code>cute-dbt report</code></td><td><strong>Plumbing.</strong> Explicit inputs (<code>--manifest</code> + <code>--pr-diff</code>/<code>--baseline-manifest</code> → HTML).</td><td>CI (exact SHAs, purpose-made checkouts), scripts, power users.</td></tr>
+</tbody>
+</table>
+</div>
+<p><code>review</code> <em>composes</em> <code>report</code>’s internals in-process — same render engine,
+two entry depths. It is the local twin of the
+<a href="#ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback">CI PR-review recipe</a>: <code>review</code>
+auto-detects what CI already knows (the base SHA, a clean checkout), so
+<strong>CI recipes deliberately stay on <code>report</code></strong> — porcelain auto-detection
+would be wrong where the SHAs are already exact.</p>
+<h2 id="scope-what-gets-reviewed"><a class="header" href="#scope-what-gets-reviewed">Scope: what gets reviewed</a></h2>
+<p>By default <code>review</code> reviews <strong>everything on your branch vs the detected
+base</strong> — committed <em>plus</em> staged <em>plus</em> unstaged edits (the working-tree
+endpoint, which is exactly what <code>dbt compile</code> just compiled, so the
+inline diffs stay sound). Narrow it with one mutually-exclusive selector:</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Flag</th><th>Reviews</th><th>Diff endpoint</th></tr>
+</thead>
+<tbody>
+<tr><td><em>(default)</em></td><td>branch work vs base</td><td>merge-base → working tree</td></tr>
+<tr><td><code>--committed-only</code></td><td>committed changes only — PR-exact parity</td><td>merge-base → HEAD</td></tr>
+<tr><td><code>--staged</code></td><td>only what is staged</td><td>HEAD → index (<code>git diff --cached</code>)</td></tr>
+<tr><td><code>--unstaged</code></td><td>only unstaged edits</td><td>index → working tree</td></tr>
+<tr><td><code>--pr [&lt;n&gt;]</code></td><td>the repo’s open PR (see <a href="#pr-anchoring">PR anchoring</a>)</td><td>merge-base → working tree</td></tr>
+</tbody>
+</table>
+</div>
+<blockquote>
+<p><strong>Staged caveat (honest).</strong> The manifest is always compiled from the
+working tree, so if a file you have staged <em>also</em> has unstaged edits,
+<code>--staged</code> diffs the index while the manifest reflects the working
+tree. cute-dbt detects that drift, warns naming the files, and the
+inline diffs for those files degrade gracefully to the plain view —
+the report is still correct about <em>which</em> tests changed.</p>
+</blockquote>
+<p>Other knobs: <code>--base &lt;ref&gt;</code> skips base detection; <code>--out &lt;path&gt;</code>
+relocates the report; <code>--project-dir &lt;dir&gt;</code> points at the dbt project
+when discovery is ambiguous; <code>--no-compile</code> trusts an existing manifest
+(dbt is then not needed at all); <code>--no-open</code> skips the browser;
+<code>--config &lt;toml&gt;</code> passes report configuration through; <code>--force</code> renders
+the zero-scope report even when the diff is empty.</p>
+<h2 id="base-detection"><a class="header" href="#base-detection">Base detection</a></h2>
+<p>With no <code>--base</code>, <code>review</code> walks a ladder and announces which rung
+answered (on stderr):</p>
+<ol>
+<li><code>--base &lt;ref&gt;</code> — explicit override (always wins).</li>
+<li><code>git config cute-dbt.base</code> — a persisted answer you can set once:
+<code>git config cute-dbt.base origin/main</code>.</li>
+<li>The open PR’s base branch, via <code>gh pr view</code> — only when the GitHub
+CLI <code>gh</code> is installed and you are on a branch; <strong>fail-soft</strong>, so a
+missing or unauthenticated <code>gh</code> silently falls through.</li>
+<li>The <code>origin/HEAD</code> symref (<code>origin/main</code> at clone time).</li>
+<li>Probing <code>origin/{main,master,trunk}</code>, then the local heads.</li>
+</ol>
+<p>If none answer, <code>review</code> stops and tells you to pass <code>--base</code>. A failed
+merge-base is diagnosed: a shallow clone gets the <code>git fetch --unshallow</code>
+hint, genuinely disjoint histories get the <code>--base</code> hint.</p>
+<h3 id="pr-anchoring"><a class="header" href="#pr-anchoring">PR anchoring</a></h3>
+<p><code>--pr</code> runs the review directly off the repo’s open pull request — its
+base branch becomes the review base:</p>
+<pre><code class="language-sh">cute-dbt review --pr          # the current branch's open PR
+cute-dbt review --pr 1234     # PR #1234 specifically
+</code></pre>
+<p><code>--pr 1234</code> first checks that your current HEAD <em>is</em> PR #1234’s head
+branch. If it is not, cute-dbt tells you to <code>gh pr checkout 1234</code> first
+and stops — <strong>it never checks out or mutates your working tree.</strong></p>
+<h2 id="--dry-run-see-exactly-what-it-will-do"><a class="header" href="#--dry-run-see-exactly-what-it-will-do"><code>--dry-run</code>: see exactly what it will do</a></h2>
+<p><code>review</code> generates the commands it would run rather than hiding them in
+a maintained script. <code>--dry-run</code> prints every one — the <code>git diff</code>
+invocation (with its full config-proof flag set), the <code>dbt compile</code>
+plan, and the equivalent <code>cute-dbt report</code> invocation — and executes
+nothing:</p>
+<pre><code class="language-sh">cute-dbt review --dry-run
+</code></pre>
+<p>This is the transparency affordance: the “script” is generated and
+auditable, never maintained prose-in-shell. Every flag the diff carries
+is there to neutralize a user git config that would otherwise silently
+corrupt the patch (<code>diff.noprefix</code>, external diff drivers, textconv,
+<code>diff.relative</code>, color, …).</p>
+<h2 id="privacy"><a class="header" href="#privacy">Privacy</a></h2>
+<p><code>review</code> itself makes <strong>zero network requests</strong>, and the generated
+report makes zero outbound requests when opened (the
+<a href="#zero-egress--the-privacy-property">zero-egress property</a>). The one caveat is the compile
+step: it runs <em>your</em> dbt, which may phone home on its own — an engine
+version check, anonymous usage stats. That egress belongs to dbt, not
+cute-dbt. Suppress it with dbt’s own switches:</p>
+<pre><code class="language-sh">DBT_DISABLE_VERSION_CHECK=1 DBT_SEND_ANONYMOUS_USAGE_STATS=false cute-dbt review
+</code></pre>
+<p><code>review</code> never reads or edits your <code>profiles.yml</code>; a connection problem
+surfaces dbt’s own error verbatim, with an engine-uniform remediation
+hint (check <code>~/.dbt/profiles.yml</code> / <code>--profiles-dir</code> / <code>DBT_PROFILES_DIR</code>,
+run <code>dbt debug</code>).</p>
+<h2 id="engines"><a class="header" href="#engines">Engines</a></h2>
+<p>Both dbt-core (1.8+) and the dbt Fusion engine are detected from the
+shape of <code>dbt --version</code> output and invoked correctly. <strong>The exit code
+is the success signal</strong> — Fusion writes <code>manifest.json</code> even on a failed
+compile, so cute-dbt never trusts mere artifact presence: a non-zero
+<code>dbt compile</code> relays dbt’s stderr verbatim and writes no report.</p>
+<p><code>--no-compile</code> skips the compile entirely and trusts the manifest
+already in <code>target/</code>; a staleness check then warns (never blocks) if any
+project source is newer than the manifest. The manifest location honors
+<code>--target-path</code> / <code>DBT_TARGET_PATH</code>, else <code>&lt;project&gt;/target/manifest.json</code>.</p>
+<h2 id="failure-handling"><a class="header" href="#failure-handling">Failure handling</a></h2>
+<p><code>review</code> fails closed with an actionable remediation on stderr at every
+upstream failure — <code>git</code>/<code>dbt</code> missing, not a git repository, no
+detectable base, a shallow clone, an empty diff (“nothing to review”,
+exit 0, no file written unless <code>--force</code>), untracked files (warned with
+a <code>git add -N</code> hint), a compile failure, or a not-yet-compiled in-scope
+model. Exit codes match <code>report</code>: <code>0</code> success (including the empty-scope
+report), <code>1</code> a review-stage or report failure, <code>2</code> a usage error.</p>
+<h2 id="output-location"><a class="header" href="#output-location">Output location</a></h2>
+<p>The report lands at <code>&lt;project&gt;/target/cute-dbt-report.html</code> by default —
+inside dbt’s conventionally-gitignored <code>target/</code>, so the generated
+report (whose inlined paths can carry your local directory layout) is
+never invited into version control. Override with <code>--out</code>.</p>
+<h2 id="platform-support"><a class="header" href="#platform-support">Platform support</a></h2>
+<p><code>review</code> shells out to <code>git</code> and <code>dbt</code> via <code>std::process::Command</code> — no
+shell, so there is no Git Bash / WSL dependency and no PowerShell
+redirection-encoding hazard. <strong>Windows support is designed-in;
+CI-verified on Linux/macOS, with Windows CI coverage tracked in
+<a href="https://github.com/breezy-bays-labs/cute-dbt/issues/308">#308</a>.</strong></p>
+<h2 id="see-also"><a class="header" href="#see-also">See also</a></h2>
+<ul>
+<li><a href="#getting-started">Getting started</a> — the manual <code>report</code> flow
+<code>review</code> automates (“what review does for you”).</li>
+<li><a href="#which-scope-source">How it works</a> — the scope-source
+model <code>report</code> exposes directly.</li>
+<li><a href="#ci-recipe-github-actions-pr-review-pages-preview--artifact-fallback">GitHub Actions PR review</a> — the
+CI recipe (on <code>report</code>) and the agent skill install one-liners.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
 <h1 id="getting-started"><a class="header" href="#getting-started">Getting started</a></h1>
 <h2 id="install"><a class="header" href="#install">Install</a></h2>
 <blockquote>
@@ -323,6 +477,13 @@ source via <code>cargo install --git https://github.com/breezy-bays-labs/cute-db
 <p>Verify:</p>
 <pre><code class="language-sh">cute-dbt --help
 </code></pre>
+<blockquote>
+<p><strong>Want one command instead?</strong> <a href="#one-command-review"><code>cute-dbt review</code></a>
+automates everything on this page — it detects the base, runs <code>dbt compile</code>, produces the diff, and renders the report for you. This page
+walks the <strong>manual <code>report</code> flow</strong> <code>review</code> wraps, so you understand
+what it does (and so CI and scripts, which call <code>report</code> directly, have
+a reference).</p>
+</blockquote>
 <h2 id="generate-a-report"><a class="header" href="#generate-a-report">Generate a report</a></h2>
 <p><code>cute-dbt report</code> always reads a <strong>current</strong> <code>manifest.json</code>, plus
 exactly one <strong>scope source</strong> telling it what changed:</p>
@@ -434,8 +595,12 @@ cute-dbt report \
     --out               report.html
 </code></pre>
 <p>Wrapping this in a make target / shell function is a common
-ergonomic. cute-dbt itself is intentionally unopinionated about how
-you produce the two manifests.</p>
+ergonomic — and it is exactly what
+<a href="#one-command-review"><code>cute-dbt review</code></a> does for you: detect the
+base, compile, diff, render, in one command. The manual flow above is
+useful when you want a baseline-mode comparison (review is the
+working-tree pr-diff twin) or precise control over how the manifests are
+produced; cute-dbt itself is intentionally unopinionated there.</p>
 <h2 id="what-youll-see"><a class="header" href="#what-youll-see">What you’ll see</a></h2>
 <p>If the diff has at least one in-scope unit test:</p>
 <ul>
@@ -511,6 +676,11 @@ in the repo.)</p>
 <p>cute-dbt’s first-class workflow is reviewing a <strong>diff</strong>, not the whole
 project. You give it the current manifest plus <strong>one scope source</strong>
 naming which models the diff touched. There are two.</p>
+<blockquote>
+<p>This page describes the <code>report</code> plumbing verb’s explicit scope
+sources. For local work, <a href="#one-command-review"><code>cute-dbt review</code></a>
+picks the scope for you (and produces the diff itself).</p>
+</blockquote>
 <h3 id="source-1--baseline-manifest---baseline-manifest"><a class="header" href="#source-1--baseline-manifest---baseline-manifest">Source 1 — baseline manifest (<code>--baseline-manifest</code>)</a></h3>
 <p>For local dev. cute-dbt diffs the current manifest against a baseline
 you supply and selects models whose SQL <strong>body checksum</strong> differs —
@@ -2057,6 +2227,54 @@ uses to self-dogfood <code>--pr-diff</code> against an embedded fusion example
 project — CI recompiles an <strong>ephemeral</strong> manifest at the PR head and
 renders the PR’s own diff into the sticky comment.</li>
 </ul>
+<h2 id="agent-skill"><a class="header" href="#agent-skill">Agent skill</a></h2>
+<p>The CI recipe above is for automation. For <em>interactive</em> review — “ask
+your agent to review this dbt PR” — cute-dbt ships an
+<a href="https://agentskills.io">Agent Skill</a>: a small, portable instruction
+file that teaches Claude Code, Codex, Cursor, Copilot, and 30+ other
+clients to drive <a href="#one-command-review"><code>cute-dbt review</code></a> for you.
+The skill is the local-interactive counterpart to this CI recipe.</p>
+<h3 id="install-it"><a class="header" href="#install-it">Install it</a></h3>
+<p>Three channels share <strong>one</strong> file (<code>skills/dbt-pr-review/SKILL.md</code>), so
+they never disagree:</p>
+<pre><code class="language-sh"># From the cute-dbt binary you already have — zero drift by
+# construction, since the skill text ships inside the binary that
+# defines the flags. Writes into the current repo.
+cute-dbt skill --install                  # .claude/skills/dbt-pr-review/
+cute-dbt skill --install --agent codex    # .agents/skills/... (Cursor/Codex/Copilot)
+
+# Or from the skills ecosystem (cross-agent, auto-detects your clients):
+npx skills add breezy-bays-labs/cute-dbt --skill dbt-pr-review
+gh skill install breezy-bays-labs/cute-dbt dbt-pr-review
+</code></pre>
+<p><code>cute-dbt skill --install</code> refuses outside a git repository (the skill
+belongs to a repo). <code>cute-dbt skill --print</code> writes the skill to stdout
+without touching anything — useful to inspect it, or to pipe it
+somewhere yourself.</p>
+<p>Once installed, the agent runs <code>cute-dbt review --no-open</code>, relays
+cute-dbt’s remediation verbatim on any failure, and re-grounds on
+<code>cute-dbt --version</code> / <code>cute-dbt review --help</code> if a flag looks
+unfamiliar — so a stale skill copy self-heals against version drift.</p>
+<h3 id="fallback-paste-into-agentsmd--claudemd"><a class="header" href="#fallback-paste-into-agentsmd--claudemd">Fallback: paste into <code>AGENTS.md</code> / <code>CLAUDE.md</code></a></h3>
+<blockquote>
+<p><strong>The less-capable path.</strong> A skill loads only its name + description
+until invoked, then carries the full workflow; a pasted snippet is
+always-loaded context with no progressive disclosure and no update
+channel. Prefer <code>cute-dbt skill --install</code> (or <code>npx skills add</code>) above.
+Use this only if you have no skills tooling.</p>
+</blockquote>
+<p>If you cannot use a skill, paste this into your repo’s <code>AGENTS.md</code> (read
+by Codex, Cursor, Copilot, Gemini CLI, …) or <code>CLAUDE.md</code> (Claude Code):</p>
+<pre><code class="language-markdown">## Reviewing dbt changes
+
+To produce a PR-review report of this dbt project's unit tests, run
+`cute-dbt review --no-open` from the repo root. It auto-detects the base
+branch, runs `dbt compile`, diffs the working tree, and writes a
+self-contained HTML report to `&lt;project&gt;/target/cute-dbt-report.html`.
+On failure, relay cute-dbt's stderr remediation verbatim — do not guess
+a fix. If a flag looks unfamiliar, re-ground via `cute-dbt --version`
+and `cute-dbt review --help`.
+</code></pre>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="zero-egress--the-privacy-property"><a class="header" href="#zero-egress--the-privacy-property">Zero egress — the privacy property</a></h1>
 <p>cute-dbt’s load-bearing trait is that the generated <code>report.html</code>
