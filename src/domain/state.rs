@@ -33,6 +33,7 @@ use std::collections::{BTreeSet, HashMap};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::manifest::{Manifest, Node, NodeId};
+use crate::domain::seed_card::SeedCard;
 use crate::domain::unit_test::UnitTest;
 
 /// The set of node ids reported as `state:modified` by the
@@ -521,6 +522,37 @@ impl StateComparator {
         ModelInScopeSet { ids }
     }
 
+    /// Seed node ids in scope for this diff (cute-dbt#350) — the **dual**
+    /// of [`Self::models_in_scope`].
+    ///
+    /// A seed is in scope when it is modified: every node in the modified
+    /// set whose `resource_type == "seed"`. Seeds are graph **roots** with
+    /// no targeting unit tests, so this is a single arm — the
+    /// `resource_type` filter on the modified set, mirroring
+    /// [`Self::models_in_scope`]'s arm-2 projection. The model-only filter
+    /// (cute-dbt#167) is **untouched**: this is an additive sibling
+    /// projection, never a rewrite.
+    ///
+    /// Seeds enter the modified set through [`BodyChecksumModifier`] the
+    /// same way models do — `modified_set` iterates `current.nodes()`
+    /// resource-agnostically, so a changed seed `checksum` flags it without
+    /// any seed-specific comparator. The output is the input to
+    /// [`build_seed_cards`], which derives each seed's downstream lineage.
+    #[must_use]
+    pub fn seeds_in_scope(&self, current: &Manifest, baseline: &Manifest) -> SeedInScopeSet {
+        let modified = self.modified_set(current, baseline);
+        let ids = modified
+            .iter()
+            .filter(|id| {
+                current
+                    .node(id)
+                    .is_some_and(|node| node.resource_type() == "seed")
+            })
+            .cloned()
+            .collect();
+        SeedInScopeSet { ids }
+    }
+
     /// Unit-test ids whose **definition changed** relative to the baseline
     /// — the precise "this PR updated this test" signal (cute-dbt#91).
     ///
@@ -646,6 +678,74 @@ fn unit_test_targets(manifest: &Manifest) -> HashMap<NodeId, Vec<String>> {
         }
     }
     map
+}
+
+/// Build the identity-and-lineage [`SeedCard`] skeleton for each in-scope
+/// seed (cute-dbt#350) — the projection's render-payload output.
+///
+/// For each seed id in `seeds` (in deterministic [`SeedInScopeSet`] order),
+/// resolves the seed node and emits a [`SeedCard`] carrying its bare name,
+/// project-relative `original_file_path`, and the bare names of the
+/// **direct** downstream models that `ref()` it (the `seed_consumers`-derived
+/// "feeds N models" line). The data-bearing
+/// fields ([`SeedCard::table`] / [`SeedCard::diff`]) and the config-display
+/// strings stay empty here — the CLI gather stage fills them from the
+/// working-tree CSV in a later slice.
+///
+/// A seed id with no matching node is skipped (defensive — the projection
+/// only emits ids that resolve, but `current` is the single source of
+/// truth). Pure: a function of `current` alone given the in-scope set.
+#[must_use]
+pub fn build_seed_cards(current: &Manifest, seeds: &SeedInScopeSet) -> Vec<SeedCard> {
+    let consumers = seed_consumers(current);
+    seeds
+        .iter()
+        .filter_map(|seed_id| {
+            let node = current.node(seed_id)?;
+            let feeds_models = consumers.get(seed_id).cloned().unwrap_or_default();
+            Some(SeedCard::new(
+                seed_id.clone(),
+                node.bare_name(),
+                node.original_file_path().map(str::to_owned),
+                feeds_models,
+            ))
+        })
+        .collect()
+}
+
+/// Map each seed node id to the **sorted, deduplicated bare names** of the
+/// `model` nodes that directly `ref()` it (cute-dbt#350).
+///
+/// Seeds are graph roots (`depends_on.nodes: []`); the edge is recorded
+/// **downstream** — a consuming model carries the seed id in *its*
+/// `depends_on.nodes`. So the derivation scans every model node's
+/// `depends_on` and attributes it to each seed it references. **Direct**
+/// consumers only (one hop), never the transitive blast radius
+/// (cute-dbt#350 critique S5): "feeds N models" is a count a reviewer reads
+/// literally, so it must be the immediate `ref()` count. Names are sorted
+/// for a stable lineage line; duplicates (a model that lists the seed twice)
+/// collapse.
+#[must_use]
+fn seed_consumers(current: &Manifest) -> HashMap<NodeId, Vec<String>> {
+    let mut map: HashMap<NodeId, BTreeSet<String>> = HashMap::new();
+    for node in current.nodes().values() {
+        if node.resource_type() != "model" {
+            continue;
+        }
+        for dep_id in node.depends_on().nodes() {
+            if current
+                .node(dep_id)
+                .is_some_and(|dep| dep.resource_type() == "seed")
+            {
+                map.entry(dep_id.clone())
+                    .or_default()
+                    .insert(node.bare_name().to_owned());
+            }
+        }
+    }
+    map.into_iter()
+        .map(|(id, names)| (id, names.into_iter().collect()))
+        .collect()
 }
 
 /// The diff-scope banner text shown when no unit test is in scope.
@@ -778,6 +878,57 @@ impl FromIterator<NodeId> for ModelInScopeSet {
 impl Extend<NodeId> for ModelInScopeSet {
     fn extend<I: IntoIterator<Item = NodeId>>(&mut self, iter: I) {
         self.ids.extend(iter);
+    }
+}
+
+/// The set of seed node ids in scope for the current diff (cute-dbt#350).
+///
+/// The seed dual of [`ModelInScopeSet`]: every modified node whose
+/// `resource_type == "seed"`. Backed by a [`BTreeSet`] for deterministic
+/// iteration — [`build_seed_cards`] and the renderer depend on a stable
+/// order. Produced by [`StateComparator::seeds_in_scope`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SeedInScopeSet {
+    ids: BTreeSet<NodeId>,
+}
+
+impl SeedInScopeSet {
+    /// Empty set (equivalent to `Default::default`).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `true` when no seed is in scope.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    /// Number of seeds in scope.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Membership test by full seed node id.
+    #[must_use]
+    pub fn contains(&self, id: &NodeId) -> bool {
+        self.ids.contains(id)
+    }
+
+    /// Deterministic iteration over the in-scope seed node ids
+    /// ([`BTreeSet`] ordering).
+    pub fn iter(&self) -> impl Iterator<Item = &NodeId> {
+        self.ids.iter()
+    }
+}
+
+impl FromIterator<NodeId> for SeedInScopeSet {
+    fn from_iter<I: IntoIterator<Item = NodeId>>(iter: I) -> Self {
+        Self {
+            ids: iter.into_iter().collect(),
+        }
     }
 }
 
@@ -2648,5 +2799,296 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert!(models.contains(&id("model.shop.stg_orders")));
         assert!(!models.contains(&id("test.shop.not_null_orders_id")));
+    }
+
+    // ===== seeds (cute-dbt#350) =====
+
+    /// A `seed` node with the given full id, body checksum, and project-
+    /// relative `original_file_path` (the shape a real fusion seed carries).
+    fn seed(full_id: &str, checksum: &str, file_path: &str) -> Node {
+        Node::new(
+            NodeId::new(full_id),
+            "seed",
+            Checksum::new("sha256", checksum),
+            None,
+            None,
+            DependsOn::default(), // seeds are graph roots
+            Some(file_path.to_owned()),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    /// A `model` node that directly `ref()`s the given dependency node ids
+    /// (the downstream edge that records seed consumption).
+    fn model_with_deps(full_id: &str, checksum: &str, deps: &[&str]) -> Node {
+        Node::new(
+            NodeId::new(full_id),
+            "model",
+            Checksum::new("sha256", checksum),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::new(Vec::new(), deps.iter().map(|d| NodeId::new(*d)).collect()),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn seeds_in_scope_includes_a_modified_seed() {
+        // A seed whose checksum changed enters the modified set via
+        // BodyChecksumModifier (resource-agnostic) and is projected here.
+        let current = manifest(
+            vec![seed(
+                "seed.shop.raw_customers",
+                "new",
+                "seeds/raw_customers.csv",
+            )],
+            vec![],
+        );
+        let baseline = manifest(
+            vec![seed(
+                "seed.shop.raw_customers",
+                "old",
+                "seeds/raw_customers.csv",
+            )],
+            vec![],
+        );
+        let seeds = StateComparator::body_only().seeds_in_scope(&current, &baseline);
+        assert!(seeds.contains(&id("seed.shop.raw_customers")));
+        assert_eq!(seeds.len(), 1);
+    }
+
+    #[test]
+    fn seeds_in_scope_excludes_an_unchanged_seed() {
+        let current = manifest(
+            vec![seed(
+                "seed.shop.raw_customers",
+                "same",
+                "seeds/raw_customers.csv",
+            )],
+            vec![],
+        );
+        let baseline = manifest(
+            vec![seed(
+                "seed.shop.raw_customers",
+                "same",
+                "seeds/raw_customers.csv",
+            )],
+            vec![],
+        );
+        let seeds = StateComparator::body_only().seeds_in_scope(&current, &baseline);
+        assert!(seeds.is_empty());
+    }
+
+    #[test]
+    fn seeds_in_scope_filters_non_seed_resource_types() {
+        // The dual of the #167 model-filter regression: only `seed` nodes
+        // enter seeds_in_scope. A modified model and a modified test node in
+        // the same set must NOT leak in; the seed (control) must.
+        let cases: &[(&str, bool)] = &[
+            ("model", false),
+            ("test", false),
+            ("snapshot", false),
+            ("seed", true), // control: the seed IS scoped
+        ];
+        for (resource_type, expected) in cases {
+            let node_id = format!("{resource_type}.shop.brand_new");
+            let node = if *resource_type == "seed" {
+                seed(&node_id, "x", "seeds/brand_new.csv")
+            } else {
+                typed_node(&node_id, resource_type)
+            };
+            let current = manifest(vec![node], vec![]);
+            let baseline = manifest(vec![], vec![]); // node is new → modified
+            let seeds = StateComparator::body_only().seeds_in_scope(&current, &baseline);
+            assert_eq!(
+                seeds.contains(&id(&node_id)),
+                *expected,
+                "resource_type {resource_type:?}: expected in-scope = {expected}",
+            );
+            assert_eq!(seeds.len(), usize::from(*expected));
+        }
+    }
+
+    #[test]
+    fn seeds_in_scope_does_not_disturb_models_in_scope() {
+        // A modified model and a modified seed in the same diff produce the
+        // correct DUALS independently: the model in models_in_scope, the
+        // seed in seeds_in_scope, neither bleeding into the other (#167).
+        let current = manifest(
+            vec![
+                model("model.shop.stg_orders", "new"),
+                seed("seed.shop.raw_orders", "new", "seeds/raw_orders.csv"),
+            ],
+            vec![],
+        );
+        let baseline = manifest(
+            vec![
+                model("model.shop.stg_orders", "old"),
+                seed("seed.shop.raw_orders", "old", "seeds/raw_orders.csv"),
+            ],
+            vec![],
+        );
+        let comparator = StateComparator::body_only();
+        let models = comparator.models_in_scope(&current, &baseline);
+        let seeds = comparator.seeds_in_scope(&current, &baseline);
+        assert_eq!(models.len(), 1);
+        assert!(models.contains(&id("model.shop.stg_orders")));
+        assert!(!models.contains(&id("seed.shop.raw_orders")));
+        assert_eq!(seeds.len(), 1);
+        assert!(seeds.contains(&id("seed.shop.raw_orders")));
+        assert!(!seeds.contains(&id("model.shop.stg_orders")));
+    }
+
+    #[test]
+    fn seeds_in_scope_iterates_in_deterministic_seed_id_order() {
+        let current = manifest(
+            vec![
+                seed("seed.shop.zzz", "new", "seeds/zzz.csv"),
+                seed("seed.shop.aaa", "new", "seeds/aaa.csv"),
+            ],
+            vec![],
+        );
+        let baseline = manifest(vec![], vec![]);
+        let seeds = StateComparator::body_only().seeds_in_scope(&current, &baseline);
+        let collected: Vec<&NodeId> = seeds.iter().collect();
+        assert_eq!(collected, vec![&id("seed.shop.aaa"), &id("seed.shop.zzz")]);
+    }
+
+    #[test]
+    fn build_seed_cards_carries_identity_path_and_direct_lineage() {
+        // raw_customers is ref()'d by two models → feeds_models = both bare
+        // names, sorted. The card carries id, bare name, project-relative
+        // path; data fields stay empty.
+        let current = manifest(
+            vec![
+                seed("seed.shop.raw_customers", "new", "seeds/raw_customers.csv"),
+                model_with_deps("model.shop.stg_orders", "x", &["seed.shop.raw_customers"]),
+                model_with_deps(
+                    "model.shop.stg_customers",
+                    "x",
+                    &["seed.shop.raw_customers"],
+                ),
+            ],
+            vec![],
+        );
+        let seeds = SeedInScopeSet::from_iter([id("seed.shop.raw_customers")]);
+        let cards = build_seed_cards(&current, &seeds);
+        assert_eq!(cards.len(), 1);
+        let card = &cards[0];
+        assert_eq!(card.id, id("seed.shop.raw_customers"));
+        assert_eq!(card.name, "raw_customers");
+        assert_eq!(
+            card.original_file_path.as_deref(),
+            Some("seeds/raw_customers.csv")
+        );
+        // Sorted, deduplicated, DIRECT consumers only.
+        assert_eq!(card.feeds_models, vec!["stg_customers", "stg_orders"]);
+        assert_eq!(card.feeds_count(), 2);
+        assert!(card.table.is_none());
+        assert!(card.diff.is_none());
+    }
+
+    #[test]
+    fn build_seed_cards_counts_only_direct_consumers_not_transitive() {
+        // raw_customers feeds stg_customers (direct); dim_customers refs
+        // stg_customers (transitive via the staging model, NOT the seed).
+        // feeds_models must list ONLY stg_customers — the one-hop count a
+        // reviewer reads literally (cute-dbt#350 critique S5).
+        let current = manifest(
+            vec![
+                seed("seed.shop.raw_customers", "new", "seeds/raw_customers.csv"),
+                model_with_deps(
+                    "model.shop.stg_customers",
+                    "x",
+                    &["seed.shop.raw_customers"],
+                ),
+                model_with_deps(
+                    "model.shop.dim_customers",
+                    "x",
+                    &["model.shop.stg_customers"],
+                ),
+            ],
+            vec![],
+        );
+        let seeds = SeedInScopeSet::from_iter([id("seed.shop.raw_customers")]);
+        let cards = build_seed_cards(&current, &seeds);
+        assert_eq!(cards[0].feeds_models, vec!["stg_customers"]);
+        assert_eq!(cards[0].feeds_count(), 1);
+    }
+
+    #[test]
+    fn build_seed_cards_dedups_a_model_that_refs_the_seed_twice() {
+        // A model that lists the seed id twice in depends_on.nodes collapses
+        // to one entry (BTreeSet dedup), so "feeds N models" counts models,
+        // not edges.
+        let current = manifest(
+            vec![
+                seed("seed.shop.raw_payments", "new", "seeds/raw_payments.csv"),
+                model_with_deps(
+                    "model.shop.stg_payments",
+                    "x",
+                    &["seed.shop.raw_payments", "seed.shop.raw_payments"],
+                ),
+            ],
+            vec![],
+        );
+        let seeds = SeedInScopeSet::from_iter([id("seed.shop.raw_payments")]);
+        let cards = build_seed_cards(&current, &seeds);
+        assert_eq!(cards[0].feeds_models, vec!["stg_payments"]);
+        assert_eq!(cards[0].feeds_count(), 1);
+    }
+
+    #[test]
+    fn build_seed_cards_yields_empty_lineage_for_an_unreferenced_seed() {
+        let current = manifest(
+            vec![seed("seed.shop.lonely", "new", "seeds/lonely.csv")],
+            vec![],
+        );
+        let seeds = SeedInScopeSet::from_iter([id("seed.shop.lonely")]);
+        let cards = build_seed_cards(&current, &seeds);
+        assert_eq!(cards.len(), 1);
+        assert!(cards[0].feeds_models.is_empty());
+        assert_eq!(cards[0].feeds_count(), 0);
+    }
+
+    #[test]
+    fn build_seed_cards_emits_nothing_for_an_empty_scope() {
+        let current = manifest(
+            vec![seed("seed.shop.raw_orders", "new", "seeds/raw_orders.csv")],
+            vec![],
+        );
+        let cards = build_seed_cards(&current, &SeedInScopeSet::new());
+        assert!(cards.is_empty());
+    }
+
+    #[test]
+    fn seed_consumers_ignores_non_seed_dependencies() {
+        // A model that refs another MODEL (not a seed) contributes no seed
+        // entry — the consumer scan attributes only seed-typed deps.
+        let current = manifest(
+            vec![
+                model("model.shop.stg_orders", "x"),
+                model_with_deps("model.shop.fct_orders", "x", &["model.shop.stg_orders"]),
+            ],
+            vec![],
+        );
+        assert!(seed_consumers(&current).is_empty());
+    }
+
+    #[test]
+    fn seed_in_scope_set_basics() {
+        assert!(SeedInScopeSet::new().is_empty());
+        assert!(SeedInScopeSet::default().is_empty());
+        assert_eq!(SeedInScopeSet::new().len(), 0);
+        let s = SeedInScopeSet::from_iter([id("seed.shop.a"), id("seed.shop.b")]);
+        assert_eq!(s.len(), 2);
+        assert!(!s.is_empty());
+        assert!(s.contains(&id("seed.shop.a")));
+        assert!(!s.contains(&id("seed.shop.c")));
     }
 }
