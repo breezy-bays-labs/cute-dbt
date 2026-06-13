@@ -12396,6 +12396,60 @@ fn governance_chip_absent_on_the_non_experimental_golden_in_a_real_browser() {
         Some(0),
         "no group chip in the DOM when governance is off",
     );
+    // cute-dbt#260 Slice 1 — the blast-radius statement is gated too.
+    let blast_count = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"gov-blast\"]').length",
+    );
+    assert_eq!(
+        blast_count.as_i64(),
+        Some(0),
+        "no blast-radius statement in the DOM when governance is off",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn governance_blast_radius_renders_on_the_committed_showcase_in_a_real_browser() {
+    // cute-dbt#260 Slice 1 — the headless guard: the committed
+    // diff-showcase golden (experimental:"1") has the in-scope
+    // fct_provider_metrics (+ its 6 upstream in-scope models) feeding the
+    // provider_quality_dashboard exposure, so the blast-radius statement
+    // surfaces. Assert the real DOM node + its composed copy.
+    let showcase = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("diff-showcase-report.html");
+    let url = format!("file://{}", showcase.to_str().expect("UTF-8 path"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"gov-blast\"]"),
+        1,
+        "exactly one blast-radius statement (one exposure reached)",
+    );
+    let blast = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"gov-blast\"]').textContent",
+    );
+    assert!(
+        blast.contains("Touches 7 models feeding provider_quality_dashboard"),
+        "the statement names the in-scope count + exposure: {blast}",
+    );
+    assert!(
+        blast.contains("(dashboard)"),
+        "the statement names the exposure type: {blast}",
+    );
+    assert!(
+        blast.contains("owner Clinical Quality Team")
+            && blast.contains("clinical-quality@example.com"),
+        "the statement carries the exposure owner + email: {blast}",
+    );
     let _ = tab.close(true);
 }
 

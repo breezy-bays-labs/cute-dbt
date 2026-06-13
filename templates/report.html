@@ -328,14 +328,22 @@
    surrounding tag trims both sides), keeping the non-experimental
    (experimental:"") goldens byte-identical — the has_project_state /
    project_panel precedent above. Slice 0 carries only the group/owner
-   header chips; the exposure / contract / enforcement / lifecycle
-   surfaces land additively here in later slices. Intentionally
-   unstyled — Claude Design owns the visual pass; the data-testid /
-   data-* hooks are the stable selectors the headless guards key off. -#}
+   header chips (Slice 0) + the blast-radius panel statements (Slice 1);
+   the contract / enforcement / lifecycle surfaces land additively here
+   in later slices. Intentionally unstyled — Claude Design owns the
+   visual pass; the data-testid / data-* hooks are the stable selectors
+   the headless guards key off. -#}
 {%- if has_governance %}
 <section class="governance-panel" aria-label="Governance &amp; ownership" data-testid="governance-panel">
 {%- for chip in governance.group_chips %}
   <span class="gov-group-chip" data-testid="gov-group-chip" data-group="{{ chip.group }}">group {{ chip.group }}{% match chip.owner_name %}{% when Some with (n) %} &middot; owner {{ n }}{% when None %}{% endmatch %}{% match chip.owner_email %}{% when Some with (e) %} &lt;{{ e }}&gt;{% when None %}{% endmatch %}</span>
+{%- endfor %}
+{#- cute-dbt#260 Slice 1 — the reverse-reachability blast-radius
+    statements: "Touches N models feeding <exposure> (<type>) — owner …".
+    One per exposure an in-scope model reaches; aggregate panel callout,
+    not a per-model verdict (an exposure has no per-model DAG home). -#}
+{%- for b in governance.blast_radius %}
+  <p class="gov-blast" data-testid="gov-blast" data-exposure="{{ b.exposure_label }}">Touches {{ b.in_scope_model_count }} {% if b.in_scope_model_count == 1 %}model{% else %}models{% endif %} feeding <strong>{{ b.exposure_label }}</strong>{% match b.exposure_type %}{% when Some with (t) %} ({{ t }}){% when None %}{% endmatch %}{% match b.owner_name %}{% when Some with (n) %} &mdash; owner {{ n }}{% match b.owner_email %}{% when Some with (e) %} &lt;{{ e }}&gt;{% when None %}{% endmatch %}{% when None %}{% match b.owner_email %}{% when Some with (e) %} &mdash; owner &lt;{{ e }}&gt;{% when None %}{% endmatch %}{% endmatch %}</p>
 {%- endfor %}
 </section>
 {% endif -%}

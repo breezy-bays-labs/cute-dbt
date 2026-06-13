@@ -2101,15 +2101,17 @@ struct ReportTemplate<'a> {
     /// payload-only (no DOM), so a display toggle would be inert.
     has_project_state: bool,
     /// `true` when the governance facts carry any visible surface
-    /// (cute-dbt#260) — Slice 0: at least one group chip. Gates the
-    /// `{%- if has_governance %}` section so an empty payload (the
-    /// off-gate default) emits zero DOM, keeping the non-experimental
-    /// golden byte-identical.
+    /// (cute-dbt#260) — a group chip (Slice 0) or a blast-radius
+    /// statement (Slice 1). Gates the `{%- if has_governance %}` section
+    /// so an empty payload (the off-gate default) emits zero DOM, keeping
+    /// the non-experimental golden byte-identical.
     has_governance: bool,
     /// The server-rendered governance facts (cute-dbt#260): the
-    /// group/owner header chips (Slice 0). The `{%- if has_governance %}`
-    /// section reads `governance.group_chips`; the same struct rides the
-    /// JSON payload for downstream consumers + headless assertions.
+    /// group/owner header chips (Slice 0) + the reverse-reachability
+    /// blast-radius statements (Slice 1). The `{%- if has_governance %}`
+    /// section reads `governance.group_chips` + `governance.blast_radius`;
+    /// the same struct rides the JSON payload for downstream consumers +
+    /// headless assertions.
     governance: GovernanceFacts,
 }
 
@@ -3062,9 +3064,9 @@ fn leaf_segment(id: &str) -> &str {
 mod tests {
     use super::*;
     use crate::domain::{
-        Checksum, CteEdge, CteNode, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind,
-        EdgeType, Group, GroupChip, Manifest, ManifestMetadata, NodeConfig, NodeId, Owner,
-        UnitTest, UnitTestExpect, UnitTestGiven,
+        BlastRadius, Checksum, CteEdge, CteNode, DEFAULT_REPORT_TITLE, DependsOn, DiffLine,
+        DiffLineKind, EdgeType, Group, GroupChip, Manifest, ManifestMetadata, NodeConfig, NodeId,
+        Owner, UnitTest, UnitTestExpect, UnitTestGiven,
     };
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
@@ -6321,6 +6323,7 @@ mod tests {
                 owner_name: Some("Finance Team".to_owned()),
                 owner_email: Some("finance@corp.example".to_owned()),
             }],
+            ..GovernanceFacts::default()
         };
         let html = render_html_with_governance("cute_dbt_render_governance_on.html", &facts);
         assert!(
@@ -6351,6 +6354,90 @@ mod tests {
         // CSS must not let this false-PASS.
         assert!(!html.contains(r#"<section class="governance-panel""#));
         assert!(!html.contains(r#"data-testid="gov-group-chip""#));
+    }
+
+    // ----- cute-dbt#260 Slice 1: blast-radius panel statement -----
+
+    #[test]
+    fn governance_blast_radius_renders_the_panel_statement() {
+        let facts = GovernanceFacts {
+            blast_radius: vec![BlastRadius {
+                exposure_label: "provider_dashboard".to_owned(),
+                exposure_type: Some("dashboard".to_owned()),
+                owner_name: Some("Clinical Team".to_owned()),
+                owner_email: Some("clinical@corp.example".to_owned()),
+                in_scope_model_count: 3,
+            }],
+            ..GovernanceFacts::default()
+        };
+        let html = render_html_with_governance("cute_dbt_render_governance_blast.html", &facts);
+        // DOM-node-targeted (the #334 hardening pattern): assert the real
+        // <p> node + its full composed statement, not a bare token.
+        assert!(
+            html.contains(r#"<section class="governance-panel""#),
+            "the governance section renders for a blast-radius statement",
+        );
+        assert!(
+            html.contains(
+                r#"<p class="gov-blast" data-testid="gov-blast" data-exposure="provider_dashboard">Touches 3 models feeding <strong>provider_dashboard</strong> (dashboard) &mdash; owner Clinical Team &lt;clinical@corp.example&gt;</p>"#
+            ),
+            "the blast statement names the count, exposure, type, and owner: {html}",
+        );
+    }
+
+    #[test]
+    fn governance_blast_radius_singular_model_when_count_is_one() {
+        let facts = GovernanceFacts {
+            blast_radius: vec![BlastRadius {
+                exposure_label: "dash".to_owned(),
+                exposure_type: Some("dashboard".to_owned()),
+                owner_name: None,
+                owner_email: None,
+                in_scope_model_count: 1,
+            }],
+            ..GovernanceFacts::default()
+        };
+        let html =
+            render_html_with_governance("cute_dbt_render_governance_blast_singular.html", &facts);
+        // "1 model" (singular), no owner clause when the owner is absent.
+        assert!(
+            html.contains(
+                r#"<p class="gov-blast" data-testid="gov-blast" data-exposure="dash">Touches 1 model feeding <strong>dash</strong> (dashboard)</p>"#
+            ),
+            "singular 'model' and no owner clause: {html}",
+        );
+    }
+
+    #[test]
+    fn governance_blast_radius_owner_email_only_renders_bare_address() {
+        let facts = GovernanceFacts {
+            blast_radius: vec![BlastRadius {
+                exposure_label: "dash".to_owned(),
+                exposure_type: None,
+                owner_name: None,
+                owner_email: Some("ops@corp.example".to_owned()),
+                in_scope_model_count: 2,
+            }],
+            ..GovernanceFacts::default()
+        };
+        let html =
+            render_html_with_governance("cute_dbt_render_governance_blast_email_only.html", &facts);
+        // No type clause, owner clause is the bare email (name absent).
+        assert!(
+            html.contains(
+                r#"<p class="gov-blast" data-testid="gov-blast" data-exposure="dash">Touches 2 models feeding <strong>dash</strong> &mdash; owner &lt;ops@corp.example&gt;</p>"#
+            ),
+            "no type clause + bare-email owner clause: {html}",
+        );
+    }
+
+    #[test]
+    fn governance_off_emits_no_blast_radius_dom() {
+        let html = render_html_with_governance(
+            "cute_dbt_render_governance_no_blast.html",
+            &GovernanceFacts::default(),
+        );
+        assert!(!html.contains(r#"data-testid="gov-blast""#));
     }
 
     // ===== project panel: hooks + dispatch rows (cute-dbt#269) =====
