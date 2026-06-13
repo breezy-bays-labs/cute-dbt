@@ -916,14 +916,18 @@ pub fn backing_test_for<'m>(
 }
 
 /// The id of the first enabled `unique` / `unique_combination_of_columns`
-/// data test attached to `model` whose asserted column SET equals
-/// `columns` (cute-dbt#341) — the composite-aware uniqueness backing join.
+/// data test attached to `model` whose asserted columns are a SUBSET of
+/// the declared `columns` (cute-dbt#341) — the composite-aware uniqueness
+/// backing join.
 ///
-/// Set EQUALITY (case-insensitive), not subset: a composite PK `(a, b)`
-/// asserts the TUPLE is unique, so a test over a proper subset (e.g. a
-/// `unique` on `a` alone) does NOT back it — partial-overlap is not
-/// coverage (the cute-dbt#341 AC). Reuses the #259 grain recognizer
-/// `uniqueness_test_columns` (the crate-private
+/// SUBSET (case-insensitive), mirroring the #259 grain
+/// [`covers_key`](crate::domain::checks) direction exactly: a uniqueness
+/// test on a proper subset of a composite key is a STRONGER guarantee
+/// that backs it (`{a}` unique ⟹ `(a, b)` unique). An exact match is the
+/// subset boundary case, so it backs too. A test over a SUPERSET, or one
+/// only partially overlapping, is NOT a subset and does not back the key
+/// (superset-uniqueness does not imply subset-uniqueness). Reuses the
+/// #259 grain recognizer `uniqueness_test_columns` (the crate-private
 /// `crate::domain::checks` extractor) for "which columns does this test
 /// assert unique?" — one authority across the grain and enforcement
 /// surfaces. Returns the REAL test node id so a Covered finding
@@ -934,14 +938,14 @@ pub fn backing_test_for_columns<'m>(
     model: &NodeId,
     columns: &[String],
 ) -> Option<&'m NodeId> {
-    let want = column_set(columns);
-    if want.is_empty() {
+    let key = column_set(columns);
+    if key.is_empty() {
         return None;
     }
     manifest
         .nodes()
         .iter()
-        .find(|(_, node)| uniqueness_test_set_equals(node, model, &want))
+        .find(|(_, node)| uniqueness_test_covers_key(node, model, &key))
         .map(|(id, _)| id)
 }
 
@@ -952,8 +956,9 @@ fn column_set(columns: &[String]) -> BTreeSet<String> {
 }
 
 /// Whether `node` is an enabled uniqueness test attached to `model` whose
-/// asserted column set equals `want` (already lowercased).
-fn uniqueness_test_set_equals(node: &Node, model: &NodeId, want: &BTreeSet<String>) -> bool {
+/// asserted columns are a non-empty SUBSET of `key` (already lowercased)
+/// — the grain `covers_key` direction (cute-dbt#169 / #341).
+fn uniqueness_test_covers_key(node: &Node, model: &NodeId, key: &BTreeSet<String>) -> bool {
     if node.resource_type() != "test" || node.attached_node() != Some(model) {
         return false;
     }
@@ -963,7 +968,8 @@ fn uniqueness_test_set_equals(node: &Node, model: &NodeId, want: &BTreeSet<Strin
     let Some(columns) = uniqueness_test_columns(node) else {
         return false;
     };
-    &column_set(&columns) == want
+    let test_cols = column_set(&columns);
+    !test_cols.is_empty() && test_cols.is_subset(key)
 }
 
 /// Whether `node` is an enabled `not_null` data test attached to `model`
@@ -2567,7 +2573,8 @@ mod tests {
     }
 
     #[test]
-    fn columns_backed_by_a_set_equal_combination_test_returns_the_id() {
+    fn an_exact_match_combination_test_backs_and_returns_the_id() {
+        // Exact match is the subset boundary case — it backs.
         let model_id = NodeId::new("model.pkg.m");
         let manifest = manifest_with_nodes(vec![
             model("model.pkg.m", None),
@@ -2580,7 +2587,7 @@ mod tests {
     }
 
     #[test]
-    fn columns_match_is_set_equal_order_and_case_independent() {
+    fn columns_match_is_order_and_case_independent() {
         let model_id = NodeId::new("model.pkg.m");
         let manifest = manifest_with_nodes(vec![
             model("model.pkg.m", None),
@@ -2588,25 +2595,46 @@ mod tests {
         ]);
         assert!(
             backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])).is_some(),
-            "order + case don't matter — it's a set match",
+            "order + case don't matter — it's a set comparison",
         );
     }
 
     #[test]
-    fn a_subset_combination_does_not_back_the_tuple() {
+    fn a_subset_combination_backs_the_tuple() {
+        // `{a}` unique ⟹ `(a, b)` unique — a uniqueness test on a proper
+        // SUBSET of the key is a stronger guarantee that backs it (the
+        // #259 grain `covers_key` direction; cute-dbt#341 corrected).
         let model_id = NodeId::new("model.pkg.m");
         let manifest = manifest_with_nodes(vec![
             model("model.pkg.m", None),
             combo_node("test.pkg.combo", "model.pkg.m", &["a"]),
         ]);
-        assert!(
-            backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])).is_none(),
-            "partial overlap is not coverage (cute-dbt#341)",
+        assert_eq!(
+            backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])),
+            Some(&NodeId::new("test.pkg.combo")),
+            "a subset uniqueness test backs the wider key",
+        );
+    }
+
+    #[test]
+    fn a_single_column_unique_backs_a_composite_key() {
+        // A plain `unique` on one tuple column is a 1-element subset of
+        // the key — it backs the composite key.
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            test_node("test.pkg.u", "model.pkg.m", "unique", "a"),
+        ]);
+        assert_eq!(
+            backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])),
+            Some(&NodeId::new("test.pkg.u")),
         );
     }
 
     #[test]
     fn a_superset_combination_does_not_back_the_tuple() {
+        // A superset is NOT a subset — uniqueness of `(a, b, c)` does not
+        // imply uniqueness of `(a, b)`, so it does not back the key.
         let model_id = NodeId::new("model.pkg.m");
         let manifest = manifest_with_nodes(vec![
             model("model.pkg.m", None),
@@ -2614,7 +2642,22 @@ mod tests {
         ]);
         assert!(
             backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])).is_none(),
-            "a wider combination is a different tuple — not set-equal",
+            "a wider combination is not a subset of the key",
+        );
+    }
+
+    #[test]
+    fn a_partial_overlap_combination_does_not_back_the_tuple() {
+        // `{a, c}` is neither a subset nor a superset of `{a, b}` — it
+        // overlaps but is not contained, so it does not back the key.
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            combo_node("test.pkg.combo", "model.pkg.m", &["a", "c"]),
+        ]);
+        assert!(
+            backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])).is_none(),
+            "partial overlap (not contained) is not coverage",
         );
     }
 
