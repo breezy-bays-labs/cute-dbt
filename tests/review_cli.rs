@@ -1067,6 +1067,232 @@ fn a_successful_compile_that_writes_no_manifest_gets_the_target_path_remediation
 }
 
 // ===================================================================
+// --pr anchor + fail-soft gh rung (V4, cute-dbt#303)
+// ===================================================================
+
+/// A `gh` shim body that answers `pr view` with the given base/head/
+/// number JSON and exits 0; every other subcommand exits 0 with no
+/// output.
+fn gh_pr_view_shim(base: &str, head: &str, number: u64) -> String {
+    format!(
+        "case \"$1 $2\" in\n  'pr view') printf '{{\"baseRefName\":\"{base}\",\
+         \"headRefName\":\"{head}\",\"number\":{number}}}\\n'; exit 0;;\nesac\nexit 0",
+    )
+}
+
+#[test]
+fn the_gh_rung_resolves_the_open_pr_base_in_the_auto_ladder() {
+    // No --base, no cute-dbt.base, no origin/HEAD: the gh rung answers.
+    // The PR's base is `main`, which exists as a local branch — review
+    // resolves it (origin/main absent in this repo, so the local ref).
+    let repo = TestRepo::init_with_branch("gh-rung", "main");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+    repo.install_gh_shim(&gh_pr_view_shim("main", "feature", 12));
+
+    let output = repo.review(&["--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("via gh pr view"),
+        "the gh rung is announced as the answering rung: {stderr}",
+    );
+    assert!(
+        std::fs::read_to_string(repo.root.join("target/cute-dbt-report.html"))
+            .expect("report written")
+            .contains(STG_CUSTOMERS_TEST),
+    );
+}
+
+#[test]
+fn a_missing_gh_falls_through_the_auto_ladder_silently() {
+    // No gh shim installed: the gh rung must fall through to the local
+    // main probe, NOT error — gh is never a hard dependency of the
+    // auto-ladder.
+    let repo = TestRepo::init_with_branch("gh-absent", "main");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+    // (no install_gh_shim)
+
+    let output = repo.review(&["--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        stderr_of(&output).contains("local main/master/trunk probe"),
+        "without gh the ladder falls through to the local probe: {}",
+        stderr_of(&output),
+    );
+}
+
+#[test]
+fn a_gh_failure_falls_through_the_auto_ladder_silently() {
+    // gh present but `pr view` exits non-zero (e.g. not authed / no PR):
+    // the auto rung still falls through, no error.
+    let repo = TestRepo::init_with_branch("gh-fails", "main");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+    repo.install_gh_shim("echo 'no pull requests found' >&2; exit 1");
+
+    let output = repo.review(&["--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        stderr_of(&output).contains("local main/master/trunk probe"),
+        "a failing gh falls through to the local probe: {}",
+        stderr_of(&output),
+    );
+}
+
+#[test]
+fn the_auto_gh_rung_never_runs_on_a_detached_head() {
+    // The rung is branch-only: on a detached HEAD it must not even spawn
+    // gh (the gh shim log stays empty), falling straight through.
+    let repo = TestRepo::init_with_branch("gh-detached", "main");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    // Make a second commit, then detach onto its SHA with a tree change.
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- v2\n");
+    repo.commit_all("v2");
+    let head = String::from_utf8(repo.git(&["rev-parse", "HEAD"]).stdout).expect("utf8");
+    repo.git(&["checkout", "-q", head.trim()]);
+    repo.write(
+        STG_CUSTOMERS_SQL,
+        "select 1 as customer_id -- detached edit\n",
+    );
+    repo.install_gh_shim(&gh_pr_view_shim("main", "feature", 1));
+
+    let output = repo.review(&["--no-open"]);
+    // The local `main` probe answers the base; the run succeeds.
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        repo.gh_log_contents().is_empty(),
+        "gh is never spawned on a detached HEAD: {}",
+        repo.gh_log_contents(),
+    );
+}
+
+#[test]
+fn bare_pr_uses_the_open_prs_base() {
+    let repo = TestRepo::init_with_branch("bare-pr", "main");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+    repo.install_gh_shim(&gh_pr_view_shim("main", "feature", 7));
+
+    let output = repo.review(&["--pr", "--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        stderr_of(&output).contains("via gh pr view"),
+        "--pr anchors via the gh rung: {}",
+        stderr_of(&output),
+    );
+    assert!(
+        repo.root.join("target/cute-dbt-report.html").exists(),
+        "the PR-anchored review renders",
+    );
+}
+
+#[test]
+fn bare_pr_with_no_open_pr_is_a_remediated_error() {
+    let repo = TestRepo::init_with_branch("no-pr", "main");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+    repo.install_gh_shim("echo 'no pull requests found' >&2; exit 1");
+
+    let output = repo.review(&["--pr", "--no-open"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("no open pull request") && stderr.contains("gh pr create"),
+        "the no-PR remediation fires (explicit --pr surfaces the failure): {stderr}",
+    );
+    assert!(
+        !repo.root.join("target/cute-dbt-report.html").exists(),
+        "no report on a --pr failure",
+    );
+}
+
+#[test]
+fn pr_with_missing_gh_errors_with_the_install_remediation() {
+    let repo = TestRepo::init_with_branch("pr-no-gh", "main");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+    // (no gh shim — gh genuinely absent)
+
+    let output = repo.review(&["--pr", "--no-open"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        stderr_of(&output).contains("cli.github.com"),
+        "explicit --pr surfaces gh-missing (auto rung would fall through): {}",
+        stderr_of(&output),
+    );
+}
+
+#[test]
+fn pr_number_on_the_matching_head_branch_runs() {
+    let repo = TestRepo::init_with_branch("pr-num-match", "main");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+    // PR #9's head IS `feature`, the current branch.
+    repo.install_gh_shim(&gh_pr_view_shim("main", "feature", 9));
+
+    let output = repo.review(&["--pr", "9", "--no-open"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        repo.root.join("target/cute-dbt-report.html").exists(),
+        "the head matches, so the review runs",
+    );
+}
+
+#[test]
+fn pr_number_on_the_wrong_branch_remediates_without_mutating_the_tree() {
+    let repo = TestRepo::init_with_branch("pr-num-mismatch", "main");
+    scaffold_dbt_project(&repo, ".", "jaffle-shop-current.json");
+    repo.git(&["checkout", "-q", "-b", "some-other-branch"]);
+    repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
+    repo.commit_all("edit");
+    // PR #9's head is `feature`, but we are on `some-other-branch`.
+    repo.install_gh_shim(&gh_pr_view_shim("main", "feature", 9));
+
+    let branch_before =
+        String::from_utf8(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]).stdout).expect("utf8");
+    let output = repo.review(&["--pr", "9", "--no-open"]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("gh pr checkout 9") && stderr.contains("never checks out"),
+        "the mismatch remediates with checkout + the never-mutate promise: {stderr}",
+    );
+    // The never-mutate contract: the working tree / branch is untouched.
+    let branch_after =
+        String::from_utf8(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]).stdout).expect("utf8");
+    assert_eq!(
+        branch_before.trim(),
+        branch_after.trim(),
+        "review never checked out — the branch is unchanged",
+    );
+    assert!(
+        gh_checkout_was_never_invoked(&repo),
+        "the gh shim was never asked to `pr checkout`",
+    );
+}
+
+/// Whether the gh shim's invocation log records any `pr checkout` call.
+fn gh_checkout_was_never_invoked(repo: &TestRepo) -> bool {
+    !repo.gh_log_contents().contains("pr checkout")
+}
+
+// ===================================================================
 // Usage errors stay exit 2
 // ===================================================================
 

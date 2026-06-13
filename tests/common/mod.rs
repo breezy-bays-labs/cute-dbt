@@ -163,7 +163,7 @@ impl TestRepo {
     }
 
     /// Apply the git-environment isolation to any command (git itself
-    /// or the spawned `cute-dbt`, which shells out to git).
+    /// or the spawned `cute-dbt`, which shells out to git/dbt/gh).
     pub fn isolate(&self, cmd: &mut Command) {
         let empty = self.home.join("gitconfig");
         scrub_git_env(cmd);
@@ -183,19 +183,19 @@ impl TestRepo {
             .env_remove("DBT_TARGET_PATH");
     }
 
-    /// Install an executable `dbt` shim into the controlled PATH. The
-    /// body is `#!/bin/sh` script text; every invocation's cwd + argv is
-    /// appended to [`TestRepo::dbt_log`] before the body runs, so tests
-    /// can assert exactly what review executed (the planned-argv ==
-    /// executed-argv pin at the subprocess level).
-    pub fn install_dbt_shim(&self, body: &str) {
+    /// Install an executable shim named `name` into the controlled PATH.
+    /// The body is `#!/bin/sh` script text; every invocation's cwd + argv
+    /// is appended to `<bin>/<name>-invocations.log` before the body
+    /// runs, so tests can assert exactly what review executed (the
+    /// planned-argv == executed-argv pin at the subprocess level).
+    pub fn install_shim(&self, name: &str, body: &str) {
         use std::os::unix::fs::PermissionsExt;
-        let path = self.bin.join("dbt");
+        let path = self.bin.join(name);
         let script = format!(
             "#!/bin/sh\nprintf 'cwd=%s args=%s\\n' \"$(pwd)\" \"$*\" >> \"{log}\"\n{body}\n",
-            log = self.dbt_log().display(),
+            log = self.shim_log(name).display(),
         );
-        std::fs::write(&path, script).expect("write dbt shim");
+        std::fs::write(&path, script).expect("write shim");
         let mut perms = std::fs::metadata(&path)
             .expect("shim metadata")
             .permissions();
@@ -203,14 +203,41 @@ impl TestRepo {
         std::fs::set_permissions(&path, perms).expect("chmod shim");
     }
 
-    /// The shim invocation log (one `cwd=… args=…` line per call).
-    pub fn dbt_log(&self) -> PathBuf {
-        self.bin.join("dbt-invocations.log")
+    /// Install an executable `dbt` shim (the common case).
+    pub fn install_dbt_shim(&self, body: &str) {
+        self.install_shim("dbt", body);
     }
 
-    /// The shim log contents — empty when dbt never ran.
+    /// Install an executable `gh` shim (cute-dbt#303 — the PR-anchor +
+    /// gh-rung tests).
+    pub fn install_gh_shim(&self, body: &str) {
+        self.install_shim("gh", body);
+    }
+
+    /// Remove a shim from the controlled PATH so the binary is genuinely
+    /// "not found" (the gh-missing / dbt-missing scenarios).
+    pub fn remove_shim(&self, name: &str) {
+        let _ = std::fs::remove_file(self.bin.join(name));
+    }
+
+    /// A named shim's invocation log (one `cwd=… args=…` line per call).
+    pub fn shim_log(&self, name: &str) -> PathBuf {
+        self.bin.join(format!("{name}-invocations.log"))
+    }
+
+    /// The `dbt` shim invocation log path.
+    pub fn dbt_log(&self) -> PathBuf {
+        self.shim_log("dbt")
+    }
+
+    /// The `dbt` shim log contents — empty when dbt never ran.
     pub fn dbt_log_contents(&self) -> String {
         std::fs::read_to_string(self.dbt_log()).unwrap_or_default()
+    }
+
+    /// The `gh` shim log contents — empty when gh never ran.
+    pub fn gh_log_contents(&self) -> String {
+        std::fs::read_to_string(self.shim_log("gh")).unwrap_or_default()
     }
 
     /// Run a git command in the repo, asserting success.
