@@ -140,7 +140,10 @@ exclude_globs = []
 # src/domain/unit_test_table.rs.
 exclude_re = [
   "delete ! in StateComparator::models_in_scope",
-  "unit_test_table\\.rs:1616:.*replace - with \\+ in dedent",
+  # Re-pinned 1616 -> 1628 (cute-dbt#313 PR2: split_quote_aware extracted
+  # `step_unquoted`, shifting every line below it in unit_test_table.rs down).
+  "unit_test_table\\.rs:1628:.*replace - with \\+ in dedent",
   "unit_test_table\\.rs:847:.*replace match guard .* with false in split_quote_aware",
-  "unit_test_table\\.rs:1173:.*replace \\* with / in single_quote_end",
+  # Re-pinned 1173 -> 1185 (cute-dbt#313 PR2, same extraction shift).
+  "unit_test_table\\.rs:1185:.*replace \\* with / in single_quote_end",
 ]

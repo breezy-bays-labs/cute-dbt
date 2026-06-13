@@ -289,9 +289,21 @@ fn list_item_name_matches(
         return true;
     }
 
-    // Case 2: `name:` is on a subsequent line at the field-indent.
-    // Stop scanning when we hit the next list item (indent <=
-    // list_indent) or the end of the file.
+    // Case 2: `name:` is on a subsequent line at the item's field-indent.
+    item_field_name_matches(lines, item_start, list_indent, field_indent, test_name)
+}
+
+/// Scan the lines after a list item's `- ` line for a `name:` field at
+/// the item's `field_indent`, returning whether it matches `test_name`.
+/// Stops at the next list item (`indent <= list_indent`) or EOF; skips
+/// blanks, comments, and nested-value lines deeper than `field_indent`.
+fn item_field_name_matches(
+    lines: &[&str],
+    item_start: usize,
+    list_indent: usize,
+    field_indent: usize,
+    test_name: &str,
+) -> bool {
     for line in lines.iter().skip(item_start + 1) {
         let t = line.trim_start();
         let ci = line.len() - t.len();
@@ -311,7 +323,6 @@ fn list_item_name_matches(
             return parse_yaml_scalar(rest) == test_name;
         }
     }
-
     false
 }
 
@@ -449,35 +460,57 @@ fn find_leading_start(lines: &[&str], name_idx: usize, list_indent: usize) -> us
 /// sibling `- name:` (no blank-line gap), those comments belong to
 /// the NEXT test's leading and are NOT in this test's trailing.
 fn find_trailing_end(lines: &[&str], body_end: usize, list_indent: usize) -> usize {
-    let mut end = body_end;
     let mut candidate_end = body_end;
     let mut have_candidates = false;
 
     for (i, line) in lines.iter().enumerate().skip(body_end + 1) {
-        let trimmed = line.trim_start();
-        let cur_indent = line.len() - trimmed.len();
-        if trimmed.is_empty() {
-            break;
-        }
-        if !trimmed.starts_with('#') {
-            // Non-comment at any indent — stop. If this is the next
-            // sibling `- ` at `list_indent`, the leading-wins rule
-            // discards our candidates.
-            if cur_indent == list_indent && trimmed.starts_with("- ") && have_candidates {
-                return body_end;
+        match classify_trailing_line(line, list_indent, have_candidates) {
+            TrailingScan::Stop => break,
+            TrailingScan::LeadingWins => return body_end,
+            TrailingScan::Candidate => {
+                candidate_end = i;
+                have_candidates = true;
             }
-            break;
         }
-        if cur_indent != list_indent {
-            break;
-        }
-        candidate_end = i;
-        have_candidates = true;
     }
     if have_candidates {
-        end = candidate_end;
+        candidate_end
+    } else {
+        body_end
     }
-    end
+}
+
+/// What [`find_trailing_end`] does with one post-body line.
+enum TrailingScan {
+    /// Block ends before this line (blank, non-list-indent comment, or a
+    /// non-comment that is not a candidate-stealing sibling).
+    Stop,
+    /// A sibling `- ` at `list_indent` directly abuts already-collected
+    /// candidate comments — the leading-wins rule discards them.
+    LeadingWins,
+    /// A `#` comment at `list_indent` — a trailing-comment candidate.
+    Candidate,
+}
+
+/// Classify one line during the trailing-comment scan.
+fn classify_trailing_line(line: &str, list_indent: usize, have_candidates: bool) -> TrailingScan {
+    let trimmed = line.trim_start();
+    let cur_indent = line.len() - trimmed.len();
+    if trimmed.is_empty() {
+        return TrailingScan::Stop;
+    }
+    if !trimmed.starts_with('#') {
+        // Non-comment at any indent ends the scan. If it is the next
+        // sibling `- ` at `list_indent`, leading-wins discards candidates.
+        if cur_indent == list_indent && trimmed.starts_with("- ") && have_candidates {
+            return TrailingScan::LeadingWins;
+        }
+        return TrailingScan::Stop;
+    }
+    if cur_indent != list_indent {
+        return TrailingScan::Stop;
+    }
+    TrailingScan::Candidate
 }
 
 #[cfg(test)]
@@ -653,6 +686,33 @@ unit_tests:
         assert!(
             !block.raw.contains("documents test_b"),
             "trailing should not steal test_b's leading; got: {:?}",
+            block.raw
+        );
+    }
+
+    #[test]
+    fn trailing_comment_at_a_shallower_indent_stops_the_scan() {
+        // A `#` comment indented SHALLOWER than `list_indent` directly
+        // after the body ends the trailing scan and is never collected
+        // (covers the `cur_indent != list_indent` arm of the trailing
+        // classifier). The body ends at `model: foo` (deeper lines belong
+        // to the body); `# top-level note` sits at column 0, below the
+        // 2-space list indent, so the scan stops at it.
+        let src = yaml(
+            "
+unit_tests:
+  - name: test_a
+    model: foo
+# top-level note
+  # list-level note
+",
+        );
+        let block = extract_unit_test_block(&src, "test_a").expect("test_a present");
+        // The shallower comment stops the scan, so neither it nor the
+        // later list-level comment is pulled into test_a's trailing.
+        assert!(
+            !block.raw.contains("top-level note") && !block.raw.contains("list-level note"),
+            "a shallower-indented comment must stop the trailing scan; got: {:?}",
             block.raw
         );
     }
