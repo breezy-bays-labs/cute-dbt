@@ -32,6 +32,38 @@ Network and observe nothing.
 > changes); v1.0 ships the first stability commitment. Full release-
 > discipline policy in [`AGENTS.md` §Release discipline](AGENTS.md#release-discipline).
 
+## Quickstart
+
+From a checked-out dbt repo with branch changes, **one command** produces
+the PR-review report — no flags:
+
+```bash
+cute-dbt review
+```
+
+`review` finds the dbt project, detects the base branch, runs *your* `dbt
+compile`, diffs the working tree against the merge-base, renders the
+report to `<project>/target/cute-dbt-report.html`, and — when run from an
+interactive terminal — opens it in your default browser (pass `--no-open`
+to skip). Want to see exactly what it will run first? `cute-dbt review
+--dry-run` prints every command and executes nothing.
+
+This is the **porcelain** verb (the first-contact path for humans and
+agents). Underneath it composes **`cute-dbt report`**, the **plumbing**
+verb that takes explicit inputs (`--manifest` + a scope source → HTML) —
+the one CI workflows and scripts call directly. Full walkthrough:
+[**One-command review**](https://breezy-bays-labs.github.io/cute-dbt/one-command-review.html).
+
+**Ask an agent.** cute-dbt ships an [Agent Skill](https://agentskills.io)
+so Claude Code, Codex, Cursor, Copilot, and others can drive the review
+for you. Install it into your repo:
+
+```bash
+cute-dbt skill --install            # writes .claude/skills/dbt-pr-review/
+cute-dbt skill --install --agent codex   # or .agents/skills/... for other clients
+npx skills add breezy-bays-labs/cute-dbt --skill dbt-pr-review   # cross-agent
+```
+
 ## What it shows
 
 For each in-scope dbt unit test (diff-scoped via `state:modified.body` —
@@ -91,10 +123,12 @@ is a usage error rather than a silent no-op.
 
 ## How it's diff-scoped
 
-cute-dbt is **PR-review-first**. Pass a current `manifest.json` and a
-baseline `manifest.json`; the report covers only the unit tests whose
-target model body changed (or whose test definition itself changed).
-`--baseline-manifest` is required:
+cute-dbt is **PR-review-first**. The [Quickstart](#quickstart)
+`cute-dbt review` auto-detects everything; the **`report`** plumbing verb
+exposes the inputs directly for CI and scripts. Pass a current
+`manifest.json` and a baseline `manifest.json`; the report covers only
+the unit tests whose target model body changed (or whose test definition
+itself changed). `--baseline-manifest` is required on `report`:
 
 ```bash
 cute-dbt report --manifest target/current/manifest.json \
@@ -103,7 +137,9 @@ cute-dbt report --manifest target/current/manifest.json \
 ```
 
 `report` itself stays diff-scoped by design: bounded reports, narrow
-fail-closed surface. Bare `cute-dbt` without a verb is a usage error.
+fail-closed surface. CI deliberately calls `report` (not `review`) — its
+checkout already has the exact base SHA, so porcelain auto-detection
+would be wrong there. Bare `cute-dbt` without a verb is a usage error.
 For a full-manifest overview there is an experimental `explore` verb —
 see [Experimental: the `explore` verb](#experimental-the-explore-verb).
 

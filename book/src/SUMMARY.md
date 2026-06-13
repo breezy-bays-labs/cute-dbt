@@ -5,6 +5,7 @@
 # User Guide
 
 - [What cute-dbt is](./the-solution.md)
+- [One-command review](./one-command-review.md)
 - [Getting started](./getting-started.md)
 - [How it works](./how-it-works.md)
 
