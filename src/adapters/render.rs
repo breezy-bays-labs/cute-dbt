@@ -68,7 +68,7 @@ use crate::adapters::asset_embed::{
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
     BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, ConfigAttribution, CteGraph, DiffLine,
-    DiffLineKind, EdgeType, Finding, FixtureTable, HeuristicId, HookChangeFacts,
+    DiffLineKind, EdgeType, Finding, FixtureTable, GovernanceFacts, HeuristicId, HookChangeFacts,
     HookManifestPresence, InScopeSet, Instrument, Manifest, ModelInScopeSet, ModelYamlOutcome,
     Node, NodeId, ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition,
     ProjectFacts, ProjectFallbackReason, SourceNode, TestMetadata, Tier, UnitTest,
@@ -1375,6 +1375,15 @@ pub struct ReportPayload {
     /// consumers + the BDD payload assertions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_change_panel: Option<ProjectChangePanel>,
+    /// The PR-review governance facts (cute-dbt#260) — group/owner chips
+    /// (Slice 0), with the exposure / contract / enforcement / lifecycle
+    /// surfaces added additively in later slices. Gated behind
+    /// [`Experiment::Governance`](crate::domain::Experiment::Governance):
+    /// the cli layer passes the empty default when the experiment is off.
+    /// Omitted from JSON when empty so the non-experimental
+    /// (`experimental: ""`) goldens stay byte-identical.
+    #[serde(skip_serializing_if = "GovernanceFacts::is_empty")]
+    pub governance: GovernanceFacts,
 }
 
 /// Which scope source produced this report — selects the diff-scope
@@ -2091,6 +2100,17 @@ struct ReportTemplate<'a> {
     /// Standing `definition` metadata alone stays `false`: it is
     /// payload-only (no DOM), so a display toggle would be inert.
     has_project_state: bool,
+    /// `true` when the governance facts carry any visible surface
+    /// (cute-dbt#260) — Slice 0: at least one group chip. Gates the
+    /// `{%- if has_governance %}` section so an empty payload (the
+    /// off-gate default) emits zero DOM, keeping the non-experimental
+    /// golden byte-identical.
+    has_governance: bool,
+    /// The server-rendered governance facts (cute-dbt#260): the
+    /// group/owner header chips (Slice 0). The `{%- if has_governance %}`
+    /// section reads `governance.group_chips`; the same struct rides the
+    /// JSON payload for downstream consumers + headless assertions.
+    governance: GovernanceFacts,
 }
 
 /// Serialize `payload` to JSON for safe embedding inside an HTML
@@ -2299,6 +2319,11 @@ pub fn build_payload_with_externals(
         // cute-dbt#266 — standing metadata + the diff-gated panel facts.
         project_definition: project_facts.definition.clone(),
         project_change_panel: project_facts.panel.clone(),
+        // cute-dbt#260 — governance facts default empty here; the gated
+        // value is threaded in by `render_report_with_externals` (the
+        // group chips are payload-level, not per-model, so they assemble
+        // at the composition root, not inside the per-model walk).
+        governance: GovernanceFacts::default(),
     }
 }
 
@@ -2357,6 +2382,7 @@ pub fn render_report(
         report_subtitle,
         &CheckPolicy::default(),
         &ProjectFacts::default(),
+        &GovernanceFacts::default(),
     )
 }
 
@@ -2388,8 +2414,9 @@ pub fn render_report_with_externals(
     report_subtitle: Option<&str>,
     check_policy: &CheckPolicy<HeuristicId>,
     project_facts: &ProjectFacts,
+    governance: &GovernanceFacts,
 ) -> io::Result<()> {
-    let payload = build_payload_with_externals(
+    let mut payload = build_payload_with_externals(
         current,
         changed,
         models_in_scope,
@@ -2403,6 +2430,10 @@ pub fn render_report_with_externals(
         check_policy,
         project_facts,
     );
+    // cute-dbt#260 — the gated governance facts. Empty (the off-gate
+    // default) ⇒ omitted from JSON + zero DOM via `{%- if has_governance
+    // %}`, keeping the non-experimental golden byte-identical.
+    payload.governance = governance.clone();
     // The empty-scope banner contract reads the TRUE in-scope set, not the
     // widened render set or the changed subset (cute-dbt#91).
     let banner_text = compose_banner_text(in_scope);
@@ -2434,6 +2465,8 @@ pub fn render_report_with_externals(
         has_project_state: project_facts.panel.is_some()
             || !project_facts.config_attributions.is_empty()
             || !project_facts.var_references.is_empty(),
+        has_governance: governance.has_content(),
+        governance: governance.clone(),
     };
     let html = template
         .render()
@@ -3030,8 +3063,8 @@ mod tests {
     use super::*;
     use crate::domain::{
         Checksum, CteEdge, CteNode, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind,
-        EdgeType, Manifest, ManifestMetadata, NodeConfig, NodeId, UnitTest, UnitTestExpect,
-        UnitTestGiven,
+        EdgeType, Group, GroupChip, Manifest, ManifestMetadata, NodeConfig, NodeId, Owner,
+        UnitTest, UnitTestExpect, UnitTestGiven,
     };
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
@@ -6067,6 +6100,7 @@ mod tests {
             check_specs: BTreeMap::new(),
             project_definition: None,
             project_change_panel: None,
+            governance: GovernanceFacts::default(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6088,6 +6122,7 @@ mod tests {
             check_specs: BTreeMap::new(),
             project_definition: None,
             project_change_panel: None,
+            governance: GovernanceFacts::default(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6111,6 +6146,7 @@ mod tests {
             check_specs: BTreeMap::new(),
             project_definition: None,
             project_change_panel: None,
+            governance: GovernanceFacts::default(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(serialized.contains("a < b"), "bare `<` is preserved");
@@ -6129,6 +6165,7 @@ mod tests {
             check_specs: BTreeMap::new(),
             project_definition: None,
             project_change_panel: None,
+            governance: GovernanceFacts::default(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6160,6 +6197,7 @@ mod tests {
             check_specs: BTreeMap::new(),
             project_definition: None,
             project_change_panel: None,
+            governance: GovernanceFacts::default(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6189,6 +6227,7 @@ mod tests {
             check_specs: BTreeMap::new(),
             project_definition: None,
             project_change_panel: None,
+            governance: GovernanceFacts::default(),
         };
         let serialized = payload_json_for_html_script(&original).unwrap();
         let parsed: serde_json::Value =
@@ -6198,6 +6237,120 @@ mod tests {
             serde_json::Value::String("</script><!--end".to_owned()),
             "round-trip recovers the original baseline value",
         );
+    }
+
+    // ===== governance surfaces (cute-dbt#260, Slice 0) =====
+
+    /// Render a one-model report carrying `governance`, returning the HTML.
+    /// The model `model.shop.x` declares `group: finance`; the manifest
+    /// carries a `finance` group with an owner so the chip can resolve.
+    fn render_html_with_governance(filename: &str, governance: &GovernanceFacts) -> String {
+        let node = model_node("model.shop.x", "body", Some("select 1"))
+            .with_governance(Some("finance".to_owned()), None);
+        let mut groups = HashMap::new();
+        groups.insert(
+            "group.shop.finance".to_owned(),
+            Group::new(
+                "finance",
+                Some(Owner::new(
+                    Some("Finance Team".to_owned()),
+                    vec!["finance@corp.example".to_owned()],
+                )),
+            ),
+        );
+        let manifest = manifest_for(vec![node], vec![]).with_groups(groups);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let tmp = std::env::temp_dir().join(filename);
+        let _ = std::fs::remove_file(&tmp);
+        render_report_with_externals(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &InScopeSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+            ScopeSource::PrDiff,
+            "t",
+            None,
+            &CheckPolicy::default(),
+            &ProjectFacts::default(),
+            governance,
+        )
+        .expect("report renders");
+        std::fs::read_to_string(&tmp).expect("read rendered report")
+    }
+
+    #[test]
+    fn governance_off_emits_zero_governance_dom() {
+        // The off-gate render: an empty GovernanceFacts (the cli passes
+        // this when the experiment is disabled) must add NO governance
+        // DOM — the byte-identity property the golden gate depends on.
+        let html = render_html_with_governance(
+            "cute_dbt_render_governance_off.html",
+            &GovernanceFacts::default(),
+        );
+        // Match the actual DOM nodes, not the bare class tokens: a later
+        // slice / the Design pass inlines `.governance-panel { … }` CSS,
+        // which would false-PASS a `!contains("governance-panel")` check
+        // even if the section wrongly rendered (CodeRabbit on #334).
+        assert!(
+            !html.contains(r#"<section class="governance-panel""#),
+            "no governance section element in the DOM when the payload is empty",
+        );
+        assert!(
+            !html.contains(r#"data-testid="governance-panel""#),
+            "no governance panel test hook when the payload is empty",
+        );
+        assert!(
+            !html.contains(r#"data-testid="gov-group-chip""#),
+            "no group chip in the DOM when the payload is empty",
+        );
+    }
+
+    #[test]
+    fn governance_on_renders_the_group_owner_chip() {
+        let facts = GovernanceFacts {
+            group_chips: vec![GroupChip {
+                group: "finance".to_owned(),
+                owner_name: Some("Finance Team".to_owned()),
+                owner_email: Some("finance@corp.example".to_owned()),
+            }],
+        };
+        let html = render_html_with_governance("cute_dbt_render_governance_on.html", &facts);
+        assert!(
+            html.contains(r#"<section class="governance-panel""#),
+            "the governance section renders when the payload has content",
+        );
+        // Anchor the chip text to the actual chip node (the rendered
+        // <span class="gov-group-chip" … data-group="finance">…), not to
+        // bare substrings that could appear elsewhere in the DOM.
+        assert!(
+            html.contains(
+                r#"<span class="gov-group-chip" data-testid="gov-group-chip" data-group="finance">group finance &middot; owner Finance Team &lt;finance@corp.example&gt;</span>"#
+            ),
+            "the group chip renders the composed group/owner/email label: {html}",
+        );
+    }
+
+    #[test]
+    fn governance_on_with_empty_facts_still_emits_zero_dom() {
+        // The gate flows through the payload, not a config flag: even on
+        // the "enabled" call path, an empty facts payload renders no DOM
+        // (has_governance is content-derived, not experiment-derived).
+        let html = render_html_with_governance(
+            "cute_dbt_render_governance_empty_on.html",
+            &GovernanceFacts::default(),
+        );
+        // DOM-node-targeted (CodeRabbit on #334): inlined `.governance-panel`
+        // CSS must not let this false-PASS.
+        assert!(!html.contains(r#"<section class="governance-panel""#));
+        assert!(!html.contains(r#"data-testid="gov-group-chip""#));
     }
 
     // ===== project panel: hooks + dispatch rows (cute-dbt#269) =====
@@ -6228,6 +6381,7 @@ mod tests {
             None,
             &CheckPolicy::default(),
             facts,
+            &GovernanceFacts::default(),
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")

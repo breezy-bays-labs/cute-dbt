@@ -44,12 +44,19 @@ pub enum Experiment {
     /// vars/hooks/dispatch rows, and the cute-dbt#267 config-tree scope
     /// widening.
     ProjectState,
+    /// The PR-review governance surfaces (cute-dbt#260, epic #260): the
+    /// group/owner header chips, the reverse-reachability exposure /
+    /// blast-radius panel, the classified contract-diff drawer, the
+    /// enforcement-reality annotation, and the access/deprecation/version
+    /// lifecycle chips. Every surface is render over already-parsed wire
+    /// data, gated empty so the released golden never moves.
+    Governance,
 }
 
 impl Experiment {
     /// Every registered experiment, in declaration order — the closed
     /// vocabulary both opt-in surfaces validate against.
-    pub const ALL: &'static [Experiment] = &[Experiment::ProjectState];
+    pub const ALL: &'static [Experiment] = &[Experiment::ProjectState, Experiment::Governance];
 
     /// The kebab-case wire id this experiment is named by in the
     /// `[experimental]` TOML list and the `CUTE_DBT_EXPERIMENTAL` env
@@ -58,6 +65,7 @@ impl Experiment {
     pub fn id(self) -> &'static str {
         match self {
             Self::ProjectState => "project-state",
+            Self::Governance => "governance",
         }
     }
 
@@ -261,6 +269,19 @@ mod tests {
         assert_eq!(Experiment::from_id("ProjectState"), None);
         assert_eq!(Experiment::from_id(""), None);
         assert_eq!(Experiment::from_id("all"), None);
+    }
+
+    #[test]
+    fn governance_is_a_registered_experiment_with_its_wire_id() {
+        // cute-dbt#260 Slice 0: the gating seam for the governance
+        // surfaces. The id round-trips and the variant is in the closed
+        // vocabulary (so `1`/`all` enables it on the diff-showcase row).
+        assert_eq!(Experiment::Governance.id(), "governance");
+        assert_eq!(
+            Experiment::from_id("governance"),
+            Some(Experiment::Governance)
+        );
+        assert!(Experiment::ALL.contains(&Experiment::Governance));
     }
 
     // ----- [experimental] TOML resolution -----

@@ -321,6 +321,24 @@
 {%- endif %}
 </section>
 {% when None %}{% endmatch -%}
+{#- cute-dbt#260 (Slice 0 — the walking skeleton) — the governance
+   surfaces section. Gated behind the `governance` experiment: when the
+   experiment is off the cli passes an empty GovernanceFacts, so
+   `has_governance` is false and this block emits ZERO bytes (every
+   surrounding tag trims both sides), keeping the non-experimental
+   (experimental:"") goldens byte-identical — the has_project_state /
+   project_panel precedent above. Slice 0 carries only the group/owner
+   header chips; the exposure / contract / enforcement / lifecycle
+   surfaces land additively here in later slices. Intentionally
+   unstyled — Claude Design owns the visual pass; the data-testid /
+   data-* hooks are the stable selectors the headless guards key off. -#}
+{%- if has_governance %}
+<section class="governance-panel" aria-label="Governance &amp; ownership" data-testid="governance-panel">
+{%- for chip in governance.group_chips %}
+  <span class="gov-group-chip" data-testid="gov-group-chip" data-group="{{ chip.group }}">group {{ chip.group }}{% match chip.owner_name %}{% when Some with (n) %} &middot; owner {{ n }}{% when None %}{% endmatch %}{% match chip.owner_email %}{% when Some with (e) %} &lt;{{ e }}&gt;{% when None %}{% endmatch %}</span>
+{%- endfor %}
+</section>
+{% endif -%}
 <section class="error-card" role="alert" aria-label="Manifest error">
   <h2>This manifest can't be visualized</h2>
   <div class="error-node-id">node: <code>—</code></div>

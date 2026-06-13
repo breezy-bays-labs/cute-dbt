@@ -63,17 +63,18 @@ use crate::adapters::render::{
 };
 use crate::domain::{
     BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_REPORT_TITLE, EnabledExperiments,
-    Experiment, FixtureTableDiff, HeuristicId, InScopeSet, Manifest, ModelInScopeSet,
-    ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex, PreflightError, ProjectChangePanel,
-    ProjectFacts, ProjectFallbackReason, ScopeInput, ScopeSelection, SuppressRule,
-    SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock, VarReference, all_models,
-    attach_hook_facts, attach_model_yaml_diffs, attach_var_facts, attribute_config_tree_changes,
-    attribute_var_changes, changed_models, check_by_id, diff_project_definitions,
-    effective_fixture_format, external_fixture_table, extract_model_block, extract_unit_test_block,
-    hook_operations, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
-    reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
-    refine_changed_by_hunks, resolve_check_policy, resolve_experimental_config, reverse_apply,
-    scan_pragmas, select_in_scope, widen_with_config_attributions,
+    Experiment, FixtureTableDiff, GovernanceFacts, HeuristicId, InScopeSet, Manifest,
+    ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex, PreflightError,
+    ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ScopeInput, ScopeSelection,
+    SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock, VarReference,
+    all_models, attach_hook_facts, attach_model_yaml_diffs, attach_var_facts,
+    attribute_config_tree_changes, attribute_var_changes, changed_models, check_by_id,
+    diff_project_definitions, effective_fixture_format, external_fixture_table,
+    extract_model_block, extract_unit_test_block, gather_governance, hook_operations,
+    preflight_compiled, raw_hunk_lines, reconstruct_block_diffs, reconstruct_external_fixture_diff,
+    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks,
+    resolve_check_policy, resolve_experimental_config, reverse_apply, scan_pragmas,
+    select_in_scope, widen_with_config_attributions,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -235,6 +236,23 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
         &current,
         &project_facts.config_attributions,
     );
+    // Governance facts (cute-dbt#260, epic #260), gated behind the
+    // `governance` experiment (Slice 0 — the same epic #288 default-OFF
+    // posture as project-state). Enabled: gather the group/owner header
+    // chips for the in-scope models that declare a governance group (a
+    // pure pass over the manifest — no file read, no YAML parse). Default
+    // (off): the empty `GovernanceFacts::default()` — omitted from the
+    // JSON payload and rendering zero DOM via `{%- if has_governance %}`,
+    // so the non-experimental golden stays byte-identical. Gathered AFTER
+    // scope selection (unlike project-state) because the chips read the
+    // resolved in-scope MODEL set, and governance never widens scope. The
+    // diff-showcase golden row sets `experimental:"1"` (every experiment),
+    // so the grouped playground model surfaces a chip there.
+    let governance_facts = if experiments.is_enabled(Experiment::Governance) {
+        gather_governance(&current, &models_in_scope)
+    } else {
+        GovernanceFacts::default()
+    };
     // Stage-2 fail-closed reads the TRUE in-scope set (cute-dbt#91): the
     // widened render set is only for what the report displays. Config-tree
     // widened tests (cute-dbt#267) ARE the true scope, so they preflight.
@@ -356,6 +374,7 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
         report_subtitle.as_deref(),
         &check_policy,
         &project_facts,
+        &governance_facts,
     )
     .map_err(|err| RunError::output(&args.out, err))?;
     Ok(())
@@ -1277,6 +1296,7 @@ fn render(
     report_subtitle: Option<&str>,
     check_policy: &CheckPolicy<HeuristicId>,
     project_facts: &ProjectFacts,
+    governance: &GovernanceFacts,
 ) -> Result<(), io::Error> {
     render_report_with_externals(
         out,
@@ -1296,6 +1316,7 @@ fn render(
         report_subtitle,
         check_policy,
         project_facts,
+        governance,
     )
 }
 
