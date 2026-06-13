@@ -6,6 +6,14 @@
 //! (`common::TestRepo`) so an install runs inside a real `git rev-parse
 //! --show-toplevel` boundary, fully isolated from the developer's git
 //! environment.
+//!
+//! tracked: cute-dbt#331 — the install tests drive `cute-dbt` through
+//! the Unix-only shim harness (`common::TestRepo`), so the crate is
+//! `#[cfg(unix)]`-gated and absent on the windows-latest job
+//! (cute-dbt#308/#316). The skill's portable invariants (embedded
+//! version mirror, base-spec frontmatter, install-path mapping) are
+//! unit-tested in `src/cli/skill.rs`, which runs everywhere.
+#![cfg(unix)]
 
 #[path = "common/mod.rs"]
 mod common;
