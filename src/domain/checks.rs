@@ -1447,34 +1447,10 @@ fn union_finding(
     for &arm in arms {
         let arm_name = node_name(arm);
         let refs = arm_external_refs(graph, arm);
-        if refs.is_empty() {
-            unknown_evidence.push(Evidence::new(
-                "unattributable arm",
-                format!("{arm_name} — no resolvable upstream relation"),
-            ));
-            continue;
-        }
-        let mut fed_by: Vec<&str> = Vec::new();
-        let mut unknown_in_a_test = false;
-        for (id, unit_test) in tests {
-            match arm_coverage_for_test(ctx.manifest, unit_test, &refs) {
-                ArmCoverage::Fed => fed_by.push(id.as_str()),
-                ArmCoverage::Unknown => unknown_in_a_test = true,
-                ArmCoverage::Unfed => {}
-            }
-        }
-        if !fed_by.is_empty() {
-            covered_by.extend(fed_by.iter().map(|id| (*id).to_owned()));
-        } else if unknown_in_a_test {
-            unknown_evidence.push(Evidence::new(
-                "unattributable arm",
-                format!(
-                    "{arm_name} — fed only by givens whose rows are not statically countable (reads {})",
-                    refs_display(&refs),
-                ),
-            ));
-        } else {
-            unfed.push((arm_name, refs));
+        match classify_union_arm(ctx, tests, &arm_name, refs) {
+            UnionArm::Covered(ids) => covered_by.extend(ids),
+            UnionArm::Unknown(evidence) => unknown_evidence.push(evidence),
+            UnionArm::Unfed(name, refs) => unfed.push((name, refs)),
         }
     }
     for (arm_name, refs) in &unfed {
@@ -1504,6 +1480,59 @@ fn union_finding(
         verdict,
         evidence,
     )
+}
+
+/// How one UNION arm classifies in [`union_finding`].
+enum UnionArm {
+    /// At least one test feeds the arm — the ids that cover it.
+    Covered(Vec<String>),
+    /// The arm is unattributable: no resolvable upstream relation, or fed
+    /// only by givens whose rows are not statically countable. Carries the
+    /// evidence line.
+    Unknown(Evidence),
+    /// No given row reaches the arm — its name + the external refs it reads.
+    Unfed(String, BTreeSet<String>),
+}
+
+/// Classify one UNION arm against the model's unit tests: an arm with no
+/// resolvable upstream relation is [`UnionArm::Unknown`]; otherwise it is
+/// [`UnionArm::Covered`] when any test feeds it, [`UnionArm::Unknown`]
+/// when only not-statically-countable givens reach it, else
+/// [`UnionArm::Unfed`].
+fn classify_union_arm(
+    ctx: &CheckContext<'_>,
+    tests: &[(&String, &UnitTest)],
+    arm_name: &str,
+    refs: BTreeSet<String>,
+) -> UnionArm {
+    if refs.is_empty() {
+        return UnionArm::Unknown(Evidence::new(
+            "unattributable arm",
+            format!("{arm_name} — no resolvable upstream relation"),
+        ));
+    }
+    let mut fed_by: Vec<String> = Vec::new();
+    let mut unknown_in_a_test = false;
+    for (id, unit_test) in tests {
+        match arm_coverage_for_test(ctx.manifest, unit_test, &refs) {
+            ArmCoverage::Fed => fed_by.push((*id).clone()),
+            ArmCoverage::Unknown => unknown_in_a_test = true,
+            ArmCoverage::Unfed => {}
+        }
+    }
+    if !fed_by.is_empty() {
+        UnionArm::Covered(fed_by)
+    } else if unknown_in_a_test {
+        UnionArm::Unknown(Evidence::new(
+            "unattributable arm",
+            format!(
+                "{arm_name} — fed only by givens whose rows are not statically countable (reads {})",
+                refs_display(&refs),
+            ),
+        ))
+    } else {
+        UnionArm::Unfed(arm_name.to_owned(), refs)
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1584,6 +1613,13 @@ fn resolve_side_external(graph: &CteGraph, leaf: &str) -> Option<String> {
         // Not a CTE — an external relation, directly mockable.
         return Some(lower);
     };
+    let closure = upstream_closure(graph, start);
+    single_external_in_closure(graph, &closure, &cte_names)
+}
+
+/// The set of node indices reachable upstream of `start` (inclusive) by
+/// walking edges backward (`edge.to() == node ⇒ visit edge.from()`).
+fn upstream_closure(graph: &CteGraph, start: usize) -> BTreeSet<usize> {
     let mut closure = BTreeSet::from([start]);
     let mut frontier = vec![start];
     while let Some(node) = frontier.pop() {
@@ -1593,8 +1629,20 @@ fn resolve_side_external(graph: &CteGraph, leaf: &str) -> Option<String> {
             }
         }
     }
+    closure
+}
+
+/// The single external (non-CTE) relation read across every node in
+/// `closure`, or `None` (the honest UNKNOWN degrade) when any node is not
+/// a simple-FROM shape, or the closure reads zero or more-than-one
+/// external relation.
+fn single_external_in_closure(
+    graph: &CteGraph,
+    closure: &BTreeSet<usize>,
+    cte_names: &BTreeSet<String>,
+) -> Option<String> {
     let mut externals: BTreeSet<String> = BTreeSet::new();
-    for index in closure {
+    for &index in closure {
         let node = graph.nodes().get(index)?;
         if !node.is_simple_from_shape() {
             return None;
