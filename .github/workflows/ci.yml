@@ -679,6 +679,23 @@ jobs:
             pr_diff: ""
             output: examples/explore
             project_root: ""
+          # cute-dbt#345 — the GOLDEN focused macro DAG. The explore verb
+          # with --pr-diff against a synthetic patch changing the root
+          # macro `quarantine_filter` (3 calling models + 8 ref()-downstream
+          # vertices, 1 an exposure sink) emits the third sub-page,
+          # examples/explore-macro/macro.html — the dagre-justifying
+          # focused subgraph (macro callers emphasized, downstream dimmed).
+          # Only macro.html is committed here (the row's dag/tests carry
+          # change context, so they are not byte-twins of the no-diff
+          # explore row's). Headless page-aware-liveness + resource-ref
+          # gated. No baseline — explore takes none, ever (cute-dbt#106).
+          - name: explore-macro
+            mode: explore
+            current: tests/fixtures/playground-current.json
+            baseline: ""
+            pr_diff: tests/fixtures/playground-macro-pr-diff.patch
+            output: examples/explore-macro
+            project_root: tests/fixtures/playground-source
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -706,22 +723,39 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/example-check
-          # --- explore arm (cute-dbt#100): the two-file --out-dir shape.
-          # Renders into a scratch dir and diffs EACH emitted page against
-          # its committed twin — never a single-file --out append.
+          # --- explore arm (cute-dbt#100): the multi-file --out-dir shape.
+          # Renders into a scratch dir and diffs EACH committed page against
+          # its renderer twin — never a single-file --out append. The
+          # default `explore` row renders the full manifest (no scope
+          # source) → dag.html + tests.html. The cute-dbt#345 macro row
+          # adds a --pr-diff (a changed root macro) + --project-root and
+          # gates the focused macro.html ONLY (its dag/tests are not
+          # committed twins — change context would perturb them).
           if [ "$MODE" = "explore" ]; then
             rendered_dir="target/example-check/$(basename "$OUTPUT_PATH")"
             rm -rf "$rendered_dir"
-            cargo run --quiet --locked --bin cute-dbt -- explore \
-              --manifest "$CURRENT_MANIFEST" \
-              --out-dir "$rendered_dir"
+            explore_args=(--manifest "$CURRENT_MANIFEST" --out-dir "$rendered_dir")
+            regen_scope=""
+            if [ -n "$PR_DIFF" ]; then
+              explore_args+=(--pr-diff "@$PR_DIFF")
+              regen_scope="$regen_scope --pr-diff @$PR_DIFF"
+            fi
+            if [ -n "$PROJECT_ROOT" ]; then
+              explore_args+=(--project-root "$PROJECT_ROOT")
+              regen_scope="$regen_scope --project-root $PROJECT_ROOT"
+            fi
+            cargo run --quiet --locked --bin cute-dbt -- explore "${explore_args[@]}"
+            # The committed pages this row gates: every *.html directly under
+            # the committed OUTPUT_PATH dir (the macro row commits only
+            # macro.html; the full row commits dag.html + tests.html).
             fail=0
-            for page in dag.html tests.html; do
-              if ! diff -q "$rendered_dir/$page" "$OUTPUT_PATH/$page" >/dev/null; then
-                echo "::error::example-report-up-to-date: $OUTPUT_PATH/$page does not match the renderer output ($EXAMPLE_NAME). Regenerate with:"
-                echo "  cargo run --bin cute-dbt -- explore --manifest $CURRENT_MANIFEST --out-dir $OUTPUT_PATH"
+            for committed in "$OUTPUT_PATH"/*.html; do
+              page="$(basename "$committed")"
+              if ! diff -q "$rendered_dir/$page" "$committed" >/dev/null; then
+                echo "::error::example-report-up-to-date: $committed does not match the renderer output ($EXAMPLE_NAME). Regenerate with:"
+                echo "  cargo run --bin cute-dbt -- explore --manifest $CURRENT_MANIFEST --out-dir $OUTPUT_PATH$regen_scope"
                 echo "Sizes:"
-                ls -l "$rendered_dir/$page" "$OUTPUT_PATH/$page" || true
+                ls -l "$rendered_dir/$page" "$committed" || true
                 fail=1
               fi
             done

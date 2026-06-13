@@ -180,6 +180,11 @@ pub struct World {
     /// Contents of `<explore_out_dir>/tests.html`, when written.
     pub explore_tests_html: Option<String>,
 
+    /// Contents of `<explore_out_dir>/macro.html`, when written
+    /// (cute-dbt#345 — emitted only when a `--pr-diff` changed a
+    /// root-project macro).
+    pub explore_macro_html: Option<String>,
+
     /// An explicit (usually broken) manifest path a Given prepared for
     /// the next explore invocation — the Stage-1 fail-closed scenarios.
     pub explore_manifest_path: Option<PathBuf>,
@@ -410,6 +415,11 @@ pub struct ExploreModelDecl {
     /// (`<package>://models/schema.yml`), so the subprocess exercises
     /// the adapter's package-URI strip for real.
     pub wire_patch_path: Option<String>,
+    /// Full macro ids this model calls directly (cute-dbt#345 — the
+    /// macro-focus scenarios): the model's wire `depends_on.macros`. A
+    /// model calling the changed macro is a macro caller (`user`), so its
+    /// `ref()`-downstream populates the focused DAG.
+    pub depends_macros: Vec<String>,
 }
 
 /// A cute-dbt#145 incremental scenario plan — the models (each with its

@@ -37,13 +37,22 @@ pub const COMMITTED_EXAMPLES: &[&str] = &["jaffle-shop-report.html", "playground
 
 /// The committed `cute-dbt explore` example pages under `examples/`
 /// (cute-dbt#100), rendered from the synthetic playground fixture by
-/// the `example-report-check` explore matrix row. Both gates scan
+/// the `example-report-check` explore matrix rows. Both gates scan
 /// them: the resource-ref lint uniformly, the headless gate with a
-/// **page-aware liveness oracle** (`dag.html` waits for the Mermaid
-/// lineage SVG; `tests.html` is a static server-rendered page asserted
-/// on DOM facts — it carries no Mermaid and no DataTables, so the
-/// report's liveness probes must never be applied to it).
-pub const COMMITTED_EXPLORE_PAGES: &[&str] = &["explore/dag.html", "explore/tests.html"];
+/// **page-aware liveness oracle** (`dag.html` / `macro.html` wait for
+/// the Cytoscape canvas; `tests.html` is a static server-rendered page
+/// asserted on DOM facts — it carries no Cytoscape and no DataTables, so
+/// the canvas liveness probe must never be applied to it).
+///
+/// `explore-macro/macro.html` (cute-dbt#345) is the focused macro DAG,
+/// rendered with `--pr-diff` against `playground-macro-pr-diff.patch` (a
+/// root macro `quarantine_filter` change) by its own matrix row — the
+/// no-`--pr-diff` `explore` row can never emit it.
+pub const COMMITTED_EXPLORE_PAGES: &[&str] = &[
+    "explore/dag.html",
+    "explore/tests.html",
+    "explore-macro/macro.html",
+];
 
 /// Absolute path to a committed example HTML under `examples/`.
 pub fn example_path(filename: &str) -> PathBuf {

@@ -1,0 +1,6 @@
+diff --git a/macros/data_quality/quarantine_filter.sql b/macros/data_quality/quarantine_filter.sql
+--- a/macros/data_quality/quarantine_filter.sql
++++ b/macros/data_quality/quarantine_filter.sql
+@@ -3 +3 @@
+-    where {{ field_name }} = true
++    where {{ field_name }} is true

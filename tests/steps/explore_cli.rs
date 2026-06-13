@@ -60,6 +60,7 @@ pub fn run_explore_with(
     world.last_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     world.explore_dag_html = std::fs::read_to_string(out_dir.join("dag.html")).ok();
     world.explore_tests_html = std::fs::read_to_string(out_dir.join("tests.html")).ok();
+    world.explore_macro_html = std::fs::read_to_string(out_dir.join("macro.html")).ok();
     world.explore_out_dir = Some(out_dir);
 }
 
