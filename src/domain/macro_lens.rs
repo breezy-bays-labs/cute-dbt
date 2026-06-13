@@ -147,7 +147,7 @@ pub struct MacroFocusSet {
 ///
 /// Seeds the closure with [`macro_blast_radius`]`(manifest, M)` (the
 /// `users`), walks the reverse `depends_on.nodes` edges with
-/// [`crate::domain::governance::downstream_node_closure`] (the shared
+/// `governance::downstream_node_closure` (the shared
 /// reverse-reachability primitive — no new walker), then subtracts the
 /// users out of the closure to leave `downstream` disjoint.
 ///
