@@ -81,7 +81,8 @@ pub use experimental::{
     resolve_experimental_config,
 };
 pub use governance::{
-    BlastRadius, GovernanceFacts, GroupChip, exposures_reachable_from, gather_governance,
+    BlastRadius, BreakingReason, ContractChange, GovernanceFacts, GroupChip, classify_contract,
+    exposures_reachable_from, gather_governance,
 };
 pub use grain::{GrainKind, GrainSignal, model_grain_signals, test_is_enabled};
 pub use manifest::{
