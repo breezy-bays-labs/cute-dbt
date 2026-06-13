@@ -114,6 +114,15 @@ impl PrConfig {
     #[must_use]
     pub fn resolve(&self) -> Option<PrRef> {
         let url = non_blank(self.url.as_deref())?;
+        // cute-dbt#346 (security review): the url becomes the banner's
+        // `<a href>`. askama escapes `<>&"` but NOT the scheme, so a
+        // `javascript:` / `data:` url from an untrusted `[pr]` config would
+        // execute on click — an XSS in the otherwise trivially-auditable-safe
+        // report. Allow only http(s) navigation; any other scheme (or a
+        // scheme-relative `//host`) degrades to a link-free banner.
+        if !is_http_url(url) {
+            return None;
+        }
         let title = non_blank(self.title.as_deref())?;
         let number = self.number.or_else(|| pr_number_from_url(url)).unwrap_or(0);
         Some(PrRef {
@@ -143,6 +152,18 @@ pub struct PrRef {
 fn non_blank(s: Option<&str>) -> Option<&str> {
     let t = s?.trim();
     (!t.is_empty()).then_some(t)
+}
+
+/// `true` when `url` uses a safe navigation scheme — `http`/`https`,
+/// case-insensitive. Guards the change-context banner's `<a href>` against
+/// `javascript:` / `data:` pseudo-protocol injection from an untrusted
+/// `[pr]` config (cute-dbt#346): askama escapes the title's HTML
+/// metacharacters but not a url's scheme, so the scheme must be vetted
+/// here. A scheme-relative `//host` url (no scheme at all) is rejected too —
+/// a PR url is always an absolute http(s) URL.
+fn is_http_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
 }
 
 /// Parse the PR number from a GitHub PR url's trailing `/pull/<n>`
@@ -497,6 +518,50 @@ number = 42
             number: None,
         };
         assert!(cfg.resolve().is_none(), "blank title is treated as absent");
+    }
+
+    #[test]
+    fn resolve_rejects_javascript_scheme_url() {
+        // cute-dbt#346: a `javascript:` url must NOT become a banner href —
+        // it degrades to a link-free banner, never an executable click.
+        let cfg = PrConfig {
+            url: Some("javascript:alert(1)".to_owned()),
+            title: Some("XSS attempt".to_owned()),
+            number: Some(7),
+        };
+        assert_eq!(cfg.resolve(), None, "javascript: scheme ⇒ no link");
+    }
+
+    #[test]
+    fn resolve_rejects_data_scheme_url() {
+        let cfg = PrConfig {
+            url: Some("data:text/html,<script>alert(1)</script>".to_owned()),
+            title: Some("XSS attempt".to_owned()),
+            number: None,
+        };
+        assert_eq!(cfg.resolve(), None, "data: scheme ⇒ no link");
+    }
+
+    #[test]
+    fn resolve_rejects_scheme_relative_url() {
+        let cfg = PrConfig {
+            url: Some("//evil.example/pull/1".to_owned()),
+            title: Some("t".to_owned()),
+            number: None,
+        };
+        assert_eq!(cfg.resolve(), None, "scheme-relative // ⇒ no link");
+    }
+
+    #[test]
+    fn resolve_accepts_uppercase_https_scheme() {
+        // The scheme check is case-insensitive — `HTTPS://` is still safe.
+        let cfg = PrConfig {
+            url: Some("HTTPS://github.com/o/r/pull/9".to_owned()),
+            title: Some("t".to_owned()),
+            number: None,
+        };
+        let pr = cfg.resolve().expect("uppercase https is a safe scheme");
+        assert_eq!(pr.number, 9);
     }
 
     #[test]

@@ -1184,11 +1184,27 @@ fn banner_shows_escaped_title(world: &mut World, raw_title: String) {
         .report_html
         .as_ref()
         .expect("report.html was written by the subprocess");
-    // The literal `<script>`-shaped title must NOT survive verbatim.
+    // Negative: a `<`-bearing title must NOT survive verbatim — it would be
+    // a raw tag opener; askama must have escaped it.
     if raw_title.contains('<') {
         assert!(
             !html.contains(&raw_title),
             "the raw title {raw_title:?} must be escaped, not rendered verbatim",
+        );
+    }
+    // Positive (cute-dbt#363 review): the title must actually be *rendered*,
+    // so a dropped `{{ pr.title }}` (or an omitted banner) fails this too.
+    // Check the longest run of non-escapable chars — it survives verbatim,
+    // which avoids replicating askama's exact escaping.
+    let longest_unescaped = raw_title
+        .split(['<', '>', '&', '"', '\''])
+        .max_by_key(|seg| seg.len())
+        .unwrap_or("")
+        .trim();
+    if !longest_unescaped.is_empty() {
+        assert!(
+            html.contains(longest_unescaped),
+            "expected the banner to render the title segment {longest_unescaped:?}",
         );
     }
 }
