@@ -52,6 +52,19 @@ Feature: A changed macro is called out, never silently invisible
     Then the exit code is 0
     And the report carries no macro-lens section
 
+  Scenario: The macro lens offers a model-selector and first-order call sites
+    Given a current manifest with a root-project macro called inline by two models
+    And the working tree carries that macro's source file
+    And the PR diff edits the macro's body
+    And the experimental switch enables macro-lens
+    When I run cute-dbt report in pr-diff mode against the macro patch
+    Then the exit code is 0
+    And the report carries the macro-lens section
+    And the macro-lens section carries an impacted-model selector
+    And the impacted-model selector offers both models
+    And each impacted model carries a server-rendered SQL panel
+    And the macro-lens section shows the macro's first-order call sites
+
   Scenario: A vendor-package macro edit is filtered out of the lens
     Given a current manifest with a vendor-package macro called by a root-project model
     And the working tree carries that macro's source file

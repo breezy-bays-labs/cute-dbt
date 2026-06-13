@@ -47,12 +47,18 @@ fn root_macro_id() -> String {
 /// `original_file_path` and a passing compiled body (so Stage-2 preflight
 /// is a no-op — these models carry no unit tests).
 fn macro_model(bare: &str, ofp: &str, macro_id: &str) -> Node {
+    macro_model_with_raw(bare, ofp, macro_id, None)
+}
+
+/// As [`macro_model`], but with an optional `raw_code` body — the
+/// call-site + inline-SQL source the Slice C model-selector reveals.
+fn macro_model_with_raw(bare: &str, ofp: &str, macro_id: &str, raw: Option<&str>) -> Node {
     Node::new(
         NodeId::new(format!("model.{PROJECT}.{bare}")),
         "model",
         Checksum::new("sha256", bare),
         Some("select 1".to_owned()),
-        None,
+        raw.map(str::to_owned),
         DependsOn::new(vec![macro_id.to_owned()], Vec::new()),
         Some(format!("models/{ofp}")),
         NodeConfig::default(),
@@ -68,6 +74,40 @@ fn manifest_two_callers() -> Manifest {
     let nodes = [
         macro_model("stg_orders", "staging/stg_orders.sql", &root_macro_id()),
         macro_model("fct_orders", "marts/core/fct_orders.sql", &root_macro_id()),
+    ];
+    Manifest::new(
+        ManifestMetadata::new("https://schemas.getdbt.com/dbt/manifest/v12.json")
+            .with_project_name(Some(PROJECT.to_owned())),
+        nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+        HashMap::new(),
+        HashMap::new(),
+    )
+}
+
+/// Build the Slice C current manifest: two root-project models both
+/// calling the macro INLINE in their `raw_code` (the call-site source the
+/// model-selector reveals). `fct_orders` calls it twice (the over-cap copy
+/// only triggers past the cap, so two is shown in full — the cap is
+/// exercised in the render-lane unit/headless layer, not the slow BDD
+/// subprocess). The bodies name `add_dq_flags(` so the first-order
+/// call-site scan resolves them.
+fn manifest_two_callers_with_call_sites() -> Manifest {
+    let stg_raw = "select *\nfrom raw_orders\n  {{ add_dq_flags() }}";
+    let fct_raw =
+        "select *\nfrom stg_orders\n  {{ add_dq_flags(amount) }}\n  {{ add_dq_flags(qty) }}";
+    let nodes = [
+        macro_model_with_raw(
+            "stg_orders",
+            "staging/stg_orders.sql",
+            &root_macro_id(),
+            Some(stg_raw),
+        ),
+        macro_model_with_raw(
+            "fct_orders",
+            "marts/core/fct_orders.sql",
+            &root_macro_id(),
+            Some(fct_raw),
+        ),
     ];
     Manifest::new(
         ManifestMetadata::new("https://schemas.getdbt.com/dbt/manifest/v12.json")
@@ -137,6 +177,12 @@ fn macro_workdir() -> std::path::PathBuf {
 fn current_manifest_two_callers(world: &mut World) {
     world.current_manifest = Some(manifest_two_callers());
     // Mark the root arm so the When serializes the root macro wire shape.
+    world.fixture_choice = None;
+}
+
+#[given("a current manifest with a root-project macro called inline by two models")]
+fn current_manifest_two_callers_inline(world: &mut World) {
+    world.current_manifest = Some(manifest_two_callers_with_call_sites());
     world.fixture_choice = None;
 }
 
@@ -354,5 +400,64 @@ fn section_never_names_selector(world: &mut World, selector: String) {
     assert!(
         !html(world).contains(&selector),
         "the section must never name the {selector:?} selector (critique S2)",
+    );
+}
+
+// ---------------------------------------------------------------------
+// Slice C — model-selector + first-order call sites
+// ---------------------------------------------------------------------
+
+#[then("the macro-lens section carries an impacted-model selector")]
+fn section_carries_model_selector(world: &mut World) {
+    assert!(
+        html(world).contains(r#"data-testid="macro-lens-model-select""#),
+        "the section must carry the impacted-model selector (founder D4)",
+    );
+}
+
+#[then("the impacted-model selector offers both models")]
+fn selector_offers_both_models(world: &mut World) {
+    let html = html(world);
+    assert!(
+        html.contains(r#"<option value="model.shop.stg_orders""#),
+        "stg_orders option present",
+    );
+    assert!(
+        html.contains(r#"<option value="model.shop.fct_orders""#),
+        "fct_orders option present",
+    );
+}
+
+#[then("each impacted model carries a server-rendered SQL panel")]
+fn each_model_has_sql_panel(world: &mut World) {
+    let html = html(world);
+    assert!(
+        html.contains(r#"data-testid="macro-lens-model-panel""#),
+        "a per-model panel renders",
+    );
+    assert!(
+        html.contains(r#"data-testid="macro-lens-model-sql""#),
+        "the inline model SQL renders server-side",
+    );
+    // Both models' panels (the selector toggles which is visible; both are
+    // in the DOM — the server-render-everything zero-egress posture).
+    assert!(html.contains(r#"data-model="model.shop.stg_orders""#));
+    assert!(html.contains(r#"data-model="model.shop.fct_orders""#));
+}
+
+#[then("the macro-lens section shows the macro's first-order call sites")]
+fn section_shows_call_sites(world: &mut World) {
+    let html = html(world);
+    assert!(
+        html.contains(r#"data-testid="macro-lens-callsites""#),
+        "the call-site list renders",
+    );
+    assert!(
+        html.contains(r#"data-testid="macro-lens-callsite""#),
+        "at least one call-site row renders",
+    );
+    assert!(
+        html.contains("{{ add_dq_flags() }}") || html.contains("add_dq_flags(amount)"),
+        "a call-site source line renders verbatim",
     );
 }

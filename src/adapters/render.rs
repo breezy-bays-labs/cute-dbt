@@ -1462,6 +1462,73 @@ pub struct ChangedMacroView {
     /// edit reaching no root-project model — the section states the
     /// honest zero).
     pub tree: Vec<MacroTreeRow>,
+    /// The impacted models as a flat, per-model detail list (cute-dbt#265
+    /// Slice C, founder D4) — the model-selector's option set + the
+    /// server-rendered inline SQL and first-order call-site snippets each
+    /// option reveals. In the same id order as the blast radius
+    /// ([`BTreeSet`]). Empty when the blast radius is empty (the section
+    /// shows only the honest zero, no selector). Distinct from
+    /// [`tree`](Self::tree): the tree is the always-full lightweight
+    /// directory view (critique S3), this is the heavy per-model surface
+    /// the selector drives.
+    pub impacted_models: Vec<ImpactedModelView>,
+}
+
+/// One impacted (macro-calling) root-project model in a
+/// [`ChangedMacroView`] (cute-dbt#265 Slice C) — the model-selector's
+/// option plus the server-rendered surfaces it reveals.
+///
+/// The model SQL ([`sql_lines`](Self::sql_lines)) and the first-order
+/// call-site snippets ([`call_sites`](Self::call_sites)) are both
+/// server-composed from the model's manifest `raw_code` (the
+/// "display strings composed in Rust" house rule), so the report JS is a
+/// pure renderer that toggles which model's pre-rendered surfaces are
+/// visible — never a recompute, never a fetch.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImpactedModelView {
+    /// The model's full node id — the stable `<option value>` + the
+    /// `data-model` hook the selector matches a server-rendered panel by.
+    pub model_id: String,
+    /// The model's bare name (the `<option>` display text).
+    pub name: String,
+    /// The model's declaring file, project-relative (the panel's code-card
+    /// header). Empty when the manifest carries no `original_file_path`.
+    pub path: String,
+    /// The model's CURRENT raw SQL as plain context lines (the
+    /// `macro_body_context_lines` shape — one terminator stripped, one
+    /// [`DiffLine`] per `\n`-split line). The inline-SQL panel the selector
+    /// reveals. Empty when the manifest carries no `raw_code` for this
+    /// model (the rare null-fill — the panel states the honest absence).
+    pub sql_lines: Vec<DiffLine>,
+    /// The FIRST-ORDER call sites of the changed macro in this model's
+    /// `raw_code` (founder D6 — first-order in the report; full-downstream
+    /// ref()-lineage is the explorer, #345). Each entry is one line of the
+    /// model body that names the macro, capped at
+    /// [`call_site_cap`](Self::call_site_cap) for the default reveal; the
+    /// template shows the rest behind a "more" disclosure. Never longer
+    /// than [`call_site_total`](Self::call_site_total).
+    pub call_sites: Vec<CallSiteView>,
+    /// The TOTAL number of call sites found in this model's `raw_code` —
+    /// the honest count the "showing N of M" copy reads, even when the
+    /// shown set is capped.
+    pub call_site_total: usize,
+    /// How many call sites the template shows before the "more" disclosure
+    /// (`MACRO_CALL_SITE_CAP`) — carried on the payload so the JS reveal
+    /// and the headless guard agree on the boundary.
+    pub call_site_cap: usize,
+}
+
+/// One first-order call site of the changed macro in an impacted model's
+/// `raw_code` (cute-dbt#265 Slice C).
+#[derive(Debug, Clone, Serialize)]
+pub struct CallSiteView {
+    /// The 1-based line number of the call site in the model's `raw_code`
+    /// (the panel's gutter label).
+    pub line: usize,
+    /// The full source line containing the macro call, leading/trailing
+    /// whitespace trimmed (the snippet text — auto-escaped by askama, never
+    /// trusted as markup).
+    pub text: String,
 }
 
 /// One row of a [`ChangedMacroView`]'s flattened impacted-model directory
@@ -2115,6 +2182,15 @@ fn project_panel_view(
     }
 }
 
+/// How many first-order call-site snippets the macro lens shows before the
+/// "more" disclosure (cute-dbt#265 Slice C, founder D6 — a generous-default
+/// low cap; the rest stay one click away). Carried onto every
+/// [`ImpactedModelView`] so the JS reveal and the headless guard read the
+/// same boundary. Distinct from the inline-model-body cap (Slice D, the
+/// gen-time knob) — this bounds per-model call-site noise, not how many
+/// model bodies inline.
+const MACRO_CALL_SITE_CAP: usize = 3;
+
 /// Build the macro perspective lens (cute-dbt#265, Slice B) from the
 /// changed-macro set + the manifest.
 ///
@@ -2217,6 +2293,7 @@ fn changed_macro_view(
     let radius = macro_blast_radius(current, macro_id);
     let impacted_count = radius.len();
     let tree = impacted_model_tree(current, &radius);
+    let impacted_models = impacted_model_views(current, &radius, &name);
     ChangedMacroView {
         name,
         package,
@@ -2225,7 +2302,107 @@ fn changed_macro_view(
         body_lines,
         impacted_count,
         tree,
+        impacted_models,
     }
+}
+
+/// Build one [`ImpactedModelView`] per model in the blast radius
+/// (cute-dbt#265 Slice C) — the model-selector option set with each
+/// model's inline SQL + first-order call sites pre-rendered from the
+/// manifest `raw_code` (no working-tree read — the model SQL is in the
+/// manifest, matching the existing Model-SQL surface's source). In blast-
+/// radius id order ([`BTreeSet`]), so the selector + the directory tree
+/// agree on ordering and the golden is stable.
+fn impacted_model_views(
+    current: &Manifest,
+    radius: &BTreeSet<NodeId>,
+    macro_name: &str,
+) -> Vec<ImpactedModelView> {
+    radius
+        .iter()
+        .map(|id| {
+            let node = current.node(id);
+            let raw = node.and_then(Node::raw_code).unwrap_or("");
+            let call_sites = macro_call_sites(raw, macro_name);
+            let call_site_total = call_sites.len();
+            let shown = call_sites.into_iter().take(MACRO_CALL_SITE_CAP).collect();
+            ImpactedModelView {
+                model_id: id.as_str().to_owned(),
+                name: leaf_segment(id.as_str()).to_owned(),
+                path: node
+                    .and_then(Node::original_file_path)
+                    .unwrap_or_default()
+                    .to_owned(),
+                sql_lines: macro_body_context_lines(raw),
+                call_sites: shown,
+                call_site_total,
+                call_site_cap: MACRO_CALL_SITE_CAP,
+            }
+        })
+        .collect()
+}
+
+/// The FIRST-ORDER call sites of `macro_name` in a model's `raw_code`
+/// (cute-dbt#265 Slice C) — every body line that invokes the macro,
+/// 1-based line number + the trimmed source line.
+///
+/// A pure string scan over already-loaded source (zero-egress, zero new
+/// I/O). A line is a call site when it contains the macro name immediately
+/// followed by `(` (a Jinja `{{ macro_name(...) }}` / `{% set x =
+/// macro_name(...) %}` invocation), with a non-identifier char (or the line
+/// start) before the name so `my_macro_name(` / `other_macro_name(` do not
+/// false-match. Whitespace between the name and `(` is tolerated
+/// (`macro_name ()`), matching Jinja's lexer. The match is intentionally
+/// first-order only — call sites in OTHER macros this model transitively
+/// reaches are the explorer's job (#345), not the report's.
+fn macro_call_sites(raw: &str, macro_name: &str) -> Vec<CallSiteView> {
+    if raw.is_empty() || macro_name.is_empty() {
+        return Vec::new();
+    }
+    raw.split('\n')
+        .enumerate()
+        .filter(|(_, line)| line_invokes_macro(line, macro_name))
+        .map(|(i, line)| CallSiteView {
+            line: i + 1,
+            text: line.trim().to_owned(),
+        })
+        .collect()
+}
+
+/// Whether `line` invokes `macro_name` as a call (`macro_name(` with an
+/// optional run of whitespace before the `(`), bounded so a longer
+/// identifier ending in `macro_name` does not match.
+fn line_invokes_macro(line: &str, macro_name: &str) -> bool {
+    let bytes = line.as_bytes();
+    let name_len = macro_name.len();
+    let mut from = 0;
+    while let Some(rel) = line[from..].find(macro_name) {
+        let at = from + rel;
+        from = at + name_len;
+        // Reject a match preceded by an identifier char (`x_macro_name`).
+        let preceded_by_ident = at
+            .checked_sub(1)
+            .and_then(|p| bytes.get(p))
+            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+        if preceded_by_ident {
+            continue;
+        }
+        // The next non-whitespace byte after the name must be `(`.
+        if bytes.get(skip_ws_bytes(bytes, from)) == Some(&b'(') {
+            return true;
+        }
+    }
+    false
+}
+
+/// Advance past ASCII whitespace from byte offset `i` (the
+/// [`crate::domain::macro_lens`] `skip_ws` shape, kept local to the
+/// adapter scanner).
+fn skip_ws_bytes(bytes: &[u8], mut i: usize) -> usize {
+    while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+        i += 1;
+    }
+    i
 }
 
 /// The macro's current body as plain context [`DiffLine`]s — the fallback
@@ -7305,6 +7482,165 @@ mod tests {
             .expect("lens builds");
         assert_eq!(lens.macros[0].impacted_count, 0);
         assert!(lens.macros[0].tree.is_empty());
+        // Slice C: an empty radius ⇒ no impacted-model views (no selector).
+        assert!(lens.macros[0].impacted_models.is_empty());
+    }
+
+    // ===== macro lens Slice C (cute-dbt#265) — selector + call sites =====
+
+    /// A root-project `model` node calling `direct_macros`, declaring file
+    /// `ofp`, AND carrying a real `raw_code` body (the call-site +
+    /// inline-SQL source). Distinct from [`macro_model`], which leaves
+    /// `raw_code` `None`.
+    fn macro_model_with_raw(id: &str, ofp: &str, direct_macros: &[&str], raw: &str) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "model",
+            Checksum::new("sha256", "abc"),
+            Some("select 1".to_owned()),
+            Some(raw.to_owned()),
+            DependsOn::new(
+                direct_macros.iter().map(|m| (*m).to_owned()).collect(),
+                vec![],
+            ),
+            Some(ofp.to_owned()),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(None, Some("shop".to_owned()))
+    }
+
+    #[test]
+    fn line_invokes_macro_matches_a_call_not_a_substring() {
+        assert!(line_invokes_macro("  {{ add_dq_flags() }}", "add_dq_flags"));
+        assert!(line_invokes_macro(
+            "{% set x = add_dq_flags(col) %}",
+            "add_dq_flags"
+        ));
+        // Whitespace between name and `(` is tolerated (Jinja lexer).
+        assert!(line_invokes_macro("{{ add_dq_flags () }}", "add_dq_flags"));
+        // A longer identifier ending in the name does NOT match.
+        assert!(!line_invokes_macro(
+            "{{ my_add_dq_flags() }}",
+            "add_dq_flags"
+        ));
+        // The name without a following `(` is not a call (a bare reference).
+        assert!(!line_invokes_macro(
+            "-- see add_dq_flags for details",
+            "add_dq_flags"
+        ));
+    }
+
+    #[test]
+    fn macro_call_sites_collects_each_invoking_line_with_its_number() {
+        let raw = "select *\nfrom t\n  {{ add_dq_flags() }}\nwhere 1=1\n  {{ add_dq_flags(x) }}";
+        let sites = macro_call_sites(raw, "add_dq_flags");
+        assert_eq!(sites.len(), 2);
+        assert_eq!(sites[0].line, 3);
+        assert_eq!(sites[0].text, "{{ add_dq_flags() }}");
+        assert_eq!(sites[1].line, 5);
+        assert_eq!(sites[1].text, "{{ add_dq_flags(x) }}");
+    }
+
+    #[test]
+    fn macro_call_sites_empty_when_no_invocation() {
+        assert!(macro_call_sites("select 1", "add_dq_flags").is_empty());
+        assert!(macro_call_sites("", "add_dq_flags").is_empty());
+        assert!(macro_call_sites("{{ add_dq_flags() }}", "").is_empty());
+    }
+
+    #[test]
+    fn build_macro_lens_carries_per_model_sql_and_call_sites() {
+        // Slice C: each impacted model gets an ImpactedModelView with its
+        // raw SQL (as context lines) + its first-order call sites of the
+        // macro, in blast-radius id order.
+        let raw_a = "select *\nfrom orders\n  {{ add_dq_flags() }}";
+        let raw_b = "select *\nfrom items\n  {{ add_dq_flags(c) }}\n  {{ add_dq_flags(d) }}";
+        let manifest = macro_lens_manifest(vec![
+            macro_model_with_raw(
+                "model.shop.stg_orders",
+                "models/staging/stg_orders.sql",
+                &["macro.shop.add_dq_flags"],
+                raw_a,
+            ),
+            macro_model_with_raw(
+                "model.shop.fct_orders",
+                "models/marts/core/fct_orders.sql",
+                &["macro.shop.add_dq_flags"],
+                raw_b,
+            ),
+        ]);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None)
+            .expect("lens builds");
+        let mac = &lens.macros[0];
+        assert_eq!(mac.impacted_models.len(), 2);
+        // BTreeSet id order: fct_orders before stg_orders.
+        let fct = &mac.impacted_models[0];
+        assert_eq!(fct.model_id, "model.shop.fct_orders");
+        assert_eq!(fct.name, "fct_orders");
+        assert_eq!(fct.path, "models/marts/core/fct_orders.sql");
+        assert_eq!(fct.call_site_total, 2, "two call sites in fct_orders");
+        assert_eq!(fct.call_sites.len(), 2);
+        assert_eq!(fct.call_site_cap, MACRO_CALL_SITE_CAP);
+        // The inline SQL renders as plain context lines (the model body).
+        assert!(!fct.sql_lines.is_empty());
+        assert!(
+            fct.sql_lines
+                .iter()
+                .all(|l| l.kind == DiffLineKind::Context),
+            "inline model SQL is plain context, never a diff",
+        );
+        let stg = &mac.impacted_models[1];
+        assert_eq!(stg.model_id, "model.shop.stg_orders");
+        assert_eq!(stg.call_site_total, 1);
+    }
+
+    #[test]
+    fn build_macro_lens_caps_shown_call_sites_at_the_default() {
+        // A model that calls the macro more than the cap: call_site_total
+        // reports the honest count, but call_sites is bounded by the cap.
+        let mut raw = String::from("select *\nfrom t\n");
+        for _ in 0..(MACRO_CALL_SITE_CAP + 4) {
+            raw.push_str("  {{ add_dq_flags() }}\n");
+        }
+        let manifest = macro_lens_manifest(vec![macro_model_with_raw(
+            "model.shop.busy",
+            "models/staging/busy.sql",
+            &["macro.shop.add_dq_flags"],
+            &raw,
+        )]);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None)
+            .expect("lens builds");
+        let im = &lens.macros[0].impacted_models[0];
+        assert_eq!(im.call_site_total, MACRO_CALL_SITE_CAP + 4);
+        assert_eq!(
+            im.call_sites.len(),
+            MACRO_CALL_SITE_CAP,
+            "shown call sites are capped",
+        );
+        assert!(im.call_site_total > im.call_sites.len(), "the 'more' case");
+    }
+
+    #[test]
+    fn build_macro_lens_impacted_model_with_no_raw_code_has_empty_sql_and_no_call_sites() {
+        // A model with raw_code None (the rare null-fill) still appears in
+        // the impacted set (the radius is depends_on-based), but its SQL +
+        // call-site surfaces are empty (the template states the absence).
+        let manifest = macro_lens_manifest(vec![macro_model(
+            "model.shop.orders",
+            "models/staging/orders.sql",
+            &["macro.shop.add_dq_flags"],
+        )]);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None)
+            .expect("lens builds");
+        let im = &lens.macros[0].impacted_models[0];
+        assert_eq!(im.call_site_total, 0);
+        assert!(im.call_sites.is_empty());
+        assert!(im.sql_lines.is_empty());
     }
 
     #[test]
@@ -7407,6 +7743,70 @@ mod tests {
         assert!(!html.contains("state:modified.macros"));
         // The macro section is ABOVE the (absent) governance region — it
         // simply renders; the placement is pinned by the template order.
+    }
+
+    #[test]
+    fn macro_lens_on_renders_the_model_selector_and_call_sites() {
+        // Slice C: a model with raw_code calling the macro inline ⇒ the
+        // section carries the impacted-model selector + a server-rendered
+        // per-model panel with the inline SQL + the first-order call sites.
+        let raw = "select *\nfrom orders\n  {{ add_dq_flags() }}";
+        let manifest = macro_lens_manifest(vec![macro_model_with_raw(
+            "model.shop.orders",
+            "models/staging/orders.sql",
+            &["macro.shop.add_dq_flags"],
+            raw,
+        )]);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens =
+            build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None).expect("lens builds");
+        let html = render_html_with_macro_lens("macro_selector.html", Some(&lens));
+        // The selector (#91 idiom reuse) + its model option.
+        assert!(html.contains(r#"data-testid="macro-lens-model-select""#));
+        assert!(html.contains(r#"<option value="model.shop.orders""#));
+        // The per-model panel, the inline SQL, and the call site.
+        assert!(html.contains(r#"data-testid="macro-lens-model-panel""#));
+        assert!(html.contains(r#"data-model="model.shop.orders""#));
+        assert!(html.contains(r#"data-testid="macro-lens-model-sql""#));
+        assert!(html.contains(r#"data-testid="macro-lens-callsites""#));
+        assert!(html.contains(r#"data-testid="macro-lens-callsite""#));
+        assert!(
+            html.contains("{{ add_dq_flags() }}"),
+            "the call-site line renders",
+        );
+        // The call-site count panel reads the honest total (1 here).
+        assert!(html.contains(r#"data-testid="macro-lens-callsite-count""#));
+    }
+
+    #[test]
+    fn macro_lens_on_renders_the_more_disclosure_when_call_sites_exceed_the_cap() {
+        // Slice C: a model calling the macro more than the cap renders a
+        // "Showing N of M" copy (the "more" case), and only the cap is shown.
+        let mut raw = String::from("select *\n");
+        for _ in 0..(MACRO_CALL_SITE_CAP + 2) {
+            raw.push_str("  {{ add_dq_flags() }}\n");
+        }
+        let manifest = macro_lens_manifest(vec![macro_model_with_raw(
+            "model.shop.busy",
+            "models/staging/busy.sql",
+            &["macro.shop.add_dq_flags"],
+            &raw,
+        )]);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens =
+            build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None).expect("lens builds");
+        let total = MACRO_CALL_SITE_CAP + 2;
+        let html = render_html_with_macro_lens("macro_more.html", Some(&lens));
+        assert!(
+            html.contains(&format!(
+                "Showing {MACRO_CALL_SITE_CAP} of {total} call sites"
+            )),
+            "the over-cap copy states the honest 'showing N of M'",
+        );
+        // Exactly cap call-site rows render (the rest are the disclosed
+        // remainder the count names but the shown list omits).
+        let shown = html.matches(r#"data-testid="macro-lens-callsite""#).count();
+        assert_eq!(shown, MACRO_CALL_SITE_CAP, "only the cap is shown");
     }
 
     // ===== project panel: hooks + dispatch rows (cute-dbt#269) =====
