@@ -267,6 +267,29 @@ enable = ["project-state"]
     }
 
     #[test]
+    fn experimental_macro_body_cap_parses_through_analysis_config() {
+        // cute-dbt#265 Slice D — the gen-time inline-body cap knob rides the
+        // [experimental] section (the macro lens is itself experimental).
+        let cfg: AnalysisConfig = toml::from_str(
+            r#"
+[experimental]
+enable = ["macro-lens"]
+macro_body_cap = 3
+"#,
+        )
+        .expect("macro_body_cap parses");
+        assert_eq!(cfg.experimental.macro_body_cap, Some(3));
+        assert_eq!(cfg.experimental.enable, vec!["macro-lens".to_owned()]);
+    }
+
+    #[test]
+    fn absent_macro_body_cap_yields_none() {
+        let cfg: AnalysisConfig =
+            toml::from_str("[experimental]\nenable = [\"macro-lens\"]\n").expect("parses");
+        assert!(cfg.experimental.macro_body_cap.is_none());
+    }
+
+    #[test]
     fn unknown_experimental_key_is_rejected() {
         let err =
             toml::from_str::<AnalysisConfig>("[experimental]\nenabel = [\"project-state\"]\n")

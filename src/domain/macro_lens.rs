@@ -570,6 +570,63 @@ mod tests {
         assert!(macro_blast_radius(&m, "macro.shop.off_cycle").is_empty());
     }
 
+    // ----- S5: dispatch macros do NOT under-report (cute-dbt#265 Slice D)
+
+    #[test]
+    fn blast_radius_reaches_a_dispatched_impl_macro_edited_directly() {
+        // critique S5 — the dispatch-macro under-report check, verified
+        // against TWO real compiled manifests (fusion 2.0-preview.177:
+        // 184/184 dispatchers record their impl edge; core 1.11.2: 281/281).
+        // The wire shape:
+        //   model.shop.orders.depends_on.macros = [generic]   (dispatcher
+        //                                                       entrypoint
+        //                                                       ONLY — never
+        //                                                       the impl)
+        //   macro.shop.dateadd ({% ... adapter.dispatch('dateadd') ... %})
+        //       .depends_on.macros = [default__dateadd]        (the
+        //                                                        adapter-
+        //                                                        resolved
+        //                                                        impl edge,
+        //                                                        baked at
+        //                                                        parse time)
+        //   macro.shop.default__dateadd.depends_on.macros = [] (leaf impl)
+        // Editing the IMPL macro must still reach the model — the dispatcher
+        // edge is a static, recorded macro->macro ref the BFS crosses. If
+        // this assertion ever fails, dispatch resolution stopped being
+        // statically recorded and the lens would under-report — file a
+        // tracking issue and surface the limit in the section banner.
+        let generic = "macro.shop.dateadd";
+        let impl_macro = "macro.shop.default__dateadd";
+        let m = manifest_with(
+            vec![model_with_macros("model.shop.orders", &[generic])],
+            // The dispatcher records its adapter-resolved impl edge; the
+            // impl is a leaf (no further macro deps).
+            &[(generic, &[impl_macro]), (impl_macro, &[])],
+            &[
+                (
+                    generic,
+                    "{% macro dateadd(d, p) %}{{ adapter.dispatch('dateadd')(d, p) }}{% endmacro %}",
+                ),
+                (
+                    impl_macro,
+                    "{% macro default__dateadd(d, p) %}dateadd({{ d }}, {{ p }}){% endmacro %}",
+                ),
+            ],
+        );
+        // Editing the IMPL reaches the model (the under-report case).
+        assert!(
+            macro_blast_radius(&m, impl_macro).contains(&id("model.shop.orders")),
+            "editing a dispatched impl macro must reach the calling model \
+             (dispatch is statically recorded — no under-report)",
+        );
+        // Editing the GENERIC dispatcher also reaches the model (the direct
+        // case — the model lists the dispatcher in depends_on.macros).
+        assert!(
+            macro_blast_radius(&m, generic).contains(&id("model.shop.orders")),
+            "editing the generic dispatcher reaches the model directly",
+        );
+    }
+
     // ----- the two mandatory filters -----------------------------------
 
     #[test]

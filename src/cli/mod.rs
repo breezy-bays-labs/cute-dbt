@@ -62,12 +62,12 @@ use crate::adapters::render::{
     build_payload, index_tests_for_models, render_report_with_externals,
 };
 use crate::domain::{
-    BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_REPORT_TITLE, DepDate, EnabledExperiments,
-    Experiment, FixtureTableDiff, GovernanceFacts, HeuristicId, InScopeSet, Manifest,
-    ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex, PreflightError,
-    ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ScopeInput, ScopeSelection,
-    SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock, VarReference,
-    all_models, attach_hook_facts, attach_model_yaml_diffs, attach_var_facts,
+    BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_MACRO_BODY_CAP, DEFAULT_REPORT_TITLE,
+    DepDate, EnabledExperiments, Experiment, FixtureTableDiff, GovernanceFacts, HeuristicId,
+    InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex,
+    PreflightError, ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ScopeInput,
+    ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock,
+    VarReference, all_models, attach_hook_facts, attach_model_yaml_diffs, attach_var_facts,
     attribute_config_tree_changes, attribute_var_changes, changed_macros_baseline,
     changed_macros_pr_diff, changed_models, check_by_id, diff_project_definitions,
     effective_fixture_format, external_fixture_table, extract_model_block, extract_unit_test_block,
@@ -287,7 +287,11 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
         GovernanceFacts::default()
     };
     // Macro perspective lens (cute-dbt#265, Slice B) — see `gather_macro_lens`.
-    let macro_lens = gather_macro_lens(&current, &scope_input, &experiments);
+    // The Slice D inline-body cap is a gen-time knob resolved here at the
+    // I/O boundary (`--macro-body-cap` over `[experimental] macro_body_cap`
+    // over the default), keeping the render side a pure fn of the cap.
+    let macro_body_cap = resolve_macro_body_cap(args);
+    let macro_lens = gather_macro_lens(&current, &scope_input, &experiments, macro_body_cap);
 
     // Stage-2 fail-closed reads the TRUE in-scope set (cute-dbt#91): the
     // widened render set is only for what the report displays. Config-tree
@@ -1359,6 +1363,7 @@ fn gather_macro_lens(
     current: &Manifest,
     scope_input: &ScopeInput,
     experiments: &EnabledExperiments,
+    body_cap: usize,
 ) -> Option<MacroLensPayload> {
     if !experiments.is_enabled(Experiment::MacroLens) {
         return None;
@@ -1375,7 +1380,29 @@ fn gather_macro_lens(
             ScopeSource::Baseline,
         ),
     };
-    build_macro_lens(current, &changed_macros, source, index)
+    build_macro_lens(current, &changed_macros, source, index, body_cap)
+}
+
+/// Resolve the macro-lens inline-body cap (cute-dbt#265 Slice D, founder
+/// D5) — the gen-time knob bounding how many impacted-model SQL bodies the
+/// experimental section server-renders inline.
+///
+/// Precedence: the `--macro-body-cap` flag wins over the
+/// `[experimental] macro_body_cap` config key, which wins over
+/// [`DEFAULT_MACRO_BODY_CAP`]. The CLI-over-TOML order mirrors the
+/// surrounding flag-over-config posture; both surfaces are already
+/// validated at parse time (a `usize` value-parser), so this is a pure
+/// pick with no failure mode. The cap is inert when the `macro-lens`
+/// experiment is off (`gather_macro_lens` returns `None` before consuming
+/// it), so resolving it unconditionally here is free of side effects.
+fn resolve_macro_body_cap(args: &ReportArgs) -> usize {
+    args.macro_body_cap
+        .or_else(|| {
+            args.config
+                .as_ref()
+                .and_then(|c| c.experimental.macro_body_cap)
+        })
+        .unwrap_or(DEFAULT_MACRO_BODY_CAP)
 }
 
 /// The diff-scope banner inputs for the selected scope source.
@@ -1496,6 +1523,7 @@ mod tests {
             pr_diff: None,
             modified_selectors: Vec::new(),
             experimental: None,
+            macro_body_cap: None,
         }
     }
 
@@ -1564,6 +1592,57 @@ mod tests {
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, "title-only");
         assert!(subtitle.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // resolve_macro_body_cap (cute-dbt#265 Slice D) — the gen-time
+    // inline-body cap precedence ladder (flag > config > default).
+    // -----------------------------------------------------------------
+
+    fn cli_with_experimental_config(cap: Option<usize>) -> ReportArgs {
+        let mut cli = cli("report.html");
+        cli.config = Some(crate::domain::AnalysisConfig {
+            report: crate::domain::ReportConfig::default(),
+            checks: crate::domain::ChecksConfig::default(),
+            experimental: crate::domain::ExperimentalConfig {
+                enable: vec!["macro-lens".to_owned()],
+                macro_body_cap: cap,
+            },
+        });
+        cli
+    }
+
+    #[test]
+    fn resolve_macro_body_cap_defaults_when_neither_surface_sets_it() {
+        let cli = cli("report.html");
+        assert_eq!(resolve_macro_body_cap(&cli), DEFAULT_MACRO_BODY_CAP);
+    }
+
+    #[test]
+    fn resolve_macro_body_cap_reads_the_config_key() {
+        let cli = cli_with_experimental_config(Some(3));
+        assert_eq!(resolve_macro_body_cap(&cli), 3);
+    }
+
+    #[test]
+    fn resolve_macro_body_cap_flag_wins_over_config() {
+        // CLI-over-TOML precedence: the flag overrides the config key.
+        let mut cli = cli_with_experimental_config(Some(3));
+        cli.macro_body_cap = Some(7);
+        assert_eq!(resolve_macro_body_cap(&cli), 7);
+    }
+
+    #[test]
+    fn resolve_macro_body_cap_flag_wins_over_default() {
+        let mut cli = cli("report.html");
+        cli.macro_body_cap = Some(2);
+        assert_eq!(resolve_macro_body_cap(&cli), 2);
+    }
+
+    #[test]
+    fn resolve_macro_body_cap_accepts_zero() {
+        let cli = cli_with_experimental_config(Some(0));
+        assert_eq!(resolve_macro_body_cap(&cli), 0);
     }
 
     // -----------------------------------------------------------------
@@ -1774,6 +1853,7 @@ mod tests {
             checks: crate::domain::ChecksConfig::default(),
             experimental: crate::domain::ExperimentalConfig {
                 enable: enable.iter().map(|s| (*s).to_owned()).collect(),
+                macro_body_cap: None,
             },
         });
         cli

@@ -1494,6 +1494,11 @@ impl ComposeInputs {
             project_root: Some(self.project_root.clone()),
             modified_selectors: Vec::new(),
             experimental,
+            // `review` has no direct `--macro-body-cap` flag — the cap
+            // rides `[experimental] macro_body_cap` in `--config` (read via
+            // `resolve_macro_body_cap`) or the default (cute-dbt#265 Slice
+            // D). `None` defers to that config/default ladder.
+            macro_body_cap: None,
         }
     }
 }

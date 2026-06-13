@@ -1,0 +1,6 @@
+diff --git a/macros/security/mask_pii.sql b/macros/security/mask_pii.sql
+--- a/macros/security/mask_pii.sql
++++ b/macros/security/mask_pii.sql
+@@ -2 +2 @@
+-  case when is_authorized() then {{ col }} else 'REDACTED' end
++  case when is_authorized() then {{ col }} else '***' end

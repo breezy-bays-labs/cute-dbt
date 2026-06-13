@@ -805,6 +805,65 @@ via include_str!. Hand-authored — pure synthetic configuration, no \
 data rows at all.\
 """
 
+[[fixture]]
+path = "macro-heavy-current.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/265"
+sha256 = "84b8dbbe4a32808d35d3865ee1e3de84c73594a6b5477a00f193587acc35d088"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+Synthetic v12 manifest for the cute-dbt#265 Slice D macro-lens \
+inline-body cap golden. A single root-project macro \
+(`macro.analytics.mask_pii`) is called by 14 root-project models spread \
+across distinct directory subtrees (staging/intermediate/marts/exec), \
+which is GREATER than the default inline-body cap of 10 — so the \
+`macro-heavy` example-report-check row exercises the cap: the golden \
+renders "showing 10 of 14 model bodies", exactly 10 inlined SQL panels, \
+and 4 over-cap "body not inlined" affordances, while the selector still \
+lists all 14 impacted models. Carries one synthetic top-level \
+`unit_tests` entry (container shape A — the `fixture_parse` gate \
+requires every committed manifest to be shape A; the test is not in \
+scope for the macro-only pr-diff, it just satisfies the shape). Each \
+model body and the macro body are pure synthetic Jinja/SQL — no real \
+data, no root_path baked in.\
+"""
+
+[[fixture]]
+path = "macro-heavy-pr-diff.patch"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/265"
+sha256 = "594b40f8993b2d152625df82379f0eff8a88a3dd699a439df935216a17c4fe86"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+Synthetic `git diff --unified=0` patch for the cute-dbt#265 Slice D \
+macro-heavy golden. A single-line edit of `macros/security/mask_pii.sql` \
+line 2 (`'REDACTED'`→`'***'`); the `+` side is byte-aligned to the \
+committed `macro-heavy-source` working-tree file (the same-revision \
+contract), so the macro is resolved as changed (path-primary channel) \
+and the macro-lens section renders. Pure synthetic — no real data.\
+"""
+
+[[fixture]]
+path = "macro-heavy-source/macros/security/mask_pii.sql"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/265"
+sha256 = "5217ef39111a78be8a10f1371a3b8cb3b4dc95cc3ccc7dbece526f46cde1e709"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+Synthetic working-tree source for the `macro.analytics.mask_pii` macro \
+(cute-dbt#265 Slice D macro-heavy golden). Byte-aligned to the macro's \
+`macro_sql` in macro-heavy-current.json (the same-revision contract), so \
+reading it through `--project-root tests/fixtures/macro-heavy-source` \
+reconstructs the body diff against the macro-heavy pr-diff patch. Pure \
+synthetic Jinja — no real data.\
+"""
+
 # ---------------------------------------------------------------------------
 # dbt-project/ data carriers (cute-dbt#114 / #115)
 #

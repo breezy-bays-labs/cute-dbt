@@ -644,6 +644,22 @@ jobs:
             # (categorized panel, provenance chips, vars tiers,
             # hooks/dispatch rows) which are default-OFF everywhere else.
             experimental: "1"
+          # cute-dbt#265 Slice D — the GOLDEN macro-lens cap showcase. A
+          # synthetic heavy macro (`mask_pii`) reaches 14 root-project
+          # models (> the default inline-body cap of 10), so the committed
+          # golden exercises the cap: the "showing 10 of 14 model bodies"
+          # affordance, exactly 10 inlined SQL panels, and 4 over-cap "body
+          # not inlined" panels — while the selector still lists all 14.
+          # Renders the heavy manifest in --pr-diff mode against a synthetic
+          # macro-body edit (NO baseline); the macro-lens experiment is on.
+          - name: macro-heavy
+            mode: report
+            current: tests/fixtures/macro-heavy-current.json
+            baseline: ""
+            pr_diff: tests/fixtures/macro-heavy-pr-diff.patch
+            output: examples/macro-heavy-report.html
+            project_root: tests/fixtures/macro-heavy-source
+            experimental: "1"
           # cute-dbt#100 — the GOLDEN explore pages: the full synthetic
           # playground manifest rendered to the two-file --out-dir shape
           # (examples/explore/dag.html + tests.html), each independently

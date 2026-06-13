@@ -73,3 +73,37 @@ Feature: A changed macro is called out, never silently invisible
     When I run cute-dbt report in pr-diff mode against the macro patch
     Then the exit code is 0
     And the report carries no macro-lens section
+
+  # cute-dbt#265 Slice D (founder D5) — the gen-time inline-body cap. A
+  # widely-used macro would otherwise server-render every impacted model's
+  # SQL panel into the (single, frozen) report; the cap bounds the inlined
+  # bodies. The selector still lists ALL impacted models (cheap); only the
+  # first N (in id order) inline a body, the rest show a "body not inlined"
+  # affordance. The cap is a gen-time knob (--macro-body-cap / TOML), not a
+  # post-gen HTML toggle.
+  Scenario: Above the inline-body cap the macro lens shows N of M bodies and a list-only tail
+    Given a current manifest with a root-project macro called by fourteen models
+    And the working tree carries that macro's source file
+    And the PR diff edits the macro's body
+    And the experimental switch enables macro-lens
+    And the inline-body cap is set to 10
+    When I run cute-dbt report in pr-diff mode against the macro patch
+    Then the exit code is 0
+    And the report carries the macro-lens section
+    And the macro-lens section reports the impacted-model count as 14
+    And the macro-lens section shows 10 of 14 model bodies inline
+    And the macro-lens section inlines exactly 10 model SQL panels
+    And the macro-lens section shows the over-cap body-not-inlined affordance
+    And the impacted-model selector lists all 14 models
+
+  Scenario: Below the inline-body cap every impacted model body inlines
+    Given a current manifest with a root-project macro called by two models
+    And the working tree carries that macro's source file
+    And the PR diff edits the macro's body
+    And the experimental switch enables macro-lens
+    And the inline-body cap is set to 10
+    When I run cute-dbt report in pr-diff mode against the macro patch
+    Then the exit code is 0
+    And the report carries the macro-lens section
+    And the macro-lens section shows no over-cap body-not-inlined affordance
+    And the macro-lens section shows no body-cap notice

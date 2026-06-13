@@ -1471,7 +1471,22 @@ pub struct ChangedMacroView {
     /// [`tree`](Self::tree): the tree is the always-full lightweight
     /// directory view (critique S3), this is the heavy per-model surface
     /// the selector drives.
+    ///
+    /// **Slice D cap (founder D5):** the selector lists every entry (the
+    /// list is cheap), but only the first
+    /// [`inlined_count`](Self::inlined_count) entries (in id order) carry a
+    /// server-rendered inline SQL + call-site panel
+    /// ([`ImpactedModelView::inline_body`] `== true`). Past the cap, an
+    /// entry's panel shows a "body not inlined" affordance (name + path
+    /// only), bounding a widely-used macro's report size — the report is a
+    /// single frozen file.
     pub impacted_models: Vec<ImpactedModelView>,
+    /// How many of the [`impacted_models`](Self::impacted_models) carry a
+    /// server-rendered inline body (`min(cap, impacted_count)`) — the "N"
+    /// of the "showing N of M bodies" copy (cute-dbt#265 Slice D, founder
+    /// D5). Equals [`impacted_count`](Self::impacted_count) when the cap is
+    /// not exceeded (then the "showing N of M" affordance is omitted).
+    pub inlined_count: usize,
 }
 
 /// One impacted (macro-calling) root-project model in a
@@ -1516,6 +1531,14 @@ pub struct ImpactedModelView {
     /// (`MACRO_CALL_SITE_CAP`) — carried on the payload so the JS reveal
     /// and the headless guard agree on the boundary.
     pub call_site_cap: usize,
+    /// Whether this model's heavy surface (inline SQL + call sites) is
+    /// server-rendered (cute-dbt#265 Slice D, founder D5). `true` for the
+    /// first N impacted models (in id order, N = the gen-time
+    /// `macro_body_cap`); `false` past the cap, where the template renders
+    /// a compact "body not inlined" affordance (name + path only) instead
+    /// of the SQL panel — bounding a widely-used macro's report size. The
+    /// model-selector still lists every entry regardless of this flag.
+    pub inline_body: bool,
 }
 
 /// One first-order call site of the changed macro in an impacted model's
@@ -2203,6 +2226,14 @@ const MACRO_CALL_SITE_CAP: usize = 3;
 /// impacted root-project models. `scope_source` selects the fidelity chip
 /// (`Baseline` = exact body comparison, `PrDiff` = path/name heuristic).
 ///
+/// `body_cap` (cute-dbt#265 Slice D, founder D5) bounds how many impacted
+/// models carry a server-rendered inline SQL + call-site panel: the first
+/// `body_cap` (in id order) inline their body
+/// ([`ImpactedModelView::inline_body`] `== true`), the rest show a
+/// tree-only "body not inlined" affordance — keeping a widely-used macro's
+/// (single, frozen) report bounded. The cli resolves `body_cap` at the I/O
+/// boundary ([`crate::domain::DEFAULT_MACRO_BODY_CAP`] default).
+///
 /// Returns `None` when `changed_macros` is empty — the cli only calls this
 /// when [`Experiment::MacroLens`](crate::domain::Experiment::MacroLens) is
 /// on, so `None` (no macro changed) and the off-gate (the cli passes the
@@ -2214,6 +2245,7 @@ pub fn build_macro_lens(
     changed_macros: &BTreeSet<String>,
     scope_source: ScopeSource,
     index: Option<&NormalizedDiffIndex>,
+    body_cap: usize,
 ) -> Option<MacroLensPayload> {
     // Root-project filter: the lens is the REVIEWER's macros, never a
     // vendor package's. The pr-diff path-primary channel resolves any macro
@@ -2226,7 +2258,7 @@ pub fn build_macro_lens(
     let macros = changed_macros
         .iter()
         .filter(|macro_id| is_root_project_macro(current, macro_id, project))
-        .map(|macro_id| changed_macro_view(current, macro_id, index))
+        .map(|macro_id| changed_macro_view(current, macro_id, index, body_cap))
         .collect::<Vec<_>>();
     if macros.is_empty() {
         return None;
@@ -2267,6 +2299,7 @@ fn changed_macro_view(
     current: &Manifest,
     macro_id: &str,
     index: Option<&NormalizedDiffIndex>,
+    body_cap: usize,
 ) -> ChangedMacroView {
     let identity = current.macro_identity().get(macro_id);
     // Name: the recorded identity name, else the unique_id leaf.
@@ -2293,7 +2326,11 @@ fn changed_macro_view(
     let radius = macro_blast_radius(current, macro_id);
     let impacted_count = radius.len();
     let tree = impacted_model_tree(current, &radius);
-    let impacted_models = impacted_model_views(current, &radius, &name);
+    let impacted_models = impacted_model_views(current, &radius, &name, body_cap);
+    // The inlined count is min(cap, impacted_count) — the "N" of the
+    // "showing N of M bodies" copy. When it equals impacted_count the cap
+    // is not exceeded and the template omits the over-cap affordance.
+    let inlined_count = impacted_count.min(body_cap);
     ChangedMacroView {
         name,
         package,
@@ -2303,6 +2340,7 @@ fn changed_macro_view(
         impacted_count,
         tree,
         impacted_models,
+        inlined_count,
     }
 }
 
@@ -2313,30 +2351,58 @@ fn changed_macro_view(
 /// manifest, matching the existing Model-SQL surface's source). In blast-
 /// radius id order ([`BTreeSet`]), so the selector + the directory tree
 /// agree on ordering and the golden is stable.
+///
+/// **Slice D cap (founder D5):** only the first `body_cap` models (in id
+/// order) carry a server-rendered inline body — their `inline_body` is
+/// `true` and the expensive SQL / call-site scan runs. Past the cap the
+/// view carries identity only (`inline_body = false`, empty SQL + call
+/// sites): the model-selector still lists it, but the panel shows a "body
+/// not inlined" affordance, so a widely-used macro's report stays bounded.
 fn impacted_model_views(
     current: &Manifest,
     radius: &BTreeSet<NodeId>,
     macro_name: &str,
+    body_cap: usize,
 ) -> Vec<ImpactedModelView> {
     radius
         .iter()
-        .map(|id| {
+        .enumerate()
+        .map(|(rank, id)| {
             let node = current.node(id);
+            let model_id = id.as_str().to_owned();
+            let name = leaf_segment(id.as_str()).to_owned();
+            let path = node
+                .and_then(Node::original_file_path)
+                .unwrap_or_default()
+                .to_owned();
+            // Past the cap: identity only, no inline body. Skipping the
+            // raw_code scan keeps a 50-model macro's payload bounded — the
+            // heavy surface is exactly the bytes the cap is meant to bound.
+            if rank >= body_cap {
+                return ImpactedModelView {
+                    model_id,
+                    name,
+                    path,
+                    sql_lines: Vec::new(),
+                    call_sites: Vec::new(),
+                    call_site_total: 0,
+                    call_site_cap: MACRO_CALL_SITE_CAP,
+                    inline_body: false,
+                };
+            }
             let raw = node.and_then(Node::raw_code).unwrap_or("");
             let call_sites = macro_call_sites(raw, macro_name);
             let call_site_total = call_sites.len();
             let shown = call_sites.into_iter().take(MACRO_CALL_SITE_CAP).collect();
             ImpactedModelView {
-                model_id: id.as_str().to_owned(),
-                name: leaf_segment(id.as_str()).to_owned(),
-                path: node
-                    .and_then(Node::original_file_path)
-                    .unwrap_or_default()
-                    .to_owned(),
+                model_id,
+                name,
+                path,
                 sql_lines: macro_body_context_lines(raw),
                 call_sites: shown,
                 call_site_total,
                 call_site_cap: MACRO_CALL_SITE_CAP,
+                inline_body: true,
             }
         })
         .collect()
@@ -3578,9 +3644,9 @@ mod tests {
     use super::*;
     use crate::domain::{
         BlastRadius, Checksum, ColumnMetaTags, ContractClass, ContractColumnDiff, CteEdge, CteNode,
-        DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, EdgeType, FileHunks, GovChip,
-        Group, GroupChip, Hunk, Manifest, ManifestMetadata, MetaPair, ModelMetaTags, NodeConfig,
-        NodeId, Owner, PrDiff, UnitTest, UnitTestExpect, UnitTestGiven,
+        DEFAULT_MACRO_BODY_CAP, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, EdgeType,
+        FileHunks, GovChip, Group, GroupChip, Hunk, Manifest, ManifestMetadata, MetaPair,
+        ModelMetaTags, NodeConfig, NodeId, Owner, PrDiff, UnitTest, UnitTestExpect, UnitTestGiven,
     };
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -7323,7 +7389,16 @@ mod tests {
             "models/staging/orders.sql",
             &["macro.shop.add_dq_flags"],
         )]);
-        assert!(build_macro_lens(&manifest, &BTreeSet::new(), ScopeSource::PrDiff, None).is_none());
+        assert!(
+            build_macro_lens(
+                &manifest,
+                &BTreeSet::new(),
+                ScopeSource::PrDiff,
+                None,
+                usize::MAX
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -7334,7 +7409,7 @@ mod tests {
             &["macro.shop.add_dq_flags"],
         )]);
         let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
-        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None)
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None, usize::MAX)
             .expect("a changed macro builds the lens");
         assert_eq!(lens.fidelity, "exact");
         assert_eq!(lens.macros.len(), 1);
@@ -7375,8 +7450,14 @@ mod tests {
         };
         let index = NormalizedDiffIndex::new(&diff, None);
         let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
-        let lens = build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, Some(&index))
-            .expect("a changed macro builds the lens");
+        let lens = build_macro_lens(
+            &manifest,
+            &changed,
+            ScopeSource::PrDiff,
+            Some(&index),
+            usize::MAX,
+        )
+        .expect("a changed macro builds the lens");
         assert_eq!(lens.fidelity, "heuristic");
         let mac = &lens.macros[0];
         let body_diff = mac.diff.as_ref().expect("the touched macro body diffs");
@@ -7407,7 +7488,7 @@ mod tests {
             ),
         ]);
         let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
-        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None)
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None, usize::MAX)
             .expect("lens builds");
         let mac = &lens.macros[0];
         assert_eq!(mac.impacted_count, 2);
@@ -7472,7 +7553,7 @@ mod tests {
         });
         let changed = BTreeSet::from(["macro.dbt_utils.helper".to_owned()]);
         assert!(
-            build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None).is_none(),
+            build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None, usize::MAX).is_none(),
             "a vendor-only changed set yields no lens",
         );
     }
@@ -7488,7 +7569,7 @@ mod tests {
             &["macro.shop.unrelated"],
         )]);
         let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
-        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None)
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None, usize::MAX)
             .expect("lens builds");
         assert_eq!(lens.macros[0].impacted_count, 0);
         assert!(lens.macros[0].tree.is_empty());
@@ -7592,7 +7673,7 @@ mod tests {
             ),
         ]);
         let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
-        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None)
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None, usize::MAX)
             .expect("lens builds");
         let mac = &lens.macros[0];
         assert_eq!(mac.impacted_models.len(), 2);
@@ -7632,7 +7713,7 @@ mod tests {
             &raw,
         )]);
         let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
-        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None)
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None, usize::MAX)
             .expect("lens builds");
         let im = &lens.macros[0].impacted_models[0];
         assert_eq!(im.call_site_total, MACRO_CALL_SITE_CAP + 4);
@@ -7655,7 +7736,7 @@ mod tests {
             &["macro.shop.add_dq_flags"],
         )]);
         let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
-        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None)
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::Baseline, None, usize::MAX)
             .expect("lens builds");
         let im = &lens.macros[0].impacted_models[0];
         assert_eq!(im.call_site_total, 0);
@@ -7751,8 +7832,8 @@ mod tests {
             &["macro.shop.add_dq_flags"],
         )]);
         let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
-        let lens =
-            build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None).expect("lens builds");
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None, usize::MAX)
+            .expect("lens builds");
         let html = render_html_with_macro_lens("macro_on.html", Some(&lens));
         assert!(html.contains(r#"data-testid="macro-lens-panel""#));
         assert!(html.contains("Macro changed"));
@@ -7778,8 +7859,8 @@ mod tests {
             raw,
         )]);
         let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
-        let lens =
-            build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None).expect("lens builds");
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None, usize::MAX)
+            .expect("lens builds");
         let html = render_html_with_macro_lens("macro_selector.html", Some(&lens));
         // The selector (#91 idiom reuse) + its model option.
         assert!(html.contains(r#"data-testid="macro-lens-model-select""#));
@@ -7813,8 +7894,8 @@ mod tests {
             &raw,
         )]);
         let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
-        let lens =
-            build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None).expect("lens builds");
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None, usize::MAX)
+            .expect("lens builds");
         let total = MACRO_CALL_SITE_CAP + 2;
         let html = render_html_with_macro_lens("macro_more.html", Some(&lens));
         assert!(
@@ -7827,6 +7908,243 @@ mod tests {
         // remainder the count names but the shown list omits).
         let shown = html.matches(r#"data-testid="macro-lens-callsite""#).count();
         assert_eq!(shown, MACRO_CALL_SITE_CAP, "only the cap is shown");
+    }
+
+    // ===== macro lens: the inline-body cap (cute-dbt#265 Slice D) =====
+
+    /// A heavy-macro manifest: `count` root-project models in distinct
+    /// directory subtrees, each calling `macro.shop.add_dq_flags` inline
+    /// (so an inlined panel has real SQL + a call site). Zero-padded names
+    /// keep the [`BTreeSet`] id order deterministic (`m00`..`m24`), so the
+    /// cap's "first N" selection is golden-stable. Each model body is a
+    /// chunky ~40-line SQL block so the cap's byte-bounding effect is
+    /// realistic (an inlined body is a few KiB; an over-cap model is a few
+    /// hundred bytes of identity-only markup).
+    fn heavy_macro_manifest(count: usize) -> Manifest {
+        use std::fmt::Write as _;
+        // A multi-line SQL body of realistic heft — the bytes the cap bounds.
+        let mut raw = String::from("with base as (\n  select *\n  from upstream\n)\n");
+        for line in 0..36 {
+            let _ = writeln!(raw, "  , col_{line} as (select {line} from base)");
+        }
+        raw.push_str("select *\nfrom base\n  {{ add_dq_flags() }}");
+        let models = (0..count)
+            .map(|i| {
+                macro_model_with_raw(
+                    &format!("model.shop.m{i:02}"),
+                    &format!("models/marts/m{i:02}.sql"),
+                    &["macro.shop.add_dq_flags"],
+                    &raw,
+                )
+            })
+            .collect();
+        macro_lens_manifest(models)
+    }
+
+    #[test]
+    fn build_macro_lens_caps_inline_bodies_at_the_knob() {
+        // Slice D (founder D5): with 25 impacted models and a cap of 10,
+        // exactly the first 10 (id order m00..m09) inline their body
+        // (inline_body == true); the rest carry identity only
+        // (inline_body == false, empty SQL + call sites). The selector still
+        // lists ALL 25 (every view is present), but the heavy surface is
+        // bounded.
+        let manifest = heavy_macro_manifest(25);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None, 10)
+            .expect("lens builds");
+        let mac = &lens.macros[0];
+        assert_eq!(mac.impacted_count, 25, "all 25 models are in the radius");
+        assert_eq!(mac.inlined_count, 10, "only the cap inlines a body");
+        assert_eq!(
+            mac.impacted_models.len(),
+            25,
+            "the selector still lists every model (the list is cheap)",
+        );
+        let inlined = mac
+            .impacted_models
+            .iter()
+            .filter(|im| im.inline_body)
+            .count();
+        assert_eq!(inlined, 10, "exactly the cap carries an inline body");
+        // The first 10 (id order) are the inlined ones; they carry SQL.
+        for im in mac.impacted_models.iter().take(10) {
+            assert!(im.inline_body, "{} inlines", im.model_id);
+            assert!(!im.sql_lines.is_empty(), "{} has SQL", im.model_id);
+        }
+        // Past the cap: identity only, no SQL, no call sites (the bytes the
+        // cap is meant to bound).
+        for im in mac.impacted_models.iter().skip(10) {
+            assert!(!im.inline_body, "{} is not inlined", im.model_id);
+            assert!(im.sql_lines.is_empty(), "{} has no SQL", im.model_id);
+            assert!(
+                im.call_sites.is_empty(),
+                "{} has no call sites",
+                im.model_id
+            );
+            assert_eq!(im.call_site_total, 0, "{} reports zero", im.model_id);
+        }
+    }
+
+    #[test]
+    fn build_macro_lens_below_cap_inlines_every_body() {
+        // At or below the cap every impacted model inlines — inlined_count
+        // == impacted_count, so the template omits the "showing N of M"
+        // affordance entirely (the Slice C behaviour, unchanged).
+        let manifest = heavy_macro_manifest(3);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None, 10)
+            .expect("lens builds");
+        let mac = &lens.macros[0];
+        assert_eq!(mac.impacted_count, 3);
+        assert_eq!(mac.inlined_count, 3, "below the cap: all inline");
+        assert!(
+            mac.impacted_models.iter().all(|im| im.inline_body),
+            "every model inlines below the cap",
+        );
+    }
+
+    #[test]
+    fn build_macro_lens_cap_zero_inlines_no_body() {
+        // A cap of 0 is legal (tree-only): the selector still lists every
+        // model, but none inline a body — the maximally-bounded report.
+        let manifest = heavy_macro_manifest(4);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None, 0)
+            .expect("lens builds");
+        let mac = &lens.macros[0];
+        assert_eq!(mac.inlined_count, 0);
+        assert!(
+            mac.impacted_models.iter().all(|im| !im.inline_body),
+            "a cap of 0 inlines nothing",
+        );
+        assert_eq!(mac.impacted_models.len(), 4, "the selector still lists all");
+    }
+
+    #[test]
+    fn macro_lens_renders_the_over_cap_affordance() {
+        // Slice D: the rendered HTML shows the "showing N of M bodies" line
+        // and the per-panel "body not inlined" affordance for over-cap
+        // models, while inlined models keep their SQL panel.
+        let manifest = heavy_macro_manifest(25);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None, 10)
+            .expect("lens builds");
+        let html = render_html_with_macro_lens("macro_cap.html", Some(&lens));
+        // The "showing N of M bodies" affordance.
+        assert!(
+            html.contains(r#"data-testid="macro-lens-body-cap""#),
+            "the body-cap line renders",
+        );
+        assert!(
+            html.contains(r#"data-inlined="10""#) && html.contains(r#"data-total="25""#),
+            "the body-cap line states 10 of 25",
+        );
+        // The over-cap "body not inlined" affordance renders.
+        assert!(
+            html.contains(r#"data-testid="macro-lens-model-uninlined""#),
+            "the over-cap panel shows the uninlined affordance",
+        );
+        // The selector still lists all 25 models (every option present).
+        let options = html.matches("<option value=\"model.shop.m").count();
+        assert_eq!(options, 25, "the selector lists every impacted model");
+        // Exactly 10 inlined SQL panels render (the bounded heavy surface).
+        let sql_panels = html
+            .matches(r#"data-testid="macro-lens-model-sql""#)
+            .count();
+        assert_eq!(sql_panels, 10, "only the cap's bodies inline");
+    }
+
+    #[test]
+    fn macro_lens_below_cap_omits_the_body_cap_line() {
+        // Below the cap: the "showing N of M bodies" line is absent (the cap
+        // is not exceeded) and no panel carries the uninlined affordance.
+        let manifest = heavy_macro_manifest(3);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None, 10)
+            .expect("lens builds");
+        let html = render_html_with_macro_lens("macro_under_cap.html", Some(&lens));
+        assert!(
+            !html.contains(r#"data-testid="macro-lens-body-cap""#),
+            "no body-cap line below the cap",
+        );
+        assert!(
+            !html.contains(r#"data-testid="macro-lens-model-uninlined""#),
+            "no uninlined panel below the cap",
+        );
+    }
+
+    #[test]
+    fn macro_lens_worst_case_heavy_macro_report_stays_under_a_byte_budget() {
+        // Slice D golden-size assertion (the cap's RAISON D'ÊTRE): a
+        // widely-used macro (200 impacted models, each a chunky ~40-line
+        // body) rendered at the default cap must produce a BOUNDED report.
+        // The inlined heavy surface is fixed at the cap (10 SQL panels);
+        // past it each model contributes only a lightweight selector option
+        // + tree row + identity panel. The whole report (asset bundle +
+        // section) must stay under the budget.
+        //
+        // The base asset bundle (Sakura + jQuery + DataTables + Mermaid +
+        // Cytoscape, all inlined) is ~4.2 MiB by itself, so the budget is a
+        // full-report ceiling. 6 MiB sits comfortably above the measured
+        // capped size while failing loudly if the cap regresses and all 200
+        // full bodies inline (which the companion test proves is materially
+        // larger). The cap is the bound that keeps the marginal per-over-cap
+        // model cost a few hundred bytes, not a few KiB.
+        const BYTE_BUDGET: usize = 6 * 1024 * 1024;
+        let manifest = heavy_macro_manifest(200);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(
+            &manifest,
+            &changed,
+            ScopeSource::PrDiff,
+            None,
+            DEFAULT_MACRO_BODY_CAP,
+        )
+        .expect("lens builds");
+        let mac = &lens.macros[0];
+        assert_eq!(mac.impacted_count, 200, "all 200 models impacted");
+        assert_eq!(
+            mac.inlined_count, DEFAULT_MACRO_BODY_CAP,
+            "only the default cap inlines",
+        );
+        let html = render_html_with_macro_lens("macro_heavy_budget.html", Some(&lens));
+        assert!(
+            html.len() < BYTE_BUDGET,
+            "worst-case heavy-macro report ({} bytes) must stay under the \
+             {BYTE_BUDGET}-byte budget — the cap bounds the heavy surface",
+            html.len(),
+        );
+        // Exactly the cap's SQL panels inline — the bound that makes the
+        // budget hold regardless of model count.
+        let sql_panels = html
+            .matches(r#"data-testid="macro-lens-model-sql""#)
+            .count();
+        assert_eq!(
+            sql_panels, DEFAULT_MACRO_BODY_CAP,
+            "the cap bounds the bodies"
+        );
+    }
+
+    #[test]
+    fn macro_lens_cap_meaningfully_shrinks_a_heavy_report() {
+        // The cap must actually bound the size: a capped render of a heavy
+        // macro is materially smaller than an uncapped one (every body
+        // inlined). This pins the cap's value — not just that it renders.
+        let manifest = heavy_macro_manifest(60);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let capped = build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None, 10)
+            .expect("capped lens builds");
+        let uncapped = build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None, usize::MAX)
+            .expect("uncapped lens builds");
+        let capped_html = render_html_with_macro_lens("macro_capped.html", Some(&capped));
+        let uncapped_html = render_html_with_macro_lens("macro_uncapped.html", Some(&uncapped));
+        assert!(
+            capped_html.len() < uncapped_html.len(),
+            "the capped report ({}) must be smaller than the uncapped one ({})",
+            capped_html.len(),
+            uncapped_html.len(),
+        );
     }
 
     // ===== project panel: hooks + dispatch rows (cute-dbt#269) =====

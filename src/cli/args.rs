@@ -217,6 +217,25 @@ pub struct ReportArgs {
         hide = true
     )]
     pub experimental: Option<BTreeSet<Experiment>>,
+
+    /// The macro-lens inline-body cap (cute-dbt#265 Slice D, founder D5) —
+    /// how many impacted-model SQL bodies the experimental "macro changed"
+    /// section server-renders inline before falling back to the
+    /// lightweight tree-only listing. A **gen-time** knob: the report is
+    /// frozen at render, so this fixes the number of inlined bodies at
+    /// generation time (NOT a post-gen HTML toggle).
+    ///
+    /// The model-selector still lists ALL impacted models (that list is
+    /// cheap); only the first N (in id order) carry an inline SQL +
+    /// call-site panel — the rest show a "body not inlined — showing N of
+    /// M" affordance, keeping a widely-used macro's report bounded.
+    ///
+    /// Absent ⇒ [`DEFAULT_MACRO_BODY_CAP`](crate::domain::DEFAULT_MACRO_BODY_CAP).
+    /// Takes precedence over `[experimental] macro_body_cap` in `--config`
+    /// when both are supplied (the CLI-over-TOML precedence). Only
+    /// meaningful with the `macro-lens` experiment on; inert otherwise.
+    #[arg(long, value_name = "N")]
+    pub macro_body_cap: Option<usize>,
 }
 
 /// Arguments for `cute-dbt explore` (cute-dbt#100) — full-manifest,

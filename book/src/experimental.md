@@ -61,6 +61,7 @@ the same posture as the `[checks]` section (see
 | id | covers |
 |----|--------|
 | `project-state` | The project-state surfaces: the "Project definition changed" panel, per-model config attributions, vars/hooks/dispatch change rows, and `dbt_project.yml` config-tree scope widening. |
+| `macro-lens` | The "Macro changed" section: a changed `macros/*.sql` macro's body diff, the count + collapsible directory tree of the root-project models it reaches, a per-model SQL selector with first-order call sites, and a per-arm fidelity chip. A macro edit is otherwise invisible to model/unit-test scope selection — this surfaces it. |
 
 Experiments graduate by becoming default behavior (the id then
 disappears from the vocabulary) — opting in early is how you preview
@@ -90,3 +91,38 @@ contributes **zero bytes** to the output:
 With the switch **on**, all of the above render exactly as before the
 switch existed — opting in previews precisely what graduation would
 make default.
+
+### Tuning the macro-lens inline-body cap
+
+When `macro-lens` is on, the "Macro changed" section can server-render
+each impacted model's SQL inline so a reviewer reads the call sites
+without leaving the report. A *widely-used* macro can reach dozens of
+models, though, and the report is a single self-contained file frozen at
+generation time — inlining every body would bloat it. So the inlined
+bodies are **capped**.
+
+The model-selector always lists **every** impacted model (that list is
+cheap); only the first **N** (in id order) carry a server-rendered inline
+SQL panel. Past the cap, a model shows a compact "body not inlined"
+affordance and the section states "showing N of M model bodies". The
+default cap is **10**.
+
+The cap is a **generation-time knob**, not a post-render toggle (the
+report is static once written). Set it on either surface:
+
+```toml
+[experimental]
+enable = ["macro-lens"]
+# Inline up to 25 impacted-model bodies (default: 10).
+macro_body_cap = 25
+```
+
+or with the CLI flag, which takes precedence over the config key:
+
+```bash
+cute-dbt report --manifest target/manifest.json \
+  --pr-diff @pr.diff --macro-body-cap 25 ...
+```
+
+A cap of `0` inlines nothing (the directory tree + selector only) — the
+maximally-bounded report. The cap is inert when `macro-lens` is off.

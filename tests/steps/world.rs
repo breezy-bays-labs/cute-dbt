@@ -221,6 +221,11 @@ pub struct World {
     /// into a scenario.
     pub experimental_env: Option<String>,
 
+    /// cute-dbt#265 Slice D: the `--macro-body-cap` value a macro-lens
+    /// scenario arms for the subprocess run (the gen-time inline-body cap).
+    /// `None` ⇒ the flag is omitted (the binary applies its default).
+    pub macro_body_cap: Option<usize>,
+
     // --- One-command review (one_command_review, cute-dbt#300) -----------
     //
     // cute-dbt#331 — these fields back the review/skill bdd steps, which

@@ -88,6 +88,16 @@ jobs:
             # project-state family (the epic #288 golden policy), mirrored
             # from ci.yml's example-report-check diff-showcase row.
             experimental: "1"
+          # cute-dbt#265 Slice D — the macro-lens inline-body cap golden,
+          # mirrored from ci.yml's example-report-check macro-heavy row. A
+          # synthetic heavy macro (`mask_pii`, 14 callers > the cap of 10)
+          # so the preview card can offer the cap showcase report.
+          - name: macro-heavy
+            current: tests/fixtures/macro-heavy-current.json
+            baseline: ""
+            pr_diff: tests/fixtures/macro-heavy-pr-diff.patch
+            project_root: tests/fixtures/macro-heavy-source
+            experimental: "1"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:

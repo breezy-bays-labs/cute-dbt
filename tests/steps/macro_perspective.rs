@@ -118,6 +118,32 @@ fn manifest_two_callers_with_call_sites() -> Manifest {
     )
 }
 
+/// Build the Slice D heavy-macro manifest: fourteen root-project models
+/// across distinct directory subtrees, all calling the root macro inline.
+/// Fourteen exceeds the cap (10) the over-cap scenario arms, so the cap
+/// affordance ("10 of 14") triggers. Zero-padded names keep the BTreeSet
+/// id order deterministic so the cap's "first N" selection is stable.
+fn manifest_fourteen_callers() -> Manifest {
+    let raw = "select *\nfrom upstream\n  {{ add_dq_flags() }}";
+    let nodes: Vec<Node> = (0..14)
+        .map(|i| {
+            macro_model_with_raw(
+                &format!("m{i:02}"),
+                &format!("marts/m{i:02}.sql"),
+                &root_macro_id(),
+                Some(raw),
+            )
+        })
+        .collect();
+    Manifest::new(
+        ManifestMetadata::new("https://schemas.getdbt.com/dbt/manifest/v12.json")
+            .with_project_name(Some(PROJECT.to_owned())),
+        nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+        HashMap::new(),
+        HashMap::new(),
+    )
+}
+
 /// Build the vendor-arm manifest: a root-project model calls a
 /// VENDOR-package macro (`macro.dbt_utils.add_dq_flags`). Editing the
 /// vendor macro must NOT surface the lens (the root-project filter on both
@@ -184,6 +210,17 @@ fn current_manifest_two_callers(world: &mut World) {
 fn current_manifest_two_callers_inline(world: &mut World) {
     world.current_manifest = Some(manifest_two_callers_with_call_sites());
     world.fixture_choice = None;
+}
+
+#[given("a current manifest with a root-project macro called by fourteen models")]
+fn current_manifest_fourteen_callers(world: &mut World) {
+    world.current_manifest = Some(manifest_fourteen_callers());
+    world.fixture_choice = None;
+}
+
+#[given(regex = r#"^the inline-body cap is set to (\d+)$"#)]
+fn inline_body_cap_set_to(world: &mut World, cap: usize) {
+    world.macro_body_cap = Some(cap);
 }
 
 #[given("a current manifest with a vendor-package macro called by a root-project model")]
@@ -297,6 +334,12 @@ fn run_macro_pr_diff(world: &mut World) {
         common::s(&out),
     ])
     .current_dir(&workdir);
+    // cute-dbt#265 Slice D: arm the gen-time inline-body cap when a Given
+    // set one (the over-cap / below-cap scenarios). Omitted otherwise so
+    // the binary applies its default.
+    if let Some(cap) = world.macro_body_cap {
+        cmd.args(["--macro-body-cap", &cap.to_string()]);
+    }
     cmd.env_remove("CUTE_DBT_EXPERIMENTAL");
     if let Some(value) = &world.experimental_env {
         cmd.env("CUTE_DBT_EXPERIMENTAL", value);
@@ -459,5 +502,66 @@ fn section_shows_call_sites(world: &mut World) {
     assert!(
         html.contains("{{ add_dq_flags() }}") || html.contains("add_dq_flags(amount)"),
         "a call-site source line renders verbatim",
+    );
+}
+
+// ---------------------------------------------------------------------
+// Slice D — the gen-time inline-body cap
+// ---------------------------------------------------------------------
+
+#[then(regex = r#"^the macro-lens section shows (\d+) of (\d+) model bodies inline$"#)]
+fn section_shows_n_of_m_bodies(world: &mut World, inlined: String, total: String) {
+    let html = html(world);
+    assert!(
+        html.contains(r#"data-testid="macro-lens-body-cap""#),
+        "the over-cap body-cap notice must render",
+    );
+    assert!(
+        html.contains(&format!(r#"data-inlined="{inlined}""#))
+            && html.contains(&format!(r#"data-total="{total}""#)),
+        "the body-cap notice must state {inlined} of {total}",
+    );
+}
+
+#[then(regex = r#"^the macro-lens section inlines exactly (\d+) model SQL panels$"#)]
+fn section_inlines_exactly_n_sql_panels(world: &mut World, n: usize) {
+    let html = html(world);
+    let panels = html
+        .matches(r#"data-testid="macro-lens-model-sql""#)
+        .count();
+    assert_eq!(panels, n, "exactly {n} model SQL panels must inline");
+}
+
+#[then("the macro-lens section shows the over-cap body-not-inlined affordance")]
+fn section_shows_uninlined_affordance(world: &mut World) {
+    assert!(
+        html(world).contains(r#"data-testid="macro-lens-model-uninlined""#),
+        "an over-cap model must show the body-not-inlined affordance",
+    );
+}
+
+#[then("the macro-lens section shows no over-cap body-not-inlined affordance")]
+fn section_shows_no_uninlined_affordance(world: &mut World) {
+    assert!(
+        !html(world).contains(r#"data-testid="macro-lens-model-uninlined""#),
+        "below the cap no model is uninlined",
+    );
+}
+
+#[then("the macro-lens section shows no body-cap notice")]
+fn section_shows_no_body_cap_notice(world: &mut World) {
+    assert!(
+        !html(world).contains(r#"data-testid="macro-lens-body-cap""#),
+        "below the cap the body-cap notice is omitted",
+    );
+}
+
+#[then(regex = r#"^the impacted-model selector lists all (\d+) models$"#)]
+fn selector_lists_all_n_models(world: &mut World, n: usize) {
+    let html = html(world);
+    let options = html.matches(r#"<option value="model.shop.m"#).count();
+    assert_eq!(
+        options, n,
+        "the selector must list all {n} impacted models (the list is cheap)",
     );
 }
