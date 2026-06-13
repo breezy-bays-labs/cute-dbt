@@ -863,12 +863,7 @@ fn hunk_is_unified_zero(h: &Hunk) -> bool {
 /// is [`hunk_is_unified_zero`], so iterating `0..h.new_len` indexes
 /// `added_lines`/`removed_lines` only within bounds.
 fn fold_hunk_edits(edits: &mut HunkEdits, h: &Hunk, bs: usize, be: usize) {
-    let anchor = if h.new_len == 0 {
-        h.new_start + 1
-    } else {
-        h.new_start
-    }
-    .clamp(bs, be + 1);
+    let anchor = removed_splice_anchor(h, bs, be);
     let removed = removed_diff_lines(h);
     if !removed.is_empty() {
         edits
@@ -882,22 +877,43 @@ fn fold_hunk_edits(edits: &mut HunkEdits, h: &Hunk, bs: usize, be: usize) {
             edits.added_real.insert(h.new_start + k);
         }
     }
-    // cute-dbt#132: record per-pair intra-line emphasis for every substantive
-    // (non-ws-only) pair of an aligned replacement that falls within the block
-    // (was 1:1-only, indexing `added_lines[0]` at `new_start`).
-    if is_aligned_replacement(h) {
-        for k in 0..h.added_lines.len() {
-            let line_no = h.new_start + k;
-            if !pair_is_ws_only(h, k) && (bs..=be).contains(&line_no) {
-                // `&str` trim (no allocation) — see removed_diff_lines
-                // (gemini review on cute-dbt#132).
-                if let Some(e) = intra_line_span(
-                    h.added_lines[k].trim_end_matches('\r'),
-                    h.removed_lines[k].trim_end_matches('\r'),
-                ) {
-                    edits.added_emphasis.insert(line_no, e);
-                }
-            }
+    record_aligned_emphasis(edits, h, bs, be);
+}
+
+/// The 1-based new-side line a hunk's removed bodies splice immediately
+/// before, clamped into the block `[bs, be + 1]`. A pure deletion
+/// (`new_len == 0`) re-inserts AFTER its anchor (`new_start + 1`); a
+/// replacement/insertion anchors AT `new_start`.
+fn removed_splice_anchor(h: &Hunk, bs: usize, be: usize) -> usize {
+    let raw = if h.new_len == 0 {
+        h.new_start + 1
+    } else {
+        h.new_start
+    };
+    raw.clamp(bs, be + 1)
+}
+
+/// Record per-pair intra-line emphasis (cute-dbt#132) for every substantive
+/// (non-ws-only) pair of an aligned replacement whose added line falls
+/// within the block `[bs, be]` (was 1:1-only, indexing `added_lines[0]` at
+/// `new_start`). A non-aligned hunk has no sound positional pairing, so it
+/// contributes no emphasis.
+fn record_aligned_emphasis(edits: &mut HunkEdits, h: &Hunk, bs: usize, be: usize) {
+    if !is_aligned_replacement(h) {
+        return;
+    }
+    for k in 0..h.added_lines.len() {
+        let line_no = h.new_start + k;
+        if pair_is_ws_only(h, k) || !(bs..=be).contains(&line_no) {
+            continue;
+        }
+        // `&str` trim (no allocation) — see removed_diff_lines
+        // (gemini review on cute-dbt#132).
+        if let Some(e) = intra_line_span(
+            h.added_lines[k].trim_end_matches('\r'),
+            h.removed_lines[k].trim_end_matches('\r'),
+        ) {
+            edits.added_emphasis.insert(line_no, e);
         }
     }
 }
@@ -1031,25 +1047,40 @@ pub fn diff_lines(old: &[String], new: &[String]) -> BlockDiff {
             continue;
         }
         // One maximal change block: consume the non-common lines on both
-        // sides (Removed first, then Added) up to the next common pair —
-        // equal heads always stop a block (matching equal lines is always
-        // on an optimal LCS path).
-        let (mut removed, mut added) = (Vec::new(), Vec::new());
-        while i < old.len()
-            && (j >= new.len() || (old[i] != new[j] && common[i + 1][j] >= common[i][j + 1]))
-        {
-            removed.push(old[i].clone());
-            i += 1;
-        }
-        while j < new.len()
-            && (i >= old.len() || (old[i] != new[j] && common[i][j + 1] > common[i + 1][j]))
-        {
-            added.push(new[j].clone());
-            j += 1;
-        }
+        // sides up to the next common pair.
+        let (removed, added) = consume_change_block(old, new, &common, &mut i, &mut j);
         push_change_block(&mut lines, &removed, &added);
     }
     BlockDiff { lines }
+}
+
+/// Consume one maximal change block from the LCS walk, advancing `i`/`j`
+/// past it: the non-common Removed lines first, then the non-common Added
+/// lines, up to the next common pair. Equal heads always stop a block
+/// (matching equal lines is always on an optimal LCS path). The
+/// `common[i + 1][j] >= common[i][j + 1]` tie-break keeps the side choice on
+/// an optimal path — Removed wins ties, Added needs a strict win.
+fn consume_change_block(
+    old: &[String],
+    new: &[String],
+    common: &[Vec<usize>],
+    i: &mut usize,
+    j: &mut usize,
+) -> (Vec<String>, Vec<String>) {
+    let (mut removed, mut added) = (Vec::new(), Vec::new());
+    while *i < old.len()
+        && (*j >= new.len() || (old[*i] != new[*j] && common[*i + 1][*j] >= common[*i][*j + 1]))
+    {
+        removed.push(old[*i].clone());
+        *i += 1;
+    }
+    while *j < new.len()
+        && (*i >= old.len() || (old[*i] != new[*j] && common[*i][*j + 1] > common[*i + 1][*j]))
+    {
+        added.push(new[*j].clone());
+        *j += 1;
+    }
+    (removed, added)
 }
 
 /// The LCS length table for [`diff_lines`]: `t[i][j]` = the LCS length of
@@ -1229,44 +1260,72 @@ fn validate_reversible(lines: &[&str], sorted: &[&Hunk]) -> Result<(), ReverseAp
     // anchors after `new_start`, so it may equal it.
     let mut claimed_through = 0usize;
     for h in sorted {
-        let new_start = h.new_start;
         if h.new_len != h.added_lines.len() {
-            return Err(ReverseApplyError::ContextBearing { new_start });
+            return Err(ReverseApplyError::ContextBearing {
+                new_start: h.new_start,
+            });
         }
-        if h.new_len == 0 {
-            if new_start > lines.len() {
-                return Err(ReverseApplyError::OutOfBounds { new_start });
-            }
-            if new_start < claimed_through {
-                return Err(ReverseApplyError::Overlapping { new_start });
-            }
-            claimed_through = claimed_through.max(new_start);
-            continue;
-        }
-        // Overflow-proof bounds check (Gemini review on cute-dbt#266):
-        // the naive `new_start + h.new_len - 1 > lines.len()` adds in
-        // usize BEFORE comparing, so a malformed/malicious hunk with
-        // `new_start` near `usize::MAX` overflows — a debug panic
-        // ("cute-dbt never panics on a bad diff"). Subtraction form:
-        // `h.new_len > lines.len()` guards the later
-        // `lines.len() - h.new_len`, and `new_start - 1` is safe after
-        // the `new_start == 0` test. Algebraically equivalent to the
-        // additive form everywhere both are defined.
-        if new_start == 0 || h.new_len > lines.len() || new_start - 1 > lines.len() - h.new_len {
-            return Err(ReverseApplyError::OutOfBounds { new_start });
-        }
-        if new_start <= claimed_through {
-            return Err(ReverseApplyError::Overlapping { new_start });
-        }
-        for (k, added) in h.added_lines.iter().enumerate() {
-            let actual = lines[new_start - 1 + k];
-            if actual.trim_end_matches('\r') != added.trim_end_matches('\r') {
-                return Err(ReverseApplyError::Drift { new_start });
-            }
-        }
-        claimed_through = new_start + h.new_len - 1;
+        claimed_through = if h.new_len == 0 {
+            validate_deletion_hunk(h, lines.len(), claimed_through)?
+        } else {
+            validate_replacement_hunk(h, lines, claimed_through)?
+        };
     }
     Ok(())
+}
+
+/// Validate a pure-deletion hunk (`new_len == 0`) and return the updated
+/// `claimed_through`. Its anchor (`new_start`) must lie within the new text
+/// and may EQUAL an earlier claim (a deletion re-inserts after its anchor),
+/// but must not regress below it.
+fn validate_deletion_hunk(
+    h: &Hunk,
+    line_count: usize,
+    claimed_through: usize,
+) -> Result<usize, ReverseApplyError> {
+    let new_start = h.new_start;
+    if new_start > line_count {
+        return Err(ReverseApplyError::OutOfBounds { new_start });
+    }
+    if new_start < claimed_through {
+        return Err(ReverseApplyError::Overlapping { new_start });
+    }
+    Ok(claimed_through.max(new_start))
+}
+
+/// Validate a replacement/insertion hunk (`new_len > 0`) against the new
+/// text and return the updated `claimed_through` (its last claimed line).
+/// Its footprint must lie in bounds, start strictly after the prior claim,
+/// and its `+` body must match the new text (`\r`-trimmed both sides) — any
+/// mismatch is stale drift.
+fn validate_replacement_hunk(
+    h: &Hunk,
+    lines: &[&str],
+    claimed_through: usize,
+) -> Result<usize, ReverseApplyError> {
+    let new_start = h.new_start;
+    // Overflow-proof bounds check (Gemini review on cute-dbt#266):
+    // the naive `new_start + h.new_len - 1 > lines.len()` adds in
+    // usize BEFORE comparing, so a malformed/malicious hunk with
+    // `new_start` near `usize::MAX` overflows — a debug panic
+    // ("cute-dbt never panics on a bad diff"). Subtraction form:
+    // `h.new_len > lines.len()` guards the later
+    // `lines.len() - h.new_len`, and `new_start - 1` is safe after
+    // the `new_start == 0` test. Algebraically equivalent to the
+    // additive form everywhere both are defined.
+    if new_start == 0 || h.new_len > lines.len() || new_start - 1 > lines.len() - h.new_len {
+        return Err(ReverseApplyError::OutOfBounds { new_start });
+    }
+    if new_start <= claimed_through {
+        return Err(ReverseApplyError::Overlapping { new_start });
+    }
+    for (k, added) in h.added_lines.iter().enumerate() {
+        let actual = lines[new_start - 1 + k];
+        if actual.trim_end_matches('\r') != added.trim_end_matches('\r') {
+            return Err(ReverseApplyError::Drift { new_start });
+        }
+    }
+    Ok(new_start + h.new_len - 1)
 }
 
 /// Render a file's hunks directly as raw diff lines — removed (`-`) then
@@ -3635,6 +3694,49 @@ mod tests {
         assert_eq!(
             reverse_apply("a\nb\nc\n", &[a, b]),
             Err(ReverseApplyError::Overlapping { new_start: 2 }),
+        );
+    }
+
+    #[test]
+    fn reverse_apply_rejects_a_pure_deletion_anchored_past_the_file() {
+        // A pure deletion (`@@ -3,1 +N,0 @@`, no `+` body) anchored past
+        // the new text's last line: `new_start (4) > lines.len() (2)` is
+        // out of bounds — the diff describes a different revision.
+        let h = full_hunk(4, &["gone"], &[]);
+        assert_eq!(
+            reverse_apply("a\nb\n", &[h]),
+            Err(ReverseApplyError::OutOfBounds { new_start: 4 }),
+            "a pure deletion past the file end must degrade, never fabricate",
+        );
+    }
+
+    #[test]
+    fn reverse_apply_rejects_a_pure_deletion_regressing_below_a_prior_claim() {
+        // A replacement at new_start 1 spanning 3 new-side lines claims
+        // through line 3. A later (sorted) pure deletion anchored at
+        // new_start 2 regresses below that claim (2 < 3) — a malformed
+        // overlap. (A deletion may EQUAL a prior claim — it re-inserts
+        // after its anchor — but regressing below it must refuse.)
+        let repl = full_hunk(1, &["was-a", "was-b", "was-c"], &["a", "b", "c"]);
+        let del = full_hunk(2, &["gone"], &[]);
+        assert_eq!(
+            reverse_apply("a\nb\nc\n", &[repl, del]),
+            Err(ReverseApplyError::Overlapping { new_start: 2 }),
+            "a pure deletion regressing below a prior claim must refuse",
+        );
+    }
+
+    #[test]
+    fn reverse_apply_allows_a_pure_deletion_equal_to_a_prior_claim() {
+        // A replacement at new_start 1 spanning 2 lines claims through
+        // line 2; a pure deletion anchored AT line 2 re-inserts after the
+        // claim, which is sound (equal, not below) — the OK boundary of
+        // the regress-below-claim guard above.
+        let repl = full_hunk(1, &["was-a", "was-b"], &["a", "b"]);
+        let del = full_hunk(2, &["gone"], &[]);
+        assert_eq!(
+            reverse_apply("a\nb\n", &[repl, del]).expect("equal-claim deletion is sound"),
+            "was-a\nwas-b\ngone\n",
         );
     }
 
