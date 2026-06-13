@@ -345,6 +345,24 @@
 {%- for b in governance.blast_radius %}
   <p class="gov-blast" data-testid="gov-blast" data-exposure="{{ b.exposure_label }}">Touches {{ b.in_scope_model_count }} {% if b.in_scope_model_count == 1 %}model{% else %}models{% endif %} feeding <strong>{{ b.exposure_label }}</strong>{% match b.exposure_type %}{% when Some with (t) %} ({{ t }}){% when None %}{% endmatch %}{% match b.owner_name %}{% when Some with (n) %} &mdash; owner {{ n }}{% match b.owner_email %}{% when Some with (e) %} &lt;{{ e }}&gt;{% when None %}{% endmatch %}{% when None %}{% match b.owner_email %}{% when Some with (e) %} &mdash; owner &lt;{{ e }}&gt;{% when None %}{% endmatch %}{% endmatch %}</p>
 {%- endfor %}
+{#- cute-dbt#260 Slice 2 — the classified contract-diff drawers: one per
+    in-scope model whose contract changed (--baseline-manifest mode only;
+    the --pr-diff path carries no OLD manifest to classify against). The
+    `safe`/`breaking` verdict drives data-verdict on the drawer + each
+    column row (the AA-contrast hook). Server-rendered inside the gated
+    section so the off-gate render stays byte-identical (no static
+    chassis bytes — the whole section trims away when governance is off). -#}
+{%- for c in governance.contract_classes %}
+  <div class="gov-contract" data-testid="gov-contract" data-model="{{ c.model }}" data-verdict="{{ c.verdict }}">
+    <span class="gov-contract-chip" data-testid="gov-contract-chip">{{ c.model }} &middot; {{ c.chip }}</span>
+{%- for col in c.column_diffs %}
+    <div class="gov-contract-col" data-testid="gov-contract-col" data-verdict="{{ col.verdict }}">{{ col.name }}: {{ col.old }} &rarr; {{ col.new }} [{{ col.verdict }}]</div>
+{%- endfor %}
+{%- for line in c.reasons %}
+    <p class="gov-contract-reason" data-testid="gov-contract-reason">{{ line }}</p>
+{%- endfor %}
+  </div>
+{%- endfor %}
 </section>
 {% endif -%}
 <section class="error-card" role="alert" aria-label="Manifest error">

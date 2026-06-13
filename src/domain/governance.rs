@@ -51,15 +51,28 @@ pub struct GovernanceFacts {
     /// Empty when no in-scope model reaches an exposure (or the
     /// experiment is off).
     pub blast_radius: Vec<BlastRadius>,
+    /// One contract-classification drawer per in-scope model with a
+    /// contract change (cute-dbt#260 Slice 2), in deterministic
+    /// (model-name) order. Empty when no in-scope model's contract
+    /// changed, in `--pr-diff` mode (no OLD manifest to compare), or when
+    /// the experiment is off. Omitted from JSON when empty so a
+    /// governance render that surfaces only Slice 0/1 facts (the
+    /// committed `diff-showcase` golden — `--pr-diff`, so it never
+    /// classifies) stays byte-identical.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contract_classes: Vec<ContractClass>,
 }
 
 impl GovernanceFacts {
     /// `true` when the payload would render any DOM — the
-    /// `has_governance` template flag. Any group chip OR any blast-radius
-    /// statement. Future slices OR their own surfaces in here.
+    /// `has_governance` template flag. Any group chip OR blast-radius
+    /// statement OR contract-classification drawer. Future slices OR
+    /// their own surfaces in here.
     #[must_use]
     pub fn has_content(&self) -> bool {
-        !self.group_chips.is_empty() || !self.blast_radius.is_empty()
+        !self.group_chips.is_empty()
+            || !self.blast_radius.is_empty()
+            || !self.contract_classes.is_empty()
     }
 
     /// `true` when the payload carries nothing — the inverse of
@@ -127,13 +140,54 @@ pub struct BlastRadius {
     pub in_scope_model_count: usize,
 }
 
-/// Gather the Slice-0 governance facts for the in-scope models.
+/// One model's contract-classification drawer (cute-dbt#260 Slice 2) —
+/// the `safe`/`breaking` structural contract diff + the contract header
+/// chip. Produced by [`gather_governance`] from
+/// [`classify_contract`] when an in-scope model's contract changed and
+/// the OLD model is available (`--baseline-manifest` mode).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContractClass {
+    /// The bare model name this drawer belongs to.
+    pub model: String,
+    /// Overall verdict — `"safe"` (a non-breaking change) or
+    /// `"breaking"`. Drives the chip + tag styling (the AA-contrast
+    /// target).
+    pub verdict: String,
+    /// The contract header chip text
+    /// (`Contract: enforced · v2 of 3 · access: public · group finance`).
+    pub chip: String,
+    /// One row per contracted column whose type changed.
+    pub column_diffs: Vec<ContractColumnDiff>,
+    /// Human-readable lines for the non-column reasons (columns-removed,
+    /// constraint-removed, materialization-changed, enforcement). Empty
+    /// for a column-type-only change. The template renders each verbatim.
+    pub reasons: Vec<String>,
+}
+
+/// One column-level contract diff row (cute-dbt#260 Slice 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ContractColumnDiff {
+    /// The column name.
+    pub name: String,
+    /// The previous declared type (`"unknown"` when undeclared).
+    pub old: String,
+    /// The current declared type.
+    pub new: String,
+    /// Always `"breaking"` (a contracted type change is breaking) — the
+    /// per-row `data-verdict` hook.
+    pub verdict: String,
+}
+
+/// Gather the governance facts for the in-scope models (cute-dbt#260).
 ///
-/// Pure: a single pass over `models_in_scope`, collecting one
-/// [`GroupChip`] per distinct group an in-scope model declares
-/// (deduplicated, group-name-ordered via the intermediate [`BTreeMap`]).
-/// Ungrouped models, and groups with no resolvable
-/// [`Group`](crate::domain::manifest::Group), contribute nothing.
+/// Pure: a single pass over `models_in_scope` collecting the group/owner
+/// chips (Slice 0) + the reverse-reachability blast-radius statements
+/// (Slice 1), plus — when `old_manifest` is `Some` (the
+/// `--baseline-manifest` arm) — the per-model contract classifications
+/// (Slice 2). `old_manifest` is `None` on the `--pr-diff` arm (no OLD
+/// manifest to compare structurally) and whenever the caller has no
+/// baseline, so contract classification is skipped and the payload stays
+/// byte-identical.
 ///
 /// The off-gate value is [`GovernanceFacts::default`] (empty); the cli
 /// layer calls this only when
@@ -143,12 +197,15 @@ pub struct BlastRadius {
 pub fn gather_governance(
     manifest: &Manifest,
     models_in_scope: &ModelInScopeSet,
+    old_manifest: Option<&Manifest>,
 ) -> GovernanceFacts {
     let mut by_group: BTreeMap<&str, GroupChip> = BTreeMap::new();
     // Per-exposure tally of how many in-scope models feed it. Keyed by
     // exposure id (deterministic exposure-id order); the value carries
     // the exposure ref + the running count.
     let mut blast_by_exposure: BTreeMap<&NodeId, (&Exposure, usize)> = BTreeMap::new();
+    // Contract classes keyed by bare model name (deterministic order).
+    let mut contract_by_model: BTreeMap<&str, ContractClass> = BTreeMap::new();
     // Precompute the two reverse maps ONCE (O(N + E)); the per-model BFS
     // below reads them via the helper instead of rebuilding them per
     // model (gemini on #336 — the loop was O(M × (N + E)); now it is
@@ -156,7 +213,10 @@ pub fn gather_governance(
     let consumers_of = reverse_node_adjacency(manifest);
     let exposure_sinks = exposure_sinks_by_producer(manifest);
     for model_id in models_in_scope.iter() {
-        if let Some(group_name) = manifest.node(model_id).and_then(|node| node.group()) {
+        let Some(node) = manifest.node(model_id) else {
+            continue;
+        };
+        if let Some(group_name) = node.group() {
             by_group
                 .entry(group_name)
                 .or_insert_with(|| group_chip(manifest, group_name));
@@ -167,6 +227,12 @@ pub fn gather_governance(
                 .and_modify(|(_, count)| *count += 1)
                 .or_insert((exposure, 1));
         }
+        // Slice 2: classify against the OLD node (same id) when a baseline
+        // is available (the helper handles the no-baseline / newly-added /
+        // unchanged cases).
+        if let Some(class) = classify_model_contract(old_manifest, model_id, node) {
+            contract_by_model.insert(node.bare_name(), class);
+        }
     }
     GovernanceFacts {
         group_chips: by_group.into_values().collect(),
@@ -174,6 +240,7 @@ pub fn gather_governance(
             .into_values()
             .map(|(exposure, count)| blast_radius(exposure, count))
             .collect(),
+        contract_classes: contract_by_model.into_values().collect(),
     }
 }
 
@@ -348,8 +415,6 @@ fn exposure_sinks_by_producer(manifest: &Manifest) -> BTreeMap<&NodeId, Vec<&Exp
 /// (cute-dbt#260 Slice 5). Mirrors fusion's `same_contract` outcome
 /// space: identical / changed-but-safe / breaking (with the engine's six
 /// reason categories).
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContractChange {
     /// No contract-relevant change: neither side enforces, or the
@@ -366,8 +431,6 @@ pub enum ContractChange {
 
 /// One category of contract breaking change (cute-dbt#260 Slice 5) — the
 /// engine's six verbatim categories (`same_contract_both_present`).
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BreakingReason {
     /// The contract was enforced and no longer is (engine:
@@ -400,6 +463,125 @@ pub enum BreakingReason {
     MaterializationChanged,
 }
 
+/// Classify one in-scope model's contract against the OLD manifest
+/// (cute-dbt#260 Slice 2). `None` when there is no baseline
+/// (`old_manifest == None`, the `--pr-diff` arm), the model is newly
+/// added (absent from the old manifest), or the contract is unchanged.
+fn classify_model_contract(
+    old_manifest: Option<&Manifest>,
+    model_id: &NodeId,
+    current: &Node,
+) -> Option<ContractClass> {
+    let old_node = old_manifest?.node(model_id)?;
+    contract_class(old_node, current)
+}
+
+/// Build a [`ContractClass`] drawer for an in-scope model (cute-dbt#260
+/// Slice 2). `None` when the classification is
+/// [`ContractChange::Unchanged`] (no drawer). The chip + reason lines
+/// reflect the CURRENT model's contract metadata.
+fn contract_class(old: &Node, current: &Node) -> Option<ContractClass> {
+    match classify_contract(old, current) {
+        ContractChange::Unchanged => None,
+        ContractChange::ChangedNotBreaking => Some(ContractClass {
+            model: current.bare_name().to_owned(),
+            verdict: "safe".to_owned(),
+            chip: contract_chip(current),
+            column_diffs: Vec::new(),
+            reasons: vec!["Contract is now enforced (newly contracted).".to_owned()],
+        }),
+        ContractChange::Breaking(breaking) => {
+            let (column_diffs, reasons) = breaking_to_rows(&breaking);
+            Some(ContractClass {
+                model: current.bare_name().to_owned(),
+                verdict: "breaking".to_owned(),
+                chip: contract_chip(current),
+                column_diffs,
+                reasons,
+            })
+        }
+    }
+}
+
+/// Split the breaking reasons into column-level diff rows + non-column
+/// reason lines.
+fn breaking_to_rows(breaking: &[BreakingReason]) -> (Vec<ContractColumnDiff>, Vec<String>) {
+    let mut column_diffs = Vec::new();
+    let mut reasons = Vec::new();
+    for reason in breaking {
+        match reason {
+            BreakingReason::ColumnTypeChanged { col, prev, current } => {
+                column_diffs.push(ContractColumnDiff {
+                    name: col.clone(),
+                    old: prev.clone(),
+                    new: current.clone(),
+                    verdict: "breaking".to_owned(),
+                });
+            }
+            other => reasons.push(breaking_reason_line(other)),
+        }
+    }
+    (column_diffs, reasons)
+}
+
+/// One human-readable line per non-column breaking reason.
+fn breaking_reason_line(reason: &BreakingReason) -> String {
+    match reason {
+        BreakingReason::ContractEnforcedDisabled => "Contract enforcement was removed.".to_owned(),
+        BreakingReason::ColumnsRemoved(cols) => format!("Columns removed: {}.", cols.join(", ")),
+        BreakingReason::EnforcedColumnConstraintRemoved => {
+            "An enforced column-level constraint was removed.".to_owned()
+        }
+        BreakingReason::EnforcedModelConstraintRemoved => {
+            "An enforced model-level constraint was removed.".to_owned()
+        }
+        BreakingReason::MaterializationChanged => {
+            "Materialization moved off a constraint-enforcing strategy.".to_owned()
+        }
+        // ColumnTypeChanged rides a column-diff row, never a line.
+        BreakingReason::ColumnTypeChanged { col, prev, current } => {
+            format!("Column {col} type changed ({prev} → {current}).")
+        }
+    }
+}
+
+/// The contract header chip text (cute-dbt#260 Slice 2) — assembled from
+/// the CURRENT model's contract metadata, segment by segment so each
+/// optional field stays a small testable formatter:
+/// `Contract: enforced · v2 of 3 · access: public · group finance`.
+fn contract_chip(current: &Node) -> String {
+    let mut segments = vec![format!(
+        "Contract: {}",
+        if current.config().contract_enforced() {
+            "enforced"
+        } else {
+            "unenforced"
+        }
+    )];
+    if let Some(version) = contract_version_segment(current) {
+        segments.push(version);
+    }
+    if let Some(access) = current.access() {
+        segments.push(format!("access: {access}"));
+    }
+    if let Some(group) = current.group() {
+        segments.push(format!("group {group}"));
+    }
+    segments.join(" · ")
+}
+
+/// The `v{version} of {latest}` chip segment (cute-dbt#260 Slice 2).
+/// `version` / `latest_version` are post-normalized strings (the wire
+/// `StringOrInteger` — `2` and `"2"` arrive identically). `None` for an
+/// unversioned model; the `of {latest}` half is dropped without a latest.
+fn contract_version_segment(current: &Node) -> Option<String> {
+    let version = current.version()?;
+    Some(match current.latest_version() {
+        Some(latest) => format!("v{version} of {latest}"),
+        None => format!("v{version}"),
+    })
+}
+
 /// Classify the contract change between an `old` and `current` model node
 /// (cute-dbt#260 Slice 5) — the structural mirror of fusion's
 /// `same_contract`.
@@ -411,8 +593,6 @@ pub enum BreakingReason {
 /// reason set. An empty reason set is [`ContractChange::Unchanged`]
 /// (the founder-taste call: NO "changed-investigate" bucket — surface
 /// nothing when the structure is identical, the plan's §5 risk-#5).
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 #[must_use]
 pub fn classify_contract(old: &Node, current: &Node) -> ContractChange {
     if let Some(decided) = classify_top_level_transition(old, current) {
@@ -436,8 +616,6 @@ pub fn classify_contract(old: &Node, current: &Node) -> ContractChange {
 /// `Some(verdict)` when the transition decides the outcome without a
 /// structural diff; `None` when both sides enforce and the structure must
 /// be compared.
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 fn classify_top_level_transition(old: &Node, current: &Node) -> Option<ContractChange> {
     let old_enforced = old.config().contract_enforced();
     let current_enforced = current.config().contract_enforced();
@@ -465,8 +643,6 @@ fn classify_top_level_transition(old: &Node, current: &Node) -> Option<ContractC
 /// `materialization_enforces_constraints` ⇒ `Table | Incremental`). A
 /// view never enforces, so a constraint removed on a view is not
 /// breaking. `None` (unset materialization) is treated as non-enforcing.
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 fn materialization_enforces(materialized: Option<&str>) -> bool {
     matches!(materialized, Some("table" | "incremental"))
 }
@@ -475,8 +651,6 @@ fn materialization_enforces(materialized: Option<&str>) -> bool {
 /// `for old_value in old.columns` loop). Reports removed columns,
 /// alias-aware type changes, and — only when `old_enforces_constraints` —
 /// removed enforced column-level constraints.
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 fn diff_columns(old: &Node, current: &Node, old_enforces_constraints: bool) -> Vec<BreakingReason> {
     let mut reasons = Vec::new();
     let mut removed = Vec::new();
@@ -510,8 +684,6 @@ fn diff_columns(old: &Node, current: &Node, old_enforces_constraints: bool) -> V
 /// diff (engine: the model-constraint loop + the materialization-changed
 /// check). Both are gated on the OLD materialization enforcing
 /// constraints.
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 fn diff_constraints(
     old: &Node,
     current: &Node,
@@ -538,8 +710,6 @@ fn diff_constraints(
 /// (engine: the inner `old_value.constraints != current_column.constraints`
 /// loop). Custom column-level constraints are dropped (dbt convention).
 /// Iterates references — no temp `Vec` allocation.
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 fn column_constraint_removed(old: &Node, current: &Node) -> bool {
     let current_facts = current.column_facts();
     old.column_facts().iter().any(|(name, facts)| {
@@ -555,16 +725,12 @@ fn column_constraint_removed(old: &Node, current: &Node) -> bool {
 /// Whether `current_constraints` (the slice, or `None` when the column is
 /// gone) contains `old_c` — the constraint-removal predicate over a
 /// borrowed slice (no temp `Vec`).
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 fn current_has(current_constraints: Option<&[Constraint]>, old_c: &Constraint) -> bool {
     current_constraints.is_some_and(|cs| cs.contains(old_c))
 }
 
 /// Whether a column-level constraint is contract-structural — i.e. not
 /// `Custom` (dbt convention: custom column constraints are free-form).
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 fn is_structural_constraint(constraint: &Constraint) -> bool {
     constraint.kind() != ConstraintKind::Custom
 }
@@ -572,8 +738,6 @@ fn is_structural_constraint(constraint: &Constraint) -> bool {
 /// Whether `old` has any column-level constraint at all (the
 /// `column_constraints_exist` flag in the engine's materialization gate).
 /// Iterates references — no temp `Vec`.
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 fn any_column_constraint(old: &Node) -> bool {
     old.column_facts()
         .values()
@@ -583,8 +747,6 @@ fn any_column_constraint(old: &Node) -> bool {
 /// Whether any constraint present in `old` is absent from `current`
 /// (engine: `!current.contains(old_constraint)`). A constraint ADD is not
 /// a removal.
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 fn constraints_removed(old: &[Constraint], current: &[Constraint]) -> bool {
     old.iter().any(|c| !current.contains(c))
 }
@@ -594,8 +756,6 @@ fn constraints_removed(old: &[Constraint], current: &[Constraint]) -> bool {
 /// canonicalize to the same alias family (`string`/`varchar`/`text`,
 /// `int`/`integer`, `bool`/`boolean`). Two undeclared types (`None`) are
 /// equal; a declared-vs-undeclared pair is not.
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 fn data_types_equal(old: Option<&str>, current: Option<&str>) -> bool {
     match (old, current) {
         (None, None) => true,
@@ -608,8 +768,6 @@ fn data_types_equal(old: Option<&str>, current: Option<&str>) -> bool {
 /// `string`↔`varchar`↔`text` (etc.) compare equal. An unknown type
 /// canonicalizes to its lowercased self (so two distinct unknowns stay
 /// distinct).
-// wired into the contract-diff drawer in #260 Slice 2
-#[allow(dead_code)]
 fn canonical_type(declared: &str) -> String {
     // Strip a length/precision suffix: `varchar(255)` → `varchar`.
     let base = declared
@@ -695,7 +853,7 @@ mod tests {
             vec![model("model.pkg.a", Some("finance"))],
             vec![Group::new("finance", None)],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]));
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
         assert!(facts.has_content());
         assert!(!facts.is_empty());
     }
@@ -706,7 +864,7 @@ mod tests {
             vec![model("model.pkg.a", None), model("model.pkg.b", None)],
             vec![],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a", "model.pkg.b"]));
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a", "model.pkg.b"]), None);
         assert!(facts.group_chips.is_empty());
         assert!(!facts.has_content());
     }
@@ -723,7 +881,7 @@ mod tests {
                 )),
             )],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]));
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
         assert_eq!(
             facts.group_chips,
             vec![GroupChip {
@@ -752,7 +910,7 @@ mod tests {
                 )),
             )],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]));
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
         assert_eq!(facts.group_chips[0].owner_name, None);
         assert_eq!(
             facts.group_chips[0].owner_email,
@@ -768,7 +926,7 @@ mod tests {
             vec![model("model.pkg.a", Some("orphan"))],
             vec![Group::new("orphan", None)],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]));
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
         assert_eq!(
             facts.group_chips,
             vec![GroupChip {
@@ -784,7 +942,7 @@ mod tests {
         // The node declares a group the manifest's top-level map omits —
         // the chip names the group, owner None.
         let manifest = manifest_with(vec![model("model.pkg.a", Some("ghost"))], vec![]);
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]));
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
         assert_eq!(
             facts.group_chips,
             vec![GroupChip {
@@ -809,6 +967,7 @@ mod tests {
         let facts = gather_governance(
             &manifest,
             &in_scope(&["model.pkg.a", "model.pkg.b", "model.pkg.c", "model.pkg.d"]),
+            None,
         );
         let names: Vec<&str> = facts
             .group_chips
@@ -828,7 +987,7 @@ mod tests {
             vec![Group::new("finance", None), Group::new("marketing", None)],
         );
         // Only `a` is in scope.
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]));
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
         let names: Vec<&str> = facts
             .group_chips
             .iter()
@@ -843,7 +1002,7 @@ mod tests {
             vec![model("model.pkg.a", Some("finance"))],
             vec![Group::new("finance", None)],
         );
-        let facts = gather_governance(&manifest, &ModelInScopeSet::new());
+        let facts = gather_governance(&manifest, &ModelInScopeSet::new(), None);
         assert!(facts.group_chips.is_empty());
     }
 
@@ -1079,7 +1238,7 @@ mod tests {
     // ---- owner-shape unit tests (StringOrArrayOfStrings + None) ----
 
     fn blast_for(manifest: &Manifest, model_id: &str) -> BlastRadius {
-        let facts = gather_governance(manifest, &in_scope(&[model_id]));
+        let facts = gather_governance(manifest, &in_scope(&[model_id]), None);
         assert_eq!(facts.blast_radius.len(), 1, "exactly one blast statement");
         facts.blast_radius.into_iter().next().unwrap()
     }
@@ -1183,7 +1342,7 @@ mod tests {
                 &["model.pkg.fct"],
             )],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a", "model.pkg.b"]));
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a", "model.pkg.b"]), None);
         assert_eq!(facts.blast_radius.len(), 1);
         assert_eq!(facts.blast_radius[0].exposure_label, "dash");
         assert_eq!(facts.blast_radius[0].in_scope_model_count, 2);
@@ -1210,7 +1369,7 @@ mod tests {
                 ),
             ],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.fct"]));
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.fct"]), None);
         let labels: Vec<&str> = facts
             .blast_radius
             .iter()
@@ -1222,7 +1381,7 @@ mod tests {
     #[test]
     fn no_exposure_in_scope_yields_no_blast_and_no_content() {
         let manifest = manifest_lineage(vec![model_with_deps("model.pkg.a", &[])], vec![]);
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]));
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
         assert!(facts.blast_radius.is_empty());
         assert!(!facts.has_content(), "no group, no exposure ⇒ no DOM");
     }
@@ -1232,7 +1391,7 @@ mod tests {
         // Ungrouped model reaching an exposure ⇒ has_content via the
         // blast-radius arm (the group_chips arm is empty).
         let manifest = manifest_one_exposure(None);
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.fct"]));
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.fct"]), None);
         assert!(facts.group_chips.is_empty());
         assert!(!facts.blast_radius.is_empty());
         assert!(facts.has_content());
@@ -1649,5 +1808,245 @@ mod tests {
             BreakingReason::ColumnTypeChanged { col, .. } if col == "a"
         )));
         assert!(reasons.contains(&BreakingReason::EnforcedModelConstraintRemoved));
+    }
+
+    // ===== Slice 2: contract classes through gather_governance =====
+
+    /// Wrap a single contract node (`model.pkg.m`) into a manifest.
+    fn manifest_one_model(node: Node) -> Manifest {
+        let mut nodes = HashMap::new();
+        nodes.insert(node.id().clone(), node);
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    fn classes_for(old: Node, current: Node) -> Vec<ContractClass> {
+        let old_m = manifest_one_model(old);
+        let current_m = manifest_one_model(current);
+        let in_scope = in_scope(&["model.pkg.m"]);
+        gather_governance(&current_m, &in_scope, Some(&old_m)).contract_classes
+    }
+
+    #[test]
+    fn no_baseline_yields_no_contract_classes() {
+        // The --pr-diff arm (old_manifest = None): no classification.
+        let current_m = manifest_one_model(
+            ContractNode::base("table", true)
+                .cols(&[("a", Some("int"))])
+                .build(),
+        );
+        let facts = gather_governance(&current_m, &in_scope(&["model.pkg.m"]), None);
+        assert!(facts.contract_classes.is_empty());
+    }
+
+    #[test]
+    fn unchanged_contract_yields_no_class() {
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        assert!(classes_for(old, current).is_empty());
+    }
+
+    #[test]
+    fn breaking_type_change_yields_a_breaking_class_with_column_diff() {
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("date"))])
+            .build();
+        let classes = classes_for(old, current);
+        assert_eq!(classes.len(), 1);
+        let c = &classes[0];
+        assert_eq!(c.model, "m");
+        assert_eq!(c.verdict, "breaking");
+        assert_eq!(
+            c.column_diffs,
+            vec![ContractColumnDiff {
+                name: "a".to_owned(),
+                old: "int".to_owned(),
+                new: "date".to_owned(),
+                verdict: "breaking".to_owned(),
+            }],
+        );
+        assert!(
+            c.reasons.is_empty(),
+            "a pure type change has no extra lines"
+        );
+        assert!(c.chip.starts_with("Contract: enforced"));
+    }
+
+    #[test]
+    fn newly_enforced_yields_a_safe_class() {
+        let old = ContractNode::base("table", false).build();
+        let current = ContractNode::base("table", true).build();
+        let classes = classes_for(old, current);
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].verdict, "safe");
+        assert!(classes[0].column_diffs.is_empty());
+        assert_eq!(
+            classes[0].reasons,
+            vec!["Contract is now enforced (newly contracted).".to_owned()],
+        );
+    }
+
+    #[test]
+    fn columns_removed_rides_a_reason_line_not_a_column_diff() {
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int")), ("b", Some("string"))])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        let classes = classes_for(old, current);
+        assert_eq!(classes[0].verdict, "breaking");
+        assert!(classes[0].column_diffs.is_empty());
+        assert_eq!(classes[0].reasons, vec!["Columns removed: b.".to_owned()]);
+    }
+
+    #[test]
+    fn contract_class_makes_payload_non_empty() {
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("date"))])
+            .build();
+        let old_m = manifest_one_model(old);
+        let current_m = manifest_one_model(current);
+        let facts = gather_governance(&current_m, &in_scope(&["model.pkg.m"]), Some(&old_m));
+        assert!(!facts.contract_classes.is_empty());
+        assert!(facts.has_content());
+        assert!(!facts.is_empty());
+    }
+
+    // ---- contract chip formatting ----
+
+    fn chip_of(build: impl FnOnce(Node) -> Node) -> String {
+        let base = ContractNode::base("table", true).build();
+        contract_chip(&build(base))
+    }
+
+    #[test]
+    fn chip_names_enforcement() {
+        assert!(chip_of(|n| n).starts_with("Contract: enforced"));
+    }
+
+    #[test]
+    fn chip_includes_version_access_and_group() {
+        let node = ContractNode::base("table", true)
+            .build()
+            .with_versions(Some("2".to_owned()), Some("3".to_owned()), None)
+            .with_governance(Some("finance".to_owned()), Some("public".to_owned()));
+        let chip = contract_chip(&node);
+        assert_eq!(
+            chip,
+            "Contract: enforced · v2 of 3 · access: public · group finance",
+        );
+    }
+
+    #[test]
+    fn chip_version_normalizes_string_or_integer_identically() {
+        // `version` arrives post-normalized to a string (the wire
+        // StringOrInteger — `2` and `"2"` are identical by the time the
+        // node carries it). The chip reads that normalized string.
+        let v_int_like = ContractNode::base("table", true).build().with_versions(
+            Some("2".to_owned()),
+            None,
+            None,
+        );
+        assert_eq!(contract_version_segment(&v_int_like), Some("v2".to_owned()));
+        // No latest_version ⇒ the `of {latest}` half is dropped.
+        let unversioned = ContractNode::base("table", true).build();
+        assert_eq!(contract_version_segment(&unversioned), None);
+    }
+
+    #[test]
+    fn chip_names_unenforced_when_the_flag_is_off() {
+        let node = ContractNode::base("table", false).build();
+        assert!(contract_chip(&node).starts_with("Contract: unenforced"));
+    }
+
+    #[test]
+    fn every_breaking_reason_line_renders() {
+        // Direct coverage of each non-column reason's copy.
+        assert_eq!(
+            breaking_reason_line(&BreakingReason::ContractEnforcedDisabled),
+            "Contract enforcement was removed.",
+        );
+        assert_eq!(
+            breaking_reason_line(&BreakingReason::ColumnsRemoved(vec![
+                "a".to_owned(),
+                "b".to_owned(),
+            ])),
+            "Columns removed: a, b.",
+        );
+        assert_eq!(
+            breaking_reason_line(&BreakingReason::EnforcedColumnConstraintRemoved),
+            "An enforced column-level constraint was removed.",
+        );
+        assert_eq!(
+            breaking_reason_line(&BreakingReason::EnforcedModelConstraintRemoved),
+            "An enforced model-level constraint was removed.",
+        );
+        assert_eq!(
+            breaking_reason_line(&BreakingReason::MaterializationChanged),
+            "Materialization moved off a constraint-enforcing strategy.",
+        );
+        // The ColumnTypeChanged arm is unreachable via breaking_to_rows
+        // (it rides a column-diff row); the line form is exercised here as
+        // a defensive fallback.
+        assert_eq!(
+            breaking_reason_line(&BreakingReason::ColumnTypeChanged {
+                col: "a".to_owned(),
+                prev: "int".to_owned(),
+                current: "date".to_owned(),
+            }),
+            "Column a type changed (int → date).",
+        );
+    }
+
+    #[test]
+    fn enforcement_dropped_yields_a_breaking_class_with_a_reason_line() {
+        // Drives the ContractEnforcedDisabled reason through the full
+        // gather path (old enforced, current not).
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        let current = ContractNode::base("table", false)
+            .cols(&[("a", Some("int"))])
+            .build();
+        let classes = classes_for(old, current);
+        assert_eq!(classes.len(), 1);
+        assert_eq!(classes[0].verdict, "breaking");
+        assert_eq!(
+            classes[0].reasons,
+            vec!["Contract enforcement was removed.".to_owned()],
+        );
+    }
+
+    #[test]
+    fn newly_added_model_has_no_old_node_so_no_class() {
+        // The current model exists but the OLD manifest omits it ⇒
+        // classify_model_contract returns None (no prior contract).
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        let current_m = manifest_one_model(current);
+        let old_m = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let facts = gather_governance(&current_m, &in_scope(&["model.pkg.m"]), Some(&old_m));
+        assert!(facts.contract_classes.is_empty());
     }
 }
