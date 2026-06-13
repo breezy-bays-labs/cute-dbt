@@ -321,6 +321,54 @@
 {%- endif %}
 </section>
 {% when None %}{% endmatch -%}
+{#- cute-dbt#265 (Slice B) — the macro perspective lens. Server-rendered
+   (no JS dependency), positioned ABOVE the governance chips (the founder's
+   "near the top"). Gated behind the `macro-lens` experiment: when off the
+   cli passes `macro_lens = None`, so this `{% match %}` emits ZERO bytes
+   (every surrounding tag trims both sides), keeping the non-macro goldens
+   byte-identical — the project_panel / governance precedents. Marked
+   EXPERIMENTAL (founder D7). The copy says "macro changed", NEVER a
+   `state:modified.macros` selector name (critique S2). Impacted models are
+   a collapsible DIRECTORY TREE (founder D3) — count + names only, NO inline
+   model bodies (Slice D), NO focused DAG (explore-only, #345), NO
+   report→explore hyperlink (it would break the one-file zero-egress
+   contract). Intentionally unstyled beyond the chassis hooks — Claude
+   Design owns the visual pass; the data-testid / data-* hooks are the
+   stable selectors the headless guards key off. -#}
+{% match macro_lens %}{% when Some with (lens) %}<section class="macro-lens-panel" aria-label="Macro changes" data-testid="macro-lens-panel">
+  <h2>Macro changed <span class="macro-lens-experimental" data-testid="macro-lens-experimental">experimental</span></h2>
+  <p class="macro-lens-subtitle">A changed macro is invisible to model and unit-test scope selection &mdash; this section shows the macros this PR changed and the root-project models they reach. <span class="macro-lens-fidelity" data-testid="macro-lens-fidelity" data-fidelity="{{ lens.fidelity }}">fidelity: {{ lens.fidelity }}</span></p>
+{%- for mac in lens.macros %}
+  <div class="macro-lens-macro" data-testid="macro-lens-macro" data-macro="{{ mac.name }}">
+    <p class="macro-lens-macro-head"><code class="macro-lens-name">{{ mac.name }}</code> <span class="macro-lens-package" data-testid="macro-lens-package">{{ mac.package }}</span>{% if !mac.path.is_empty() %} <code class="macro-lens-path">{{ mac.path }}</code>{% endif %}</p>
+    {#- The body diff (pr-diff arm, touched + aligned + substantive) or the
+        plain current body as context lines (baseline arm / untouched). The
+        DiffLine kind drives the per-line CSS hook, mirroring the project-def
+        raw-diff fallback. -#}
+{%- match mac.diff %}{% when Some with (d) %}
+    <pre class="macro-lens-diff" data-testid="macro-lens-diff">{% for line in d.lines %}<span class="macro-lens-line is-{% match line.kind %}{% when DiffLineKind::Context %}context{% when DiffLineKind::Removed %}removed{% when DiffLineKind::Added %}added{% endmatch %}">{{ line.text }}</span>
+{% endfor %}</pre>
+{%- when None %}
+    <pre class="macro-lens-body" data-testid="macro-lens-body">{% for line in mac.body_lines %}<span class="macro-lens-line is-context">{{ line.text }}</span>
+{% endfor %}</pre>
+{%- endmatch %}
+    <p class="macro-lens-count" data-testid="macro-lens-count" data-count="{{ mac.impacted_count }}">Impacts {{ mac.impacted_count }} root-project {% if mac.impacted_count == 1 %}model{% else %}models{% endif %}.</p>
+{%- if !mac.tree.is_empty() %}
+    <details class="macro-lens-tree-details" data-testid="macro-lens-tree-details" open>
+      <summary>impacted models</summary>
+      <ul class="macro-lens-tree" data-testid="macro-lens-tree">
+{%- for row in mac.tree %}
+        <li class="macro-lens-tree-row macro-lens-tree-{{ row.kind }}" data-testid="macro-lens-tree-row" data-kind="{{ row.kind }}" data-depth="{{ row.depth }}"{% if !row.model_id.is_empty() %} data-model="{{ row.model_id }}"{% endif %} style="--macro-tree-depth: {{ row.depth }}">{% if row.kind == "dir" %}<span class="macro-lens-tree-dir">{{ row.label }}/</span>{% else %}<code class="macro-lens-tree-model">{{ row.label }}</code>{% endif %}</li>
+{%- endfor %}
+      </ul>
+    </details>
+{%- else %}
+    <p class="macro-lens-empty" data-testid="macro-lens-empty">No root-project models reach this macro &mdash; a materialization macro, or a macro this PR added/removed rather than edited in place.</p>
+{%- endif %}
+  </div>
+{%- endfor %}
+</section>
+{% when None %}{% endmatch -%}
 {#- cute-dbt#260 (Slice 0 — the walking skeleton) — the governance
    surfaces section. Gated behind the `governance` experiment: when the
    experiment is off the cli passes an empty GovernanceFacts, so

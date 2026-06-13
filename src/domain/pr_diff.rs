@@ -706,6 +706,70 @@ fn model_sql_diff(model: &Node, index: &NormalizedDiffIndex) -> Option<BlockDiff
     diff.has_real_change().then_some(diff)
 }
 
+/// Reconstruct an inline diff of a changed macro's `macro_sql` body
+/// (cute-dbt#265 macro perspective, Slice B) — the macro sibling of the
+/// internal model-SQL diff (`model_sql_diff`).
+///
+/// A macro is not a [`Node`], so this takes the body string and its
+/// declaring path directly (from [`crate::domain::Manifest::macros`] +
+/// [`crate::domain::MacroIdentity::original_file_path`]) rather than a
+/// node. Everything else is the [`reconstruct_model_sql_diffs`] per-model
+/// contract verbatim:
+///
+/// 1. Normalize the body to git's line frame — strip **exactly one**
+///    trailing `\n` ([`str::strip_suffix`]). dbt engines diverge on the
+///    trailing terminator the same way they do for model `raw_code`
+///    (dbt-core strips it, dbt-fusion retains it); stripping one
+///    normalizes both to the same content frame so `body.split('\n')`
+///    lines up with the diff's new-side numbering.
+/// 2. Take the whole-file span `(body, 1, body.split('\n').count())` and
+///    the hunks touching `original_file_path`
+///    ([`NormalizedDiffIndex::hunks_for`]).
+/// 3. Emit a [`BlockDiff`] **only** when the diff still aligns
+///    ([`block_aligns_with_hunks`]), at least one hunk touches the file
+///    ([`hunk_touches_block`]), and the reconstruction carries a
+///    substantive change ([`BlockDiff::has_real_change`] — a
+///    whitespace-only edit emits nothing, cute-dbt#111). Otherwise `None`,
+///    so the macro section shows the plain current body.
+///
+/// Runs only on the [`crate::domain::ScopeInput::PrDiff`] arm — baseline
+/// mode has no hunks to reconstruct from (the macro lens carries no diff
+/// there; the fidelity chip names the baseline arm "exact" by macro-body
+/// comparison, not a rendered hunk diff). An empty body, or a macro with
+/// no `original_file_path` (the rare fusion null-fill the spike named),
+/// yields `None`.
+#[must_use]
+pub fn reconstruct_macro_sql_diff(
+    macro_body: &str,
+    original_file_path: &str,
+    index: &NormalizedDiffIndex,
+) -> Option<BlockDiff> {
+    if macro_body.is_empty() {
+        return None;
+    }
+    // Strip git's single trailing terminator (engine-divergent — the same
+    // normalization `model_sql_diff` applies). A real blank line at EOF
+    // survives.
+    let body = macro_body.strip_suffix('\n').unwrap_or(macro_body);
+    // Whole-file span: 1..=line count.
+    let span = BlockSpan::new(body, 1, body.split('\n').count());
+
+    let hunks = index.hunks_for(original_file_path);
+    if !block_aligns_with_hunks(&span, hunks) {
+        return None; // stale diff (N7b) → plain macro body
+    }
+    let touching: Vec<&Hunk> = hunks
+        .iter()
+        .filter(|h| hunk_touches_block(span.start, span.end, h))
+        .collect();
+    if touching.is_empty() {
+        return None; // the macro file is not touched by this diff
+    }
+    let diff = reconstruct_one(&span, &touching);
+    // Whitespace-only macro edit → all-Context → no diff (plain body).
+    diff.has_real_change().then_some(diff)
+}
+
 /// Attach an inline diff to each gathered Model-YAML block the PR diff
 /// genuinely edited (cute-dbt#247).
 ///
@@ -3425,6 +3489,123 @@ mod tests {
         let index = NormalizedDiffIndex::new(&diff, None);
         let scope = ModelInScopeSet::from_iter([NodeId::new("model.s.empty")]);
         assert!(reconstruct_model_sql_diffs(&current, &scope, &index).is_empty());
+    }
+
+    // ----- reconstruct_macro_sql_diff (cute-dbt#265 macro lens) ---------
+
+    #[test]
+    fn reconstruct_macro_sql_diff_renders_a_touched_macro_body_edit() {
+        // The macro file's line 2 changed; the `+` matches the working-tree
+        // body, so the reconstruction splices the removed line in place.
+        let ofp = "macros/dq.sql";
+        let body = "{% macro dq() %}\n  where flag is true\n{% endmacro %}";
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![FileHunks {
+                path: ofp.to_owned(),
+                hunks: vec![replace(
+                    2,
+                    &["  where flag = true"],
+                    &["  where flag is true"],
+                )],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        let reconstructed = reconstruct_macro_sql_diff(body, ofp, &index)
+            .expect("a touched macro body edit reconstructs");
+        assert!(reconstructed.has_real_change());
+        assert!(
+            reconstructed
+                .lines
+                .iter()
+                .any(|l| l.kind == DiffLineKind::Removed && l.text == "  where flag = true"),
+            "the old line is spliced in",
+        );
+    }
+
+    #[test]
+    fn reconstruct_macro_sql_diff_engine_trailing_newline_frame_is_identical() {
+        // dbt-core ships `macro_sql` stripped; dbt-fusion retains the file's
+        // trailing `\n`. Stripping exactly one terminator normalizes both to
+        // the SAME DiffLine frame (the model_sql_diff cross-engine guard).
+        let ofp = "macros/m.sql";
+        let core_body = "{% macro m() %}\nfrom u\n{% endmacro %}";
+        let fusion_body = "{% macro m() %}\nfrom u\n{% endmacro %}\n";
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![FileHunks {
+                path: ofp.to_owned(),
+                hunks: vec![replace(2, &["from t"], &["from u"])],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        let core = reconstruct_macro_sql_diff(core_body, ofp, &index).expect("core reconstructs");
+        let fusion =
+            reconstruct_macro_sql_diff(fusion_body, ofp, &index).expect("fusion reconstructs");
+        assert_eq!(
+            core.lines, fusion.lines,
+            "the trailing-newline divergence must not move the frame",
+        );
+    }
+
+    #[test]
+    fn reconstruct_macro_sql_diff_skips_an_untouched_file() {
+        let body = "{% macro m() %}\nx\n{% endmacro %}";
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![FileHunks {
+                path: "macros/OTHER.sql".to_owned(),
+                hunks: vec![replace(2, &["old"], &["new"])],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        assert!(reconstruct_macro_sql_diff(body, "macros/m.sql", &index).is_none());
+    }
+
+    #[test]
+    fn reconstruct_macro_sql_diff_skips_a_stale_diff() {
+        // The `+` body does not match the working-tree body → N7b drift →
+        // None (the section falls back to the plain current body).
+        let ofp = "macros/m.sql";
+        let body = "{% macro m() %}\nfrom u\n{% endmacro %}";
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![FileHunks {
+                path: ofp.to_owned(),
+                hunks: vec![replace(2, &["from was"], &["from DRIFTED"])],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        assert!(reconstruct_macro_sql_diff(body, ofp, &index).is_none());
+    }
+
+    #[test]
+    fn reconstruct_macro_sql_diff_skips_a_whitespace_only_edit() {
+        // A re-indent of an otherwise-equal line → all-Context → None.
+        let ofp = "macros/m.sql";
+        let body = "{% macro m() %}\n    from u\n{% endmacro %}";
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![FileHunks {
+                path: ofp.to_owned(),
+                hunks: vec![replace(2, &["from u"], &["    from u"])],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        assert!(reconstruct_macro_sql_diff(body, ofp, &index).is_none());
+    }
+
+    #[test]
+    fn reconstruct_macro_sql_diff_empty_body_is_none() {
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: vec![FileHunks {
+                path: "macros/m.sql".to_owned(),
+                hunks: vec![replace(1, &["old"], &["new"])],
+            }],
+        };
+        let index = NormalizedDiffIndex::new(&diff, None);
+        assert!(reconstruct_macro_sql_diff("", "macros/m.sql", &index).is_none());
     }
 
     // ----- Non-`--unified=0` (context-bearing) hunk safety -----
