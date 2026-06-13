@@ -830,6 +830,13 @@ pub enum ConstraintSupport {
 /// the honest "declared, enforcement unknown" default, never a false
 /// `Enforced` claim. `Other`/unknown constraint kinds also degrade to
 /// `NotEnforced`.
+// `match_same_arms`: the per-adapter rows are a deliberate VERBATIM mirror
+// of fusion's `get_constraint_support` table — one row per adapter, in the
+// engine's order. Merging arms with identical bodies (e.g. every
+// `Unique | PrimaryKey => NotEnforced`) across adapters would collapse the
+// audit trail that makes this a checkable mirror of the source. Keep the
+// table shape; the lint's dedup goal is not the goal here.
+#[allow(clippy::match_same_arms)]
 #[must_use]
 pub fn constraint_support(adapter: &str, kind: ConstraintKind) -> ConstraintSupport {
     use ConstraintKind::{Check, Custom, ForeignKey, NotNull, PrimaryKey, Unique};
@@ -893,7 +900,7 @@ pub fn backing_test_for(
 
 /// The generic data-test name that backs a constraint kind, or `None`
 /// for kinds with no column-level generic backing (FK/check/custom/etc.
-/// are out of the unique/not_null inference).
+/// are out of the `unique`/`not_null` inference).
 fn backing_test_name(kind: ConstraintKind) -> Option<&'static str> {
     match kind {
         ConstraintKind::Unique | ConstraintKind::PrimaryKey => Some("unique"),

@@ -298,8 +298,19 @@ pub struct CheckPolicy<Id: CheckId> {
 
 impl<Id: CheckId> Default for CheckPolicy<Id> {
     fn default() -> Self {
+        // cute-dbt#260 Slice 3 — experiment-gated checks (the
+        // `enforcement` group, gated behind `Experiment::Governance`) are
+        // OFF in the default display set, so the gate-free `explore` page
+        // and every non-governance render never surface them. The report
+        // run loop's `build_check_policy` re-adds them when governance is
+        // enabled. Gated checks still EVALUATE — this is a display filter,
+        // not a registry exclusion (the suppression-hierarchy invariant).
         Self {
-            displayed: Id::ALL.to_vec(),
+            displayed: Id::ALL
+                .iter()
+                .copied()
+                .filter(|id| !id.is_experimental())
+                .collect(),
             suppressions: Vec::new(),
         }
     }

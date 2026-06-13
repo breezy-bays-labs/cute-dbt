@@ -225,11 +225,30 @@ pub trait CheckId: Copy + Eq + Ord + std::fmt::Debug + Sized + 'static {
         self.spec().id_str
     }
 
+    /// Whether this check belongs to an **experiment-gated** group
+    /// (cute-dbt#260 Slice 3) — a check that is OFF in the default policy
+    /// and only displayed when its experiment is explicitly enabled. The
+    /// `enforcement` group is gated behind `Experiment::Governance`. A
+    /// gated check still **evaluates** (the suppression-hierarchy
+    /// invariant) — it is excluded from the default *display* set, so the
+    /// non-experimental report AND the gate-free `explore` page never
+    /// surface it. Keyed on the spec's group so synthetic test registries
+    /// (which carry no `enforcement` group) are unaffected.
+    #[must_use]
+    fn is_experimental(self) -> bool {
+        EXPERIMENT_GATED_GROUPS.contains(&self.spec().group)
+    }
+
     /// Run this check's detector — the macro-generated **exhaustive,
     /// no-wildcard** id→detector dispatch.
     #[must_use]
     fn detect(self, ctx: &CheckContext<'_>) -> Vec<Finding<Self>>;
 }
+
+/// Check groups that are OFF in the default display policy — gated behind
+/// an experiment and only shown when it is enabled (cute-dbt#260 Slice 3).
+/// `enforcement` is gated behind `Experiment::Governance`.
+pub const EXPERIMENT_GATED_GROUPS: &[&str] = &["enforcement"];
 
 /// The evidence a detector pattern-matches over: the whole parsed
 /// [`Manifest`] plus the one model node under evaluation, plus the
