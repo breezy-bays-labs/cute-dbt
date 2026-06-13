@@ -49,6 +49,10 @@ jobs:
         # The mdbook is the site root; `examples/*.html` is mounted at
         # `/examples/` so book chapters can link to rendered reports via
         # relative URLs (e.g. `./examples/jaffle-shop-report.html`).
+        # The `explore/` SUBDIR is mounted too (cute-dbt#318) so the book's
+        # Explore examples subsection can link the two-page explorer goldens
+        # (`./examples/explore/dag.html` + `tests.html`) — `cp examples/*.html`
+        # only matches top-level files, so the subdir needs its own copy.
         # Without this, the book would have to link to GitHub blob URLs
         # which display HTML as source (compounded by .gitattributes
         # `linguist-generated` suppressing the diff view).
@@ -58,6 +62,8 @@ jobs:
           cp -r book/book/. _site/
           mkdir -p _site/examples
           cp examples/*.html _site/examples/
+          mkdir -p _site/examples/explore
+          cp examples/explore/*.html _site/examples/explore/
       - name: Deploy book to gh-pages root (main only)
         # Pages serves from the `gh-pages` BRANCH (Settings → Pages →
         # Deploy from a branch → gh-pages /). This pushes the book + the
