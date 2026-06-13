@@ -718,6 +718,59 @@ unit_tests:
     }
 
     #[test]
+    fn leading_wins_fires_only_for_a_dash_item_at_list_indent() {
+        // The leading-wins discard requires the boundary line to be a
+        // `- ` item AT list_indent. A non-`-` non-comment line at exactly
+        // list_indent (here `extra: x` at 2 spaces — a content-agnostic
+        // slicer accepts it even though dbt would not) is NOT a sibling
+        // test, so the collected trailing comment is kept. This pins the
+        // first conjunct (`cur_indent == list_indent`) of the leading-wins
+        // guard against degrading to a disjunction.
+        let src = yaml(
+            "
+unit_tests:
+  - name: test_a
+    model: foo
+  # trailing of test_a
+  extra: x
+",
+        );
+        let block = extract_unit_test_block(&src, "test_a").expect("test_a present");
+        assert!(
+            block.raw.contains("trailing of test_a"),
+            "a non-dash line at list_indent must not trigger leading-wins; got: {:?}",
+            block.raw
+        );
+    }
+
+    #[test]
+    fn trailing_comment_before_a_sibling_section_is_kept() {
+        // A list-indent trailing comment followed by a NON-`-` non-comment
+        // line (a sibling top-level section) is the LAST test's trailing —
+        // the leading-wins discard fires ONLY for a sibling `- ` at
+        // list_indent. This pins all three conjuncts of the leading-wins
+        // guard: a shallower section (`models:` at column 0) is neither at
+        // list_indent nor a `- `, so the scan must Stop and keep the
+        // collected comment, never LeadingWins-discard it.
+        let src = yaml(
+            "
+unit_tests:
+  - name: test_a
+    model: foo
+  # trailing of test_a
+models:
+  - name: foo
+",
+        );
+        let block = extract_unit_test_block(&src, "test_a").expect("test_a present");
+        assert!(
+            block.raw.contains("trailing of test_a"),
+            "a trailing comment before a sibling section must be kept; got: {:?}",
+            block.raw
+        );
+    }
+
+    #[test]
     fn next_test_picks_up_leading_when_previous_did_not_steal_it() {
         // Same fixture as the previous case, but from test_b's side —
         // it should claim the comment as its leading.
