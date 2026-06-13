@@ -1678,6 +1678,36 @@ mod tests {
     }
 
     #[test]
+    fn diff_lines_added_loop_stops_at_a_common_line_mid_block() {
+        // The Added-loop's `old[i] != new[j] && common[i][j+1] > common[i+1][j]`
+        // guard must stop consuming added lines the moment the cursor reaches
+        // a line common to both sides — even mid change-block. Here the single
+        // old line "a" matches the MIDDLE new line: the LCS-optimal alignment
+        // keeps that "a" as Context, with "b" Added before it and the trailing
+        // "a" Added after. If the `&&` degrades to `||`, the Added loop would
+        // swallow the common "a" (emitting it as Added and flipping the
+        // Context to the tail), so this pins the conjunction. (Brute-forced
+        // distinguishing input: `old=["a"], new=["b","a","a"]`.)
+        let old = owned(&["a"]);
+        let new = owned(&["b", "a", "a"]);
+        let diff = diff_lines(&old, &new);
+        let kinds: Vec<(DiffLineKind, &str)> = diff
+            .lines
+            .iter()
+            .map(|l| (l.kind, l.text.as_str()))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (DiffLineKind::Added, "b"),
+                (DiffLineKind::Context, "a"),
+                (DiffLineKind::Added, "a"),
+            ],
+            "the common line must stay Context between the two added lines",
+        );
+    }
+
+    #[test]
     fn diff_lines_both_sides_empty_is_an_empty_diff() {
         let diff = diff_lines(&[], &[]);
         assert!(diff.lines.is_empty());
