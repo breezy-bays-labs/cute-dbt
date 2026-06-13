@@ -5,6 +5,7 @@
 # User Guide
 
 - [What cute-dbt is](./the-solution.md)
+- [One-command review](./one-command-review.md)
 - [Getting started](./getting-started.md)
 - [How it works](./how-it-works.md)
 
@@ -20,6 +21,8 @@
 - [Selecting & suppressing checks](./check-selection.md)
 - [Experimental features](./experimental.md)
 - [Examples](./examples.md)
+  - [Reports examples](./examples/reports.md)
+  - [Explore examples](./examples/explore.md)
 - [Explorer external-drive contract](./explore-contract.md)
 - [Release discipline](./release-discipline.md)
 

@@ -77,48 +77,66 @@ pub fn normalize_path(p: &str, strip_prefix: Option<&Path>) -> String {
     }
 
     // Step 2: strip the configured project-root prefix, if present.
-    // Match must be segment-aware (`prefix` or `prefix/…`, never
-    // mid-segment) so `dbt_project_notes/x.sql` is NOT stripped when the
-    // prefix is `dbt_project` — bot-review finding on cute-dbt#86.
-    if let Some(prefix) = strip_prefix {
-        let prefix_lossy = prefix.to_string_lossy();
-        let prefix_canonical = canonicalize_separators(&prefix_lossy);
-        let prefix_str = prefix_canonical.trim_end_matches('/');
-        if !prefix_str.is_empty() {
-            if remaining == prefix_str {
-                remaining = "";
-            } else if let Some(rest) = remaining.strip_prefix(prefix_str)
-                // Segment-aware guard: a prefix match only counts as a real
-                // path-component match when followed by `/`. If the next
-                // character is anything else (e.g. `dbt_project_notes/...`
-                // with prefix `dbt_project`), this leg fails, the arm is
-                // skipped, and `remaining` is left unchanged.
-                && let Some(after_slash) = rest.strip_prefix('/')
-            {
-                remaining = after_slash;
-            }
-        }
-    }
+    remaining = strip_project_root(remaining, strip_prefix);
 
     // Step 3: collapse "//" runs into "/".
-    if remaining.contains("//") {
-        let mut out = String::with_capacity(remaining.len());
-        let mut prev_slash = false;
-        for ch in remaining.chars() {
-            if ch == '/' {
-                if !prev_slash {
-                    out.push('/');
-                }
-                prev_slash = true;
-            } else {
-                out.push(ch);
-                prev_slash = false;
-            }
-        }
-        return out;
-    }
+    collapse_slash_runs(remaining)
+}
 
-    remaining.to_owned()
+/// Strip the project-root `prefix` from `remaining` when it matches as a
+/// whole path component — `prefix` itself (→ `""`) or `prefix/…` (→ the
+/// tail). The match is **segment-aware**: a prefix that is only a leading
+/// substring of the first segment (e.g. `dbt_project` vs
+/// `dbt_project_notes/x.sql`) is NOT stripped (bot-review finding on
+/// cute-dbt#86). `prefix` is `\`-canonicalized and trailing-`/`-trimmed
+/// first so a Windows-shaped or slash-suffixed root still matches. Returns
+/// `remaining` unchanged when there is no prefix, an empty prefix, or no
+/// segment match.
+fn strip_project_root<'a>(remaining: &'a str, strip_prefix: Option<&Path>) -> &'a str {
+    let Some(prefix) = strip_prefix else {
+        return remaining;
+    };
+    let prefix_lossy = prefix.to_string_lossy();
+    let prefix_canonical = canonicalize_separators(&prefix_lossy);
+    let prefix_str = prefix_canonical.trim_end_matches('/');
+    if prefix_str.is_empty() {
+        return remaining;
+    }
+    if remaining == prefix_str {
+        return "";
+    }
+    // Segment-aware guard: a prefix match only counts as a real
+    // path-component match when followed by `/`. If the next character is
+    // anything else, the strip is skipped and `remaining` is unchanged.
+    if let Some(rest) = remaining.strip_prefix(prefix_str)
+        && let Some(after_slash) = rest.strip_prefix('/')
+    {
+        return after_slash;
+    }
+    remaining
+}
+
+/// Collapse runs of `/` into a single `/`. Borrows-then-clones only when
+/// no run is present (the common case); allocates a compacted buffer
+/// otherwise.
+fn collapse_slash_runs(remaining: &str) -> String {
+    if !remaining.contains("//") {
+        return remaining.to_owned();
+    }
+    let mut out = String::with_capacity(remaining.len());
+    let mut prev_slash = false;
+    for ch in remaining.chars() {
+        if ch == '/' {
+            if !prev_slash {
+                out.push('/');
+            }
+            prev_slash = true;
+        } else {
+            out.push(ch);
+            prev_slash = false;
+        }
+    }
+    out
 }
 
 /// `true` when `manifest_path` (after normalization) equals any of
@@ -177,6 +195,16 @@ mod tests {
     #[test]
     fn normalize_path_collapses_double_slash() {
         assert_eq!(normalize_path("models//x.sql", None), "models/x.sql");
+    }
+
+    #[test]
+    fn normalize_path_keeps_single_slashes_while_collapsing_a_run() {
+        // A path with BOTH a single separator and a `//` run: the single
+        // `/` must survive, only the run collapses. Pins the collapse
+        // loop's per-run dedup (`if !prev_slash`) — a path with a `//`
+        // run but no lone separator (e.g. `models//x.sql`) cannot tell
+        // the dedup apart from dropping every first-of-run slash.
+        assert_eq!(normalize_path("a/b//c/d", None), "a/b/c/d");
     }
 
     #[test]

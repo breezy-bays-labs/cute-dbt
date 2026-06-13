@@ -46,6 +46,10 @@ cute-dbt's first-class workflow is reviewing a **diff**, not the whole
 project. You give it the current manifest plus **one scope source**
 naming which models the diff touched. There are two.
 
+> This page describes the `report` plumbing verb's explicit scope
+> sources. For local work, [`cute-dbt review`](./one-command-review.md)
+> picks the scope for you (and produces the diff itself).
+
 ### Source 1 — baseline manifest (`--baseline-manifest`)
 
 For local dev. cute-dbt diffs the current manifest against a baseline
