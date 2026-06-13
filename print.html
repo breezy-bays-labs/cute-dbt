@@ -36,10 +36,10 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-dd1c0c38.js";
+            window.path_to_searchindex_js = "searchindex-8edef322.js";
         </script>
         <!-- Start loading toc.js asap -->
-        <script src="toc-c5a54955.js"></script>
+        <script src="toc-aa34fb98.js"></script>
     </head>
     <body>
     <div id="mdbook-help-container">
@@ -974,6 +974,7 @@ TOML file.</p>
 <tr><td><a href="#joinleft-null-propagation"><code>join.left-null-propagation</code></a></td><td>LEFT JOIN null propagation untested</td><td><code>high</code></td><td><code>both</code></td></tr>
 <tr><td><a href="#joinanti-join"><code>join.anti-join</code></a></td><td>Anti-join exclusion untested</td><td><code>high</code></td><td><code>unit-test</code></td></tr>
 <tr><td><a href="#incrementalbranch-coverage"><code>incremental.branch-coverage</code></a></td><td>Unexercised is_incremental() branch</td><td><code>high</code></td><td><code>unit-test</code></td></tr>
+<tr><td><a href="#enforcementconstraint-unbacked"><code>enforcement.constraint-unbacked</code></a></td><td>Declared constraint without a backing test</td><td><code>total</code></td><td><code>data-test</code></td></tr>
 </tbody>
 </table>
 </div>
@@ -1151,6 +1152,38 @@ TOML file.</p>
 <p>Add a unit test for each missing is_incremental() branch: one with <code>overrides: macros: is_incremental: true</code> (mock the prior model state with a <code>given: - input: this</code> entry) to exercise the incremental branch, and one without the override for the initial full build (dbt compiles is_incremental() as false by default). This finding’s evidence carries a copy-pasteable unit-test sketch per missing branch.</p>
 <h2 id="rationale-4"><a class="header" href="#rationale-4">Rationale</a></h2>
 <p>An incremental model is two programs in one body: the initial full build, and the incremental run that filters on the high-water mark and merges by key. Each unit test compiles only one of them, so a suite living entirely on one branch ships the other untested — exactly where incremental models silently drop, duplicate, or re-process rows.</p>
+<div style="break-before: page; page-break-before: always;"></div><!-- GENERATED — do not edit. Source of truth: the `heuristics!` block in src/domain/checks.rs. Regenerate: GEN_HEURISTICS_LEDGER=1 cargo test --test heuristics_ledger -->
+<h1 id="enforcementconstraint-unbacked"><a class="header" href="#enforcementconstraint-unbacked">enforcement.constraint-unbacked</a></h1>
+<p><strong>Declared constraint without a backing test</strong></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th></th><th></th></tr>
+</thead>
+<tbody>
+<tr><td>Group</td><td><code>enforcement</code></td></tr>
+<tr><td>Tier</td><td><code>total</code></td></tr>
+<tr><td>Instrument</td><td><code>data-test</code></td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="conditions-5"><a class="header" href="#conditions-5">Conditions</a></h2>
+<ul>
+<li>the model declares a primary_key or unique constraint (model-level constraints[] or a column-level constraint) whose enforcement on the manifest’s adapter is metadata-only (NotEnforced) — the warehouse accepts the declaration but does not enforce uniqueness at write time</li>
+<li>no enabled generic uniqueness data test (unique, attached to the model) backs the constrained column — the constraint→test edge is INFERRED by column + test-name match, since the manifest never links a constraint to its test</li>
+<li>the verdict is UNCOVERED only when the constraint is declared, metadata-only, AND has no inferred backing test; a backing test (even one cute-dbt could miss) keeps it silent</li>
+</ul>
+<h2 id="exclusions-5"><a class="header" href="#exclusions-5">Exclusions</a></h2>
+<ul>
+<li>a constraint the adapter ENFORCES at write time (e.g. not_null / foreign_key on Postgres/DuckDB) is never a gap — the warehouse guarantees it</li>
+<li>a constraint kind with no column-level generic-test backing (check / custom / foreign_key) is out of this inference and never reported here</li>
+<li>the inferred edge can MISS a renamed test or a singular/custom test asserting the same uniqueness — the copy says “backing test” (an authoring-discipline cue), never that the warehouse lacks an index; columns are authored-YAML-only, so this is never a warehouse-truth claim</li>
+<li>the whole <code>enforcement</code> group is gated behind the governance experiment — off by default, it never fires on a non-governance report</li>
+</ul>
+<h2 id="recommendation-5"><a class="header" href="#recommendation-5">Recommendation</a></h2>
+<p>Add a uniqueness data test on the declared-but-unenforced constraint column (<code>unique</code> for a single column), so the grain the contract DECLARES is actually verified by a test on every run. The warehouse will not enforce it for you on this adapter.</p>
+<h2 id="rationale-5"><a class="header" href="#rationale-5">Rationale</a></h2>
+<p>A primary-key / unique constraint that the warehouse treats as metadata-only is a DECLARED guarantee with nothing checking it: duplicate rows load silently, and any downstream join or incremental merge that trusts the declared grain corrupts. A backing data test is the only thing that actually verifies the declared uniqueness on this adapter.</p>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="selecting--suppressing-checks"><a class="header" href="#selecting--suppressing-checks">Selecting &amp; suppressing checks</a></h1>
 <p>cute-dbt’s coverage checks (see <a href="#checks">Checks</a>) are tuned
