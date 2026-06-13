@@ -66,16 +66,16 @@ use crate::domain::{
     DepDate, EnabledExperiments, Experiment, FixtureTableDiff, GovernanceFacts, HeuristicId,
     InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex,
     PrConfig, PrRef, PreflightError, ProjectChangePanel, ProjectFacts, ProjectFallbackReason,
-    ScopeInput, ScopeSelection, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff,
-    UnitTestYamlBlock, VarReference, all_models, attach_hook_facts, attach_model_yaml_diffs,
-    attach_var_facts, attribute_config_tree_changes, attribute_var_changes,
-    changed_macros_baseline, changed_macros_pr_diff, changed_models, check_by_id,
-    diff_project_definitions, effective_fixture_format, external_fixture_table,
-    extract_model_block, extract_unit_test_block, gather_governance, hook_operations,
-    macro_focus_set, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
+    ScopeInput, ScopeSelection, SeedCard, SeedInScopeSet, SuppressRule, SuppressionSource,
+    UnitTest, UnitTestDataDiff, UnitTestYamlBlock, VarReference, all_models, attach_hook_facts,
+    attach_model_yaml_diffs, attach_var_facts, attribute_config_tree_changes,
+    attribute_var_changes, build_seed_cards, changed_macros_baseline, changed_macros_pr_diff,
+    changed_models, check_by_id, diff_project_definitions, effective_fixture_format,
+    external_fixture_table, extract_model_block, extract_unit_test_block, gather_governance,
+    hook_operations, macro_focus_set, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
     reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
     refine_changed_by_hunks, resolve_check_policy, resolve_experimental_config, reverse_apply,
-    scan_pragmas, select_in_scope, widen_with_config_attributions,
+    scan_pragmas, select_in_scope, select_seeds_in_scope, widen_with_config_attributions,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -355,6 +355,17 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     if let ScopeInput::PrDiff { index } = &scope_input {
         attach_model_yaml_diffs(&mut model_yaml, index);
     }
+    // Seed cards (cute-dbt#350): the seed dual of the model scope. Select
+    // the in-scope seeds on EITHER arm (`select_seeds_in_scope` — baseline:
+    // changed `checksum`; pr-diff: the `seeds/<name>.csv` is in the diff),
+    // then read each seed's working-tree CSV into its card (truthful degrade
+    // per seed — a card the reader cannot fill keeps `table: None`). Data
+    // only this slice; the pr-diff cell-diff lands later. The payload is
+    // plumbed but UNRENDERED here (the "Data tables" section is a later
+    // slice), so a populated `seed_cards` changes zero emitted bytes — every
+    // committed golden stays byte-identical.
+    let seeds_in_scope = select_seeds_in_scope(&current, &scope_input);
+    let seed_cards = gather_seeds(args, &current, &seeds_in_scope);
     // Cell-level unit-test data-table diffs (cute-dbt#98): the structured
     // sibling of `yaml_diffs`. For each in-scope changed test whose own YAML
     // block the diff touched, reconstruct an aligned given/expect cell diff
@@ -421,6 +432,7 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
         &governance_facts,
         macro_lens.as_ref(),
         pr_ref.as_ref(),
+        &seed_cards,
     )
     .map_err(|err| RunError::output(&args.out, err))?;
     Ok(())
@@ -803,6 +815,91 @@ fn gather_external_fixtures_with_reader(
         }
     }
     out
+}
+
+/// The `gather_seeds` stage (cute-dbt#350) — build the identity-and-lineage
+/// [`SeedCard`] skeleton for each in-scope seed
+/// ([`build_seed_cards`]), then read each seed's working-tree CSV
+/// (`seeds/<name>.csv`, the `original_file_path`) through the
+/// [`ProjectFileReader`] port and parse it ([`external_fixture_table`] on
+/// the `.csv`-derived format) into the card's
+/// [`table`](crate::domain::SeedCard::table). The header row of the CSV
+/// supplies the column names — **not** the manifest `columns` map, which is
+/// empty for the common un-YAML'd seed.
+///
+/// **Truthful degrade, never a silent skip** (the cute-dbt#126 lesson, and
+/// the [`gather_model_yaml`] posture — deliberately *unlike*
+/// [`gather_external_fixtures`]'s silent skip): every in-scope seed yields a
+/// `SeedCard`. When `--project-root` is unresolvable, every card keeps
+/// `table: None` (the no-root degrade — the cards still carry identity +
+/// lineage + config facts, which the later "Data tables" section renders as
+/// a *labeled* empty-data state). Per-seed, an unreadable / missing /
+/// non-tabulatable CSV also leaves that one card's `table: None` while its
+/// siblings still fill. No arm drops a card or fails the run (a render-time
+/// working-tree read, exactly like the YAML-drawer gather — the zero-egress
+/// property of the generated HTML is untouched).
+fn gather_seeds(
+    args: &ReportArgs,
+    current: &Manifest,
+    seeds_in_scope: &SeedInScopeSet,
+) -> Vec<SeedCard> {
+    let cards = build_seed_cards(current, seeds_in_scope);
+    let (resolved, _derived) =
+        self::args::resolve_project_root(args.project_root.as_deref(), &args.manifest);
+    let Some(project_root) = resolved else {
+        // No-root degrade: return the identity-and-lineage skeletons
+        // unchanged — every card keeps `table: None` (a labeled empty-data
+        // state, NOT a dropped card), so the section can say truthfully
+        // "data unavailable — no project root".
+        return cards;
+    };
+    let reader = FsProjectFileReader::new(project_root);
+    gather_seeds_with_reader(&reader, cards)
+}
+
+/// Pure composition step over the [`ProjectFileReader`] port — testable
+/// without touching the filesystem by passing an in-memory impl. Takes the
+/// already-built skeleton cards (so the projection / lineage derivation is
+/// not re-run here) and fills each card's
+/// [`table`](crate::domain::SeedCard::table) from its working-tree CSV.
+///
+/// Per-card degrade: a card with no `original_file_path`, or whose file is
+/// unreadable / missing / non-tabulatable, keeps `table: None` (the
+/// truthful empty-data state). A [`io::ErrorKind::NotFound`] (including the
+/// adapter's `InvalidInput` rejection of an absolute / `..`-escaping path)
+/// is silent; any other read error warns on stderr but never fails the run.
+fn gather_seeds_with_reader(
+    reader: &dyn ProjectFileReader,
+    mut cards: Vec<SeedCard>,
+) -> Vec<SeedCard> {
+    for card in &mut cards {
+        let Some(path) = card.original_file_path.as_deref() else {
+            continue; // no path on the node ⇒ truthful empty (table stays None)
+        };
+        let text = match reader.read(path) {
+            Ok(text) => text,
+            Err(err)
+                if err.kind() == io::ErrorKind::NotFound
+                    || err.kind() == io::ErrorKind::InvalidInput =>
+            {
+                continue; // missing / rejected path ⇒ truthful empty
+            }
+            Err(err) => {
+                eprintln!(
+                    "cute-dbt: warning: could not read seed CSV for {}: {err}",
+                    card.id,
+                );
+                continue; // unreadable ⇒ truthful empty
+            }
+        };
+        // Seeds are CSV by definition (`seeds/<name>.csv`); derive the
+        // effective format from the path so the parser hits the CSV branch
+        // (header-keyed, value-inferred rows). A non-`.csv` extension or a
+        // non-tabulatable body leaves `table: None` (truthful empty).
+        let format = effective_fixture_format(None, path);
+        card.table = external_fixture_table(&text, format.as_deref());
+    }
+    cards
 }
 
 /// Load one external fixture, or `None` when this given/expect is not an
@@ -1567,6 +1664,7 @@ fn render(
     governance: &GovernanceFacts,
     macro_lens: Option<&MacroLensPayload>,
     pr_ref: Option<&PrRef>,
+    seed_cards: &[SeedCard],
 ) -> Result<(), io::Error> {
     render_report_with_externals(
         out,
@@ -1589,6 +1687,7 @@ fn render(
         governance,
         macro_lens,
         pr_ref,
+        seed_cards,
     )
 }
 
@@ -3316,5 +3415,173 @@ mod tests {
             facts.config_attributions.is_empty(),
             "a degrade arm never widens",
         );
+    }
+
+    // -----------------------------------------------------------------
+    // gather_seeds / gather_seeds_with_reader (cute-dbt#350) — the seed
+    // working-tree CSV read. Unlike `gather_external_fixtures` (silent
+    // skip), this follows `gather_model_yaml`'s TRUTHFUL DEGRADE: every
+    // in-scope seed yields a card, and a card the reader cannot fill keeps
+    // `table: None` (a labeled empty-data state, NEVER a silent blank grid
+    // — the cute-dbt#126 lesson). Headers come from the CSV header row, NOT
+    // the manifest `columns` map (empty for an un-YAML'd seed).
+    // -----------------------------------------------------------------
+
+    fn seed_node(id: &str, original_file_path: Option<&str>) -> crate::domain::Node {
+        crate::domain::Node::new(
+            NodeId::new(id),
+            "seed",
+            crate::domain::Checksum::new("sha256", "ck"),
+            None,
+            None,
+            DependsOn::default(),
+            original_file_path.map(str::to_owned),
+            crate::domain::NodeConfig::default(),
+            None,
+            StdBTreeMap::new(),
+        )
+    }
+
+    /// A `model` node that `ref()`s the given seed id (its downstream
+    /// consumer — the "feeds N models" edge).
+    fn model_consuming_seed(id: &str, seed_id: &str) -> crate::domain::Node {
+        crate::domain::Node::new(
+            NodeId::new(id),
+            "model",
+            crate::domain::Checksum::new("sha256", "ck"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::new(Vec::new(), vec![NodeId::new(seed_id)]),
+            None,
+            crate::domain::NodeConfig::default(),
+            None,
+            StdBTreeMap::new(),
+        )
+    }
+
+    fn seed_manifest(nodes: Vec<crate::domain::Node>) -> Manifest {
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+            StdHashMap::new(),
+            StdHashMap::new(),
+        )
+    }
+
+    fn seeds_in_scope_of(ids: &[&str]) -> SeedInScopeSet {
+        ids.iter().map(|id| NodeId::new(*id)).collect()
+    }
+
+    #[test]
+    fn gather_seeds_reads_the_working_tree_csv_into_a_table() {
+        // Happy path: an in-scope seed with a readable CSV gets `table:
+        // Some` whose columns come from the CSV HEADER ROW (the manifest
+        // `columns` map is empty for this un-YAML'd seed).
+        let seed_id = "seed.shop.raw_customers";
+        let manifest = seed_manifest(vec![
+            seed_node(seed_id, Some("seeds/raw_customers.csv")),
+            model_consuming_seed("model.shop.stg_customers", seed_id),
+        ]);
+        let mut entries = StdHashMap::new();
+        entries.insert(
+            "seeds/raw_customers.csv".to_owned(),
+            StubResult::Ok("id,first_name\n1,Ada\n2,Grace\n".to_owned()),
+        );
+        let reader = StubReader { entries };
+
+        let cards = build_seed_cards(&manifest, &seeds_in_scope_of(&[seed_id]));
+        let cards = gather_seeds_with_reader(&reader, cards);
+
+        assert_eq!(cards.len(), 1);
+        let card = &cards[0];
+        assert_eq!(card.id, NodeId::new(seed_id));
+        assert_eq!(card.name, "raw_customers");
+        // Lineage carried from the projection skeleton (direct consumer).
+        assert_eq!(card.feeds_models, vec!["stg_customers"]);
+        let table = card.table.as_ref().expect("CSV read fills the table");
+        // Header row supplies the column names — NOT the (empty) manifest
+        // `columns` map.
+        assert_eq!(
+            table.columns,
+            vec!["id".to_owned(), "first_name".to_owned()],
+        );
+        assert_eq!(table.rows.len(), 2);
+    }
+
+    #[test]
+    fn gather_seeds_degrades_truthfully_when_the_file_is_missing() {
+        // A missing CSV ⇒ the card is STILL emitted (identity + lineage),
+        // just with `table: None` — never dropped, never a silent skip.
+        let seed_id = "seed.shop.raw_customers";
+        let manifest = seed_manifest(vec![seed_node(seed_id, Some("seeds/raw_customers.csv"))]);
+        // Empty reader ⇒ every read is NotFound.
+        let reader = StubReader {
+            entries: StdHashMap::new(),
+        };
+
+        let cards = build_seed_cards(&manifest, &seeds_in_scope_of(&[seed_id]));
+        let cards = gather_seeds_with_reader(&reader, cards);
+
+        assert_eq!(cards.len(), 1, "a missing file degrades, never drops");
+        assert_eq!(cards[0].id, NodeId::new(seed_id));
+        assert!(
+            cards[0].table.is_none(),
+            "the truthful empty-data state — not a fabricated grid",
+        );
+    }
+
+    #[test]
+    fn gather_seeds_degrades_truthfully_when_no_project_root_resolves() {
+        // The no-`--project-root` arm of the public `gather_seeds`: nothing
+        // can be read, so EVERY in-scope seed still yields a card carrying
+        // identity + lineage with `table: None`. Driving the full
+        // `gather_seeds` (not the `_with_reader` core) exercises the
+        // root-resolution degrade: a `--pr-diff` ReportArgs with no
+        // `--project-root` and a relative `--manifest` cannot derive a root.
+        let seed_id = "seed.shop.raw_customers";
+        let manifest = seed_manifest(vec![
+            seed_node(seed_id, Some("seeds/raw_customers.csv")),
+            model_consuming_seed("model.shop.stg_customers", seed_id),
+        ]);
+        // No `--project-root` and a bare `--manifest` name (not the
+        // `<root>/target/manifest.json` layout) ⇒ `resolve_project_root`
+        // yields `None`: the no-root degrade. The default `cli()` args
+        // already carry `manifest: "current.json"`, `project_root: None`.
+        let args = cli("out.html");
+
+        let cards = gather_seeds(&args, &manifest, &seeds_in_scope_of(&[seed_id]));
+
+        assert_eq!(cards.len(), 1, "no-root degrade emits every card");
+        assert_eq!(cards[0].id, NodeId::new(seed_id));
+        assert_eq!(cards[0].feeds_models, vec!["stg_customers"]);
+        assert!(
+            cards[0].table.is_none(),
+            "no project root ⇒ labeled empty-data state, never a blank grid",
+        );
+    }
+
+    #[test]
+    fn gather_seeds_returns_an_empty_vec_when_no_seed_is_in_scope() {
+        // The not-called path (the conditional-clear lesson): an empty
+        // in-scope set yields an empty vec — no spurious cards, no read
+        // attempts. Pin it so a future refactor cannot leak a card on the
+        // zero-seed path.
+        let manifest = seed_manifest(vec![seed_node(
+            "seed.shop.raw_customers",
+            Some("seeds/raw_customers.csv"),
+        )]);
+        // A reader that WOULD serve the file — proving emptiness comes from
+        // the empty scope set, not a read miss.
+        let mut entries = StdHashMap::new();
+        entries.insert(
+            "seeds/raw_customers.csv".to_owned(),
+            StubResult::Ok("id\n1\n".to_owned()),
+        );
+        let reader = StubReader { entries };
+
+        let cards = build_seed_cards(&manifest, &seeds_in_scope_of(&[]));
+        let cards = gather_seeds_with_reader(&reader, cards);
+
+        assert!(cards.is_empty(), "no seed in scope ⇒ empty vec");
     }
 }
