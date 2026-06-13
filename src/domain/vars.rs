@@ -420,30 +420,49 @@ fn scan_calls(text: &str, token: &str, refs: &mut VarRefs) {
         if !boundary_before(bytes, start) {
             continue;
         }
-        let mut i = start + token.len();
-        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
-            i += 1;
+        if let Some(arg_start) = call_first_arg_index(bytes, start + token.len()) {
+            classify_first_arg(text, bytes, arg_start, refs);
         }
-        if bytes.get(i) != Some(&b'(') {
-            continue;
-        }
+    }
+}
+
+/// From `after_token` (the byte just past a matched call token), skip
+/// whitespace, require a `(`, then skip whitespace again and return the
+/// index of the first argument byte. `None` when the token is not
+/// immediately followed by a `(` call (a bare mention, not a call site).
+fn call_first_arg_index(bytes: &[u8], after_token: usize) -> Option<usize> {
+    let mut i = skip_ws(bytes, after_token);
+    if bytes.get(i) != Some(&b'(') {
+        return None;
+    }
+    i = skip_ws(bytes, i + 1);
+    Some(i)
+}
+
+/// Index of the first non-whitespace byte at or after `i`.
+fn skip_ws(bytes: &[u8], mut i: usize) -> usize {
+    while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
         i += 1;
-        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
-            i += 1;
-        }
-        match bytes.get(i) {
-            Some(&quote @ (b'\'' | b'"')) => {
-                let name_start = i + 1;
-                match text[name_start..].find(quote as char) {
-                    Some(len) => {
-                        refs.names
-                            .insert(text[name_start..name_start + len].to_owned());
-                    }
-                    None => refs.dynamic = true, // unterminated literal
+    }
+    i
+}
+
+/// Classify the first argument starting at `arg_start`: a quoted string
+/// literal records its inner text as a var name; an unterminated literal
+/// or any non-literal (an expression) marks the ref set dynamic.
+fn classify_first_arg(text: &str, bytes: &[u8], arg_start: usize, refs: &mut VarRefs) {
+    match bytes.get(arg_start) {
+        Some(&quote @ (b'\'' | b'"')) => {
+            let name_start = arg_start + 1;
+            match text[name_start..].find(quote as char) {
+                Some(len) => {
+                    refs.names
+                        .insert(text[name_start..name_start + len].to_owned());
                 }
+                None => refs.dynamic = true, // unterminated literal
             }
-            _ => refs.dynamic = true,
         }
+        _ => refs.dynamic = true,
     }
 }
 
@@ -1293,6 +1312,21 @@ mod tests {
     fn scanner_unterminated_region_scans_conservatively() {
         assert_eq!(names_of("{{ var('open')"), vec!["open".to_owned()]);
         assert!(names_of("{% raw %}{{ var('never_closed') }}").is_empty());
+    }
+
+    #[test]
+    fn scanner_marks_an_unterminated_string_literal_dynamic() {
+        // The first arg opens a quote that never closes (`var('x` with no
+        // matching `'`). No name can be read, so the call degrades to
+        // dynamic rather than extracting a truncated name. Pins the
+        // `None => refs.dynamic` arm of the first-arg classifier.
+        let refs = scan_jinja_text("{{ var('unclosed }}");
+        assert!(
+            refs.names.is_empty(),
+            "no name from an unterminated literal; got {:?}",
+            refs.names
+        );
+        assert!(refs.dynamic, "an unterminated string literal is dynamic");
     }
 
     #[test]

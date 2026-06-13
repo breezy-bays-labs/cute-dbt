@@ -1985,6 +1985,18 @@ mod tests {
         // serialize→deserialize is the identity so the wire contract — in
         // particular Absent-vs-Null adjacency (Absent = tag-only, Null =
         // tag-only, distinct tokens) — can't drift silently.
+        for diff in data_diff_variant_matrix() {
+            let back: UnitTestDataDiff =
+                serde_json::from_str(&serde_json::to_string(&diff).unwrap()).unwrap();
+            assert_eq!(back, diff, "data_diff round-trip failed for {diff:?}");
+        }
+    }
+
+    /// Every `UnitTestDataDiff` in the CellValue × kind × status × expect
+    /// variant matrix exercised by the round-trip test. Kept out of the
+    /// test body so the assertion loop stays flat (the nested enumeration
+    /// is mechanical product-building, not test logic).
+    fn data_diff_variant_matrix() -> Vec<UnitTestDataDiff> {
         let cell_variants = [
             CellValue::Null,
             CellValue::Absent,
@@ -2004,41 +2016,68 @@ mod tests {
             ColumnStatus::Added,
             ColumnStatus::Removed,
         ];
-        for old in &cell_variants {
-            for new in &cell_variants {
-                for kind in kinds {
-                    for status in statuses {
-                        for expect_present in [false, true] {
-                            let table = FixtureTableDiff {
-                                columns: vec![DiffColumn {
-                                    name: "c".into(),
-                                    status,
-                                }],
-                                rows: vec![RowChange {
-                                    kind,
-                                    cells: vec![CellChange {
-                                        old: Cell::new(old.clone()),
-                                        new: Cell::new(new.clone()),
-                                        changed: old != new,
-                                    }],
-                                }],
-                            };
-                            let diff = UnitTestDataDiff {
-                                given: vec![NamedTableDiff {
-                                    ordinal: 0,
-                                    input: "ref('a')".into(),
-                                    diff: table.clone(),
-                                }],
-                                expect: expect_present.then(|| table.clone()),
-                            };
-                            let back: UnitTestDataDiff =
-                                serde_json::from_str(&serde_json::to_string(&diff).unwrap())
-                                    .unwrap();
-                            assert_eq!(back, diff, "data_diff round-trip failed for {diff:?}");
-                        }
-                    }
-                }
-            }
+        // Flat Cartesian product: each dimension contributes one `flat_map`
+        // over OWNED clones, so no nested-loop branches accrue and no
+        // borrowed reference escapes a closure.
+        cell_variants
+            .iter()
+            .cloned()
+            .flat_map(|old| {
+                let cells = cell_variants.clone();
+                cells.into_iter().map(move |new| (old.clone(), new))
+            })
+            .flat_map(|(old, new)| {
+                kinds
+                    .into_iter()
+                    .map(move |kind| (old.clone(), new.clone(), kind))
+            })
+            .flat_map(|(old, new, kind)| {
+                statuses
+                    .into_iter()
+                    .map(move |status| (old.clone(), new.clone(), kind, status))
+            })
+            .flat_map(|(old, new, kind, status)| {
+                [false, true]
+                    .into_iter()
+                    .map(move |expect| (old.clone(), new.clone(), kind, status, expect))
+            })
+            .map(|(old, new, kind, status, expect)| {
+                round_trip_case(&old, &new, kind, status, expect)
+            })
+            .collect()
+    }
+
+    /// Build one [`UnitTestDataDiff`] case for the variant-matrix round-trip
+    /// test: a single column/row with the given old/new cells, kind, column
+    /// status, and optional `expect` table.
+    fn round_trip_case(
+        old: &CellValue,
+        new: &CellValue,
+        kind: RowChangeKind,
+        status: ColumnStatus,
+        expect_present: bool,
+    ) -> UnitTestDataDiff {
+        let table = FixtureTableDiff {
+            columns: vec![DiffColumn {
+                name: "c".into(),
+                status,
+            }],
+            rows: vec![RowChange {
+                kind,
+                cells: vec![CellChange {
+                    old: Cell::new(old.clone()),
+                    new: Cell::new(new.clone()),
+                    changed: old != new,
+                }],
+            }],
+        };
+        UnitTestDataDiff {
+            given: vec![NamedTableDiff {
+                ordinal: 0,
+                input: "ref('a')".into(),
+                diff: table.clone(),
+            }],
+            expect: expect_present.then(|| table.clone()),
         }
     }
 

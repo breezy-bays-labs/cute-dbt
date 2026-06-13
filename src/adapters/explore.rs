@@ -260,25 +260,7 @@ fn lineage_node_name(current: &Manifest, id: &NodeId, node_type: LineageNodeType
 /// skipped defensively (a manifest should never carry one).
 #[must_use]
 pub fn build_lineage(current: &Manifest, models: &ModelInScopeSet) -> Lineage {
-    // The typed union, ordered by full node id.
-    let mut typed: BTreeMap<&NodeId, LineageNodeType> = models
-        .iter()
-        .map(|id| (id, LineageNodeType::Model))
-        .collect();
-    for (id, node) in current.nodes() {
-        let node_type = match node.resource_type() {
-            "snapshot" => LineageNodeType::Snapshot,
-            "seed" => LineageNodeType::Seed,
-            _ => continue,
-        };
-        typed.entry(id).or_insert(node_type);
-    }
-    for id in current.sources().keys() {
-        typed.entry(id).or_insert(LineageNodeType::Source);
-    }
-    for id in current.exposures().keys() {
-        typed.entry(id).or_insert(LineageNodeType::Exposure);
-    }
+    let typed = build_typed_node_map(current, models);
 
     let index_of: HashMap<&NodeId, usize> =
         typed.keys().enumerate().map(|(i, id)| (*id, i)).collect();
@@ -303,6 +285,47 @@ pub fn build_lineage(current: &Manifest, models: &ModelInScopeSet) -> Lineage {
         })
         .collect();
 
+    let edges = lineage_edges(current, &typed, &index_of);
+    Lineage { nodes, edges }
+}
+
+/// Build the typed node union for the lineage graph, ordered by full node
+/// id (`BTreeMap`): the in-scope `models`, every `snapshot`/`seed` node,
+/// every source, and every exposure (cute-dbt#253). `or_insert` keeps the
+/// model type when an id appears in more than one set.
+fn build_typed_node_map<'a>(
+    current: &'a Manifest,
+    models: &'a ModelInScopeSet,
+) -> BTreeMap<&'a NodeId, LineageNodeType> {
+    let mut typed: BTreeMap<&NodeId, LineageNodeType> = models
+        .iter()
+        .map(|id| (id, LineageNodeType::Model))
+        .collect();
+    for (id, node) in current.nodes() {
+        let node_type = match node.resource_type() {
+            "snapshot" => LineageNodeType::Snapshot,
+            "seed" => LineageNodeType::Seed,
+            _ => continue,
+        };
+        typed.entry(id).or_insert(node_type);
+    }
+    for id in current.sources().keys() {
+        typed.entry(id).or_insert(LineageNodeType::Source);
+    }
+    for id in current.exposures().keys() {
+        typed.entry(id).or_insert(LineageNodeType::Exposure);
+    }
+    typed
+}
+
+/// Build the deduplicated, sorted `(from_idx, to_idx)` edge list from each
+/// node's `depends_on.nodes`, keeping only edges between union members and
+/// dropping defensive self-edges. Sources contribute no outgoing deps.
+fn lineage_edges(
+    current: &Manifest,
+    typed: &BTreeMap<&NodeId, LineageNodeType>,
+    index_of: &HashMap<&NodeId, usize>,
+) -> Vec<(usize, usize)> {
     let mut edges: Vec<(usize, usize)> = Vec::new();
     for (to_idx, (id, node_type)) in typed.iter().enumerate() {
         let deps: &[NodeId] = match node_type {
@@ -325,7 +348,7 @@ pub fn build_lineage(current: &Manifest, models: &ModelInScopeSet) -> Lineage {
     }
     edges.sort_unstable();
     edges.dedup();
-    Lineage { nodes, edges }
+    edges
 }
 
 /// One node in the serialized lineage payload (the `explore-dag-data`
