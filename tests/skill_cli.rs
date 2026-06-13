@@ -52,6 +52,42 @@ fn skill_print_is_byte_identical_to_the_repo_file() {
 }
 
 #[test]
+fn skill_print_into_a_closed_pipe_exits_clean() {
+    // `cute-dbt skill --print | head` closes stdout early; the
+    // resulting BrokenPipe must NOT become a spurious error + nonzero
+    // exit (cute-dbt#304 bot review). Run the real pipeline through a
+    // shell so `head` closes the pipe after its first line.
+    let bin = env!("CARGO_BIN_EXE_cute-dbt");
+    // bash (not /bin/sh, which is dash on Linux CI and lacks pipefail):
+    // `pipefail` makes the pipeline's exit reflect cute-dbt's OWN
+    // status, so a BrokenPipe-induced nonzero exit surfaces here.
+    // Pipe into `true`, which reads NOTHING and closes the read end
+    // immediately — so cute-dbt's `write_all` hits a genuinely closed
+    // pipe (EPIPE -> BrokenPipe). (`head -c <n>` would not: the ~3 KB
+    // skill fits the kernel pipe buffer, so the single write returns
+    // before the reader closes — no BrokenPipe is ever raised, and the
+    // test would vacuously pass even on the buggy code.)
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(format!("set -o pipefail; '{bin}' skill --print | true"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("the bash pipeline spawns");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a closed downstream pipe is clean success (cute-dbt exits 0 under pipefail): {output:?}",
+    );
+    // The shell pipeline's stderr is cute-dbt's stderr (head writes
+    // none): no BrokenPipe complaint.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.to_lowercase().contains("broken pipe") && !stderr.contains("cute-dbt skill:"),
+        "no spurious error on a closed pipe: {stderr}",
+    );
+}
+
+#[test]
 fn skill_install_claude_code_writes_under_dot_claude() {
     let repo = TestRepo::init("skill-claude");
     repo.write("README.md", "a repo\n");

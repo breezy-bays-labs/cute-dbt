@@ -169,12 +169,19 @@ pub fn execute_skill(args: &SkillArgs) -> Result<(), SkillError> {
 
 /// Write the embedded SKILL.md verbatim to stdout.
 fn print_skill() -> Result<(), SkillError> {
-    io::stdout()
-        .write_all(SKILL_MD.as_bytes())
-        .map_err(|err| SkillError::StageFailed {
+    // A closed downstream pipe (`skill --print | head`, `| grep -q`) is
+    // the primary use of `--print`, not an error — treat BrokenPipe as
+    // clean success rather than a spurious stderr + nonzero exit
+    // (cute-dbt#304 bot review).
+    if let Err(err) = io::stdout().write_all(SKILL_MD.as_bytes())
+        && err.kind() != io::ErrorKind::BrokenPipe
+    {
+        return Err(SkillError::StageFailed {
             context: "writing the skill to stdout",
             detail: err.to_string(),
-        })
+        });
+    }
+    Ok(())
 }
 
 /// Install the skill at the agent's conventional location under the
@@ -215,15 +222,12 @@ fn write_skill_file(dest: &Path) -> Result<(), SkillError> {
 }
 
 /// Resolve the git repository toplevel from the current directory, or
-/// [`SkillError::NotInGitRepo`] when there is none.
+/// [`SkillError::NotInGitRepo`] when there is none. `git` runs in the
+/// inherited cwd (no explicit `current_dir` — one fewer syscall and
+/// failure point, cute-dbt#304 bot review).
 fn git_toplevel() -> Result<PathBuf, SkillError> {
-    let cwd = std::env::current_dir().map_err(|err| SkillError::StageFailed {
-        context: "reading the working directory",
-        detail: err.to_string(),
-    })?;
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
-        .current_dir(&cwd)
         .env("LC_ALL", "C")
         .stdin(std::process::Stdio::null())
         .output()
