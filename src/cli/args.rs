@@ -45,7 +45,8 @@ use crate::domain::{AnalysisConfig, Experiment, ModifierKind, PrDiff, parse_expe
 )]
 pub struct Cli {
     /// The selected verb: `review` (one-command PR review), `report`
-    /// (explicit-inputs PR review), or `explore` (local dev).
+    /// (explicit-inputs PR review), `explore` (local dev), or `skill`
+    /// (emit/install the agent integration).
     #[command(subcommand)]
     pub command: Command,
 }
@@ -72,6 +73,12 @@ pub enum Command {
     /// instead of failing. Experimental means the surface and output may
     /// change or be removed in any v0.x release (cute-dbt#290).
     Explore(ExploreArgs),
+    /// Emit or install the cute-dbt agent skill: `--print` writes the
+    /// packaged SKILL.md to stdout; `--install [--agent <a>]` writes it
+    /// into your repo (`.claude/skills/` for Claude Code,
+    /// `.agents/skills/` for Cursor/Codex/Copilot). The skill teaches an
+    /// agent to drive `cute-dbt review` (cute-dbt#304).
+    Skill(crate::cli::skill::SkillArgs),
 }
 
 /// Arguments for `cute-dbt report` — the pre-#100 flat surface,
@@ -420,7 +427,9 @@ mod tests {
     fn parse_report(args: &[&str]) -> Result<ReportArgs, clap::Error> {
         parse(args).map(|cli| match cli.command {
             Command::Report(report) => report,
-            Command::Explore(_) | Command::Review(_) => panic!("expected the report arm"),
+            Command::Explore(_) | Command::Review(_) | Command::Skill(_) => {
+                panic!("expected the report arm")
+            }
         })
     }
 

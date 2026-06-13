@@ -8,6 +8,7 @@
 //! Node / UnitTest construction so step files stay focused on
 //! Given/When/Then prose.
 
+pub mod agent_skill;
 pub mod builders;
 pub mod cell_table_diff;
 pub mod check_selection;
