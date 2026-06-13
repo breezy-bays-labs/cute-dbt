@@ -1,0 +1,1455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cute-dbt explore — unit tests</title>
+<link rel="icon" href="data:,">
+<style>
+/* Sakura.css v1.5.0
+ * ================
+ * Minimal css theme.
+ * Project: https://github.com/oxalorg/sakura/
+ */
+/* Body */
+html {
+  font-size: 62.5%;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+}
+
+body {
+  font-size: 1.8rem;
+  line-height: 1.618;
+  max-width: 38em;
+  margin: auto;
+  color: #4a4a4a;
+  background-color: #f9f9f9;
+  padding: 13px;
+}
+
+@media (max-width: 684px) {
+  body {
+    font-size: 1.53rem;
+  }
+}
+@media (max-width: 382px) {
+  body {
+    font-size: 1.35rem;
+  }
+}
+h1, h2, h3, h4, h5, h6 {
+  line-height: 1.1;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  font-weight: 700;
+  margin-top: 3rem;
+  margin-bottom: 1.5rem;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  -ms-word-break: break-all;
+  word-break: break-word;
+}
+
+h1 {
+  font-size: 2.35em;
+}
+
+h2 {
+  font-size: 2em;
+}
+
+h3 {
+  font-size: 1.75em;
+}
+
+h4 {
+  font-size: 1.5em;
+}
+
+h5 {
+  font-size: 1.25em;
+}
+
+h6 {
+  font-size: 1em;
+}
+
+p {
+  margin-top: 0px;
+  margin-bottom: 2.5rem;
+}
+
+small, sub, sup {
+  font-size: 75%;
+}
+
+hr {
+  border-color: #1d7484;
+}
+
+a {
+  text-decoration: none;
+  color: #1d7484;
+}
+a:visited {
+  color: #144f5a;
+}
+a:hover {
+  color: #982c61;
+  border-bottom: 2px solid #4a4a4a;
+}
+
+ul {
+  padding-left: 1.4em;
+  margin-top: 0px;
+  margin-bottom: 2.5rem;
+}
+
+li {
+  margin-bottom: 0.4em;
+}
+
+blockquote {
+  margin-left: 0px;
+  margin-right: 0px;
+  padding-left: 1em;
+  padding-top: 0.8em;
+  padding-bottom: 0.8em;
+  padding-right: 0.8em;
+  border-left: 5px solid #1d7484;
+  margin-bottom: 2.5rem;
+  background-color: #f1f1f1;
+}
+
+blockquote p {
+  margin-bottom: 0;
+}
+
+img, video {
+  height: auto;
+  max-width: 100%;
+  margin-top: 0px;
+  margin-bottom: 2.5rem;
+}
+
+/* Pre and Code */
+pre {
+  background-color: #f1f1f1;
+  display: block;
+  padding: 1em;
+  overflow-x: auto;
+  margin-top: 0px;
+  margin-bottom: 2.5rem;
+  font-size: 0.9em;
+}
+
+code, kbd, samp {
+  font-size: 0.9em;
+  padding: 0 0.5em;
+  background-color: #f1f1f1;
+  white-space: pre-wrap;
+}
+
+pre > code {
+  padding: 0;
+  background-color: transparent;
+  white-space: pre;
+  font-size: 1em;
+}
+
+/* Tables */
+table {
+  text-align: justify;
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 2rem;
+}
+
+td, th {
+  padding: 0.5em;
+  border-bottom: 1px solid #f1f1f1;
+}
+
+/* Buttons, forms and input */
+input, textarea {
+  border: 1px solid #4a4a4a;
+}
+input:focus, textarea:focus {
+  border: 1px solid #1d7484;
+}
+
+textarea {
+  width: 100%;
+}
+
+.button, button, input[type=submit], input[type=reset], input[type=button], input[type=file]::file-selector-button {
+  display: inline-block;
+  padding: 5px 10px;
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  background-color: #1d7484;
+  color: #f9f9f9;
+  border-radius: 1px;
+  border: 1px solid #1d7484;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+.button[disabled], button[disabled], input[type=submit][disabled], input[type=reset][disabled], input[type=button][disabled], input[type=file]::file-selector-button[disabled] {
+  cursor: default;
+  opacity: 0.5;
+}
+.button:hover, button:hover, input[type=submit]:hover, input[type=reset]:hover, input[type=button]:hover, input[type=file]::file-selector-button:hover {
+  background-color: #982c61;
+  color: #f9f9f9;
+  outline: 0;
+}
+.button:focus-visible, button:focus-visible, input[type=submit]:focus-visible, input[type=reset]:focus-visible, input[type=button]:focus-visible, input[type=file]::file-selector-button:focus-visible {
+  outline-style: solid;
+  outline-width: 2px;
+}
+
+textarea, select, input {
+  color: #4a4a4a;
+  padding: 6px 10px; /* The 6px vertically centers text on FF, ignored by Webkit */
+  margin-bottom: 10px;
+  background-color: #f1f1f1;
+  border: 1px solid #f1f1f1;
+  border-radius: 4px;
+  box-shadow: none;
+  box-sizing: border-box;
+}
+textarea:focus, select:focus, input:focus {
+  border: 1px solid #1d7484;
+  outline: 0;
+}
+
+input[type=checkbox]:focus {
+  outline: 1px dotted #1d7484;
+}
+
+label, legend, fieldset {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+
+</style>
+<style>
+
+/* ============================================================================
+   cute-dbt design tokens v1 (cute-dbt#242)
+   ----------------------------------------------------------------------------
+   The design-system ROOT: the semantic token layer + ALL EIGHT [data-theme]
+   blocks, extracted VERBATIM from templates/report.css (the cute-dbt#177
+   chassis) at cute-dbt#242 — exact current values, zero value changes.
+   Shared by BOTH page families through an askama include (report.html and
+   explore-dag.html / explore-tests.html each inline this partial into their
+   own <style> block at compile time), so the report and the explore pages
+   consume ONE design system structurally. Single-file outputs hold: the
+   sharing happens at the template layer, never via a runtime asset.
+
+   FIRST-PARTY asset — authored for cute-dbt. Deliberately NOT listed in
+   `assets/MANIFEST.toml` (that index is third-party vendoring provenance);
+   its integrity gates are the banner-pin + comment-balance tests in
+   `src/adapters/asset_embed.rs`.
+
+   Design sessions: treat THIS file as the design-system root (see
+   DESIGN.md). Tokens are law — no new color literals; per-theme,
+   surface-scoped AA overrides live with their surfaces in the page
+   layers, never here.
+
+   PORTING-BUG GUARD (handoff §2.1): never write a `*` immediately followed
+   by `/` inside a comment body — it closes the comment early and silently
+   eats the next rule. A comment-balance test pins this.
+   ========================================================================== */
+
+/* ============================================================================
+   AA pins — do not re-brighten
+   ----------------------------------------------------------------------------
+   Every theme passes WCAG-AA (>= 4.5:1) on the load-bearing diff add/remove
+   pair (pass-2 handoff §2.3, re-pinned for 8 themes at cute-dbt#198). These
+   contrast ratios are verified and LOAD-BEARING; do not re-brighten any
+   theme's add/remove colors. Re-run the WCAG math on the diff add/remove
+   pair for every theme if any code-surface color changes.
+
+   | theme     | add-fg on surface | remove-fg on surface | white on add-chip | white on remove-chip |
+   |-----------|-------------------|----------------------|-------------------|----------------------|
+   | Light     | 5.02              | 4.83                 | 5.02              | 4.83                 |
+   | Solarized | 6.10              | 5.68                 | 4.81              | 5.41                 |
+   | Latte     | 5.42              | 5.63                 | 4.98              | 6.01                 |
+   | Rosé Pine | 5.37              | 6.24                 | 5.31              | 6.36                 |
+   | Dark      | 9.65              | 7.52                 | 5.02              | 4.58                 |
+   | Tokyo     | 8.81              | 6.08                 | 5.22              | 4.99                 |
+   | Gruvbox   | 6.74              | 4.85                 | 4.86              | 5.47                 |
+   | Dracula   | 9.83              | 4.95                 | 4.96              | 5.03                 |
+
+   cute-dbt#251 — the per-theme AA token repair (the #206 deepening
+   pattern, applied at TOKEN level — since #264 the tokens live in ONE
+   place, so deepening here repairs the report AND explore pages
+   simultaneously; the older surface-scoped overrides in report.css
+   predate this and stay). The #264 adversarial verification measured
+   the shared palette sub-AA on 5 of 8 themes; the values below were
+   adjusted minimally (lightness-only shifts, hue/saturation kept) so
+   EVERY combo clears 4.5:1 — pinned by the report + explore AA matrix
+   guards in tests/headless_toggle.rs (universal: all 8 themes,
+   effective composited backdrops). Do not re-brighten:
+     · --text-muted on the worst of bg/bg-alt/surface/surface-2/
+       code-header-bg/code-bg (solarized 4.58, latte 5.14,
+       rosepine 4.82, tokyo 4.58, gruvbox 4.59);
+     · --accent (and --accent-hover) on the worst of bg/bg-alt/surface
+       (accent: solarized 4.57, latte 4.77, rosepine 4.59; hover:
+       latte 4.55, rosepine 4.56);
+     · --code-add/rem-sigil on their composited add/rem rows (all
+       themes >= 4.55 at FULL opacity — `.diff-sigil` opacity dimming
+       was removed at #251 per the #227 composited-opacity rule);
+     · body --text on --code-add/rem-word composited over row + code-bg
+       (all themes >= 4.56; the dark themes' word-tint alphas were
+       lowered, the light themes' rem-word hexes lightened).
+   Latte/rosepine muted + latte accent adopt the themes' OWN deeper
+   steps already established by the #198/#227 scoped stand-ins
+   (Catppuccin subtext1 #5c5f77, latte blue #1a5cdd, rosepine #5d5780).
+   Light and Dark are untouched (they already passed everywhere).
+   ========================================================================== */
+
+/* ============================================================================
+   1. TOKEN LAYER  (engine/tokens.css)
+   ----------------------------------------------------------------------------
+   Semantic design tokens (the ~50 hardcoded report hexes collapsed to ~24
+   themeable tokens) + a density layer (set by the *direction* stylesheet, not
+   the theme) + eight [data-theme] blocks.
+
+   TWO ORTHOGONAL AXES
+     · THEME  (data-theme on <html>): colour identity. 8 of them.
+     · DIRECTION (a separate stylesheet): density + feel. 4 of them.
+
+   Theme families (kept in lockstep with the settings-panel theme grid):
+     · light : Light, Solarized, Catppuccin Latte, Rosé Pine Dawn
+     · dark  : Dark, Tokyo Night, Gruvbox, Dracula
+
+   FIXED-ACROSS-THEMES (intentionally NOT overridden per theme):
+     · the DAG role/edge palette (Okabe-Ito, colourblind-safe) — handoff §5.
+     · the diff "strong marker" chips (white-on-fill, AA everywhere).
+   Everything else themes.
+   ========================================================================== */
+
+:root {
+  /* ---- surfaces ------------------------------------------------------- */
+  --bg:            #ffffff;   /* page */
+  --bg-alt:        #f5f6f8;   /* code blocks, callouts, sunken wells */
+  --surface:       #ffffff;   /* cards / panels */
+  --surface-2:     #f1f2f4;   /* control chrome, switch tracks */
+
+  /* ---- text ----------------------------------------------------------- */
+  --text:          #33363d;   /* body */
+  --text-muted:    #6a6e78;   /* labels, hints, captions */
+  --text-faint:    #9aa0ab;   /* absent cells, disabled */
+
+  /* ---- lines ---------------------------------------------------------- */
+  --border:        #d9dce1;   /* dividers, inputs, panels */
+  --border-strong: #b9bdc6;   /* emphasised dividers */
+
+  /* ---- accent (themes + Tweakable) ------------------------------------ */
+  --accent:         #1d7484;  /* links, focus, active control, table rule */
+  --accent-hover:   #155c69;
+  --accent-tint:    #e3f0f2;  /* faint accent wash */
+  --accent-on:      #ffffff;  /* text on a solid accent fill */
+
+  /* ---- control chrome (segmented toggles, settings switches) ---------- */
+  --control-bg:        var(--surface-2);
+  --control-fg:        var(--text);
+  --control-border:    var(--border);
+  --control-active-bg: #2a2d34;
+  --control-active-fg: #ffffff;
+
+  /* ---- diff: text-on-surface (LOAD-BEARING, AA per theme) ------------- */
+  --diff-add-fg:    #15803d;  /* "new" scalar text */
+  --diff-remove-fg: #dc2626;  /* "old" scalar text */
+  --diff-arrow:     var(--text-muted);
+  --diff-add-row:    rgba(46, 160, 67, 0.07);   /* whole-row tint */
+  --diff-remove-row: rgba(244, 63, 94, 0.07);
+  --diff-add-edge:    rgba(46, 160, 67, 0.85);  /* inset left accent */
+  --diff-remove-edge: rgba(244, 63, 94, 0.85);
+
+  /* ---- diff: strong marker chip (CONSTANT — white-on-fill, AA) -------- */
+  --diff-add-chip:    #15803d;  /* green fill, white text ≈ 5.0:1   */
+  --diff-remove-chip: #dc2626;  /* red fill,   white text ≈ 4.8:1   */
+  --diff-chip-on:     #ffffff;
+  --col-add-chip:     #a6f0b8;  --col-add-on:    #04260f;
+  --col-remove-chip:  #ffabd6;  --col-remove-on: #26000a;
+
+  /* ---- badges / incremental ------------------------------------------ */
+  --badge-amber:    #b07400;  /* incremental affordances */
+  --badge-amber-bg: #fff8e1;
+  --badge-amber-edge: #E69F00;
+
+  /* ---- syntax (cool/neutral; never red/green) ------------------------ */
+  --syntax-keyword: #4338ca;
+  --syntax-string:  #0e7490;
+  --syntax-comment: #555a66;
+  --syntax-jinja:   #7c3aed;
+  --syntax-fold:    #4338ca;
+  --syntax-fold-bg: rgba(67, 56, 202, 0.07);
+
+  /* ---- code surface (GitHub-grade frame + unified diff) -------------- */
+  --code-bg:          #ffffff;   /* the code canvas */
+  --code-header-bg:   #f6f8fa;   /* toolbar strip + file header */
+  --code-gutter-bg:   #ffffff;   /* line-number rail (plain blocks) */
+  --code-gutter-fg:   #9aa0ab;   /* line numbers */
+  --code-line-hover:  rgba(27,31,36,0.035);
+  /* unified-diff rows (full-bleed tint) + their gutter rail + word-emphasis */
+  --code-add-bg:        #e6ffec;  --code-add-gutter: #ccffd6;  --code-add-word: #abf2bc;
+  --code-rem-bg:        #ffebe9;  --code-rem-gutter: #ffd7d5;  --code-rem-word: #ff9c98;
+  --code-hunk-bg:       #ddf4ff;  --code-hunk-fg:    #4b5563;  /* fold / "show N" rows */
+  --code-add-sigil:     #1a7f37;  --code-rem-sigil:  #cf222e;
+
+  /* ---- feedback ------------------------------------------------------- */
+  --warn:     #a06320;
+  --error:    #b3261e;
+  --error-bg: #fdecea;
+
+  /* ---- tooltip (dark bubble, constant) ------------------------------- */
+  --tooltip-bg: #1d1d22;
+  --tooltip-fg: #f5f5f7;
+
+  /* ====================================================================
+     FIXED DAG PALETTE — identical in every theme (handoff §5).
+     The DAG must read the same colourblind-safe way regardless of skin.
+     ==================================================================== */
+  --dag-import-fill:   #e8f1f8;  --dag-import-stroke:   #0072B2;
+  --dag-transform-fill:#f4f4f5;  --dag-transform-stroke:#8a8a90;
+  --dag-final-fill:    #fdf2dc;  --dag-final-stroke:    #E69F00;
+  --dag-node-text:     #1c1c1f;
+  --dag-selected:      #E91E63;  /* pink, reserved for selection only */
+  /* edge types (Okabe-Ito) */
+  --edge-from:  #1c1c1f;  --edge-inner:  #009E73;  --edge-left: #0072B2;
+  --edge-right: #56B4E9;  --edge-cross:  #CC79A7;  --edge-full: #982c61;
+  --edge-union-all: #E69F00;  --edge-union-distinct: #0072B2;
+
+  /* ---- DENSITY (defaults; the DIRECTION stylesheet overrides these) --- */
+  --fs-base:   13px;
+  --lh-base:   1.5;
+  --fs-label:  10.5px;
+  --pad-cell:  0.2rem 0.5rem;
+  --pad-panel: 1rem;
+  --gap-section: 1rem;
+  --radius-sm:  4px;
+  --radius-pan: 6px;
+  --rule-w:     1px;        /* hairline weight */
+  --font-ui:   system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --label-font: var(--font-ui);   /* directions can flip labels to mono */
+  --label-tracking: 0.06em;
+}
+
+/* ==========================================================================
+   THEME · DARK  — neutral, high-contrast
+   ========================================================================== */
+:root[data-theme="dark"] {
+  --bg:#15171c; --bg-alt:#1b1e25; --surface:#191c22; --surface-2:#23262e;
+  --text:#d7dae1; --text-muted:#9098a4; --text-faint:#646b77;
+  --border:#2e323b; --border-strong:#3c4150;
+  --accent:#5fb3c4; --accent-hover:#85cad9; --accent-tint:#16323a; --accent-on:#08191d;
+  --control-bg:#23262e; --control-active-bg:#5fb3c4; --control-active-fg:#08191d;
+  --diff-add-fg:#5fd99a; --diff-remove-fg:#ff8a8a;
+  --diff-add-row:rgba(95,217,154,0.10); --diff-remove-row:rgba(255,138,138,0.10);
+  --diff-add-edge:rgba(95,217,154,0.85); --diff-remove-edge:rgba(255,138,138,0.85);
+  --diff-add-chip:#15803d; --diff-remove-chip:#d83a3a;
+  --col-add-chip:#1f8a4c; --col-add-on:#eafff1; --col-remove-chip:#b3344e; --col-remove-on:#ffe9f1;
+  --badge-amber:#e0a93a; --badge-amber-bg:#2a2310; --badge-amber-edge:#e0a93a;
+  --syntax-keyword:#9aa6ff; --syntax-string:#56c8d8; --syntax-comment:#7e8595; --syntax-jinja:#c8a6ff;
+  --syntax-fold:#9aa6ff; --syntax-fold-bg:rgba(154,166,255,0.10);
+  --warn:#e0a93a; --error:#ff8a8a; --error-bg:#2a1414;
+  --tooltip-bg:#000000; --tooltip-fg:#f5f5f7;
+  --code-bg:#0d1117; --code-header-bg:#161b22; --code-gutter-bg:#0d1117; --code-gutter-fg:#6e7681;
+  --code-line-hover:rgba(255,255,255,0.04);
+  --code-add-bg:rgba(46,160,67,0.15); --code-add-gutter:rgba(46,160,67,0.30); --code-add-word:rgba(46,160,67,0.40);
+  --code-rem-bg:rgba(248,81,73,0.15); --code-rem-gutter:rgba(248,81,73,0.30); --code-rem-word:rgba(248,81,73,0.40);
+  --code-hunk-bg:rgba(56,139,253,0.15); --code-hunk-fg:#79c0ff;
+  --code-add-sigil:#3fb950; --code-rem-sigil:#f85149;
+}
+
+/* ==========================================================================
+   THEME · TOKYO NIGHT  — cool blue-purple
+   ========================================================================== */
+:root[data-theme="tokyo"] {
+  --bg:#1a1b26; --bg-alt:#1f2335; --surface:#1e2030; --surface-2:#292e42;
+  --text:#c0caf5; --text-muted:#8e95ba; --text-faint:#565f89;
+  --border:#2c3150; --border-strong:#3b4261;
+  --accent:#7aa2f7; --accent-hover:#9cb8fb; --accent-tint:#212d4f; --accent-on:#0d1020;
+  --control-bg:#292e42; --control-active-bg:#7aa2f7; --control-active-fg:#0d1020;
+  --diff-add-fg:#9ece6a; --diff-remove-fg:#f7768e;
+  --diff-add-row:rgba(158,206,106,0.10); --diff-remove-row:rgba(247,118,142,0.10);
+  --diff-add-edge:rgba(158,206,106,0.85); --diff-remove-edge:rgba(247,118,142,0.85);
+  --diff-add-chip:#3d7a2e; --diff-remove-chip:#c14358;
+  --col-add-chip:#3d7a2e; --col-add-on:#eafff1; --col-remove-chip:#a83b54; --col-remove-on:#ffe9f1;
+  --badge-amber:#e0af68; --badge-amber-bg:#2a2417; --badge-amber-edge:#e0af68;
+  --syntax-keyword:#bb9af7; --syntax-string:#7dcfff; --syntax-comment:#565f89; --syntax-jinja:#ff9e64;
+  --syntax-fold:#bb9af7; --syntax-fold-bg:rgba(187,154,247,0.10);
+  --warn:#e0af68; --error:#f7768e; --error-bg:#2d1620;
+  --tooltip-bg:#0d1020; --tooltip-fg:#c0caf5;
+  --code-bg:#1a1b26; --code-header-bg:#1f2335; --code-gutter-bg:#1a1b26; --code-gutter-fg:#565f89;
+  --code-line-hover:rgba(255,255,255,0.04);
+  --code-add-bg:rgba(158,206,106,0.15); --code-add-gutter:rgba(158,206,106,0.28); --code-add-word:rgba(158,206,106,0.24);
+  --code-rem-bg:rgba(247,118,142,0.15); --code-rem-gutter:rgba(247,118,142,0.28); --code-rem-word:rgba(247,118,142,0.35);
+  --code-hunk-bg:rgba(122,162,247,0.15); --code-hunk-fg:#7aa2f7;
+  --code-add-sigil:#9ece6a; --code-rem-sigil:#f7768e;
+}
+
+/* ==========================================================================
+   THEME · SOLARIZED  — warm cream (the "warm" slot)
+   ========================================================================== */
+:root[data-theme="solarized"] {
+  --bg:#fdf6e3; --bg-alt:#f3ecd6; --surface:#fdf6e3; --surface-2:#eee8d5;
+  --text:#4f5b62; --text-muted:#566b72; --text-faint:#9aa8ab;
+  --border:#ddd6c1; --border-strong:#c6bfa8;
+  --accent:#1d6fa8; --accent-hover:#155a8a; --accent-tint:#e3eedd; --accent-on:#ffffff;
+  --control-bg:#eee8d5; --control-active-bg:#586e75; --control-active-fg:#fdf6e3;
+  --diff-add-fg:#4a6600; --diff-remove-fg:#b82d18;
+  --diff-add-row:rgba(133,153,0,0.12); --diff-remove-row:rgba(220,50,47,0.10);
+  --diff-add-edge:rgba(110,130,0,0.85); --diff-remove-edge:rgba(220,50,47,0.85);
+  --diff-add-chip:#5a7d04; --diff-remove-chip:#c5341c;
+  --col-add-chip:#cfe08a; --col-add-on:#1f2b00; --col-remove-chip:#f4b8c4; --col-remove-on:#3a0008;
+  --badge-amber:#b58900; --badge-amber-bg:#f3e9c8; --badge-amber-edge:#b58900;
+  --syntax-keyword:#6c71c4; --syntax-string:#2aa198; --syntax-comment:#93a1a1; --syntax-jinja:#d33682;
+  --syntax-fold:#6c71c4; --syntax-fold-bg:rgba(108,113,196,0.10);
+  --warn:#b58900; --error:#dc322f; --error-bg:#f7e2dd;
+  --tooltip-bg:#073642; --tooltip-fg:#fdf6e3;
+  --code-bg:#fdf6e3; --code-header-bg:#f3ecd6; --code-gutter-bg:#fdf6e3; --code-gutter-fg:#93a1a1;
+  --code-line-hover:rgba(0,43,54,0.035);
+  --code-add-bg:#eef3d4; --code-add-gutter:#dde6b0; --code-add-word:#c8d98a;
+  --code-rem-bg:#fbe3da; --code-rem-gutter:#f5cdbf; --code-rem-word:#f4c8b8;
+  --code-hunk-bg:#e3ecdd; --code-hunk-fg:#586e75;
+  --code-add-sigil:#647300; --code-rem-sigil:#c82522;
+}
+
+/* ==========================================================================
+   THEME · GRUVBOX  — warm retro-dark (5th pick)
+   ========================================================================== */
+:root[data-theme="gruvbox"] {
+  --bg:#282828; --bg-alt:#32302f; --surface:#2e2c2a; --surface-2:#3c3836;
+  --text:#ebdbb2; --text-muted:#afa18d; --text-faint:#7c6f64;
+  --border:#3c3836; --border-strong:#504945;
+  --accent:#83a598; --accent-hover:#a3c4b7; --accent-tint:#2c3a36; --accent-on:#1d2021;
+  --control-bg:#3c3836; --control-active-bg:#83a598; --control-active-fg:#1d2021;
+  --diff-add-fg:#b8bb26; --diff-remove-fg:#fb6a5d;
+  --diff-add-row:rgba(184,187,38,0.10); --diff-remove-row:rgba(251,106,93,0.10);
+  --diff-add-edge:rgba(184,187,38,0.85); --diff-remove-edge:rgba(251,106,93,0.85);
+  --diff-add-chip:#79740e; --diff-remove-chip:#cc241d;
+  --col-add-chip:#79740e; --col-add-on:#f6f3d0; --col-remove-chip:#b3231c; --col-remove-on:#ffe9e2;
+  --badge-amber:#fabd2f; --badge-amber-bg:#332b10; --badge-amber-edge:#fabd2f;
+  --syntax-keyword:#d3869b; --syntax-string:#8ec07c; --syntax-comment:#928374; --syntax-jinja:#fe8019;
+  --syntax-fold:#d3869b; --syntax-fold-bg:rgba(211,134,155,0.10);
+  --warn:#fabd2f; --error:#fb4934; --error-bg:#3a1a16;
+  --tooltip-bg:#1d2021; --tooltip-fg:#ebdbb2;
+  --code-bg:#282828; --code-header-bg:#32302f; --code-gutter-bg:#282828; --code-gutter-fg:#7c6f64;
+  --code-line-hover:rgba(255,255,255,0.04);
+  --code-add-bg:rgba(184,187,38,0.15); --code-add-gutter:rgba(184,187,38,0.28); --code-add-word:rgba(184,187,38,0.30);
+  --code-rem-bg:rgba(251,73,52,0.15); --code-rem-gutter:rgba(251,73,52,0.28); --code-rem-word:rgba(251,73,52,0.40);
+  --code-hunk-bg:rgba(131,165,152,0.18); --code-hunk-fg:#83a598;
+  --code-add-sigil:#b8bb26; --code-rem-sigil:#fb7164;
+}
+
+/* ==========================================================================
+   THEME · DRACULA  — vivid purple-on-charcoal (dark family)
+   ========================================================================== */
+:root[data-theme="dracula"] {
+  --bg:#282a36; --bg-alt:#21222c; --surface:#2b2e3b; --surface-2:#343746;
+  --text:#f8f8f2; --text-muted:#a9adc4; --text-faint:#6272a4;
+  --border:#44475a; --border-strong:#565a73;
+  --accent:#bd93f9; --accent-hover:#d6bbfb; --accent-tint:#352b50; --accent-on:#21222c;
+  --control-bg:#343746; --control-active-bg:#bd93f9; --control-active-fg:#21222c;
+  --diff-add-fg:#50fa7b; --diff-remove-fg:#ff6e6e;
+  --diff-add-row:rgba(80,250,123,0.10); --diff-remove-row:rgba(255,85,85,0.12);
+  --diff-add-edge:rgba(80,250,123,0.85); --diff-remove-edge:rgba(255,110,110,0.85);
+  --diff-add-chip:#25803f; --diff-remove-chip:#c93b3b;
+  --col-add-chip:#25803f; --col-add-on:#eafff1; --col-remove-chip:#b3344e; --col-remove-on:#ffe9f1;
+  --badge-amber:#ffb86c; --badge-amber-bg:#2e2616; --badge-amber-edge:#ffb86c;
+  --syntax-keyword:#ff79c6; --syntax-string:#f1fa8c; --syntax-comment:#6272a4; --syntax-jinja:#ffb86c;
+  --syntax-fold:#ff79c6; --syntax-fold-bg:rgba(255,121,198,0.10);
+  --warn:#ffb86c; --error:#ff5555; --error-bg:#3a1a1f;
+  --tooltip-bg:#21222c; --tooltip-fg:#f8f8f2;
+  --code-bg:#282a36; --code-header-bg:#21222c; --code-gutter-bg:#282a36; --code-gutter-fg:#6272a4;
+  --code-line-hover:rgba(255,255,255,0.04);
+  --code-add-bg:rgba(80,250,123,0.12); --code-add-gutter:rgba(80,250,123,0.26); --code-add-word:rgba(80,250,123,0.32);
+  --code-rem-bg:rgba(255,85,85,0.13); --code-rem-gutter:rgba(255,85,85,0.28); --code-rem-word:rgba(255,85,85,0.40);
+  --code-hunk-bg:rgba(189,147,249,0.16); --code-hunk-fg:#bd93f9;
+  --code-add-sigil:#50fa7b; --code-rem-sigil:#ff7171;
+}
+
+/* ==========================================================================
+   THEME · CATPPUCCIN LATTE  — soft pastel cream (light family)
+   ========================================================================== */
+:root[data-theme="latte"] {
+  --bg:#eff1f5; --bg-alt:#e6e9ef; --surface:#eff1f5; --surface-2:#e6e9ef;
+  --text:#4c4f69; --text-muted:#5c5f77; --text-faint:#9ca0b0;
+  --border:#ccd0da; --border-strong:#acb0be;
+  --accent:#1a5cdd; --accent-hover:#3553fc; --accent-tint:#dce4fb; --accent-on:#ffffff;
+  --control-bg:#e6e9ef; --control-active-bg:#1e66f5; --control-active-fg:#ffffff;
+  --diff-add-fg:#2a7016; --diff-remove-fg:#bd1331;
+  --diff-add-row:#e3f0db; --diff-remove-row:#f6dde0;
+  --diff-add-edge:#40a02b; --diff-remove-edge:#d20f39;
+  --diff-add-chip:#2a8026; --diff-remove-chip:#c4123a;
+  --col-add-chip:#cfe6c0; --col-add-on:#234d12; --col-remove-chip:#f4c4cb; --col-remove-on:#6e0a1f;
+  --badge-amber:#a36608; --badge-amber-bg:#faefd6; --badge-amber-edge:#df8e1d;
+  --syntax-keyword:#8839ef; --syntax-string:#40a02b; --syntax-comment:#8c8fa1; --syntax-jinja:#ea76cb;
+  --syntax-fold:#8839ef; --syntax-fold-bg:rgba(136,57,239,0.08);
+  --warn:#a36608; --error:#d20f39; --error-bg:#f7d8de;
+  --tooltip-bg:#4c4f69; --tooltip-fg:#eff1f5;
+  --code-bg:#eff1f5; --code-header-bg:#e6e9ef; --code-gutter-bg:#eff1f5; --code-gutter-fg:#9ca0b0;
+  --code-line-hover:rgba(76,79,105,0.04);
+  --code-add-bg:#e3f0db; --code-add-gutter:#cfe6c0; --code-add-word:#bfe0a8;
+  --code-rem-bg:#f6dde0; --code-rem-gutter:#efc3c8; --code-rem-word:#ecb6bc;
+  --code-hunk-bg:#dce4fb; --code-hunk-fg:#5c5f77;
+  --code-add-sigil:#2a7016; --code-rem-sigil:#bd1331;
+}
+
+/* ==========================================================================
+   THEME · ROSÉ PINE DAWN  — muted rose / warm low-contrast (light family)
+   ========================================================================== */
+:root[data-theme="rosepine"] {
+  --bg:#e6d9c9; --bg-alt:#f7f1ea; --surface:#fbf6ef; --surface-2:#ece0d3;
+  --text:#544f74; --text-muted:#5d5780; --text-faint:#938ea1;
+  --border:#cdbfb1; --border-strong:#b3a596;
+  --accent:#276680; --accent-hover:#3c666e; --accent-tint:#dde7ea; --accent-on:#ffffff;
+  --control-bg:#f2e9e1; --control-active-bg:#286983; --control-active-fg:#ffffff;
+  --diff-add-fg:#45700f; --diff-remove-fg:#b01b43;
+  --diff-add-row:#e6ebdd; --diff-remove-row:#f6dde1;
+  --diff-add-edge:#56743a; --diff-remove-edge:#b4254a;
+  --diff-add-chip:#56743a; --diff-remove-chip:#b4254a;
+  --col-add-chip:#d3ddbd; --col-add-on:#2c4410; --col-remove-chip:#f1c6cf; --col-remove-on:#67132f;
+  --badge-amber:#996515; --badge-amber-bg:#f7ebd5; --badge-amber-edge:#ea9d34;
+  --syntax-keyword:#907aa9; --syntax-string:#286983; --syntax-comment:#9893a5; --syntax-jinja:#d7827e;
+  --syntax-fold:#907aa9; --syntax-fold-bg:rgba(144,122,169,0.10);
+  --warn:#996515; --error:#b4254a; --error-bg:#f3dde2;
+  --tooltip-bg:#232136; --tooltip-fg:#e0def4;
+  --code-bg:#faf4ed; --code-header-bg:#f2e9e1; --code-gutter-bg:#faf4ed; --code-gutter-fg:#9893a5;
+  --code-line-hover:rgba(87,82,121,0.04);
+  --code-add-bg:#e6ebdd; --code-add-gutter:#d3ddbd; --code-add-word:#c2d3a0;
+  --code-rem-bg:#f6dde1; --code-rem-gutter:#eec3cb; --code-rem-word:#eabdc5;
+  --code-hunk-bg:#dde7ea; --code-hunk-fg:#575279;
+  --code-add-sigil:#45700f; --code-rem-sigil:#b01b43;
+}
+
+/* end of cute-dbt design tokens v1 (cute-dbt#242) */
+/* ============================================================================
+   cute-dbt base chassis v1 (cute-dbt#242)
+   ----------------------------------------------------------------------------
+   The minimal CROSS-FAMILY page chassis: the token-consuming page-level
+   rules both page families (report + explore) share, moved here from
+   templates/report.css section 4 — rules only, exact current values.
+   Included via askama immediately after partials/tokens.css in every
+   page's <style> block; the report-specific remainder (style packs,
+   chrome, components, reconciliation, coverage panel) stays in
+   templates/report.css and cascades after this file exactly as before.
+
+   ORDER DISCIPLINE (the zero-visual-diff contract of the extraction):
+   only cascade-order-safe rules moved. The report's body GEOMETRY
+   (font-size / max-width / padding-top / font-family) deliberately stays
+   in report.css — it must keep winning the equal-specificity contest
+   against the report's 720px responsive body rule, which sits earlier in
+   that file. This file carries only the body's token skin.
+
+   FIRST-PARTY asset — authored for cute-dbt; integrity gates are the
+   banner-pin + comment-balance tests in `src/adapters/asset_embed.rs`.
+
+   PORTING-BUG GUARD (handoff §2.1): never write a `*` immediately followed
+   by `/` inside a comment body — it closes the comment early and silently
+   eats the next rule. A comment-balance test pins this.
+   ========================================================================== */
+
+/* cute-dbt#121 — make the `hidden` attribute authoritative: Sakura's
+   `pre { display: block }` (author origin) otherwise overrides the UA
+   `[hidden] { display: none }`, so a toggled-off element would still
+   render. Both page families toggle visibility by setting `hidden`;
+   this rule wins. */
+[hidden] { display: none !important; }
+
+html { background: var(--bg); }
+body {
+  background: var(--bg);
+  color: var(--text);
+  transition: background 120ms ease, color 120ms ease;
+}
+
+a { color: var(--accent); }
+a:hover { color: var(--accent-hover); }
+
+select, input, textarea {
+  background: var(--surface); color: var(--text);
+  border: var(--rule-w) solid var(--border); border-radius: var(--radius-sm);
+}
+select:hover, input:hover { border-color: var(--border-strong); }
+select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* end of cute-dbt base chassis v1 (cute-dbt#242) */
+</style>
+<style>
+
+body { max-width: 72rem; }
+/* generic code/kbd surfaces re-skin with theme tokens (the report's
+   .td-defined-in idiom, cute-dbt#240): Sakura's constant #f1f1f1 fill is
+   illegible under the dark themes' near-white --text. */
+code, kbd { background: var(--bg-alt); color: var(--text); }
+.explore-header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.explore-header h1 { margin-bottom: 0.25rem; }
+.explore-nav a { font-size: 0.95rem; }
+.explore-counts { color: var(--text-muted); font-size: 0.9rem; }
+.explore-model { border-top: 1px solid var(--border); padding-top: 0.75rem; margin-top: 0.75rem; }
+.explore-model h2 { margin-bottom: 0.2rem; }
+.model-path { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 0.4rem; }
+.not-compiled-badge { font-size: 0.7em; vertical-align: middle; padding: 0.1rem 0.45rem; border: 1.5px dashed #b07400; border-radius: 4px; background: var(--dag-transform-fill); color: var(--dag-node-text); }
+.explore-tests { margin-bottom: 0.5rem; }
+.explore-test .test-shape { color: var(--text-muted); font-size: 0.85rem; }
+.explore-test .test-description { color: var(--text-muted); font-size: 0.9rem; margin: 0.1rem 0 0; }
+.no-tests { color: var(--text-muted); font-style: italic; }
+.explore-empty { color: var(--text-muted); font-style: italic; }
+/* cute-dbt#102 — explore-local styling for the SHARED test-card partial
+   (report.html styles the same markup through its report-specific chassis
+   remainder, which this light page deliberately does not embed — only the
+   shared tokens + base partials above). */
+.explore-viewer { border-top: 1px solid var(--border); padding-top: 0.75rem; margin-top: 0.75rem; }
+.explore-viewer > h2 { margin-bottom: 0.4rem; }
+.test-card { border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem 1rem; background: var(--surface); }
+.test-card-head { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.test-select-field label { font-weight: 600; margin-right: 0.4rem; }
+/* Explore is full-manifest by design: there is no updated/context split,
+   so the partial's scope toggle is inert chrome here — hidden, not
+   forked out of the shared markup. */
+.test-mode-toggle { display: none; }
+.test-badges .tag-badge { display: inline-block; font-size: 0.75rem; color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.35rem; background: var(--surface-2); margin-right: 0.25rem; }
+.test-description { color: var(--text); margin: 0.5rem 0 0; }
+.test-defined-in { color: var(--text-muted); font-size: 0.85rem; margin: 0.3rem 0 0; }
+.panel-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.75rem; }
+.panel { flex: 1 1 22rem; min-width: 0; border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.8rem; background: var(--surface); }
+.panel-header { display: flex; align-items: baseline; gap: 0.6rem; }
+.panel-header h2 { font-size: 1.1rem; margin: 0 0 0.4rem; }
+.table-header { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+.table-title { margin: 0.4rem 0 0.2rem; font-size: 0.95rem; }
+.row-count-badge, .format-badge, .this-badge { font-size: 0.75rem; color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.35rem; background: var(--surface-2); }
+.fixture-provenance { font-size: 0.8rem; color: var(--text-muted); }
+table.given-table, table.expected-table { font-size: 0.85rem; margin: 0.3rem 0 0.6rem; }
+/* Sakura's constant #f1f1f1 hairline flares against the dark themes */
+table.given-table th, table.given-table td,
+table.expected-table th, table.expected-table td { border-color: var(--border); }
+.cell-null { color: var(--text-muted); font-style: italic; }
+.empty-hint, .given-empty { color: var(--text-muted); font-style: italic; }
+.sql-block { font-size: 0.85rem; background: var(--code-bg); color: var(--text); }
+.test-jump { background: none; border: none; padding: 0; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
+.test-jump:hover, .test-jump:focus { color: var(--accent-hover); }
+</style>
+</head>
+<body>
+
+<header class="explore-header">
+  <div>
+    <h1>Unit tests</h1>
+    <p class="explore-counts">full manifest — 11 models, 7 unit tests</p>
+  </div>
+  <nav class="explore-nav" aria-label="Explore pages">
+    <a href="dag.html">&larr; Model lineage</a>
+  </nav>
+</header>
+
+
+
+<section class="explore-viewer" aria-label="Unit-test viewer">
+<h2>Unit-test viewer</h2>
+<section class="test-section" aria-label="Unit test">
+  <div class="test-card">
+    <div class="test-card-head">
+      <div class="selector-field test-select-field">
+        <label for="test-select">Unit test</label>
+        <select id="test-select"></select>
+      </div>
+      <div class="test-mode-toggle" role="group" aria-label="Test scope" data-testid="updated-toggle">
+        <button type="button" data-test-mode="updated" class="is-active" aria-pressed="true">Updated only</button>
+        <button type="button" data-test-mode="all" aria-pressed="false">All tests</button>
+      </div>
+      <div class="test-badges"></div>
+    </div>
+    <p class="test-description" hidden></p>
+    <div class="test-details-body"></div>
+  </div>
+</section>
+
+<div class="panel-row">
+
+  <section class="panel left-panel" aria-label="Given inputs">
+    
+    <div class="panel-header">
+      <h2>Given</h2>
+    </div>
+    <div class="left-panel-body" data-mode="inputs"></div>
+  </section>
+
+  <section class="panel expected-panel" aria-label="Expected output">
+    <div class="panel-header">
+      <h2>Expected</h2>
+      <span class="row-count-badge expected-rowcount">0 rows</span>
+    </div>
+    <div class="expected-body"></div>
+  </section>
+
+</div>
+</section>
+
+<section class="explore-model" data-model-id="model.jaffle_shop.customer_order_days" aria-label="Model customer_order_days">
+  <h2>customer_order_days</h2>
+  <p class="model-path"><code>models/marts/customer_order_days.sql</code></p>
+  <p class="no-tests">0 unit tests wired</p>
+  
+</section>
+
+<section class="explore-model" data-model-id="model.jaffle_shop.customers" aria-label="Model customers">
+  <h2>customers</h2>
+  <p class="model-path"><code>models/customers.sql</code></p>
+  <ul class="explore-tests">
+    <li class="explore-test" data-test-id="unit_test.jaffle_shop.customers.test_customers_aggregates_orders_and_payments">
+      
+      <button type="button" class="test-jump" data-test-id="unit_test.jaffle_shop.customers.test_customers_aggregates_orders_and_payments">test_customers_aggregates_orders_and_payments</button>
+      <span class="test-shape">&mdash; 3 givens, expects 1 row</span>
+      <p class="test-description">customers left-joins per-customer order aggregates and payment totals.
+One customer with one $10 completed order yields number_of_orders = 1
+and customer_lifetime_value = 10. Uses sql format for the GIVEN mocks
+and dict format for EXPECT (dict compares only listed columns).
+</p>
+      
+    </li>
+    
+  </ul>
+  
+</section>
+
+<section class="explore-model" data-model-id="model.jaffle_shop.customers_with_no_orders" aria-label="Model customers_with_no_orders">
+  <h2>customers_with_no_orders</h2>
+  <p class="model-path"><code>models/marts/customers_with_no_orders.sql</code></p>
+  <p class="no-tests">0 unit tests wired</p>
+  
+</section>
+
+<section class="explore-model" data-model-id="model.jaffle_shop.order_events_incremental" aria-label="Model order_events_incremental">
+  <h2>order_events_incremental</h2>
+  <p class="model-path"><code>models/marts/order_events_incremental.sql</code></p>
+  <ul class="explore-tests">
+    <li class="explore-test" data-test-id="unit_test.jaffle_shop.order_events_incremental.test_order_events_incremental_initial_full_build">
+      
+      <button type="button" class="test-jump" data-test-id="unit_test.jaffle_shop.order_events_incremental.test_order_events_incremental_initial_full_build">test_order_events_incremental_initial_full_build</button>
+      <span class="test-shape">&mdash; 1 given, expects 2 rows</span>
+      <p class="test-description">cute-dbt#164 — the FULL-BUILD branch: no overrides block, so dbt
+compiles is_incremental() as false (the unit-test default) and the
+high-water-mark filter drops out of the compiled SQL. EXPECT is every
+input row. Pairs with test_order_events_incremental_only_new_rows to
+exercise BOTH is_incremental() branches.
+</p>
+      
+    </li>
+    <li class="explore-test" data-test-id="unit_test.jaffle_shop.order_events_incremental.test_order_events_incremental_only_new_rows">
+      
+      <button type="button" class="test-jump" data-test-id="unit_test.jaffle_shop.order_events_incremental.test_order_events_incremental_only_new_rows">test_order_events_incremental_only_new_rows</button>
+      <span class="test-shape">&mdash; 2 givens, expects 1 row</span>
+      <p class="test-description">With is_incremental() true, the model filters to orders newer than the
+high-water mark in the existing table. `given: - input: this` mocks the
+prior model state (one order on 2024-01-01); stg_orders supplies a newer
+2024-01-02 order. EXPECT is the rows the incremental run MERGES — just the
+newer 2024-01-02 row — NOT the resulting (merged) table.
+</p>
+      
+    </li>
+    
+  </ul>
+  
+</section>
+
+<section class="explore-model" data-model-id="model.jaffle_shop.order_metrics" aria-label="Model order_metrics">
+  <h2>order_metrics</h2>
+  <p class="model-path"><code>models/marts/order_metrics.sql</code></p>
+  <ul class="explore-tests">
+    <li class="explore-test" data-test-id="unit_test.jaffle_shop.order_metrics.test_order_metrics_computes_amount_share">
+      
+      <button type="button" class="test-jump" data-test-id="unit_test.jaffle_shop.order_metrics.test_order_metrics_computes_amount_share">test_order_metrics_computes_amount_share</button>
+      <span class="test-shape">&mdash; 4 givens, expects 1 row</span>
+      <p class="test-description">order_metrics crosses each enriched order against the grand total of
+all paid orders and derives amount_share = amount / all_orders_amount.
+With one paid order of $10 the grand total is $10, so the single row&#39;s
+share is 1.0. Uses dbt&#39;s dict format for both GIVEN and EXPECT.
+</p>
+      
+    </li>
+    
+  </ul>
+  
+</section>
+
+<section class="explore-model" data-model-id="model.jaffle_shop.orders" aria-label="Model orders">
+  <h2>orders</h2>
+  <p class="model-path"><code>models/orders.sql</code></p>
+  <ul class="explore-tests">
+    <li class="explore-test" data-test-id="unit_test.jaffle_shop.orders.test_orders_from_external_csv_fixture">
+      
+      <button type="button" class="test-jump" data-test-id="unit_test.jaffle_shop.orders.test_orders_from_external_csv_fixture">test_orders_from_external_csv_fixture</button>
+      <span class="test-shape">&mdash; 2 givens, expects 1 row</span>
+      <p class="test-description">orders pivots payments into per-method columns and a total amount.
+Identical to test_orders_sums_payment_methods except the stg_payments
+mock is an EXTERNAL csv fixture (cute-dbt#126) — the fixture data is not
+inlined in the manifest, it lives in tests/fixtures/.
+</p>
+      
+    </li>
+    <li class="explore-test" data-test-id="unit_test.jaffle_shop.orders.test_orders_sums_payment_methods">
+      
+      <button type="button" class="test-jump" data-test-id="unit_test.jaffle_shop.orders.test_orders_sums_payment_methods">test_orders_sums_payment_methods</button>
+      <span class="test-shape">&mdash; 2 givens, expects 1 row</span>
+      <p class="test-description">orders pivots payments into per-method columns and a total amount.
+A single order paid once by credit_card for $10 yields
+credit_card_amount = 10 and amount (total) = 10, with the other
+method columns zeroed. Uses csv format for GIVEN and EXPECT —
+compact tabular form across the four payment-method columns.
+</p>
+      
+    </li>
+    
+  </ul>
+  
+</section>
+
+<section class="explore-model" data-model-id="model.jaffle_shop.orders_never_refunded" aria-label="Model orders_never_refunded">
+  <h2>orders_never_refunded</h2>
+  <p class="model-path"><code>models/marts/orders_never_refunded.sql</code></p>
+  <ul class="explore-tests">
+    <li class="explore-test" data-test-id="unit_test.jaffle_shop.orders_never_refunded.test_orders_never_refunded_excludes_refunded_orders">
+      
+      <button type="button" class="test-jump" data-test-id="unit_test.jaffle_shop.orders_never_refunded.test_orders_never_refunded_excludes_refunded_orders">test_orders_never_refunded_excludes_refunded_orders</button>
+      <span class="test-shape">&mdash; 2 givens, expects 1 row</span>
+      <p class="test-description">orders_never_refunded keeps only orders absent from the refunded
+set. Order 1 is refunded (its id appears in stg_refunds) and order
+2 is clean, so the output carries order 2 alone — the matched row
+is provably excluded (the anti-join&#39;s risk class, exercised).
+</p>
+      
+    </li>
+    
+  </ul>
+  
+</section>
+
+<section class="explore-model" data-model-id="model.jaffle_shop.stg_customers" aria-label="Model stg_customers">
+  <h2>stg_customers</h2>
+  <p class="model-path"><code>models/staging/stg_customers.sql</code></p>
+  <p class="no-tests">0 unit tests wired</p>
+  
+</section>
+
+<section class="explore-model" data-model-id="model.jaffle_shop.stg_orders" aria-label="Model stg_orders">
+  <h2>stg_orders</h2>
+  <p class="model-path"><code>models/staging/stg_orders.sql</code></p>
+  <p class="no-tests">0 unit tests wired</p>
+  
+</section>
+
+<section class="explore-model" data-model-id="model.jaffle_shop.stg_payments" aria-label="Model stg_payments">
+  <h2>stg_payments</h2>
+  <p class="model-path"><code>models/staging/stg_payments.sql</code></p>
+  <p class="no-tests">0 unit tests wired</p>
+  
+</section>
+
+<section class="explore-model" data-model-id="model.jaffle_shop.stg_refunds" aria-label="Model stg_refunds">
+  <h2>stg_refunds</h2>
+  <p class="model-path"><code>models/staging/stg_refunds.sql</code></p>
+  <p class="no-tests">0 unit tests wired</p>
+  
+</section>
+
+
+
+<script type="application/json" id="cute-dbt-data">{"baseline":"","models":[{"name":"customer_order_days","path":"models/marts/customer_order_days.sql","description":"Per-customer order-day rollup at the (customer_id, order_date) grain. Incremental delete+insert keyed on the composite unique_key; no uniqueness test backs the declared grain — the cute-dbt#169 walking-skeleton coverage gap.\n","dag":{"nodes":[{"id":"orders","role":"import"},{"id":"(final select)","label":"customer_order_days.sql","role":"final"}],"edges":[{"from":"orders","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select\n    customer_id,\n    order_date,\n    count(*) as orders_placed\nfrom orders\n\ngroup by customer_id, order_date","orders":"orders as (\n    select * from \"main\".\"stg_orders\"\n)"},"raw_sql":"-- cute-dbt#169 dogfood — an incremental model declaring a COMPOSITE\n-- unique_key (the list wire form of fusion's DbtUniqueKey) with\n-- deliberately NO uniqueness data test backing it: the committed gap the\n-- `grain.unique-key-unbacked` check flags as UNCOVERED at the payload\n-- level (the report findings surface lands with cute-dbt#170). The\n-- not_null test on customer_id (see _incremental__models.yml) is there\n-- to prove a non-uniqueness test never satisfies the grain check.\n-- cute-dbt#320 dogfood — a no-op source touch so this PR's own sticky\n-- preview lights up the LIVE explore rows (the `dbt-project/` touched\n-- gate), exercising the new Explore section end to end on its own PR.\n{{ config(materialized='incremental', unique_key=['customer_id', 'order_date'], incremental_strategy='delete+insert') }}\n\nwith orders as (\n    select * from {{ ref('stg_orders') }}\n)\n\nselect\n    customer_id,\n    order_date,\n    count(*) as orders_placed\nfrom orders\n{% if is_incremental() %}\n-- delete+insert reprocesses whole key partitions: take every order day at\n-- or after the loaded high-water mark. coalesce guards the empty target.\nwhere order_date >= (select coalesce(max(order_date), '1900-01-01') from {{ this }})\n{% endif %}\ngroup by customer_id, order_date\n","tests":[],"is_recursive":false,"is_incremental":true,"findings":[{"check":"grain.unique-key-unbacked","tier":"total","instrument":"data-test","model_id":"model.jaffle_shop.customer_order_days","construct":"config.unique_key","verdict":{"status":"uncovered"},"evidence":[{"label":"unique_key","value":"customer_id, order_date"}],"recommendation":"Add a uniqueness data test at the declared grain: `unique` on a single-column key, or `dbt_utils.unique_combination_of_columns` over the composite key columns.","pin_node":"(final select)"},{"check":"incremental.branch-coverage","tier":"high","instrument":"unit-test","model_id":"model.jaffle_shop.customer_order_days","construct":"config.materialized","verdict":{"status":"uncovered"},"evidence":[{"label":"materialized","value":"incremental (strategy: delete+insert)"},{"label":"branch coverage","value":"none — the model has no unit tests; neither is_incremental() branch is exercised"},{"label":"missing branch","value":"both branches: neither the incremental (true) nor the initial full-build (false) side runs in any unit test"}],"recommendation":"Add a unit test for each missing is_incremental() branch: one with `overrides: macros: is_incremental: true` (mock the prior model state with a `given: - input: this` entry) to exercise the incremental branch, and one without the override for the initial full build (dbt compiles is_incremental() as false by default). This finding's evidence carries a copy-pasteable unit-test sketch per missing branch.","pin_node":"(final select)","sketches":["- name: test_customer_order_days_incremental_run\n  model: customer_order_days\n  overrides:\n    macros:\n      is_incremental: true\n  given:\n    - input: this\n      rows:\n        - {...}   # the prior model state the incremental run reads\n    # plus the model's normal input givens\n  # expect: only the rows the incremental run emits (the delta), not the merged table","- name: test_customer_order_days_initial_build\n  model: customer_order_days\n  # no overrides block — dbt compiles is_incremental() as false by default\n  given:\n    - input: ref('...')\n      rows:\n        - {...}\n  # expect: the full first-build output"]}]},{"name":"customers","path":"models/customers.sql","description":"This table has basic information about a customer, as well as some derived facts based on a customer's orders. Grain is one row per customer.","dag":{"nodes":[{"id":"customers","role":"import"},{"id":"orders","role":"import"},{"id":"payments","role":"import"},{"id":"customer_orders","role":"transform"},{"id":"customer_payments","role":"transform"},{"id":"final","role":"transform"},{"id":"(final select)","label":"customers.sql","role":"final"}],"edges":[{"from":"orders","to":"customer_orders","edge_type":"from"},{"from":"payments","to":"customer_payments","edge_type":"from"},{"from":"orders","to":"customer_payments","edge_type":"left"},{"from":"customers","to":"final","edge_type":"from"},{"from":"customer_orders","to":"final","edge_type":"left"},{"from":"customer_payments","to":"final","edge_type":"left"},{"from":"final","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select * from final","customer_orders":"customer_orders as (\n\n        select\n        customer_id,\n\n        min(order_date) as first_order,\n        max(order_date) as most_recent_order,\n        count(order_id) as number_of_orders\n    from orders\n\n    group by customer_id\n\n)","customer_payments":"customer_payments as (\n\n    select\n        orders.customer_id,\n        sum(amount) as total_amount\n\n    from payments\n\n    left join orders on\n         payments.order_id = orders.order_id\n\n    group by orders.customer_id\n\n)","customers":"customers as (\n\n    select * from \"main\".\"stg_customers\"\n\n)","final":"final as (\n\n    select\n        customers.customer_id,\n        customers.first_name,\n        customers.last_name,\n        customer_orders.first_order,\n        customer_orders.most_recent_order,\n        customer_orders.number_of_orders,\n        customer_payments.total_amount as customer_lifetime_value\n\n    from customers\n\n    left join customer_orders\n        on customers.customer_id = customer_orders.customer_id\n\n    left join customer_payments\n        on  customers.customer_id = customer_payments.customer_id\n\n)","orders":"orders as (\n\n    select * from \"main\".\"stg_orders\"\n\n)","payments":"payments as (\n\n    select * from \"main\".\"stg_payments\"\n\n)"},"raw_sql":"with customers as (\n\n    select * from {{ ref('stg_customers') }}\n\n),\n\norders as (\n\n    select * from {{ ref('stg_orders') }}\n\n),\n\npayments as (\n\n    select * from {{ ref('stg_payments') }}\n\n),\n\ncustomer_orders as (\n\n        select\n        customer_id,\n\n        min(order_date) as first_order,\n        max(order_date) as most_recent_order,\n        count(order_id) as number_of_orders\n    from orders\n\n    group by customer_id\n\n),\n\ncustomer_payments as (\n\n    select\n        orders.customer_id,\n        sum(amount) as total_amount\n\n    from payments\n\n    left join orders on\n         payments.order_id = orders.order_id\n\n    group by orders.customer_id\n\n),\n\nfinal as (\n\n    select\n        customers.customer_id,\n        customers.first_name,\n        customers.last_name,\n        customer_orders.first_order,\n        customer_orders.most_recent_order,\n        customer_orders.number_of_orders,\n        customer_payments.total_amount as customer_lifetime_value\n\n    from customers\n\n    left join customer_orders\n        on customers.customer_id = customer_orders.customer_id\n\n    left join customer_payments\n        on  customers.customer_id = customer_payments.customer_id\n\n)\n\nselect * from final\n","tests":[{"id":"unit_test.jaffle_shop.customers.test_customers_aggregates_orders_and_payments","name":"test_customers_aggregates_orders_and_payments","target_model":"customers","changed":false,"description":"customers left-joins per-customer order aggregates and payment totals.\nOne customer with one $10 completed order yields number_of_orders = 1\nand customer_lifetime_value = 10. Uses sql format for the GIVEN mocks\nand dict format for EXPECT (dict compares only listed columns).\n","defined_in":"models/marts/_marts__models.yml","given":[{"input":"ref('stg_customers')","bound_to_node":"customers","table":{"columns":["customer_id","first_name","last_name"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"Ada","key":{"t":"str","v":"Ada"}},{"display":"Lovelace","key":{"t":"str","v":"Lovelace"}}]}]},"rows":"select\n  1 as customer_id\n  , 'Ada' as first_name\n  , 'Lovelace' as last_name\n","format":"sql","column_meta":{"customer_id":{"description":"Unique identifier for a customer (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]}}},{"input":"ref('stg_orders')","bound_to_node":"orders","rows":"select\n  1 as order_id\n  , 1 as customer_id\n  , cast('2024-01-01' as date) as order_date\n  , 'completed' as status\n","format":"sql"},{"input":"ref('stg_payments')","bound_to_node":"payments","table":{"columns":["payment_id","order_id","payment_method","amount"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"credit_card","key":{"t":"str","v":"credit_card"}},{"display":"10","key":{"t":"number","v":"10"}}]}]},"rows":"select\n  1 as payment_id\n  , 1 as order_id\n  , 'credit_card' as payment_method\n  , 10 as amount\n","format":"sql","column_meta":{"payment_id":{"description":"Unique identifier for a payment (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]},"payment_method":{"description":"Payment instrument used for this payment","tests":[{"name":"accepted values","values":["credit_card","coupon","bank_transfer","gift_card"]}]}}}],"expected":{"table":{"columns":["customer_id","customer_lifetime_value","first_name","last_name","number_of_orders"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"10","key":{"t":"number","v":"10"}},{"display":"Ada","key":{"t":"str","v":"Ada"}},{"display":"Lovelace","key":{"t":"str","v":"Lovelace"}},{"display":"1","key":{"t":"number","v":"1"}}]}]},"rows":[{"customer_id":1,"customer_lifetime_value":10,"first_name":"Ada","last_name":"Lovelace","number_of_orders":1}],"format":"dict","column_meta":{"customer_id":{"description":"This is a unique identifier for a customer","tests":[{"name":"not null"},{"name":"unique"}]},"customer_lifetime_value":{"description":"Total value (AUD) of a customer's payments — the sum of payment amounts across all of the customer's orders"},"first_name":{"description":"Customer's first name. PII."},"last_name":{"description":"Customer's last name. PII."},"number_of_orders":{"description":"Count of the number of orders a customer has placed"}}}}],"is_recursive":false,"findings":[{"check":"join.left-null-propagation","tier":"high","instrument":"both","model_id":"model.jaffle_shop.customers","construct":"left_join[customer_payments:orders]","verdict":{"status":"unknown"},"evidence":[{"label":"left join","value":"customer_payments — LEFT JOIN orders ON payments.order_id = orders.order_id"},{"label":"unattributable given","value":"customer_payments — a unit test's rows are not statically countable (external fixture, non-literal sql, or ungiven seed input)"}],"pin_node":"customer_payments"},{"check":"join.left-null-propagation","tier":"high","instrument":"both","model_id":"model.jaffle_shop.customers","construct":"left_join[final:customer_orders]","verdict":{"status":"unknown"},"evidence":[{"label":"left join","value":"final — LEFT JOIN customer_orders ON customers.customer_id = customer_orders.customer_id"},{"label":"unattributable given","value":"final — a unit test's rows are not statically countable (external fixture, non-literal sql, or ungiven seed input)"}],"pin_node":"final"},{"check":"join.left-null-propagation","tier":"high","instrument":"both","model_id":"model.jaffle_shop.customers","construct":"left_join[final:customer_payments]","verdict":{"status":"unknown"},"evidence":[{"label":"left join","value":"final — LEFT JOIN customer_payments ON customers.customer_id = customer_payments.customer_id"},{"label":"unattributable join","value":"final — join key or side binding not statically recoverable"}],"pin_node":"final"}]},{"name":"customers_with_no_orders","path":"models/marts/customers_with_no_orders.sql","description":"Customers with no orders — the LEFT JOIN + WHERE right-key IS NULL anti-join idiom (cute-dbt#173 supersedes showcase).\n","dag":{"nodes":[{"id":"customers","role":"import"},{"id":"orders","role":"import"},{"id":"final","role":"transform"},{"id":"(final select)","label":"customers_with_no_orders.sql","role":"final"}],"edges":[{"from":"customers","to":"final","edge_type":"from"},{"from":"orders","to":"final","edge_type":"left"},{"from":"final","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select * from final","customers":"customers as (\n    select * from \"main\".\"stg_customers\"\n)","final":"final as (\n    select\n        customers.customer_id,\n        customers.first_name,\n        customers.last_name,\n        -- always NULL on the kept rows; projected so the GENERAL\n        -- left-null check's trigger provably fires and is visibly\n        -- superseded by join.anti-join (cute-dbt#173).\n        orders.customer_id as matched_customer_id\n    from customers\n    left join orders\n        on customers.customer_id = orders.customer_id\n    where orders.customer_id is null\n)","orders":"orders as (\n    select * from \"main\".\"stg_orders\"\n)"},"raw_sql":"-- customers_with_no_orders — the cute-dbt#173 anti-join dogfood.\n--\n-- The canonical `LEFT JOIN … WHERE \u003cright key> IS NULL` idiom:\n-- deliberately keep the customers with NO orders. This model is the\n-- live supersedes showcase: the general `join.left-null-propagation`\n-- check's own trigger fires here too (a right-side column reaches the\n-- projection), but the more specific `join.anti-join` check recognizes\n-- the pattern, SILENCES it, and emits the INVERTED recommendation —\n-- a given row that DOES match, proving the matched class is excluded.\n-- There is deliberately no unit test on this model, so the PR preview\n-- shows the UNCOVERED finding with its copy-pasteable given sketch.\n\nwith customers as (\n    select * from {{ ref('stg_customers') }}\n),\n\norders as (\n    select * from {{ ref('stg_orders') }}\n),\n\nfinal as (\n    select\n        customers.customer_id,\n        customers.first_name,\n        customers.last_name,\n        -- always NULL on the kept rows; projected so the GENERAL\n        -- left-null check's trigger provably fires and is visibly\n        -- superseded by join.anti-join (cute-dbt#173).\n        orders.customer_id as matched_customer_id\n    from customers\n    left join orders\n        on customers.customer_id = orders.customer_id\n    where orders.customer_id is null\n)\n\nselect * from final\n","tests":[],"is_recursive":false,"findings":[{"check":"join.anti-join","tier":"high","instrument":"unit-test","model_id":"model.jaffle_shop.customers_with_no_orders","construct":"left_join[final:orders]","verdict":{"status":"uncovered"},"evidence":[{"label":"left join","value":"final — LEFT JOIN orders ON customers.customer_id = orders.customer_id"},{"label":"anti-join filter","value":"WHERE orders.customer_id IS NULL"}],"recommendation":"Add a matching given pair: one left row whose join key IS present in the right-side given rows, then assert in `expect` that the matched row is excluded from the output. This finding's evidence carries a copy-pasteable given sketch.","pin_node":"final","sketches":["- input: ref('stg_customers')\n  rows:\n    - {customer_id: 1}   # matches the right row below\n- input: ref('stg_orders')\n  rows:\n    - {customer_id: 1}\n# expect: rows WITHOUT the matched left row — the anti-join must exclude it"]}]},{"name":"order_events_incremental","path":"models/marts/order_events_incremental.sql","description":"Incremental order-events accumulator. On incremental runs it only processes orders newer than the loaded high-water mark (max(order_date) from ).","dag":{"nodes":[{"id":"orders","role":"import"},{"id":"(final select)","label":"order_events_incremental.sql","role":"final"}],"edges":[{"from":"orders","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select\n    order_id,\n    customer_id,\n    order_date,\n    status\nfrom orders\n","orders":"orders as (\n    select * from \"main\".\"stg_orders\"\n)"},"raw_sql":"-- SPIKE (cute-dbt#145 discovery) — incremental model to inspect how fusion\n-- serializes `given: - input: this`, config.materialized, and overrides in\n-- manifest.json. May become the committed dogfood fixture after shaping.\n{{ config(materialized='incremental', unique_key='order_id', incremental_strategy='merge') }}\n\nwith orders as (\n    select * from {{ ref('stg_orders') }}\n)\n\nselect\n    order_id,\n    customer_id,\n    order_date,\n    status\nfrom orders\n{% if is_incremental() %}\n-- on incremental runs, only process orders newer than the loaded high-water\n-- mark. coalesce guards an existing-but-empty target: max() over zero rows is\n-- NULL, and `order_date > NULL` is NULL (never true), which would silently\n-- filter out every row on that run.\nwhere order_date > (select coalesce(max(order_date), '1900-01-01') from {{ this }})\n{% endif %}\n","tests":[{"id":"unit_test.jaffle_shop.order_events_incremental.test_order_events_incremental_initial_full_build","name":"test_order_events_incremental_initial_full_build","target_model":"order_events_incremental","changed":false,"description":"cute-dbt#164 — the FULL-BUILD branch: no overrides block, so dbt\ncompiles is_incremental() as false (the unit-test default) and the\nhigh-water-mark filter drops out of the compiled SQL. EXPECT is every\ninput row. Pairs with test_order_events_incremental_only_new_rows to\nexercise BOTH is_incremental() branches.\n","defined_in":"models/marts/_incremental__models.yml","given":[{"input":"ref('stg_orders')","bound_to_node":"orders","table":{"columns":["customer_id","order_date","order_id","status"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"2024-01-01","key":{"t":"str","v":"2024-01-01"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"completed","key":{"t":"str","v":"completed"}}]},{"cells":[{"display":"2","key":{"t":"number","v":"2"}},{"display":"2024-01-02","key":{"t":"str","v":"2024-01-02"}},{"display":"2","key":{"t":"number","v":"2"}},{"display":"placed","key":{"t":"str","v":"placed"}}]}]},"rows":[{"customer_id":1,"order_date":"2024-01-01","order_id":1,"status":"completed"},{"customer_id":2,"order_date":"2024-01-02","order_id":2,"status":"placed"}],"format":"dict","column_meta":{"order_id":{"description":"Unique identifier for an order (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]},"status":{"description":"Order lifecycle status as exported from the app","tests":[{"name":"accepted values","values":["placed","shipped","completed","return_pending","returned"]}]}}}],"expected":{"table":{"columns":["customer_id","order_date","order_id","status"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"2024-01-01","key":{"t":"str","v":"2024-01-01"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"completed","key":{"t":"str","v":"completed"}}]},{"cells":[{"display":"2","key":{"t":"number","v":"2"}},{"display":"2024-01-02","key":{"t":"str","v":"2024-01-02"}},{"display":"2","key":{"t":"number","v":"2"}},{"display":"placed","key":{"t":"str","v":"placed"}}]}]},"rows":[{"customer_id":1,"order_date":"2024-01-01","order_id":1,"status":"completed"},{"customer_id":2,"order_date":"2024-01-02","order_id":2,"status":"placed"}],"format":"dict","column_meta":{"order_date":{"description":"Order date; the incremental high-water-mark column."},"order_id":{"description":"Order identifier (unique key for the incremental merge).","tests":[{"name":"not null"},{"name":"unique"}]},"status":{"description":"Order status."}}}},{"id":"unit_test.jaffle_shop.order_events_incremental.test_order_events_incremental_only_new_rows","name":"test_order_events_incremental_only_new_rows","target_model":"order_events_incremental","changed":false,"description":"With is_incremental() true, the model filters to orders newer than the\nhigh-water mark in the existing table. `given: - input: this` mocks the\nprior model state (one order on 2024-01-01); stg_orders supplies a newer\n2024-01-02 order. EXPECT is the rows the incremental run MERGES — just the\nnewer 2024-01-02 row — NOT the resulting (merged) table.\n","defined_in":"models/marts/_incremental__models.yml","is_incremental_mode":true,"overrides":{"macros":{"is_incremental":true}},"given":[{"input":"this","table":{"columns":["customer_id","order_date","order_id","status"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"2024-01-01","key":{"t":"str","v":"2024-01-01"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"completed","key":{"t":"str","v":"completed"}}]}]},"rows":[{"customer_id":1,"order_date":"2024-01-01","order_id":1,"status":"completed"}],"format":"dict","is_this":true,"column_meta":{"order_date":{"description":"Order date; the incremental high-water-mark column."},"order_id":{"description":"Order identifier (unique key for the incremental merge).","tests":[{"name":"not null"},{"name":"unique"}]},"status":{"description":"Order status."}}},{"input":"ref('stg_orders')","bound_to_node":"orders","table":{"columns":["customer_id","order_date","order_id","status"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"2024-01-01","key":{"t":"str","v":"2024-01-01"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"completed","key":{"t":"str","v":"completed"}}]},{"cells":[{"display":"2","key":{"t":"number","v":"2"}},{"display":"2024-01-02","key":{"t":"str","v":"2024-01-02"}},{"display":"2","key":{"t":"number","v":"2"}},{"display":"placed","key":{"t":"str","v":"placed"}}]}]},"rows":[{"customer_id":1,"order_date":"2024-01-01","order_id":1,"status":"completed"},{"customer_id":2,"order_date":"2024-01-02","order_id":2,"status":"placed"}],"format":"dict","column_meta":{"order_id":{"description":"Unique identifier for an order (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]},"status":{"description":"Order lifecycle status as exported from the app","tests":[{"name":"accepted values","values":["placed","shipped","completed","return_pending","returned"]}]}}}],"expected":{"table":{"columns":["customer_id","order_date","order_id","status"],"rows":[{"cells":[{"display":"2","key":{"t":"number","v":"2"}},{"display":"2024-01-02","key":{"t":"str","v":"2024-01-02"}},{"display":"2","key":{"t":"number","v":"2"}},{"display":"placed","key":{"t":"str","v":"placed"}}]}]},"rows":[{"customer_id":2,"order_date":"2024-01-02","order_id":2,"status":"placed"}],"format":"dict","column_meta":{"order_date":{"description":"Order date; the incremental high-water-mark column."},"order_id":{"description":"Order identifier (unique key for the incremental merge).","tests":[{"name":"not null"},{"name":"unique"}]},"status":{"description":"Order status."}}}}],"is_recursive":false,"is_incremental":true,"findings":[{"check":"grain.unique-key-unbacked","tier":"total","instrument":"data-test","model_id":"model.jaffle_shop.order_events_incremental","construct":"config.unique_key","verdict":{"status":"covered","by":["test.jaffle_shop.unique_order_events_incremental_order_id.f6cdfc9a43"]},"evidence":[{"label":"unique_key","value":"order_id"}],"pin_node":"(final select)"},{"check":"incremental.branch-coverage","tier":"high","instrument":"unit-test","model_id":"model.jaffle_shop.order_events_incremental","construct":"config.materialized","verdict":{"status":"covered","by":["unit_test.jaffle_shop.order_events_incremental.test_order_events_incremental_initial_full_build","unit_test.jaffle_shop.order_events_incremental.test_order_events_incremental_only_new_rows"]},"evidence":[{"label":"materialized","value":"incremental (strategy: merge)"},{"label":"branch coverage","value":"both — 1 test(s) exercise the incremental (true) branch, 1 the initial full-build (false) branch"}],"pin_node":"(final select)"}]},{"name":"order_metrics","path":"models/marts/order_metrics.sql","description":"Rich dogfood mart whose transform CTEs reference each other through every cute-dbt v0.1 EdgeType (From / Inner / Left / Right / Full / Cross / UnionAll / UnionDistinct) plus a comma cross-join (cute-dbt#40 heuristic). Built to exercise the CTE DAG + JoinType legend rendering.\n","dag":{"nodes":[{"id":"orders","role":"import"},{"id":"payments","role":"import"},{"id":"customers","role":"import"},{"id":"refunds","role":"import"},{"id":"paid_orders","role":"transform"},{"id":"customer_orders","role":"transform"},{"id":"order_payment_match","role":"transform"},{"id":"enriched","role":"transform"},{"id":"grand_total","role":"transform"},{"id":"enriched_with_share","role":"transform"},{"id":"status_per_total","role":"transform"},{"id":"completed_rows","role":"transform"},{"id":"other_rows","role":"transform"},{"id":"all_statuses","role":"transform"},{"id":"status_dim","role":"transform"},{"id":"final","role":"transform"},{"id":"(final select)","label":"order_metrics.sql","role":"final"}],"edges":[{"from":"orders","to":"paid_orders","edge_type":"from"},{"from":"payments","to":"paid_orders","edge_type":"inner"},{"from":"customers","to":"customer_orders","edge_type":"from"},{"from":"paid_orders","to":"customer_orders","edge_type":"left"},{"from":"payments","to":"order_payment_match","edge_type":"from"},{"from":"orders","to":"order_payment_match","edge_type":"right"},{"from":"customer_orders","to":"enriched","edge_type":"from"},{"from":"order_payment_match","to":"enriched","edge_type":"full"},{"from":"paid_orders","to":"grand_total","edge_type":"from"},{"from":"enriched","to":"enriched_with_share","edge_type":"from"},{"from":"grand_total","to":"enriched_with_share","edge_type":"cross"},{"from":"enriched_with_share","to":"status_per_total","edge_type":"from"},{"from":"grand_total","to":"status_per_total","edge_type":"from"},{"from":"status_per_total","to":"completed_rows","edge_type":"from"},{"from":"status_per_total","to":"other_rows","edge_type":"from"},{"from":"completed_rows","to":"all_statuses","edge_type":"union_all"},{"from":"other_rows","to":"all_statuses","edge_type":"union_all"},{"from":"refunds","to":"all_statuses","edge_type":"union_all"},{"from":"completed_rows","to":"status_dim","edge_type":"union_distinct"},{"from":"other_rows","to":"status_dim","edge_type":"union_distinct"},{"from":"all_statuses","to":"final","edge_type":"from"},{"from":"final","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select * from final","all_statuses":"all_statuses as (\n    select order_id, status, amount, all_orders_amount from completed_rows\n    union all\n    select order_id, status, amount, all_orders_amount from other_rows\n    union all\n    select\n        order_id,\n        'refunded' as status,\n        amount,\n        cast(null as double) as all_orders_amount\n    from refunds\n)","completed_rows":"completed_rows as (\n    select order_id, status, amount, all_orders_amount\n    from status_per_total\n    where status = 'completed'\n)","customer_orders":"customer_orders as (\n    select\n        customers.customer_id,\n        customers.first_name,\n        customers.last_name,\n        paid_orders.order_id,\n        paid_orders.order_date,\n        paid_orders.status,\n        paid_orders.amount\n    from customers\n    left join paid_orders\n        on customers.customer_id = paid_orders.customer_id\n)","customers":"customers as (\n    select * from \"main\".\"stg_customers\"\n)","enriched":"enriched as (\n    select\n        customer_orders.customer_id,\n        customer_orders.first_name,\n        customer_orders.last_name,\n        coalesce(customer_orders.order_id, order_payment_match.order_id) as order_id,\n        customer_orders.order_date,\n        coalesce(customer_orders.status, order_payment_match.status) as status,\n        order_payment_match.payment_method,\n        coalesce(customer_orders.amount, order_payment_match.amount) as amount\n    from customer_orders\n    full outer join order_payment_match\n        on customer_orders.order_id = order_payment_match.order_id\n)","enriched_with_share":"enriched_with_share as (\n    select\n        enriched.customer_id,\n        enriched.first_name,\n        enriched.last_name,\n        enriched.order_id,\n        enriched.order_date,\n        enriched.status,\n        enriched.payment_method,\n        enriched.amount,\n        grand_total.all_orders_amount\n    from enriched\n    cross join grand_total\n)","final":"final as (\n    select\n        all_statuses.order_id,\n        all_statuses.status,\n        all_statuses.amount,\n        all_statuses.all_orders_amount,\n        case\n            when all_statuses.all_orders_amount > 0\n            then round(all_statuses.amount / all_statuses.all_orders_amount, 4)\n            else 0\n        end as amount_share,\n        (select count(*) from status_dim) as distinct_status_count\n    from all_statuses\n)","grand_total":"grand_total as (\n    select sum(amount) as all_orders_amount\n    from paid_orders\n)","order_payment_match":"order_payment_match as (\n    select\n        orders.order_id,\n        orders.status,\n        payments.payment_method,\n        payments.amount\n    from payments\n    right join orders\n        on payments.order_id = orders.order_id\n)","orders":"orders as (\n    select * from \"main\".\"stg_orders\"\n)","other_rows":"other_rows as (\n    select order_id, status, amount, all_orders_amount\n    from status_per_total\n    where status <> 'completed'\n)","paid_orders":"paid_orders as (\n    select\n        orders.order_id,\n        orders.customer_id,\n        orders.order_date,\n        orders.status,\n        payments.amount\n    from orders\n    inner join payments\n        on orders.order_id = payments.order_id\n)","payments":"payments as (\n    select * from \"main\".\"stg_payments\"\n)","refunds":"refunds as (\n    select * from \"main\".\"stg_refunds\"\n)","status_dim":"status_dim as (\n    select status from completed_rows\n    union\n    select status from other_rows\n)","status_per_total":"status_per_total as (\n    select\n        enriched_with_share.order_id,\n        enriched_with_share.status,\n        enriched_with_share.amount,\n        enriched_with_share.all_orders_amount,\n        grand_total.all_orders_amount as total_check\n    from enriched_with_share, grand_total\n)"},"raw_sql":"-- order_metrics — the cute-dbt dogfood \"rich\" mart.\n--\n-- This model exists to give cute-dbt's CTE DAG + JoinType legend real,\n-- varied material. Its transform CTEs deliberately reference each other\n-- through every edge type in cute-dbt's v0.1 EdgeType vocabulary\n-- (src/domain/cte.rs): From, Inner, Left, Right, Full, Cross, UnionAll,\n-- UnionDistinct — plus a comma-join CTE that exercises the cute-dbt#40\n-- \"comma cross-join is NOT the simple-FROM import shape\" heuristic\n-- (which renders as two From edges, not a Cross edge).\n--\n-- Edges form CTE -> CTE only, so each join below references an\n-- earlier-declared CTE on both sides.\n\nwith\n\n-- ---- import CTEs (each renders as a `From` edge) ----\norders as (\n    select * from {{ ref('stg_orders') }}\n),\n\npayments as (\n    select * from {{ ref('stg_payments') }}\n),\n\ncustomers as (\n    select * from {{ ref('stg_customers') }}\n),\n\n-- cute-dbt#172 dogfood: this import feeds the deliberately-unexercised\n-- third UNION ALL arm in all_statuses below.\nrefunds as (\n    select * from {{ ref('stg_refunds') }}\n),\n\n-- ---- INNER JOIN: orders (From) x payments (Inner) ----\npaid_orders as (\n    select\n        orders.order_id,\n        orders.customer_id,\n        orders.order_date,\n        orders.status,\n        payments.amount\n    from orders\n    inner join payments\n        on orders.order_id = payments.order_id\n),\n\n-- ---- LEFT JOIN: customers (From) x paid_orders (Left) ----\ncustomer_orders as (\n    select\n        customers.customer_id,\n        customers.first_name,\n        customers.last_name,\n        paid_orders.order_id,\n        paid_orders.order_date,\n        paid_orders.status,\n        paid_orders.amount\n    from customers\n    left join paid_orders\n        on customers.customer_id = paid_orders.customer_id\n),\n\n-- ---- RIGHT JOIN: payments (From) x orders (Right) ----\norder_payment_match as (\n    select\n        orders.order_id,\n        orders.status,\n        payments.payment_method,\n        payments.amount\n    from payments\n    right join orders\n        on payments.order_id = orders.order_id\n),\n\n-- ---- FULL OUTER JOIN: customer_orders (From) x order_payment_match (Full) ----\nenriched as (\n    select\n        customer_orders.customer_id,\n        customer_orders.first_name,\n        customer_orders.last_name,\n        coalesce(customer_orders.order_id, order_payment_match.order_id) as order_id,\n        customer_orders.order_date,\n        coalesce(customer_orders.status, order_payment_match.status) as status,\n        order_payment_match.payment_method,\n        coalesce(customer_orders.amount, order_payment_match.amount) as amount\n    from customer_orders\n    full outer join order_payment_match\n        on customer_orders.order_id = order_payment_match.order_id\n),\n\n-- ---- CROSS JOIN: enriched (From) x grand_total (Cross) ----\n-- a single-row constant CTE crossed onto every enriched row.\ngrand_total as (\n    select sum(amount) as all_orders_amount\n    from paid_orders\n),\n\nenriched_with_share as (\n    select\n        enriched.customer_id,\n        enriched.first_name,\n        enriched.last_name,\n        enriched.order_id,\n        enriched.order_date,\n        enriched.status,\n        enriched.payment_method,\n        enriched.amount,\n        grand_total.all_orders_amount\n    from enriched\n    cross join grand_total\n),\n\n-- ---- comma cross-join (cute-dbt#40 heuristic): two `From` edges, NOT Cross ----\n-- `from a, b` is a Cartesian product syntactically, but cute-dbt classifies\n-- each comma source as a plain `From` edge (only explicit CROSS JOIN ->\n-- Cross). Kept deliberately so the report exercises the #40 multi-source\n-- shape detection.\nstatus_per_total as (\n    select\n        enriched_with_share.order_id,\n        enriched_with_share.status,\n        enriched_with_share.amount,\n        enriched_with_share.all_orders_amount,\n        grand_total.all_orders_amount as total_check\n    from enriched_with_share, grand_total\n),\n\n-- ---- UNION ALL: completed_rows (UnionAll) + other_rows (UnionAll) ----\ncompleted_rows as (\n    select order_id, status, amount, all_orders_amount\n    from status_per_total\n    where status = 'completed'\n),\n\nother_rows as (\n    select order_id, status, amount, all_orders_amount\n    from status_per_total\n    where status <> 'completed'\n),\n\n-- cute-dbt#172 dogfood (union.arm-coverage): the third arm reads\n-- `refunds`, which the unit test mocks EMPTY — the live PR-diff preview\n-- report carries the UNCOVERED finding + its given-row sketch (the\n-- catalog C3 charges/refunds worked example, self-dogfooded). With an\n-- empty given the arm contributes zero rows, so the existing expect is\n-- unchanged.\nall_statuses as (\n    select order_id, status, amount, all_orders_amount from completed_rows\n    union all\n    select order_id, status, amount, all_orders_amount from other_rows\n    union all\n    select\n        order_id,\n        'refunded' as status,\n        amount,\n        cast(null as double) as all_orders_amount\n    from refunds\n),\n\n-- ---- UNION (distinct): distinct status pairs from two arms ----\nstatus_dim as (\n    select status from completed_rows\n    union\n    select status from other_rows\n),\n\nfinal as (\n    select\n        all_statuses.order_id,\n        all_statuses.status,\n        all_statuses.amount,\n        all_statuses.all_orders_amount,\n        case\n            when all_statuses.all_orders_amount > 0\n            then round(all_statuses.amount / all_statuses.all_orders_amount, 4)\n            else 0\n        end as amount_share,\n        (select count(*) from status_dim) as distinct_status_count\n    from all_statuses\n)\n\nselect * from final\n","tests":[{"id":"unit_test.jaffle_shop.order_metrics.test_order_metrics_computes_amount_share","name":"test_order_metrics_computes_amount_share","target_model":"order_metrics","changed":false,"description":"order_metrics crosses each enriched order against the grand total of\nall paid orders and derives amount_share = amount / all_orders_amount.\nWith one paid order of $10 the grand total is $10, so the single row's\nshare is 1.0. Uses dbt's dict format for both GIVEN and EXPECT.\n","defined_in":"models/marts/_marts__models.yml","overrides":{"env_vars":{"DBT_ORDERS_REGION":"us-east-1"},"vars":{"reporting_currency":"USD"}},"given":[{"input":"ref('stg_orders')","bound_to_node":"orders","table":{"columns":["customer_id","order_date","order_id","status"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"2024-01-01","key":{"t":"str","v":"2024-01-01"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"completed","key":{"t":"str","v":"completed"}}]}]},"rows":[{"customer_id":1,"order_date":"2024-01-01","order_id":1,"status":"completed"}],"format":"dict","column_meta":{"order_id":{"description":"Unique identifier for an order (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]},"status":{"description":"Order lifecycle status as exported from the app","tests":[{"name":"accepted values","values":["placed","shipped","completed","return_pending","returned"]}]}}},{"input":"ref(\"stg_payments\")","bound_to_node":"payments","table":{"columns":["amount","order_id","payment_id","payment_method"],"rows":[{"cells":[{"display":"10","key":{"t":"number","v":"10"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"credit_card","key":{"t":"str","v":"credit_card"}}]}]},"rows":[{"amount":10,"order_id":1,"payment_id":1,"payment_method":"credit_card"}],"format":"dict","column_meta":{"payment_id":{"description":"Unique identifier for a payment (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]},"payment_method":{"description":"Payment instrument used for this payment","tests":[{"name":"accepted values","values":["credit_card","coupon","bank_transfer","gift_card"]}]}}},{"input":"ref('stg_customers')","bound_to_node":"customers","table":{"columns":["customer_id","first_name","last_name"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"Ada","key":{"t":"str","v":"Ada"}},{"display":"Lovelace","key":{"t":"str","v":"Lovelace"}}]}]},"rows":[{"customer_id":1,"first_name":"Ada","last_name":"Lovelace"}],"format":"dict","column_meta":{"customer_id":{"description":"Unique identifier for a customer (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]}}},{"input":"ref('stg_refunds')","bound_to_node":"refunds","table":{"columns":[],"rows":[]},"rows":[],"format":"dict"}],"expected":{"table":{"columns":["all_orders_amount","amount","amount_share","distinct_status_count","order_id","status"],"rows":[{"cells":[{"display":"10","key":{"t":"number","v":"10"}},{"display":"10","key":{"t":"number","v":"10"}},{"display":"1.0","key":{"t":"number","v":"1"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"completed","key":{"t":"str","v":"completed"}}]}]},"rows":[{"all_orders_amount":10,"amount":10,"amount_share":1.0,"distinct_status_count":1,"order_id":1,"status":"completed"}],"format":"dict","column_meta":{"all_orders_amount":{"description":"Grand total of all paid orders (cross-joined constant)."},"amount":{"description":"Paid amount in dollars."},"amount_share":{"description":"This order's amount as a fraction of all_orders_amount."},"distinct_status_count":{"description":"Count of distinct statuses (from the UNION-distinct arm)."},"order_id":{"description":"Order identifier (may be null for full-outer non-matches)."},"status":{"description":"Order status."}}}}],"is_recursive":false,"findings":[{"check":"union.arm-coverage","tier":"high","instrument":"unit-test","model_id":"model.jaffle_shop.order_metrics","construct":"union[all_statuses]","verdict":{"status":"uncovered"},"evidence":[{"label":"union","value":"all_statuses (3 arms: refunds, completed_rows, other_rows)"},{"label":"unexercised arm","value":"refunds — no given row reaches ref('stg_refunds')"}],"recommendation":"Add (or fill) a given row for each unexercised UNION arm's input so every arm contributes at least one row, then extend `expect` with the row(s) that arm should emit. This finding's evidence carries the per-arm input and a given-row sketch.","pin_node":"all_statuses","sketches":["- input: ref('stg_refunds')\n  rows:\n    - {amount: ..., order_id: ..., refund_id: ...}"]},{"check":"union.arm-coverage","tier":"high","instrument":"unit-test","model_id":"model.jaffle_shop.order_metrics","construct":"union[status_dim]","verdict":{"status":"covered","by":["unit_test.jaffle_shop.order_metrics.test_order_metrics_computes_amount_share"]},"evidence":[{"label":"union","value":"status_dim (2 arms: completed_rows, other_rows)"}],"pin_node":"status_dim"},{"check":"join.left-null-propagation","tier":"high","instrument":"both","model_id":"model.jaffle_shop.order_metrics","construct":"left_join[customer_orders:paid_orders]","verdict":{"status":"unknown"},"evidence":[{"label":"left join","value":"customer_orders — LEFT JOIN paid_orders ON customers.customer_id = paid_orders.customer_id"},{"label":"unattributable join","value":"customer_orders — join key or side binding not statically recoverable"}],"pin_node":"customer_orders"}]},{"name":"orders","path":"models/orders.sql","description":"This table has basic information about orders, as well as some derived facts based on payments","dag":{"nodes":[{"id":"orders","role":"import"},{"id":"payments","role":"import"},{"id":"order_payments","role":"transform"},{"id":"final","role":"transform"},{"id":"(final select)","label":"orders.sql","role":"final"}],"edges":[{"from":"payments","to":"order_payments","edge_type":"from"},{"from":"orders","to":"final","edge_type":"from"},{"from":"order_payments","to":"final","edge_type":"left"},{"from":"final","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select * from final","final":"final as (\n\n    select\n        orders.order_id,\n        orders.customer_id,\n        orders.order_date,\n        orders.status,\n\n        coalesce(order_payments.credit_card_amount, 0) as credit_card_amount,\n\n        coalesce(order_payments.coupon_amount, 0) as coupon_amount,\n\n        coalesce(order_payments.bank_transfer_amount, 0) as bank_transfer_amount,\n\n        coalesce(order_payments.gift_card_amount, 0) as gift_card_amount,\n\n        coalesce(order_payments.total_amount, 0) as amount\n\n    from orders\n\n\n    left join order_payments\n        on orders.order_id = order_payments.order_id\n\n)","order_payments":"order_payments as (\n\n    select\n        order_id,\n\n        sum(case when payment_method = 'credit_card' then amount else 0 end) as credit_card_amount,\n        sum(case when payment_method = 'coupon' then amount else 0 end) as coupon_amount,\n        sum(case when payment_method = 'bank_transfer' then amount else 0 end) as bank_transfer_amount,\n        sum(case when payment_method = 'gift_card' then amount else 0 end) as gift_card_amount,\n        sum(amount) as total_amount\n\n    from payments\n\n    group by order_id\n\n)","orders":"orders as (\n\n    select * from \"main\".\"stg_orders\"\n\n)","payments":"payments as (\n\n    select * from \"main\".\"stg_payments\"\n\n)"},"raw_sql":"-- cute-dbt#155 dogfood: this model's import CTE is named `orders` — the same\n-- name as the model itself (the idiomatic jaffle-shop shape). It exercises the\n-- DAG node-identity fix: the lineage graph renders `orders` (import) → `final`\n-- → `orders.sql` (the model's final select) as three distinct nodes, with no\n-- spurious `orders ↔ final` self-cycle and the import node showing its own SQL.\n{% set payment_methods = ['credit_card', 'coupon', 'bank_transfer', 'gift_card'] %}\n\nwith orders as (\n\n    select * from {{ ref('stg_orders') }}\n\n),\n\npayments as (\n\n    select * from {{ ref('stg_payments') }}\n\n),\n\norder_payments as (\n\n    select\n        order_id,\n\n        {% for payment_method in payment_methods -%}\n        sum(case when payment_method = '{{ payment_method }}' then amount else 0 end) as {{ payment_method }}_amount,\n        {% endfor -%}\n\n        sum(amount) as total_amount\n\n    from payments\n\n    group by order_id\n\n),\n\nfinal as (\n\n    select\n        orders.order_id,\n        orders.customer_id,\n        orders.order_date,\n        orders.status,\n\n        {% for payment_method in payment_methods -%}\n\n        coalesce(order_payments.{{ payment_method }}_amount, 0) as {{ payment_method }}_amount,\n\n        {% endfor -%}\n\n        coalesce(order_payments.total_amount, 0) as amount\n\n    from orders\n\n\n    left join order_payments\n        on orders.order_id = order_payments.order_id\n\n)\n\nselect * from final\n","tests":[{"id":"unit_test.jaffle_shop.orders.test_orders_from_external_csv_fixture","name":"test_orders_from_external_csv_fixture","target_model":"orders","changed":false,"description":"orders pivots payments into per-method columns and a total amount.\nIdentical to test_orders_sums_payment_methods except the stg_payments\nmock is an EXTERNAL csv fixture (cute-dbt#126) — the fixture data is not\ninlined in the manifest, it lives in tests/fixtures/.\n","defined_in":"models/marts/_marts__models.yml","given":[{"input":"ref('stg_orders')","bound_to_node":"orders","table":{"columns":["order_id","customer_id","order_date","status"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"2024-01-01","key":{"t":"str","v":"2024-01-01"}},{"display":"completed","key":{"t":"str","v":"completed"}}]}]},"rows":"order_id,customer_id,order_date,status\n1,1,2024-01-01,completed\n","format":"csv","column_meta":{"order_id":{"description":"Unique identifier for an order (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]},"status":{"description":"Order lifecycle status as exported from the app","tests":[{"name":"accepted values","values":["placed","shipped","completed","return_pending","returned"]}]}}},{"input":"ref('stg_payments')","bound_to_node":"payments","rows":null,"format":"csv","fixture":"tests/fixtures/stg_payments_credit_card.csv"}],"expected":{"table":{"columns":["order_id","customer_id","order_date","status","credit_card_amount","coupon_amount","bank_transfer_amount","gift_card_amount","amount"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"2024-01-01","key":{"t":"str","v":"2024-01-01"}},{"display":"completed","key":{"t":"str","v":"completed"}},{"display":"10","key":{"t":"number","v":"10"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"10","key":{"t":"number","v":"10"}}]}]},"rows":"order_id,customer_id,order_date,status,credit_card_amount,coupon_amount,bank_transfer_amount,gift_card_amount,amount\n1,1,2024-01-01,completed,10,0,0,0,10","format":"csv","column_meta":{"amount":{"description":"Total amount (AUD) of the order","tests":[{"name":"not null"}]},"bank_transfer_amount":{"description":"Amount of the order (AUD) paid for by bank transfer","tests":[{"name":"not null"}]},"coupon_amount":{"description":"Amount of the order (AUD) paid for by coupon","tests":[{"name":"not null"}]},"credit_card_amount":{"description":"Amount of the order (AUD) paid for by credit card","tests":[{"name":"not null"}]},"customer_id":{"description":"Foreign key to the customers table","tests":[{"name":"not null"},{"name":"relationships","detail":"customers.customer_id"}]},"gift_card_amount":{"description":"Amount of the order (AUD) paid for by gift card","tests":[{"name":"not null"}]},"order_date":{"description":"Date (UTC) that the order was placed"},"order_id":{"description":"This is a unique identifier for an order","tests":[{"name":"not null"},{"name":"unique"}]},"status":{"description":"Orders can be one of the following statuses:\n\n| status         | description                                                                                                            |\n|----------------|------------------------------------------------------------------------------------------------------------------------|\n| placed         | The order has been placed but has not yet left the warehouse                                                           |\n| shipped        | The order has been shipped to the customer and is currently in transit                                                 |\n| completed      | The order has been received by the customer                                                                            |\n| return_pending | The customer has indicated that they would like to return the order, but it has not yet been received at the warehouse |\n| returned       | The order has been returned by the customer and received at the warehouse                                              |","tests":[{"name":"accepted values","values":["placed","shipped","completed","return_pending","returned"]}]}}}},{"id":"unit_test.jaffle_shop.orders.test_orders_sums_payment_methods","name":"test_orders_sums_payment_methods","target_model":"orders","changed":false,"description":"orders pivots payments into per-method columns and a total amount.\nA single order paid once by credit_card for $10 yields\ncredit_card_amount = 10 and amount (total) = 10, with the other\nmethod columns zeroed. Uses csv format for GIVEN and EXPECT —\ncompact tabular form across the four payment-method columns.\n","defined_in":"models/marts/_marts__models.yml","given":[{"input":"ref('stg_orders')","bound_to_node":"orders","table":{"columns":["order_id","customer_id","order_date","status"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"2024-01-01","key":{"t":"str","v":"2024-01-01"}},{"display":"completed","key":{"t":"str","v":"completed"}}]}]},"rows":"order_id,customer_id,order_date,status\n1,1,2024-01-01,completed\n","format":"csv","column_meta":{"order_id":{"description":"Unique identifier for an order (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]},"status":{"description":"Order lifecycle status as exported from the app","tests":[{"name":"accepted values","values":["placed","shipped","completed","return_pending","returned"]}]}}},{"input":"ref('stg_payments')","bound_to_node":"payments","table":{"columns":["payment_id","order_id","payment_method","amount"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"credit_card","key":{"t":"str","v":"credit_card"}},{"display":"10","key":{"t":"number","v":"10"}}]}]},"rows":"payment_id,order_id,payment_method,amount\n1,1,credit_card,10\n","format":"csv","column_meta":{"payment_id":{"description":"Unique identifier for a payment (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]},"payment_method":{"description":"Payment instrument used for this payment","tests":[{"name":"accepted values","values":["credit_card","coupon","bank_transfer","gift_card"]}]}}}],"expected":{"table":{"columns":["order_id","customer_id","order_date","status","credit_card_amount","coupon_amount","bank_transfer_amount","gift_card_amount","amount"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"2024-01-01","key":{"t":"str","v":"2024-01-01"}},{"display":"completed","key":{"t":"str","v":"completed"}},{"display":"10","key":{"t":"number","v":"10"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"0","key":{"t":"number","v":"0"}},{"display":"10","key":{"t":"number","v":"10"}}]}]},"rows":"order_id,customer_id,order_date,status,credit_card_amount,coupon_amount,bank_transfer_amount,gift_card_amount,amount\n1,1,2024-01-01,completed,10,0,0,0,10\n","format":"csv","column_meta":{"amount":{"description":"Total amount (AUD) of the order","tests":[{"name":"not null"}]},"bank_transfer_amount":{"description":"Amount of the order (AUD) paid for by bank transfer","tests":[{"name":"not null"}]},"coupon_amount":{"description":"Amount of the order (AUD) paid for by coupon","tests":[{"name":"not null"}]},"credit_card_amount":{"description":"Amount of the order (AUD) paid for by credit card","tests":[{"name":"not null"}]},"customer_id":{"description":"Foreign key to the customers table","tests":[{"name":"not null"},{"name":"relationships","detail":"customers.customer_id"}]},"gift_card_amount":{"description":"Amount of the order (AUD) paid for by gift card","tests":[{"name":"not null"}]},"order_date":{"description":"Date (UTC) that the order was placed"},"order_id":{"description":"This is a unique identifier for an order","tests":[{"name":"not null"},{"name":"unique"}]},"status":{"description":"Orders can be one of the following statuses:\n\n| status         | description                                                                                                            |\n|----------------|------------------------------------------------------------------------------------------------------------------------|\n| placed         | The order has been placed but has not yet left the warehouse                                                           |\n| shipped        | The order has been shipped to the customer and is currently in transit                                                 |\n| completed      | The order has been received by the customer                                                                            |\n| return_pending | The customer has indicated that they would like to return the order, but it has not yet been received at the warehouse |\n| returned       | The order has been returned by the customer and received at the warehouse                                              |","tests":[{"name":"accepted values","values":["placed","shipped","completed","return_pending","returned"]}]}}}}],"is_recursive":false},{"name":"orders_never_refunded","path":"models/marts/orders_never_refunded.sql","description":"Orders that were never refunded — the \u003ccol> NOT IN (SELECT …) membership anti-join idiom (cute-dbt#196 subquery evidence family).\n","dag":{"nodes":[],"edges":[]},"compiled_sql":{"orders_never_refunded":"-- orders_never_refunded — the cute-dbt#196 NOT IN anti-join dogfood.\n--\n-- The membership anti-join idiom: deliberately keep the orders whose\n-- order_id is NOT IN the refunded set. cute-dbt#173 shipped this form\n-- as a declared exclusion (silent); cute-dbt#196's correlated-subquery\n-- evidence family lifts it — join.anti-join now fires on the\n-- not_in[…] construct. Unlike customers_with_no_orders (the UNCOVERED\n-- showcase), this model carries a unit test whose givens include a\n-- MATCHING pair (order 1 is refunded) with expect proving the matched\n-- row is excluded — the live PR preview renders the arm COVERED with\n-- attribution.\n\nselect\n    o.order_id,\n    o.customer_id,\n    o.order_date,\n    o.status\nfrom \"main\".\"stg_orders\" o\nwhere o.order_id not in (\n    select r.order_id\n    from \"main\".\"stg_refunds\" r\n)"},"raw_sql":"-- orders_never_refunded — the cute-dbt#196 NOT IN anti-join dogfood.\n--\n-- The membership anti-join idiom: deliberately keep the orders whose\n-- order_id is NOT IN the refunded set. cute-dbt#173 shipped this form\n-- as a declared exclusion (silent); cute-dbt#196's correlated-subquery\n-- evidence family lifts it — join.anti-join now fires on the\n-- not_in[…] construct. Unlike customers_with_no_orders (the UNCOVERED\n-- showcase), this model carries a unit test whose givens include a\n-- MATCHING pair (order 1 is refunded) with expect proving the matched\n-- row is excluded — the live PR preview renders the arm COVERED with\n-- attribution.\n\nselect\n    o.order_id,\n    o.customer_id,\n    o.order_date,\n    o.status\nfrom {{ ref('stg_orders') }} o\nwhere o.order_id not in (\n    select r.order_id\n    from {{ ref('stg_refunds') }} r\n)\n","tests":[{"id":"unit_test.jaffle_shop.orders_never_refunded.test_orders_never_refunded_excludes_refunded_orders","name":"test_orders_never_refunded_excludes_refunded_orders","target_model":"orders_never_refunded","changed":false,"description":"orders_never_refunded keeps only orders absent from the refunded\nset. Order 1 is refunded (its id appears in stg_refunds) and order\n2 is clean, so the output carries order 2 alone — the matched row\nis provably excluded (the anti-join's risk class, exercised).\n","defined_in":"models/marts/_marts__models.yml","given":[{"input":"ref('stg_orders')","table":{"columns":["customer_id","order_date","order_id","status"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"2024-01-01","key":{"t":"str","v":"2024-01-01"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"completed","key":{"t":"str","v":"completed"}}]},{"cells":[{"display":"2","key":{"t":"number","v":"2"}},{"display":"2024-01-02","key":{"t":"str","v":"2024-01-02"}},{"display":"2","key":{"t":"number","v":"2"}},{"display":"completed","key":{"t":"str","v":"completed"}}]}]},"rows":[{"customer_id":1,"order_date":"2024-01-01","order_id":1,"status":"completed"},{"customer_id":2,"order_date":"2024-01-02","order_id":2,"status":"completed"}],"format":"dict","column_meta":{"order_id":{"description":"Unique identifier for an order (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]},"status":{"description":"Order lifecycle status as exported from the app","tests":[{"name":"accepted values","values":["placed","shipped","completed","return_pending","returned"]}]}}},{"input":"ref('stg_refunds')","table":{"columns":["amount","order_id","refund_id"],"rows":[{"cells":[{"display":"-10","key":{"t":"number","v":"-10"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"1","key":{"t":"number","v":"1"}}]}]},"rows":[{"amount":-10,"order_id":1,"refund_id":1}],"format":"dict","column_meta":{"amount":{"description":"Refunded amount in dollars (negative)"},"order_id":{"description":"Order the refund applies to"},"refund_id":{"description":"Unique identifier for a refund event (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]}}}],"expected":{"table":{"columns":["customer_id","order_date","order_id","status"],"rows":[{"cells":[{"display":"2","key":{"t":"number","v":"2"}},{"display":"2024-01-02","key":{"t":"str","v":"2024-01-02"}},{"display":"2","key":{"t":"number","v":"2"}},{"display":"completed","key":{"t":"str","v":"completed"}}]}]},"rows":[{"customer_id":2,"order_date":"2024-01-02","order_id":2,"status":"completed"}],"format":"dict","column_meta":{"customer_id":{"description":"Customer who placed the order."},"order_date":{"description":"Date the order was placed."},"order_id":{"description":"Order identifier (natural key of the kept rows)."},"status":{"description":"Order status."}}}}],"is_recursive":false,"findings":[{"check":"join.anti-join","tier":"high","instrument":"unit-test","model_id":"model.jaffle_shop.orders_never_refunded","construct":"not_in[(final select):stg_refunds]","verdict":{"status":"covered","by":["unit_test.jaffle_shop.orders_never_refunded.test_orders_never_refunded_excludes_refunded_orders"]},"evidence":[{"label":"anti-join (NOT IN)","value":"(final select) — WHERE stg_orders.order_id NOT IN (SELECT order_id FROM stg_refunds)"}]}]},{"name":"stg_customers","path":"models/staging/stg_customers.sql","dag":{"nodes":[{"id":"source","role":"import"},{"id":"renamed","role":"transform"},{"id":"(final select)","label":"stg_customers.sql","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select * from renamed","renamed":"renamed as (\n\n    select\n        id as customer_id,\n        first_name,\n        last_name\n\n    from source\n\n)","source":"source as (\n    select * from \"main\".\"raw_customers\"\n\n)"},"raw_sql":"with source as (\n\n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project\n    #}\n    select * from {{ ref('raw_customers') }}\n\n),\n\nrenamed as (\n\n    select\n        id as customer_id,\n        first_name,\n        last_name\n\n    from source\n\n)\n\nselect * from renamed\n","tests":[],"is_recursive":false},{"name":"stg_orders","path":"models/staging/stg_orders.sql","dag":{"nodes":[{"id":"source","role":"import"},{"id":"renamed","role":"transform"},{"id":"(final select)","label":"stg_orders.sql","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select * from renamed","renamed":"renamed as (\n\n    select\n        id as order_id,\n        user_id as customer_id,\n        order_date,\n        status\n\n    from source\n\n)","source":"source as (\n    select * from \"main\".\"raw_orders\"\n\n)"},"raw_sql":"with source as (\n\n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project\n    #}\n    select * from {{ ref('raw_orders') }}\n\n),\n\nrenamed as (\n\n    select\n        id as order_id,\n        user_id as customer_id,\n        order_date,\n        status\n\n    from source\n\n)\n\nselect * from renamed\n","tests":[],"is_recursive":false},{"name":"stg_payments","path":"models/staging/stg_payments.sql","dag":{"nodes":[{"id":"source","role":"import"},{"id":"renamed","role":"transform"},{"id":"(final select)","label":"stg_payments.sql","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select * from renamed","renamed":"renamed as (\n\n    select\n        id as payment_id,\n        order_id,\n        payment_method,\n\n        -- `amount` is currently stored in cents, so we convert it to dollars\n        amount / 100 as amount\n\n    from source\n\n)","source":"source as (\n    select * from \"main\".\"raw_payments\"\n\n)"},"raw_sql":"with source as (\n    \n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project\n    #}\n    select * from {{ ref('raw_payments') }}\n\n),\n\nrenamed as (\n\n    select\n        id as payment_id,\n        order_id,\n        payment_method,\n\n        -- `amount` is currently stored in cents, so we convert it to dollars\n        amount / 100 as amount\n\n    from source\n\n)\n\nselect * from renamed\n","tests":[],"is_recursive":false},{"name":"stg_refunds","path":"models/staging/stg_refunds.sql","dag":{"nodes":[{"id":"source","role":"import"},{"id":"refunds","role":"transform"},{"id":"(final select)","label":"stg_refunds.sql","role":"final"}],"edges":[{"from":"source","to":"refunds","edge_type":"from"},{"from":"refunds","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select * from refunds","refunds":"refunds as (\n\n    select\n        id as refund_id,\n        order_id,\n\n        -- `amount` is stored in cents; refunds are negated dollars\n        -(amount / 100) as amount\n\n    from source\n    where payment_method = 'gift_card'\n\n)","source":"source as (\n    select * from \"main\".\"raw_payments\"\n\n)"},"raw_sql":"-- stg_refunds — cute-dbt#172 dogfood material (union.arm-coverage).\n--\n-- A synthetic \"refunds\" staging view derived from the payments seed:\n-- gift-card payments are treated as refund events (negated amount).\n-- It exists so order_metrics can grow a UNION ALL arm that the\n-- order_metrics unit test deliberately mocks EMPTY — the live PR-diff\n-- preview then surfaces an UNCOVERED union.arm-coverage finding with\n-- its given-row recommendation sketch (the catalog C3 worked example,\n-- self-dogfooded).\n\nwith source as (\n\n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project\n    #}\n    select * from {{ ref('raw_payments') }}\n\n),\n\nrefunds as (\n\n    select\n        id as refund_id,\n        order_id,\n\n        -- `amount` is stored in cents; refunds are negated dollars\n        -(amount / 100) as amount\n\n    from source\n    where payment_method = 'gift_card'\n\n)\n\nselect * from refunds\n","tests":[],"is_recursive":false}],"manifest_nodes":{"customer_order_days":{"description":"Per-customer order-day rollup at the (customer_id, order_date) grain. Incremental delete+insert keyed on the composite unique_key; no uniqueness test backs the declared grain — the cute-dbt#169 walking-skeleton coverage gap.\n","materialized":"incremental","columns":[{"name":"customer_id","description":"Customer identifier (half of the composite grain).","tests":[{"name":"not null"}]},{"name":"order_date","description":"Order date (the other half of the composite grain)."},{"name":"orders_placed","description":"Number of orders the customer placed that day."}]},"customers":{"description":"This table has basic information about a customer, as well as some derived facts based on a customer's orders. Grain is one row per customer.","materialized":"table","columns":[{"name":"customer_id","description":"This is a unique identifier for a customer","tests":[{"name":"not null"},{"name":"unique"}]},{"name":"customer_lifetime_value","description":"Total value (AUD) of a customer's payments — the sum of payment amounts across all of the customer's orders"},{"name":"first_name","description":"Customer's first name. PII."},{"name":"first_order","description":"Date (UTC) of a customer's first order"},{"name":"last_name","description":"Customer's last name. PII."},{"name":"most_recent_order","description":"Date (UTC) of a customer's most recent order"},{"name":"number_of_orders","description":"Count of the number of orders a customer has placed"}]},"customers_with_no_orders":{"description":"Customers with no orders — the LEFT JOIN + WHERE right-key IS NULL anti-join idiom (cute-dbt#173 supersedes showcase).\n","materialized":"table","columns":[{"name":"customer_id","description":"Customer identifier (natural key of the kept rows)."},{"name":"first_name","description":"Customer first name."},{"name":"last_name","description":"Customer last name."},{"name":"matched_customer_id","description":"The right-side join key — always NULL on kept rows; projected so the general left-null check provably fires and is superseded.\n"}]},"order_events_incremental":{"description":"Incremental order-events accumulator. On incremental runs it only processes orders newer than the loaded high-water mark (max(order_date) from ).","materialized":"incremental","columns":[{"name":"order_date","description":"Order date; the incremental high-water-mark column."},{"name":"order_id","description":"Order identifier (unique key for the incremental merge).","tests":[{"name":"not null"},{"name":"unique"}]},{"name":"status","description":"Order status."}]},"order_metrics":{"description":"Rich dogfood mart whose transform CTEs reference each other through every cute-dbt v0.1 EdgeType (From / Inner / Left / Right / Full / Cross / UnionAll / UnionDistinct) plus a comma cross-join (cute-dbt#40 heuristic). Built to exercise the CTE DAG + JoinType legend rendering.\n","materialized":"table","tags":["marts","dogfood"],"columns":[{"name":"all_orders_amount","description":"Grand total of all paid orders (cross-joined constant)."},{"name":"amount","description":"Paid amount in dollars."},{"name":"amount_share","description":"This order's amount as a fraction of all_orders_amount."},{"name":"distinct_status_count","description":"Count of distinct statuses (from the UNION-distinct arm)."},{"name":"order_id","description":"Order identifier (may be null for full-outer non-matches)."},{"name":"status","description":"Order status."}]},"orders":{"description":"This table has basic information about orders, as well as some derived facts based on payments","materialized":"table","columns":[{"name":"amount","description":"Total amount (AUD) of the order","tests":[{"name":"not null"}]},{"name":"bank_transfer_amount","description":"Amount of the order (AUD) paid for by bank transfer","tests":[{"name":"not null"}]},{"name":"coupon_amount","description":"Amount of the order (AUD) paid for by coupon","tests":[{"name":"not null"}]},{"name":"credit_card_amount","description":"Amount of the order (AUD) paid for by credit card","tests":[{"name":"not null"}]},{"name":"customer_id","description":"Foreign key to the customers table","tests":[{"name":"not null"},{"name":"relationships","detail":"customers.customer_id"}]},{"name":"gift_card_amount","description":"Amount of the order (AUD) paid for by gift card","tests":[{"name":"not null"}]},{"name":"order_date","description":"Date (UTC) that the order was placed"},{"name":"order_id","description":"This is a unique identifier for an order","tests":[{"name":"not null"},{"name":"unique"}]},{"name":"status","description":"Orders can be one of the following statuses:\n\n| status         | description                                                                                                            |\n|----------------|------------------------------------------------------------------------------------------------------------------------|\n| placed         | The order has been placed but has not yet left the warehouse                                                           |\n| shipped        | The order has been shipped to the customer and is currently in transit                                                 |\n| completed      | The order has been received by the customer                                                                            |\n| return_pending | The customer has indicated that they would like to return the order, but it has not yet been received at the warehouse |\n| returned       | The order has been returned by the customer and received at the warehouse                                              |","tests":[{"name":"accepted values","values":["placed","shipped","completed","return_pending","returned"]}]}]},"orders_never_refunded":{"description":"Orders that were never refunded — the \u003ccol> NOT IN (SELECT …) membership anti-join idiom (cute-dbt#196 subquery evidence family).\n","materialized":"table","columns":[{"name":"customer_id","description":"Customer who placed the order."},{"name":"order_date","description":"Date the order was placed."},{"name":"order_id","description":"Order identifier (natural key of the kept rows)."},{"name":"status","description":"Order status."}]},"stg_customers":{"materialized":"view","columns":[{"name":"customer_id","description":"Unique identifier for a customer (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]}]},"stg_orders":{"materialized":"view","columns":[{"name":"order_id","description":"Unique identifier for an order (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]},{"name":"status","description":"Order lifecycle status as exported from the app","tests":[{"name":"accepted values","values":["placed","shipped","completed","return_pending","returned"]}]}]},"stg_payments":{"materialized":"view","columns":[{"name":"payment_id","description":"Unique identifier for a payment (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]},{"name":"payment_method","description":"Payment instrument used for this payment","tests":[{"name":"accepted values","values":["credit_card","coupon","bank_transfer","gift_card"]}]}]},"stg_refunds":{"materialized":"view","columns":[{"name":"amount","description":"Refunded amount in dollars (negative)"},{"name":"order_id","description":"Order the refund applies to"},{"name":"refund_id","description":"Unique identifier for a refund event (staging grain)","tests":[{"name":"not null"},{"name":"unique"}]}]}},"check_specs":{"grain.unique-key-unbacked":{"name":"Unique key without a uniqueness test","group":"grain","tier":"total","instrument":"data-test","conditions":["the model declares config.unique_key (a column name or a list of columns)","no enabled uniqueness data test (unique, or a composite unique_combination_of_columns) attached to the model has a column set that is a subset of the declared key","a covering test whose own config weakens the guarantee — severity: warn, a where row filter, or a limit cap — still attributes, marked as DEGRADED backing with every cause enumerated on the finding (in-row honesty: a cue beside the attribution, never a fourth verdict, never a percentage)","when no enabled generic uniqueness test covers the key but an enabled singular (SQL-file) test references the model through depends_on, the verdict degrades to UNKNOWN — a singular test may assert the declared grain, but its SQL is not statically classifiable (never a false Uncovered nag on singular-test shops)","a uniqueness test on the declared grain that exists but is disabled — config.enabled: false on a nodes-map test, or a generic-test entry in the manifest disabled map — never counts as coverage and surfaces as `exists but disabled` evidence, distinct from absent"],"exclusions":["a unique_key value that is not a literal column name / list of column names is reported UNKNOWN, never UNCOVERED (the declared grain is not statically recoverable)","a uniqueness test whose column set is WIDER than the key does not satisfy the check (uniqueness of a superset does not imply uniqueness at the declared grain)","a disabled SINGULAR test (and every non-generic-test disabled-map entry) carries no statically recoverable model linkage — both engines empty depends_on and omit attached_node on disabled nodes — so it is never attributed and never surfaced here"],"rationale":"Incremental merge / delete+insert semantics silently depend on the declared unique_key actually being unique — a duplicate key corrupts the merge with no test to catch it. Declaring a grain without a test at that grain is an unverified load-bearing assumption.","book_href":"https://breezy-bays-labs.github.io/cute-dbt/checks/grain.unique-key-unbacked.html"},"incremental.branch-coverage":{"name":"Unexercised is_incremental() branch","group":"incremental","tier":"high","instrument":"unit-test","conditions":["the model is materialized incremental (config.materialized = \"incremental\") — its body forks on is_incremental(), and a dbt unit test compiles exactly one side of that fork","a unit test with overrides.macros.is_incremental = true exercises the incremental branch; an explicit false override OR no override at all exercises the initial full-build branch (dbt compiles is_incremental() as false in unit tests by default)","branch coverage rolls up per model as none / false-only / true-only / both; only BOTH satisfies the construct, attributing every unit test on the model (each test compiles one side of the fork)","the HIGH-tier cue boundary (the union.arm-coverage precedent): a test on a branch proves that branch's compiled SQL runs under fixtures — whether the branch's filter/merge semantics are meaningfully asserted, or whether the body's Jinja even calls is_incremental(), is not statically decidable from the manifest, so the recommendation is a cue, never an assertion of a bug"],"exclusions":["models whose materialization is absent, non-string, or anything other than incremental (view, table, ephemeral, custom) emit no finding — when the fork provably cannot exist or cannot be statically known, the check is silent, never misclassifies","microbatch-strategy models (incremental_strategy = \"microbatch\", or any non-null event_time config) are OUT of rule #1: dbt replays them through event-time batch windows, not the is_incremental() fork, so true/false override coverage does not describe their semantics — never classified","a non-boolean is_incremental override collapses to the no-override default at ingestion (cute-dbt#145 tolerant truthiness) and counts toward the full-build branch — the conservative side of the cue"],"rationale":"An incremental model is two programs in one body: the initial full build, and the incremental run that filters on the high-water mark and merges by key. Each unit test compiles only one of them, so a suite living entirely on one branch ships the other untested — exactly where incremental models silently drop, duplicate, or re-process rows.","book_href":"https://breezy-bays-labs.github.io/cute-dbt/checks/incremental.branch-coverage.html"},"join.anti-join":{"name":"Anti-join exclusion untested","group":"join","tier":"high","instrument":"unit-test","conditions":["the model LEFT-JOINs a relation and filters `WHERE \u003cright>.\u003ckey> IS NULL` in a top-level AND conjunct, where `\u003ckey>` is one of the join's ON equi-key right columns — the anti-join idiom: the join deliberately keeps the UNMATCHED left rows","OR the model filters `WHERE NOT EXISTS (SELECT … FROM \u003cinner> WHERE …)` in a top-level AND conjunct, the inner being a single plain named relation whose WHERE carries a correlated reference to the outer query — the resolvable outer↔inner equi-conjuncts are the anti-join keys (cute-dbt#196)","OR the model filters `WHERE \u003ccol> NOT IN (SELECT \u003ccol> FROM \u003cinner>)` in a top-level AND conjunct, the inner being a single plain named relation projecting exactly one column — the membership pair (outer column ↔ inner projected column) is the anti-join key (cute-dbt#196). SQL honesty note: a NULL in the inner column makes NOT IN yield NO rows at all; detection still treats the construct as the anti-join idiom (that is how it is authored), and the matched-row fixture this check recommends is exactly what surfaces the NULL trap","the recommendation INVERTS join.left-null-propagation's: the anti-join's risk is the matched class leaking through, so the missing fixture is a left row that DOES match a right row, with `expect` proving it is excluded","satisfaction (all arms): some unit test's literal givens carry a left/outer row whose key matches an inner/right given row (both cells non-NULL, equal on the value-normalized key)","supersedes join.left-null-propagation on the same construct: NULL right-side columns are the anti-join's working mechanism, not an untested gap (the subquery constructs are never enumerated by left-null-propagation at all)","given binding follows the union.arm-coverage premise: only `given` entries carry statically-visible rows — an ungiven non-seed input is an empty mock; join sides bind directly by external leaf name or through a single-external simple-FROM closure"],"exclusions":["negated subqueries anywhere but a top-level AND conjunct of a SELECT's WHERE (OR branches, HAVING, JOIN ON, projections) are NOT detected — different semantics or position, silent, never misclassified","non-negated EXISTS / IN subqueries (semi-join and membership inclusion — future evidence consumers) and scalar subqueries are NOT detected","a NOT EXISTS / NOT IN whose inner is a derived table, joins or reads several relations, or carries its own WITH clause is NOT detected; an uncorrelated NOT EXISTS (zero outer references) is not a keyed anti-join — silent","expression (non-column) correlations and projections are not key material: a correlated NOT EXISTS with no resolvable equi pair, and a NOT IN whose outer column does not resolve to a single relation, degrade to UNKNOWN, never UNCOVERED","an IS NULL on a non-key right column is a data filter, not the anti-join idiom — join.left-null-propagation governs that construct","an IS NULL inside an OR branch has different semantics and is never treated as the anti-join filter","unrecoverable join keys, unresolvable side bindings, external `fixture:` files, non-literal `format: sql` givens, and ungiven seed inputs degrade to UNKNOWN, never UNCOVERED"],"rationale":"An anti-join's output is defined by what it excludes. Every existing given that only carries unmatched rows proves the keep path, never the exclusion: if the ON key drifts or the IS NULL column changes, matched rows leak into the output and no test catches it.","book_href":"https://breezy-bays-labs.github.io/cute-dbt/checks/join.anti-join.html"},"join.left-null-propagation":{"name":"LEFT JOIN null propagation untested","group":"join","tier":"high","instrument":"both","conditions":["the model LEFT-JOINs a relation and right-side columns provably reach the containing SELECT's projection: a direct `\u003cright>.\u003ccolumn>` item, a `\u003cright>.*` qualified wildcard, or a bare `*`","satisfaction: some unit test's literal givens carry a left-side row whose ON equi-key has no match among the right-side given rows — cells compare on the value-normalized equality key, and a left row whose key cell is NULL or absent never matches (SQL join semantics), so it exercises the no-match path","given binding follows the union.arm-coverage premise: only `given` entries carry statically-visible rows — an ungiven non-seed input is an empty mock; join sides bind to givens directly by external leaf name or through an upstream closure of simple-FROM CTEs reading exactly one external relation","instrument routing (catalog C4/C10): when the SELECT containing the LEFT JOIN dedups its output with DISTINCT — the dedup-after-fan-out signal — the data-test recommendation wins: prove the right key's grain with a uniqueness data test at the source instead of adding fixtures","verdict order: any test exercising an unmatched left row makes the construct COVERED with attribution; otherwise any statically-unattributable binding or given makes it UNKNOWN; otherwise UNCOVERED"],"exclusions":["right-side columns reaching the output only through expressions (COALESCE, CASE, function calls) are not attributed — the construct stays silent unless a direct right-qualified item or wildcard projects (conservative: never a false fire)","non-equi or non-column ON predicates, USING / NATURAL constraints, and unqualified key columns leave the join key statically unrecoverable — verdict UNKNOWN, never UNCOVERED","a derived-table join side emits no fact; a CTE side whose upstream closure is not a single-external chain of simple-FROM CTEs is UNKNOWN, never UNCOVERED","external `fixture:` files and non-literal `format: sql` givens make a test statically uncountable — UNKNOWN, never UNCOVERED","an ungiven seed-side input reads real seed data — UNKNOWN, never UNCOVERED"],"rationale":"A LEFT JOIN whose right-side columns reach the output propagates NULLs on every unmatched left row — the most common real dbt unit-test catch. When every left given row has a right match, the no-match path runs on zero rows in every test, so an unhandled NULL (or a wrong fallback) ships silently.","book_href":"https://breezy-bays-labs.github.io/cute-dbt/checks/join.left-null-propagation.html"},"union.arm-coverage":{"name":"Unexercised UNION arm","group":"union","tier":"high","instrument":"unit-test","conditions":["the model's body (or a CTE within it) UNIONs arms the CTE engine resolved to union-typed edges — each checked arm is a join-free reference to an earlier CTE (`UnionAll` / `UnionDistinct`)","an arm counts as exercised when at least one unit-test given with one or more in-manifest rows binds — by `ref(...)` / `source(...)` leaf name, case-insensitive — to any external relation in the arm's upstream CTE closure","a given bound to a relation shared by several arms exercises every arm whose closure reads it: its rows provably enter each arm's scan, while per-arm filter survival is deliberately out of scope (no predicate evaluation) — the HIGH-tier cue boundary, never an assertion of output-level coverage","verdict order: any provably-unfed arm makes the construct UNCOVERED; otherwise any statically-unattributable arm makes it UNKNOWN; otherwise COVERED, attributing every test that feeds an arm"],"exclusions":["arms that are not a join-free reference to an earlier CTE (join chains, derived tables, arms reading external tables directly, EXCEPT/INTERSECT arms) emit no union edge and are invisible to this check — never counted, never reported","an arm whose upstream closure reads no resolvable external relation (constant SELECT, table functions) makes the construct UNKNOWN, never UNCOVERED","an arm fed only by external-fixture or non-literal-sql givens (row counts not statically recoverable) makes the construct UNKNOWN, never UNCOVERED","an arm whose only unbound feeding relation resolves to a seed is UNKNOWN, never UNCOVERED, when the model has unit tests (dbt lets seed inputs go ungiven and reads the real seed file)","`this` givens (incremental prior state) never feed a union arm"],"rationale":"A UNION arm with no fixture rows contributes nothing to any unit test: its projection, casts, and filters run on zero rows, so a column mix-up or a dropped row in that arm ships silently. One given row per arm makes every branch's contribution visible in the expected output.","book_href":"https://breezy-bays-labs.github.io/cute-dbt/checks/union.arm-coverage.html"}}}</script>
+<script>
+
+/* cute-dbt shared appearance engine v1 (cute-dbt#242)
+   ----------------------------------------------------------------------------
+   The cross-page-family half of the appearance system, re-layered out of
+   templates/theme.js at cute-dbt#242: reads the persisted appearance
+   (localStorage key cute-dbt.appearance.v1, graceful in-memory fallback),
+   resolves the prefers-color-scheme default, and applies the html-level
+   hooks the shared token partial (templates/partials/tokens.css) keys on:
+   [data-theme] + the html.dark family class (the DataTables dark sync),
+   [data-style], [data-density], [data-difflayout], [data-coverage],
+   [data-project] and the accent custom-property overrides. Embedded into BOTH page families —
+   report.html (where templates/theme.js layers the settings UI on top via
+   window.CuteAppearance) and explore-dag.html / explore-tests.html (which
+   apply the saved appearance read-only; the explore-side settings
+   affordance is cute-dbt#219's lane). Plain vanilla ES5, no framework,
+   zero egress.
+
+   Application happens at PARSE TIME (the script sits at the end of <body>;
+   documentElement already exists), so the attributes are in place before
+   any DOMContentLoaded boot — including the report's interaction engine
+   and theme.js's control sync.
+
+   Attributes without matching rules on a page are deliberately applied
+   anyway ([data-difflayout] / [data-coverage] / [data-project] are inert
+   on the explore pages today): ONE attribute contract across page
+   families, so pages
+   adopt new surfaces without touching this engine. The `engine` field
+   (the report's Mermaid <-> Cytoscape DAG pick) is persisted state only
+   here — applying it is report-specific (theme.js applyEngine).
+
+   First-party, NOT vendored: this file lives at templates/appearance.js,
+   embedded at compile time via asset_embed::APPEARANCE_JS (include_str!)
+   and interpolated inline by the askama renderers. Banner-pin +
+   end-of-file-sentinel tests in src/adapters/asset_embed.rs guard the
+   include. */
+(function () {
+  "use strict";
+
+  // The eight [data-theme] packs the token partial ships
+  // (templates/partials/tokens.css), light family first (design pass-2,
+  // cute-dbt#198) — kept in lockstep with the report's static theme grid.
+  // `dark` drives the html.dark class DataTables' vendored dark rules key on.
+  var THEMES = [
+    { id: "light",     dark: false },
+    { id: "solarized", dark: false },
+    { id: "latte",     dark: false },
+    { id: "rosepine",  dark: false },
+    { id: "dark",      dark: true  },
+    { id: "tokyo",     dark: true  },
+    { id: "gruvbox",   dark: true  },
+    { id: "dracula",   dark: true  }
+  ];
+
+  // Accent palettes: value / hover / tint triples applied as inline custom
+  // properties on <html>. "theme" = remove the override (the active theme's
+  // own accent shows through).
+  var ACCENTS = [
+    { id: "theme" },
+    { id: "teal",   v: "#1d7484", h: "#155c69", t: "#e3f0f2" },
+    { id: "blue",   v: "#2a6fdb", h: "#1f57b0", t: "#e6eefb" },
+    { id: "violet", v: "#7c3aed", h: "#6027c4", t: "#efe8fd" },
+    { id: "green",  v: "#1f8a5b", h: "#176d47", t: "#e2f3ec" },
+    { id: "amber",  v: "#b45c0c", h: "#8f4708", t: "#fbeede" }
+  ];
+
+  // The public localStorage key for the appearance state — a stable consumer
+  // contract (cute-dbt#178 AC3), not a credential. Cross-page since #242:
+  // every cute-dbt page family reads + applies this same key.
+  var KEY = "cute-dbt.appearance.v1"; // gitleaks:allow — a public storage key name, no secret
+  // `engine` (cute-dbt#180) is the DAG-engine picker: "mermaid" (the static
+  // default) or "cytoscape" (the opt-in interactive engine).
+  // `coverage` (cute-dbt#219) is the viewer-side coverage-intelligence
+  // display toggle: "off" (the default since cute-dbt#292 — the settings
+  // panel's Experimental group; the field may be absent) or the explicit
+  // opt-in "on". The CROSS-PAGE contract: any cute-dbt page that renders
+  // check-engine-derived content reads this same field — the report keys
+  // one CSS rule on html[data-coverage=off]; the explorer pages adopt it
+  // as #103/#104 land.
+  // `project` (cute-dbt#292) is the viewer-side project-state display
+  // toggle: "on" (default; the field may be absent) or "off". Emission is
+  // already opt-in at render time (the cute-dbt#291 experimental gate), so
+  // the viewer default SHOWS what the producer chose to emit; the report
+  // keys CSS rules on html[data-project=off].
+  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", difflayout: "auto", engine: "mermaid", coverage: "off", project: "on" };
+
+  // Read the persisted appearance, string-typed keys only. Any storage error
+  // (file:// SecurityError, disabled storage) leaves the defaults intact.
+  function load() {
+    var raw;
+    try { raw = window.localStorage && window.localStorage.getItem(KEY); } catch (e) { raw = null; }
+    if (!raw) return;
+    try {
+      var p = JSON.parse(raw);
+      if (p && typeof p === "object") {
+        ["theme", "style", "accent", "density", "difflayout", "engine", "coverage", "project"].forEach(function (k) {
+          if (typeof p[k] === "string") pref[k] = p[k];
+        });
+      }
+    } catch (e) { /* ignore — defaults hold */ }
+    // Coerce the engine into its closed vocabulary — an unknown persisted
+    // value must fall back to the static default, never reach the dispatcher.
+    if (pref.engine !== "cytoscape") pref.engine = "mermaid";
+    // Same closed-vocabulary coercion for the coverage toggle (cute-dbt#219;
+    // default flipped OFF at cute-dbt#292): anything but the explicit "on"
+    // reads as the default OFF.
+    if (pref.coverage !== "on") pref.coverage = "off";
+    // And for the project-state display toggle (cute-dbt#292): anything but
+    // the explicit "off" reads as the default ON — emission is already
+    // opt-in at render time (cute-dbt#291).
+    if (pref.project !== "off") pref.project = "on";
+  }
+  // Persist the current appearance. Swallows any storage error (zero-egress
+  // in-memory fallback, mirrors interaction.js saveSettings).
+  function save() {
+    try { if (window.localStorage) window.localStorage.setItem(KEY, JSON.stringify(pref)); } catch (e) { /* in-memory only */ }
+  }
+
+  var root = document.documentElement;
+
+  function themeById(id) {
+    for (var i = 0; i < THEMES.length; i++) if (THEMES[i].id === id) return THEMES[i];
+    return THEMES[0];
+  }
+
+  function applyTheme(id) {
+    var t = themeById(id);
+    root.setAttribute("data-theme", t.id);
+    root.classList.toggle("dark", t.dark); // DataTables dark rules follow html.dark
+    pref.theme = t.id;
+  }
+  function applyAccent(id) {
+    var a = null;
+    for (var i = 0; i < ACCENTS.length; i++) if (ACCENTS[i].id === id) a = ACCENTS[i];
+    if (!a || a.id === "theme") {
+      root.style.removeProperty("--accent");
+      root.style.removeProperty("--accent-hover");
+      root.style.removeProperty("--accent-tint");
+      pref.accent = "theme";
+    } else {
+      root.style.setProperty("--accent", a.v);
+      root.style.setProperty("--accent-hover", a.h);
+      root.style.setProperty("--accent-tint", a.t);
+      pref.accent = a.id;
+    }
+  }
+  function applyDensity(d) {
+    if (d === "auto") root.removeAttribute("data-density");
+    else root.setAttribute("data-density", d);
+    pref.density = d;
+  }
+  function applyDiffLayout(v) {
+    root.setAttribute("data-difflayout", v);
+    pref.difflayout = v;
+  }
+  function applyStyle(s) {
+    root.setAttribute("data-style", s);
+    pref.style = s;
+  }
+  // cute-dbt#219 — the coverage-intelligence display toggle. PURE display:
+  // OFF sets html[data-coverage=off] (one CSS rule hides every
+  // check-engine-derived surface); ON removes the attribute and the
+  // already-rendered content shows again — no re-render, payload untouched.
+  // Default OFF since cute-dbt#292 (the Experimental settings group), so an
+  // unknown value reads as OFF.
+  function applyCoverage(v) {
+    var coverage = v === "on" ? "on" : "off";
+    if (coverage === "off") root.setAttribute("data-coverage", "off");
+    else root.removeAttribute("data-coverage");
+    pref.coverage = coverage;
+  }
+  // cute-dbt#292 — the project-state display toggle, the applyCoverage
+  // twin with the OPPOSITE default polarity (emission is already opt-in at
+  // render time, so an unknown value reads as ON): OFF sets
+  // html[data-project=off] — CSS hides the project-definition panel and the
+  // per-model provenance/var chips; ON removes the attribute. PURE display:
+  // no re-render, payload untouched.
+  function applyProject(v) {
+    var project = v === "off" ? "off" : "on";
+    if (project === "off") root.setAttribute("data-project", "off");
+    else root.removeAttribute("data-project");
+    pref.project = project;
+  }
+
+  // ---- boot: load, resolve the default theme, apply everything ----------
+  load();
+  // Default theme: saved -> prefers-color-scheme -> light.
+  if (!pref.theme) {
+    pref.theme = (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
+  }
+  applyStyle(pref.style);
+  applyTheme(pref.theme);
+  applyAccent(pref.accent);
+  applyDensity(pref.density);
+  applyDiffLayout(pref.difflayout);
+  applyCoverage(pref.coverage);
+  applyProject(pref.project);
+
+  // The page-facing seam: templates/theme.js (the report's settings UI)
+  // drives the engine through this object — `pref` is the ONE live state
+  // (shared by reference; apply* mutate it, save() persists it).
+  window.CuteAppearance = {
+    key: KEY,
+    pref: pref,
+    save: save,
+    applyTheme: applyTheme,
+    applyStyle: applyStyle,
+    applyAccent: applyAccent,
+    applyDensity: applyDensity,
+    applyDiffLayout: applyDiffLayout,
+    applyCoverage: applyCoverage,
+    applyProject: applyProject
+  };
+})();
+/* end of cute-dbt shared appearance engine v1 (cute-dbt#242) */
+
+</script>
+<script>
+
+/* cute-dbt explore tests viewer v1 (cute-dbt#102)
+   ----------------------------------------------------------------------------
+   The unit-test viewer on explore's tests.html: renders the selected
+   test's description, badges, given fixtures and expected table into the
+   SHARED test-card partial (templates/partials/test-card.html — the same
+   markup report.html renders), reading the embedded `cute-dbt-data`
+   ReportPayload (the build_payload reuse seam).
+
+   Deliberately a LIGHT sibling of the report's interaction engine, not a
+   copy: no jQuery, no DataTables, no diff toggles (explore is
+   full-manifest — there is no changed-set and no PR diff to tint), no
+   Mermaid/Cytoscape. The Current-view fixture grids render the SAME
+   Rust-computed FixtureTable POD ({display, key} cells, cute-dbt#138)
+   the report renders, so the two surfaces cannot drift on cell
+   semantics.
+
+   Affordances:
+   - the test selector (the partial's #test-select) lists every unit
+     test, optgrouped by model;
+   - each index row's test-name button (data-test-id) selects that test
+     in the viewer;
+   - NULL / absent cells keep the report's vocabulary (.cell-null /
+     .cell-absent); sql-format fixtures render as a code block; external
+     fixture files surface the provenance note instead of a silently
+     empty grid (the cute-dbt#126 contract).
+
+   DOM discipline: every dynamic string lands via createElement +
+   textContent — never an HTML-string sink (the asset_embed banner test
+   pins this). First-party, NOT vendored: lives at templates/explore-tests.js,
+   embedded via asset_embed::EXPLORE_TESTS_JS (include_str!). Banner-pin
+   + end-of-file-sentinel tests guard the include. */
+(function () {
+  "use strict";
+
+  var carrier = document.getElementById("cute-dbt-data");
+  var viewer = document.querySelector(".explore-viewer");
+  var select = document.getElementById("test-select");
+  if (!carrier || !viewer || !select) return;
+  var data = JSON.parse(carrier.textContent);
+
+  // Flat id -> {model, test} index over the payload (prototype-less so a
+  // hostile test id can never collide with a built-in property).
+  var byId = Object.create(null);
+  var total = 0;
+  (data.models || []).forEach(function (m) {
+    (m.tests || []).forEach(function (t) {
+      byId[t.id] = { model: m, test: t };
+      total += 1;
+    });
+  });
+  if (!total) {
+    viewer.hidden = true;
+    return;
+  }
+
+  // ---- tiny DOM helpers (textContent only) --------------------------------
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function clear(node) {
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  function rowsText(n) {
+    return n + " row" + (n === 1 ? "" : "s");
+  }
+
+  // ---- fixture-shape predicates (the interaction.js vocabulary) -----------
+  function isSqlCodeBlock(obj) {
+    return Boolean(obj && obj.format === "sql" && typeof obj.rows === "string");
+  }
+
+  function isExternalFixture(obj) {
+    return Boolean(obj && obj.fixture && (obj.rows === null || obj.rows === undefined));
+  }
+
+  function isLoadedExternalFixture(obj) {
+    return Boolean(obj && obj.fixture && obj.rows !== null && obj.rows !== undefined);
+  }
+
+  function provenanceChip(name) {
+    var chip = el("span", "fixture-provenance", "from ");
+    chip.appendChild(el("code", "", String(name)));
+    return chip;
+  }
+
+  function externalNote(name) {
+    var box = el("div", "given-empty external-fixture-note",
+      "data in external fixture file: ");
+    box.appendChild(el("code", "", String(name)));
+    return box;
+  }
+
+  function sqlBlock(text) {
+    var pre = el("pre", "sql-block");
+    pre.appendChild(el("code", "", String(text)));
+    return pre;
+  }
+
+  // ---- the Current-view grid off the Rust FixtureTable POD ----------------
+  function cellTd(cell) {
+    var td = document.createElement("td");
+    var key = cell && cell.key;
+    if (!key || key.t === "null") {
+      td.className = "cell-null";
+      td.textContent = "NULL";
+      return td;
+    }
+    if (key.t === "absent") {
+      td.className = "cell-absent";
+      return td;
+    }
+    if (key.t === "number") td.className = "cell-num";
+    td.textContent = cell.display;
+    return td;
+  }
+
+  function buildTable(table, cls) {
+    var tbl = el("table", cls);
+    var thead = document.createElement("thead");
+    var hr = document.createElement("tr");
+    (table.columns || []).forEach(function (c) {
+      hr.appendChild(el("th", "", c));
+    });
+    thead.appendChild(hr);
+    tbl.appendChild(thead);
+    var tbody = document.createElement("tbody");
+    (table.rows || []).forEach(function (r) {
+      var tr = document.createElement("tr");
+      (r.cells || []).forEach(function (cell) {
+        tr.appendChild(cellTd(cell));
+      });
+      tbody.appendChild(tr);
+    });
+    tbl.appendChild(tbody);
+    return tbl;
+  }
+
+  // ---- per-test render -----------------------------------------------------
+  function renderGiven(g) {
+    var sec = el("section", "given-section");
+    var hdr = el("div", "table-header");
+    hdr.appendChild(el("h4", "table-title", "given · " + g.input));
+    if (g.is_this) hdr.appendChild(el("span", "this-badge", "prior model state"));
+    if (isLoadedExternalFixture(g)) hdr.appendChild(provenanceChip(g.fixture));
+    if (isSqlCodeBlock(g)) {
+      hdr.appendChild(el("span", "format-badge", "format: sql"));
+      sec.appendChild(hdr);
+      sec.appendChild(sqlBlock(g.rows));
+      return sec;
+    }
+    if (isExternalFixture(g)) {
+      if (g.format) hdr.appendChild(el("span", "format-badge", "format: " + g.format));
+      sec.appendChild(hdr);
+      sec.appendChild(externalNote(g.fixture));
+      return sec;
+    }
+    var table = g.table || { columns: [], rows: [] };
+    if (g.format && g.format !== "dict") {
+      hdr.appendChild(el("span", "format-badge", "format: " + g.format));
+    }
+    hdr.appendChild(el("span", "row-count-badge", rowsText(table.rows.length)));
+    sec.appendChild(hdr);
+    sec.appendChild(buildTable(table, "given-table"));
+    return sec;
+  }
+
+  function renderExpected(t) {
+    var body = document.querySelector(".expected-body");
+    var rowcount = document.querySelector(".expected-rowcount");
+    clear(body);
+    if (isLoadedExternalFixture(t.expected)) {
+      body.appendChild(provenanceChip(t.expected.fixture));
+    }
+    if (isSqlCodeBlock(t.expected)) {
+      rowcount.textContent = "format: sql";
+      body.appendChild(sqlBlock(t.expected.rows));
+      return;
+    }
+    if (isExternalFixture(t.expected)) {
+      rowcount.textContent = "external fixture";
+      body.appendChild(externalNote(t.expected.fixture));
+      return;
+    }
+    var table = (t.expected && t.expected.table) || { columns: [], rows: [] };
+    rowcount.textContent = rowsText(table.rows.length);
+    body.appendChild(buildTable(table, "expected-table"));
+  }
+
+  function renderTest(t) {
+    // Description (the partial's hidden-when-absent contract).
+    var desc = document.querySelector(".test-description");
+    if (t.description) {
+      desc.textContent = t.description;
+      desc.hidden = false;
+    } else {
+      desc.textContent = "";
+      desc.hidden = true;
+    }
+    // Badges: tag chips (kept light — explore has no diff badges).
+    var badges = document.querySelector(".test-badges");
+    clear(badges);
+    (t.tags || []).forEach(function (tag) {
+      badges.appendChild(el("span", "tag-badge", tag));
+    });
+    // Details body: where the test was authored.
+    var details = document.querySelector(".test-details-body");
+    clear(details);
+    if (t.defined_in) {
+      var p = el("p", "test-defined-in", "defined in ");
+      p.appendChild(el("code", "", t.defined_in));
+      details.appendChild(p);
+    }
+    // Given panel.
+    var givenWrap = document.querySelector(".left-panel-body");
+    clear(givenWrap);
+    if (!t.given || !t.given.length) {
+      givenWrap.appendChild(el("div", "empty-hint", "No fixtures defined for this test."));
+    } else {
+      t.given.forEach(function (g) { givenWrap.appendChild(renderGiven(g)); });
+    }
+    // Expected panel.
+    renderExpected(t);
+  }
+
+  function selectTest(id) {
+    var entry = byId[id];
+    if (!entry) return;
+    if (select.value !== id) select.value = id;
+    renderTest(entry.test);
+  }
+
+  // ---- selector population + wiring ----------------------------------------
+  (data.models || []).forEach(function (m) {
+    if (!m.tests || !m.tests.length) return;
+    var og = document.createElement("optgroup");
+    og.label = m.name;
+    m.tests.forEach(function (t) {
+      var opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = t.name;
+      og.appendChild(opt);
+    });
+    select.appendChild(og);
+  });
+
+  select.addEventListener("change", function () { selectTest(select.value); });
+
+  // Index rows: each test-name button jumps the viewer to its test.
+  Array.prototype.forEach.call(
+    document.querySelectorAll(".test-jump[data-test-id]"),
+    function (btn) {
+      btn.addEventListener("click", function () {
+        selectTest(btn.getAttribute("data-test-id"));
+        if (viewer.scrollIntoView) viewer.scrollIntoView({ block: "start" });
+      });
+    }
+  );
+
+  // Boot: the first test in payload order.
+  selectTest(select.value);
+})();
+/* end of cute-dbt explore tests viewer v1 (cute-dbt#102) */
+
+</script>
+</body>
+</html>
