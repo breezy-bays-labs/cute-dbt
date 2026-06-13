@@ -1132,7 +1132,7 @@ fn resolve_report_strings(args: &ReportArgs) -> (String, Option<String>) {
 /// flags over the `[pr]` config section (the CLI-over-TOML precedence the
 /// `[experimental] macro_body_cap` knob already follows). Each flag, when
 /// supplied, overrides the matching config key; the merged
-/// [`PrConfig`](crate::domain::PrConfig) is then
+/// [`PrConfig`] is then
 /// [`resolve`](crate::domain::PrConfig::resolve)d — yielding `Some` only
 /// when both a url and a title are present (graceful degradation otherwise).
 ///
