@@ -4781,6 +4781,7 @@ fn render_with_external_fixtures(
         None,
         &cute_dbt::domain::CheckPolicy::default(),
         &cute_dbt::domain::ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -7394,6 +7395,7 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
         None,
         &policy,
         &cute_dbt::domain::ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -7963,6 +7965,7 @@ fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
         None,
         &policy,
         &cute_dbt::domain::ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -12100,6 +12103,7 @@ fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
         None,
         &cute_dbt::domain::CheckPolicy::default(),
         facts,
+        &cute_dbt::domain::GovernanceFacts::default(),
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -12303,6 +12307,94 @@ fn project_panel_renders_categorized_on_the_committed_showcase() {
     assert_eq!(
         chip, "+materialized via dbt_project.yml · models.healthcare_analytics.marts",
         "the chip names the contributing subtree",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn governance_group_chip_renders_on_the_committed_showcase_in_a_real_browser() {
+    // cute-dbt#260 Slice 0 — the headless guard: the committed
+    // diff-showcase golden sets experimental:"1" (every experiment), so
+    // the grouped playground model (dim_payers → group clinical_quality)
+    // surfaces the governance group/owner chip. Assert it's in the real
+    // DOM (the chip is server-rendered static markup, but this proves it
+    // survives in a live browser with the full asset bundle loaded).
+    let showcase = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("diff-showcase-report.html");
+    let url = format!("file://{}", showcase.to_str().expect("UTF-8 path"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"governance-panel\"]"),
+        1,
+        "the experimental:\"1\" showcase renders exactly one governance panel",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"gov-group-chip\"]"),
+        1,
+        "the grouped in-scope model surfaces exactly one group chip",
+    );
+    let chip = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"gov-group-chip\"]').textContent",
+    );
+    assert!(
+        chip.contains("group clinical_quality"),
+        "the chip names the governance group: {chip}",
+    );
+    assert!(
+        chip.contains("owner Clinical Quality Team"),
+        "the chip names the group owner: {chip}",
+    );
+    assert!(
+        chip.contains("clinical-quality@example.com"),
+        "the chip carries the owner email: {chip}",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn governance_chip_absent_on_the_non_experimental_golden_in_a_real_browser() {
+    // cute-dbt#260 Slice 0 — the gating proof: the committed
+    // playground-report.html golden is experimental:"" (governance OFF),
+    // so the empty payload renders ZERO governance DOM. The chip must be
+    // absent from the real browser DOM, not merely hidden.
+    let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("playground-report.html");
+    let url = format!("file://{}", golden.to_str().expect("UTF-8 path"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    let panel_count = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"governance-panel\"]').length",
+    );
+    assert_eq!(
+        panel_count.as_i64(),
+        Some(0),
+        "the experimental:\"\" golden carries no governance DOM at all",
+    );
+    let chip_count = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"gov-group-chip\"]').length",
+    );
+    assert_eq!(
+        chip_count.as_i64(),
+        Some(0),
+        "no group chip in the DOM when governance is off",
     );
     let _ = tab.close(true);
 }

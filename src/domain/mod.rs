@@ -41,6 +41,7 @@ pub mod checks;
 pub mod config;
 pub mod cte;
 pub mod experimental;
+pub mod governance;
 pub mod grain;
 pub mod manifest;
 pub mod model_yaml;
@@ -79,6 +80,7 @@ pub use experimental::{
     EnabledExperiments, Experiment, ExperimentalConfig, ExperimentalError, parse_experimental_env,
     resolve_experimental_config,
 };
+pub use governance::{GovernanceFacts, GroupChip, gather_governance};
 pub use grain::{GrainKind, GrainSignal, model_grain_signals, test_is_enabled};
 pub use manifest::{
     Checksum, ColumnFacts, Constraint, ConstraintKind, DependsOn, DisabledEntry, Exposure, Group,
