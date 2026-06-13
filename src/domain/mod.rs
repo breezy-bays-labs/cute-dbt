@@ -89,7 +89,10 @@ pub use governance::{
     exposures_reachable_from, gather_governance,
 };
 pub use grain::{GrainKind, GrainSignal, model_grain_signals, test_is_enabled};
-pub use macro_lens::{changed_macros_baseline, changed_macros_pr_diff, macro_blast_radius};
+pub use macro_lens::{
+    MacroFocusSet, changed_macros_baseline, changed_macros_pr_diff, macro_blast_radius,
+    macro_focus_set,
+};
 pub use manifest::{
     Checksum, ColumnFacts, Constraint, ConstraintKind, DependsOn, DisabledEntry, Exposure, Group,
     MacroIdentity, Manifest, ManifestMetadata, Node, NodeConfig, NodeId, Owner, SourceNode,

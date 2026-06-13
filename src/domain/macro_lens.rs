@@ -59,6 +59,9 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use serde::Serialize;
+
+use crate::domain::governance::downstream_node_closure;
 use crate::domain::manifest::{Manifest, NodeId};
 use crate::domain::pr_diff::NormalizedDiffIndex;
 
@@ -100,6 +103,67 @@ pub fn macro_blast_radius(manifest: &Manifest, changed_macro_id: &str) -> BTreeS
         })
         .map(|(id, _)| id.clone())
         .collect()
+}
+
+/// The focused node set for the explore macro DAG (cute-dbt#345) — the
+/// macro-calling models (`users`) and everything reached **downstream**
+/// of them (`downstream`), as two **disjoint, owned** id sets.
+///
+/// - `users` = [`macro_blast_radius`] — the root-project **models** whose
+///   `depends_on.macros` closure contains the changed macro M. These are
+///   the seed and the emphasized nodes on the page.
+/// - `downstream` = the transitive `ref()`-downstream closure of `users`
+///   (reverse `depends_on.nodes`), **minus `users`**. It crosses every
+///   consumer node type — models, snapshots, seeds, tests — and folds in
+///   the exposures that consume a reached node, so it is the complete
+///   lineage-DAG vertex set the macro page renders, with `users`
+///   subtracted out so the two roles never overlap.
+///
+/// `users` and `downstream` are **disjoint** by construction
+/// (`downstream = closure − users`), so the renderer tags each node's
+/// role (`"user"` vs `"downstream"`) by membership without recomputing
+/// anything. The union `users ∪ downstream` is the full focused vertex
+/// set.
+///
+/// **Not depth-bounded — by design (shaping S4, founder D6).** A
+/// widely-used staging macro can converge the closure on nearly the whole
+/// project; the lens does **not** silently truncate (a hop cap would
+/// manufacture a false "this is the blast radius" claim, violating the
+/// never-a-false-claim invariant). The legibility guard is a *presentation*
+/// banner on the page (the count), not a domain bound here.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct MacroFocusSet {
+    /// The root-project models that call M (= [`macro_blast_radius`]).
+    /// Emphasized on the page.
+    pub users: BTreeSet<NodeId>,
+    /// The `ref()`-downstream closure of `users`, **minus `users`**
+    /// (disjoint). Dimmed-as-context on the page.
+    pub downstream: BTreeSet<NodeId>,
+}
+
+/// The focused node set for the explore macro DAG (cute-dbt#345): the
+/// macro-calling models plus their full `ref()`-downstream closure,
+/// partitioned into the disjoint [`MacroFocusSet`] roles.
+///
+/// Seeds the closure with [`macro_blast_radius`]`(manifest, M)` (the
+/// `users`), walks the reverse `depends_on.nodes` edges with
+/// `governance::downstream_node_closure` (the shared
+/// reverse-reachability primitive — no new walker), then subtracts the
+/// users out of the closure to leave `downstream` disjoint.
+///
+/// An unknown macro, or one no root-project model calls, yields an
+/// empty `users` ⇒ an empty closure ⇒ an empty `MacroFocusSet`
+/// (fail-open — the macro page simply shows no focused models).
+#[must_use]
+pub fn macro_focus_set(manifest: &Manifest, changed_macro_id: &str) -> MacroFocusSet {
+    let users = macro_blast_radius(manifest, changed_macro_id);
+    // The closure includes the seed (`users`); subtract it so the two
+    // roles are disjoint and the renderer tags by membership.
+    let mut downstream = downstream_node_closure(manifest, &users);
+    for u in &users {
+        downstream.remove(u);
+    }
+    MacroFocusSet { users, downstream }
 }
 
 /// Whether any macro in `roots` (a model's DIRECT `depends_on.macros`
@@ -954,5 +1018,262 @@ mod tests {
             macro_declaration_names("{% macro good_one(a, b) %}"),
             vec!["good_one".to_owned()],
         );
+    }
+
+    // ===== macro_focus_set (cute-dbt#345 Slice 2) =====================
+    //
+    // The focused-node-set walk: `users` = macro_blast_radius (the
+    // callers), `downstream` = the reverse depends_on.nodes closure of
+    // `users` MINUS `users`. These helpers add the `depends_on.nodes`
+    // (ref) edges + typed nodes + exposures the blast-radius helpers
+    // above don't exercise.
+
+    use crate::domain::manifest::Exposure;
+
+    /// A root-project node of `resource_type` with DIRECT macro deps and
+    /// DIRECT node (`ref()`) deps — the consumer→producer `depends_on.nodes`
+    /// edge the downstream closure reverses.
+    fn node_with_deps(
+        full_id: &str,
+        resource_type: &str,
+        direct_macros: &[&str],
+        ref_nodes: &[&str],
+    ) -> Node {
+        let macros = direct_macros.iter().map(|m| (*m).to_owned()).collect();
+        let nodes = ref_nodes.iter().map(|n| NodeId::new(*n)).collect();
+        Node::new(
+            NodeId::new(full_id),
+            resource_type,
+            Checksum::new("sha256", "abc"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::new(macros, nodes),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(None, Some(PROJECT.to_owned()))
+    }
+
+    /// An exposure sink depending on `ref_nodes` (the separate exposures
+    /// map — only reachable downstream via the exposure-sink fold).
+    fn exposure_on(full_id: &str, ref_nodes: &[&str]) -> Exposure {
+        Exposure::new(
+            NodeId::new(full_id),
+            "an_exposure",
+            Some("dashboard".to_owned()),
+            None,
+            None,
+            DependsOn::new(vec![], ref_nodes.iter().map(|n| NodeId::new(*n)).collect()),
+        )
+    }
+
+    /// Build a manifest from nodes + macro edges + macro bodies + exposures.
+    fn manifest_with_exposures(
+        nodes: Vec<Node>,
+        macro_edges: &[(&str, &[&str])],
+        macro_bodies: &[(&str, &str)],
+        exposures: Vec<Exposure>,
+    ) -> Manifest {
+        let exposure_map: std::collections::HashMap<NodeId, Exposure> =
+            exposures.into_iter().map(|e| (e.id().clone(), e)).collect();
+        manifest_with(nodes, macro_edges, macro_bodies).with_exposures(exposure_map)
+    }
+
+    #[test]
+    fn focus_set_users_equal_blast_radius_and_are_disjoint_from_downstream() {
+        // (a) users ⊆ closure, users ∩ downstream = ∅.
+        //   orders (calls M) -> daily (refs orders) -> report (refs daily).
+        let m = manifest_with_exposures(
+            vec![
+                node_with_deps("model.shop.orders", "model", &["macro.shop.m"], &[]),
+                node_with_deps("model.shop.daily", "model", &[], &["model.shop.orders"]),
+                node_with_deps("model.shop.report", "model", &[], &["model.shop.daily"]),
+            ],
+            &[],
+            &[("macro.shop.m", "/* m */")],
+            vec![],
+        );
+        let focus = macro_focus_set(&m, "macro.shop.m");
+        // users = exactly the macro caller.
+        assert_eq!(focus.users, [id("model.shop.orders")].into_iter().collect());
+        // downstream = daily + report (the closure minus users).
+        assert_eq!(
+            focus.downstream,
+            [id("model.shop.daily"), id("model.shop.report")]
+                .into_iter()
+                .collect()
+        );
+        // Disjoint.
+        assert!(focus.users.is_disjoint(&focus.downstream));
+        // users ⊆ closure (= users ∪ downstream).
+        let closure: BTreeSet<NodeId> = focus.users.union(&focus.downstream).cloned().collect();
+        assert!(focus.users.is_subset(&closure));
+    }
+
+    #[test]
+    fn focus_set_downstream_empty_for_a_leaf_caller() {
+        // (b) reflexivity — a caller no node refs ⇒ downstream empty.
+        let m = manifest_with_exposures(
+            vec![node_with_deps(
+                "model.shop.orders",
+                "model",
+                &["macro.shop.m"],
+                &[],
+            )],
+            &[],
+            &[("macro.shop.m", "/* m */")],
+            vec![],
+        );
+        let focus = macro_focus_set(&m, "macro.shop.m");
+        assert_eq!(focus.users, [id("model.shop.orders")].into_iter().collect());
+        assert!(
+            focus.downstream.is_empty(),
+            "a caller with no downstream consumers has an empty downstream"
+        );
+    }
+
+    #[test]
+    fn focus_set_terminates_on_a_node_ref_cycle() {
+        // (c) cycle-safety — a -> b -> a in depends_on.nodes terminates.
+        // orders calls M; a refs orders; b refs a; a also refs b (cycle).
+        let m = manifest_with_exposures(
+            vec![
+                node_with_deps("model.shop.orders", "model", &["macro.shop.m"], &[]),
+                node_with_deps(
+                    "model.shop.a",
+                    "model",
+                    &[],
+                    &["model.shop.orders", "model.shop.b"],
+                ),
+                node_with_deps("model.shop.b", "model", &[], &["model.shop.a"]),
+            ],
+            &[],
+            &[("macro.shop.m", "/* m */")],
+            vec![],
+        );
+        let focus = macro_focus_set(&m, "macro.shop.m");
+        // The cyclic pair is downstream of orders and the walk terminates.
+        assert_eq!(
+            focus.downstream,
+            [id("model.shop.a"), id("model.shop.b")]
+                .into_iter()
+                .collect()
+        );
+        assert!(focus.users.is_disjoint(&focus.downstream));
+    }
+
+    #[test]
+    fn focus_set_crosses_an_intermediate_snapshot_and_reaches_an_exposure() {
+        // (d) typed-crossing — a snapshot between two models stays in
+        // downstream (the pre-#253 snapshot-severance guard), and an
+        // exposure consuming a reached model is folded into downstream.
+        //   orders (calls M) -> snap (snapshot, refs orders)
+        //                    -> mart (model, refs snap) <- exposure
+        let m = manifest_with_exposures(
+            vec![
+                node_with_deps("model.shop.orders", "model", &["macro.shop.m"], &[]),
+                node_with_deps(
+                    "snapshot.shop.snap",
+                    "snapshot",
+                    &[],
+                    &["model.shop.orders"],
+                ),
+                node_with_deps("model.shop.mart", "model", &[], &["snapshot.shop.snap"]),
+            ],
+            &[],
+            &[("macro.shop.m", "/* m */")],
+            vec![exposure_on("exposure.shop.dash", &["model.shop.mart"])],
+        );
+        let focus = macro_focus_set(&m, "macro.shop.m");
+        assert!(
+            focus.downstream.contains(&id("snapshot.shop.snap")),
+            "an intermediate snapshot must stay in the downstream closure"
+        );
+        assert!(focus.downstream.contains(&id("model.shop.mart")));
+        assert!(
+            focus.downstream.contains(&id("exposure.shop.dash")),
+            "an exposure consuming a reached node is folded into downstream"
+        );
+        assert!(focus.users.is_disjoint(&focus.downstream));
+    }
+
+    #[test]
+    fn focus_set_is_deterministic_and_btreeset_ordered() {
+        // (e) determinism — two runs over the same manifest agree, and the
+        // closure is BTreeSet-ordered (stable iteration).
+        let build = || {
+            manifest_with_exposures(
+                vec![
+                    node_with_deps("model.shop.orders", "model", &["macro.shop.m"], &[]),
+                    node_with_deps("model.shop.z", "model", &[], &["model.shop.orders"]),
+                    node_with_deps("model.shop.a", "model", &[], &["model.shop.orders"]),
+                ],
+                &[],
+                &[("macro.shop.m", "/* m */")],
+                vec![],
+            )
+        };
+        let first = macro_focus_set(&build(), "macro.shop.m");
+        let second = macro_focus_set(&build(), "macro.shop.m");
+        assert_eq!(first, second, "the focus set is a pure fn of the manifest");
+        // BTreeSet iteration is sorted: a before z.
+        let downstream: Vec<&str> = first.downstream.iter().map(NodeId::as_str).collect();
+        assert_eq!(downstream, vec!["model.shop.a", "model.shop.z"]);
+    }
+
+    #[test]
+    fn focus_set_empty_when_no_model_calls_the_macro() {
+        // Fail-open: an unknown / uncalled macro ⇒ empty users ⇒ empty set.
+        let m = manifest_with_exposures(
+            vec![node_with_deps(
+                "model.shop.orders",
+                "model",
+                &["macro.shop.other"],
+                &[],
+            )],
+            &[],
+            &[("macro.shop.other", "/* other */")],
+            vec![],
+        );
+        let focus = macro_focus_set(&m, "macro.shop.m");
+        assert!(focus.users.is_empty());
+        assert!(focus.downstream.is_empty());
+    }
+
+    #[test]
+    fn focus_set_downstream_excludes_a_user_that_is_also_downstream() {
+        // The seed-subtraction guard: if a caller is itself downstream of
+        // another caller, it must stay a `user` (emphasized), never leak
+        // into `downstream` (the roles are disjoint by construction).
+        //   up (calls M) -> down (calls M too, refs up).
+        // `down` is both a caller AND downstream of `up`; it must be a user.
+        let m = manifest_with_exposures(
+            vec![
+                node_with_deps("model.shop.up", "model", &["macro.shop.m"], &[]),
+                node_with_deps(
+                    "model.shop.down",
+                    "model",
+                    &["macro.shop.m"],
+                    &["model.shop.up"],
+                ),
+            ],
+            &[],
+            &[("macro.shop.m", "/* m */")],
+            vec![],
+        );
+        let focus = macro_focus_set(&m, "macro.shop.m");
+        assert_eq!(
+            focus.users,
+            [id("model.shop.up"), id("model.shop.down")]
+                .into_iter()
+                .collect()
+        );
+        assert!(
+            focus.downstream.is_empty(),
+            "both nodes are callers (users); neither leaks into downstream"
+        );
+        assert!(focus.users.is_disjoint(&focus.downstream));
     }
 }
