@@ -91,6 +91,33 @@ expression: rendered
         ],
         "status": "covered"
       }
+    },
+    {
+      "check": "enforcement.constraint-unbacked",
+      "construct": "constraint.primary_key[(patient_id, year_actual)]",
+      "evidence": [
+        {
+          "label": "constraint",
+          "value": "primary_key on (patient_id, year_actual)"
+        },
+        {
+          "label": "adapter",
+          "value": "duckdb (metadata-only)"
+        },
+        {
+          "label": "backing-test",
+          "value": "present"
+        }
+      ],
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_patient_summary",
+      "tier": "total",
+      "verdict": {
+        "by": [
+          "test.healthcare_analytics.dbt_utils_unique_combination_of_columns_fct_patient_summary_patient_id__year_actual.cdb3418166"
+        ],
+        "status": "covered"
+      }
     }
   ]
 }

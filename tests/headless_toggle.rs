@@ -12282,6 +12282,42 @@ fn enforcement_finding_renders_on_the_committed_showcase_in_a_real_browser() {
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn composite_enforcement_finding_renders_on_the_committed_showcase_in_a_real_browser() {
+    // cute-dbt#341 — the committed diff-showcase golden has
+    // fct_patient_summary declaring a COMPOSITE primary_key over
+    // (patient_id, year_actual), backed by a dbt_utils
+    // unique_combination_of_columns test over the same set, so the
+    // composite enforcement annotation surfaces (Covered) through the
+    // existing findings panel.
+    let showcase = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("diff-showcase-report.html");
+    let url = format!("file://{}", showcase.to_str().expect("UTF-8 path"));
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    enable_coverage_display(&tab);
+    select_model(&tab, "fct_patient_summary");
+
+    const ROW: &str =
+        "document.querySelector('.finding-row[data-check=\"enforcement.constraint-unbacked\"]')";
+    assert!(
+        eval_bool(&tab, &format!("{ROW} !== null")),
+        "the composite enforcement finding row renders",
+    );
+    let text = eval_string(&tab, &format!("{ROW}.textContent"));
+    assert!(
+        text.contains("patient_id") && text.contains("year_actual"),
+        "the finding names the composite tuple columns: {text}",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn project_panel_renders_categorized_on_the_committed_showcase() {
     // The dogfood surface: the committed diff-showcase golden must carry
     // the categorized panel — two vars rows (cute-dbt#268: tiered

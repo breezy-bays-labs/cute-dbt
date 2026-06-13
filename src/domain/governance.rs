@@ -29,6 +29,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
 
+use crate::domain::checks::uniqueness_test_columns;
 use crate::domain::grain::test_is_enabled;
 use crate::domain::manifest::{
     ColumnFacts, Constraint, ConstraintKind, Exposure, Manifest, Node, NodeId, Owner,
@@ -897,28 +898,83 @@ pub fn backing_test_for<'m>(
     column: &str,
     kind: ConstraintKind,
 ) -> Option<&'m NodeId> {
-    let test_name = backing_test_name(kind)?;
-    manifest
-        .nodes()
-        .iter()
-        .find(|(_, node)| test_backs(node, model, column, test_name))
-        .map(|(id, _)| id)
-}
-
-/// The generic data-test name that backs a constraint kind, or `None`
-/// for kinds with no column-level generic backing (FK/check/custom/etc.
-/// are out of the `unique`/`not_null` inference).
-fn backing_test_name(kind: ConstraintKind) -> Option<&'static str> {
     match kind {
-        ConstraintKind::Unique | ConstraintKind::PrimaryKey => Some("unique"),
-        ConstraintKind::NotNull => Some("not_null"),
+        // PK / Unique on a single column: a uniqueness test whose column
+        // SET equals `{column}` (a `unique` on it, OR a
+        // `unique_combination_of_columns` over exactly that one column).
+        ConstraintKind::PrimaryKey | ConstraintKind::Unique => {
+            backing_test_for_columns(manifest, model, &[column.to_owned()])
+        }
+        // NotNull: a `not_null` test on the column (not a uniqueness test).
+        ConstraintKind::NotNull => manifest
+            .nodes()
+            .iter()
+            .find(|(_, node)| not_null_test_backs(node, model, column))
+            .map(|(id, _)| id),
         _ => None,
     }
 }
 
-/// Whether `node` is an enabled `test_name` data test attached to `model`
+/// The id of the first enabled `unique` / `unique_combination_of_columns`
+/// data test attached to `model` whose asserted columns are a SUBSET of
+/// the declared `columns` (cute-dbt#341) — the composite-aware uniqueness
+/// backing join.
+///
+/// SUBSET (case-insensitive), mirroring the #259 grain
+/// [`covers_key`](crate::domain::checks) direction exactly: a uniqueness
+/// test on a proper subset of a composite key is a STRONGER guarantee
+/// that backs it (`{a}` unique ⟹ `(a, b)` unique). An exact match is the
+/// subset boundary case, so it backs too. A test over a SUPERSET, or one
+/// only partially overlapping, is NOT a subset and does not back the key
+/// (superset-uniqueness does not imply subset-uniqueness). Reuses the
+/// #259 grain recognizer `uniqueness_test_columns` (the crate-private
+/// `crate::domain::checks` extractor) for "which columns does this test
+/// assert unique?" — one authority across the grain and enforcement
+/// surfaces. Returns the REAL test node id so a Covered finding
+/// attributes it.
+#[must_use]
+pub fn backing_test_for_columns<'m>(
+    manifest: &'m Manifest,
+    model: &NodeId,
+    columns: &[String],
+) -> Option<&'m NodeId> {
+    let key = column_set(columns);
+    if key.is_empty() {
+        return None;
+    }
+    manifest
+        .nodes()
+        .iter()
+        .find(|(_, node)| uniqueness_test_covers_key(node, model, &key))
+        .map(|(id, _)| id)
+}
+
+/// The lowercased column set of `columns` (the case-insensitive
+/// match key).
+fn column_set(columns: &[String]) -> BTreeSet<String> {
+    columns.iter().map(|c| c.to_ascii_lowercase()).collect()
+}
+
+/// Whether `node` is an enabled uniqueness test attached to `model` whose
+/// asserted columns are a non-empty SUBSET of `key` (already lowercased)
+/// — the grain `covers_key` direction (cute-dbt#169 / #341).
+fn uniqueness_test_covers_key(node: &Node, model: &NodeId, key: &BTreeSet<String>) -> bool {
+    if node.resource_type() != "test" || node.attached_node() != Some(model) {
+        return false;
+    }
+    if !test_is_enabled(node) {
+        return false;
+    }
+    let Some(columns) = uniqueness_test_columns(node) else {
+        return false;
+    };
+    let test_cols = column_set(&columns);
+    !test_cols.is_empty() && test_cols.is_subset(key)
+}
+
+/// Whether `node` is an enabled `not_null` data test attached to `model`
 /// targeting `column` (case-insensitive).
-fn test_backs(node: &Node, model: &NodeId, column: &str, test_name: &str) -> bool {
+fn not_null_test_backs(node: &Node, model: &NodeId, column: &str) -> bool {
     if node.resource_type() != "test" || node.attached_node() != Some(model) {
         return false;
     }
@@ -928,7 +984,7 @@ fn test_backs(node: &Node, model: &NodeId, column: &str, test_name: &str) -> boo
     let Some(metadata) = node.test_metadata() else {
         return false;
     };
-    if metadata.name() != test_name {
+    if metadata.name() != "not_null" {
         return false;
     }
     let target = metadata
@@ -2417,6 +2473,39 @@ mod tests {
     }
 
     #[test]
+    fn not_null_backing_ignores_wrong_column_model_and_disabled() {
+        let model_id = NodeId::new("model.pkg.m");
+        // Wrong column.
+        let m1 = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            test_node("test.pkg.nn", "model.pkg.m", "not_null", "other"),
+        ]);
+        assert!(backing_test_for(&m1, &model_id, "id", ConstraintKind::NotNull).is_none());
+        // Attached to a different model.
+        let m2 = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            test_node("test.pkg.nn", "model.pkg.other", "not_null", "id"),
+        ]);
+        assert!(backing_test_for(&m2, &model_id, "id", ConstraintKind::NotNull).is_none());
+        // A unique test does NOT back a NotNull constraint (wrong name).
+        let m3 = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            test_node("test.pkg.u", "model.pkg.m", "unique", "id"),
+        ]);
+        assert!(backing_test_for(&m3, &model_id, "id", ConstraintKind::NotNull).is_none());
+        // No test node at all.
+        let m4 = manifest_with_nodes(vec![model("model.pkg.m", None)]);
+        assert!(backing_test_for(&m4, &model_id, "id", ConstraintKind::NotNull).is_none());
+    }
+
+    #[test]
+    fn an_other_constraint_kind_has_no_backing() {
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![model("model.pkg.m", None)]);
+        assert!(backing_test_for(&manifest, &model_id, "id", ConstraintKind::ForeignKey).is_none());
+    }
+
+    #[test]
     fn a_disabled_backing_test_does_not_count() {
         // config.enabled: false ⇒ the test asserts nothing ⇒ not backing.
         let model_id = NodeId::new("model.pkg.m");
@@ -2449,5 +2538,178 @@ mod tests {
         let model_id = NodeId::new("model.pkg.m");
         let manifest = manifest_with_nodes(vec![model("model.pkg.m", None)]);
         assert!(backing_test_for(&manifest, &model_id, "id", ConstraintKind::Unique).is_none());
+    }
+
+    // ---- backing_test_for_columns: composite-key join (cute-dbt#341) ----
+
+    /// A `unique_combination_of_columns` test node over `cols`, attached
+    /// to `model`.
+    fn combo_node(id: &str, model: &str, cols: &[&str]) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "test",
+            sample_checksum(),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_test_attachment(
+            None,
+            Some(NodeId::new(model)),
+            Some(TestMetadata::new(
+                "unique_combination_of_columns",
+                Some("dbt_utils".to_owned()),
+                serde_json::json!({ "combination_of_columns": cols }),
+            )),
+        )
+    }
+
+    fn cols(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn an_exact_match_combination_test_backs_and_returns_the_id() {
+        // Exact match is the subset boundary case — it backs.
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            combo_node("test.pkg.combo", "model.pkg.m", &["a", "b"]),
+        ]);
+        assert_eq!(
+            backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])),
+            Some(&NodeId::new("test.pkg.combo")),
+        );
+    }
+
+    #[test]
+    fn columns_match_is_order_and_case_independent() {
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            combo_node("test.pkg.combo", "model.pkg.m", &["B", "a"]),
+        ]);
+        assert!(
+            backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])).is_some(),
+            "order + case don't matter — it's a set comparison",
+        );
+    }
+
+    #[test]
+    fn a_subset_combination_backs_the_tuple() {
+        // `{a}` unique ⟹ `(a, b)` unique — a uniqueness test on a proper
+        // SUBSET of the key is a stronger guarantee that backs it (the
+        // #259 grain `covers_key` direction; cute-dbt#341 corrected).
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            combo_node("test.pkg.combo", "model.pkg.m", &["a"]),
+        ]);
+        assert_eq!(
+            backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])),
+            Some(&NodeId::new("test.pkg.combo")),
+            "a subset uniqueness test backs the wider key",
+        );
+    }
+
+    #[test]
+    fn a_single_column_unique_backs_a_composite_key() {
+        // A plain `unique` on one tuple column is a 1-element subset of
+        // the key — it backs the composite key.
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            test_node("test.pkg.u", "model.pkg.m", "unique", "a"),
+        ]);
+        assert_eq!(
+            backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])),
+            Some(&NodeId::new("test.pkg.u")),
+        );
+    }
+
+    #[test]
+    fn a_superset_combination_does_not_back_the_tuple() {
+        // A superset is NOT a subset — uniqueness of `(a, b, c)` does not
+        // imply uniqueness of `(a, b)`, so it does not back the key.
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            combo_node("test.pkg.combo", "model.pkg.m", &["a", "b", "c"]),
+        ]);
+        assert!(
+            backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])).is_none(),
+            "a wider combination is not a subset of the key",
+        );
+    }
+
+    #[test]
+    fn a_partial_overlap_combination_does_not_back_the_tuple() {
+        // `{a, c}` is neither a subset nor a superset of `{a, b}` — it
+        // overlaps but is not contained, so it does not back the key.
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            combo_node("test.pkg.combo", "model.pkg.m", &["a", "c"]),
+        ]);
+        assert!(
+            backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])).is_none(),
+            "partial overlap (not contained) is not coverage",
+        );
+    }
+
+    #[test]
+    fn a_single_column_unique_backs_a_single_column_key_via_columns() {
+        // The single-column key path: a plain `unique` is set-equal to a
+        // 1-column tuple.
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![
+            model("model.pkg.m", None),
+            test_node("test.pkg.u", "model.pkg.m", "unique", "id"),
+        ]);
+        assert_eq!(
+            backing_test_for_columns(&manifest, &model_id, &cols(&["id"])),
+            Some(&NodeId::new("test.pkg.u")),
+        );
+    }
+
+    #[test]
+    fn empty_columns_never_back() {
+        let model_id = NodeId::new("model.pkg.m");
+        let manifest = manifest_with_nodes(vec![model("model.pkg.m", None)]);
+        assert!(backing_test_for_columns(&manifest, &model_id, &[]).is_none());
+    }
+
+    #[test]
+    fn a_disabled_combination_test_does_not_back() {
+        let model_id = NodeId::new("model.pkg.m");
+        let mut config = BTreeMap::new();
+        config.insert("enabled".to_owned(), serde_json::json!(false));
+        let disabled = Node::new(
+            NodeId::new("test.pkg.combo"),
+            "test",
+            sample_checksum(),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(config, false),
+            None,
+            BTreeMap::new(),
+        )
+        .with_test_attachment(
+            None,
+            Some(NodeId::new("model.pkg.m")),
+            Some(TestMetadata::new(
+                "unique_combination_of_columns",
+                Some("dbt_utils".to_owned()),
+                serde_json::json!({ "combination_of_columns": ["a", "b"] }),
+            )),
+        );
+        let manifest = manifest_with_nodes(vec![model("model.pkg.m", None), disabled]);
+        assert!(backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])).is_none());
     }
 }

@@ -97,7 +97,7 @@ use serde_json::Value;
 use crate::domain::cte::{
     CteGraph, EdgeType, JoinKeyPair, LeftJoinFact, SubqueryFact, SubqueryKind,
 };
-use crate::domain::governance::{ConstraintSupport, backing_test_for, constraint_support};
+use crate::domain::governance::{ConstraintSupport, backing_test_for_columns, constraint_support};
 use crate::domain::grain::test_is_enabled;
 use crate::domain::manifest::{
     Constraint, ConstraintKind, Manifest, Node, NodeConfig, NodeId, TestMetadata, TestSeverity,
@@ -1000,20 +1000,39 @@ fn detect_grain_unique_key_unbacked(ctx: &CheckContext<'_>) -> Vec<Finding<Heuri
 
 /// The construct id for an enforcement-reality finding (cute-dbt#260
 /// Slice 3) — the declared constraint column it annotates.
-fn enforcement_construct(column: &str, kind: ConstraintKind) -> String {
+fn enforcement_construct(columns: &[String], kind: ConstraintKind) -> String {
     let kind_label = match kind {
         ConstraintKind::PrimaryKey => "primary_key",
         ConstraintKind::Unique => "unique",
         _ => "constraint",
     };
-    format!("constraint.{kind_label}[{column}]")
+    // A composite key names the tuple: `constraint.primary_key[(a, b)]`;
+    // a single column omits the parens: `constraint.unique[id]`.
+    if columns.len() == 1 {
+        format!("constraint.{kind_label}[{}]", columns[0])
+    } else {
+        format!("constraint.{kind_label}[({})]", columns.join(", "))
+    }
 }
 
-/// `enforcement.constraint-unbacked` (cute-dbt#260 Slice 3) — a DECLARED
-/// PK/unique constraint that the adapter does not enforce (metadata-only)
-/// and no inferred backing test covers. Governance-gated: the
-/// `enforcement` group is filtered out of a non-governance report's
-/// policy, so this never fires unless the experiment is on.
+/// One declared PK/unique constraint to check — its column TUPLE (one or
+/// more columns) and kind (cute-dbt#260 / cute-dbt#341).
+struct DeclaredConstraint {
+    columns: Vec<String>,
+    kind: ConstraintKind,
+}
+
+/// `enforcement.constraint-unbacked` (cute-dbt#260 Slice 3, composite-key
+/// inference cute-dbt#341) — a DECLARED PK/unique constraint that the
+/// adapter does not enforce (metadata-only) and no inferred backing test
+/// covers. A uniqueness test whose columns are a SUBSET of the declared
+/// key backs it (the #259 grain `covers_key` direction): `{a}` unique
+/// ⟹ `(a, b)` unique, so a `unique` on a tuple column — or any
+/// `unique_combination_of_columns` over a subset (exact match included) —
+/// is a backing guarantee. A test over a superset or one only partially
+/// overlapping does NOT back it. Governance-gated: the `enforcement`
+/// group is filtered out of a non-governance report's policy, so this
+/// never fires unless the experiment is on.
 fn detect_enforcement_constraint_unbacked(ctx: &CheckContext<'_>) -> Vec<Finding<HeuristicId>> {
     if ctx.model.resource_type() != "model" {
         return Vec::new();
@@ -1025,62 +1044,60 @@ fn detect_enforcement_constraint_unbacked(ctx: &CheckContext<'_>) -> Vec<Finding
     };
     declared_unique_constraints(ctx.model)
         .into_iter()
-        .filter_map(|(column, kind)| enforcement_finding(ctx, adapter, &column, kind))
+        .filter_map(|constraint| enforcement_finding(ctx, adapter, &constraint))
         .collect()
 }
 
-/// The declared primary-key / unique constraint columns on a model
-/// (cute-dbt#260 Slice 3) — model-level `constraints[]` of PK/unique kind
-/// (one entry per constrained column) plus column-level PK/unique
-/// constraints. Deduplicated by `(column, kind)`, deterministic order.
-fn declared_unique_constraints(model: &Node) -> Vec<(String, ConstraintKind)> {
-    let mut seen: BTreeSet<(String, &'static str)> = BTreeSet::new();
-    model_level_unique_columns(model)
-        .into_iter()
-        .chain(column_level_unique_columns(model))
-        .filter(|(column, kind)| seen.insert((column.clone(), kind_tag(*kind))))
-        .collect()
-}
-
-/// Model-level `constraints[]` of PK/unique kind, as `(column, kind)`.
+/// The declared primary-key / unique constraints on a model
+/// (cute-dbt#260 / cute-dbt#341) — model-level `constraints[]` of
+/// PK/unique kind (each a column tuple — single OR composite) plus
+/// column-level PK/unique constraints (always single-column).
 ///
-/// Only SINGLE-column model-level constraints are emitted. A COMPOSITE
-/// model-level PK/unique asserts the *tuple* is unique (backed by
-/// `unique_combination_of_columns`, not per-column `unique`); flattening
-/// it to per-column findings would be a FALSE "this column is unbacked"
-/// claim — the check's own never-a-false-claim invariant. So composite
-/// keys are filtered OUT here; the column-level constraints + single-column
-/// model-level constraints remain.
-fn model_level_unique_columns(model: &Node) -> Vec<(String, ConstraintKind)> {
-    model
-        .constraints()
-        .iter()
-        .filter_map(|c| unique_constraint_kind(c).map(|kind| (c, kind)))
-        // tracked: cute-dbt#341 — composite-key enforcement inference
-        // deferred (one tuple-keyed finding + unique_combination_of_columns
-        // join, reusing the #259 grain matching). For Slice 3, silence
-        // over a per-column falsehood on composite keys.
-        .filter(|(c, _)| c.columns().len() == 1)
-        .flat_map(|(c, kind)| c.columns().iter().map(move |col| (col.clone(), kind)))
-        .collect()
-}
-
-/// Column-level PK/unique constraints, as `(column, kind)`.
-fn column_level_unique_columns(model: &Node) -> Vec<(String, ConstraintKind)> {
-    model
-        .column_facts()
-        .iter()
-        .flat_map(|(column, facts)| {
-            facts
-                .constraints()
-                .iter()
-                .filter_map(move |c| unique_constraint_kind(c).map(|kind| (column.clone(), kind)))
+/// Deduplicated by the column SET (order-insensitive — `(a, b)` and
+/// `(b, a)` are the same uniqueness key) + kind (gemini on #342). The
+/// FIRST-declared order is kept for the surviving constraint's display
+/// (the construct id renders the tuple as declared).
+fn declared_unique_constraints(model: &Node) -> Vec<DeclaredConstraint> {
+    let mut seen: BTreeSet<(BTreeSet<String>, &'static str)> = BTreeSet::new();
+    model_level_unique_constraints(model)
+        .chain(column_level_unique_constraints(model))
+        // A column with no name (empty constraint) is unrecoverable — skip.
+        .filter(|c| !c.columns.is_empty())
+        .filter(|c| {
+            // Dedup on the lowercased column SET (order-insensitive).
+            let key: BTreeSet<String> = c.columns.iter().map(|s| s.to_ascii_lowercase()).collect();
+            seen.insert((key, kind_tag(c.kind)))
         })
         .collect()
 }
 
+/// Model-level `constraints[]` of PK/unique kind, each as a column-tuple
+/// [`DeclaredConstraint`] (single OR composite — cute-dbt#341 handles the
+/// tuple as ONE finding, never per-column).
+fn model_level_unique_constraints(model: &Node) -> impl Iterator<Item = DeclaredConstraint> + '_ {
+    model.constraints().iter().filter_map(|c| {
+        unique_constraint_kind(c).map(|kind| DeclaredConstraint {
+            columns: c.columns().to_vec(),
+            kind,
+        })
+    })
+}
+
+/// Column-level PK/unique constraints, each a single-column
+/// [`DeclaredConstraint`].
+fn column_level_unique_constraints(model: &Node) -> impl Iterator<Item = DeclaredConstraint> + '_ {
+    model.column_facts().iter().flat_map(|(column, facts)| {
+        facts.constraints().iter().filter_map(move |c| {
+            unique_constraint_kind(c).map(|kind| DeclaredConstraint {
+                columns: vec![column.clone()],
+                kind,
+            })
+        })
+    })
+}
+
 /// The PK/unique kind of a constraint, or `None` for any other kind
-/// (only PK + unique are in the column-uniqueness inference).
+/// (only PK + unique are in the uniqueness inference).
 fn unique_constraint_kind(constraint: &Constraint) -> Option<ConstraintKind> {
     match constraint.kind() {
         kind @ (ConstraintKind::PrimaryKey | ConstraintKind::Unique) => Some(kind),
@@ -1096,29 +1113,40 @@ fn kind_tag(kind: ConstraintKind) -> &'static str {
     }
 }
 
-/// Emit the enforcement finding for one declared constraint column, or
-/// `None` when the warehouse enforces it (no gap) or a backing test
-/// covers it (the inference found one). The copy says "declared" +
-/// "backing test" — authoring discipline, never a warehouse-truth claim.
+/// Emit the enforcement finding for one declared constraint (single or
+/// composite), or `None` when the warehouse enforces it (no gap). A
+/// backing uniqueness test whose columns SUBSET the declared key ⇒
+/// Covered (attributing the real test node id); none ⇒ Uncovered. The
+/// copy says "declared" + "backing test" — authoring discipline, never a
+/// warehouse-truth claim.
 fn enforcement_finding(
     ctx: &CheckContext<'_>,
     adapter: &str,
-    column: &str,
-    kind: ConstraintKind,
+    constraint: &DeclaredConstraint,
 ) -> Option<Finding<HeuristicId>> {
     // Only metadata-only (NotEnforced) declarations are a gap — an
     // enforced one is guaranteed by the warehouse; a NotSupported one was
     // never accepted.
-    if constraint_support(adapter, kind) != ConstraintSupport::NotEnforced {
+    if constraint_support(adapter, constraint.kind) != ConstraintSupport::NotEnforced {
         return None;
     }
-    // The REAL backing-test node id (None ⇒ no inferred backing) — so a
-    // Covered verdict attributes the actual test node, like every other
-    // Covered.by in this registry (never a synthetic label).
-    let backing = backing_test_for(ctx.manifest, ctx.model.id(), column, kind);
-    let kind_label = kind_tag(kind);
+    // The REAL backing-test node id (None ⇒ no inferred backing). Subset
+    // over the column tuple (the #259 grain direction): a uniqueness test
+    // on a SUBSET of the composite key — a `unique` on a tuple column, or
+    // a combination test over a subset — is a stronger guarantee that
+    // backs it. The Covered verdict attributes the actual test node, like
+    // every other Covered.by in this registry.
+    let backing = backing_test_for_columns(ctx.manifest, ctx.model.id(), &constraint.columns);
+    let kind_label = kind_tag(constraint.kind);
+    // Single column: `primary_key on id`. Composite: `primary_key on
+    // (a, b)` — the tuple, parenthesized.
+    let columns_label = if constraint.columns.len() == 1 {
+        constraint.columns[0].clone()
+    } else {
+        format!("({})", constraint.columns.join(", "))
+    };
     let evidence = vec![
-        Evidence::new("constraint", format!("{kind_label} on {column}")),
+        Evidence::new("constraint", format!("{kind_label} on {columns_label}")),
         Evidence::new("adapter", format!("{adapter} (metadata-only)")),
         Evidence::new(
             "backing-test",
@@ -1138,7 +1166,7 @@ fn enforcement_finding(
     Some(Finding::new(
         HeuristicId::EnforcementConstraintUnbacked,
         ctx.model.id().clone(),
-        enforcement_construct(column, kind),
+        enforcement_construct(&constraint.columns, constraint.kind),
         verdict,
         evidence,
     ))
@@ -1314,7 +1342,12 @@ fn singular_tests_on<'a>(manifest: &'a Manifest, model_id: &NodeId) -> Vec<&'a s
 /// The column set a uniqueness test asserts, or `None` when `node` is
 /// not a uniqueness test ([`uniqueness_columns`] over the node's
 /// linkage fields).
-fn uniqueness_test_columns(node: &Node) -> Option<Vec<String>> {
+///
+/// `pub(crate)` so the cute-dbt#260 enforcement backing-test join
+/// (cute-dbt#341 composite-key inference) reuses this #259 recognizer —
+/// one authority for "which columns does this test assert unique?"
+/// across the grain and enforcement surfaces.
+pub(crate) fn uniqueness_test_columns(node: &Node) -> Option<Vec<String>> {
     uniqueness_columns(node.test_metadata()?, node.column_name())
 }
 
@@ -6284,41 +6317,209 @@ mod tests {
         );
     }
 
-    #[test]
-    fn enforcement_does_not_emit_per_column_findings_for_a_composite_key() {
-        // A COMPOSITE model-level PK asserts the TUPLE is unique (backed
-        // by unique_combination_of_columns, not per-column unique). Emitting
-        // a per-column "unbacked" finding for each column would be a FALSE
-        // claim — the check's never-a-false-claim invariant. Composite
-        // model-level keys are filtered out (tracked: cute-dbt#341).
+    // ----- cute-dbt#341: composite-key enforcement inference -----
+
+    /// A model with a single COMPOSITE model-level PK over `cols`.
+    fn model_with_composite_pk(full_id: &str, cols: &[&str]) -> Node {
         use crate::domain::manifest::Constraint;
         let composite = Constraint::new(
             "primary_key",
-            vec!["order_id".to_owned(), "line_id".to_owned()],
+            cols.iter().map(|s| (*s).to_owned()).collect(),
             None,
             None,
             None,
             Vec::new(),
         );
-        let model = model_with_config("model.shop.lines", &[]).with_contract_facts(
-            vec![composite],
-            Vec::new(),
-            None,
+        model_with_config(full_id, &[]).with_contract_facts(vec![composite], Vec::new(), None)
+    }
+
+    /// A `unique_combination_of_columns` test node over `cols`, attached to
+    /// `attached`.
+    fn combo_test_node(id: &str, attached: &str, cols: &[&str]) -> Node {
+        test_node(id, attached, None, combo_metadata(cols), &[])
+    }
+
+    #[test]
+    fn enforcement_emits_one_tuple_finding_for_an_unbacked_composite_key() {
+        // The #341 behavior: ONE tuple-keyed finding, not N per-column.
+        let manifest = manifest_on_adapter(
+            "duckdb",
+            vec![model_with_composite_pk(
+                "model.shop.lines",
+                &["order_id", "line_id"],
+            )],
         );
-        let manifest = manifest_on_adapter("duckdb", vec![model]);
         let findings = run(&manifest, "model.shop.lines");
-        assert!(
-            !findings
-                .iter()
-                .any(|f| f.check == HeuristicId::EnforcementConstraintUnbacked),
-            "a composite key emits no per-column enforcement finding (cute-dbt#341)",
+        let enforcement: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == HeuristicId::EnforcementConstraintUnbacked)
+            .collect();
+        assert_eq!(enforcement.len(), 1, "exactly one tuple-keyed finding");
+        assert_eq!(
+            enforcement[0].construct, "constraint.primary_key[(order_id, line_id)]",
+            "the construct names the tuple",
+        );
+        assert_eq!(enforcement[0].verdict, Verdict::Uncovered);
+    }
+
+    #[test]
+    fn enforcement_covered_by_a_matching_combination_test() {
+        // A unique_combination_of_columns over the SAME set ⇒ Covered,
+        // attributing the real test node id.
+        let manifest = manifest_on_adapter(
+            "duckdb",
+            vec![
+                model_with_composite_pk("model.shop.lines", &["order_id", "line_id"]),
+                combo_test_node(
+                    "test.shop.combo",
+                    "model.shop.lines",
+                    &["order_id", "line_id"],
+                ),
+            ],
+        );
+        let findings = run(&manifest, "model.shop.lines");
+        let enforcement: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == HeuristicId::EnforcementConstraintUnbacked)
+            .collect();
+        assert_eq!(enforcement.len(), 1);
+        assert_eq!(
+            enforcement[0].verdict,
+            Verdict::Covered {
+                by: vec!["test.shop.combo".to_owned()],
+            },
         );
     }
 
     #[test]
+    fn enforcement_combination_test_is_set_equal_order_independent() {
+        // The match is by SET — column order in the test vs the key
+        // doesn't matter.
+        let manifest = manifest_on_adapter(
+            "duckdb",
+            vec![
+                model_with_composite_pk("model.shop.lines", &["order_id", "line_id"]),
+                combo_test_node(
+                    "test.shop.combo",
+                    "model.shop.lines",
+                    &["line_id", "order_id"],
+                ),
+            ],
+        );
+        let findings = run(&manifest, "model.shop.lines");
+        let enforcement: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == HeuristicId::EnforcementConstraintUnbacked)
+            .collect();
+        assert!(matches!(enforcement[0].verdict, Verdict::Covered { .. }));
+    }
+
+    #[test]
+    fn enforcement_subset_combination_covers_a_composite_key() {
+        // A combination test over a proper SUBSET of the tuple DOES cover
+        // it: `{order_id}` unique ⟹ `(order_id, line_id)` unique (the #259
+        // grain covers_key direction; cute-dbt#341 corrected).
+        let manifest = manifest_on_adapter(
+            "duckdb",
+            vec![
+                model_with_composite_pk("model.shop.lines", &["order_id", "line_id"]),
+                combo_test_node("test.shop.partial", "model.shop.lines", &["order_id"]),
+            ],
+        );
+        let findings = run(&manifest, "model.shop.lines");
+        let enforcement: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == HeuristicId::EnforcementConstraintUnbacked)
+            .collect();
+        assert_eq!(enforcement.len(), 1);
+        assert_eq!(
+            enforcement[0].verdict,
+            Verdict::Covered {
+                by: vec!["test.shop.partial".to_owned()],
+            },
+            "a subset combination backs the wider tuple",
+        );
+    }
+
+    #[test]
+    fn enforcement_single_column_unique_covers_a_composite_key() {
+        // A plain `unique` on one tuple column is a 1-element subset of
+        // the key — it backs the composite key.
+        let manifest = manifest_on_adapter(
+            "duckdb",
+            vec![
+                model_with_composite_pk("model.shop.lines", &["order_id", "line_id"]),
+                test_node(
+                    "test.shop.u",
+                    "model.shop.lines",
+                    Some("order_id"),
+                    unique_metadata("order_id"),
+                    &[],
+                ),
+            ],
+        );
+        let findings = run(&manifest, "model.shop.lines");
+        let enforcement: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == HeuristicId::EnforcementConstraintUnbacked)
+            .collect();
+        assert_eq!(
+            enforcement[0].verdict,
+            Verdict::Covered {
+                by: vec!["test.shop.u".to_owned()],
+            },
+        );
+    }
+
+    #[test]
+    fn enforcement_superset_combination_does_not_cover_a_composite_key() {
+        // A SUPERSET is not a subset — `(a, b, c)` unique does not imply
+        // `(a, b)` unique, so it does not back the key.
+        let manifest = manifest_on_adapter(
+            "duckdb",
+            vec![
+                model_with_composite_pk("model.shop.lines", &["order_id", "line_id"]),
+                combo_test_node(
+                    "test.shop.wide",
+                    "model.shop.lines",
+                    &["order_id", "line_id", "sku"],
+                ),
+            ],
+        );
+        let findings = run(&manifest, "model.shop.lines");
+        let enforcement: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == HeuristicId::EnforcementConstraintUnbacked)
+            .collect();
+        assert_eq!(enforcement[0].verdict, Verdict::Uncovered);
+    }
+
+    #[test]
+    fn enforcement_partial_overlap_does_not_cover_a_composite_key() {
+        // `{order_id, sku}` overlaps `{order_id, line_id}` but is not
+        // contained — not a subset, so it does not back the key.
+        let manifest = manifest_on_adapter(
+            "duckdb",
+            vec![
+                model_with_composite_pk("model.shop.lines", &["order_id", "line_id"]),
+                combo_test_node(
+                    "test.shop.overlap",
+                    "model.shop.lines",
+                    &["order_id", "sku"],
+                ),
+            ],
+        );
+        let findings = run(&manifest, "model.shop.lines");
+        let enforcement: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == HeuristicId::EnforcementConstraintUnbacked)
+            .collect();
+        assert_eq!(enforcement[0].verdict, Verdict::Uncovered);
+    }
+
+    #[test]
     fn enforcement_still_fires_for_a_single_column_model_level_pk() {
-        // The single-column model-level case still works (only composite
-        // keys are filtered).
+        // The single-column model-level case (the #339 baseline).
         use crate::domain::manifest::Constraint;
         let single = Constraint::new(
             "primary_key",
@@ -6341,5 +6542,42 @@ mod tests {
             .collect();
         assert_eq!(enforcement.len(), 1);
         assert_eq!(enforcement[0].construct, "constraint.primary_key[id]");
+    }
+
+    #[test]
+    fn enforcement_dedups_a_composite_key_declared_in_both_orders() {
+        // `(a, b)` and `(b, a)` are the same uniqueness key — ONE finding,
+        // not two (gemini on #342: dedup on the column SET).
+        use crate::domain::manifest::Constraint;
+        let ab = Constraint::new(
+            "primary_key",
+            vec!["a".to_owned(), "b".to_owned()],
+            None,
+            None,
+            None,
+            Vec::new(),
+        );
+        let ba = Constraint::new(
+            "primary_key",
+            vec!["b".to_owned(), "a".to_owned()],
+            None,
+            None,
+            None,
+            Vec::new(),
+        );
+        let model = model_with_config("model.shop.lines", &[]).with_contract_facts(
+            vec![ab, ba],
+            Vec::new(),
+            None,
+        );
+        let manifest = manifest_on_adapter("duckdb", vec![model]);
+        let findings = run(&manifest, "model.shop.lines");
+        let enforcement: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == HeuristicId::EnforcementConstraintUnbacked)
+            .collect();
+        assert_eq!(enforcement.len(), 1, "order-insensitive set dedup");
+        // The FIRST-declared order is kept for display.
+        assert_eq!(enforcement[0].construct, "constraint.primary_key[(a, b)]");
     }
 }
