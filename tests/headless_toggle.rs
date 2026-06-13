@@ -43,15 +43,16 @@ use headless_chrome::{Browser, LaunchOptionsBuilder, Tab};
 
 use cute_dbt::adapters::manifest::FileManifestSource;
 use cute_dbt::adapters::render::{
-    ExternalFixtures, LoadedFixture, ScopeSource, render_report, render_report_with_externals,
+    ExternalFixtures, LoadedFixture, MacroLensPayload, ScopeSource, build_macro_lens,
+    render_report, render_report_with_externals,
 };
 use cute_dbt::domain::{
     BlockDiff, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, FileHunks,
-    HookChangeFacts, HookManifestPresence, Hunk, InScopeSet, Manifest, ManifestMetadata,
-    ModelInScopeSet, Node, NodeConfig, NodeId, NormalizedDiffIndex, PrDiff, ProjectChange,
-    ProjectChangeCategory, ProjectChangePanel, ProjectFacts, ProjectFallbackReason, SourceNode,
-    TestMetadata, UnitTest, UnitTestDataDiff, UnitTestExpect, UnitTestGiven, UnitTestYamlBlock,
-    external_fixture_table, raw_hunk_lines, reconstruct_table_diffs,
+    HookChangeFacts, HookManifestPresence, Hunk, InScopeSet, MacroIdentity, Manifest,
+    ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId, NormalizedDiffIndex, PrDiff,
+    ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectFacts, ProjectFallbackReason,
+    SourceNode, TestMetadata, UnitTest, UnitTestDataDiff, UnitTestExpect, UnitTestGiven,
+    UnitTestYamlBlock, external_fixture_table, raw_hunk_lines, reconstruct_table_diffs,
 };
 use cute_dbt::ports::ManifestSource;
 
@@ -4782,6 +4783,7 @@ fn render_with_external_fixtures(
         &cute_dbt::domain::CheckPolicy::default(),
         &cute_dbt::domain::ProjectFacts::default(),
         &cute_dbt::domain::GovernanceFacts::default(),
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -7396,6 +7398,7 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
         &policy,
         &cute_dbt::domain::ProjectFacts::default(),
         &cute_dbt::domain::GovernanceFacts::default(),
+        None,
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -7966,6 +7969,7 @@ fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
         &policy,
         &cute_dbt::domain::ProjectFacts::default(),
         &cute_dbt::domain::GovernanceFacts::default(),
+        None,
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -12104,6 +12108,7 @@ fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
         &cute_dbt::domain::CheckPolicy::default(),
         facts,
         &cute_dbt::domain::GovernanceFacts::default(),
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -12143,6 +12148,7 @@ fn render_governance_to_file(
         &cute_dbt::domain::CheckPolicy::default(),
         &cute_dbt::domain::ProjectFacts::default(),
         governance,
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -12237,6 +12243,166 @@ fn governance_contract_drawer_absent_without_a_class_in_a_real_browser() {
         count.as_i64(),
         Some(0),
         "no drawer without a contract class"
+    );
+    let _ = tab.close(true);
+}
+
+// ===== macro lens (cute-dbt#265, Slice B) =====
+
+/// cute-dbt#265 Slice B — render a minimal pr-diff report carrying a
+/// `MacroLensPayload` (the server-rendered macro section) to a temp file,
+/// returning its file:// URL. Built from a real `build_macro_lens` over a
+/// synthetic manifest so the body diff + the impacted-model directory tree
+/// are the genuine render output, proven to survive in a real browser with
+/// the full asset bundle loaded.
+fn render_macro_lens_to_file(filename: &str) -> String {
+    // Two root-project models in different directory subtrees calling one
+    // macro, so the tree groups under distinct directories.
+    let macro_id = "macro.shop.add_dq_flags";
+    let body = "{% macro add_dq_flags(col) %}\n  case when {{ col }} then 1 end\n{% endmacro %}";
+    let mut macros = HashMap::new();
+    macros.insert(macro_id.to_owned(), body.to_owned());
+    let mut identity = std::collections::BTreeMap::new();
+    identity.insert(
+        macro_id.to_owned(),
+        MacroIdentity::new(
+            Some("macros/dq.sql".to_owned()),
+            Some("add_dq_flags".to_owned()),
+            Some("shop".to_owned()),
+        ),
+    );
+    let model = |bare: &str, ofp: &str| {
+        Node::new(
+            NodeId::new(format!("model.shop.{bare}")),
+            "model",
+            Checksum::new("sha256", bare),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::new(vec![macro_id.to_owned()], Vec::new()),
+            Some(format!("models/{ofp}")),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(None, Some("shop".to_owned()))
+    };
+    let nodes = [
+        model("stg_orders", "staging/stg_orders.sql"),
+        model("fct_orders", "marts/core/fct_orders.sql"),
+    ];
+    let m = Manifest::new(
+        ManifestMetadata::new("v12").with_project_name(Some("shop".to_owned())),
+        nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+        HashMap::new(),
+        macros,
+    )
+    .with_macro_identity(identity);
+    // A pr-diff index touching the macro file's line 2, so the body diff
+    // reconstructs (the `+` matches the working-tree body).
+    let diff = PrDiff {
+        renames: Vec::new(),
+        files: vec![FileHunks {
+            path: "macros/dq.sql".to_owned(),
+            hunks: vec![Hunk {
+                new_start: 2,
+                new_len: 1,
+                removed_lines: vec!["  case when {{ col }} then 0 end".to_owned()],
+                added_lines: vec!["  case when {{ col }} then 1 end".to_owned()],
+            }],
+        }],
+    };
+    let index = NormalizedDiffIndex::new(&diff, None);
+    let changed = [macro_id.to_owned()].into_iter().collect();
+    let lens: MacroLensPayload =
+        build_macro_lens(&m, &changed, ScopeSource::PrDiff, Some(&index)).expect("lens builds");
+
+    let models: ModelInScopeSet = [
+        NodeId::new("model.shop.stg_orders"),
+        NodeId::new("model.shop.fct_orders"),
+    ]
+    .into_iter()
+    .collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &InScopeSet::new(),
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        &cute_dbt::domain::ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
+        Some(&lens),
+    )
+    .expect("render writes the report");
+    format!("file://{}", out.to_str().expect("UTF-8 path"))
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn macro_lens_section_renders_with_tree_in_a_real_browser() {
+    // cute-dbt#265 Slice B — the server-rendered macro section survives in a
+    // real browser with the full asset bundle: the panel is in the DOM, the
+    // body diff renders, the impacted-model directory tree is present and
+    // (since it ships `<details open>`) its model leaves are visible. The
+    // dedicated headless_zero_egress job proves the same committed golden
+    // makes zero network requests; this guard proves the section RENDERS.
+    let url = render_macro_lens_to_file("cute_dbt_macro_lens.html");
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"macro-lens-panel\"]"),
+        1,
+        "the macro-lens section renders",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"macro-lens-diff\"]"),
+        1,
+        "the macro body diff renders",
+    );
+    // The directory tree ships `<details open>`, so its model leaves are
+    // visible without interaction — assert both impacted models are shown.
+    let leaves = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"macro-lens-tree-row\"][data-kind=\"model\"]').length",
+    );
+    assert_eq!(
+        leaves.as_i64(),
+        Some(2),
+        "both impacted-model leaves render in the tree",
+    );
+    let count = eval_string(
+        &tab,
+        "document.querySelector('[data-testid=\"macro-lens-count\"]').getAttribute('data-count')",
+    );
+    assert_eq!(count, "2", "the impacted-model count reads 2");
+    // The tree <details> can be toggled closed and re-opened — prove the
+    // expand affordance is live in the real DOM.
+    let toggled_open = eval(
+        &tab,
+        "(() => { const d = document.querySelector('[data-testid=\"macro-lens-tree-details\"]'); \
+         d.open = false; d.open = true; return d.open; })()",
+    );
+    assert_eq!(
+        toggled_open.as_bool(),
+        Some(true),
+        "the impacted-model tree <details> expands",
     );
     let _ = tab.close(true);
 }

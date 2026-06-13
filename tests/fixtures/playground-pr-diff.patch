@@ -1,3 +1,9 @@
+diff --git a/macros/data_quality/quarantine_filter.sql b/macros/data_quality/quarantine_filter.sql
+--- a/macros/data_quality/quarantine_filter.sql
++++ b/macros/data_quality/quarantine_filter.sql
+@@ -3 +3 @@
+-    where {{ field_name }} is true
++    where {{ field_name }} = true
 diff --git a/models/marts/analytics/fct_provider_metrics.sql b/models/marts/analytics/fct_provider_metrics.sql
 --- a/models/marts/analytics/fct_provider_metrics.sql
 +++ b/models/marts/analytics/fct_provider_metrics.sql

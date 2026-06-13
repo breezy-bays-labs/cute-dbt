@@ -58,8 +58,8 @@ use crate::adapters::manifest::{FileManifestSource, load_baseline};
 use crate::adapters::project_def::parse as parse_project_definition;
 use crate::adapters::project_file::FsProjectFileReader;
 use crate::adapters::render::{
-    ExternalFixtures, LoadedFixture, ScopeSource, build_payload, index_tests_for_models,
-    render_report_with_externals,
+    ExternalFixtures, LoadedFixture, MacroLensPayload, ScopeSource, build_macro_lens,
+    build_payload, index_tests_for_models, render_report_with_externals,
 };
 use crate::domain::{
     BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_REPORT_TITLE, DepDate, EnabledExperiments,
@@ -68,13 +68,14 @@ use crate::domain::{
     ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ScopeInput, ScopeSelection,
     SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock, VarReference,
     all_models, attach_hook_facts, attach_model_yaml_diffs, attach_var_facts,
-    attribute_config_tree_changes, attribute_var_changes, changed_models, check_by_id,
-    diff_project_definitions, effective_fixture_format, external_fixture_table,
-    extract_model_block, extract_unit_test_block, gather_governance, hook_operations,
-    preflight_compiled, raw_hunk_lines, reconstruct_block_diffs, reconstruct_external_fixture_diff,
-    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks,
-    resolve_check_policy, resolve_experimental_config, reverse_apply, scan_pragmas,
-    select_in_scope, widen_with_config_attributions,
+    attribute_config_tree_changes, attribute_var_changes, changed_macros_baseline,
+    changed_macros_pr_diff, changed_models, check_by_id, diff_project_definitions,
+    effective_fixture_format, external_fixture_table, extract_model_block, extract_unit_test_block,
+    gather_governance, hook_operations, preflight_compiled, raw_hunk_lines,
+    reconstruct_block_diffs, reconstruct_external_fixture_diff, reconstruct_model_sql_diffs,
+    reconstruct_table_diffs, refine_changed_by_hunks, resolve_check_policy,
+    resolve_experimental_config, reverse_apply, scan_pragmas, select_in_scope,
+    widen_with_config_attributions,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -189,6 +190,12 @@ impl RunError {
 /// renders and nothing widens. `?` short-circuits before
 /// `render`, so a fail-closed manifest never produces a partial
 /// `report.html`.
+// `too_many_lines`: the report run loop is a linear composition root —
+// each gather slice (project-state, governance, macro-lens, the inline-diff
+// reconstructions) is one named, already-factored step threaded in sequence.
+// Splitting the loop into sub-loops would add indirection that buys nothing
+// at this single composition site (the `render_report` rationale, cli edition).
+#[allow(clippy::too_many_lines)]
 fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     let current = load_current(args)?;
     let scope_input = resolve_scope_input(args)?;
@@ -279,6 +286,9 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     } else {
         GovernanceFacts::default()
     };
+    // Macro perspective lens (cute-dbt#265, Slice B) — see `gather_macro_lens`.
+    let macro_lens = gather_macro_lens(&current, &scope_input, &experiments);
+
     // Stage-2 fail-closed reads the TRUE in-scope set (cute-dbt#91): the
     // widened render set is only for what the report displays. Config-tree
     // widened tests (cute-dbt#267) ARE the true scope, so they preflight.
@@ -401,6 +411,7 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
         &check_policy,
         &project_facts,
         &governance_facts,
+        macro_lens.as_ref(),
     )
     .map_err(|err| RunError::output(&args.out, err))?;
     Ok(())
@@ -1328,6 +1339,45 @@ fn resolve_scope_input(args: &ReportArgs) -> Result<ScopeInput, RunError> {
     }
 }
 
+/// Gather the macro perspective lens (cute-dbt#265, Slice B), gated behind
+/// the `macro-lens` experiment (the epic #288 default-OFF posture).
+///
+/// Enabled: resolve the changed root-project macros by scope arm — the
+/// `PrDiff` arm runs the path-primary + name-fallback heuristic over the
+/// diff index, the `Baseline` arm runs the exact `macro_sql` body
+/// comparison (fusion's `check_modified_macros` semantics) — then build the
+/// section
+/// (per-macro body diff + reverse blast-radius directory tree + count +
+/// fidelity chip). Default (off): `None` ⇒ omitted from the JSON payload
+/// and zero DOM via `{% if macro_lens %}`, so the non-macro goldens stay
+/// byte-identical. A pure pass over the already-parsed manifest + the diff
+/// index (no file read, zero-egress); the blast radius never widens scope
+/// (it is a render-only contextualizer, the governance posture). The
+/// diff-showcase golden row sets `experimental:"1"`, so a changed
+/// playground macro surfaces here.
+fn gather_macro_lens(
+    current: &Manifest,
+    scope_input: &ScopeInput,
+    experiments: &EnabledExperiments,
+) -> Option<MacroLensPayload> {
+    if !experiments.is_enabled(Experiment::MacroLens) {
+        return None;
+    }
+    let (changed_macros, index, source) = match scope_input {
+        ScopeInput::PrDiff { index } => (
+            changed_macros_pr_diff(current, index),
+            Some(index),
+            ScopeSource::PrDiff,
+        ),
+        ScopeInput::Baseline { manifest, .. } => (
+            changed_macros_baseline(current, manifest),
+            None,
+            ScopeSource::Baseline,
+        ),
+    };
+    build_macro_lens(current, &changed_macros, source, index)
+}
+
 /// The diff-scope banner inputs for the selected scope source.
 ///
 /// Returns `(baseline_label, scope_source)`. The baseline arm carries the
@@ -1407,6 +1457,7 @@ fn render(
     check_policy: &CheckPolicy<HeuristicId>,
     project_facts: &ProjectFacts,
     governance: &GovernanceFacts,
+    macro_lens: Option<&MacroLensPayload>,
 ) -> Result<(), io::Error> {
     render_report_with_externals(
         out,
@@ -1427,6 +1478,7 @@ fn render(
         check_policy,
         project_facts,
         governance,
+        macro_lens,
     )
 }
 

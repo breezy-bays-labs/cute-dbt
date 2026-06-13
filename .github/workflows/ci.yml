@@ -341,6 +341,7 @@ jobs:
     #   - 26 after review_scope_variants (cute-dbt#302)
     #   - 27 after review_pr_anchor (cute-dbt#303)
     #   - 28 after agent_skill (cute-dbt#304)
+    #   - 29 after macro_perspective (cute-dbt#265)
     # The README is not a feature. The job name deliberately carries no
     # number (cute-dbt#68 — the old `==6` display label went stale across
     # several bumps): the enforced count lives ONLY in the `expected=`
@@ -358,7 +359,7 @@ jobs:
       - name: features/*.feature count matches expected
         run: |
           set -euo pipefail
-          expected=28
+          expected=29
           count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
           echo "feature-count: expected ${expected}, found ${count}"
           if [ "$count" != "$expected" ]; then

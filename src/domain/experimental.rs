@@ -51,12 +51,25 @@ pub enum Experiment {
     /// lifecycle chips. Every surface is render over already-parsed wire
     /// data, gated empty so the released golden never moves.
     Governance,
+    /// The macro perspective lens (cute-dbt#265, epic #265): the
+    /// "macro changed" section — the changed macro's body diff, the
+    /// collapsible directory tree of the impacted root-project models (the
+    /// reverse [`macro_blast_radius`](crate::domain::macro_blast_radius)),
+    /// the impacted-model count, and a per-arm fidelity chip (baseline =
+    /// exact macro-body comparison; pr-diff = path/name heuristic). Render
+    /// over already-parsed wire data + the PR diff index; gated empty so
+    /// the non-macro goldens stay byte-identical.
+    MacroLens,
 }
 
 impl Experiment {
     /// Every registered experiment, in declaration order — the closed
     /// vocabulary both opt-in surfaces validate against.
-    pub const ALL: &'static [Experiment] = &[Experiment::ProjectState, Experiment::Governance];
+    pub const ALL: &'static [Experiment] = &[
+        Experiment::ProjectState,
+        Experiment::Governance,
+        Experiment::MacroLens,
+    ];
 
     /// The kebab-case wire id this experiment is named by in the
     /// `[experimental]` TOML list and the `CUTE_DBT_EXPERIMENTAL` env
@@ -66,6 +79,7 @@ impl Experiment {
         match self {
             Self::ProjectState => "project-state",
             Self::Governance => "governance",
+            Self::MacroLens => "macro-lens",
         }
     }
 
@@ -282,6 +296,19 @@ mod tests {
             Some(Experiment::Governance)
         );
         assert!(Experiment::ALL.contains(&Experiment::Governance));
+    }
+
+    #[test]
+    fn macro_lens_is_a_registered_experiment_with_its_wire_id() {
+        // cute-dbt#265 Slice B: the gating seam for the macro perspective
+        // section. The id round-trips and the variant is in the closed
+        // vocabulary (so `1`/`all` enables it on the diff-showcase row).
+        assert_eq!(Experiment::MacroLens.id(), "macro-lens");
+        assert_eq!(
+            Experiment::from_id("macro-lens"),
+            Some(Experiment::MacroLens)
+        );
+        assert!(Experiment::ALL.contains(&Experiment::MacroLens));
     }
 
     // ----- [experimental] TOML resolution -----
