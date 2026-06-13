@@ -20,6 +20,13 @@ Verify:
 cute-dbt --help
 ```
 
+> **Want one command instead?** [`cute-dbt review`](./one-command-review.md)
+> automates everything on this page — it detects the base, runs `dbt
+> compile`, produces the diff, and renders the report for you. This page
+> walks the **manual `report` flow** `review` wraps, so you understand
+> what it does (and so CI and scripts, which call `report` directly, have
+> a reference).
+
 ## Generate a report
 
 `cute-dbt report` always reads a **current** `manifest.json`, plus
@@ -160,8 +167,12 @@ cute-dbt report \
 ```
 
 Wrapping this in a make target / shell function is a common
-ergonomic. cute-dbt itself is intentionally unopinionated about how
-you produce the two manifests.
+ergonomic — and it is exactly what
+[`cute-dbt review`](./one-command-review.md) does for you: detect the
+base, compile, diff, render, in one command. The manual flow above is
+useful when you want a baseline-mode comparison (review is the
+working-tree pr-diff twin) or precise control over how the manifests are
+produced; cute-dbt itself is intentionally unopinionated there.
 
 ## What you'll see
 

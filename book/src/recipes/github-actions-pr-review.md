@@ -643,3 +643,62 @@ Notes:
   uses to self-dogfood `--pr-diff` against an embedded fusion example
   project — CI recompiles an **ephemeral** manifest at the PR head and
   renders the PR's own diff into the sticky comment.
+
+## Agent skill
+
+The CI recipe above is for automation. For *interactive* review — "ask
+your agent to review this dbt PR" — cute-dbt ships an
+[Agent Skill](https://agentskills.io): a small, portable instruction
+file that teaches Claude Code, Codex, Cursor, Copilot, and 30+ other
+clients to drive [`cute-dbt review`](../one-command-review.md) for you.
+The skill is the local-interactive counterpart to this CI recipe.
+
+### Install it
+
+Three channels share **one** file (`skills/dbt-pr-review/SKILL.md`), so
+they never disagree:
+
+```sh
+# From the cute-dbt binary you already have — zero drift by
+# construction, since the skill text ships inside the binary that
+# defines the flags. Writes into the current repo.
+cute-dbt skill --install                  # .claude/skills/dbt-pr-review/
+cute-dbt skill --install --agent codex    # .agents/skills/... (Cursor/Codex/Copilot)
+
+# Or from the skills ecosystem (cross-agent, auto-detects your clients):
+npx skills add breezy-bays-labs/cute-dbt --skill dbt-pr-review
+gh skill install breezy-bays-labs/cute-dbt dbt-pr-review
+```
+
+`cute-dbt skill --install` refuses outside a git repository (the skill
+belongs to a repo). `cute-dbt skill --print` writes the skill to stdout
+without touching anything — useful to inspect it, or to pipe it
+somewhere yourself.
+
+Once installed, the agent runs `cute-dbt review --no-open`, relays
+cute-dbt's remediation verbatim on any failure, and re-grounds on
+`cute-dbt --version` / `cute-dbt review --help` if a flag looks
+unfamiliar — so a stale skill copy self-heals against version drift.
+
+### Fallback: paste into `AGENTS.md` / `CLAUDE.md`
+
+> **The less-capable path.** A skill loads only its name + description
+> until invoked, then carries the full workflow; a pasted snippet is
+> always-loaded context with no progressive disclosure and no update
+> channel. Prefer `cute-dbt skill --install` (or `npx skills add`) above.
+> Use this only if you have no skills tooling.
+
+If you cannot use a skill, paste this into your repo's `AGENTS.md` (read
+by Codex, Cursor, Copilot, Gemini CLI, …) or `CLAUDE.md` (Claude Code):
+
+```markdown
+## Reviewing dbt changes
+
+To produce a PR-review report of this dbt project's unit tests, run
+`cute-dbt review --no-open` from the repo root. It auto-detects the base
+branch, runs `dbt compile`, diffs the working tree, and writes a
+self-contained HTML report to `<project>/target/cute-dbt-report.html`.
+On failure, relay cute-dbt's stderr remediation verbatim — do not guess
+a fix. If a flag looks unfamiliar, re-ground via `cute-dbt --version`
+and `cute-dbt review --help`.
+```
