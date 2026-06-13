@@ -2372,7 +2372,17 @@ fn macro_call_sites(raw: &str, macro_name: &str) -> Vec<CallSiteView> {
 /// Whether `line` invokes `macro_name` as a call (`macro_name(` with an
 /// optional run of whitespace before the `(`), bounded so a longer
 /// identifier ending in `macro_name` does not match.
+///
+/// An empty `macro_name` returns `false` defensively: `str::find("")`
+/// yields `Some(0)` and a zero-length name never advances `from`, so the
+/// scan would otherwise spin forever. The sole caller
+/// ([`macro_call_sites`]) already guards the empty name, but this local
+/// guard makes the helper safe regardless of caller invariants — a silent
+/// hang is the worst latent failure.
 fn line_invokes_macro(line: &str, macro_name: &str) -> bool {
+    if macro_name.is_empty() {
+        return false;
+    }
     let bytes = line.as_bytes();
     let name_len = macro_name.len();
     let mut from = 0;
@@ -7530,6 +7540,16 @@ mod tests {
             "-- see add_dq_flags for details",
             "add_dq_flags"
         ));
+    }
+
+    #[test]
+    fn line_invokes_macro_empty_name_is_false_and_does_not_hang() {
+        // gemini #358 — an empty macro_name makes `str::find("")` return
+        // Some(0) with a zero-length advance: the defensive top guard must
+        // return false rather than spin forever. (The test completing IS
+        // the no-hang assertion.)
+        assert!(!line_invokes_macro("select foo()", ""));
+        assert!(!line_invokes_macro("", ""));
     }
 
     #[test]
