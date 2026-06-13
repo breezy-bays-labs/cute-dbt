@@ -10,9 +10,10 @@ cute-dbt review
 
 It finds the dbt project, detects the base branch, runs *your* `dbt
 compile`, diffs the working tree against the merge-base, renders the
-report to `<project>/target/cute-dbt-report.html`, and opens it on an
-interactive terminal. Everything `report` needs explicitly, `review`
-figures out for you.
+report to `<project>/target/cute-dbt-report.html`, and — when run from an
+interactive terminal — opens it in your default browser (`--no-open`
+skips this). Everything `report` needs explicitly, `review` figures out
+for you.
 
 ## Two verbs: porcelain and plumbing
 

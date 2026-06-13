@@ -43,8 +43,9 @@ cute-dbt review
 
 `review` finds the dbt project, detects the base branch, runs *your* `dbt
 compile`, diffs the working tree against the merge-base, renders the
-report to `<project>/target/cute-dbt-report.html`, and opens it on a
-terminal. Want to see exactly what it will run first? `cute-dbt review
+report to `<project>/target/cute-dbt-report.html`, and — when run from an
+interactive terminal — opens it in your default browser (pass `--no-open`
+to skip). Want to see exactly what it will run first? `cute-dbt review
 --dry-run` prints every command and executes nothing.
 
 This is the **porcelain** verb (the first-contact path for humans and
