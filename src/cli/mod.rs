@@ -44,6 +44,7 @@ mod args;
 mod exit;
 mod pr_diff;
 mod review;
+mod skill;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
@@ -103,6 +104,9 @@ pub fn run() -> ExitCode {
         }
         Command::Report(report) => execute_report(report).map_err(|failure| failure.message()),
         Command::Explore(explore) => execute_explore(explore).map_err(|failure| failure.message()),
+        Command::Skill(skill_args) => {
+            skill::execute_skill(skill_args).map_err(|failure| failure.message())
+        }
     };
     match outcome {
         Ok(()) => ExitCode::SUCCESS,

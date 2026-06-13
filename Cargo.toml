@@ -21,17 +21,21 @@ readme = "README.md"
 keywords = ["dbt", "unit-test", "cte", "data-engineering", "cli"]
 categories = ["command-line-utilities", "development-tools", "visualization"]
 # Package whitelist (cute-dbt#293): the published .crate ships only what
-# the build + crates.io page need. `templates/**` and `assets/**` are
-# LOAD-BEARING — every vendored frontend asset and askama template is
-# embedded at compile time (`include_str!`/`include_bytes!` from
-# src/adapters/), so the verify build breaks without them;
-# `assets/MANIFEST.toml` (the provenance index) travels inside
-# `assets/**` by design. Excluded: examples/, tests/, dbt-project/,
-# book/, .github/, agent notes. Cargo.toml itself is always included.
+# the build + crates.io page need. `templates/**`, `assets/**`, and
+# `skills/**` are LOAD-BEARING — every vendored frontend asset and askama
+# template, plus the agent SKILL.md, is embedded at compile time
+# (`include_str!`/`include_bytes!` from src/), so the verify build breaks
+# without them; `assets/MANIFEST.toml` (the provenance index) travels
+# inside `assets/**` by design. Excluded: examples/, tests/,
+# dbt-project/, book/, .github/, agent notes. Cargo.toml itself is always
+# included.
 include = [
     "src/**",
     "templates/**",
     "assets/**",
+    # The agent skill is `include_str!`-embedded by src/cli/skill.rs
+    # (cute-dbt#304), so the canonical SKILL.md must ship in the crate.
+    "skills/**",
     # Leading `/` anchors to the package root — the patterns are
     # gitignore-style, so a bare `README.md` would also drag in
     # `dbt-project/README.md` and `examples/README.md`.
