@@ -61,14 +61,118 @@ fn not_a_diff(detail: &str) -> String {
     format!("the --pr-diff value could not be parsed as a unified diff: {detail}")
 }
 
+/// The mutable accumulator threaded through the line-oriented diff scan.
+///
+/// Owning the per-line state in a struct (rather than a fistful of `let
+/// mut` locals) keeps [`parse_unified_diff`] a thin loop and moves the
+/// line-classification branching into [`DiffScan::feed`] and its small
+/// pure helpers — each well under the strict CRAP line.
+#[derive(Default)]
+struct DiffScan {
+    files: Vec<FileHunks>,
+    renames: Vec<RenamePair>,
+    pending_rename_from: Option<String>,
+    current: Option<FileHunks>,
+    in_hunk: bool,
+    saw_structure: bool,
+}
+
+impl DiffScan {
+    /// Classify and consume one diff line, mutating the scan state.
+    ///
+    /// The dispatch order is load-bearing: `diff --git` and `@@` headers
+    /// are recognized first (and reset / open hunks), then in-hunk body
+    /// lines, then header-territory path / rename lines. A malformed `@@`
+    /// header propagates as a usage error.
+    fn feed(&mut self, line: &str) -> Result<(), String> {
+        if self.feed_file_marker(line) || self.feed_hunk_header(line)? {
+            return Ok(());
+        }
+        if self.feed_body_line(line) {
+            return Ok(());
+        }
+        self.feed_header_line(line);
+        Ok(())
+    }
+
+    /// `diff --git` — start of a new file's header block. Resets `in_hunk`
+    /// and drops any dangling `rename from` (never adjacent across files in
+    /// real git output) so a malformed header cannot leak across files,
+    /// then flushes the in-progress file. Returns `true` when consumed.
+    fn feed_file_marker(&mut self, line: &str) -> bool {
+        if !line.starts_with("diff --git") {
+            return false;
+        }
+        self.saw_structure = true;
+        self.in_hunk = false;
+        self.pending_rename_from = None;
+        flush(&mut self.current, &mut self.files);
+        true
+    }
+
+    /// Hunk header — `@@ -old[,c] +new[,c] @@ [section]`. Opens the hunk on
+    /// the current file and flags `in_hunk`. Returns `Ok(true)` when
+    /// consumed; a malformed header is propagated as a usage error.
+    fn feed_hunk_header(&mut self, line: &str) -> Result<bool, String> {
+        let Some(rest) = line.strip_prefix("@@") else {
+            return Ok(false);
+        };
+        self.saw_structure = true;
+        open_hunk(rest, self.current.as_mut(), &mut self.in_hunk)?;
+        Ok(true)
+    }
+
+    /// Inside a hunk body, [`consume_body_line`] appends `+`/`-` bodies
+    /// (and ignores `\ No newline…`). A non-body line ends the hunk
+    /// (clears `in_hunk`) and is **not** consumed, so the caller
+    /// re-classifies it as a header. Returns `true` only when the line was
+    /// a body line.
+    fn feed_body_line(&mut self, line: &str) -> bool {
+        if !self.in_hunk {
+            return false;
+        }
+        if consume_body_line(line, self.current.as_mut()) {
+            return true;
+        }
+        self.in_hunk = false;
+        false
+    }
+
+    /// Header block (`in_hunk == false`). `--- `/`+++ ` are the path
+    /// headers; `rename from`/`rename to` pair into a `RenamePair`
+    /// (cute-dbt#80). `index`, mode, `similarity …`, blank → ignored. Marks
+    /// `saw_structure` when the line was a recognized header.
+    fn feed_header_line(&mut self, line: &str) {
+        if consume_path_header(line, &mut self.current, &mut self.files)
+            || consume_rename_header(line, &mut self.pending_rename_from, &mut self.renames)
+        {
+            self.saw_structure = true;
+        }
+    }
+
+    /// Flush the trailing in-progress file and yield the parsed [`PrDiff`].
+    /// `had_input` (the original string was non-blank) with no recognized
+    /// structure is the "not a diff" error.
+    fn finish(mut self, had_input: bool) -> Result<PrDiff, String> {
+        flush(&mut self.current, &mut self.files);
+        if had_input && !self.saw_structure {
+            return Err(not_a_diff("no diff headers or hunks found"));
+        }
+        Ok(PrDiff {
+            files: self.files,
+            renames: self.renames,
+        })
+    }
+}
+
 /// Parse `git diff --unified=0` text into a [`PrDiff`].
 ///
 /// A small line-oriented state machine — no diff-parsing dependency at
 /// this layer (same spirit as the hand-rolled CSV parser, cute-dbt#66).
-/// Lines are classified relative to a single `in_hunk` flag so a `+++`
-/// **added body line** inside a hunk is never confused with a `+++ b/…`
-/// **file header** (headers only appear when `in_hunk` is false, after a
-/// `--- ` / `diff --git`).
+/// Each line is classified by [`DiffScan::feed`] relative to a single
+/// `in_hunk` flag so a `+++` **added body line** inside a hunk is never
+/// confused with a `+++ b/…` **file header** (headers only appear when
+/// `in_hunk` is false, after a `--- ` / `diff --git`).
 ///
 /// Rename detection (cute-dbt#80): the `rename from <old>` /
 /// `rename to <new>` extended-header pair (emitted by `git diff`'s
@@ -80,57 +184,11 @@ fn not_a_diff(detail: &str) -> String {
 /// C-quoted non-ASCII paths are not dequoted — parity with the
 /// `+++ b/<path>` parser).
 fn parse_unified_diff(s: &str) -> Result<PrDiff, String> {
-    let mut files: Vec<FileHunks> = Vec::new();
-    let mut renames: Vec<RenamePair> = Vec::new();
-    let mut pending_rename_from: Option<String> = None;
-    let mut current: Option<FileHunks> = None;
-    let mut in_hunk = false;
-    let mut saw_structure = false;
-
+    let mut scan = DiffScan::default();
     for line in s.lines() {
-        // `diff --git` — start of a new file's header block.
-        if line.starts_with("diff --git") {
-            saw_structure = true;
-            in_hunk = false;
-            // A dangling `rename from` never happens in real git output
-            // (the pair is adjacent); dropping it here keeps a malformed
-            // header from leaking across files.
-            pending_rename_from = None;
-            flush(&mut current, &mut files);
-            continue;
-        }
-        // Hunk header — `@@ -old[,c] +new[,c] @@ [section]`.
-        if let Some(rest) = line.strip_prefix("@@") {
-            saw_structure = true;
-            open_hunk(rest, current.as_mut(), &mut in_hunk)?;
-            continue;
-        }
-        // Inside a hunk body, `consume_body_line` appends `+`/`-` bodies (and
-        // ignores `\ No newline…`); a non-body line ends the hunk and falls
-        // through to the header checks below.
-        if in_hunk {
-            if consume_body_line(line, current.as_mut()) {
-                continue;
-            }
-            in_hunk = false;
-        }
-        // Header block (in_hunk == false). `--- `/`+++ ` are the path
-        // headers; `rename from`/`rename to` pair into a RenamePair
-        // (cute-dbt#80). `index`, mode, `similarity …`, blank → ignored.
-        if consume_path_header(line, &mut current, &mut files) {
-            saw_structure = true;
-            continue;
-        }
-        if consume_rename_header(line, &mut pending_rename_from, &mut renames) {
-            saw_structure = true;
-        }
+        scan.feed(line)?;
     }
-    flush(&mut current, &mut files);
-
-    if !s.trim().is_empty() && !saw_structure {
-        return Err(not_a_diff("no diff headers or hunks found"));
-    }
-    Ok(PrDiff { files, renames })
+    scan.finish(!s.trim().is_empty())
 }
 
 /// Parse a `@@ … @@` header (everything after the `@@`) and open the hunk
@@ -702,6 +760,43 @@ index 3333333..4444444 100644\n\
             h.added_lines,
             vec!["new".to_owned()],
             "the `+new` after a context line is still captured",
+        );
+    }
+
+    // ----- A new file opens after the prior file's hunk via `diff --git` -----
+
+    #[test]
+    fn a_diff_git_after_a_hunk_body_flushes_and_opens_the_next_file() {
+        // The prior file is `in_hunk` when the next file's `diff --git`
+        // header arrives: the marker resets `in_hunk`, flushes the open
+        // file, and the second file opens from its own `+++ b/` header — the
+        // body→header transition across a file boundary that the scan's
+        // dispatch order pins. Both files (and both hunk bodies) survive.
+        let diff = concat!(
+            "diff --git a/_ut.yml b/_ut.yml\n",
+            "--- a/_ut.yml\n",
+            "+++ b/_ut.yml\n",
+            "@@ -1 +1 @@\n",
+            "-a\n",
+            "+b\n",
+            "diff --git a/dim.sql b/dim.sql\n",
+            "--- a/dim.sql\n",
+            "+++ b/dim.sql\n",
+            "@@ -2,0 +3,1 @@\n",
+            "+select 1\n",
+        );
+        let pr = parse_diff(diff).expect("parses");
+        assert_eq!(
+            pr.files.len(),
+            2,
+            "the second file opens after the first file's hunk"
+        );
+        assert_eq!(pr.files[0].path, "_ut.yml");
+        assert_eq!(pr.files[0].hunks[0].added_lines, vec!["b".to_owned()]);
+        assert_eq!(pr.files[1].path, "dim.sql");
+        assert_eq!(
+            pr.files[1].hunks[0].added_lines,
+            vec!["select 1".to_owned()]
         );
     }
 }
