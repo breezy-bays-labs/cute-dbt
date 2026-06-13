@@ -84,313 +84,343 @@ pub fn run_cli(args: &[&str]) -> Output {
 // a test), and identity comes from explicit env vars. The SAME
 // isolation wraps the spawned `cute-dbt review` subprocess, because the
 // binary itself shells out to git.
+//
+// tracked: cute-dbt#331 — review subprocess shim harness is Unix-only;
+// Windows-capable shim deferred. The shim machinery below
+// (`PermissionsExt`/`set_mode(0o755)`, the `#!/bin/sh` shim bodies, the
+// `{bin}:/usr/bin:/bin` controlled PATH, and the host-tool symlinks)
+// uses Unix-only APIs, so the whole block — and the subprocess test
+// suites that consume it — is `#[cfg(unix)]`-gated. The PORTABLE review
+// unit tests (path/git logic) in `src/cli/review.rs` and the direct-
+// spawn integration tests (run_loop.rs etc.) run everywhere, including
+// the windows-latest job (cute-dbt#308/#316). Re-exported below so
+// callers keep using `common::TestRepo` / `common::scrub_git_env`.
+#[cfg(unix)]
+mod review_harness {
+    use super::{Output, PathBuf, fixture, tmp};
+    use std::process::Command;
 
-/// Scrub every repo-pointing `GIT_*` variable from a command's
-/// environment. **Load-bearing**: `git push` exports `GIT_DIR` into its
-/// pre-push hook, so a test suite running UNDER lefthook would
-/// otherwise have every spawned `git add`/`git commit` operate on the
-/// *developer's actual repository* (with the work tree defaulting to
-/// the test cwd) instead of the temp repo — exactly the near-miss that
-/// rewrote this branch's index during cute-dbt#300 development. Applied
-/// to every test-spawned `git` AND to the spawned `cute-dbt` binary
-/// (which shells out to git itself).
-pub fn scrub_git_env(cmd: &mut Command) {
-    for var in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_PREFIX",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_NAMESPACE",
-    ] {
-        cmd.env_remove(var);
-    }
-}
-
-/// A throwaway git repository for `cute-dbt review` tests.
-#[derive(Debug)]
-pub struct TestRepo {
-    /// The repository root (also the spawn cwd for `review`).
-    pub root: PathBuf,
-    /// Holds the empty gitconfig stand-in, OUTSIDE the repo so it can
-    /// never appear as an untracked file.
-    home: PathBuf,
-    /// Shim bin dir, prepended to a **fully controlled** PATH
-    /// (`<bin>:/usr/bin:/bin`) on every spawn — so a developer's real
-    /// `dbt` (homebrew, venv, …) can never answer a test, and `dbt` is
-    /// genuinely missing unless a test installs a shim via
-    /// [`TestRepo::install_dbt_shim`].
-    bin: PathBuf,
-}
-
-impl TestRepo {
-    /// Create a fresh repo under `CARGO_TARGET_TMPDIR` with `main` as
-    /// the initial branch (the probes' first candidate).
-    pub fn init(stem: &str) -> Self {
-        Self::init_with_branch(stem, "main")
-    }
-
-    /// Create a fresh repo with an explicit initial branch name (the
-    /// no-detectable-base scenarios use a branch the ladder never
-    /// probes).
-    pub fn init_with_branch(stem: &str, branch: &str) -> Self {
-        let base = tmp(&format!("review-repo-{stem}"));
-        let _ = std::fs::remove_dir_all(&base);
-        let root = base.join("repo");
-        let home = base.join("home");
-        let bin = base.join("bin");
-        std::fs::create_dir_all(&root).expect("create repo dir");
-        std::fs::create_dir_all(&home).expect("create home dir");
-        std::fs::create_dir_all(&bin).expect("create bin dir");
-        std::fs::write(home.join("gitconfig"), "").expect("write empty gitconfig");
-        let repo = Self { root, home, bin };
-        repo.git(&["init", "-q", "-b", branch]);
-        // Sanity tripwire: every later git command must operate on THIS
-        // repo, never an enclosing one (see `scrub_git_env`). Canonical
-        // comparison — macOS tempdirs traverse the /var symlink.
-        let toplevel = repo.git(&["rev-parse", "--show-toplevel"]);
-        let reported = std::fs::canonicalize(String::from_utf8_lossy(&toplevel.stdout).trim())
-            .expect("canonicalize reported toplevel");
-        let expected = std::fs::canonicalize(&repo.root).expect("canonicalize repo root");
-        assert_eq!(
-            reported, expected,
-            "the temp repo's git context leaked outside its root",
-        );
-        repo
-    }
-
-    /// Apply the git-environment isolation to any command (git itself
-    /// or the spawned `cute-dbt`, which shells out to git/dbt/gh).
-    pub fn isolate(&self, cmd: &mut Command) {
-        let empty = self.home.join("gitconfig");
-        scrub_git_env(cmd);
-        cmd.env("GIT_CONFIG_GLOBAL", &empty)
-            .env("GIT_CONFIG_SYSTEM", &empty)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("HOME", &self.home)
-            .env("GIT_AUTHOR_NAME", "cute-dbt-test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-            .env("GIT_COMMITTER_NAME", "cute-dbt-test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-            // Fully controlled PATH: the shim dir, then just enough
-            // system dirs for git/sh. A developer's real dbt can never
-            // answer a test, and "dbt missing" is the true default.
-            .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
-            .env_remove("CUTE_DBT_EXPERIMENTAL")
-            .env_remove("DBT_TARGET_PATH");
-    }
-
-    /// Install an executable shim named `name` into the controlled PATH.
-    /// The body is `#!/bin/sh` script text; every invocation's cwd + argv
-    /// is appended to `<bin>/<name>-invocations.log` before the body
-    /// runs, so tests can assert exactly what review executed (the
-    /// planned-argv == executed-argv pin at the subprocess level).
-    pub fn install_shim(&self, name: &str, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        let path = self.bin.join(name);
-        let script = format!(
-            "#!/bin/sh\nprintf 'cwd=%s args=%s\\n' \"$(pwd)\" \"$*\" >> \"{log}\"\n{body}\n",
-            log = self.shim_log(name).display(),
-        );
-        std::fs::write(&path, script).expect("write shim");
-        let mut perms = std::fs::metadata(&path)
-            .expect("shim metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod shim");
-    }
-
-    /// Install an executable `dbt` shim (the common case).
-    pub fn install_dbt_shim(&self, body: &str) {
-        self.install_shim("dbt", body);
-    }
-
-    /// Install an executable `gh` shim (cute-dbt#303 — the PR-anchor +
-    /// gh-rung tests).
-    pub fn install_gh_shim(&self, body: &str) {
-        self.install_shim("gh", body);
-    }
-
-    /// Remove a shim from the controlled PATH so the binary is genuinely
-    /// "not found" (the gh-missing / dbt-missing scenarios).
-    pub fn remove_shim(&self, name: &str) {
-        let _ = std::fs::remove_file(self.bin.join(name));
-    }
-
-    /// A named shim's invocation log (one `cwd=… args=…` line per call).
-    pub fn shim_log(&self, name: &str) -> PathBuf {
-        self.bin.join(format!("{name}-invocations.log"))
-    }
-
-    /// The `dbt` shim invocation log path.
-    pub fn dbt_log(&self) -> PathBuf {
-        self.shim_log("dbt")
-    }
-
-    /// The `dbt` shim log contents — empty when dbt never ran.
-    pub fn dbt_log_contents(&self) -> String {
-        std::fs::read_to_string(self.dbt_log()).unwrap_or_default()
-    }
-
-    /// The `gh` shim log contents — empty when gh never ran.
-    pub fn gh_log_contents(&self) -> String {
-        std::fs::read_to_string(self.shim_log("gh")).unwrap_or_default()
-    }
-
-    /// Run a git command in the repo, asserting success.
-    pub fn git(&self, args: &[&str]) -> Output {
-        let mut cmd = Command::new("git");
-        cmd.args(args).current_dir(&self.root);
-        self.isolate(&mut cmd);
-        let output = cmd.output().expect("git spawns");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr),
-        );
-        output
-    }
-
-    /// Write a file (creating parents) relative to the repo root.
-    pub fn write(&self, rel: &str, content: &str) {
-        let path = self.root.join(rel);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent dirs");
-        }
-        std::fs::write(&path, content).expect("write file");
-    }
-
-    /// Stage everything and commit.
-    pub fn commit_all(&self, message: &str) {
-        self.git(&["add", "-A"]);
-        self.git(&["commit", "-q", "-m", message]);
-    }
-
-    /// Spawn `cute-dbt review <args>` with cwd at `cwd_rel` under the
-    /// repo root, fully environment-isolated, output captured (so
-    /// stdout is never a TTY and auto-open can never fire).
-    pub fn review_in(&self, cwd_rel: &str, args: &[&str]) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
-        cmd.arg("review")
-            .args(args)
-            .current_dir(self.root.join(cwd_rel));
-        self.isolate(&mut cmd);
-        cmd.output().expect("the cute-dbt binary spawns")
-    }
-
-    /// Spawn `cute-dbt review <args>` from the repo root.
-    pub fn review(&self, args: &[&str]) -> Output {
-        self.review_in(".", args)
-    }
-
-    /// Spawn `cute-dbt review <args>` on a **hermetic PATH** that
-    /// contains ONLY the shim dir — `/usr/bin` and `/bin` are excluded,
-    /// so `gh` is genuinely `NotFound` even on hosts (GitHub-hosted
-    /// Linux runners) that pre-install `/usr/bin/gh`. The tools review
-    /// shells out to are symlinked into the shim dir first, so they
-    /// still resolve: `git` (every stage), plus `sh`/`env` for any shell
-    /// shim a test may have installed. `dbt`/`gh` are reachable ONLY if
-    /// a test installed their shims — never the host binaries.
-    ///
-    /// This is the only way to exercise the `--pr` gh-MISSING branch
-    /// (`ReviewError::DbtMissing`/`GhMissing` fire on
-    /// `io::ErrorKind::NotFound`, the genuine-missing-binary case — a
-    /// non-zero-exit shim is "present but failed", a different branch).
-    pub fn review_hermetic(&self, args: &[&str]) -> Output {
-        self.symlink_host_tools(&["git", "sh", "env"]);
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
-        cmd.arg("review").args(args).current_dir(&self.root);
-        let empty = self.home.join("gitconfig");
-        scrub_git_env(&mut cmd);
-        cmd.env("GIT_CONFIG_GLOBAL", &empty)
-            .env("GIT_CONFIG_SYSTEM", &empty)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("HOME", &self.home)
-            .env("GIT_AUTHOR_NAME", "cute-dbt-test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-            .env("GIT_COMMITTER_NAME", "cute-dbt-test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-            // HERMETIC: the shim dir ONLY. No /usr/bin, so a host
-            // /usr/bin/gh (GitHub runners) is unreachable; git/sh resolve
-            // via the symlinks created above.
-            .env("PATH", self.bin.display().to_string())
-            .env_remove("CUTE_DBT_EXPERIMENTAL")
-            .env_remove("DBT_TARGET_PATH");
-        cmd.output().expect("the cute-dbt binary spawns")
-    }
-
-    /// Symlink each named host tool into the shim dir (resolved from the
-    /// real PATH), so it resolves on the hermetic PATH that excludes the
-    /// system dirs. A tool already present (a real binary, a prior
-    /// symlink, or a test shim) is left untouched; an unresolvable tool
-    /// is skipped (the hermetic run will surface its own NotFound).
-    fn symlink_host_tools(&self, tools: &[&str]) {
-        for tool in tools {
-            let target = self.bin.join(tool);
-            if target.exists() {
-                continue;
-            }
-            if let Some(src) = resolve_on_host_path(tool) {
-                let _ = std::os::unix::fs::symlink(&src, &target);
-            }
+    /// Scrub every repo-pointing `GIT_*` variable from a command's
+    /// environment. **Load-bearing**: `git push` exports `GIT_DIR` into its
+    /// pre-push hook, so a test suite running UNDER lefthook would
+    /// otherwise have every spawned `git add`/`git commit` operate on the
+    /// *developer's actual repository* (with the work tree defaulting to
+    /// the test cwd) instead of the temp repo — exactly the near-miss that
+    /// rewrote this branch's index during cute-dbt#300 development. Applied
+    /// to every test-spawned `git` AND to the spawned `cute-dbt` binary
+    /// (which shells out to git itself).
+    pub fn scrub_git_env(cmd: &mut Command) {
+        for var in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_PREFIX",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_NAMESPACE",
+        ] {
+            cmd.env_remove(var);
         }
     }
-}
 
-/// Resolve a bare tool name to its absolute path by searching the test
-/// process's real `PATH` (the host PATH, before any harness override).
-fn resolve_on_host_path(tool: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(tool))
-        .find(|candidate| candidate.is_file())
-}
+    /// A throwaway git repository for `cute-dbt review` tests.
+    #[derive(Debug)]
+    pub struct TestRepo {
+        /// The repository root (also the spawn cwd for `review`).
+        pub root: PathBuf,
+        /// Holds the empty gitconfig stand-in, OUTSIDE the repo so it can
+        /// never appear as an untracked file.
+        home: PathBuf,
+        /// Shim bin dir, prepended to a **fully controlled** PATH
+        /// (`<bin>:/usr/bin:/bin`) on every spawn — so a developer's real
+        /// `dbt` (homebrew, venv, …) can never answer a test, and `dbt` is
+        /// genuinely missing unless a test installs a shim via
+        /// [`TestRepo::install_dbt_shim`].
+        bin: PathBuf,
+    }
 
-/// Scaffold a minimal dbt project at `project_rel` (`"."` = the repo
-/// root): `dbt_project.yml`, the jaffle-shop staging model the
-/// committed fixtures know, a `target/`-ignoring `.gitignore`, one
-/// initial commit — then the committed `manifest_fixture` copied to
-/// `<project>/target/manifest.json` (untracked + ignored, like a real
-/// `dbt compile` output).
-pub fn scaffold_dbt_project(repo: &TestRepo, project_rel: &str, manifest_fixture: &str) {
-    let prefix = if project_rel == "." {
-        String::new()
-    } else {
-        format!("{project_rel}/")
-    };
-    repo.write(
-        &format!("{prefix}dbt_project.yml"),
-        "name: jaffle_shop\nversion: \"1.0\"\nprofile: jaffle_shop\n",
-    );
-    repo.write(&format!("{prefix}.gitignore"), "target/\n");
-    repo.write(
-        &format!("{prefix}models/staging/stg_customers.sql"),
-        "select 1 as customer_id\n",
-    );
-    repo.commit_all("initial dbt project");
-    let target = repo.root.join(project_rel).join("target");
-    std::fs::create_dir_all(&target).expect("create target dir");
-    std::fs::copy(fixture(manifest_fixture), target.join("manifest.json"))
-        .expect("copy manifest fixture");
-    // A well-behaved fusion shim (cute-dbt#301): review compiles by
-    // default, so the default scaffold answers `--version` with the
-    // fusion single-line shape and no-op "compiles" (the manifest above
-    // already plays the compiled artifact). Tests that need other
-    // engine behaviors overwrite it via `install_dbt_shim`.
-    repo.install_dbt_shim(WELL_BEHAVED_FUSION_SHIM);
-}
+    impl TestRepo {
+        /// Create a fresh repo under `CARGO_TARGET_TMPDIR` with `main` as
+        /// the initial branch (the probes' first candidate).
+        pub fn init(stem: &str) -> Self {
+            Self::init_with_branch(stem, "main")
+        }
 
-/// The default shim body: fusion version banner; `compile` succeeds
-/// without touching anything (the scaffolded manifest is the artifact).
-pub const WELL_BEHAVED_FUSION_SHIM: &str = "\
+        /// Create a fresh repo with an explicit initial branch name (the
+        /// no-detectable-base scenarios use a branch the ladder never
+        /// probes).
+        pub fn init_with_branch(stem: &str, branch: &str) -> Self {
+            let base = tmp(&format!("review-repo-{stem}"));
+            let _ = std::fs::remove_dir_all(&base);
+            let root = base.join("repo");
+            let home = base.join("home");
+            let bin = base.join("bin");
+            std::fs::create_dir_all(&root).expect("create repo dir");
+            std::fs::create_dir_all(&home).expect("create home dir");
+            std::fs::create_dir_all(&bin).expect("create bin dir");
+            std::fs::write(home.join("gitconfig"), "").expect("write empty gitconfig");
+            let repo = Self { root, home, bin };
+            repo.git(&["init", "-q", "-b", branch]);
+            // Sanity tripwire: every later git command must operate on THIS
+            // repo, never an enclosing one (see `scrub_git_env`). Canonical
+            // comparison — macOS tempdirs traverse the /var symlink.
+            let toplevel = repo.git(&["rev-parse", "--show-toplevel"]);
+            let reported = std::fs::canonicalize(String::from_utf8_lossy(&toplevel.stdout).trim())
+                .expect("canonicalize reported toplevel");
+            let expected = std::fs::canonicalize(&repo.root).expect("canonicalize repo root");
+            assert_eq!(
+                reported, expected,
+                "the temp repo's git context leaked outside its root",
+            );
+            repo
+        }
+
+        /// Apply the git-environment isolation to any command (git itself
+        /// or the spawned `cute-dbt`, which shells out to git/dbt/gh).
+        pub fn isolate(&self, cmd: &mut Command) {
+            let empty = self.home.join("gitconfig");
+            scrub_git_env(cmd);
+            cmd.env("GIT_CONFIG_GLOBAL", &empty)
+                .env("GIT_CONFIG_SYSTEM", &empty)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("HOME", &self.home)
+                .env("GIT_AUTHOR_NAME", "cute-dbt-test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "cute-dbt-test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                // Fully controlled PATH: the shim dir, then just enough
+                // system dirs for git/sh. A developer's real dbt can never
+                // answer a test, and "dbt missing" is the true default.
+                .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+                .env_remove("CUTE_DBT_EXPERIMENTAL")
+                .env_remove("DBT_TARGET_PATH");
+        }
+
+        /// Install an executable shim named `name` into the controlled PATH.
+        /// The body is `#!/bin/sh` script text; every invocation's cwd + argv
+        /// is appended to `<bin>/<name>-invocations.log` before the body
+        /// runs, so tests can assert exactly what review executed (the
+        /// planned-argv == executed-argv pin at the subprocess level).
+        pub fn install_shim(&self, name: &str, body: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.bin.join(name);
+            let script = format!(
+                "#!/bin/sh\nprintf 'cwd=%s args=%s\\n' \"$(pwd)\" \"$*\" >> \"{log}\"\n{body}\n",
+                log = self.shim_log(name).display(),
+            );
+            std::fs::write(&path, script).expect("write shim");
+            let mut perms = std::fs::metadata(&path)
+                .expect("shim metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).expect("chmod shim");
+        }
+
+        /// Install an executable `dbt` shim (the common case).
+        pub fn install_dbt_shim(&self, body: &str) {
+            self.install_shim("dbt", body);
+        }
+
+        /// Install an executable `gh` shim (cute-dbt#303 — the PR-anchor +
+        /// gh-rung tests).
+        pub fn install_gh_shim(&self, body: &str) {
+            self.install_shim("gh", body);
+        }
+
+        /// Remove a shim from the controlled PATH so the binary is genuinely
+        /// "not found" (the gh-missing / dbt-missing scenarios).
+        pub fn remove_shim(&self, name: &str) {
+            let _ = std::fs::remove_file(self.bin.join(name));
+        }
+
+        /// A named shim's invocation log (one `cwd=… args=…` line per call).
+        pub fn shim_log(&self, name: &str) -> PathBuf {
+            self.bin.join(format!("{name}-invocations.log"))
+        }
+
+        /// The `dbt` shim invocation log path.
+        pub fn dbt_log(&self) -> PathBuf {
+            self.shim_log("dbt")
+        }
+
+        /// The `dbt` shim log contents — empty when dbt never ran.
+        pub fn dbt_log_contents(&self) -> String {
+            std::fs::read_to_string(self.dbt_log()).unwrap_or_default()
+        }
+
+        /// The `gh` shim log contents — empty when gh never ran.
+        pub fn gh_log_contents(&self) -> String {
+            std::fs::read_to_string(self.shim_log("gh")).unwrap_or_default()
+        }
+
+        /// Run a git command in the repo, asserting success.
+        pub fn git(&self, args: &[&str]) -> Output {
+            let mut cmd = Command::new("git");
+            cmd.args(args).current_dir(&self.root);
+            self.isolate(&mut cmd);
+            let output = cmd.output().expect("git spawns");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr),
+            );
+            output
+        }
+
+        /// Write a file (creating parents) relative to the repo root.
+        pub fn write(&self, rel: &str, content: &str) {
+            let path = self.root.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create parent dirs");
+            }
+            std::fs::write(&path, content).expect("write file");
+        }
+
+        /// Stage everything and commit.
+        pub fn commit_all(&self, message: &str) {
+            self.git(&["add", "-A"]);
+            self.git(&["commit", "-q", "-m", message]);
+        }
+
+        /// Spawn `cute-dbt review <args>` with cwd at `cwd_rel` under the
+        /// repo root, fully environment-isolated, output captured (so
+        /// stdout is never a TTY and auto-open can never fire).
+        pub fn review_in(&self, cwd_rel: &str, args: &[&str]) -> Output {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
+            cmd.arg("review")
+                .args(args)
+                .current_dir(self.root.join(cwd_rel));
+            self.isolate(&mut cmd);
+            cmd.output().expect("the cute-dbt binary spawns")
+        }
+
+        /// Spawn `cute-dbt review <args>` from the repo root.
+        pub fn review(&self, args: &[&str]) -> Output {
+            self.review_in(".", args)
+        }
+
+        /// Spawn `cute-dbt review <args>` on a **hermetic PATH** that
+        /// contains ONLY the shim dir — `/usr/bin` and `/bin` are excluded,
+        /// so `gh` is genuinely `NotFound` even on hosts (GitHub-hosted
+        /// Linux runners) that pre-install `/usr/bin/gh`. The tools review
+        /// shells out to are symlinked into the shim dir first, so they
+        /// still resolve: `git` (every stage), plus `sh`/`env` for any shell
+        /// shim a test may have installed. `dbt`/`gh` are reachable ONLY if
+        /// a test installed their shims — never the host binaries.
+        ///
+        /// This is the only way to exercise the `--pr` gh-MISSING branch
+        /// (`ReviewError::DbtMissing`/`GhMissing` fire on
+        /// `io::ErrorKind::NotFound`, the genuine-missing-binary case — a
+        /// non-zero-exit shim is "present but failed", a different branch).
+        pub fn review_hermetic(&self, args: &[&str]) -> Output {
+            self.symlink_host_tools(&["git", "sh", "env"]);
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
+            cmd.arg("review").args(args).current_dir(&self.root);
+            let empty = self.home.join("gitconfig");
+            scrub_git_env(&mut cmd);
+            cmd.env("GIT_CONFIG_GLOBAL", &empty)
+                .env("GIT_CONFIG_SYSTEM", &empty)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("HOME", &self.home)
+                .env("GIT_AUTHOR_NAME", "cute-dbt-test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "cute-dbt-test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                // HERMETIC: the shim dir ONLY. No /usr/bin, so a host
+                // /usr/bin/gh (GitHub runners) is unreachable; git/sh resolve
+                // via the symlinks created above.
+                .env("PATH", self.bin.display().to_string())
+                .env_remove("CUTE_DBT_EXPERIMENTAL")
+                .env_remove("DBT_TARGET_PATH");
+            cmd.output().expect("the cute-dbt binary spawns")
+        }
+
+        /// Symlink each named host tool into the shim dir (resolved from the
+        /// real PATH), so it resolves on the hermetic PATH that excludes the
+        /// system dirs. A tool already present (a real binary, a prior
+        /// symlink, or a test shim) is left untouched; an unresolvable tool
+        /// is skipped (the hermetic run will surface its own NotFound).
+        fn symlink_host_tools(&self, tools: &[&str]) {
+            for tool in tools {
+                let target = self.bin.join(tool);
+                if target.exists() {
+                    continue;
+                }
+                if let Some(src) = resolve_on_host_path(tool) {
+                    let _ = std::os::unix::fs::symlink(&src, &target);
+                }
+            }
+        }
+    }
+
+    /// Resolve a bare tool name to its absolute path by searching the test
+    /// process's real `PATH` (the host PATH, before any harness override).
+    fn resolve_on_host_path(tool: &str) -> Option<PathBuf> {
+        let path = std::env::var_os("PATH")?;
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(tool))
+            .find(|candidate| candidate.is_file())
+    }
+
+    /// Scaffold a minimal dbt project at `project_rel` (`"."` = the repo
+    /// root): `dbt_project.yml`, the jaffle-shop staging model the
+    /// committed fixtures know, a `target/`-ignoring `.gitignore`, one
+    /// initial commit — then the committed `manifest_fixture` copied to
+    /// `<project>/target/manifest.json` (untracked + ignored, like a real
+    /// `dbt compile` output).
+    pub fn scaffold_dbt_project(repo: &TestRepo, project_rel: &str, manifest_fixture: &str) {
+        let prefix = if project_rel == "." {
+            String::new()
+        } else {
+            format!("{project_rel}/")
+        };
+        repo.write(
+            &format!("{prefix}dbt_project.yml"),
+            "name: jaffle_shop\nversion: \"1.0\"\nprofile: jaffle_shop\n",
+        );
+        repo.write(&format!("{prefix}.gitignore"), "target/\n");
+        repo.write(
+            &format!("{prefix}models/staging/stg_customers.sql"),
+            "select 1 as customer_id\n",
+        );
+        repo.commit_all("initial dbt project");
+        let target = repo.root.join(project_rel).join("target");
+        std::fs::create_dir_all(&target).expect("create target dir");
+        std::fs::copy(fixture(manifest_fixture), target.join("manifest.json"))
+            .expect("copy manifest fixture");
+        // A well-behaved fusion shim (cute-dbt#301): review compiles by
+        // default, so the default scaffold answers `--version` with the
+        // fusion single-line shape and no-op "compiles" (the manifest above
+        // already plays the compiled artifact). Tests that need other
+        // engine behaviors overwrite it via `install_dbt_shim`.
+        repo.install_dbt_shim(WELL_BEHAVED_FUSION_SHIM);
+    }
+
+    /// The default shim body: fusion version banner; `compile` succeeds
+    /// without touching anything (the scaffolded manifest is the artifact).
+    pub const WELL_BEHAVED_FUSION_SHIM: &str = "\
 case \"$1\" in
   --version) printf 'dbt 2.0.0-preview.186\\n'; exit 0;;
   compile) exit 0;;
 esac
 exit 0";
+}
+
+// Re-export the Unix-only review harness so callers keep using
+// `common::TestRepo`, `common::scrub_git_env`, etc. unchanged. The
+// `pub use` is itself `#[cfg(unix)]`, so on Windows these names simply
+// do not exist (and the test suites that reference them are gated too).
+// `allow(unused_imports)`: `common/mod.rs` is `#[path]`-included by
+// several test binaries (resource_ref_lint, golden_report, …) that use
+// only the lint/fixture helpers, never the review harness — so the
+// re-export is legitimately unused from *their* compile unit (it IS
+// used by review_cli / skill_cli / the bdd review steps). The
+// crate-level `#![allow(dead_code)]` does not cover unused *imports*.
+#[cfg(unix)]
+#[allow(unused_imports)]
+pub use review_harness::{TestRepo, WELL_BEHAVED_FUSION_SHIM, scaffold_dbt_project, scrub_git_env};
 
 // ===== Resource-ref lint shared with tests/resource_ref_lint.rs =====
 //

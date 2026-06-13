@@ -3515,14 +3515,22 @@ AM models/added_then_edited.sql
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // Unix-by-design: this test asserts the symlink-skip BEHAVIOR of
+    // `visit_source_entry`, built on `std::os::unix::fs::symlink`. The
+    // walk's symlink handling is exercised on Unix runners (the only
+    // place creating a symlink is portable without elevated perms); no
+    // tracking issue — a platform-specific test for a platform-specific
+    // runtime path. The cross-platform walk logic is covered by the
+    // non-symlink tests, which run everywhere.
+    #[cfg(unix)]
     #[test]
     fn visit_source_entry_queues_dirs_folds_files_and_skips_symlinks() {
+        use std::os::unix::fs::symlink;
         let dir = unique_temp_dir("visit-entry");
         fs::write(dir.join("model.sql"), "select 1\n").expect("write");
         fs::create_dir_all(dir.join("models")).expect("mkdir");
         fs::create_dir_all(dir.join("target")).expect("mkdir");
-        std::os::unix::fs::symlink(dir.join("model.sql"), dir.join("link.sql"))
-            .expect("create symlink");
+        symlink(dir.join("model.sql"), dir.join("link.sql")).expect("create symlink");
 
         let mut stack: Vec<PathBuf> = Vec::new();
         let mut newest: Option<(PathBuf, SystemTime)> = None;
@@ -3566,12 +3574,16 @@ AM models/added_then_edited.sql
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // Unix-by-design (see `visit_source_entry_..._skips_symlinks`): the
+    // symlink-never-folds path is exercised on Unix runners; no tracking
+    // issue.
+    #[cfg(unix)]
     #[test]
     fn newest_source_mtime_ignores_a_symlink_even_when_it_is_newest() {
+        use std::os::unix::fs::symlink;
         let dir = unique_temp_dir("stale-symlink");
         fs::write(dir.join("model.sql"), "select 1\n").expect("write");
-        std::os::unix::fs::symlink(dir.join("model.sql"), dir.join("newer-link.sql"))
-            .expect("create symlink");
+        symlink(dir.join("model.sql"), dir.join("newer-link.sql")).expect("create symlink");
         let (path, _) = newest_source_mtime(&dir, None).expect("source found");
         assert_eq!(path, dir.join("model.sql"));
         let _ = fs::remove_dir_all(&dir);
