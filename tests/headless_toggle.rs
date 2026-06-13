@@ -7017,7 +7017,39 @@ fn wait_for_cy_node_count(tab: &Tab, cy_expr: &str, expected: i64) {
          return cy && typeof cy.nodes === 'function' ? cy.nodes().length : -1; }})()"
     );
     loop {
-        if eval(tab, &probe).as_i64() == Some(expected) {
+        // Raw Runtime::Evaluate, deliberately NOT the fail-loud `eval`
+        // helper: while the model switch / re-layout is in flight the cy
+        // hook may not yet be safely callable, so `cy_expr` can throw
+        // transiently. Readiness polling must treat a protocol error or a
+        // thrown eval as "not ready yet — keep polling", never as a failure
+        // (cute-dbt#109 / #208); `eval` (correctly) panics on a throw, which
+        // would defeat this loop's wait-until-ready intent. The probe's own
+        // `cy && typeof cy.nodes` guard covers the null/undefined-cy case
+        // (→ -1); this covers the case where `cy_expr` itself throws.
+        let count = tab
+            .call_method(Runtime::Evaluate {
+                expression: probe.clone(),
+                object_group: None,
+                include_command_line_api: None,
+                silent: Some(true),
+                context_id: None,
+                return_by_value: Some(true),
+                generate_preview: None,
+                user_gesture: Some(true),
+                await_promise: Some(false),
+                throw_on_side_effect: None,
+                timeout: None,
+                disable_breaks: None,
+                repl_mode: None,
+                allow_unsafe_eval_blocked_by_csp: None,
+                unique_context_id: None,
+                serialization_options: None,
+            })
+            .ok()
+            .filter(|r| r.exception_details.is_none())
+            .and_then(|r| r.result.value)
+            .and_then(|v| v.as_i64());
+        if count == Some(expected) {
             return;
         }
         assert!(
