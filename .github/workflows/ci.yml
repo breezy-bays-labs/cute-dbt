@@ -925,3 +925,53 @@ jobs:
           else
             echo "crap4rs binary not yet pinned for cute-dbt — scorecard job is no-op until the composite-action ref lands"
           fi
+
+  windows-review-seams:
+    # SCOPED Windows verification for the `review` subcommand's git/path
+    # seams (cute-dbt#308, epic #294 D8). `cute-dbt review` is designed
+    # shell-free — std::process::Command, raw-byte capture, forward-slash
+    # diff paths — but the rest of CI runs Linux/macOS only, so the
+    # cross-platform claim was untested. This job exercises ONLY the
+    # review surface on windows-latest: the review unit tests (the
+    # #[cfg(test)] module in src/cli/review.rs) and the temp-git-repo
+    # subprocess integration suite (tests/review_cli.rs). It deliberately
+    # does NOT run the full nextest matrix, the cucumber-rs BDD outer
+    # loop, or the headless Chromium zero-egress gate — those are
+    # platform-agnostic concerns already covered on Linux/macOS, and
+    # widening this job to them would just duplicate runner cost.
+    #
+    # The shim-dbt approach (tests/common/mod.rs WELL_BEHAVED_FUSION_SHIM)
+    # stands in for a real dbt install, so the runner needs no Python or
+    # dbt-core — only the toolchain + the bundled Git for Windows that
+    # github actions runners ship (`git` is on PATH; the run block below
+    # runs under the workflow's `shell: bash`, i.e. the runner's Git Bash,
+    # matching how the Linux/macOS jobs invoke cargo).
+    #
+    # Scoped to the review targets via explicit `cargo test` filters
+    # rather than `cargo nextest run --all-targets`: this job is a seam
+    # probe, not a full suite, so it carries no nextest dependency.
+    name: Windows review git/path seams (scoped)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # Distinct cache key: the Windows target triple differs from the
+          # shared cute-dbt Linux/macOS cache, so a shared key would only
+          # ever miss. Keyed per-OS by rust-cache automatically, but the
+          # explicit name keeps the scoping legible.
+          shared-key: cute-dbt-windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Configure git identity for the subprocess test harness. The
+      # TestRepo isolation (tests/common/mod.rs) supplies GIT_AUTHOR_* /
+      # GIT_COMMITTER_* per spawn and points GIT_CONFIG_GLOBAL/SYSTEM at an
+      # empty file, so no host git identity is required — left here as a
+      # belt-and-braces no-op the harness overrides per command.
+      - name: Review unit tests (src/cli/review.rs #[cfg(test)] module)
+        run: cargo test --locked --lib review
+      - name: Review temp-git-repo subprocess integration suite
+        run: cargo test --locked --test review_cli
