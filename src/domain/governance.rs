@@ -32,7 +32,7 @@ use serde::Serialize;
 use crate::domain::checks::uniqueness_test_columns;
 use crate::domain::grain::test_is_enabled;
 use crate::domain::manifest::{
-    ColumnFacts, Constraint, ConstraintKind, Exposure, Manifest, Node, NodeId, Owner,
+    ColumnFacts, Constraint, ConstraintKind, Exposure, Group, Manifest, Node, NodeId, Owner,
 };
 use crate::domain::state::ModelInScopeSet;
 
@@ -63,18 +63,27 @@ pub struct GovernanceFacts {
     /// classifies) stays byte-identical.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub contract_classes: Vec<ContractClass>,
+    /// The dbt-native lifecycle chips (cute-dbt#260 Slice 4):
+    /// public-surface-changed, ref-to-deprecated, version-bump-without-
+    /// latest, group-owner-touch, access-violation. Deterministic order
+    /// (built per in-scope model, model-id then kind). Omitted from JSON
+    /// when empty so a governance render surfacing only earlier-slice
+    /// facts stays byte-identical.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub lifecycle_chips: Vec<GovChip>,
 }
 
 impl GovernanceFacts {
     /// `true` when the payload would render any DOM — the
     /// `has_governance` template flag. Any group chip OR blast-radius
-    /// statement OR contract-classification drawer. Future slices OR
-    /// their own surfaces in here.
+    /// statement OR contract-classification drawer OR lifecycle chip.
+    /// Future slices OR their own surfaces in here.
     #[must_use]
     pub fn has_content(&self) -> bool {
         !self.group_chips.is_empty()
             || !self.blast_radius.is_empty()
             || !self.contract_classes.is_empty()
+            || !self.lifecycle_chips.is_empty()
     }
 
     /// `true` when the payload carries nothing — the inverse of
@@ -90,8 +99,7 @@ impl GovernanceFacts {
 /// A governance group + its owner, surfaced as a header chip
 /// (cute-dbt#260). The dbt `group:` declaration is the only ownership
 /// signal on a model node; the owner rides the top-level
-/// [`Group`](crate::domain::manifest::Group), resolved via
-/// [`Manifest::group_by_name`].
+/// [`Group`], resolved via [`Manifest::group_by_name`].
 ///
 /// `owner_email` is post-normalized to the FIRST declared address (the
 /// wire shape is `StringOrArrayOfStrings`; the chip names a single
@@ -180,6 +188,62 @@ pub struct ContractColumnDiff {
     pub verdict: String,
 }
 
+/// One dbt-native lifecycle chip (cute-dbt#260 Slice 4) — the
+/// `Rust computes, the template renders` contract: the predicate fns
+/// build the `kind` / `label` / optional `severity`, the template emits
+/// `<span data-chip-kind=… data-chip-severity=…>{label}</span>`.
+/// Intentionally unstyled beyond the shared chip/semantic classes —
+/// Claude Design owns the visual pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct GovChip {
+    /// Stable kind discriminant — the `data-chip-kind` hook
+    /// (`public-surface-changed` / `ref-to-deprecated` /
+    /// `version-bump-without-latest` / `group-owner-touch` /
+    /// `access-violation`).
+    pub kind: String,
+    /// The rendered chip text.
+    pub label: String,
+    /// Optional severity for the dual-state chips — the
+    /// `data-chip-severity` hook that maps to the report's theme semantic
+    /// tokens (`info` / `danger`), never a hardcoded color. `None` for the
+    /// chips with no severity dimension.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+}
+
+/// A parsed `deprecation_date` (`%Y-%m-%d`) as a comparable civil date
+/// (cute-dbt#260 Slice 4). `(year, month, day)` orders lexicographically
+/// as a date, so the `scheduled` (future) vs `elapsed` (today-or-past)
+/// split is a plain tuple comparison against the threaded generation
+/// date — keeping the domain pure + deterministic (no `SystemTime` here;
+/// the cli computes "today" and threads it in).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DepDate {
+    /// Four-digit year.
+    pub year: i32,
+    /// Month, 1–12.
+    pub month: u32,
+    /// Day, 1–31.
+    pub day: u32,
+}
+
+impl DepDate {
+    /// Parse a `%Y-%m-%d` string (the dbt `deprecation_date` wire shape).
+    /// `None` for any malformed value — the chip simply does not fire
+    /// (never a panic, never a guess).
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        let mut parts = raw.split('-');
+        let year: i32 = parts.next()?.parse().ok()?;
+        let month: u32 = parts.next()?.parse().ok()?;
+        let day: u32 = parts.next()?.parse().ok()?;
+        if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return None;
+        }
+        Some(Self { year, month, day })
+    }
+}
+
 /// Gather the governance facts for the in-scope models (cute-dbt#260).
 ///
 /// Pure: a single pass over `models_in_scope` collecting the group/owner
@@ -200,6 +264,7 @@ pub fn gather_governance(
     manifest: &Manifest,
     models_in_scope: &ModelInScopeSet,
     old_manifest: Option<&Manifest>,
+    today: Option<DepDate>,
 ) -> GovernanceFacts {
     let mut by_group: BTreeMap<&str, GroupChip> = BTreeMap::new();
     // Per-exposure tally of how many in-scope models feed it. Keyed by
@@ -208,6 +273,10 @@ pub fn gather_governance(
     let mut blast_by_exposure: BTreeMap<&NodeId, (&Exposure, usize)> = BTreeMap::new();
     // Contract classes keyed by bare model name (deterministic order).
     let mut contract_by_model: BTreeMap<&str, ContractClass> = BTreeMap::new();
+    // Slice 4 lifecycle chips, accumulated per in-scope model (the
+    // model_in_scope set iterates in node-id order, so the chip order is
+    // deterministic; each model's chips append in fixed predicate order).
+    let mut lifecycle_chips: Vec<GovChip> = Vec::new();
     // Precompute the two reverse maps ONCE (O(N + E)); the per-model BFS
     // below reads them via the helper instead of rebuilding them per
     // model (gemini on #336 — the loop was O(M × (N + E)); now it is
@@ -235,6 +304,8 @@ pub fn gather_governance(
         if let Some(class) = classify_model_contract(old_manifest, model_id, node) {
             contract_by_model.insert(node.bare_name(), class);
         }
+        // Slice 4: the dbt-native lifecycle chips for this model.
+        lifecycle_chips.extend(lifecycle_chips_for(manifest, node, old_manifest, today));
     }
     GovernanceFacts {
         group_chips: by_group.into_values().collect(),
@@ -243,7 +314,157 @@ pub fn gather_governance(
             .map(|(exposure, count)| blast_radius(exposure, count))
             .collect(),
         contract_classes: contract_by_model.into_values().collect(),
+        lifecycle_chips,
     }
+}
+
+/// The Slice-4 lifecycle chips for one in-scope `node`, in fixed
+/// predicate order: public-surface-changed, version-bump-without-latest,
+/// group-owner-touch (this-model chips), then the ref-driven chips
+/// (ref-to-deprecated, access-violation) over the node's `depends_on`
+/// targets. Each predicate is pure and returns `Option`/`Vec`; the
+/// assembler just collects.
+fn lifecycle_chips_for(
+    manifest: &Manifest,
+    node: &Node,
+    old_manifest: Option<&Manifest>,
+    today: Option<DepDate>,
+) -> Vec<GovChip> {
+    let mut chips = Vec::new();
+    chips.extend(public_surface_changed_chip(node, old_manifest));
+    chips.extend(version_bump_without_latest_chip(node));
+    chips.extend(group_owner_touch_chip(manifest, node));
+    chips.extend(ref_chips(manifest, node, today));
+    chips
+}
+
+/// `public-surface-changed` (cute-dbt#260 Slice 4) — fires when a
+/// `public` model's contract change is `Breaking` (reuses Slice 5's
+/// [`classify_contract`]). `None` when the model is not public, there is
+/// no baseline (no old node to classify), or the change is not breaking.
+/// A missing `access` defaults to `protected` (Intel C — missing ≠
+/// public), so an unset model never trips this.
+fn public_surface_changed_chip(node: &Node, old_manifest: Option<&Manifest>) -> Option<GovChip> {
+    if effective_access(node) != "public" {
+        return None;
+    }
+    let old = old_manifest?.node(node.id())?;
+    if !matches!(classify_contract(old, node), ContractChange::Breaking(_)) {
+        return None;
+    }
+    Some(GovChip {
+        kind: "public-surface-changed".to_owned(),
+        label: "Public contract — breaking change".to_owned(),
+        severity: None,
+    })
+}
+
+/// `version-bump-without-latest` (cute-dbt#260 Slice 4, ADVISORY) — the
+/// model declares a `version` that differs from its `latest_version`
+/// (`latest_version` lag during migration is legitimate, so this is a
+/// cue, never a defect). `None` when either is unset or they match.
+/// `version`/`latest_version` are post-normalized strings, so `2` and
+/// `"2"` compare equal (Intel C).
+fn version_bump_without_latest_chip(node: &Node) -> Option<GovChip> {
+    let version = node.version()?;
+    let latest = node.latest_version()?;
+    if version == latest {
+        return None;
+    }
+    Some(GovChip {
+        kind: "version-bump-without-latest".to_owned(),
+        label: format!(
+            "{} v{version} — latest_version still v{latest}",
+            node.bare_name()
+        ),
+        severity: None,
+    })
+}
+
+/// `group-owner-touch` (cute-dbt#260 Slice 4) — the model belongs to a
+/// governance group whose owner declares an email. `None` for ungrouped
+/// models, unresolvable groups, or owners with no email.
+fn group_owner_touch_chip(manifest: &Manifest, node: &Node) -> Option<GovChip> {
+    let group = node.group()?;
+    let owner = manifest.group_by_name(group).and_then(Group::owner)?;
+    let email = owner.email().first()?;
+    Some(GovChip {
+        kind: "group-owner-touch".to_owned(),
+        label: format!("Touches group {group} (owner: {email})"),
+        severity: None,
+    })
+}
+
+/// The ref-driven chips for `node`: for each model it `ref()`s
+/// (`depends_on.nodes`), a `ref-to-deprecated` chip (the target carries a
+/// `deprecation_date`) and/or an `access-violation` chip (the target is
+/// `private` and in a different group). Deterministic: walks
+/// `depends_on.nodes` in wire order.
+fn ref_chips(manifest: &Manifest, node: &Node, today: Option<DepDate>) -> Vec<GovChip> {
+    let mut chips = Vec::new();
+    for target_id in node.depends_on().nodes() {
+        let Some(target) = manifest.node(target_id) else {
+            continue;
+        };
+        if target.resource_type() != "model" {
+            continue;
+        }
+        chips.extend(ref_to_deprecated_chip(target, today));
+        chips.extend(access_violation_chip(node, target));
+    }
+    chips
+}
+
+/// `ref-to-deprecated` (cute-dbt#260 Slice 4, DUAL-STATE) — the PR refs a
+/// model carrying a `deprecation_date`. Future date ⇒ `scheduled` /
+/// `info`; today-or-past ⇒ `elapsed` / `danger`. A malformed date ⇒ no
+/// chip (no panic, no guess — Intel C). When `today` is unknown the chip
+/// still fires with no severity (date set is the signal; the
+/// scheduled/elapsed split is the refinement).
+fn ref_to_deprecated_chip(target: &Node, today: Option<DepDate>) -> Option<GovChip> {
+    let raw = target.deprecation_date()?;
+    let date = DepDate::parse(raw)?;
+    let severity = today.map(|now| {
+        if date > now {
+            "info".to_owned() // scheduled
+        } else {
+            "danger".to_owned() // elapsed (today-or-past)
+        }
+    });
+    Some(GovChip {
+        kind: "ref-to-deprecated".to_owned(),
+        label: format!("Refs deprecated {} (deprecated {raw})", target.bare_name()),
+        severity,
+    })
+}
+
+/// `access-violation` (cute-dbt#260 Slice 4) — a `private` model ref'd
+/// across a group boundary. Fires when the ref TARGET is `private` and
+/// the referer's group differs from the target's group (a private model
+/// is only legitimately referenced within its own group). A target with
+/// the same group (or both ungrouped, matching `None`) is in-bounds.
+fn access_violation_chip(referer: &Node, target: &Node) -> Option<GovChip> {
+    if effective_access(target) != "private" {
+        return None;
+    }
+    if referer.group() == target.group() {
+        return None;
+    }
+    Some(GovChip {
+        kind: "access-violation".to_owned(),
+        label: format!(
+            "Private {} referenced across group boundary",
+            target.bare_name()
+        ),
+        severity: None,
+    })
+}
+
+/// The model's effective access level (cute-dbt#260 Slice 4) — the
+/// declared `access`, defaulting to `"protected"` when unset (Intel C:
+/// missing access ≠ public).
+fn effective_access(node: &Node) -> &str {
+    node.access().unwrap_or("protected")
 }
 
 /// Build a [`BlastRadius`] for `exposure` fed by `in_scope_model_count`
@@ -1062,7 +1283,7 @@ mod tests {
             vec![model("model.pkg.a", Some("finance"))],
             vec![Group::new("finance", None)],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None, None);
         assert!(facts.has_content());
         assert!(!facts.is_empty());
     }
@@ -1073,7 +1294,12 @@ mod tests {
             vec![model("model.pkg.a", None), model("model.pkg.b", None)],
             vec![],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a", "model.pkg.b"]), None);
+        let facts = gather_governance(
+            &manifest,
+            &in_scope(&["model.pkg.a", "model.pkg.b"]),
+            None,
+            None,
+        );
         assert!(facts.group_chips.is_empty());
         assert!(!facts.has_content());
     }
@@ -1090,7 +1316,7 @@ mod tests {
                 )),
             )],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None, None);
         assert_eq!(
             facts.group_chips,
             vec![GroupChip {
@@ -1119,7 +1345,7 @@ mod tests {
                 )),
             )],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None, None);
         assert_eq!(facts.group_chips[0].owner_name, None);
         assert_eq!(
             facts.group_chips[0].owner_email,
@@ -1135,7 +1361,7 @@ mod tests {
             vec![model("model.pkg.a", Some("orphan"))],
             vec![Group::new("orphan", None)],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None, None);
         assert_eq!(
             facts.group_chips,
             vec![GroupChip {
@@ -1151,7 +1377,7 @@ mod tests {
         // The node declares a group the manifest's top-level map omits —
         // the chip names the group, owner None.
         let manifest = manifest_with(vec![model("model.pkg.a", Some("ghost"))], vec![]);
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None, None);
         assert_eq!(
             facts.group_chips,
             vec![GroupChip {
@@ -1177,6 +1403,7 @@ mod tests {
             &manifest,
             &in_scope(&["model.pkg.a", "model.pkg.b", "model.pkg.c", "model.pkg.d"]),
             None,
+            None,
         );
         let names: Vec<&str> = facts
             .group_chips
@@ -1196,7 +1423,7 @@ mod tests {
             vec![Group::new("finance", None), Group::new("marketing", None)],
         );
         // Only `a` is in scope.
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None, None);
         let names: Vec<&str> = facts
             .group_chips
             .iter()
@@ -1211,7 +1438,7 @@ mod tests {
             vec![model("model.pkg.a", Some("finance"))],
             vec![Group::new("finance", None)],
         );
-        let facts = gather_governance(&manifest, &ModelInScopeSet::new(), None);
+        let facts = gather_governance(&manifest, &ModelInScopeSet::new(), None, None);
         assert!(facts.group_chips.is_empty());
     }
 
@@ -1447,7 +1674,7 @@ mod tests {
     // ---- owner-shape unit tests (StringOrArrayOfStrings + None) ----
 
     fn blast_for(manifest: &Manifest, model_id: &str) -> BlastRadius {
-        let facts = gather_governance(manifest, &in_scope(&[model_id]), None);
+        let facts = gather_governance(manifest, &in_scope(&[model_id]), None, None);
         assert_eq!(facts.blast_radius.len(), 1, "exactly one blast statement");
         facts.blast_radius.into_iter().next().unwrap()
     }
@@ -1551,7 +1778,12 @@ mod tests {
                 &["model.pkg.fct"],
             )],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a", "model.pkg.b"]), None);
+        let facts = gather_governance(
+            &manifest,
+            &in_scope(&["model.pkg.a", "model.pkg.b"]),
+            None,
+            None,
+        );
         assert_eq!(facts.blast_radius.len(), 1);
         assert_eq!(facts.blast_radius[0].exposure_label, "dash");
         assert_eq!(facts.blast_radius[0].in_scope_model_count, 2);
@@ -1578,7 +1810,7 @@ mod tests {
                 ),
             ],
         );
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.fct"]), None);
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.fct"]), None, None);
         let labels: Vec<&str> = facts
             .blast_radius
             .iter()
@@ -1590,7 +1822,7 @@ mod tests {
     #[test]
     fn no_exposure_in_scope_yields_no_blast_and_no_content() {
         let manifest = manifest_lineage(vec![model_with_deps("model.pkg.a", &[])], vec![]);
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None);
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.a"]), None, None);
         assert!(facts.blast_radius.is_empty());
         assert!(!facts.has_content(), "no group, no exposure ⇒ no DOM");
     }
@@ -1600,7 +1832,7 @@ mod tests {
         // Ungrouped model reaching an exposure ⇒ has_content via the
         // blast-radius arm (the group_chips arm is empty).
         let manifest = manifest_one_exposure(None);
-        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.fct"]), None);
+        let facts = gather_governance(&manifest, &in_scope(&["model.pkg.fct"]), None, None);
         assert!(facts.group_chips.is_empty());
         assert!(!facts.blast_radius.is_empty());
         assert!(facts.has_content());
@@ -2037,7 +2269,7 @@ mod tests {
         let old_m = manifest_one_model(old);
         let current_m = manifest_one_model(current);
         let in_scope = in_scope(&["model.pkg.m"]);
-        gather_governance(&current_m, &in_scope, Some(&old_m)).contract_classes
+        gather_governance(&current_m, &in_scope, Some(&old_m), None).contract_classes
     }
 
     #[test]
@@ -2048,7 +2280,7 @@ mod tests {
                 .cols(&[("a", Some("int"))])
                 .build(),
         );
-        let facts = gather_governance(&current_m, &in_scope(&["model.pkg.m"]), None);
+        let facts = gather_governance(&current_m, &in_scope(&["model.pkg.m"]), None, None);
         assert!(facts.contract_classes.is_empty());
     }
 
@@ -2130,7 +2362,7 @@ mod tests {
             .build();
         let old_m = manifest_one_model(old);
         let current_m = manifest_one_model(current);
-        let facts = gather_governance(&current_m, &in_scope(&["model.pkg.m"]), Some(&old_m));
+        let facts = gather_governance(&current_m, &in_scope(&["model.pkg.m"]), Some(&old_m), None);
         assert!(!facts.contract_classes.is_empty());
         assert!(facts.has_content());
         assert!(!facts.is_empty());
@@ -2255,7 +2487,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
         );
-        let facts = gather_governance(&current_m, &in_scope(&["model.pkg.m"]), Some(&old_m));
+        let facts = gather_governance(&current_m, &in_scope(&["model.pkg.m"]), Some(&old_m), None);
         assert!(facts.contract_classes.is_empty());
     }
 
@@ -2711,5 +2943,653 @@ mod tests {
         );
         let manifest = manifest_with_nodes(vec![model("model.pkg.m", None), disabled]);
         assert!(backing_test_for_columns(&manifest, &model_id, &cols(&["a", "b"])).is_none());
+    }
+
+    // ===== Slice 4: dbt-native lifecycle chips =====
+
+    /// A model node with the full Slice-4 governance field set + refs.
+    #[allow(clippy::too_many_arguments)]
+    fn gov_model(
+        full_id: &str,
+        access: Option<&str>,
+        group: Option<&str>,
+        version: Option<&str>,
+        latest: Option<&str>,
+        deprecation: Option<&str>,
+        refs: &[&str],
+    ) -> Node {
+        Node::new(
+            NodeId::new(full_id),
+            "model",
+            sample_checksum(),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::new(Vec::new(), refs.iter().map(|r| NodeId::new(*r)).collect()),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_governance(group.map(str::to_owned), access.map(str::to_owned))
+        .with_versions(
+            version.map(str::to_owned),
+            latest.map(str::to_owned),
+            deprecation.map(str::to_owned),
+        )
+    }
+
+    /// The lifecycle chips for one in-scope model, gathered through the
+    /// public entry (so the assembler order is exercised end to end).
+    fn chips_for(manifest: &Manifest, model_id: &str, today: Option<DepDate>) -> Vec<GovChip> {
+        gather_governance(manifest, &in_scope(&[model_id]), None, today).lifecycle_chips
+    }
+
+    fn far_past() -> DepDate {
+        DepDate {
+            year: 2020,
+            month: 1,
+            day: 1,
+        }
+    }
+
+    fn far_future() -> DepDate {
+        DepDate {
+            year: 2099,
+            month: 1,
+            day: 1,
+        }
+    }
+
+    fn today_2026() -> DepDate {
+        DepDate {
+            year: 2026,
+            month: 6,
+            day: 13,
+        }
+    }
+
+    // ---- DepDate::parse ----
+
+    #[test]
+    fn dep_date_parses_a_well_formed_date() {
+        assert_eq!(
+            DepDate::parse("2024-12-31"),
+            Some(DepDate {
+                year: 2024,
+                month: 12,
+                day: 31
+            }),
+        );
+    }
+
+    #[test]
+    fn dep_date_rejects_malformed_dates_without_panic() {
+        for bad in [
+            "",
+            "2024",
+            "2024-12",
+            "2024-13-01", // month out of range
+            "2024-00-01", // month 0
+            "2024-12-32", // day out of range
+            "2024-12-00", // day 0
+            "not-a-date",
+            "2024-12-31-extra", // too many parts
+            "2024/12/31",       // wrong separator
+        ] {
+            assert_eq!(DepDate::parse(bad), None, "{bad:?} must not parse");
+        }
+    }
+
+    // ---- public-surface-changed ----
+
+    /// Manifest with an old + current node pair for the contract classify
+    /// path, plus an optional group for owner chips.
+    fn manifest_pair(old: Node, current: Node) -> (Manifest, Manifest) {
+        let mut old_nodes = HashMap::new();
+        old_nodes.insert(old.id().clone(), old);
+        let mut cur_nodes = HashMap::new();
+        cur_nodes.insert(current.id().clone(), current);
+        let mk = |nodes| {
+            Manifest::new(
+                ManifestMetadata::new("v12"),
+                nodes,
+                HashMap::new(),
+                HashMap::new(),
+            )
+        };
+        (mk(old_nodes), mk(cur_nodes))
+    }
+
+    #[test]
+    fn public_breaking_contract_fires_the_chip() {
+        // public access + a breaking contract change (a removed column).
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int")), ("b", Some("string"))])
+            .build()
+            .with_governance(None, Some("public".to_owned()));
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))]) // b removed ⇒ breaking
+            .build()
+            .with_governance(None, Some("public".to_owned()));
+        let (old_m, cur_m) = manifest_pair(old, current);
+        let facts = gather_governance(&cur_m, &in_scope(&["model.pkg.m"]), Some(&old_m), None);
+        assert!(
+            facts
+                .lifecycle_chips
+                .iter()
+                .any(|c| c.kind == "public-surface-changed"
+                    && c.label == "Public contract — breaking change"),
+        );
+    }
+
+    #[test]
+    fn protected_breaking_contract_does_not_fire_the_public_chip() {
+        // The default access (protected — missing ≠ public): no public chip
+        // even on a breaking change.
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int")), ("b", Some("string"))])
+            .build();
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build();
+        let (old_m, cur_m) = manifest_pair(old, current);
+        let facts = gather_governance(&cur_m, &in_scope(&["model.pkg.m"]), Some(&old_m), None);
+        assert!(
+            !facts
+                .lifecycle_chips
+                .iter()
+                .any(|c| c.kind == "public-surface-changed"),
+            "missing access defaults to protected — never public",
+        );
+    }
+
+    #[test]
+    fn public_non_breaking_change_does_not_fire_the_chip() {
+        // public + a column ADD (safe, not breaking) ⇒ no chip.
+        let old = ContractNode::base("table", true)
+            .cols(&[("a", Some("int"))])
+            .build()
+            .with_governance(None, Some("public".to_owned()));
+        let current = ContractNode::base("table", true)
+            .cols(&[("a", Some("int")), ("b", Some("string"))]) // add ⇒ safe
+            .build()
+            .with_governance(None, Some("public".to_owned()));
+        let (old_m, cur_m) = manifest_pair(old, current);
+        let facts = gather_governance(&cur_m, &in_scope(&["model.pkg.m"]), Some(&old_m), None);
+        assert!(
+            !facts
+                .lifecycle_chips
+                .iter()
+                .any(|c| c.kind == "public-surface-changed"),
+        );
+    }
+
+    // ---- version-bump-without-latest ----
+
+    #[test]
+    fn version_ahead_of_latest_fires_an_advisory_chip() {
+        let m = manifest_with_nodes(vec![gov_model(
+            "model.pkg.m",
+            None,
+            None,
+            Some("3"),
+            Some("2"),
+            None,
+            &[],
+        )]);
+        let chips = chips_for(&m, "model.pkg.m", None);
+        let chip = chips
+            .iter()
+            .find(|c| c.kind == "version-bump-without-latest")
+            .expect("version chip fires");
+        assert_eq!(chip.label, "m v3 — latest_version still v2");
+        assert!(chip.severity.is_none(), "advisory — no severity");
+    }
+
+    #[test]
+    fn version_equal_to_latest_does_not_fire() {
+        // Normalized strings — `2` == `"2"` at the node layer; equal ⇒ no
+        // chip.
+        let m = manifest_with_nodes(vec![gov_model(
+            "model.pkg.m",
+            None,
+            None,
+            Some("2"),
+            Some("2"),
+            None,
+            &[],
+        )]);
+        assert!(
+            !chips_for(&m, "model.pkg.m", None)
+                .iter()
+                .any(|c| c.kind == "version-bump-without-latest"),
+        );
+    }
+
+    #[test]
+    fn unversioned_model_fires_no_version_chip() {
+        let m = manifest_with_nodes(vec![gov_model(
+            "model.pkg.m",
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+        )]);
+        assert!(
+            !chips_for(&m, "model.pkg.m", None)
+                .iter()
+                .any(|c| c.kind == "version-bump-without-latest"),
+        );
+    }
+
+    // ---- group-owner-touch ----
+
+    #[test]
+    fn grouped_model_with_owner_email_fires_the_touch_chip() {
+        let m = manifest_with(
+            vec![gov_model(
+                "model.pkg.m",
+                None,
+                Some("finance"),
+                None,
+                None,
+                None,
+                &[],
+            )],
+            vec![Group::new(
+                "finance",
+                Some(Owner::new(None, vec!["fin@corp.example".to_owned()])),
+            )],
+        );
+        let chip = chips_for(&m, "model.pkg.m", None)
+            .into_iter()
+            .find(|c| c.kind == "group-owner-touch")
+            .expect("group-owner chip fires");
+        assert_eq!(
+            chip.label,
+            "Touches group finance (owner: fin@corp.example)"
+        );
+    }
+
+    #[test]
+    fn grouped_model_without_owner_email_fires_no_touch_chip() {
+        let m = manifest_with(
+            vec![gov_model(
+                "model.pkg.m",
+                None,
+                Some("finance"),
+                None,
+                None,
+                None,
+                &[],
+            )],
+            vec![Group::new("finance", None)],
+        );
+        assert!(
+            !chips_for(&m, "model.pkg.m", None)
+                .iter()
+                .any(|c| c.kind == "group-owner-touch"),
+        );
+    }
+
+    // ---- ref-to-deprecated (dual state) ----
+
+    #[test]
+    fn ref_to_elapsed_deprecation_is_danger() {
+        // Far-past date ⇒ always elapsed ⇒ danger (stable golden).
+        let m = manifest_with_nodes(vec![
+            gov_model(
+                "model.pkg.a",
+                None,
+                None,
+                None,
+                None,
+                None,
+                &["model.pkg.dep"],
+            ),
+            gov_model(
+                "model.pkg.dep",
+                None,
+                None,
+                None,
+                None,
+                Some("2020-01-01"),
+                &[],
+            ),
+        ]);
+        let chip = chips_for(&m, "model.pkg.a", Some(today_2026()))
+            .into_iter()
+            .find(|c| c.kind == "ref-to-deprecated")
+            .expect("ref-to-deprecated chip fires");
+        assert_eq!(chip.label, "Refs deprecated dep (deprecated 2020-01-01)");
+        assert_eq!(chip.severity, Some("danger".to_owned()));
+    }
+
+    #[test]
+    fn ref_to_scheduled_deprecation_is_info() {
+        // Far-future date ⇒ always scheduled ⇒ info (stable golden).
+        let m = manifest_with_nodes(vec![
+            gov_model(
+                "model.pkg.a",
+                None,
+                None,
+                None,
+                None,
+                None,
+                &["model.pkg.dep"],
+            ),
+            gov_model(
+                "model.pkg.dep",
+                None,
+                None,
+                None,
+                None,
+                Some("2099-01-01"),
+                &[],
+            ),
+        ]);
+        let chip = chips_for(&m, "model.pkg.a", Some(far_past()))
+            .into_iter()
+            .find(|c| c.kind == "ref-to-deprecated")
+            .expect("chip fires");
+        assert_eq!(chip.severity, Some("info".to_owned()));
+    }
+
+    #[test]
+    fn ref_to_deprecation_on_today_is_danger() {
+        // today-or-past ⇒ elapsed/danger (the boundary is inclusive of
+        // today).
+        let m = manifest_with_nodes(vec![
+            gov_model(
+                "model.pkg.a",
+                None,
+                None,
+                None,
+                None,
+                None,
+                &["model.pkg.dep"],
+            ),
+            gov_model(
+                "model.pkg.dep",
+                None,
+                None,
+                None,
+                None,
+                Some("2026-06-13"),
+                &[],
+            ),
+        ]);
+        let chip = chips_for(&m, "model.pkg.a", Some(today_2026()))
+            .into_iter()
+            .find(|c| c.kind == "ref-to-deprecated")
+            .expect("chip fires");
+        assert_eq!(chip.severity, Some("danger".to_owned()));
+    }
+
+    #[test]
+    fn ref_to_deprecation_with_unknown_today_fires_without_severity() {
+        let m = manifest_with_nodes(vec![
+            gov_model(
+                "model.pkg.a",
+                None,
+                None,
+                None,
+                None,
+                None,
+                &["model.pkg.dep"],
+            ),
+            gov_model(
+                "model.pkg.dep",
+                None,
+                None,
+                None,
+                None,
+                Some("2020-01-01"),
+                &[],
+            ),
+        ]);
+        let chip = chips_for(&m, "model.pkg.a", None)
+            .into_iter()
+            .find(|c| c.kind == "ref-to-deprecated")
+            .expect("chip fires even with unknown today");
+        assert_eq!(chip.severity, None);
+    }
+
+    #[test]
+    fn ref_to_malformed_deprecation_date_fires_no_chip() {
+        let m = manifest_with_nodes(vec![
+            gov_model(
+                "model.pkg.a",
+                None,
+                None,
+                None,
+                None,
+                None,
+                &["model.pkg.dep"],
+            ),
+            gov_model(
+                "model.pkg.dep",
+                None,
+                None,
+                None,
+                None,
+                Some("not-a-date"),
+                &[],
+            ),
+        ]);
+        assert!(
+            !chips_for(&m, "model.pkg.a", Some(far_future()))
+                .iter()
+                .any(|c| c.kind == "ref-to-deprecated"),
+            "a malformed date is no panic + no chip",
+        );
+    }
+
+    #[test]
+    fn ref_to_non_deprecated_model_fires_no_chip() {
+        let m = manifest_with_nodes(vec![
+            gov_model(
+                "model.pkg.a",
+                None,
+                None,
+                None,
+                None,
+                None,
+                &["model.pkg.b"],
+            ),
+            gov_model("model.pkg.b", None, None, None, None, None, &[]),
+        ]);
+        assert!(
+            !chips_for(&m, "model.pkg.a", Some(today_2026()))
+                .iter()
+                .any(|c| c.kind == "ref-to-deprecated"),
+        );
+    }
+
+    #[test]
+    fn refs_to_missing_or_non_model_targets_are_skipped() {
+        // A ref to a node absent from the manifest, and a ref to a test
+        // node (non-model), both skip cleanly — no chip, no panic.
+        let test_node = Node::new(
+            NodeId::new("test.pkg.t"),
+            "test",
+            sample_checksum(),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_test_attachment(
+            None,
+            Some(NodeId::new("model.pkg.a")),
+            Some(TestMetadata::new("not_null", None, serde_json::json!({}))),
+        );
+        let m = manifest_with_nodes(vec![
+            gov_model(
+                "model.pkg.a",
+                None,
+                None,
+                None,
+                None,
+                None,
+                &["model.pkg.absent", "test.pkg.t"],
+            ),
+            test_node,
+        ]);
+        assert!(
+            chips_for(&m, "model.pkg.a", Some(today_2026())).is_empty(),
+            "missing + non-model refs contribute no chips",
+        );
+    }
+
+    // ---- access-violation ----
+
+    #[test]
+    fn private_ref_across_group_boundary_fires() {
+        // a (group finance) refs b (private, group marketing) ⇒ violation.
+        let m = manifest_with_nodes(vec![
+            gov_model(
+                "model.pkg.a",
+                None,
+                Some("finance"),
+                None,
+                None,
+                None,
+                &["model.pkg.b"],
+            ),
+            gov_model(
+                "model.pkg.b",
+                Some("private"),
+                Some("marketing"),
+                None,
+                None,
+                None,
+                &[],
+            ),
+        ]);
+        let chip = chips_for(&m, "model.pkg.a", None)
+            .into_iter()
+            .find(|c| c.kind == "access-violation")
+            .expect("access-violation chip fires");
+        assert_eq!(chip.label, "Private b referenced across group boundary");
+    }
+
+    #[test]
+    fn private_ref_within_same_group_does_not_fire() {
+        // Both in `finance` — a private model ref'd within its own group is
+        // in-bounds.
+        let m = manifest_with_nodes(vec![
+            gov_model(
+                "model.pkg.a",
+                None,
+                Some("finance"),
+                None,
+                None,
+                None,
+                &["model.pkg.b"],
+            ),
+            gov_model(
+                "model.pkg.b",
+                Some("private"),
+                Some("finance"),
+                None,
+                None,
+                None,
+                &[],
+            ),
+        ]);
+        assert!(
+            !chips_for(&m, "model.pkg.a", None)
+                .iter()
+                .any(|c| c.kind == "access-violation"),
+        );
+    }
+
+    #[test]
+    fn public_ref_never_fires_access_violation() {
+        let m = manifest_with_nodes(vec![
+            gov_model(
+                "model.pkg.a",
+                None,
+                Some("finance"),
+                None,
+                None,
+                None,
+                &["model.pkg.b"],
+            ),
+            gov_model(
+                "model.pkg.b",
+                Some("public"),
+                Some("marketing"),
+                None,
+                None,
+                None,
+                &[],
+            ),
+        ]);
+        assert!(
+            !chips_for(&m, "model.pkg.a", None)
+                .iter()
+                .any(|c| c.kind == "access-violation"),
+        );
+    }
+
+    #[test]
+    fn protected_target_never_fires_access_violation() {
+        // The default (protected) target across a group boundary is NOT a
+        // violation — only `private` is.
+        let m = manifest_with_nodes(vec![
+            gov_model(
+                "model.pkg.a",
+                None,
+                Some("finance"),
+                None,
+                None,
+                None,
+                &["model.pkg.b"],
+            ),
+            gov_model(
+                "model.pkg.b",
+                None,
+                Some("marketing"),
+                None,
+                None,
+                None,
+                &[],
+            ),
+        ]);
+        assert!(
+            !chips_for(&m, "model.pkg.a", None)
+                .iter()
+                .any(|c| c.kind == "access-violation"),
+        );
+    }
+
+    #[test]
+    fn lifecycle_chips_make_the_payload_non_empty() {
+        let m = manifest_with(
+            vec![gov_model(
+                "model.pkg.m",
+                None,
+                Some("finance"),
+                None,
+                None,
+                None,
+                &[],
+            )],
+            vec![Group::new(
+                "finance",
+                Some(Owner::new(None, vec!["fin@corp.example".to_owned()])),
+            )],
+        );
+        let facts = gather_governance(&m, &in_scope(&["model.pkg.m"]), None, None);
+        assert!(!facts.lifecycle_chips.is_empty());
+        assert!(facts.has_content());
+        assert!(!facts.is_empty());
     }
 }

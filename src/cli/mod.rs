@@ -62,7 +62,7 @@ use crate::adapters::render::{
     render_report_with_externals,
 };
 use crate::domain::{
-    BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_REPORT_TITLE, EnabledExperiments,
+    BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_REPORT_TITLE, DepDate, EnabledExperiments,
     Experiment, FixtureTableDiff, GovernanceFacts, HeuristicId, InScopeSet, Manifest,
     ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex, PreflightError,
     ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ScopeInput, ScopeSelection,
@@ -265,7 +265,17 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
         ScopeInput::PrDiff { .. } => None,
     };
     let governance_facts = if experiments.is_enabled(Experiment::Governance) {
-        gather_governance(&current, &models_in_scope, old_manifest)
+        // cute-dbt#260 Slice 4 — "today" (UTC civil date) for the
+        // deprecation scheduled/elapsed split, computed HERE (the I/O
+        // boundary) and threaded into the pure domain so the comparison
+        // is deterministic + testable. Far-past/far-future fixture dates
+        // keep the golden stable regardless of the real generation date.
+        gather_governance(
+            &current,
+            &models_in_scope,
+            old_manifest,
+            Some(today_dep_date()),
+        )
     } else {
         GovernanceFacts::default()
     };
@@ -1208,6 +1218,47 @@ fn resolve_enabled_experiments(args: &ReportArgs) -> EnabledExperiments {
     EnabledExperiments::from_union(&toml, env)
 }
 
+/// Today's UTC civil date as a [`DepDate`] (cute-dbt#260 Slice 4) — the
+/// I/O-boundary `SystemTime::now()` read, kept OUT of the pure domain so
+/// the deprecation scheduled/elapsed comparison stays deterministic +
+/// testable (the domain takes the date as a parameter). A
+/// pre-`UNIX_EPOCH` clock (impossible in practice) falls back to the
+/// epoch date — the chip degrades to a stable result, never a panic.
+fn today_dep_date() -> DepDate {
+    // `as_secs()` is `u64`; whole days since the epoch fit in `i64` for
+    // ~25 trillion years, so the conversion is exact (and the `Err`
+    // pre-epoch arm — impossible in practice — degrades to day 0).
+    let days = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0_i64, |d| i64::try_from(d.as_secs() / 86_400).unwrap_or(0));
+    let (year, month, day) = civil_from_days(days);
+    DepDate { year, month, day }
+}
+
+/// Days-since-Unix-epoch → `(year, month, day)` (proleptic Gregorian) —
+/// Howard Hinnant's `civil_from_days` algorithm, std-only (the domain
+/// forbids `chrono`). Pure + total. `m`/`d` are in `[1, 12]` / `[1, 31]`
+/// and `year` in a realistic range, so the narrowing conversions are
+/// lossless; `try_from` makes that explicit + total (any impossible
+/// out-of-range value degrades to 0 rather than wrapping).
+fn civil_from_days(z: i64) -> (i32, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+    (
+        i32::try_from(year).unwrap_or(0),
+        u32::try_from(m).unwrap_or(0),
+        u32::try_from(d).unwrap_or(0),
+    )
+}
+
 /// Emit a stderr note for an inline pragma naming an unknown check id
 /// (cute-dbt#171). The pragma is inert — without this note a typo'd id
 /// would silently suppress nothing while the author believes it does.
@@ -1708,6 +1759,30 @@ mod tests {
         let resolved = resolve_enabled_experiments(&args);
         assert_eq!(resolved.enabled.len(), 1);
         assert!(resolved.is_enabled(crate::domain::Experiment::ProjectState));
+    }
+
+    #[test]
+    fn civil_from_days_matches_known_dates() {
+        // The Hinnant days→civil port (cute-dbt#260 Slice 4). Days since
+        // 1970-01-01: 0, 18262 (2020-01-01), 47117 (2099-01-01),
+        // 20617 (2026-06-13).
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(18_262), (2020, 1, 1));
+        assert_eq!(civil_from_days(47_117), (2099, 1, 1));
+        assert_eq!(civil_from_days(20_617), (2026, 6, 13));
+        // A pre-epoch day still resolves (proleptic), never panics.
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+    }
+
+    #[test]
+    fn today_dep_date_is_a_plausible_modern_date() {
+        // Threaded from the I/O boundary; just pin it produces a sane
+        // value (the comparison logic is tested deterministically in the
+        // domain).
+        let today = today_dep_date();
+        assert!(today.year >= 2026 && today.year < 2200);
+        assert!((1..=12).contains(&today.month));
+        assert!((1..=31).contains(&today.day));
     }
 
     #[test]

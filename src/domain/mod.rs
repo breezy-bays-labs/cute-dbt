@@ -83,8 +83,9 @@ pub use experimental::{
 };
 pub use governance::{
     BlastRadius, BreakingReason, ConstraintSupport, ContractChange, ContractClass,
-    ContractColumnDiff, GovernanceFacts, GroupChip, backing_test_for, backing_test_for_columns,
-    classify_contract, constraint_support, exposures_reachable_from, gather_governance,
+    ContractColumnDiff, DepDate, GovChip, GovernanceFacts, GroupChip, backing_test_for,
+    backing_test_for_columns, classify_contract, constraint_support, exposures_reachable_from,
+    gather_governance,
 };
 pub use grain::{GrainKind, GrainSignal, model_grain_signals, test_is_enabled};
 pub use macro_lens::{changed_macros_baseline, changed_macros_pr_diff, macro_blast_radius};
