@@ -704,6 +704,21 @@ index 3333333..4444444 100644\n\
         );
     }
 
+    #[test]
+    fn hunk_header_with_a_bad_old_range_but_valid_new_range_is_an_error() {
+        // `@@ garbage +5 @@`: the new-side token `+5` is well-formed, but the
+        // old-side token does not begin with `-`. Both side-sigil checks are
+        // required (the `||` in the guard) — were it an `&&`, this header would
+        // wrongly parse (the valid `+5` masking the bad old side). Pins the
+        // old-side half of the malformed-header guard independently.
+        let err = parse_diff("--- a/x\n+++ b/x\n@@ garbage +5 @@\n+a\n")
+            .expect_err("a hunk header whose old-side range is malformed is an error");
+        assert!(
+            err.contains("malformed hunk header"),
+            "the malformed-header guard fires on a bad old side: {err}"
+        );
+    }
+
     // ----- @file form -----
 
     #[test]
@@ -797,6 +812,28 @@ index 3333333..4444444 100644\n\
         assert_eq!(
             pr.files[1].hunks[0].added_lines,
             vec!["select 1".to_owned()]
+        );
+    }
+
+    // ----- The no-open-hunk defensive arm keeps body lines "consumed" -----
+
+    #[test]
+    fn a_body_line_under_an_orphan_hunk_header_stays_in_hunk() {
+        // A `@@` header with NO preceding `+++ b/` file leaves `in_hunk == true`
+        // but `current == None`, so `consume_body_line` falls to its defensive
+        // arm. A `+`/`-` body line there is still body-shaped → consumed (the
+        // arm returns `true` via the `||`), so `in_hunk` stays set and a
+        // following `+++ b/real.yml` is swallowed as a body line — NO file
+        // opens. Were the arm's `||` an `&&`, the first `+orphan` would end the
+        // hunk and the `+++` would open a spurious file. Asserting zero files
+        // pins the `||`. (The leading `diff --git` only keeps the whole value
+        // off the `@file` path — it creates no file itself.)
+        let diff = "diff --git a/x b/x\n@@ -1 +1 @@\n+orphan body\n+++ b/real.yml\n";
+        let pr = parse_diff(diff).expect("an orphan hunk header parses (no file)");
+        assert!(
+            pr.files.is_empty(),
+            "a body line under an orphan hunk keeps in_hunk set, so the later \
+             `+++` is body, not a new file"
         );
     }
 }
