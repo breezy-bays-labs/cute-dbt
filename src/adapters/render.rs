@@ -6295,12 +6295,20 @@ mod tests {
             "cute_dbt_render_governance_off.html",
             &GovernanceFacts::default(),
         );
+        // Match the actual DOM nodes, not the bare class tokens: a later
+        // slice / the Design pass inlines `.governance-panel { … }` CSS,
+        // which would false-PASS a `!contains("governance-panel")` check
+        // even if the section wrongly rendered (CodeRabbit on #334).
         assert!(
-            !html.contains("governance-panel"),
-            "no governance section in the DOM when the payload is empty",
+            !html.contains(r#"<section class="governance-panel""#),
+            "no governance section element in the DOM when the payload is empty",
         );
         assert!(
-            !html.contains("gov-group-chip"),
+            !html.contains(r#"data-testid="governance-panel""#),
+            "no governance panel test hook when the payload is empty",
+        );
+        assert!(
+            !html.contains(r#"data-testid="gov-group-chip""#),
             "no group chip in the DOM when the payload is empty",
         );
     }
@@ -6319,21 +6327,14 @@ mod tests {
             html.contains(r#"<section class="governance-panel""#),
             "the governance section renders when the payload has content",
         );
+        // Anchor the chip text to the actual chip node (the rendered
+        // <span class="gov-group-chip" … data-group="finance">…), not to
+        // bare substrings that could appear elsewhere in the DOM.
         assert!(
-            html.contains(r#"data-testid="gov-group-chip""#),
-            "the group chip carries its stable test hook",
-        );
-        assert!(
-            html.contains("group finance"),
-            "the chip names the group: {html}",
-        );
-        assert!(
-            html.contains("owner Finance Team"),
-            "the chip names the owner",
-        );
-        assert!(
-            html.contains("finance@corp.example"),
-            "the chip carries the owner email",
+            html.contains(
+                r#"<span class="gov-group-chip" data-testid="gov-group-chip" data-group="finance">group finance &middot; owner Finance Team &lt;finance@corp.example&gt;</span>"#
+            ),
+            "the group chip renders the composed group/owner/email label: {html}",
         );
     }
 
@@ -6346,7 +6347,10 @@ mod tests {
             "cute_dbt_render_governance_empty_on.html",
             &GovernanceFacts::default(),
         );
-        assert!(!html.contains("governance-panel"));
+        // DOM-node-targeted (CodeRabbit on #334): inlined `.governance-panel`
+        // CSS must not let this false-PASS.
+        assert!(!html.contains(r#"<section class="governance-panel""#));
+        assert!(!html.contains(r#"data-testid="gov-group-chip""#));
     }
 
     // ===== project panel: hooks + dispatch rows (cute-dbt#269) =====

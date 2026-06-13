@@ -137,7 +137,7 @@ fn group_chip(manifest: &Manifest, group_name: &str) -> GroupChip {
 /// The first declared email of an [`Owner`], owned. `None` for an owner
 /// with no email (the post-normalized list is empty).
 fn first_email(owner: &Owner) -> Option<String> {
-    owner.email().first().map(String::to_owned)
+    owner.email().first().cloned()
 }
 
 #[cfg(test)]
