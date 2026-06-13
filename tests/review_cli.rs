@@ -8,17 +8,16 @@
 //! per repo (`TestRepo::isolate`): a developer's `commit.gpgsign`,
 //! `diff.noprefix`, or global `cute-dbt.base` can never steer a test.
 //!
-//! tracked: cute-dbt#331 — this whole suite drives `cute-dbt` through
-//! the Unix-only shim harness (`common::TestRepo`), so the crate is
-//! `#[cfg(unix)]`-gated and is simply absent on the windows-latest job
-//! (cute-dbt#308/#316). The portable path/git logic is unit-tested in
-//! `src/cli/review.rs`, which runs everywhere.
-#![cfg(unix)]
+//! cute-dbt#331 — this suite drives `cute-dbt` through the shim harness
+//! (`common::TestRepo`), now cross-platform (the `dbt`/`gh` stand-ins are
+//! renamed copies of the `cute-dbt` binary with a sibling spec, not
+//! `#!/bin/sh` scripts), so the suite runs on the windows-latest
+//! review-seams job (cute-dbt#308/#316/#317) as well as Linux/macOS.
 
 #[path = "common/mod.rs"]
 mod common;
 
-use common::{TestRepo, scaffold_dbt_project};
+use common::{ShimSpec, TestRepo, scaffold_dbt_project};
 
 /// The unit test the jaffle-shop fixtures declare on `stg_customers` —
 /// the scope oracle for the happy paths.
@@ -771,10 +770,12 @@ fn a_failed_compile_is_fatal_even_though_the_manifest_exists() {
     // perfectly valid manifest sitting in target/; the run must still
     // fail and write no report.
     let repo = repo_with_branch_change("compile-fails");
-    repo.install_dbt_shim(
-        "case \"$1\" in\n  --version) printf 'dbt 2.0.0-preview.186\\n'; exit 0;;\n  \
-         compile) printf 'Compilation Error in model stg_customers\\n' >&2; exit 1;;\nesac\nexit 0",
-    );
+    repo.install_dbt_shim(&ShimSpec::new(0).version("dbt 2.0.0-preview.186\n").rule(
+        "compile",
+        "",
+        "Compilation Error in model stg_customers\n",
+        1,
+    ));
 
     let output = repo.review(&["--no-open"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -805,9 +806,11 @@ fn a_failed_compile_is_fatal_even_though_the_manifest_exists() {
 fn the_python_core_version_shape_is_detected_and_announced() {
     let repo = repo_with_branch_change("core-engine");
     repo.install_dbt_shim(
-        "case \"$1\" in\n  --version) printf 'Core:\\n  - installed: 1.10.2\\n  - latest:    \
-         1.10.2 - Up to date!\\n\\nPlugins:\\n  - duckdb: 1.9.1\\n'; exit 0;;\n  \
-         compile) exit 0;;\nesac\nexit 0",
+        &ShimSpec::new(0)
+            .version(
+                "Core:\n  - installed: 1.10.2\n  - latest:    1.10.2 - Up to date!\n\nPlugins:\n  - duckdb: 1.9.1\n",
+            )
+            .compile_ok(),
     );
 
     let output = repo.review(&["--no-open"]);
@@ -827,8 +830,9 @@ fn the_python_core_version_shape_is_detected_and_announced() {
 fn a_pre_1_8_core_is_rejected_before_compiling() {
     let repo = repo_with_branch_change("core-old");
     repo.install_dbt_shim(
-        "case \"$1\" in\n  --version) printf 'Core:\\n  - installed: 1.7.6\\n'; exit 0;;\n  \
-         compile) exit 0;;\nesac\nexit 0",
+        &ShimSpec::new(0)
+            .version("Core:\n  - installed: 1.7.6\n")
+            .compile_ok(),
     );
 
     let output = repo.review(&["--no-open"]);
@@ -853,8 +857,7 @@ fn a_pre_1_8_core_is_rejected_before_compiling() {
 fn the_cloud_cli_is_rejected_with_remediation() {
     let repo = repo_with_branch_change("cloud-cli");
     repo.install_dbt_shim(
-        "case \"$1\" in\n  --version) printf 'Cloud CLI - 0.38.0 (abc1234 \
-         2026-05-01T00:00:00Z)\\n'; exit 0;;\nesac\nexit 0",
+        &ShimSpec::new(0).version("Cloud CLI - 0.38.0 (abc1234 2026-05-01T00:00:00Z)\n"),
     );
 
     let output = repo.review(&["--no-open"]);
@@ -871,12 +874,11 @@ fn a_missing_dbt_gets_the_install_remediation() {
     let repo = repo_with_branch_change("dbt-missing");
     // Remove the scaffold's default shim, then run hermetically: dbt
     // (and gh) must be genuinely absent. A plain controlled PATH that
-    // includes /usr/bin would let a host dbt/gh leak in on some runners;
-    // `review_hermetic` excludes the system dirs (git/sh symlinked in),
+    // includes the system dirs would let a host dbt/gh leak in on some
+    // runners; `review_hermetic` excludes them (only git is linked in),
     // so the binary sees io::ErrorKind::NotFound — the only trigger for
     // the dbt-MISSING install remediation.
-    std::fs::remove_file(repo.root.parent().expect("base").join("bin/dbt"))
-        .expect("remove the default shim");
+    repo.remove_shim("dbt");
 
     let output = repo.review_hermetic(&["--no-open"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -891,8 +893,7 @@ fn a_missing_dbt_gets_the_install_remediation() {
 #[test]
 fn no_compile_needs_no_dbt_at_all() {
     let repo = repo_with_branch_change("nocompile-nodbt");
-    std::fs::remove_file(repo.root.parent().expect("base").join("bin/dbt"))
-        .expect("remove the default shim");
+    repo.remove_shim("dbt");
 
     let output = repo.review(&["--no-compile", "--no-open"]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
@@ -1063,7 +1064,7 @@ fn a_successful_compile_that_writes_no_manifest_gets_the_target_path_remediation
     repo.write(".gitignore", "target/\n");
     repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id\n");
     repo.commit_all("init");
-    repo.install_dbt_shim(common::WELL_BEHAVED_FUSION_SHIM);
+    repo.install_dbt_shim(&common::well_behaved_fusion_spec());
     repo.git(&["checkout", "-q", "-b", "feature"]);
     repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
     repo.commit_all("edit");
@@ -1081,14 +1082,21 @@ fn a_successful_compile_that_writes_no_manifest_gets_the_target_path_remediation
 // --pr anchor + fail-soft gh rung (V4, cute-dbt#303)
 // ===================================================================
 
-/// A `gh` shim body that answers `pr view` with the given base/head/
-/// number JSON and exits 0; every other subcommand exits 0 with no
-/// output.
-fn gh_pr_view_shim(base: &str, head: &str, number: u64) -> String {
-    format!(
-        "case \"$1 $2\" in\n  'pr view') printf '{{\"baseRefName\":\"{base}\",\
-         \"headRefName\":\"{head}\",\"number\":{number}}}\\n'; exit 0;;\nesac\nexit 0",
+/// A `gh` shim that answers `pr view` with the given base/head/number
+/// JSON and exits 0; every other subcommand exits 0 with no output.
+fn gh_pr_view_shim(base: &str, head: &str, number: u64) -> ShimSpec {
+    ShimSpec::new(0).rule(
+        "pr view",
+        &format!("{{\"baseRefName\":\"{base}\",\"headRefName\":\"{head}\",\"number\":{number}}}\n"),
+        "",
+        0,
     )
+}
+
+/// A `gh` shim that writes the not-found message to stderr and exits 1
+/// for any invocation (the gh-reports-no-PR case).
+fn gh_no_pr_shim() -> ShimSpec {
+    ShimSpec::new(1).rule("", "", "no pull requests found\n", 1)
 }
 
 #[test]
@@ -1147,7 +1155,7 @@ fn a_gh_failure_falls_through_the_auto_ladder_silently() {
     repo.git(&["checkout", "-q", "-b", "feature"]);
     repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
     repo.commit_all("edit");
-    repo.install_gh_shim("echo 'no pull requests found' >&2; exit 1");
+    repo.install_gh_shim(&gh_no_pr_shim());
 
     let output = repo.review(&["--no-open"]);
     assert_eq!(output.status.code(), Some(0), "{output:?}");
@@ -1214,7 +1222,7 @@ fn bare_pr_with_no_open_pr_is_a_remediated_error() {
     repo.git(&["checkout", "-q", "-b", "feature"]);
     repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
     repo.commit_all("edit");
-    repo.install_gh_shim("echo 'no pull requests found' >&2; exit 1");
+    repo.install_gh_shim(&gh_no_pr_shim());
 
     let output = repo.review(&["--pr", "--no-open"]);
     assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -1286,18 +1294,29 @@ fn gh_pr_view_number_aware_shim(
     numbered_head: &str,
     current_base: &str,
     current_head: &str,
-) -> String {
-    // `$3` is the first arg after `pr view`: the PR number on the
-    // numbered path, `--json` on the argless path.
-    format!(
-        "if [ \"$1 $2\" = 'pr view' ] && [ \"$3\" = '{number}' ]; then\n  \
-         printf '{{\"baseRefName\":\"{numbered_base}\",\"headRefName\":\"{numbered_head}\",\
-         \"number\":{number}}}\\n'; exit 0\n\
-         elif [ \"$1 $2\" = 'pr view' ]; then\n  \
-         printf '{{\"baseRefName\":\"{current_base}\",\"headRefName\":\"{current_head}\",\
-         \"number\":0}}\\n'; exit 0\n\
-         fi\nexit 0",
-    )
+) -> ShimSpec {
+    // The number-aware rule (`pr view <number>`) is listed FIRST, so it
+    // wins over the argless `pr view` for `gh pr view <number> --json …`;
+    // the bare `gh pr view --json …` falls to the second rule. (The sh
+    // original dispatched on `$3` == the number; the prefix match here is
+    // equivalent because `--json` never equals the numeric `<number>`.)
+    ShimSpec::new(0)
+        .rule(
+            &format!("pr view {number}"),
+            &format!(
+                "{{\"baseRefName\":\"{numbered_base}\",\"headRefName\":\"{numbered_head}\",\"number\":{number}}}\n"
+            ),
+            "",
+            0,
+        )
+        .rule(
+            "pr view",
+            &format!(
+                "{{\"baseRefName\":\"{current_base}\",\"headRefName\":\"{current_head}\",\"number\":0}}\n"
+            ),
+            "",
+            0,
+        )
 }
 
 #[test]
@@ -1377,12 +1396,17 @@ fn pr_number_resolves_even_when_the_current_branch_has_no_pr() {
     repo.write(STG_CUSTOMERS_SQL, "select 1 as customer_id -- edited\n");
     repo.commit_all("edit");
     // `pr view 9` → PR #9 (head `feature`, base `main`); the argless
-    // `pr view` → exit 1 (no PR for the current branch).
+    // `pr view` → exit 1 (no PR for the current branch). The numbered
+    // rule is listed first so it wins for `pr view 9 --json …`.
     repo.install_gh_shim(
-        "if [ \"$1 $2\" = 'pr view' ] && [ \"$3\" = '9' ]; then\n  \
-         printf '{\"baseRefName\":\"main\",\"headRefName\":\"feature\",\"number\":9}\\n'; \
-         exit 0\nelif [ \"$1 $2\" = 'pr view' ]; then\n  \
-         echo 'no pull requests found' >&2; exit 1\nfi\nexit 0",
+        &ShimSpec::new(0)
+            .rule(
+                "pr view 9",
+                "{\"baseRefName\":\"main\",\"headRefName\":\"feature\",\"number\":9}\n",
+                "",
+                0,
+            )
+            .rule("pr view", "", "no pull requests found\n", 1),
     );
 
     let output = repo.review(&["--pr", "9", "--no-open"]);

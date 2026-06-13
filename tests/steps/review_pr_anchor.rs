@@ -11,6 +11,7 @@
 
 use cucumber::{given, then, when};
 
+use super::super::common::ShimSpec;
 use super::World;
 
 /// The repo the shared Given built (one_command_review.rs).
@@ -43,15 +44,19 @@ fn given_named_branch_edit(world: &mut World, branch: String, model: String) {
 
 #[given(regex = r#"^gh reports an open PR with base "([^"]+)" and head "([^"]+)"$"#)]
 fn given_gh_pr(world: &mut World, base: String, head: String) {
-    repo(world).install_gh_shim(&format!(
-        "case \"$1 $2\" in\n  'pr view') printf '{{\"baseRefName\":\"{base}\",\
-         \"headRefName\":\"{head}\",\"number\":9}}\\n'; exit 0;;\nesac\nexit 0",
+    repo(world).install_gh_shim(&ShimSpec::new(0).rule(
+        "pr view",
+        &format!("{{\"baseRefName\":\"{base}\",\"headRefName\":\"{head}\",\"number\":9}}\n"),
+        "",
+        0,
     ));
 }
 
 #[given("gh reports no open PR")]
 fn given_gh_no_pr(world: &mut World) {
-    repo(world).install_gh_shim("echo 'no pull requests found' >&2; exit 1");
+    // Any `gh` invocation writes the not-found message to stderr and
+    // exits 1 (the catch-all default rule, no matchers).
+    repo(world).install_gh_shim(&ShimSpec::new(1).rule("", "", "no pull requests found\n", 1));
 }
 
 #[given("gh is not installed on PATH")]

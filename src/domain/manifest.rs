@@ -1805,6 +1805,68 @@ impl DisabledEntry {
     }
 }
 
+/// The macro identity triple (cute-dbt#265): a macro's
+/// `original_file_path`, `name`, and `package_name` — the three fields
+/// of the fusion `DbtMacro` struct (`dbt-schemas` `macros.rs:20-42`
+/// @ `9977b6cb…`; dbt-core mirrors the shape) cute-dbt needs to resolve
+/// a changed `macros/*.sql` path (or a `{% macro NAME %}` declaration)
+/// back to a macro `unique_id`.
+///
+/// Every field is `Option<String>` for the cute-dbt#145 null-fill
+/// tolerance — fusion's `#[skip_serializing_none]` omits unset keys while
+/// dbt-core emits explicit `null`; `#[serde(default)]` on the wire side
+/// covers both. The spike (2026-06-13) verified `original_file_path` is
+/// reliably non-null on real fusion manifests (510/510), so the
+/// path-primary resolution in [`crate::domain::macro_lens`] holds; the
+/// `name` fallback is the safety net for the rare null and the
+/// multiple-macros-per-file case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacroIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original_file_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package_name: Option<String>,
+}
+
+impl MacroIdentity {
+    /// Canonical constructor — every field owned, each `None`-tolerant.
+    #[must_use]
+    pub fn new(
+        original_file_path: Option<String>,
+        name: Option<String>,
+        package_name: Option<String>,
+    ) -> Self {
+        Self {
+            original_file_path,
+            name,
+            package_name,
+        }
+    }
+
+    /// The macro's declaring file, project-relative (e.g.
+    /// `macros/add_dq_flags.sql`). The path-primary resolution key.
+    #[must_use]
+    pub fn original_file_path(&self) -> Option<&str> {
+        self.original_file_path.as_deref()
+    }
+
+    /// The macro's bare name (the `X` of `{% macro X(...) %}`) — the
+    /// name-extraction fallback key.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The package/project owning the macro — root-project filter for the
+    /// blast radius (`package_name == metadata().project_name()`).
+    #[must_use]
+    pub fn package_name(&self) -> Option<&str> {
+        self.package_name.as_deref()
+    }
+}
+
 /// Parsed dbt `manifest.json` projection.
 ///
 /// **Post-normalized shape** (see module docs) — `unit_tests` is a
@@ -1859,6 +1921,18 @@ pub struct Manifest {
     /// input and the #265 macro-perspective building block.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     macro_depends_on: BTreeMap<String, Vec<String>>,
+    /// The macro identity triple (cute-dbt#265): macro `unique_id` →
+    /// its [`MacroIdentity`] (`original_file_path` / `name` /
+    /// `package_name`). A PARALLEL map beside [`Self::macros`] (id →
+    /// body) and [`Self::macro_depends_on`] (id → refs), the same shape
+    /// the #271 reference map established — pre-#265 serializations keep
+    /// deserializing (payload byte-stability), and
+    /// `skip_serializing_if` keeps an identity-free manifest
+    /// byte-stable. The #265 macro-perspective resolution input
+    /// (changed-macro detection matches a diff path / declaration name
+    /// against these).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    macro_identity: BTreeMap<String, MacroIdentity>,
 }
 
 impl Manifest {
@@ -1884,6 +1958,7 @@ impl Manifest {
             groups: HashMap::new(),
             disabled: BTreeMap::new(),
             macro_depends_on: BTreeMap::new(),
+            macro_identity: BTreeMap::new(),
         }
     }
 
@@ -1923,6 +1998,15 @@ impl Manifest {
         macro_depends_on: BTreeMap<String, Vec<String>>,
     ) -> Self {
         self.macro_depends_on = macro_depends_on;
+        self
+    }
+
+    /// Attach the macro identity triple map (cute-dbt#265) — the adapter
+    /// passes every macro's `original_file_path` / `name` /
+    /// `package_name`.
+    #[must_use]
+    pub fn with_macro_identity(mut self, macro_identity: BTreeMap<String, MacroIdentity>) -> Self {
+        self.macro_identity = macro_identity;
         self
     }
 
@@ -2008,6 +2092,55 @@ impl Manifest {
         self.macro_depends_on
             .get(macro_id)
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// The macro identity map (cute-dbt#265): macro `unique_id` → its
+    /// [`MacroIdentity`]. Empty on pre-#265 serializations and on
+    /// synthetic fixtures that omit the triple.
+    #[must_use]
+    pub fn macro_identity(&self) -> &BTreeMap<String, MacroIdentity> {
+        &self.macro_identity
+    }
+
+    /// Resolve a project-relative macro file path (e.g.
+    /// `macros/add_dq_flags.sql`) to its macro `unique_id` — the
+    /// path-primary half of cute-dbt#265 changed-macro detection.
+    ///
+    /// Leading-`./`-tolerant on the lookup side (a manifest
+    /// `original_file_path` can carry the `./` prefix; the
+    /// [`crate::domain::path`] precedent), so a bare `macros/x.sql`
+    /// query matches a `./macros/x.sql` stored path and vice versa.
+    /// Linear scan — manifests carry a few hundred macros and the lookup
+    /// runs once per changed macro file (the [`Self::source_by_name`]
+    /// precedent).
+    #[must_use]
+    pub fn macro_id_for_path(&self, original_file_path: &str) -> Option<&str> {
+        let target = original_file_path
+            .strip_prefix("./")
+            .unwrap_or(original_file_path);
+        self.macro_identity.iter().find_map(|(id, identity)| {
+            identity
+                .original_file_path()
+                .is_some_and(|stored| stored.strip_prefix("./").unwrap_or(stored) == target)
+                .then_some(id.as_str())
+        })
+    }
+
+    /// Resolve a `(package, name)` pair to its macro `unique_id` — the
+    /// `{% macro NAME %}` declaration-name fallback half of cute-dbt#265
+    /// changed-macro detection.
+    ///
+    /// The fusion/core macro `unique_id` is `macro.<package>.<name>`, so
+    /// this is a direct keyed membership probe (project-qualified to dodge
+    /// the rare cross-package name collision — `name` alone collides 2/508
+    /// on the spike's fixture, but `macro.<root_project>.<name>` is
+    /// structurally unique).
+    #[must_use]
+    pub fn macro_id_for_name(&self, package: &str, name: &str) -> Option<&str> {
+        let candidate = format!("macro.{package}.{name}");
+        self.macro_identity
+            .get_key_value(&candidate)
+            .map(|(id, _)| id.as_str())
     }
 
     /// Look up a group by its NAME — the value a node's [`Node::group`]
@@ -2708,6 +2841,113 @@ mod tests {
         );
         let back: Manifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
         assert_eq!(back, m);
+    }
+
+    // ----- cute-dbt#265: macro identity triple -------------------------
+
+    #[test]
+    fn manifest_macro_identity_builder_lookup_round_trip_and_byte_stable_omission() {
+        let bare = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        assert!(bare.macro_identity().is_empty());
+        assert_eq!(
+            bare.macro_id_for_path("macros/add_dq_flags.sql"),
+            None,
+            "no identity map ⇒ no path resolves",
+        );
+        // Byte-stability: an identity-free Manifest serializes without the
+        // key (pre-#265 shape).
+        assert!(
+            !serde_json::to_string(&bare)
+                .unwrap()
+                .contains("macro_identity"),
+        );
+
+        let mut identity = BTreeMap::new();
+        identity.insert(
+            "macro.shop.add_dq_flags".to_owned(),
+            MacroIdentity::new(
+                Some("macros/add_dq_flags.sql".to_owned()),
+                Some("add_dq_flags".to_owned()),
+                Some("shop".to_owned()),
+            ),
+        );
+        identity.insert(
+            "macro.dbt.create_table_as".to_owned(),
+            MacroIdentity::new(
+                Some("macros/materializations/create_table_as.sql".to_owned()),
+                Some("create_table_as".to_owned()),
+                Some("dbt".to_owned()),
+            ),
+        );
+        let m = bare.with_macro_identity(identity);
+        assert_eq!(m.macro_identity().len(), 2);
+        let id = m
+            .macro_identity()
+            .get("macro.shop.add_dq_flags")
+            .expect("present");
+        assert_eq!(id.original_file_path(), Some("macros/add_dq_flags.sql"));
+        assert_eq!(id.name(), Some("add_dq_flags"));
+        assert_eq!(id.package_name(), Some("shop"));
+        let back: Manifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[test]
+    fn manifest_macro_id_for_path_matches_original_file_path() {
+        let mut identity = BTreeMap::new();
+        identity.insert(
+            "macro.shop.add_dq_flags".to_owned(),
+            MacroIdentity::new(
+                Some("macros/add_dq_flags.sql".to_owned()),
+                Some("add_dq_flags".to_owned()),
+                Some("shop".to_owned()),
+            ),
+        );
+        let m = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .with_macro_identity(identity);
+        assert_eq!(
+            m.macro_id_for_path("macros/add_dq_flags.sql"),
+            Some("macro.shop.add_dq_flags"),
+        );
+        assert_eq!(m.macro_id_for_path("macros/other.sql"), None);
+    }
+
+    #[test]
+    fn manifest_macro_id_for_name_keys_under_project_qualified_id() {
+        let mut identity = BTreeMap::new();
+        identity.insert(
+            "macro.shop.add_dq_flags".to_owned(),
+            MacroIdentity::new(
+                Some("macros/add_dq_flags.sql".to_owned()),
+                Some("add_dq_flags".to_owned()),
+                Some("shop".to_owned()),
+            ),
+        );
+        let m = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
+        .with_macro_identity(identity);
+        assert_eq!(
+            m.macro_id_for_name("shop", "add_dq_flags"),
+            Some("macro.shop.add_dq_flags"),
+        );
+        // A name-only collision across packages never crosses into the
+        // root project's resolution (project-qualified lookup).
+        assert_eq!(m.macro_id_for_name("dbt", "add_dq_flags"), None);
+        assert_eq!(m.macro_id_for_name("shop", "missing"), None);
     }
 
     // ===== SourceNode (cute-dbt#57) =====

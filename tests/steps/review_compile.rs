@@ -10,6 +10,7 @@
 
 use cucumber::{given, then};
 
+use super::super::common::ShimSpec;
 use super::World;
 
 /// The repo the shared Given built (one_command_review.rs).
@@ -24,28 +25,27 @@ fn repo(world: &World) -> &super::super::common::TestRepo {
 
 #[given("dbt is not installed on PATH")]
 fn given_no_dbt(world: &mut World) {
-    let bin_dbt = repo(world)
-        .root
-        .parent()
-        .expect("repo root has a parent")
-        .join("bin/dbt");
-    std::fs::remove_file(bin_dbt).expect("remove the default dbt shim");
+    // Remove the default dbt stand-in (binary copy + sibling spec) so dbt
+    // is genuinely NotFound on the controlled PATH.
+    repo(world).remove_shim("dbt");
 }
 
 #[given("the dbt on PATH fails its compile with a compilation error")]
 fn given_failing_compile(world: &mut World) {
-    repo(world).install_dbt_shim(
-        "case \"$1\" in\n  --version) printf 'dbt 2.0.0-preview.186\\n'; exit 0;;\n  \
-         compile) printf 'Compilation Error in model stg_customers\\n' >&2; exit 1;;\n\
-         esac\nexit 0",
-    );
+    repo(world).install_dbt_shim(&ShimSpec::new(0).version("dbt 2.0.0-preview.186\n").rule(
+        "compile",
+        "",
+        "Compilation Error in model stg_customers\n",
+        1,
+    ));
 }
 
 #[given("the dbt on PATH answers with the python core version block")]
 fn given_core_shim(world: &mut World) {
     repo(world).install_dbt_shim(
-        "case \"$1\" in\n  --version) printf 'Core:\\n  - installed: 1.10.2\\n  - latest:    \
-         1.10.2 - Up to date!\\n'; exit 0;;\n  compile) exit 0;;\nesac\nexit 0",
+        &ShimSpec::new(0)
+            .version("Core:\n  - installed: 1.10.2\n  - latest:    1.10.2 - Up to date!\n")
+            .compile_ok(),
     );
 }
 
