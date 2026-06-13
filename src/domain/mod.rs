@@ -73,7 +73,7 @@ pub use checks::{
     checks_index_markdown, evaluate_all, filter_for_display, model_findings, registry_toml,
     resolve_supersedes, supersedes_is_acyclic,
 };
-pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, ReportConfig};
+pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, PrConfig, PrRef, ReportConfig};
 pub use cte::{
     CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, Span, SubqueryFact,
     SubqueryKind,

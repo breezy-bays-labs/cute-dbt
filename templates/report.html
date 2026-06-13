@@ -33,7 +33,7 @@
 
 <section class="diff-scope-banner" aria-label="Diff scope">
   <p class="diff-scope-line">
-    <span class="diff-scope-text">{{ banner_text }}</span> —{% if is_pr_diff %} from PR file diff{% else %}
+    <span class="diff-scope-text">{{ banner_text }}</span> —{% if is_pr_diff %} from PR file diff{% match pr_ref %}{% when Some with (pr) %} (<a class="diff-scope-pr-link" href="{{ pr.url }}">PR #{{ pr.number }}</a> &mdash; {{ pr.title }}){% when None %}{% endmatch %}{% else %}
     vs baseline manifest <code class="diff-scope-baseline">{{ baseline_label }}</code>{% endif %}.
   </p>
   {%- if is_pr_diff %}

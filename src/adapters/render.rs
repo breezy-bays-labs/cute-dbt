@@ -70,12 +70,13 @@ use crate::domain::{
     BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, ConfigAttribution, CteGraph, DiffLine,
     DiffLineKind, EdgeType, Finding, FixtureTable, GovernanceFacts, HeuristicId, HookChangeFacts,
     HookManifestPresence, InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet,
-    ModelYamlOutcome, Node, NodeId, NormalizedDiffIndex, ProjectChange, ProjectChangeCategory,
-    ProjectChangePanel, ProjectDefinition, ProjectFacts, ProjectFallbackReason, SourceNode,
-    TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
-    UnitTestYamlBlock, VarAttribution, VarChangeFacts, VarReference, VarScanFootprint,
-    apply_check_policy, macro_blast_radius, model_findings, reconstruct_macro_sql_diff,
-    resolve_target_model, resolve_tested_model, table_from_manifest_rows,
+    ModelYamlOutcome, Node, NodeId, NormalizedDiffIndex, PrRef, ProjectChange,
+    ProjectChangeCategory, ProjectChangePanel, ProjectDefinition, ProjectFacts,
+    ProjectFallbackReason, SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff,
+    UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock, VarAttribution, VarChangeFacts,
+    VarReference, VarScanFootprint, apply_check_policy, macro_blast_radius, model_findings,
+    reconstruct_macro_sql_diff, resolve_target_model, resolve_tested_model,
+    table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -1397,6 +1398,37 @@ pub struct ReportPayload {
     /// section.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub macro_lens: Option<MacroLensPayload>,
+    /// The source-PR reference (cute-dbt#346) — the PR number, title, and
+    /// URL the `--pr-diff` change-context banner links to. `Some` only on
+    /// the PR-diff arm when a usable PR context was supplied at generation
+    /// time (`[pr]` config / `--pr-*` flags / `review`-derived); `None` ⇒
+    /// the key is omitted from JSON and the banner renders link-free,
+    /// keeping the no-PR-context goldens byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_ref: Option<PrRefPayload>,
+}
+
+/// The serialized source-PR reference (cute-dbt#346) — the JSON twin of
+/// the server-rendered banner link. Mirrors the domain [`PrRef`] POD
+/// (the renderer owns the wire shape; the domain owns the resolution).
+#[derive(Debug, Clone, Serialize)]
+pub struct PrRefPayload {
+    /// The PR number (`PR #<n>`).
+    pub number: u64,
+    /// The PR title — escaped by askama in the DOM; carried verbatim here.
+    pub title: String,
+    /// The GitHub URL — the `<a href>` navigation target.
+    pub url: String,
+}
+
+impl From<&PrRef> for PrRefPayload {
+    fn from(pr: &PrRef) -> Self {
+        Self {
+            number: pr.number,
+            title: pr.title.clone(),
+            url: pr.url.clone(),
+        }
+    }
 }
 
 /// The macro perspective lens (cute-dbt#265, Slice B) — the "macro changed"
@@ -2638,6 +2670,12 @@ struct ReportTemplate<'a> {
     /// banner's provenance clause: PR-diff → "from PR file diff";
     /// baseline → "vs baseline manifest `<label>`" (cute-dbt#85).
     is_pr_diff: bool,
+    /// The source-PR reference (cute-dbt#346) — `Some` only on the PR-diff
+    /// arm when a usable PR context was supplied. The banner then renders a
+    /// linked `PR #<n> — <title>` clause (`<a href>` navigation, NOT a
+    /// resource load — the zero-egress gate is unaffected; the title is
+    /// askama-escaped). `None` ⇒ no clause, byte-identical to pre-#346.
+    pr_ref: Option<&'a PrRef>,
     /// JSON payload, pre-escaped for safe interpolation inside
     /// `<script type="application/json">` via [`payload_json_for_html_script`].
     /// The template emits this with `|safe`; the safety property is the
@@ -2895,6 +2933,11 @@ pub fn build_payload_with_externals(
         // section is payload-level, not per-model — it assembles at the
         // composition root from the changed-macro set + blast radius).
         macro_lens: None,
+        // cute-dbt#346 — the source-PR ref defaults `None` here; the
+        // resolved value (PrDiff arm only) is threaded in by
+        // `render_report_with_externals` from the cli's `--pr-*` / `[pr]` /
+        // `review`-derived inputs.
+        pr_ref: None,
     }
 }
 
@@ -2955,6 +2998,7 @@ pub fn render_report(
         &ProjectFacts::default(),
         &GovernanceFacts::default(),
         None,
+        None,
     )
 }
 
@@ -2988,6 +3032,7 @@ pub fn render_report_with_externals(
     project_facts: &ProjectFacts,
     governance: &GovernanceFacts,
     macro_lens: Option<&MacroLensPayload>,
+    pr_ref: Option<&PrRef>,
 ) -> io::Result<()> {
     let mut payload = build_payload_with_externals(
         current,
@@ -3014,6 +3059,13 @@ pub fn render_report_with_externals(
     // off-gate default, or no macro changed) ⇒ omitted from JSON + zero DOM
     // via `{% if macro_lens %}`, keeping the non-macro goldens byte-identical.
     payload.macro_lens = macro_lens.cloned();
+    // cute-dbt#346 — the source-PR ref is a PR-DIFF banner clause only: the
+    // baseline arm has no "from PR file diff" provenance to anchor a PR link
+    // to. Gating here (not at the cli) keeps the link strictly tied to the
+    // banner arm that renders it, so a stray `[pr]` config on a baseline run
+    // is inert rather than rendering a dangling link with no diff context.
+    let pr_ref = pr_ref.filter(|_| scope_source == ScopeSource::PrDiff);
+    payload.pr_ref = pr_ref.map(PrRefPayload::from);
     // The empty-scope banner contract reads the TRUE in-scope set, not the
     // widened render set or the changed subset (cute-dbt#91).
     let banner_text = compose_banner_text(in_scope);
@@ -3037,6 +3089,7 @@ pub fn render_report_with_externals(
         banner_text: &banner_text,
         baseline_label,
         is_pr_diff: scope_source == ScopeSource::PrDiff,
+        pr_ref,
         payload_json: &payload_json,
         project_panel: project_facts
             .panel
@@ -6684,6 +6737,7 @@ mod tests {
             project_change_panel: None,
             governance: GovernanceFacts::default(),
             macro_lens: None,
+            pr_ref: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6707,6 +6761,7 @@ mod tests {
             project_change_panel: None,
             governance: GovernanceFacts::default(),
             macro_lens: None,
+            pr_ref: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6732,6 +6787,7 @@ mod tests {
             project_change_panel: None,
             governance: GovernanceFacts::default(),
             macro_lens: None,
+            pr_ref: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(serialized.contains("a < b"), "bare `<` is preserved");
@@ -6752,6 +6808,7 @@ mod tests {
             project_change_panel: None,
             governance: GovernanceFacts::default(),
             macro_lens: None,
+            pr_ref: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6785,6 +6842,7 @@ mod tests {
             project_change_panel: None,
             governance: GovernanceFacts::default(),
             macro_lens: None,
+            pr_ref: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6816,6 +6874,7 @@ mod tests {
             project_change_panel: None,
             governance: GovernanceFacts::default(),
             macro_lens: None,
+            pr_ref: None,
         };
         let serialized = payload_json_for_html_script(&original).unwrap();
         let parsed: serde_json::Value =
@@ -6869,6 +6928,7 @@ mod tests {
             &CheckPolicy::default(),
             &ProjectFacts::default(),
             governance,
+            None,
             None,
         )
         .expect("report renders");
@@ -7810,6 +7870,7 @@ mod tests {
             &ProjectFacts::default(),
             &GovernanceFacts::default(),
             macro_lens,
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8147,6 +8208,146 @@ mod tests {
         );
     }
 
+    // ===== change-context banner PR link (cute-dbt#346) =====
+
+    /// Render a one-model report carrying `pr_ref` on the given scope arm,
+    /// returning the HTML. Reuses the macro-lens manifest helper for a
+    /// minimal in-scope model.
+    fn render_html_with_pr_ref(
+        filename: &str,
+        scope_source: ScopeSource,
+        pr_ref: Option<&PrRef>,
+    ) -> String {
+        let node = macro_model(
+            "model.shop.orders",
+            "models/staging/orders.sql",
+            &["macro.shop.add_dq_flags"],
+        );
+        let manifest = macro_lens_manifest(vec![node]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.orders")]);
+        let tmp = std::env::temp_dir().join(filename);
+        let _ = std::fs::remove_file(&tmp);
+        render_report_with_externals(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &InScopeSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+            scope_source,
+            "t",
+            None,
+            &CheckPolicy::default(),
+            &ProjectFacts::default(),
+            &GovernanceFacts::default(),
+            None,
+            pr_ref,
+        )
+        .expect("report renders");
+        std::fs::read_to_string(&tmp).expect("read rendered report")
+    }
+
+    fn sample_pr_ref() -> PrRef {
+        PrRef {
+            number: 123,
+            title: "Add customer churn model".to_owned(),
+            url: "https://github.com/acme/shop/pull/123".to_owned(),
+        }
+    }
+
+    #[test]
+    fn pr_ref_renders_a_linked_clause_on_the_pr_diff_arm() {
+        let pr = sample_pr_ref();
+        let html = render_html_with_pr_ref("pr_ref_on.html", ScopeSource::PrDiff, Some(&pr));
+        // The link points at the PR url (navigation, NOT a resource load).
+        assert!(
+            html.contains(r#"<a class="diff-scope-pr-link" href="https://github.com/acme/shop/pull/123">PR #123</a>"#),
+            "the banner carries the linked PR token: {html}",
+        );
+        // The title renders as adjacent text inside the clause.
+        assert!(
+            html.contains("Add customer churn model"),
+            "the title renders beside the link",
+        );
+        // The provenance clause still reads truthfully.
+        assert!(html.contains("from PR file diff"));
+    }
+
+    #[test]
+    fn pr_ref_title_is_html_escaped() {
+        // An untrusted PR title with HTML metacharacters must be
+        // askama-escaped — no raw tag injection from a title.
+        let pr = PrRef {
+            number: 7,
+            title: "<img src=x onerror=alert(1)> & \"quotes\"".to_owned(),
+            url: "https://github.com/acme/shop/pull/7".to_owned(),
+        };
+        let html = render_html_with_pr_ref("pr_ref_xss.html", ScopeSource::PrDiff, Some(&pr));
+        assert!(
+            !html.contains("<img src=x onerror=alert(1)>"),
+            "the raw tag must NOT survive: {html}",
+        );
+        assert!(
+            html.contains("&#60;img") || html.contains("&lt;img"),
+            "the `<` is escaped",
+        );
+        // The url is a trusted-shape attribute; the link still resolves.
+        assert!(html.contains(r#"href="https://github.com/acme/shop/pull/7""#));
+    }
+
+    #[test]
+    fn pr_ref_absent_emits_no_link_and_no_clause() {
+        // Graceful degradation: no PR ref ⇒ the banner renders exactly as
+        // today (no link, no dangling dash). Byte-identity precondition.
+        let html = render_html_with_pr_ref("pr_ref_off.html", ScopeSource::PrDiff, None);
+        assert!(!html.contains("diff-scope-pr-link"));
+        // The banner line ends right after the provenance clause — no PR
+        // clause appended (the `(<a ...>PR #...` shape is absent).
+        assert!(!html.contains("from PR file diff (<a"));
+        assert!(html.contains("from PR file diff"));
+    }
+
+    #[test]
+    fn pr_ref_is_inert_on_the_baseline_arm() {
+        // A PR ref supplied on a baseline run is gated out by the renderer
+        // (the baseline banner has no "from PR file diff" clause to anchor
+        // a PR link to). The baseline banner is unchanged.
+        let pr = sample_pr_ref();
+        let html =
+            render_html_with_pr_ref("pr_ref_baseline.html", ScopeSource::Baseline, Some(&pr));
+        assert!(!html.contains("diff-scope-pr-link"));
+        assert!(!html.contains("PR #123"));
+        assert!(html.contains("vs baseline manifest"));
+    }
+
+    #[test]
+    fn pr_ref_rides_the_json_payload_on_the_pr_diff_arm() {
+        // The wire twin (the governance/macro-lens both-surfaces precedent):
+        // the ref serializes into the embedded JSON payload too.
+        let pr = sample_pr_ref();
+        let html = render_html_with_pr_ref("pr_ref_payload.html", ScopeSource::PrDiff, Some(&pr));
+        assert!(
+            html.contains(r#""pr_ref""#),
+            "the pr_ref key is in the payload"
+        );
+        assert!(html.contains(r#""number":123"#));
+    }
+
+    #[test]
+    fn pr_ref_is_omitted_from_the_payload_when_absent() {
+        let html = render_html_with_pr_ref("pr_ref_payload_off.html", ScopeSource::PrDiff, None);
+        assert!(
+            !html.contains(r#""pr_ref""#),
+            "the skip-when-None contract keeps it out of the JSON",
+        );
+    }
+
     // ===== project panel: hooks + dispatch rows (cute-dbt#269) =====
 
     /// Render a one-model PR-diff report carrying `facts`, returning the
@@ -8176,6 +8377,7 @@ mod tests {
             &CheckPolicy::default(),
             facts,
             &GovernanceFacts::default(),
+            None,
             None,
         )
         .expect("report renders");

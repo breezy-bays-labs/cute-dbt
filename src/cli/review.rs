@@ -898,6 +898,11 @@ pub struct BaseFacts {
     /// HEAD is detached, there is no open PR, the call times out, or the
     /// resolved ref is not present locally — the ladder falls through.
     pub pr_base: Option<String>,
+    /// The full open-PR context the gh rung saw (cute-dbt#346) — carried
+    /// through so the change-context banner can link to the PR even on the
+    /// fail-soft auto-ladder. `Some` exactly when `gh pr view` returned a
+    /// usable PR (independent of whether the gh rung *won* the ladder).
+    pub pr_info: Option<PrInfo>,
     /// The `origin/HEAD` symref target (e.g. `origin/main`), present
     /// only when the symref exists **and** resolves (a stale symref
     /// falls through to the probes).
@@ -1006,7 +1011,7 @@ pub fn diagnose_no_merge_base(base: &str, is_shallow: bool) -> ReviewError {
 // ===================================================================
 
 /// The fields review reads from `gh pr view --json
-/// baseRefName,headRefName,number`.
+/// baseRefName,headRefName,number,title,url`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrInfo {
     /// The PR's base branch (e.g. `main`) — becomes the review base.
@@ -1015,11 +1020,18 @@ pub struct PrInfo {
     pub head_ref: String,
     /// The PR number.
     pub number: u64,
+    /// The PR title (cute-dbt#346) — feeds the change-context banner link.
+    /// Empty when the manifest carries no title (the banner then renders
+    /// link-free — both a url and a title are required).
+    pub title: String,
+    /// The PR's GitHub URL (cute-dbt#346) — the `<a href>` the banner
+    /// links to. Empty when absent (banner renders link-free).
+    pub url: String,
 }
 
-/// Parse the `gh pr view --json baseRefName,headRefName,number` payload.
-/// `None` for any shape review cannot use (not an object, missing /
-/// blank `baseRefName`) — the caller treats `None` as "no usable PR".
+/// Parse the `gh pr view --json baseRefName,headRefName,number,title,url`
+/// payload. `None` for any shape review cannot use (not an object, missing
+/// / blank `baseRefName`) — the caller treats `None` as "no usable PR".
 #[must_use]
 pub fn parse_pr_info(json: &str) -> Option<PrInfo> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
@@ -1037,10 +1049,24 @@ pub fn parse_pr_info(json: &str) -> Option<PrInfo> {
         .get("number")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
+    let title = value
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    let url = value
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_owned();
     Some(PrInfo {
         base_ref,
         head_ref,
         number,
+        title,
+        url,
     })
 }
 
@@ -1444,6 +1470,13 @@ pub struct ComposeInputs {
     pub out: PathBuf,
     /// The pass-through `--config`, when given.
     pub config: Option<ReviewConfig>,
+    /// The resolved open-PR context (cute-dbt#346) — `Some` when `gh pr
+    /// view` returned a usable PR (the auto-ladder gh rung or the `--pr`
+    /// anchor). Feeds the change-context banner link: its url + title
+    /// populate the composed [`ReportArgs`]'s `--pr-*` fields. `None` ⇒ the
+    /// banner renders link-free (graceful degradation: local review with no
+    /// PR, or `gh` absent).
+    pub pr: Option<PrInfo>,
 }
 
 /// Placeholder standing for the diff text in the displayed report
@@ -1499,6 +1532,18 @@ impl ComposeInputs {
             // `resolve_macro_body_cap`) or the default (cute-dbt#265 Slice
             // D). `None` defers to that config/default ladder.
             macro_body_cap: None,
+            // cute-dbt#346 — the change-context banner link, derived from
+            // `gh pr view` (number + title + url). `review` populates the
+            // report's `--pr-*` fields directly (rather than synthesizing a
+            // `[pr]` config), so the link rides EVERY review run that has a
+            // resolvable PR — no extra config required. The renderer gates
+            // it to the pr-diff arm (review is always pr-diff) and to
+            // url-and-title presence (`PrConfig::resolve`). The pass-through
+            // `--config` `[pr]` section still applies for keys the PrInfo
+            // leaves blank, but the derived values win (CLI-over-TOML).
+            pr_url: self.pr.as_ref().map(|p| p.url.clone()),
+            pr_title: self.pr.as_ref().map(|p| p.title.clone()),
+            pr_number: self.pr.as_ref().map(|p| p.number),
         }
     }
 }
@@ -1567,7 +1612,7 @@ pub fn opener_invocation(path: &Path) -> (&'static str, Vec<String>) {
 pub fn execute_review(args: &ReviewArgs) -> Result<(), ReviewFailure> {
     let cwd = current_dir()?;
     let layout = resolve_review_layout(args, &cwd)?;
-    let merge_base = resolve_base(args, &layout.toplevel)?;
+    let (merge_base, pr_info) = resolve_base(args, &layout.toplevel)?;
 
     let scope = DiffScope::from_flags(args.committed_only, args.staged, args.unstaged);
     let diff = diff_plan(&layout.toplevel, &layout.project_rel, &merge_base, scope);
@@ -1575,7 +1620,7 @@ pub fn execute_review(args: &ReviewArgs) -> Result<(), ReviewFailure> {
     // `--dry-run` prints it from the SAME value a real run executes.
     let compile =
         (!args.no_compile).then(|| compile_plan(&layout.project_dir, args.target_path.as_deref()));
-    let compose = build_compose_inputs(args, &cwd, &layout);
+    let compose = build_compose_inputs(args, &cwd, &layout, pr_info);
 
     if args.dry_run {
         print_dry_run(&diff, compile.as_ref(), &compose);
@@ -1635,15 +1680,25 @@ fn resolve_review_layout(args: &ReviewArgs, cwd: &Path) -> Result<ReviewLayout, 
 }
 
 /// Walk the base-detection ladder, announce the answering rung, and
-/// return the merge-base SHA.
-fn resolve_base(args: &ReviewArgs, toplevel: &Path) -> Result<String, ReviewError> {
-    let (base_ref, rung) = if let Some(requested) = args.pr {
+/// return the merge-base SHA plus the open-PR context (cute-dbt#346 — the
+/// change-context banner link, `None` when no PR resolved).
+fn resolve_base(
+    args: &ReviewArgs,
+    toplevel: &Path,
+) -> Result<(String, Option<PrInfo>), ReviewError> {
+    let (base_ref, rung, pr_info) = if let Some(requested) = args.pr {
         // `--pr [<n>]`: anchor to the open PR (gh failures surfaced).
-        resolve_pr_anchor_base(toplevel, requested)?
+        let (base, rung, pr) = resolve_pr_anchor_base(toplevel, requested)?;
+        (base, rung, Some(pr))
     } else {
-        // The auto-ladder (the gh rung is one fail-soft step within).
+        // The auto-ladder (the gh rung is one fail-soft step within). The
+        // PR context the gh rung saw rides along regardless of which rung
+        // won, so the banner can link even when the base came from another
+        // rung.
         let facts = gather_base_facts(toplevel, args.base.as_deref())?;
-        decide_base(&facts)?
+        let pr_info = facts.pr_info.clone();
+        let (base, rung) = decide_base(&facts)?;
+        (base, rung, pr_info)
     };
     let merge_base = find_merge_base(toplevel, &base_ref)?;
     eprintln!(
@@ -1651,16 +1706,18 @@ fn resolve_base(args: &ReviewArgs, toplevel: &Path) -> Result<String, ReviewErro
         rung.describe(),
         short_sha(&merge_base),
     );
-    Ok(merge_base)
+    Ok((merge_base, pr_info))
 }
 
 /// The explicit `--pr [<n>]` base: require an open PR (gh failures are
 /// surfaced, not silenced), assert the head branch on `--pr <n>` (never
 /// checking out), then resolve the PR's base to a verified local ref.
+/// Returns the resolved base, the rung, and the full PR context (the
+/// banner link, cute-dbt#346).
 fn resolve_pr_anchor_base(
     toplevel: &Path,
     requested: Option<u64>,
-) -> Result<(String, Rung), ReviewError> {
+) -> Result<(String, Rung, PrInfo), ReviewError> {
     // Query PR #requested explicitly (bare `--pr` ⇒ None ⇒ the current
     // branch's PR), so `--pr <n>` resolves PR #n's base — not whatever
     // PR the current branch happens to have (cute-dbt#303 bot review).
@@ -1672,12 +1729,19 @@ fn resolve_pr_anchor_base(
             source: BaseSource::PullRequest,
         }
     })?;
-    Ok((base, Rung::GhPr))
+    Ok((base, Rung::GhPr, pr))
 }
 
 /// Build the in-process report composition inputs from the resolved
-/// layout (manifest location, project root, out path, config).
-fn build_compose_inputs(args: &ReviewArgs, cwd: &Path, layout: &ReviewLayout) -> ComposeInputs {
+/// layout (manifest location, project root, out path, config) and the
+/// resolved open-PR context (cute-dbt#346 — the banner link, `None` when
+/// no PR resolved).
+fn build_compose_inputs(
+    args: &ReviewArgs,
+    cwd: &Path,
+    layout: &ReviewLayout,
+    pr: Option<PrInfo>,
+) -> ComposeInputs {
     let target_dir = resolve_target_dir(
         &layout.project_dir,
         args.target_path.as_deref(),
@@ -1688,6 +1752,7 @@ fn build_compose_inputs(args: &ReviewArgs, cwd: &Path, layout: &ReviewLayout) ->
         project_root: rel_or_dot(&layout.project_rel),
         out: resolve_out_path(args.out.as_deref(), cwd, &target_dir),
         config: args.config.clone(),
+        pr,
     }
 }
 
@@ -1895,10 +1960,12 @@ fn project_rel_to_toplevel(project_dir: &Path, toplevel: &Path) -> Result<String
 /// [`probe_gh_pr_base`], [`probe_origin_head`], and [`probe_name_refs`].
 fn gather_base_facts(toplevel: &Path, explicit: Option<&str>) -> Result<BaseFacts, ReviewError> {
     let (remote_probe, local_probe) = probe_name_refs(toplevel)?;
+    let (pr_base, pr_info) = probe_gh_pr_base(toplevel)?;
     Ok(BaseFacts {
         explicit: probe_explicit_ref(toplevel, explicit)?,
         configured: probe_configured_base(toplevel)?,
-        pr_base: probe_gh_pr_base(toplevel)?,
+        pr_base,
+        pr_info,
         origin_head: probe_origin_head(toplevel)?,
         remote_probe,
         local_probe,
@@ -1906,20 +1973,27 @@ fn gather_base_facts(toplevel: &Path, explicit: Option<&str>) -> Result<BaseFact
 }
 
 /// The auto-ladder gh rung: the open PR's base, resolved to a verified
-/// local ref. **Fail-soft** — `None` whenever `gh` is absent, HEAD is
+/// local ref, plus the full PR context (cute-dbt#346 — the banner link).
+/// **Fail-soft** — `(None, None)` whenever `gh` is absent, HEAD is
 /// detached, no PR resolves, the call times out, or the base ref is not
 /// present locally. Only the local-ref resolution can surface a real
 /// error (a git probe failure); everything `gh`-side degrades to `None`
-/// so `gh` is never a hard dependency of the auto-ladder.
-fn probe_gh_pr_base(toplevel: &Path) -> Result<Option<String>, ReviewError> {
+/// so `gh` is never a hard dependency of the auto-ladder. The `PrInfo` is
+/// returned even when the resolved base ref is absent locally — the PR
+/// context is still valid for the banner link though the base rung falls
+/// through.
+fn probe_gh_pr_base(toplevel: &Path) -> Result<(Option<String>, Option<PrInfo>), ReviewError> {
     // Branch-only: `gh pr view` needs a branch, and the rung must never
     // run on a detached HEAD.
     if current_branch(toplevel)?.is_none() {
-        return Ok(None);
+        return Ok((None, None));
     }
     match gh_pr_view(toplevel) {
-        Some(pr) => resolve_pr_base_ref(toplevel, &pr.base_ref),
-        None => Ok(None),
+        Some(pr) => {
+            let base = resolve_pr_base_ref(toplevel, &pr.base_ref)?;
+            Ok((base, Some(pr)))
+        }
+        None => Ok((None, None)),
     }
 }
 
@@ -1979,7 +2053,7 @@ fn run_gh_pr_view(toplevel: &Path, number: Option<u64>) -> Result<Option<Output>
         command.arg(n.to_string());
     }
     let result = command
-        .args(["--json", "baseRefName,headRefName,number"])
+        .args(["--json", "baseRefName,headRefName,number,title,url"])
         .current_dir(toplevel)
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
@@ -2444,6 +2518,7 @@ mod tests {
             explicit: Some(probe("release-2.4", true)),
             configured: Some(probe("develop", true)),
             pr_base: Some("origin/dev".to_owned()),
+            pr_info: None,
             origin_head: Some("origin/main".to_owned()),
             remote_probe: Some("origin/main".to_owned()),
             local_probe: Some("main".to_owned()),
@@ -2609,6 +2684,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_pr_info_reads_the_title_and_url_for_the_banner_link() {
+        // cute-dbt#346 — the same `gh pr view` call now also carries
+        // `title` + `url` (one more --json field, no new gh call).
+        let pr = parse_pr_info(
+            r#"{"baseRefName":"main","headRefName":"f","number":7,"title":"Add churn","url":"https://github.com/o/r/pull/7"}"#,
+        )
+        .expect("a payload with title + url parses");
+        assert_eq!(pr.number, 7);
+        assert_eq!(pr.title, "Add churn");
+        assert_eq!(pr.url, "https://github.com/o/r/pull/7");
+    }
+
+    #[test]
+    fn parse_pr_info_defaults_title_and_url_to_blank_when_absent() {
+        // The pre-#346 payload shape (no title/url) still parses; the
+        // banner then renders link-free (both fields required downstream).
+        let pr = parse_pr_info(r#"{"baseRefName":"main","headRefName":"f","number":7}"#)
+            .expect("a title-less payload still parses");
+        assert_eq!(pr.title, "");
+        assert_eq!(pr.url, "");
+    }
+
+    #[test]
     fn parse_pr_info_rejects_unusable_shapes() {
         // No base ref ⇒ unusable; blank base ref ⇒ unusable; non-object
         // / non-JSON ⇒ None. Each is "no usable PR", never a panic.
@@ -2635,6 +2733,8 @@ mod tests {
             base_ref: base.to_owned(),
             head_ref: head.to_owned(),
             number,
+            title: String::new(),
+            url: String::new(),
         }
     }
 
@@ -3147,6 +3247,7 @@ AM models/added_then_edited.sql
             project_root: PathBuf::from("proj"),
             out: PathBuf::from("/repo/proj/target/cute-dbt-report.html"),
             config: None,
+            pr: None,
         }
     }
 
@@ -3219,6 +3320,40 @@ AM models/added_then_edited.sql
             Some("T"),
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_resolved_pr_threads_the_banner_link_fields() {
+        // cute-dbt#346 — a resolved open PR populates the composed report's
+        // `--pr-*` fields (number + title + url), so the change-context
+        // banner links to the PR on every review run that has one.
+        let compose = ComposeInputs {
+            pr: Some(PrInfo {
+                base_ref: "main".to_owned(),
+                head_ref: "feature/x".to_owned(),
+                number: 314,
+                title: "Refine payer dims".to_owned(),
+                url: "https://github.com/acme/shop/pull/314".to_owned(),
+            }),
+            ..sample_compose()
+        };
+        let composed = compose.report_args(parse_diff("").expect("empty diff"), None);
+        assert_eq!(composed.pr_number, Some(314));
+        assert_eq!(composed.pr_title.as_deref(), Some("Refine payer dims"));
+        assert_eq!(
+            composed.pr_url.as_deref(),
+            Some("https://github.com/acme/shop/pull/314"),
+        );
+    }
+
+    #[test]
+    fn no_resolved_pr_leaves_the_banner_link_fields_unset() {
+        // Graceful degradation: a review run with no resolvable PR composes
+        // a report with no `--pr-*` fields ⇒ a link-free banner.
+        let composed = sample_compose().report_args(parse_diff("").expect("empty diff"), None);
+        assert!(composed.pr_number.is_none());
+        assert!(composed.pr_title.is_none());
+        assert!(composed.pr_url.is_none());
     }
 
     // ----- manifest / out resolution ---------------------------------

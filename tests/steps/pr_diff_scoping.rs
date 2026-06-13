@@ -702,6 +702,51 @@ fn run_pr_diff(world: &mut World, project_root: String) {
     capture(world, output, out);
 }
 
+/// cute-dbt#346 — the change-context banner PR link. Same as `run_pr_diff`
+/// but also passes `--pr-url <url> --pr-title <title>`; the banner then
+/// renders the linked `PR #<n> — <title>` clause.
+#[when(
+    regex = r#"^I run cute-dbt report with --manifest current\.json --pr-diff @diff\.patch --project-root \. --pr-url "([^"]+)" --pr-title "([^"]*)" --out report\.html$"#
+)]
+fn run_pr_diff_with_pr_link(world: &mut World, pr_url: String, pr_title: String) {
+    let manifest = take_current(world);
+    let manifest_path = serialize_to_tmp(&manifest, "pr_diff_link_current");
+
+    let out = common::tmp("pr_diff_link_report.html");
+    common::clear(&out);
+
+    let workdir = common::tmp("pr_diff_link_workdir");
+    std::fs::create_dir_all(&workdir).expect("create workdir");
+
+    let patch_path = world
+        .explicit_patch
+        .clone()
+        .unwrap_or_else(|| synthesize_pr_diff(&manifest, world, &workdir, "."));
+    world.current_manifest = Some(manifest);
+    let scope_arg = format!("@{}", common::s(&patch_path));
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_cute-dbt"))
+        .args([
+            "report",
+            "--manifest",
+            common::s(&manifest_path),
+            "--pr-diff",
+            &scope_arg,
+            "--project-root",
+            ".",
+            "--pr-url",
+            &pr_url,
+            "--pr-title",
+            &pr_title,
+            "--out",
+            common::s(&out),
+        ])
+        .current_dir(&workdir)
+        .output()
+        .expect("the cute-dbt binary spawns");
+    capture(world, output, out);
+}
+
 #[when(
     regex = r#"^I run cute-dbt report with --manifest current\.json --baseline-manifest baseline\.json --pr-diff @diff\.patch --project-root \. --out report\.html$"#
 )]
@@ -1111,6 +1156,53 @@ fn no_cte_diagrams(world: &mut World) {
     assert!(
         names.is_empty(),
         "expected no models (hence no CTE diagrams); got {names:?}",
+    );
+}
+
+/// cute-dbt#346 — the change-context banner links the PR number to its url
+/// and shows the title beside it.
+#[then(regex = r#"^the change-context banner links to "([^"]+)" as "PR #(\d+)"$"#)]
+fn banner_links_pr(world: &mut World, url: String, number: String) {
+    require_exit_0(world);
+    let html = world
+        .report_html
+        .as_ref()
+        .expect("report.html was written by the subprocess");
+    let needle = format!(r#"<a class="diff-scope-pr-link" href="{url}">PR #{number}</a>"#);
+    assert!(
+        html.contains(&needle),
+        "expected the banner to carry {needle:?}",
+    );
+}
+
+/// The PR title renders as escaped text — a `<` in the title must not
+/// survive as a raw tag opener.
+#[then(regex = r#"^the banner shows the title "([^"]+)" as escaped text$"#)]
+fn banner_shows_escaped_title(world: &mut World, raw_title: String) {
+    require_exit_0(world);
+    let html = world
+        .report_html
+        .as_ref()
+        .expect("report.html was written by the subprocess");
+    // The literal `<script>`-shaped title must NOT survive verbatim.
+    if raw_title.contains('<') {
+        assert!(
+            !html.contains(&raw_title),
+            "the raw title {raw_title:?} must be escaped, not rendered verbatim",
+        );
+    }
+}
+
+#[then("the change-context banner shows no PR link")]
+fn banner_shows_no_pr_link(world: &mut World) {
+    require_exit_0(world);
+    let html = world
+        .report_html
+        .as_ref()
+        .expect("report.html was written by the subprocess");
+    assert!(
+        !html.contains("diff-scope-pr-link"),
+        "expected no PR link in the banner",
     );
 }
 

@@ -1,0 +1,9 @@
+# Synthetic config fixture for the cute-dbt#346 change-context banner PR
+# link. Supplies a SYNTHETIC `[pr]` section so the committed
+# `diff-showcase` golden showcases the linked `PR #<n> — <title>` banner
+# clause. The url/owner/repo are fictional (acme/shop) — never a real PR.
+
+[pr]
+url = "https://github.com/acme/shop/pull/42"
+title = "Add encounter DQ summary + payer dim coverage"
+number = 42

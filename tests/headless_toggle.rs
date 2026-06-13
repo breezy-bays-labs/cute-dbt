@@ -4784,6 +4784,7 @@ fn render_with_external_fixtures(
         &cute_dbt::domain::ProjectFacts::default(),
         &cute_dbt::domain::GovernanceFacts::default(),
         None,
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -7399,6 +7400,7 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
         &cute_dbt::domain::ProjectFacts::default(),
         &cute_dbt::domain::GovernanceFacts::default(),
         None,
+        None,
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -7969,6 +7971,7 @@ fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
         &policy,
         &cute_dbt::domain::ProjectFacts::default(),
         &cute_dbt::domain::GovernanceFacts::default(),
+        None,
         None,
     )
     .expect("render writes the report");
@@ -12109,6 +12112,7 @@ fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
         facts,
         &cute_dbt::domain::GovernanceFacts::default(),
         None,
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -12148,6 +12152,7 @@ fn render_governance_to_file(
         &cute_dbt::domain::CheckPolicy::default(),
         &cute_dbt::domain::ProjectFacts::default(),
         governance,
+        None,
         None,
     )
     .expect("render writes the report");
@@ -12357,6 +12362,7 @@ fn render_macro_lens_to_file(filename: &str) -> String {
         &cute_dbt::domain::ProjectFacts::default(),
         &cute_dbt::domain::GovernanceFacts::default(),
         Some(&lens),
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -12574,6 +12580,7 @@ fn render_capped_macro_lens_to_file(filename: &str, model_count: usize, body_cap
         &cute_dbt::domain::ProjectFacts::default(),
         &cute_dbt::domain::GovernanceFacts::default(),
         Some(&lens),
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))

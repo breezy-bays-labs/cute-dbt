@@ -88,6 +88,10 @@ jobs:
             # project-state family (the epic #288 golden policy), mirrored
             # from ci.yml's example-report-check diff-showcase row.
             experimental: "1"
+            # cute-dbt#346 — the synthetic [pr] config so the preview's
+            # diff-showcase matches the committed golden's banner PR link
+            # (mirrored from ci.yml's diff-showcase row).
+            config: tests/fixtures/config-pr-showcase.toml
           # cute-dbt#265 Slice D — the macro-lens inline-body cap golden,
           # mirrored from ci.yml's example-report-check macro-heavy row. A
           # synthetic heavy macro (`mask_pii`, 14 callers > the cap of 10)
@@ -118,6 +122,9 @@ jobs:
           # cute-dbt#291: the report binary reads this directly (clap
           # env-fallback); empty = every experiment off, by contract.
           CUTE_DBT_EXPERIMENTAL: ${{ matrix.experimental }}
+          # cute-dbt#346: optional --config (the diff-showcase row's
+          # synthetic [pr] section); empty = no --config arg.
+          CONFIG: ${{ matrix.config }}
         run: |
           set -euo pipefail
           mkdir -p target/report-preview
@@ -145,10 +152,17 @@ jobs:
           else
             scope_args=(--baseline-manifest "$BASELINE")
           fi
+          # cute-dbt#346: optional --config (the diff-showcase row's
+          # synthetic [pr] section). Built only when the matrix row sets one.
+          config_args=()
+          if [ -n "$CONFIG" ]; then
+            config_args=(--config "$CONFIG")
+          fi
           cargo run --quiet --locked --bin cute-dbt -- report \
             --manifest "$CURRENT" \
             "${scope_args[@]}" \
             "${project_root_args[@]}" \
+            "${config_args[@]}" \
             --out "$out"
           # Emit a size breadcrumb in the log so the sticky-comment body
           # builder doesn't need a second probe.
@@ -344,12 +358,24 @@ jobs:
           # visible on the sticky preview even though the family is
           # default-OFF for consumers.
           CUTE_DBT_EXPERIMENTAL: "1"
+          # cute-dbt#346 — link the live dogfood report back to THIS PR.
+          # html_url + title come straight off the PR event. The title is
+          # attacker-controllable, so it rides env: (the safe pattern) and is
+          # passed as a single quoted argv element to `--pr-title` (NOT
+          # interpolated into the command), then askama-escaped in the HTML —
+          # no command injection, no raw-HTML injection.
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
           cargo run --quiet --locked --bin cute-dbt -- report \
             --manifest dbt-project/target/manifest.json \
             --pr-diff @target/report-preview/prdiff.patch \
             --project-root dbt-project \
+            --pr-url "$PR_URL" \
+            --pr-title "$PR_TITLE" \
+            --pr-number "$PR_NUMBER" \
             --out target/report-preview/dbt-project-report.html
           ls -l target/report-preview/dbt-project-report.html
 
