@@ -932,22 +932,26 @@ jobs:
     # shell-free — std::process::Command, raw-byte capture, forward-slash
     # diff paths — but the rest of CI runs Linux/macOS only, so the
     # cross-platform claim was untested. This job exercises ONLY the
-    # review surface on windows-latest: the review unit tests (the
-    # #[cfg(test)] module in src/cli/review.rs) and the temp-git-repo
-    # subprocess integration suite (tests/review_cli.rs). It deliberately
-    # does NOT run the full nextest matrix, the cucumber-rs BDD outer
-    # loop, or the headless Chromium zero-egress gate — those are
+    # review/skill subprocess surface on windows-latest: the review unit
+    # tests (the #[cfg(test)] module in src/cli/review.rs), the temp-git-
+    # repo subprocess integration suites (tests/review_cli.rs,
+    # tests/skill_cli.rs), and the fake-tool contract (tests/fake_tool.rs).
+    # It deliberately does NOT run the full nextest matrix, the cucumber-rs
+    # BDD outer loop, or the headless Chromium zero-egress gate — those are
     # platform-agnostic concerns already covered on Linux/macOS, and
     # widening this job to them would just duplicate runner cost.
     #
-    # The shim-dbt approach (tests/common/mod.rs WELL_BEHAVED_FUSION_SHIM)
-    # stands in for a real dbt install, so the runner needs no Python or
-    # dbt-core — only the toolchain + the bundled Git for Windows that
+    # The fake-tool approach (cute-dbt#331, src/fake_tool.rs +
+    # tests/common/mod.rs) stands in for real dbt/gh installs: each
+    # `dbt`/`gh` shim is a COPY of the built `cute-dbt` binary that reads a
+    # sibling `<tool>.spec.toml` behaviour contract — no shebang scripts
+    # (Windows CreateProcess ignores them), no Python, no dbt-core. The
+    # runner needs only the toolchain + the bundled Git for Windows that
     # github actions runners ship (`git` is on PATH; the run block below
     # runs under the workflow's `shell: bash`, i.e. the runner's Git Bash,
     # matching how the Linux/macOS jobs invoke cargo).
     #
-    # Scoped to the review targets via explicit `cargo test` filters
+    # Scoped to the review/skill targets via explicit `cargo test` filters
     # rather than `cargo nextest run --all-targets`: this job is a seam
     # probe, not a full suite, so it carries no nextest dependency.
     name: Windows review git/path seams (scoped)
@@ -973,5 +977,9 @@ jobs:
       # belt-and-braces no-op the harness overrides per command.
       - name: Review unit tests (src/cli/review.rs #[cfg(test)] module)
         run: cargo test --locked --lib review
+      - name: Fake-tool contract (cross-platform shim, cute-dbt#331)
+        run: cargo test --locked --test fake_tool
       - name: Review temp-git-repo subprocess integration suite
         run: cargo test --locked --test review_cli
+      - name: Skill temp-git-repo subprocess integration suite
+        run: cargo test --locked --test skill_cli
