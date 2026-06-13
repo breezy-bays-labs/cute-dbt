@@ -85,20 +85,147 @@ pub fn run_cli(args: &[&str]) -> Output {
 // isolation wraps the spawned `cute-dbt review` subprocess, because the
 // binary itself shells out to git.
 //
-// tracked: cute-dbt#331 — review subprocess shim harness is Unix-only;
-// Windows-capable shim deferred. The shim machinery below
-// (`PermissionsExt`/`set_mode(0o755)`, the `#!/bin/sh` shim bodies, the
-// `{bin}:/usr/bin:/bin` controlled PATH, and the host-tool symlinks)
-// uses Unix-only APIs, so the whole block — and the subprocess test
-// suites that consume it — is `#[cfg(unix)]`-gated. The PORTABLE review
-// unit tests (path/git logic) in `src/cli/review.rs` and the direct-
-// spawn integration tests (run_loop.rs etc.) run everywhere, including
-// the windows-latest job (cute-dbt#308/#316). Re-exported below so
-// callers keep using `common::TestRepo` / `common::scrub_git_env`.
-#[cfg(unix)]
+// cute-dbt#331 — the shim harness is cross-platform. Stand-in `dbt`/`gh`
+// tools are no longer `#!/bin/sh` scripts (Unix-only: Windows'
+// CreateProcess ignores shebangs); each shim is a hard link to (copy
+// fallback) the already-built `cute-dbt` binary, installed under the tool
+// name (`dbt`/`gh`, with the platform exe suffix) beside a
+// `<tool>.spec.toml` behaviour contract. The renamed binary detects the
+// sibling spec at startup and acts as that fake tool (see
+// `src/fake_tool.rs`). The controlled PATH and the hermetic git resolution
+// below are OS-aware: the PATH separator/system tail differ per platform,
+// and `git` is symlinked into the shim dir on Unix but reached via its own
+// install dir on Windows (Git for Windows' `git.exe` needs its tree). So
+// this block — and the subprocess suites that consume it — now run on
+// windows-latest too (cute-dbt#308/#316/#317). Re-exported below so callers
+// keep using `common::TestRepo` / `common::scrub_git_env` /
+// `common::ShimSpec`.
 mod review_harness {
     use super::{Output, PathBuf, fixture, tmp};
+    use std::path::Path;
     use std::process::Command;
+
+    /// The platform executable suffix (`.exe` on Windows, empty on Unix).
+    fn exe_suffix() -> &'static str {
+        if cfg!(windows) { ".exe" } else { "" }
+    }
+
+    /// PATH entries appended after the shim dir on the controlled (non-
+    /// hermetic) PATH: just enough system dirs for `git` to resolve. The
+    /// GitHub windows-latest runner's Git for Windows lives under
+    /// `C:\Program Files\Git\...`; the workflow runs under Git Bash, whose
+    /// `git`/`sh` resolve via the inherited process PATH, so on Windows we
+    /// append the inherited PATH wholesale rather than guess system dirs
+    /// (a developer's real `dbt`/`gh` is still shadowed by the shim dir,
+    /// which is searched FIRST). On Unix the classic `/usr/bin:/bin` is
+    /// sufficient and keeps a developer's homebrew/venv `dbt` out.
+    fn system_path_tail() -> String {
+        if cfg!(windows) {
+            std::env::var("PATH").unwrap_or_default()
+        } else {
+            "/usr/bin:/bin".to_owned()
+        }
+    }
+
+    /// Join PATH entries with the platform separator (`;` on Windows,
+    /// `:` on Unix).
+    fn join_path(dirs: &[&Path]) -> std::ffi::OsString {
+        std::env::join_paths(dirs.iter().map(|d| d.as_os_str())).expect("join PATH dirs")
+    }
+
+    /// A stand-in tool's behaviour contract — the cross-platform
+    /// replacement for a `#!/bin/sh` shim body. Built fluently, then
+    /// serialized to the `<tool>.spec.toml` the fake-tool reads
+    /// (`src/fake_tool.rs`). Each rule's `stdout`/`stderr` are emitted
+    /// byte-for-byte, so a spec reproduces the exact contract of the sh
+    /// shim it replaces.
+    #[derive(Debug, Default, Clone)]
+    pub struct ShimSpec {
+        rules: Vec<ShimRule>,
+        default_exit: u8,
+    }
+
+    #[derive(Debug, Clone)]
+    struct ShimRule {
+        when: String,
+        stdout: String,
+        stderr: String,
+        exit: u8,
+    }
+
+    impl ShimSpec {
+        /// An empty spec: no rules, exit `default_exit` on every call.
+        #[must_use]
+        pub fn new(default_exit: u8) -> Self {
+            Self {
+                rules: Vec::new(),
+                default_exit,
+            }
+        }
+
+        /// Add a rule: when the invocation's leading args equal `when`
+        /// (space-joined, e.g. `"--version"` or `"pr view"`), write
+        /// `stdout` then `stderr` verbatim and exit `exit`.
+        #[must_use]
+        pub fn rule(mut self, when: &str, stdout: &str, stderr: &str, exit: u8) -> Self {
+            self.rules.push(ShimRule {
+                when: when.to_owned(),
+                stdout: stdout.to_owned(),
+                stderr: stderr.to_owned(),
+                exit,
+            });
+            self
+        }
+
+        /// A `--version` rule emitting `banner` to stdout, exit 0 — the
+        /// common engine-detection shape.
+        #[must_use]
+        pub fn version(self, banner: &str) -> Self {
+            self.rule("--version", banner, "", 0)
+        }
+
+        /// A `compile` rule that succeeds with no output (the scaffolded
+        /// manifest already plays the compiled artifact).
+        #[must_use]
+        pub fn compile_ok(self) -> Self {
+            self.rule("compile", "", "", 0)
+        }
+
+        /// Serialize to the TOML spec format the fake-tool reads. Uses
+        /// `toml`'s own string escaping so any byte (newlines, quotes,
+        /// JSON braces) round-trips exactly.
+        fn to_toml(&self) -> String {
+            use std::fmt::Write as _;
+            let mut out = format!("default_exit = {}\n", self.default_exit);
+            for r in &self.rules {
+                out.push_str("\n[[rules]]\n");
+                let _ = writeln!(out, "when = {}", toml_str(&r.when));
+                let _ = writeln!(out, "stdout = {}", toml_str(&r.stdout));
+                let _ = writeln!(out, "stderr = {}", toml_str(&r.stderr));
+                let _ = writeln!(out, "exit = {}", r.exit);
+            }
+            out
+        }
+    }
+
+    /// Encode a string as a TOML string literal via the `toml` crate's own
+    /// serializer, so every byte — quotes, backslashes, newlines, and any
+    /// control character — round-trips correctly into the
+    /// [`crate::common`]-written spec that `src/fake_tool.rs` parses back
+    /// with the same crate (gemini review on cute-dbt#347).
+    fn toml_str(s: &str) -> String {
+        toml::Value::String(s.to_owned()).to_string()
+    }
+
+    /// The default fusion shim: a fusion `--version` banner and a no-op
+    /// `compile` (the scaffolded manifest is the artifact). Replaces the
+    /// retired `WELL_BEHAVED_FUSION_SHIM` sh body byte-for-byte.
+    #[must_use]
+    pub fn well_behaved_fusion_spec() -> ShimSpec {
+        ShimSpec::new(0)
+            .version("dbt 2.0.0-preview.186\n")
+            .compile_ok()
+    }
 
     /// Scrub every repo-pointing `GIT_*` variable from a command's
     /// environment. **Load-bearing**: `git push` exports `GIT_DIR` into its
@@ -133,11 +260,13 @@ mod review_harness {
         /// Holds the empty gitconfig stand-in, OUTSIDE the repo so it can
         /// never appear as an untracked file.
         home: PathBuf,
-        /// Shim bin dir, prepended to a **fully controlled** PATH
-        /// (`<bin>:/usr/bin:/bin`) on every spawn — so a developer's real
-        /// `dbt` (homebrew, venv, …) can never answer a test, and `dbt` is
-        /// genuinely missing unless a test installs a shim via
-        /// [`TestRepo::install_dbt_shim`].
+        /// Shim bin dir, prepended FIRST to a controlled PATH on every
+        /// spawn (the shim dir then the platform system tail — `/usr/bin:
+        /// /bin` on Unix, the inherited PATH on Windows) — so a developer's
+        /// real `dbt` (homebrew, venv, …) is shadowed by an installed shim
+        /// and `dbt` is genuinely missing unless a test installs one via
+        /// [`TestRepo::install_dbt_shim`]. Genuine-absence cases use
+        /// [`TestRepo::review_hermetic`] (shim dir only).
         bin: PathBuf,
     }
 
@@ -190,49 +319,59 @@ mod review_harness {
                 .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
                 .env("GIT_COMMITTER_NAME", "cute-dbt-test")
                 .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-                // Fully controlled PATH: the shim dir, then just enough
-                // system dirs for git/sh. A developer's real dbt can never
+                // Fully controlled PATH: the shim dir FIRST (so a shim
+                // shadows any host tool of the same name), then just enough
+                // system dirs for git. A developer's real dbt can never
                 // answer a test, and "dbt missing" is the true default.
-                .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+                .env("PATH", prepend_path(&self.bin, &system_path_tail()))
                 .env_remove("CUTE_DBT_EXPERIMENTAL")
                 .env_remove("DBT_TARGET_PATH");
         }
 
-        /// Install an executable shim named `name` into the controlled PATH.
-        /// The body is `#!/bin/sh` script text; every invocation's cwd + argv
-        /// is appended to `<bin>/<name>-invocations.log` before the body
-        /// runs, so tests can assert exactly what review executed (the
-        /// planned-argv == executed-argv pin at the subprocess level).
-        pub fn install_shim(&self, name: &str, body: &str) {
-            use std::os::unix::fs::PermissionsExt;
-            let path = self.bin.join(name);
-            let script = format!(
-                "#!/bin/sh\nprintf 'cwd=%s args=%s\\n' \"$(pwd)\" \"$*\" >> \"{log}\"\n{body}\n",
-                log = self.shim_log(name).display(),
-            );
-            std::fs::write(&path, script).expect("write shim");
-            let mut perms = std::fs::metadata(&path)
-                .expect("shim metadata")
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&path, perms).expect("chmod shim");
+        /// Install a stand-in tool named `name` into the controlled PATH:
+        /// a hard link to (or copy of) the `cute-dbt` binary (with the
+        /// platform exe suffix) plus its sibling `<name>.spec.toml`
+        /// behaviour contract. When
+        /// `review` spawns `<name>`, the renamed copy detects the spec and
+        /// acts as the fake tool (`src/fake_tool.rs`), logging every
+        /// invocation to `<bin>/<name>-invocations.log` so tests can assert
+        /// the planned-argv == executed-argv pin at the subprocess level.
+        pub fn install_shim(&self, name: &str, spec: &ShimSpec) {
+            let tool = self.bin.join(format!("{name}{}", exe_suffix()));
+            // Re-installs overwrite (a test swaps the scaffold's default dbt
+            // shim for its own), so clear any prior tool first — `hard_link`
+            // errors if the target exists.
+            let _ = std::fs::remove_file(&tool);
+            // Hard-link the (multi-MB) binary to avoid copying its bytes per
+            // shim; fall back to a copy when a hard link can't be made (a
+            // cross-filesystem temp dir, or a FS that disallows it). Both are
+            // privilege-free on every platform (gemini review on
+            // cute-dbt#347).
+            if std::fs::hard_link(env!("CARGO_BIN_EXE_cute-dbt"), &tool).is_err() {
+                std::fs::copy(env!("CARGO_BIN_EXE_cute-dbt"), &tool)
+                    .expect("install cute-dbt shim");
+            }
+            std::fs::write(self.bin.join(format!("{name}.spec.toml")), spec.to_toml())
+                .expect("write shim spec");
         }
 
-        /// Install an executable `dbt` shim (the common case).
-        pub fn install_dbt_shim(&self, body: &str) {
-            self.install_shim("dbt", body);
+        /// Install a stand-in `dbt` tool (the common case).
+        pub fn install_dbt_shim(&self, spec: &ShimSpec) {
+            self.install_shim("dbt", spec);
         }
 
-        /// Install an executable `gh` shim (cute-dbt#303 — the PR-anchor +
+        /// Install a stand-in `gh` tool (cute-dbt#303 — the PR-anchor +
         /// gh-rung tests).
-        pub fn install_gh_shim(&self, body: &str) {
-            self.install_shim("gh", body);
+        pub fn install_gh_shim(&self, spec: &ShimSpec) {
+            self.install_shim("gh", spec);
         }
 
         /// Remove a shim from the controlled PATH so the binary is genuinely
-        /// "not found" (the gh-missing / dbt-missing scenarios).
+        /// "not found" (the gh-missing / dbt-missing scenarios). Removes both
+        /// the renamed copy and its sibling spec.
         pub fn remove_shim(&self, name: &str) {
-            let _ = std::fs::remove_file(self.bin.join(name));
+            let _ = std::fs::remove_file(self.bin.join(format!("{name}{}", exe_suffix())));
+            let _ = std::fs::remove_file(self.bin.join(format!("{name}.spec.toml")));
         }
 
         /// A named shim's invocation log (one `cwd=… args=…` line per call).
@@ -302,20 +441,19 @@ mod review_harness {
         }
 
         /// Spawn `cute-dbt review <args>` on a **hermetic PATH** that
-        /// contains ONLY the shim dir — `/usr/bin` and `/bin` are excluded,
-        /// so `gh` is genuinely `NotFound` even on hosts (GitHub-hosted
-        /// Linux runners) that pre-install `/usr/bin/gh`. The tools review
-        /// shells out to are symlinked into the shim dir first, so they
-        /// still resolve: `git` (every stage), plus `sh`/`env` for any shell
-        /// shim a test may have installed. `dbt`/`gh` are reachable ONLY if
-        /// a test installed their shims — never the host binaries.
+        /// contains ONLY the shim dir — the system dirs are excluded, so
+        /// `gh` is genuinely `NotFound` even on hosts (GitHub-hosted
+        /// runners) that pre-install it. The tools review shells out to are
+        /// linked into the shim dir first, so they still resolve: `git`
+        /// (every stage); on Unix `sh`/`env` are linked too (harmless, kept
+        /// for parity). `dbt`/`gh` are reachable ONLY if a test installed
+        /// their shims — never the host binaries.
         ///
         /// This is the only way to exercise the `--pr` gh-MISSING branch
         /// (`ReviewError::DbtMissing`/`GhMissing` fire on
         /// `io::ErrorKind::NotFound`, the genuine-missing-binary case — a
         /// non-zero-exit shim is "present but failed", a different branch).
         pub fn review_hermetic(&self, args: &[&str]) -> Output {
-            self.symlink_host_tools(&["git", "sh", "env"]);
             let mut cmd = Command::new(env!("CARGO_BIN_EXE_cute-dbt"));
             cmd.arg("review").args(args).current_dir(&self.root);
             let empty = self.home.join("gitconfig");
@@ -328,22 +466,36 @@ mod review_harness {
                 .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
                 .env("GIT_COMMITTER_NAME", "cute-dbt-test")
                 .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-                // HERMETIC: the shim dir ONLY. No /usr/bin, so a host
-                // /usr/bin/gh (GitHub runners) is unreachable; git/sh resolve
-                // via the symlinks created above.
-                .env("PATH", self.bin.display().to_string())
+                // HERMETIC: shim dir + just enough to resolve `git`. A host
+                // `gh`/`dbt` (GitHub runners pre-install gh) is unreachable,
+                // so the binary sees io::ErrorKind::NotFound — the only
+                // trigger for the dbt/gh-MISSING install remediation.
+                .env("PATH", self.hermetic_path())
                 .env_remove("CUTE_DBT_EXPERIMENTAL")
                 .env_remove("DBT_TARGET_PATH");
             cmd.output().expect("the cute-dbt binary spawns")
         }
 
-        /// Symlink each named host tool into the shim dir (resolved from the
-        /// real PATH), so it resolves on the hermetic PATH that excludes the
-        /// system dirs. A tool already present (a real binary, a prior
-        /// symlink, or a test shim) is left untouched; an unresolvable tool
-        /// is skipped (the hermetic run will surface its own NotFound).
-        fn symlink_host_tools(&self, tools: &[&str]) {
-            for tool in tools {
+        /// The hermetic PATH: the shim dir plus only what `git` needs to
+        /// resolve, never the broad system dirs where `gh`/`dbt` live.
+        ///
+        /// On Unix, `git` is symlinked INTO the shim dir (a symlink to
+        /// `/usr/bin/git` works standalone), so the PATH is the shim dir
+        /// alone. On Windows, Git for Windows' `git.exe` is a launcher that
+        /// locates its install tree (libexec, DLLs, the `git-*` helpers)
+        /// relative to its OWN directory — a bare copy/symlink into the
+        /// shim dir would break (`not inside a git repository`). So we
+        /// instead append `git.exe`'s REAL parent dir to the PATH. That dir
+        /// (e.g. `C:\Program Files\Git\cmd`) carries `git` but not
+        /// `gh`/`dbt` on the runner, preserving hermeticity for the
+        /// missing-tool assertions.
+        #[cfg(unix)]
+        fn hermetic_path(&self) -> std::ffi::OsString {
+            // Symlink `git` (and `sh`/`env` for parity) into the shim dir; a
+            // symlink to e.g. `/usr/bin/git` works standalone. A tool already
+            // present is left untouched; an unresolvable one is skipped (the
+            // run surfaces its own NotFound).
+            for tool in ["git", "sh", "env"] {
                 let target = self.bin.join(tool);
                 if target.exists() {
                     continue;
@@ -352,15 +504,37 @@ mod review_harness {
                     let _ = std::os::unix::fs::symlink(&src, &target);
                 }
             }
+            self.bin.as_os_str().to_owned()
         }
+
+        #[cfg(windows)]
+        fn hermetic_path(&self) -> std::ffi::OsString {
+            match resolve_on_host_path("git").and_then(|p| p.parent().map(Path::to_path_buf)) {
+                Some(dir) => join_path(&[self.bin.as_path(), dir.as_path()]),
+                None => self.bin.as_os_str().to_owned(),
+            }
+        }
+    }
+
+    /// Prepend `dir` to a PATH `tail`, joined with the platform separator.
+    fn prepend_path(dir: &Path, tail: &str) -> std::ffi::OsString {
+        if tail.is_empty() {
+            return dir.as_os_str().to_owned();
+        }
+        let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
+        dirs.extend(std::env::split_paths(tail));
+        let refs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+        join_path(&refs)
     }
 
     /// Resolve a bare tool name to its absolute path by searching the test
     /// process's real `PATH` (the host PATH, before any harness override).
+    /// On Windows the tool resolves with its `.exe` suffix.
     fn resolve_on_host_path(tool: &str) -> Option<PathBuf> {
         let path = std::env::var_os("PATH")?;
+        let name = format!("{tool}{}", exe_suffix());
         std::env::split_paths(&path)
-            .map(|dir| dir.join(tool))
+            .map(|dir| dir.join(&name))
             .find(|candidate| candidate.is_file())
     }
 
@@ -395,32 +569,22 @@ mod review_harness {
         // fusion single-line shape and no-op "compiles" (the manifest above
         // already plays the compiled artifact). Tests that need other
         // engine behaviors overwrite it via `install_dbt_shim`.
-        repo.install_dbt_shim(WELL_BEHAVED_FUSION_SHIM);
+        repo.install_dbt_shim(&well_behaved_fusion_spec());
     }
-
-    /// The default shim body: fusion version banner; `compile` succeeds
-    /// without touching anything (the scaffolded manifest is the artifact).
-    pub const WELL_BEHAVED_FUSION_SHIM: &str = "\
-case \"$1\" in
-  --version) printf 'dbt 2.0.0-preview.186\\n'; exit 0;;
-  compile) exit 0;;
-esac
-exit 0";
 }
 
-// Re-export the Unix-only review harness so callers keep using
-// `common::TestRepo`, `common::scrub_git_env`, etc. unchanged. The
-// `pub use` is itself `#[cfg(unix)]`, so on Windows these names simply
-// do not exist (and the test suites that reference them are gated too).
+// Re-export the cross-platform review harness so callers keep using
+// `common::TestRepo`, `common::scrub_git_env`, `common::ShimSpec`, etc.
 // `allow(unused_imports)`: `common/mod.rs` is `#[path]`-included by
 // several test binaries (resource_ref_lint, golden_report, …) that use
 // only the lint/fixture helpers, never the review harness — so the
 // re-export is legitimately unused from *their* compile unit (it IS
 // used by review_cli / skill_cli / the bdd review steps). The
 // crate-level `#![allow(dead_code)]` does not cover unused *imports*.
-#[cfg(unix)]
 #[allow(unused_imports)]
-pub use review_harness::{TestRepo, WELL_BEHAVED_FUSION_SHIM, scaffold_dbt_project, scrub_git_env};
+pub use review_harness::{
+    ShimSpec, TestRepo, scaffold_dbt_project, scrub_git_env, well_behaved_fusion_spec,
+};
 
 // ===== Resource-ref lint shared with tests/resource_ref_lint.rs =====
 //

@@ -8,13 +8,11 @@
 //! Node / UnitTest construction so step files stay focused on
 //! Given/When/Then prose.
 
-// tracked: cute-dbt#331 — these review/skill step modules drive
-// `cute-dbt` through the Unix-only shim harness (`common::TestRepo`),
-// so they (and the `World` fields they use) are `#[cfg(unix)]`-gated.
-// The bdd binary still COMPILES on the windows-latest job
-// (cute-dbt#308/#316); the bdd RUN is a Linux CI job. The portable
-// step modules below are unaffected.
-#[cfg(unix)]
+// cute-dbt#331 — the review/skill step modules drive `cute-dbt` through
+// the shim harness (`common::TestRepo`), now cross-platform (the shims
+// are renamed binary copies, not `#!/bin/sh` scripts), so they no longer
+// need a `#[cfg(unix)]` gate. The bdd RUN remains a Linux CI job; these
+// modules simply compile (and would run) on every platform.
 pub mod agent_skill;
 pub mod builders;
 pub mod cell_table_diff;
@@ -34,16 +32,12 @@ pub mod explore_test_badges;
 pub mod explore_view_toggle;
 pub mod fail_closed;
 pub mod incremental_models;
-#[cfg(unix)]
 pub mod one_command_review;
 pub mod pr_diff_scoping;
 pub mod project_definition;
 pub mod report_generation;
-#[cfg(unix)]
 pub mod review_compile;
-#[cfg(unix)]
 pub mod review_pr_anchor;
-#[cfg(unix)]
 pub mod review_scope_variants;
 pub mod unit_test_format_coverage;
 pub mod unit_test_yaml;
