@@ -47,6 +47,7 @@ pub mod macro_lens;
 pub mod manifest;
 pub mod model_yaml;
 pub mod path;
+pub mod pr_dag;
 pub mod pr_diff;
 pub mod preflight;
 pub mod project_def;
@@ -96,6 +97,7 @@ pub use manifest::{
 };
 pub use model_yaml::ModelYamlOutcome;
 pub use path::{match_changed_path, normalize_path};
+pub use pr_dag::{PrDagEdge, PrDagGraph, PrDagNode, PrDagState, compute_pr_dag};
 pub use pr_diff::{
     BlockDiff, DiffLine, DiffLineKind, FileHunks, Hunk, NormalizedDiffIndex, PrDiff,
     ReverseApplyError, attach_model_yaml_diffs, diff_lines, raw_hunk_lines,
