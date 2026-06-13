@@ -279,3 +279,9 @@ proof of the diff-view feature set.
 | Supply chain | `cargo deny check` |
 | BDD outer loop | `cargo test --test bdd` (cucumber-rs, `harness = false`; not nextest-compatible) |
 | Quick verify | `lefthook run pre-push` |
+
+**Testing strategy.** For *which test level* each behavior belongs at and
+*why*, the org's canonical taxonomy is the taxonomy spine at
+`~/Github/ops/standards/testing-strategy.md`; cute-dbt's thin tool-map
+(which tool answers each level, with honest maturity status) is
+[`.claude/rules/testing.md`](.claude/rules/testing.md).
