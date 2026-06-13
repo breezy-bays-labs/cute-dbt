@@ -35,7 +35,8 @@ use crate::domain::manifest::{Manifest, NodeId};
 use crate::domain::pr_diff::NormalizedDiffIndex;
 use crate::domain::project_def::ConfigAttribution;
 use crate::domain::state::{
-    InScopeSet, ModelInScopeSet, ModifierKind, StateComparator, resolve_tested_model,
+    InScopeSet, ModelInScopeSet, ModifierKind, SeedInScopeSet, StateComparator,
+    resolve_tested_model,
 };
 
 /// Source of the in-scope set: either a baseline manifest (dbt
@@ -180,6 +181,66 @@ pub fn changed_models(current: &Manifest, index: &NormalizedDiffIndex) -> ModelI
         .nodes()
         .iter()
         .filter(|(_, node)| node.resource_type() == "model")
+        .filter(|(_, node)| {
+            node.original_file_path()
+                .is_some_and(|ofp| index.contains_changed(ofp))
+        })
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// Resolve the in-scope **seed** set for the current manifest and the
+/// given [`ScopeInput`] (cute-dbt#350) — the seed sibling of
+/// [`select_in_scope`].
+///
+/// - [`ScopeInput::Baseline`] delegates to
+///   [`StateComparator::seeds_in_scope`] (the always-on body checksum plus
+///   any opt-in `state:modified` sub-selectors, exactly as the model arm
+///   composes its comparator) — a seed is in scope when its `checksum`
+///   changed against the baseline.
+/// - [`ScopeInput::PrDiff`] delegates to the private `changed_seeds` — a
+///   seed is in scope when its `original_file_path` (the `seeds/<name>.csv`
+///   the diff
+///   edited) appears in the [`NormalizedDiffIndex`] changed-file keyset,
+///   matched through the index's single normalization authority (the same
+///   path-matching both [`changed_models`] and the report's `PrDiff` arm
+///   apply).
+///
+/// Additive sibling of [`select_in_scope`]: the model selection and the
+/// `resource_type == "model"` filter (cute-dbt#167) are untouched — this is
+/// a parallel projection, never a rewrite. The output feeds
+/// [`build_seed_cards`](crate::domain::build_seed_cards) → the CLI gather
+/// stage → the render payload.
+#[must_use]
+pub fn select_seeds_in_scope(current: &Manifest, input: &ScopeInput) -> SeedInScopeSet {
+    match input {
+        ScopeInput::Baseline {
+            manifest: baseline,
+            sub_selectors,
+        } => StateComparator::from_selectors(sub_selectors).seeds_in_scope(current, baseline),
+        ScopeInput::PrDiff { index } => changed_seeds(current, index),
+    }
+}
+
+/// The seeds whose CSV file a PR diff changed — the `PrDiff` arm of
+/// [`select_seeds_in_scope`] (cute-dbt#350).
+///
+/// The seed dual of [`changed_models`]: match each `seed` node's
+/// `original_file_path` against the [`NormalizedDiffIndex`] changed-file
+/// keyset. Seeds are graph **roots** (no targeting unit tests, no upstream
+/// `depends_on`), so a seed is in scope precisely when its own source file
+/// was edited — there is no second arm to union. The index owns the
+/// changed-file keyset (including both sides of every git-rename pair), so
+/// this consults it rather than normalizing paths here (the single
+/// normalization authority [`changed_models`] also respects). Non-`seed`
+/// resource types never match (the `resource_type == "seed"` filter, the
+/// seed mirror of the cute-dbt#167 model-only filter).
+#[must_use]
+fn changed_seeds(current: &Manifest, index: &NormalizedDiffIndex) -> SeedInScopeSet {
+    current
+        .nodes()
+        .iter()
+        .filter(|(_, node)| node.resource_type() == "seed")
         .filter(|(_, node)| {
             node.original_file_path()
                 .is_some_and(|ofp| index.contains_changed(ofp))
@@ -1474,6 +1535,125 @@ mod tests {
 
     fn test_for(name: &str, model_bare: &str) -> UnitTest {
         test_with_path(name, model_bare, None)
+    }
+
+    // ----- select_seeds_in_scope (cute-dbt#350) -----
+
+    #[test]
+    fn select_seeds_baseline_arm_scopes_a_modified_seed() {
+        // A seed whose checksum changed against the baseline is in scope;
+        // an unchanged seed is not.
+        let modified = NodeId::new("seed.shop.raw_customers");
+        let unchanged = NodeId::new("seed.shop.raw_orders");
+        let mut current_nodes = HashMap::new();
+        current_nodes.insert(modified.clone(), typed_node(&modified, "seed", "ck-new"));
+        current_nodes.insert(unchanged.clone(), typed_node(&unchanged, "seed", "ck-same"));
+        let mut baseline_nodes = HashMap::new();
+        baseline_nodes.insert(modified.clone(), typed_node(&modified, "seed", "ck-old"));
+        baseline_nodes.insert(unchanged.clone(), typed_node(&unchanged, "seed", "ck-same"));
+
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            current_nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let baseline = Manifest::new(
+            ManifestMetadata::new("v12"),
+            baseline_nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let input = ScopeInput::Baseline {
+            manifest: Box::new(baseline),
+            sub_selectors: Vec::new(),
+        };
+
+        let seeds = select_seeds_in_scope(&current, &input);
+        assert!(seeds.contains(&modified));
+        assert!(!seeds.contains(&unchanged));
+        assert_eq!(seeds.len(), 1);
+    }
+
+    #[test]
+    fn select_seeds_pr_diff_arm_scopes_a_seed_whose_csv_the_diff_changed() {
+        // The seed's `original_file_path` is in the diff ⇒ in scope; a seed
+        // whose CSV the diff did not touch is not.
+        let touched = NodeId::new("seed.shop.raw_customers");
+        let untouched = NodeId::new("seed.shop.raw_orders");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            touched.clone(),
+            typed_node_with_path(&touched, "seed", "ck", "seeds/raw_customers.csv"),
+        );
+        nodes.insert(
+            untouched.clone(),
+            typed_node_with_path(&untouched, "seed", "ck", "seeds/raw_orders.csv"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let input = pr_diff_input(&["seeds/raw_customers.csv"], None);
+
+        let seeds = select_seeds_in_scope(&current, &input);
+        assert!(seeds.contains(&touched));
+        assert!(!seeds.contains(&untouched));
+    }
+
+    #[test]
+    fn select_seeds_pr_diff_arm_filters_non_seed_resource_types() {
+        // A model whose `.sql` the diff changed never enters the SEED set —
+        // the seed mirror of the cute-dbt#167 resource-type filter.
+        let model = NodeId::new("model.shop.stg_customers");
+        let seed = NodeId::new("seed.shop.raw_customers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            model.clone(),
+            model_node_with_path(&model, "ck", "models/stg_customers.sql"),
+        );
+        nodes.insert(
+            seed.clone(),
+            typed_node_with_path(&seed, "seed", "ck", "seeds/raw_customers.csv"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        // The diff touches BOTH files; only the seed should surface.
+        let input = pr_diff_input(
+            &["models/stg_customers.sql", "seeds/raw_customers.csv"],
+            None,
+        );
+
+        let seeds = select_seeds_in_scope(&current, &input);
+        assert!(seeds.contains(&seed));
+        assert!(!seeds.contains(&model));
+        assert_eq!(seeds.len(), 1);
+    }
+
+    #[test]
+    fn select_seeds_pr_diff_arm_is_empty_when_no_seed_csv_changed() {
+        // A diff that touches only a model file scopes zero seeds.
+        let seed = NodeId::new("seed.shop.raw_customers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            seed.clone(),
+            typed_node_with_path(&seed, "seed", "ck", "seeds/raw_customers.csv"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let input = pr_diff_input(&["models/stg_customers.sql"], None);
+
+        assert!(select_seeds_in_scope(&current, &input).is_empty());
     }
 
     fn test_with_path(name: &str, model_bare: &str, ofp: Option<&str>) -> UnitTest {

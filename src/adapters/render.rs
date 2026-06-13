@@ -72,7 +72,7 @@ use crate::domain::{
     HookManifestPresence, InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet,
     ModelYamlOutcome, Node, NodeId, NormalizedDiffIndex, PrRef, ProjectChange,
     ProjectChangeCategory, ProjectChangePanel, ProjectDefinition, ProjectFacts,
-    ProjectFallbackReason, SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff,
+    ProjectFallbackReason, SeedCard, SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff,
     UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock, VarAttribution, VarChangeFacts,
     VarReference, VarScanFootprint, apply_check_policy, macro_blast_radius, model_findings,
     reconstruct_macro_sql_diff, resolve_target_model, resolve_tested_model,
@@ -1406,6 +1406,22 @@ pub struct ReportPayload {
     /// keeping the no-PR-context goldens byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_ref: Option<PrRefPayload>,
+    /// The in-scope seed cards (cute-dbt#350) — one per seed the diff
+    /// modified (baseline arm: changed `checksum`; pr-diff arm: the
+    /// `seeds/<name>.csv` appears in the diff). Each carries the seed's
+    /// identity, project-relative path, direct downstream-model lineage,
+    /// and — once the CLI gather stage reads the working-tree CSV — the
+    /// parsed [`FixtureTable`]; a seed whose
+    /// file could not be read keeps `table: None` (a labeled empty-data
+    /// state at render, the truthful degrade — never a silent blank grid,
+    /// the cute-dbt#126 lesson). This slice plumbs the payload but does
+    /// **not** render it (the "Data tables" report section lands in a later
+    /// slice); the field is serialized for downstream consumers + the
+    /// gather-stage assertions. Omitted from JSON when empty (no seed in
+    /// scope), so seed-free payloads — every committed golden — stay
+    /// byte-identical.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub seed_cards: Vec<SeedCard>,
 }
 
 /// The serialized source-PR reference (cute-dbt#346) — the JSON twin of
@@ -2938,6 +2954,12 @@ pub fn build_payload_with_externals(
         // `render_report_with_externals` from the cli's `--pr-*` / `[pr]` /
         // `review`-derived inputs.
         pr_ref: None,
+        // cute-dbt#350 — seed cards default empty here; the gated value
+        // (the CLI's working-tree-read `gather_seeds` output) is threaded
+        // in by `render_report_with_externals`, mirroring `governance` /
+        // `macro_lens` / `pr_ref`. Empty ⇒ omitted from JSON, so seed-free
+        // payloads stay byte-identical.
+        seed_cards: Vec::new(),
     }
 }
 
@@ -2999,6 +3021,7 @@ pub fn render_report(
         &GovernanceFacts::default(),
         None,
         None,
+        &[],
     )
 }
 
@@ -3033,6 +3056,7 @@ pub fn render_report_with_externals(
     governance: &GovernanceFacts,
     macro_lens: Option<&MacroLensPayload>,
     pr_ref: Option<&PrRef>,
+    seed_cards: &[SeedCard],
 ) -> io::Result<()> {
     let mut payload = build_payload_with_externals(
         current,
@@ -3066,6 +3090,15 @@ pub fn render_report_with_externals(
     // is inert rather than rendering a dangling link with no diff context.
     let pr_ref = pr_ref.filter(|_| scope_source == ScopeSource::PrDiff);
     payload.pr_ref = pr_ref.map(PrRefPayload::from);
+    // cute-dbt#350 — the seed cards the CLI gathered (identity + lineage
+    // from the projection, enriched with the working-tree CSV table). Both
+    // scope arms populate this (data only this slice; the pr-diff cell-diff
+    // lands later). Empty (no seed in scope) ⇒ omitted from JSON, so every
+    // seed-free golden stays byte-identical. The payload is plumbed but
+    // UNRENDERED in this slice — the report "Data tables" section is a
+    // later slice — so a populated `seed_cards` changes zero emitted bytes
+    // until that section ships.
+    payload.seed_cards = seed_cards.to_vec();
     // The empty-scope banner contract reads the TRUE in-scope set, not the
     // widened render set or the changed subset (cute-dbt#91).
     let banner_text = compose_banner_text(in_scope);
@@ -6738,6 +6771,7 @@ mod tests {
             governance: GovernanceFacts::default(),
             macro_lens: None,
             pr_ref: None,
+            seed_cards: Vec::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6762,6 +6796,7 @@ mod tests {
             governance: GovernanceFacts::default(),
             macro_lens: None,
             pr_ref: None,
+            seed_cards: Vec::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6788,6 +6823,7 @@ mod tests {
             governance: GovernanceFacts::default(),
             macro_lens: None,
             pr_ref: None,
+            seed_cards: Vec::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(serialized.contains("a < b"), "bare `<` is preserved");
@@ -6809,6 +6845,7 @@ mod tests {
             governance: GovernanceFacts::default(),
             macro_lens: None,
             pr_ref: None,
+            seed_cards: Vec::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6843,6 +6880,7 @@ mod tests {
             governance: GovernanceFacts::default(),
             macro_lens: None,
             pr_ref: None,
+            seed_cards: Vec::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6875,6 +6913,7 @@ mod tests {
             governance: GovernanceFacts::default(),
             macro_lens: None,
             pr_ref: None,
+            seed_cards: Vec::new(),
         };
         let serialized = payload_json_for_html_script(&original).unwrap();
         let parsed: serde_json::Value =
@@ -6884,6 +6923,65 @@ mod tests {
             serde_json::Value::String("</script><!--end".to_owned()),
             "round-trip recovers the original baseline value",
         );
+    }
+
+    // ===== seed cards payload (cute-dbt#350) =====
+
+    fn payload_with_seed_cards(seed_cards: Vec<SeedCard>) -> ReportPayload {
+        ReportPayload {
+            baseline: "baseline.json".to_owned(),
+            models: vec![],
+            manifest_nodes: BTreeMap::new(),
+            check_specs: BTreeMap::new(),
+            project_definition: None,
+            project_change_panel: None,
+            governance: GovernanceFacts::default(),
+            macro_lens: None,
+            pr_ref: None,
+            seed_cards,
+        }
+    }
+
+    #[test]
+    fn empty_seed_cards_are_omitted_from_the_json_payload() {
+        // The byte-identity guard: no seed in scope ⇒ the `seed_cards` key
+        // is absent from JSON, so every seed-free golden stays identical.
+        let serialized =
+            payload_json_for_html_script(&payload_with_seed_cards(Vec::new())).expect("serialize");
+        assert!(
+            !serialized.contains("seed_cards"),
+            "an empty seed_cards vec must not appear in the JSON: {serialized}",
+        );
+    }
+
+    #[test]
+    fn populated_seed_cards_serialize_into_the_json_payload() {
+        // The plumbing proof: a populated card crosses to the payload JSON
+        // (the renderer does not yet render it — that is a later slice — but
+        // the wire shape is carried for downstream consumers + assertions).
+        let card = SeedCard::new(
+            NodeId::new("seed.shop.raw_customers"),
+            "raw_customers",
+            Some("seeds/raw_customers.csv".to_owned()),
+            vec!["stg_customers".to_owned()],
+        );
+        let serialized =
+            payload_json_for_html_script(&payload_with_seed_cards(vec![card])).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&serialized).expect("valid JSON");
+        let cards = parsed["seed_cards"]
+            .as_array()
+            .expect("seed_cards is a JSON array");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0]["name"],
+            serde_json::Value::String("raw_customers".to_owned())
+        );
+        assert_eq!(
+            cards[0]["feeds_models"],
+            serde_json::json!(["stg_customers"]),
+        );
+        // The data-bearing field is null until the gather stage fills it.
+        assert!(cards[0]["table"].is_null());
     }
 
     // ===== governance surfaces (cute-dbt#260, Slice 0) =====
@@ -6930,6 +7028,7 @@ mod tests {
             governance,
             None,
             None,
+            &[],
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -7871,6 +7970,7 @@ mod tests {
             &GovernanceFacts::default(),
             macro_lens,
             None,
+            &[],
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8248,6 +8348,7 @@ mod tests {
             &GovernanceFacts::default(),
             None,
             pr_ref,
+            &[],
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8379,6 +8480,7 @@ mod tests {
             &GovernanceFacts::default(),
             None,
             None,
+            &[],
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
