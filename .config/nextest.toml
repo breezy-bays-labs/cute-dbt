@@ -24,6 +24,18 @@ default-filter = "all() - binary(bdd)"
 # carry no `.git` dir, so the gate fails there spuriously. This is a
 # profile-scoped filter, NOT a coverage exclusion — the gate still runs
 # in the default profile, lefthook, and CI.
+#
+# review_cli/run_loop/changed_files_provider/external_fixture_reader are
+# additionally filtered here (cute-dbt#325): since #294's review
+# subcommand landed, these four binaries spawn real git/dbt subprocesses
+# and exceed the 5s slow-timeout in cold cargo-mutants scratch trees, so
+# the cargo-mutants BASELINE run fails before any mutant is tested. They
+# are subprocess integration tests, not lib mutation targets (same
+# rationale as the bdd/fixture_manifest_listed exclusions) — none of the
+# examine_globs source lives in these binaries, so filtering them out of
+# the mutants profile loses zero kill-detection coverage. Profile-scoped
+# filter, NOT a coverage exclusion — they still run in the default
+# profile, lefthook, and CI.
 [profile.mutants]
-default-filter = "all() - binary(bdd) - binary(fixture_manifest_listed)"
+default-filter = "all() - binary(bdd) - binary(fixture_manifest_listed) - binary(review_cli) - binary(run_loop) - binary(changed_files_provider) - binary(external_fixture_reader)"
 slow-timeout = { period = "5s", terminate-after = 1 }
