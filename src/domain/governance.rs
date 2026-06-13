@@ -71,18 +71,26 @@ pub struct GovernanceFacts {
     /// facts stays byte-identical.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lifecycle_chips: Vec<GovChip>,
+    /// Per in-scope model config-driven `meta` + `tags` (cute-dbt#260 /
+    /// cute-dbt#348), model-name order. Empty when no in-scope model (or
+    /// its columns) carries meta/tags, or the experiment is off. Omitted
+    /// from JSON when empty so a meta-free governance render stays
+    /// byte-identical.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub meta_tags: Vec<ModelMetaTags>,
 }
 
 impl GovernanceFacts {
     /// `true` when the payload would render any DOM — the
     /// `has_governance` template flag. Any group chip OR blast-radius
-    /// statement OR contract-classification drawer OR lifecycle chip.
-    /// Future slices OR their own surfaces in here.
+    /// statement OR contract-classification drawer OR lifecycle chip OR
+    /// meta/tags block. Future slices OR their own surfaces in here.
     #[must_use]
     pub fn has_content(&self) -> bool {
         !self.group_chips.is_empty()
             || !self.blast_radius.is_empty()
             || !self.contract_classes.is_empty()
+            || !self.meta_tags.is_empty()
             || !self.lifecycle_chips.is_empty()
     }
 
@@ -211,6 +219,53 @@ pub struct GovChip {
     pub severity: Option<String>,
 }
 
+/// One in-scope model's config-driven `meta` + `tags` (cute-dbt#260 /
+/// cute-dbt#348). Model-level `tags` become per-tag header chips;
+/// model-level `meta` becomes one aggregate chip + tooltip; column-level
+/// `meta`/`tags` ride the per-column rows in the drawer. Present only
+/// when the model (or one of its columns) carries meta or tags, so the
+/// payload stays byte-stable on meta-free models.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelMetaTags {
+    /// The bare model name (the drawer header + `data-model` hook).
+    pub model: String,
+    /// The model-level `config.tags`, deduplicated + sorted (dbt re-emits
+    /// inherited tags, so the wire list carries duplicates). One chip per
+    /// entry.
+    pub tags: Vec<String>,
+    /// The model-level `config.meta` as flattened `key: value` pairs,
+    /// key-sorted — the aggregate-chip tooltip body. Each value is the
+    /// compact-JSON rendering of the wire value (auto-escaped at render).
+    pub meta: Vec<MetaPair>,
+    /// Per-column `meta`/`tags` for the drawer — only columns carrying
+    /// either appear, column-name-sorted.
+    pub columns: Vec<ColumnMetaTags>,
+}
+
+/// One column's config-driven `meta` + `tags` (cute-dbt#348) — the
+/// per-column drawer row. Present only for columns carrying either.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ColumnMetaTags {
+    /// The column name.
+    pub column: String,
+    /// The column-level `tags`, deduplicated + sorted.
+    pub tags: Vec<String>,
+    /// The column-level `meta` as key-sorted `key: value` pairs.
+    pub meta: Vec<MetaPair>,
+}
+
+/// One `meta` `key: value` entry (cute-dbt#348). The value is the
+/// compact-JSON rendering of the (possibly nested) wire value, rendered
+/// as auto-escaped text — never interpreted, never trusted as markup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MetaPair {
+    /// The meta key.
+    pub key: String,
+    /// The value, compact-JSON rendered (`"x"` / `42` / `["a","b"]` /
+    /// `{"k":1}`).
+    pub value: String,
+}
+
 /// A parsed `deprecation_date` (`%Y-%m-%d`) as a comparable civil date
 /// (cute-dbt#260 Slice 4). `(year, month, day)` orders lexicographically
 /// as a date, so the `scheduled` (future) vs `elapsed` (today-or-past)
@@ -277,6 +332,8 @@ pub fn gather_governance(
     // model_in_scope set iterates in node-id order, so the chip order is
     // deterministic; each model's chips append in fixed predicate order).
     let mut lifecycle_chips: Vec<GovChip> = Vec::new();
+    // cute-dbt#348 — per-model config-driven meta/tags blocks.
+    let mut meta_tags: Vec<ModelMetaTags> = Vec::new();
     // Precompute the two reverse maps ONCE (O(N + E)); the per-model BFS
     // below reads them via the helper instead of rebuilding them per
     // model (gemini on #336 — the loop was O(M × (N + E)); now it is
@@ -306,6 +363,11 @@ pub fn gather_governance(
         }
         // Slice 4: the dbt-native lifecycle chips for this model.
         lifecycle_chips.extend(lifecycle_chips_for(manifest, node, old_manifest, today));
+        // cute-dbt#348: the config-driven meta/tags block for this model
+        // (None when neither the model nor any column carries meta/tags).
+        if let Some(block) = model_meta_tags(node) {
+            meta_tags.push(block);
+        }
     }
     GovernanceFacts {
         group_chips: by_group.into_values().collect(),
@@ -315,7 +377,123 @@ pub fn gather_governance(
             .collect(),
         contract_classes: contract_by_model.into_values().collect(),
         lifecycle_chips,
+        meta_tags,
     }
+}
+
+/// The config-driven meta/tags block for one in-scope model
+/// (cute-dbt#348), or `None` when neither the model nor any of its
+/// columns carries `meta` or `tags`. Pure: reads `config.meta` /
+/// `config.tags` (model-level, via the generic `NodeConfig` dict) and
+/// [`ColumnFacts`] (column-level) — no new ingestion.
+fn model_meta_tags(node: &Node) -> Option<ModelMetaTags> {
+    let tags = config_tags(node);
+    let meta = config_meta(node);
+    let columns = column_meta_tags(node);
+    if tags.is_empty() && meta.is_empty() && columns.is_empty() {
+        return None;
+    }
+    Some(ModelMetaTags {
+        model: node.bare_name().to_owned(),
+        tags,
+        meta,
+        columns,
+    })
+}
+
+/// Model-level `config.tags`, deduplicated + sorted (dbt re-emits
+/// inherited tags, so the wire list carries duplicates). Non-string
+/// entries are skipped (tags are categorical strings).
+fn config_tags(node: &Node) -> Vec<String> {
+    let Some(value) = node.config().config().get("tags") else {
+        return Vec::new();
+    };
+    dedup_sorted_tags(value)
+}
+
+/// Deduplicate + sort the string entries of a JSON `tags` value (an
+/// array, or a lone string). Empty for any other shape.
+fn dedup_sorted_tags(value: &serde_json::Value) -> Vec<String> {
+    let mut set: BTreeSet<String> = BTreeSet::new();
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                if let Some(s) = item.as_str() {
+                    set.insert(s.to_owned());
+                }
+            }
+        }
+        serde_json::Value::String(s) => {
+            set.insert(s.clone());
+        }
+        _ => {}
+    }
+    set.into_iter().collect()
+}
+
+/// Model-level `config.meta` as key-sorted [`MetaPair`]s. Empty when
+/// absent or not an object.
+fn config_meta(node: &Node) -> Vec<MetaPair> {
+    node.config()
+        .config()
+        .get("meta")
+        .map(meta_pairs)
+        .unwrap_or_default()
+}
+
+/// Flatten a JSON `meta` value into key-sorted `key: value` pairs. A
+/// non-object value yields no pairs (meta is a dict). Each value is the
+/// compact-JSON rendering of the (possibly nested) wire value.
+fn meta_pairs(value: &serde_json::Value) -> Vec<MetaPair> {
+    let serde_json::Value::Object(map) = value else {
+        return Vec::new();
+    };
+    // serde_json::Map preserves insertion order; sort by key for a
+    // deterministic, golden-stable rendering.
+    let mut pairs: Vec<MetaPair> = map
+        .iter()
+        .map(|(key, v)| MetaPair {
+            key: key.clone(),
+            value: meta_value_string(v),
+        })
+        .collect();
+    pairs.sort_by(|a, b| a.key.cmp(&b.key));
+    pairs
+}
+
+/// Render a meta value to a compact display string: a bare string stays
+/// unquoted; everything else is compact JSON (`42` / `true` /
+/// `["a","b"]` / `{"k":1}`). Auto-escaped as text at the render layer.
+fn meta_value_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Per-column meta/tags for the drawer (cute-dbt#348) — only columns
+/// carrying `meta` or `tags`, column-name-sorted (the `column_facts`
+/// `BTreeMap` is already key-ordered).
+fn column_meta_tags(node: &Node) -> Vec<ColumnMetaTags> {
+    node.column_facts()
+        .iter()
+        .filter_map(|(column, facts)| {
+            let tags = dedup_sorted_tag_slice(facts.tags());
+            let meta = facts.meta().map(meta_pairs).unwrap_or_default();
+            (!tags.is_empty() || !meta.is_empty()).then(|| ColumnMetaTags {
+                column: column.clone(),
+                tags,
+                meta,
+            })
+        })
+        .collect()
+}
+
+/// Deduplicate + sort an already-typed string tag slice (the column
+/// `ColumnFacts::tags` shape).
+fn dedup_sorted_tag_slice(tags: &[String]) -> Vec<String> {
+    let set: BTreeSet<String> = tags.iter().cloned().collect();
+    set.into_iter().collect()
 }
 
 /// The Slice-4 lifecycle chips for one in-scope `node`, in fixed
@@ -3589,6 +3767,240 @@ mod tests {
         );
         let facts = gather_governance(&m, &in_scope(&["model.pkg.m"]), None, None);
         assert!(!facts.lifecycle_chips.is_empty());
+        assert!(facts.has_content());
+        assert!(!facts.is_empty());
+    }
+
+    // ===== cute-dbt#348: config-driven meta + tags =====
+
+    /// A model node carrying a `config` dict (`meta`/`tags` ride here) and
+    /// optional per-column meta/tags. `col_meta_tags` is
+    /// `(column, tags, meta_json)` triples — `meta_json` is `None` for no
+    /// column meta.
+    fn meta_model(
+        full_id: &str,
+        config: serde_json::Value,
+        col_meta_tags: &[(&str, &[&str], Option<serde_json::Value>)],
+    ) -> Node {
+        let config_map: BTreeMap<String, serde_json::Value> = match config {
+            serde_json::Value::Object(map) => map.into_iter().collect(),
+            _ => BTreeMap::new(),
+        };
+        let columns: BTreeMap<String, Option<String>> = col_meta_tags
+            .iter()
+            .map(|(name, _, _)| ((*name).to_owned(), None))
+            .collect();
+        let column_facts: BTreeMap<String, ColumnFacts> = col_meta_tags
+            .iter()
+            .map(|(name, tags, meta)| {
+                (
+                    (*name).to_owned(),
+                    ColumnFacts::new(
+                        meta.clone(),
+                        tags.iter().map(|t| (*t).to_owned()).collect(),
+                        Vec::new(),
+                        Vec::new(),
+                    ),
+                )
+            })
+            .collect();
+        Node::new(
+            NodeId::new(full_id),
+            "model",
+            sample_checksum(),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::new(config_map, false),
+            None,
+            columns,
+        )
+        .with_column_facts(column_facts)
+    }
+
+    fn meta_pair(key: &str, value: &str) -> MetaPair {
+        MetaPair {
+            key: key.to_owned(),
+            value: value.to_owned(),
+        }
+    }
+
+    #[test]
+    fn model_without_meta_or_tags_yields_no_block() {
+        let m = manifest_with(
+            vec![meta_model("model.pkg.m", serde_json::json!({}), &[])],
+            vec![],
+        );
+        let facts = gather_governance(&m, &in_scope(&["model.pkg.m"]), None, None);
+        assert!(facts.meta_tags.is_empty(), "no meta/tags ⇒ no block");
+        assert!(!facts.has_content());
+    }
+
+    #[test]
+    fn model_tags_become_dedup_sorted_chips() {
+        // dbt re-emits inherited tags, so the wire list carries duplicates
+        // (and unsorted) — the block dedups + sorts.
+        let m = manifest_with(
+            vec![meta_model(
+                "model.pkg.m",
+                serde_json::json!({
+                    "tags": ["marts", "analytics", "dimension", "marts", "analytics"]
+                }),
+                &[],
+            )],
+            vec![],
+        );
+        let facts = gather_governance(&m, &in_scope(&["model.pkg.m"]), None, None);
+        assert_eq!(facts.meta_tags.len(), 1);
+        assert_eq!(
+            facts.meta_tags[0].tags,
+            vec![
+                "analytics".to_owned(),
+                "dimension".to_owned(),
+                "marts".to_owned()
+            ],
+        );
+        assert!(facts.meta_tags[0].meta.is_empty());
+        assert!(facts.has_content());
+    }
+
+    #[test]
+    fn a_lone_string_tag_is_accepted() {
+        // dbt also allows `tags: a_single_tag` (scalar, not array).
+        let m = manifest_with(
+            vec![meta_model(
+                "model.pkg.m",
+                serde_json::json!({ "tags": "hourly" }),
+                &[],
+            )],
+            vec![],
+        );
+        let facts = gather_governance(&m, &in_scope(&["model.pkg.m"]), None, None);
+        assert_eq!(facts.meta_tags[0].tags, vec!["hourly".to_owned()]);
+    }
+
+    #[test]
+    fn model_meta_flattens_to_key_sorted_pairs() {
+        let m = manifest_with(
+            vec![meta_model(
+                "model.pkg.m",
+                serde_json::json!({
+                    "meta": {
+                        "owner": "clinical-quality",
+                        "contains_pii": false,
+                        "row_count": 42
+                    }
+                }),
+                &[],
+            )],
+            vec![],
+        );
+        let facts = gather_governance(&m, &in_scope(&["model.pkg.m"]), None, None);
+        assert_eq!(
+            facts.meta_tags[0].meta,
+            vec![
+                meta_pair("contains_pii", "false"),
+                meta_pair("owner", "clinical-quality"),
+                meta_pair("row_count", "42"),
+            ],
+        );
+        assert!(facts.meta_tags[0].tags.is_empty());
+    }
+
+    #[test]
+    fn nested_meta_value_renders_as_compact_json() {
+        // A nested dict/array value is compact-JSON rendered; a bare string
+        // stays unquoted. Both are auto-escaped as text at render.
+        let m = manifest_with(
+            vec![meta_model(
+                "model.pkg.m",
+                serde_json::json!({
+                    "meta": {
+                        "labels": ["a", "b"],
+                        "sla": { "freshness_hours": 6 },
+                        "note": "ships nightly"
+                    }
+                }),
+                &[],
+            )],
+            vec![],
+        );
+        let facts = gather_governance(&m, &in_scope(&["model.pkg.m"]), None, None);
+        assert_eq!(
+            facts.meta_tags[0].meta,
+            vec![
+                meta_pair("labels", r#"["a","b"]"#),
+                meta_pair("note", "ships nightly"),
+                meta_pair("sla", r#"{"freshness_hours":6}"#),
+            ],
+        );
+    }
+
+    #[test]
+    fn column_meta_and_tags_ride_the_columns_list() {
+        let m = manifest_with(
+            vec![meta_model(
+                "model.pkg.m",
+                serde_json::json!({}),
+                &[
+                    (
+                        "payer_key",
+                        &["dimension_key", "dimension_key"][..],
+                        Some(serde_json::json!({ "pii": false, "owner": "cq" })),
+                    ),
+                    ("plain_col", &[][..], None),
+                ],
+            )],
+            vec![],
+        );
+        let facts = gather_governance(&m, &in_scope(&["model.pkg.m"]), None, None);
+        // Block exists purely on the strength of column-level meta/tags.
+        assert_eq!(facts.meta_tags.len(), 1);
+        assert!(facts.meta_tags[0].tags.is_empty());
+        assert!(facts.meta_tags[0].meta.is_empty());
+        // Only the column carrying meta/tags appears; `plain_col` is filtered.
+        assert_eq!(facts.meta_tags[0].columns.len(), 1);
+        let col = &facts.meta_tags[0].columns[0];
+        assert_eq!(col.column, "payer_key");
+        assert_eq!(col.tags, vec!["dimension_key".to_owned()]);
+        assert_eq!(
+            col.meta,
+            vec![meta_pair("owner", "cq"), meta_pair("pii", "false")],
+        );
+        assert!(facts.has_content());
+    }
+
+    #[test]
+    fn out_of_scope_model_contributes_no_block() {
+        let m = manifest_with(
+            vec![meta_model(
+                "model.pkg.m",
+                serde_json::json!({ "tags": ["analytics"] }),
+                &[],
+            )],
+            vec![],
+        );
+        // Empty in-scope set ⇒ no block, no content.
+        let facts = gather_governance(&m, &in_scope(&[]), None, None);
+        assert!(facts.meta_tags.is_empty());
+        assert!(!facts.has_content());
+    }
+
+    #[test]
+    fn meta_tags_block_makes_the_payload_non_empty() {
+        let m = manifest_with(
+            vec![meta_model(
+                "model.pkg.m",
+                serde_json::json!({ "tags": ["analytics"] }),
+                &[],
+            )],
+            vec![],
+        );
+        let facts = gather_governance(&m, &in_scope(&["model.pkg.m"]), None, None);
+        assert!(facts.group_chips.is_empty());
+        assert!(facts.lifecycle_chips.is_empty());
+        assert!(!facts.meta_tags.is_empty());
         assert!(facts.has_content());
         assert!(!facts.is_empty());
     }

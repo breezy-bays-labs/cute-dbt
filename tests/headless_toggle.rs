@@ -12243,6 +12243,99 @@ fn governance_contract_drawer_absent_without_a_class_in_a_real_browser() {
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn governance_meta_chip_tooltip_reveals_the_bubble_on_focus_in_a_real_browser() {
+    // cute-dbt#348 — the aggregate-meta chip is the #146 focusable-button +
+    // CSS-bubble tooltip, never a native `title`. The bubble is hidden until
+    // hover/focus; `focus()` (the keyboard path) reveals it (`:hover` shares
+    // the same CSS rule, so visible-on-focus proves the hover path too). The
+    // governance panel has no overflow:hidden ancestor, so the z-index:60
+    // bubble is not clipped — assert it actually computes `visible`.
+    use cute_dbt::domain::{GovernanceFacts, MetaPair, ModelMetaTags};
+    let facts = GovernanceFacts {
+        meta_tags: vec![ModelMetaTags {
+            model: "dim_payers".to_owned(),
+            tags: vec!["analytics".to_owned()],
+            meta: vec![
+                MetaPair {
+                    key: "contains_pii".to_owned(),
+                    value: "false".to_owned(),
+                },
+                MetaPair {
+                    key: "owner".to_owned(),
+                    value: "clinical-quality".to_owned(),
+                },
+            ],
+            columns: Vec::new(),
+        }],
+        ..GovernanceFacts::default()
+    };
+    let url = render_governance_to_file("cute_dbt_meta_tooltip.html", &facts);
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // The chip is a focusable <button>, not a hover-only span.
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"gov-meta-chip\"]').tagName"
+        ),
+        "BUTTON",
+        "the aggregate-meta chip is a focusable <button>",
+    );
+    // It carries an aria-label for AT (NOT a native title).
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"gov-meta-chip\"]')\
+             .getAttribute('title') === null",
+        ),
+        "the meta chip uses NO native title (load-bearing-tooltip rule #146)",
+    );
+    assert!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"gov-meta-chip\"]').getAttribute('aria-label')",
+        )
+        .contains("meta"),
+        "the meta chip carries an aria-label summary for AT",
+    );
+
+    const BUBBLE_VIS: &str =
+        "getComputedStyle(document.querySelector('[data-testid=\"gov-meta-bubble\"]')).visibility";
+    assert_eq!(
+        eval_string(&tab, BUBBLE_VIS),
+        "hidden",
+        "the meta bubble is hidden until hover/focus",
+    );
+    let _ = eval(
+        &tab,
+        "document.querySelector('[data-testid=\"gov-meta-chip\"]').focus()",
+    );
+    assert_eq!(
+        eval_string(&tab, BUBBLE_VIS),
+        "visible",
+        "focusing the meta chip reveals the bubble (the #146 keyboard path)",
+    );
+    // No ancestor clips the bubble (the panel is the relative context;
+    // assert no enclosing overflow:hidden between the bubble and <body>).
+    assert!(
+        eval_bool(
+            &tab,
+            "(() => { let n = document.querySelector('[data-testid=\"gov-meta-bubble\"]'); \
+             for (let e = n.parentElement; e && e !== document.body; e = e.parentElement) { \
+               if (getComputedStyle(e).overflow === 'hidden') return false; } return true; })()",
+        ),
+        "no ancestor overflow:hidden clips the meta bubble",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn enforcement_finding_renders_on_the_committed_showcase_in_a_real_browser() {
     // cute-dbt#260 Slice 3 — the committed diff-showcase golden
     // (experimental:"1") has fct_encounters declaring a PK on duckdb

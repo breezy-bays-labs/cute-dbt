@@ -3066,10 +3066,10 @@ fn leaf_segment(id: &str) -> &str {
 mod tests {
     use super::*;
     use crate::domain::{
-        BlastRadius, Checksum, ContractClass, ContractColumnDiff, CteEdge, CteNode,
+        BlastRadius, Checksum, ColumnMetaTags, ContractClass, ContractColumnDiff, CteEdge, CteNode,
         DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, EdgeType, GovChip, Group,
-        GroupChip, Manifest, ManifestMetadata, NodeConfig, NodeId, Owner, UnitTest, UnitTestExpect,
-        UnitTestGiven,
+        GroupChip, Manifest, ManifestMetadata, MetaPair, ModelMetaTags, NodeConfig, NodeId, Owner,
+        UnitTest, UnitTestExpect, UnitTestGiven,
     };
     use serde_json::json;
     use std::collections::{BTreeMap, HashMap};
@@ -6586,6 +6586,164 @@ mod tests {
         );
         assert!(!html.contains(r#"data-testid="gov-chip""#));
         assert!(!html.contains("data-chip-kind"));
+    }
+
+    // ----- cute-dbt#348: config-driven meta + tags -----
+
+    #[test]
+    fn governance_model_tags_render_one_chip_each() {
+        let facts = GovernanceFacts {
+            meta_tags: vec![ModelMetaTags {
+                model: "dim_payers".to_owned(),
+                tags: vec!["analytics".to_owned(), "dimension".to_owned()],
+                meta: Vec::new(),
+                columns: Vec::new(),
+            }],
+            ..GovernanceFacts::default()
+        };
+        let html = render_html_with_governance("cute_dbt_render_meta_tags_chips.html", &facts);
+        assert!(
+            html.contains(
+                r#"<span class="gov-tag-chip" data-testid="gov-tag-chip" data-tag="analytics">🏷 analytics</span>"#
+            ),
+            "one chip per tag, tag-hooked: {html}",
+        );
+        assert!(
+            html.contains(r#"data-tag="dimension">🏷 dimension</span>"#),
+            "the second tag chip renders too",
+        );
+        // No meta ⇒ no aggregate-meta chip.
+        assert!(!html.contains(r#"data-testid="gov-meta-chip""#));
+    }
+
+    #[test]
+    fn governance_meta_chip_is_a_focusable_tooltip_button() {
+        // The aggregate-meta chip MUST be a focusable <button> carrying the
+        // reused .expect-tooltip pattern + an aria-hidden bubble enumerating
+        // every key:value pair — never a native `title` (cute-dbt#146).
+        let facts = GovernanceFacts {
+            meta_tags: vec![ModelMetaTags {
+                model: "dim_payers".to_owned(),
+                tags: Vec::new(),
+                meta: vec![
+                    MetaPair {
+                        key: "contains_pii".to_owned(),
+                        value: "false".to_owned(),
+                    },
+                    MetaPair {
+                        key: "owner".to_owned(),
+                        value: "clinical-quality".to_owned(),
+                    },
+                ],
+                columns: Vec::new(),
+            }],
+            ..GovernanceFacts::default()
+        };
+        let html = render_html_with_governance("cute_dbt_render_meta_tooltip.html", &facts);
+        // Focusable button + the reused .expect-tooltip class + aria-label
+        // for AT (summarizes the keys), label shows the count.
+        assert!(
+            html.contains(
+                r#"<button type="button" class="expect-tooltip gov-meta-chip" data-testid="gov-meta-chip" aria-label="2 meta entries: contains_pii, owner">meta (2)"#
+            ),
+            "the meta chip is a focusable button with the expect-tooltip pattern + aria-label summary: {html}",
+        );
+        // The bubble is aria-hidden (not announced twice) and enumerates pairs.
+        assert!(
+            html.contains(
+                r#"<span class="expect-tooltip-bubble gov-meta-bubble" data-testid="gov-meta-bubble" aria-hidden="true">"#
+            ),
+            "the bubble reuses .expect-tooltip-bubble and is aria-hidden: {html}",
+        );
+        assert!(
+            html.contains(
+                r#"<span class="gov-meta-row" data-testid="gov-meta-row"><code class="gov-meta-key">owner</code>: <span class="gov-meta-val">clinical-quality</span></span>"#
+            ),
+            "the bubble enumerates each key:value pair: {html}",
+        );
+        // Never a native title attribute on the chip.
+        assert!(
+            !html.contains(r#"data-testid="gov-meta-chip" title="#),
+            "the meta chip must not use a native title (load-bearing-tooltip rule)",
+        );
+    }
+
+    #[test]
+    fn governance_meta_values_are_auto_escaped() {
+        // A meta value carrying markup-ish characters must be HTML-escaped
+        // as text — never interpreted (askama escapes by default).
+        let facts = GovernanceFacts {
+            meta_tags: vec![ModelMetaTags {
+                model: "dim_payers".to_owned(),
+                tags: Vec::new(),
+                meta: vec![MetaPair {
+                    key: "note".to_owned(),
+                    value: r#"<script>alert("x")</script> & "quoted""#.to_owned(),
+                }],
+                columns: Vec::new(),
+            }],
+            ..GovernanceFacts::default()
+        };
+        let html = render_html_with_governance("cute_dbt_render_meta_escape.html", &facts);
+        assert!(
+            !html.contains("<script>alert"),
+            "meta value markup must not appear raw in the DOM: {html}",
+        );
+        // askama escapes to numeric entities by default (&#60; not &lt;).
+        assert!(
+            html.contains(
+                "&#60;script&#62;alert(&#34;x&#34;)&#60;/script&#62; &#38; &#34;quoted&#34;"
+            ),
+            "meta value is HTML-escaped as text: {html}",
+        );
+    }
+
+    #[test]
+    fn governance_column_meta_tags_render_in_the_drawer() {
+        let facts = GovernanceFacts {
+            meta_tags: vec![ModelMetaTags {
+                model: "dim_payers".to_owned(),
+                tags: Vec::new(),
+                meta: Vec::new(),
+                columns: vec![ColumnMetaTags {
+                    column: "payer_key".to_owned(),
+                    tags: vec!["dimension_key".to_owned()],
+                    meta: vec![MetaPair {
+                        key: "pii".to_owned(),
+                        value: "false".to_owned(),
+                    }],
+                }],
+            }],
+            ..GovernanceFacts::default()
+        };
+        let html = render_html_with_governance("cute_dbt_render_col_meta.html", &facts);
+        assert!(
+            html.contains(
+                r#"<div class="gov-meta-col" data-testid="gov-meta-col" data-column="payer_key">"#
+            ),
+            "the per-column drawer row renders with its column hook: {html}",
+        );
+        assert!(
+            html.contains(
+                r#"data-testid="gov-col-tag-chip" data-tag="dimension_key">🏷 dimension_key</span>"#
+            ),
+            "the column-level tag chip renders inside the drawer row",
+        );
+        assert!(
+            html.contains(r#"data-testid="gov-col-meta-row"><code class="gov-meta-key">pii</code>: <span class="gov-meta-val">false</span>"#),
+            "the column-level meta pair renders inside the drawer row",
+        );
+    }
+
+    #[test]
+    fn governance_off_emits_no_meta_tags_dom() {
+        let html = render_html_with_governance(
+            "cute_dbt_render_no_meta_tags.html",
+            &GovernanceFacts::default(),
+        );
+        assert!(!html.contains(r#"data-testid="gov-meta""#));
+        assert!(!html.contains(r#"data-testid="gov-tag-chip""#));
+        assert!(!html.contains(r#"data-testid="gov-meta-chip""#));
     }
 
     // ===== project panel: hooks + dispatch rows (cute-dbt#269) =====
