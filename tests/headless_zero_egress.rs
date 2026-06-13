@@ -409,8 +409,12 @@ fn every_committed_explore_page_makes_zero_external_requests_when_opened_via_fil
         tab.wait_until_navigated().expect("await navigation");
 
         // Page-aware liveness oracle (cute-dbt#100; dag.html re-oracled
-        // for the interactive Cytoscape engine in cute-dbt#101).
-        if filename.ends_with("dag.html") {
+        // for the interactive Cytoscape engine in cute-dbt#101). The
+        // cute-dbt#345 focused macro DAG (`macro.html`) is the SAME
+        // Cytoscape/cytoscape-dagre page — same canvas-liveness +
+        // component-fidelity oracle. `tests.html` is the static page
+        // (the else arm).
+        if filename.ends_with("dag.html") || filename.ends_with("macro.html") {
             let lineage_ok = tab
                 .wait_for_element_with_custom_timeout(
                     ".lineage-canvas canvas",
@@ -569,7 +573,7 @@ fn render_explore_pages(
     );
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
     let _ = std::fs::remove_dir_all(&dir);
-    render_explore(&dir, &manifest, &models, changed, &payload, false).expect("explore renders");
+    render_explore(&dir, &manifest, &models, changed, &payload, None).expect("explore renders");
     dir
 }
 
@@ -600,7 +604,7 @@ fn render_explore_dag_manifest(stem: &str, manifest: &Manifest) -> String {
     );
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
     let _ = std::fs::remove_dir_all(&dir);
-    render_explore(&dir, manifest, &models, None, &payload, false).expect("explore renders");
+    render_explore(&dir, manifest, &models, None, &payload, None).expect("explore renders");
     let p = dir.join("dag.html");
     format!("file://{}", p.to_str().expect("page path is valid UTF-8"))
 }
@@ -1766,12 +1770,23 @@ fn explore_tests_viewer_renders_fixture_grids_offline() {
     let _ = tab.close(true);
 }
 
-/// Render the explore pages with `has_macro_focus = true` (cute-dbt#345
-/// Slice 1 — the third sub-page emitted) and return the `file://` URL of
-/// the emitted `macro.html`. The in-process render discipline matches
-/// `render_explore_pages`, but threads the macro-focus flag so the walking
-/// skeleton actually writes `macro.html`.
-fn render_explore_macro_page(stem: &str, nodes: Vec<Node>) -> String {
+/// Render the explore pages with a non-empty
+/// [`MacroFocusSet`](cute_dbt::domain::MacroFocusSet) (cute-dbt#345
+/// Slice 3 — the focused macro DAG) and return the `file://` URL of the
+/// emitted `macro.html`. The in-process render discipline matches
+/// `render_explore_pages`, but threads a focus set so the page renders
+/// the role-stamped focused subgraph through the Cytoscape engine.
+///
+/// `users`/`downstream` are the full node ids partitioning the focus set
+/// (disjoint by the domain contract); the helper builds them directly so
+/// the headless test exercises the render path without a domain walk.
+fn render_explore_macro_page(
+    stem: &str,
+    nodes: Vec<Node>,
+    users: &[&str],
+    downstream: &[&str],
+) -> String {
+    use cute_dbt::domain::MacroFocusSet;
     let manifest = Manifest::new(
         ManifestMetadata::new("v12"),
         nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
@@ -1790,28 +1805,41 @@ fn render_explore_macro_page(stem: &str, nodes: Vec<Node>) -> String {
         &HashMap::new(),
         "",
     );
+    let focus = MacroFocusSet {
+        users: users.iter().map(|s| NodeId::new(*s)).collect(),
+        downstream: downstream.iter().map(|s| NodeId::new(*s)).collect(),
+    };
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
     let _ = std::fs::remove_dir_all(&dir);
-    render_explore(&dir, &manifest, &models, None, &payload, true).expect("explore renders");
+    render_explore(&dir, &manifest, &models, None, &payload, Some(&focus))
+        .expect("explore renders");
     let p = dir.join("macro.html");
     format!("file://{}", p.to_str().expect("page path is valid UTF-8"))
 }
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
-fn explore_macro_page_makes_zero_external_requests_when_opened_via_file_url() {
-    // cute-dbt#345 Slice 1 — the explorer macro view walking skeleton.
-    // The third explore sub-page (`macro.html`) is opened via a real
-    // file:// origin with all DNS denied; it must make ZERO external
-    // requests and render its empty-state placeholder (the focused macro
-    // DAG + filtered directory land in Slices 3–4). Uniform with the
-    // dag.html/tests.html arms of the primary gate.
+fn explore_macro_page_renders_a_focused_dag_and_makes_zero_external_requests() {
+    // cute-dbt#345 Slice 3 — the focused macro DAG. The third explore
+    // sub-page (`macro.html`) now renders the role-stamped `users ∪
+    // downstream` subgraph through the same vendored Cytoscape +
+    // cytoscape-dagre engine `dag.html` uses. Opened via a real file://
+    // origin with all DNS denied, it must: (1) boot the dagre layout,
+    // (2) apply the `.macro-user` / `.macro-downstream` boot classes, and
+    // (3) make ZERO external requests. Uniform with the dag.html arm of
+    // the primary gate.
+    //
+    // Focus: stg_orders is the macro caller (user); dim_orders is its
+    // downstream. The headless helper stamps the roles directly (no
+    // domain walk) so this test exercises the RENDER path.
     let url = render_explore_macro_page(
-        "explore-macro-skeleton",
+        "explore-macro-focused",
         vec![
             explore_model("model.shop.stg_orders", &[]),
             explore_model("model.shop.dim_orders", &["model.shop.stg_orders"]),
         ],
+        &["model.shop.stg_orders"],
+        &["model.shop.dim_orders"],
     );
     assert!(
         url.starts_with("file://"),
@@ -1848,32 +1876,55 @@ fn explore_macro_page_makes_zero_external_requests_when_opened_via_file_url() {
     tab.navigate_to(&url).expect("navigate to file:// URL");
     tab.wait_until_navigated().expect("await navigation");
 
-    // The page renders its heading and the walking-skeleton empty state.
+    // The page renders its heading.
     assert_eq!(
         eval(&tab, "document.querySelector('h1').textContent"),
         serde_json::Value::String("Macro focus".to_owned()),
         "macro.html renders the macro-focus heading",
     );
-    assert_eq!(
-        eval(&tab, "document.querySelector('.explore-empty') !== null"),
-        serde_json::Value::Bool(true),
-        "the Slice 1 skeleton renders its empty-state placeholder",
+    // The dagre layout boots — the Cytoscape canvas appears inside the
+    // lineage host (the same liveness oracle as dag.html).
+    let lineage_ok = tab
+        .wait_for_element_with_custom_timeout(".lineage-canvas canvas", Duration::from_secs(15))
+        .is_ok();
+    assert!(
+        lineage_ok,
+        "the focused macro DAG must boot the Cytoscape/cytoscape-dagre engine \
+         (canvas inside .lineage-canvas)",
     );
-    // The nav round-trips back to the sibling pages.
+    // The engine global IS present now (Slice 3 ships it).
+    assert_eq!(
+        eval(&tab, "typeof window.cytoscape"),
+        serde_json::Value::String("function".to_owned()),
+        "macro.html ships the Cytoscape engine for the focused DAG",
+    );
+    // The boot-time macro-role classes are applied: one user, one
+    // downstream (the in-place class assignment from `macroRole`).
     assert_eq!(
         eval(
             &tab,
-            "document.querySelector('.explore-nav a[href=\"dag.html\"]') !== null"
-        ),
-        serde_json::Value::Bool(true),
-        "macro.html navigates back to dag.html",
+            "window.CuteExploreLineage.cyInstance().nodes('.macro-user').length",
+        )
+        .as_u64()
+        .unwrap_or(0),
+        1,
+        "the macro caller carries the .macro-user emphasis class at boot",
     );
-    // No graph engine on the skeleton page.
     assert_eq!(
-        eval(&tab, "typeof window.cytoscape"),
-        serde_json::Value::String("undefined".to_owned()),
-        "the Slice 1 macro.html skeleton ships no Cytoscape global",
+        eval(
+            &tab,
+            "window.CuteExploreLineage.cyInstance().nodes('.macro-downstream').length",
+        )
+        .as_u64()
+        .unwrap_or(0),
+        1,
+        "the downstream node carries the .macro-downstream dim class at boot",
     );
+    // No console warnings (the `width: label` / `wheelSensitivity` trap).
+    // The lineage engine measures widths via measureText — a warning here
+    // would mean the focused page regressed the init contract.
+    // (Console-warning capture is covered by the dag.html headless arm's
+    // shared engine; the macro page reuses it verbatim.)
 
     let captured = external.lock().unwrap().clone();
     assert!(

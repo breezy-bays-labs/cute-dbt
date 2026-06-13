@@ -51,3 +51,26 @@ Feature: explore emits a macro-focus sub-page only when a root macro changed
     Then the exit code is 0
     And no macro.html is written
     And dag.html does not link to the macro-focus page
+
+  # cute-dbt#345 Slice 3 — the focused macro DAG. A changed root-project
+  # macro called by `stg_claims`, whose ref()-downstream is `dim_claims`,
+  # produces a two-node focused DAG: the caller is a `user` (emphasized),
+  # the downstream is `downstream` (dimmed). A model that neither calls
+  # the macro nor lies downstream of a caller (`unrelated`) is excluded.
+  @no-baseline-usage-error
+  Scenario: a changed macro renders a role-stamped focused DAG
+    Given the explore manifest declares the model "stg_claims"
+    And the explore model "stg_claims" has source path "models/staging/stg_claims.sql"
+    And the explore manifest declares the model "dim_claims"
+    And the explore model "dim_claims" depends on "stg_claims"
+    And the explore manifest declares the model "unrelated"
+    And the explore manifest carries the root-project macro "add_dq_flags" at "macros/add_dq_flags.sql"
+    And the explore model "stg_claims" calls the macro "add_dq_flags"
+    And the PR diff changes the explore file "macros/add_dq_flags.sql"
+    When I run cute-dbt explore on the macro manifest with the PR diff
+    Then the exit code is 0
+    And the explore out directory contains "macro.html"
+    And macro.html marks the model "stg_claims" as a macro "user"
+    And macro.html marks the model "dim_claims" as a macro "downstream"
+    And macro.html does not render the model "unrelated"
+    And the focused macro DAG carries exactly 2 nodes

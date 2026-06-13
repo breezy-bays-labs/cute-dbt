@@ -538,6 +538,28 @@ real data — a hypothetical PR against the synthetic Synthea playground.\
 """
 
 [[fixture]]
+path = "playground-macro-pr-diff.patch"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/345"
+sha256 = "99e4250641c1a6dbfad58f56c3f4200847b97ecaf16cc6e58fa1dad7ce7edfa5"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+Synthetic hand-crafted `git diff --unified=0` (cute-dbt#345) — the explorer \
+focused-macro-DAG golden. A single hunk changing the root-project macro \
+`macros/data_quality/quarantine_filter.sql` line 3 (`= true`→`is true`); its \
+`+` side is byte-aligned to the committed playground-source macro file \
+(same-revision contract). Paired with playground-current.json + \
+playground-source under `cute-dbt explore --pr-diff`, it triggers the \
+cute-dbt#345 macro view: the `--pr-diff` resolves the changed macro id, and \
+the explorer emits examples/explore-macro/macro.html — the focused \
+ref()-downstream DAG of `quarantine_filter`'s 3 calling models (8 downstream \
+vertices, 1 an exposure sink), macro callers emphasized + downstream dimmed. \
+No real data — a hypothetical PR against the synthetic Synthea playground.\
+"""
+
+[[fixture]]
 path = "config-broken.toml"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/24"

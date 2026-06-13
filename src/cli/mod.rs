@@ -72,10 +72,10 @@ use crate::domain::{
     changed_macros_baseline, changed_macros_pr_diff, changed_models, check_by_id,
     diff_project_definitions, effective_fixture_format, external_fixture_table,
     extract_model_block, extract_unit_test_block, gather_governance, hook_operations,
-    preflight_compiled, raw_hunk_lines, reconstruct_block_diffs, reconstruct_external_fixture_diff,
-    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks,
-    resolve_check_policy, resolve_experimental_config, reverse_apply, scan_pragmas,
-    select_in_scope, widen_with_config_attributions,
+    macro_focus_set, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
+    reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
+    refine_changed_by_hunks, resolve_check_policy, resolve_experimental_config, reverse_apply,
+    scan_pragmas, select_in_scope, widen_with_config_attributions,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -472,17 +472,24 @@ fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
         "",
     );
     // cute-dbt#345 — the macro view emits its third sub-page only when the
-    // `--pr-diff` changed a root-project macro. The flag is RESOLVED here
-    // (the scope-resolution lane) and handed to the renderer, which stays
-    // a pure renderer (it never calls a domain walker).
-    let has_macro_focus = !context.changed_macros.is_empty();
+    // `--pr-diff` changed a root-project macro. The FOCUS SET is RESOLVED
+    // here (the scope-resolution lane, including the domain walk) and
+    // handed to the renderer, which stays a pure renderer (it never calls
+    // a domain walker). When several macros changed, the focused DAG is
+    // built for the lowest-id one (the deterministic `BTreeSet` first) —
+    // the multi-macro picker is a later slice (founder Open Q 6).
+    let macro_focus = context
+        .changed_macros
+        .iter()
+        .next()
+        .map(|macro_id| macro_focus_set(&current, macro_id));
     render_explore(
         &args.out_dir,
         &current,
         &models,
         context.changed_models.as_ref(),
         &payload,
-        has_macro_focus,
+        macro_focus.as_ref(),
     )
     .map_err(|err| RunError::output(&args.out_dir, err))?;
     Ok(())

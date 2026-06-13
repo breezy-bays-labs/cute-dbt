@@ -48,6 +48,7 @@ fn declares_model(world: &mut World, bare: String) {
         columns: Vec::new(),
         original_file_path: None,
         wire_patch_path: None,
+        depends_macros: Vec::new(),
     });
 }
 
@@ -166,9 +167,11 @@ pub fn serialize_plan_manifest(world: &World, stem: &str) -> std::path::PathBuf 
     }
     // cute-dbt#253 — non-model dependencies (snapshot/seed/source ids)
     // ride a wire `depends_on` patch: the domain decl's bare `deps` map
-    // through `model_id`, which is model-only by design.
+    // through `model_id`, which is model-only by design. cute-dbt#345 —
+    // a model's `depends_on.macros` rides the SAME patch (the macro-focus
+    // scenarios: a caller's `macros` list carries the changed macro id).
     for m in &plan.models {
-        if m.raw_deps.is_empty() {
+        if m.raw_deps.is_empty() && m.depends_macros.is_empty() {
             continue;
         }
         let mut dep_ids: Vec<String> = m
@@ -180,7 +183,7 @@ pub fn serialize_plan_manifest(world: &World, stem: &str) -> std::path::PathBuf 
         node_patches.push((
             m.bare.clone(),
             "depends_on".to_owned(),
-            serde_json::json!({ "macros": [], "nodes": dep_ids }),
+            serde_json::json!({ "macros": m.depends_macros, "nodes": dep_ids }),
         ));
     }
     // cute-dbt#103 — splice the declared data-test nodes in the REAL
@@ -285,6 +288,25 @@ pub fn serialize_plan_manifest(world: &World, stem: &str) -> std::path::PathBuf 
                 "package_name": "jaffle_shop",
             }),
         ));
+    }
+    // cute-dbt#345 — the macro blast radius (`macro_blast_radius`) filters
+    // models to the root project: `package_name == metadata.project_name`.
+    // The synthetic plan's `empty_manifest` sets neither, so a macro-focus
+    // scenario must pin BOTH — the project name in metadata, and each
+    // model's `package_name` — or the focus set is silently empty.
+    if !plan.macros.is_empty() {
+        top_map_entries.push((
+            "metadata".to_owned(),
+            "project_name".to_owned(),
+            serde_json::json!("jaffle_shop"),
+        ));
+        for m in &plan.models {
+            node_patches.push((
+                m.bare.clone(),
+                "package_name".to_owned(),
+                serde_json::json!("jaffle_shop"),
+            ));
+        }
     }
     serialize_explore_to_tmp(&manifest, stem, &node_patches, &raw_nodes, &top_map_entries)
 }

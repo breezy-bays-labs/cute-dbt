@@ -38,6 +38,22 @@ fn manifest_carries_macro(world: &mut World, bare: String, path: String) {
     world.explore_plan.macros.push((bare, path));
 }
 
+/// Mark a model as a DIRECT caller of a root-project macro (cute-dbt#345)
+/// — splices the macro's full id (`macro.jaffle_shop.<bare>`) into the
+/// model's wire `depends_on.macros`. A caller is a `user` in the focus
+/// set, so its `ref()`-downstream populates the focused macro DAG.
+#[given(regex = r#"^the explore model "([^"]+)" calls the macro "([^"]+)"$"#)]
+fn model_calls_macro(world: &mut World, model: String, macro_bare: String) {
+    let macro_id = format!("macro.jaffle_shop.{macro_bare}");
+    let decl = world
+        .explore_plan
+        .models
+        .iter_mut()
+        .find(|m| m.bare == model)
+        .unwrap_or_else(|| panic!("model {model:?} must be declared before it calls a macro"));
+    decl.depends_macros.push(macro_id);
+}
+
 // --- When -------------------------------------------------------------
 
 /// Serialize the macro-bearing plan manifest and run
@@ -119,6 +135,66 @@ fn macro_html_carries_heading(world: &mut World) {
         html.contains("<h1>Macro focus</h1>"),
         "macro.html must render the macro-focus page heading",
     );
+}
+
+// --- Then: Slice 3 focused-DAG carrier facts --------------------------
+
+#[then(regex = r#"^macro\.html marks the model "([^"]+)" as a macro "(user|downstream)"$"#)]
+fn macro_node_role(world: &mut World, bare: String, role: String) {
+    let payload = macro_lineage_payload(world);
+    let id = format!("model.jaffle_shop.{bare}");
+    let node = payload["nodes"]
+        .as_array()
+        .expect("the macro carrier has a nodes array")
+        .iter()
+        .find(|n| n["id"] == id)
+        .unwrap_or_else(|| panic!("{id} must render in the focused macro DAG: {payload}"));
+    assert_eq!(
+        node["macro_role"].as_str(),
+        Some(role.as_str()),
+        "{bare} must carry macro_role={role:?} in the focused carrier: {node}",
+    );
+}
+
+#[then(regex = r#"^macro\.html does not render the model "([^"]+)"$"#)]
+fn macro_node_absent(world: &mut World, bare: String) {
+    let payload = macro_lineage_payload(world);
+    let id = format!("model.jaffle_shop.{bare}");
+    let present = payload["nodes"]
+        .as_array()
+        .is_some_and(|nodes| nodes.iter().any(|n| n["id"] == id));
+    assert!(
+        !present,
+        "{id} is outside the focus set and must not render: {payload}",
+    );
+}
+
+#[then(regex = r#"^the focused macro DAG carries exactly (\d+) nodes?$"#)]
+fn macro_node_count(world: &mut World, expected: usize) {
+    let payload = macro_lineage_payload(world);
+    let count = payload["nodes"].as_array().map_or(0, Vec::len);
+    assert_eq!(
+        count, expected,
+        "the focused macro DAG renders exactly the users ∪ downstream set: {payload}",
+    );
+}
+
+/// Parse the `explore-dag-data` JSON carrier embedded in `macro.html`
+/// (the focused [`LineagePayload`]). Self-contained on the `World`'s
+/// captured `macro.html` (the subprocess wrote it).
+fn macro_lineage_payload(world: &World) -> serde_json::Value {
+    let html = world
+        .explore_macro_html
+        .clone()
+        .unwrap_or_else(|| panic!("macro.html was not written; stderr={}", world.last_stderr));
+    let dom = tl::parse(&html, tl::ParserOptions::default()).expect("macro.html must parse");
+    let parser = dom.parser();
+    let node = dom
+        .get_element_by_id("explore-dag-data")
+        .expect("macro.html must embed <script id=\"explore-dag-data\">")
+        .get(parser)
+        .expect("dag data node resolves");
+    serde_json::from_str(&node.inner_text(parser)).expect("macro dag data must be valid JSON")
 }
 
 /// The rendered `dag.html`/`tests.html` captured into the `World`,

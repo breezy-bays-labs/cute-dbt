@@ -52,8 +52,8 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::render::{DagPayload, ReportPayload};
 use crate::domain::{
-    GrainKind, Manifest, ModelInScopeSet, Node, NodeId, SourceNode, model_grain_signals,
-    resolve_tested_model,
+    GrainKind, MacroFocusSet, Manifest, ModelInScopeSet, Node, NodeId, SourceNode,
+    model_grain_signals, resolve_tested_model,
 };
 
 /// The explorer's external-drive contract version (cute-dbt#105).
@@ -132,6 +132,31 @@ impl LineageNodeType {
             Self::Exposure => "exposure",
         }
     }
+}
+
+/// The focused-macro-DAG role of a lineage node (cute-dbt#345 Slice 3) —
+/// the render-layer twin of the domain
+/// [`MacroFocusSet`] partition.
+///
+/// Carried (serde-skip-gated) on [`LineageNodePayload::macro_role`] only
+/// on the `macro.html` carrier: a focused payload stamps each node
+/// `User` (a macro-calling model — emphasized on the page) or
+/// `Downstream` (a node in the `ref()`-downstream closure of the callers
+/// — dimmed-as-context). The full-manifest `dag.html` payload leaves it
+/// `None`, so the existing golden carries no `macro_role` keys at all
+/// (the `changed`/`is_false` serde-skip precedent — golden byte-stability,
+/// R9). Serializes `"user"` / `"downstream"` for the engine's per-role
+/// class assignment at boot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MacroRole {
+    /// A macro-calling root-project model
+    /// ([`macro_blast_radius`](crate::domain::macro_blast_radius)) —
+    /// emphasized.
+    User,
+    /// A node in the `ref()`-downstream closure of the callers, minus the
+    /// callers themselves — dimmed-as-context.
+    Downstream,
 }
 
 /// One node in the lineage graph (typed since cute-dbt#253).
@@ -260,33 +285,11 @@ fn lineage_node_name(current: &Manifest, id: &NodeId, node_type: LineageNodeType
 /// skipped defensively (a manifest should never carry one).
 #[must_use]
 pub fn build_lineage(current: &Manifest, models: &ModelInScopeSet) -> Lineage {
+    // The full-manifest typed union (models + every snapshot/seed/source/
+    // exposure); the focused macro DAG restricts this via
+    // [`focused_typed_node_map`]. Both feed the shared assembly core.
     let typed = build_typed_node_map(current, models);
-
-    let index_of: HashMap<&NodeId, usize> =
-        typed.keys().enumerate().map(|(i, id)| (*id, i)).collect();
-    let data_tests = data_test_counts(current);
-    let unit_tests = unit_test_counts(current);
-    let nodes: Vec<LineageNode> = typed
-        .iter()
-        .map(|(id, &node_type)| {
-            let node = current.node(id);
-            LineageNode {
-                id: id.as_str().to_owned(),
-                name: lineage_node_name(current, id, node_type),
-                node_type,
-                // SQL-bearing types only — see [`LineageNodePayload::not_compiled`].
-                not_compiled: matches!(
-                    node_type,
-                    LineageNodeType::Model | LineageNodeType::Snapshot
-                ) && node.is_none_or(|n| n.compiled_code().is_none()),
-                data_tests: data_tests.get(*id).copied().unwrap_or(0),
-                unit_tests: unit_tests.get(*id).copied().unwrap_or(0),
-            }
-        })
-        .collect();
-
-    let edges = lineage_edges(current, &typed, &index_of);
-    Lineage { nodes, edges }
+    lineage_from_typed_map(current, &typed)
 }
 
 /// Build the typed node union for the lineage graph, ordered by full node
@@ -412,6 +415,15 @@ pub struct LineageNodePayload {
     /// decorates.
     #[serde(skip_serializing_if = "is_false")]
     pub changed: bool,
+    /// Focused-macro-DAG role (cute-dbt#345 Slice 3): `Some(User)` for a
+    /// macro-calling model and `Some(Downstream)` for a node in their
+    /// `ref()`-downstream closure — set ONLY on the `macro.html` focused
+    /// carrier. `None` on the full-manifest `dag.html` payload, and
+    /// serialized **only when `Some`** (the `changed` serde-skip
+    /// precedent) so the committed `dag.html` golden carries no
+    /// `macro_role` keys and stays byte-identical (R9).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub macro_role: Option<MacroRole>,
 }
 
 /// `serde(skip_serializing_if)` predicate for
@@ -770,6 +782,29 @@ pub fn build_lineage_payload(
     changed: Option<&ModelInScopeSet>,
 ) -> LineagePayload {
     let lineage = build_lineage(current, models);
+    // Full-manifest lineage carries no macro role — every node maps to
+    // `None`, so the serde-skip gate keeps the dag.html golden byte-stable.
+    lineage_payload_from(
+        current,
+        lineage,
+        |id| changed.is_some_and(|set| set.contains(id)),
+        |_| None,
+    )
+}
+
+/// Assemble a [`LineagePayload`] from a built [`Lineage`], resolving each
+/// node's `changed` flag and `macro_role` via the supplied closures.
+///
+/// The shared core of [`build_lineage_payload`] (full manifest, no role)
+/// and [`build_macro_lineage_payload`] (focused subgraph, role-stamped) —
+/// the per-type detail/paths/badge assembly lives here once. Pure
+/// assembly over owned manifest data; no I/O.
+fn lineage_payload_from(
+    current: &Manifest,
+    lineage: Lineage,
+    is_changed: impl Fn(&NodeId) -> bool,
+    role_of: impl Fn(&NodeId) -> Option<MacroRole>,
+) -> LineagePayload {
     let edges = lineage
         .edges
         .iter()
@@ -809,7 +844,8 @@ pub fn build_lineage_payload(
             };
             LineageNodePayload {
                 badge: typed_badge(n.node_type, n.data_tests, n.unit_tests),
-                changed: changed.is_some_and(|set| set.contains(&id)),
+                changed: is_changed(&id),
+                macro_role: role_of(&id),
                 id: n.id,
                 name: n.name,
                 node_type: n.node_type,
@@ -826,6 +862,123 @@ pub fn build_lineage_payload(
         edges,
         cte_dags: BTreeMap::new(),
     }
+}
+
+/// Build the focused-macro lineage payload for `macro.html` (cute-dbt#345
+/// Slice 3) — the [`MacroFocusSet`]
+/// restricted to its own `users ∪ downstream` vertex set, with each node
+/// stamped [`MacroRole`].
+///
+/// Restricts the typed-node union to the focus ids
+/// (`focused_typed_node_map`) instead of the whole manifest — without
+/// the restriction, the shared `build_typed_node_map` unconditionally
+/// folds in EVERY snapshot/seed/source/exposure, flooding the focused
+/// DAG. The `depends_on.nodes` edges then fall out via the existing
+/// induced-subgraph filter (`lineage_edges` keeps only edges between
+/// union members), so a focused payload is the same forward-edge POD over
+/// a smaller vertex set. Roles come from `MacroFocusSet` membership:
+/// `users` ⇒ [`MacroRole::User`], everything else (the closure) ⇒
+/// [`MacroRole::Downstream`]. The two sets are disjoint by construction,
+/// so a node is `User` iff it is in `focus.users`.
+///
+/// Pure assembly — no domain walk here; the focus set is computed upstream
+/// (`cli::execute_explore`), keeping this layer a pure renderer.
+#[must_use]
+pub fn build_macro_lineage_payload(current: &Manifest, focus: &MacroFocusSet) -> LineagePayload {
+    let typed = focused_typed_node_map(current, focus);
+    let lineage = lineage_from_typed_map(current, &typed);
+    // `changed` is unused on the macro page (no `--pr-diff` underlay on
+    // the focused carrier); every node maps to `false`.
+    lineage_payload_from(
+        current,
+        lineage,
+        |_| false,
+        |id| {
+            Some(if focus.users.contains(id) {
+                MacroRole::User
+            } else {
+                MacroRole::Downstream
+            })
+        },
+    )
+}
+
+/// The typed node union RESTRICTED to a focus id set (cute-dbt#345 Slice
+/// 3) — the focused-DAG counterpart of [`build_typed_node_map`].
+///
+/// Unlike the full builder, this one never folds in the whole manifest:
+/// every node id is typed by consulting the manifest, but ONLY if it is
+/// in `focus.users ∪ focus.downstream`. A focus id absent from the
+/// manifest's `nodes`/`sources`/`exposures` maps is skipped (a defensive
+/// dangling id never becomes an untyped vertex). [`BTreeMap`] ordering
+/// keeps the payload deterministic (golden stability).
+fn focused_typed_node_map<'a>(
+    current: &'a Manifest,
+    focus: &MacroFocusSet,
+) -> BTreeMap<&'a NodeId, LineageNodeType> {
+    let mut typed: BTreeMap<&NodeId, LineageNodeType> = BTreeMap::new();
+    let in_focus = |id: &NodeId| focus.users.contains(id) || focus.downstream.contains(id);
+    for (id, node) in current.nodes() {
+        if !in_focus(id) {
+            continue;
+        }
+        let node_type = match node.resource_type() {
+            "model" => LineageNodeType::Model,
+            "snapshot" => LineageNodeType::Snapshot,
+            "seed" => LineageNodeType::Seed,
+            // Any other consumer type the closure reached (`test`,
+            // `operation`, …) is not a lineage vertex vocabulary member —
+            // skip it (the same silent-skip the full edge builder applies
+            // to non-vertex deps).
+            _ => continue,
+        };
+        typed.insert(id, node_type);
+    }
+    for id in current.sources().keys() {
+        if in_focus(id) {
+            typed.insert(id, LineageNodeType::Source);
+        }
+    }
+    for id in current.exposures().keys() {
+        if in_focus(id) {
+            typed.insert(id, LineageNodeType::Exposure);
+        }
+    }
+    typed
+}
+
+/// Assemble a [`Lineage`] (typed nodes + forward edges) from a prebuilt
+/// typed-node map — the shared core of [`build_lineage`] (full manifest)
+/// and [`build_macro_lineage_payload`] (focused subgraph). Both compute
+/// `not_compiled` per type and the deduplicated forward edge list the
+/// same way; only the node-set source differs.
+fn lineage_from_typed_map(
+    current: &Manifest,
+    typed: &BTreeMap<&NodeId, LineageNodeType>,
+) -> Lineage {
+    let index_of: HashMap<&NodeId, usize> =
+        typed.keys().enumerate().map(|(i, id)| (*id, i)).collect();
+    let data_tests = data_test_counts(current);
+    let unit_tests = unit_test_counts(current);
+    let nodes: Vec<LineageNode> = typed
+        .iter()
+        .map(|(id, &node_type)| {
+            let node = current.node(id);
+            LineageNode {
+                id: id.as_str().to_owned(),
+                name: lineage_node_name(current, id, node_type),
+                node_type,
+                not_compiled: matches!(
+                    node_type,
+                    LineageNodeType::Model | LineageNodeType::Snapshot
+                ) && node.is_none_or(|n| n.compiled_code().is_none()),
+                data_tests: data_tests.get(*id).copied().unwrap_or(0),
+                unit_tests: unit_tests.get(*id).copied().unwrap_or(0),
+            }
+        })
+        .collect();
+    let edges = lineage_edges(current, typed, &index_of);
+    Lineage { nodes, edges }
 }
 
 /// Build the per-model CTE-DAG map for the dag.html carrier
@@ -1010,12 +1163,15 @@ struct ExploreTestsTemplate<'a> {
 
 /// askama binding for `templates/explore-macro.html`.
 ///
-/// The third explore sub-page (cute-dbt#345, epic cute-dbt#99). Slice 1
-/// is the walking skeleton: an empty, real, zero-egress-clean shell that
-/// only the `--pr-diff`-changed-root-macro path emits, carrying the page
-/// chassis and the nav round-trip back to `dag.html`/`tests.html`. The
-/// focused macro DAG (Slice 3) and the filtered model+test directory
-/// (Slice 4) render into this shell in later slices.
+/// The third explore sub-page (cute-dbt#345, epic cute-dbt#99). Emitted
+/// only when a `--pr-diff` changed a root-project macro. Slice 3 renders
+/// the focused macro DAG: the [`build_macro_lineage_payload`] carrier (the
+/// `users ∪ downstream` subgraph, role-stamped) driven by the SAME
+/// vendored Cytoscape + cytoscape-dagre core and `explore-lineage.js`
+/// engine as `dag.html`, with the macro-callers emphasized and the
+/// downstream closure dimmed-as-context. The filtered model+test
+/// directory (Slice 4) and the legibility banner (Slice 5) land in this
+/// shell later.
 #[derive(Template)]
 #[template(path = "explore-macro.html", escape = "html")]
 struct ExploreMacroTemplate<'a> {
@@ -1023,7 +1179,26 @@ struct ExploreMacroTemplate<'a> {
     /// SHARED appearance engine (cute-dbt#242) — the page honors the
     /// saved `cute-dbt.appearance.v1` appearance (read-only).
     appearance_js: &'a str,
+    /// The vendored Cytoscape UMD core + the cytoscape-dagre layout
+    /// extension + the first-party lineage engine — the SAME pinned
+    /// assets `dag.html` embeds (cute-dbt#101; `assets/MANIFEST.toml`
+    /// untouched, R6). The macro page reuses the lineage engine verbatim
+    /// over the focused carrier.
+    cytoscape_js: &'a str,
+    cytoscape_dagre_js: &'a str,
+    explore_lineage_js: &'a str,
     favicon_data_uri: &'a str,
+    /// Pre-escaped JSON for the `explore-dag-data` carrier — the focused
+    /// [`LineagePayload`] from [`build_macro_lineage_payload`]. Each node
+    /// carries its `macro_role` (`"user"`/`"downstream"`), the per-role
+    /// boot-class hook in `explore-lineage.js`.
+    dag_json: &'a str,
+    /// The macro-caller (`users`) count — the emphasized models.
+    user_count: usize,
+    /// The downstream-closure count — the dimmed-as-context nodes.
+    downstream_count: usize,
+    /// Forward dependency edges in the focused subgraph.
+    edge_count: usize,
 }
 
 /// Serialize `value` for safe embedding inside an HTML
@@ -1100,9 +1275,9 @@ fn explore_models(
 
 /// Render the explore pages into `out_dir` (created if absent).
 ///
-/// Writes `dag.html` then `tests.html`, and — when `has_macro_focus` —
-/// the third sub-page `macro.html` (cute-dbt#345). A failure on any
-/// write (or on directory creation) surfaces the underlying
+/// Writes `dag.html` then `tests.html`, and — when `macro_focus` is
+/// `Some` — the third sub-page `macro.html` (cute-dbt#345). A failure on
+/// any write (or on directory creation) surfaces the underlying
 /// [`io::Error`] — the cli layer names `--out-dir` in the operator
 /// message. Template rendering itself is compile-time-checked askama
 /// (the same infallible-at-runtime posture as the report renderer).
@@ -1113,13 +1288,14 @@ fn explore_models(
 /// page. Either way the full `models` set renders — context never
 /// narrows scope.
 ///
-/// `has_macro_focus` (cute-dbt#345) is the resolved signal that the run
-/// carried a `--pr-diff` changing a root-project macro: `true` emits
-/// `macro.html` and renders the third nav anchor on every page; `false`
-/// keeps the two-page output (and its byte-identical goldens) unchanged.
-/// The renderer takes the pre-resolved flag, not the raw changed-macro
-/// id set — scope resolution stays in `cli/mod.rs`, so this layer is a
-/// pure renderer (the explore-lane posture).
+/// `macro_focus` (cute-dbt#345) is the resolved
+/// [`MacroFocusSet`] for the macro a
+/// `--pr-diff` changed: `Some(focus)` renders the focused macro DAG into
+/// `macro.html` (and the third nav anchor on every page); `None` keeps
+/// the two-page output (and its byte-identical goldens) unchanged. The
+/// renderer takes the pre-resolved focus set, not the raw changed-macro
+/// ids — scope resolution (and the domain walk) stays in `cli/mod.rs`, so
+/// this layer is a pure renderer (the explore-lane posture).
 ///
 /// # Errors
 ///
@@ -1131,9 +1307,14 @@ pub fn render_explore(
     models: &ModelInScopeSet,
     changed: Option<&ModelInScopeSet>,
     payload: &ReportPayload,
-    has_macro_focus: bool,
+    macro_focus: Option<&MacroFocusSet>,
 ) -> io::Result<()> {
     fs::create_dir_all(out_dir)?;
+
+    // The presence of a focus set gates the macro page + the conditional
+    // third nav anchor on every page (the byte-identity-golden contract:
+    // no anchor, no macro.html when `None`).
+    let has_macro_focus = macro_focus.is_some();
 
     let mut lineage = build_lineage_payload(current, models, changed);
     // cute-dbt#102 — the CTE ⇄ model toggle's per-model CTE DAGs ride
@@ -1197,17 +1378,27 @@ pub fn render_explore(
     .map_err(|err| io::Error::other(format!("render tests.html: {err}")))?;
     fs::write(out_dir.join("tests.html"), tests_html)?;
 
-    // cute-dbt#345 Slice 1 — the third explore sub-page. Emitted only
-    // when the run carried a `--pr-diff` changing a root-project macro;
-    // the no-macro path writes just dag.html/tests.html (the goldens'
-    // shape). Slice 1 renders the walking-skeleton empty shell — the
-    // focused macro DAG (Slice 3) and the filtered directory (Slice 4)
-    // fill it in later.
-    if has_macro_focus {
+    // cute-dbt#345 — the third explore sub-page. Emitted only when the
+    // run carried a `--pr-diff` changing a root-project macro; the
+    // no-macro path writes just dag.html/tests.html (the goldens' shape).
+    // Slice 3 renders the focused macro DAG: the `users ∪ downstream`
+    // subgraph (role-stamped) through the same vendored Cytoscape +
+    // cytoscape-dagre engine `dag.html` uses.
+    if let Some(focus) = macro_focus {
+        let macro_lineage = build_macro_lineage_payload(current, focus);
+        let macro_dag_json = json_for_html_script(&macro_lineage)
+            .map_err(|err| io::Error::other(format!("macro dag payload serialization: {err}")))?;
         let macro_html = ExploreMacroTemplate {
             sakura_css: SAKURA_CSS,
             appearance_js: APPEARANCE_JS,
+            cytoscape_js: CYTOSCAPE_JS,
+            cytoscape_dagre_js: CYTOSCAPE_DAGRE_JS,
+            explore_lineage_js: EXPLORE_LINEAGE_JS,
             favicon_data_uri: FAVICON_DATA_URI,
+            dag_json: &macro_dag_json,
+            user_count: focus.users.len(),
+            downstream_count: focus.downstream.len(),
+            edge_count: macro_lineage.edges.len(),
         }
         .render()
         .map_err(|err| io::Error::other(format!("render macro.html: {err}")))?;
@@ -1872,7 +2063,7 @@ mod tests {
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("both-pages");
 
-        render_explore(&dir, &current, &models, None, &payload, false).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload, None).expect("explore renders");
 
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html written");
         let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html written");
@@ -1925,8 +2116,8 @@ mod tests {
         let payload = payload_for(&current, &models);
         let dir_a = tmp_dir("det-a");
         let dir_b = tmp_dir("det-b");
-        render_explore(&dir_a, &current, &models, None, &payload, false).expect("first render");
-        render_explore(&dir_b, &current, &models, None, &payload, false).expect("second render");
+        render_explore(&dir_a, &current, &models, None, &payload, None).expect("first render");
+        render_explore(&dir_b, &current, &models, None, &payload, None).expect("second render");
         for page in ["dag.html", "tests.html"] {
             let a = fs::read(dir_a.join(page)).expect("page a");
             let b = fs::read(dir_b.join(page)).expect("page b");
@@ -1942,7 +2133,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("nested").join("deeper");
-        render_explore(&dir, &current, &models, None, &payload, false).expect("creates out-dir");
+        render_explore(&dir, &current, &models, None, &payload, None).expect("creates out-dir");
         assert!(dir.join("dag.html").exists());
         assert!(dir.join("tests.html").exists());
         let _ = fs::remove_dir_all(dir.parent().expect("parent"));
@@ -1954,7 +2145,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("empty");
-        render_explore(&dir, &current, &models, None, &payload, false)
+        render_explore(&dir, &current, &models, None, &payload, None)
             .expect("empty manifest renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
@@ -2031,7 +2222,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("cte-toggle");
-        render_explore(&dir, &current, &models, None, &payload, false).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload, None).expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         // The carrier embeds the per-model CTE DAG map.
         assert!(dag.contains("\"cte_dags\":{"), "cte_dags carrier present");
@@ -2086,7 +2277,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("tests-viewer");
-        render_explore(&dir, &current, &models, None, &payload, false).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload, None).expect("explore renders");
         let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html");
         // The shared askama partial (report.html's test card) renders.
         assert!(
@@ -2657,7 +2848,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("contract-version");
-        render_explore(&dir, &current, &models, None, &payload, false).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload, None).expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
             dag.contains(&format!(
@@ -2762,7 +2953,7 @@ mod tests {
         let payload = payload_for(&current, &models);
         let changed = changed_set(&["model.shop.dim_orders"]);
         let dir = tmp_dir("change-context");
-        render_explore(&dir, &current, &models, Some(&changed), &payload, false)
+        render_explore(&dir, &current, &models, Some(&changed), &payload, None)
             .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
@@ -2796,13 +2987,213 @@ mod tests {
         let payload = payload_for(&current, &models);
         let empty = ModelInScopeSet::new();
         let dir = tmp_dir("change-context-zero");
-        render_explore(&dir, &current, &models, Some(&empty), &payload, false)
+        render_explore(&dir, &current, &models, Some(&empty), &payload, None)
             .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(dag.contains("0 changed in this diff"), "honest zero");
         assert!(
             !dag.contains("\"changed\":true"),
             "no node marks changed in the carrier",
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ----- build_macro_lineage_payload (cute-dbt#345 Slice 3) --------
+    //
+    // The focused macro DAG restricts the lineage to `users ∪ downstream`
+    // and stamps each node's `macro_role`. `build_macro_lineage_payload`
+    // takes the already-computed `MacroFocusSet` (the domain seam) — it
+    // never calls a domain walker, so these adapter tests construct the
+    // focus set by hand and assert the focused subgraph + roles.
+
+    /// A small lineage: stg -> dim -> mart, plus an unrelated `other`
+    /// node that must NOT appear in a focus restricted to stg/dim/mart.
+    fn focus_chain_manifest() -> Manifest {
+        manifest_of(vec![
+            model("model.shop.stg_orders", Some("select 1"), &[]),
+            model(
+                "model.shop.dim_orders",
+                Some("select 1"),
+                &["model.shop.stg_orders"],
+            ),
+            model(
+                "model.shop.mart_orders",
+                Some("select 1"),
+                &["model.shop.dim_orders"],
+            ),
+            // Outside the focus set — proves the restriction excludes it.
+            model("model.shop.other", Some("select 1"), &[]),
+        ])
+    }
+
+    fn focus_of(users: &[&str], downstream: &[&str]) -> MacroFocusSet {
+        MacroFocusSet {
+            users: users.iter().map(|s| NodeId::new(*s)).collect(),
+            downstream: downstream.iter().map(|s| NodeId::new(*s)).collect(),
+        }
+    }
+
+    #[test]
+    fn macro_payload_restricts_nodes_to_the_focus_set() {
+        let current = focus_chain_manifest();
+        // stg is the macro caller; dim + mart are its downstream.
+        let focus = focus_of(
+            &["model.shop.stg_orders"],
+            &["model.shop.dim_orders", "model.shop.mart_orders"],
+        );
+        let payload = build_macro_lineage_payload(&current, &focus);
+        let ids: Vec<&str> = payload.nodes.iter().map(|n| n.id.as_str()).collect();
+        // Exactly the focus union, id-ordered — `other` is excluded even
+        // though `build_typed_node_map` would otherwise pull the whole
+        // manifest's non-model nodes in.
+        assert_eq!(
+            ids,
+            vec![
+                "model.shop.dim_orders",
+                "model.shop.mart_orders",
+                "model.shop.stg_orders",
+            ],
+        );
+        assert!(
+            !ids.contains(&"model.shop.other"),
+            "a node outside the focus set must not render: {ids:?}",
+        );
+    }
+
+    #[test]
+    fn macro_payload_stamps_user_and_downstream_roles() {
+        let current = focus_chain_manifest();
+        let focus = focus_of(
+            &["model.shop.stg_orders"],
+            &["model.shop.dim_orders", "model.shop.mart_orders"],
+        );
+        let payload = build_macro_lineage_payload(&current, &focus);
+        let role_of = |id: &str| {
+            payload
+                .nodes
+                .iter()
+                .find(|n| n.id == id)
+                .and_then(|n| n.macro_role)
+        };
+        assert_eq!(role_of("model.shop.stg_orders"), Some(MacroRole::User));
+        assert_eq!(
+            role_of("model.shop.dim_orders"),
+            Some(MacroRole::Downstream),
+        );
+        assert_eq!(
+            role_of("model.shop.mart_orders"),
+            Some(MacroRole::Downstream),
+        );
+    }
+
+    #[test]
+    fn macro_payload_edges_are_the_induced_subgraph() {
+        let current = focus_chain_manifest();
+        let focus = focus_of(
+            &["model.shop.stg_orders"],
+            &["model.shop.dim_orders", "model.shop.mart_orders"],
+        );
+        let payload = build_macro_lineage_payload(&current, &focus);
+        // stg -> dim -> mart, all inside the focus; the `other` node's
+        // (absent) edges never appear.
+        assert_eq!(
+            payload.edges,
+            vec![
+                LineageEdgePayload {
+                    from: "model.shop.dim_orders".to_owned(),
+                    to: "model.shop.mart_orders".to_owned(),
+                },
+                LineageEdgePayload {
+                    from: "model.shop.stg_orders".to_owned(),
+                    to: "model.shop.dim_orders".to_owned(),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn macro_role_serializes_to_user_and_downstream_strings() {
+        let current = focus_chain_manifest();
+        let focus = focus_of(&["model.shop.stg_orders"], &["model.shop.dim_orders"]);
+        let payload = build_macro_lineage_payload(&current, &focus);
+        let json = json_for_html_script(&payload).expect("serializes");
+        let round: serde_json::Value = serde_json::from_str(&json).expect("round-trips");
+        let role = |id: &str| {
+            round["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|n| n["id"] == id)
+                .and_then(|n| n["macro_role"].as_str())
+                .map(str::to_owned)
+        };
+        assert_eq!(role("model.shop.stg_orders").as_deref(), Some("user"));
+        assert_eq!(role("model.shop.dim_orders").as_deref(), Some("downstream"));
+    }
+
+    #[test]
+    fn non_macro_payload_carries_no_macro_role_keys() {
+        // The byte-stability guard for the committed dag.html golden: the
+        // full-manifest lineage payload (no focus) serializes ZERO
+        // `macro_role` keys — the serde-skip gate keeps the pre-#345 shape.
+        let current = three_model_manifest();
+        let payload = build_lineage_payload(&current, &all_models(&current), None);
+        assert!(payload.nodes.iter().all(|n| n.macro_role.is_none()));
+        let json = json_for_html_script(&payload).expect("serializes");
+        assert!(
+            !json.contains("macro_role"),
+            "the non-macro carrier must omit the key entirely: {json}",
+        );
+    }
+
+    #[test]
+    fn render_explore_with_macro_focus_writes_a_non_empty_macro_page() {
+        let current = focus_chain_manifest();
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let focus = focus_of(
+            &["model.shop.stg_orders"],
+            &["model.shop.dim_orders", "model.shop.mart_orders"],
+        );
+        let dir = tmp_dir("macro-focus");
+        render_explore(&dir, &current, &models, None, &payload, Some(&focus))
+            .expect("explore renders");
+        let macro_html = fs::read_to_string(dir.join("macro.html")).expect("macro.html written");
+        // The focused carrier rides macro.html and carries the role keys.
+        assert!(
+            macro_html.contains("explore-dag-data"),
+            "macro.html embeds the focused lineage carrier",
+        );
+        assert!(
+            macro_html.contains("\"macro_role\":\"user\""),
+            "the carrier marks the macro caller: {macro_html}",
+        );
+        assert!(
+            macro_html.contains("\"macro_role\":\"downstream\""),
+            "the carrier marks the downstream nodes",
+        );
+        // The dag.html carrier stays role-free (the serde-skip gate) —
+        // the literal `n.macro_role` appears in the embedded engine SOURCE,
+        // so the guard targets the SERIALIZED KEY (`"macro_role":`), which
+        // only a focused carrier emits.
+        let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
+        assert!(
+            !dag.contains("\"macro_role\":"),
+            "the full-manifest dag.html carrier carries no macro_role keys",
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_explore_without_macro_focus_writes_no_macro_page() {
+        let current = three_model_manifest();
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let dir = tmp_dir("no-macro-focus");
+        render_explore(&dir, &current, &models, None, &payload, None).expect("explore renders");
+        assert!(
+            !dir.join("macro.html").exists(),
+            "the no-focus path must not emit macro.html",
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2818,7 +3209,7 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("no-change-context");
-        render_explore(&dir, &current, &models, None, &payload, false).expect("explore renders");
+        render_explore(&dir, &current, &models, None, &payload, None).expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
             !dag.contains("<span class=\"legend-chip changed\">"),

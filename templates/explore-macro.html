@@ -20,14 +20,17 @@
 {% include "partials/base.css" %}
 </style>
 <style>
-{# cute-dbt#345 — the explorer macro view (epic cute-dbt#99). Slice 1 is
-   the walking skeleton: the third explore sub-page, wired into the
-   existing dag.html ⇄ tests.html nav, carrying only the page chassis and
-   an empty "no focused macro" placeholder. The focused macro DAG
-   (cute-dbt#345 Slice 3) and the filtered model+test directory (Slice 4)
-   render into this shell in later slices. Like the sibling explore pages
-   this embeds no Mermaid, no DataTables, no jQuery — the chassis re-uses
-   the shared semantic tokens (cute-dbt#242) so all eight themes apply. #}
+{# cute-dbt#345 Slice 3 — the explorer macro view (epic cute-dbt#99): the
+   FOCUSED macro DAG. The `users ∪ downstream` subgraph renders through the
+   same vendored Cytoscape + cytoscape-dagre engine and explore-lineage.js
+   `dag.html` uses — macro callers emphasized (.macro-user), the downstream
+   closure dimmed-as-context (.macro-downstream), both applied once at boot.
+   The lineage-host chrome mirrors dag.html (canvas host + detail card +
+   tooltip + legend) so explore-lineage.js binds unchanged. The filtered
+   model+test directory (Slice 4) and the legibility banner (Slice 5) land
+   in this shell later. Like the sibling explore pages this embeds no
+   Mermaid, no DataTables, no jQuery; the chassis re-uses the shared
+   semantic tokens (cute-dbt#242) so all eight themes apply. #}
 body { max-width: 72rem; }
 /* generic code/kbd surfaces re-skin with theme tokens (the report's
    .td-defined-in idiom, cute-dbt#240): Sakura's constant #f1f1f1 fill is
@@ -37,7 +40,52 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
 .explore-header h1 { margin-bottom: 0.25rem; }
 .explore-nav a { font-size: 0.95rem; }
 .explore-counts { color: var(--text-muted); font-size: 0.9rem; }
-.explore-empty { color: var(--text-muted); font-style: italic; }
+.lineage-toolbar { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.lineage-search { position: relative; flex: 0 1 22rem; }
+.lineage-search-input { width: 100%; margin-bottom: 0; }
+.lineage-search-results { position: absolute; z-index: 10; left: 0; right: 0; margin: 0.15rem 0 0; padding: 0.2rem 0; list-style: none; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; box-shadow: 0 4px 14px rgba(28, 28, 31, 0.12); max-height: 16rem; overflow-y: auto; }
+.lineage-search-results li { margin: 0; padding: 0.25rem 0.6rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; cursor: pointer; }
+.lineage-search-results li.is-active { background: var(--accent-tint); }
+.lineage-search-results li.lineage-search-none { color: var(--text-faint); font-style: italic; cursor: default; }
+.lineage-canvas { height: min(70vh, 40rem); border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.lineage-canvas:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lineage-empty { color: var(--text-muted); font-style: italic; }
+.lineage-legend { color: var(--text-muted); font-size: 0.85rem; margin-top: 0.5rem; }
+.lineage-legend .legend-chip { display: inline-block; padding: 0 0.4rem; border-radius: 4px; color: var(--dag-node-text); }
+/* cute-dbt#345 — the macro-role legend chips. Canvas-paired with the
+   explore-lineage.js .macro-user emphasis fill and the .macro-downstream
+   soft dim, so the legend can never desync from the canvas (the report's
+   fixed-DAG-palette posture). */
+.lineage-legend .legend-chip.macro-user { border: 2px solid #0072B2; background: #d4e7f5; font-weight: 600; }
+.lineage-legend .legend-chip.macro-downstream { border: 1.5px solid #8b8b96; background: #e8f1f8; opacity: 0.55; }
+.lineage-hint { color: var(--text-muted); font-size: 0.85rem; margin: 0.25rem 0; }
+.lineage-view { position: relative; }
+.lineage-tooltip { position: absolute; z-index: 20; max-width: 22rem; padding: 0.35rem 0.6rem; background: var(--tooltip-bg); color: var(--tooltip-fg); border-radius: 5px; box-shadow: 0 4px 14px rgba(28, 28, 31, 0.25); font-size: 0.8rem; line-height: 1.35; pointer-events: none; }
+.lineage-tooltip .tooltip-name { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 600; display: block; }
+.lineage-tooltip .tooltip-fact { display: block; color: var(--tooltip-fg); opacity: 0.85; }
+.model-detail-card { margin-top: 0.75rem; padding: 0.75rem 1rem; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.model-detail-card h2 { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 1.05rem; margin: 0 0 0.35rem; overflow-wrap: anywhere; }
+.model-detail-card .detail-description { margin: 0 0 0.5rem; color: var(--text); }
+.model-detail-card .detail-facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.1rem 0.8rem; margin: 0 0 0.5rem; font-size: 0.9rem; }
+.model-detail-card .detail-facts dt { color: var(--text-muted); font-weight: 600; }
+.model-detail-card .detail-facts dd { margin: 0; overflow-wrap: anywhere; }
+.model-detail-card .detail-grain-source { color: var(--text-muted); font-size: 0.85rem; }
+.model-detail-card .detail-grain-unknown { color: var(--badge-amber); font-weight: 600; }
+.model-detail-card .detail-grain-detected { margin: 0.1rem 0 0; padding-left: 1.1rem; font-size: 0.85rem; color: var(--text-muted); }
+.model-detail-card .detail-grain-detected li { margin: 0; overflow-wrap: anywhere; }
+.model-detail-card .detail-tag { display: inline-block; margin-right: 0.3rem; padding: 0 0.45rem; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); font-size: 0.8rem; }
+.model-detail-card .detail-meta-value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; display: block; }
+.model-detail-card .detail-columns { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin: 0.25rem 0 0; }
+.model-detail-card .detail-columns th, .model-detail-card .detail-columns td { text-align: left; padding: 0.15rem 0.6rem 0.15rem 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+.model-detail-card .detail-columns code { overflow-wrap: anywhere; }
+.model-detail-card .detail-empty { color: var(--text-faint); font-style: italic; }
+.model-detail-card .detail-paths { font-size: 0.85rem; }
+.model-detail-card .detail-paths code { overflow-wrap: anywhere; }
+.model-detail-card .detail-path-fixtures { color: var(--text-muted); }
+.model-detail-card .detail-notcompiled { display: inline-block; padding: 0 0.4rem; border: 1.5px dashed #b07400; border-radius: 4px; background: var(--dag-transform-fill); color: var(--dag-node-text); font-size: 0.8rem; }
+.model-detail-card .detail-type { display: inline-block; margin-right: 0.35rem; padding: 0 0.4rem; border: 1.5px solid var(--dag-import-stroke); border-radius: 4px; color: var(--dag-node-text); font-size: 0.8rem; }
+.model-detail-card .detail-changed { display: inline-block; margin-left: 0.35rem; padding: 0 0.4rem; border: 1.5px solid var(--dag-import-stroke); border-radius: 4px; background: var(--dag-import-fill); color: var(--dag-node-text); box-shadow: 0 0 0 2px rgba(230, 159, 0, 0.55); font-size: 0.8rem; }
+.model-detail-card .detail-section-title { margin: 0.5rem 0 0.15rem; font-size: 0.85rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
 </style>
 </head>
 <body>
@@ -45,7 +93,9 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
 <header class="explore-header">
   <div>
     <h1>Macro focus</h1>
-    <p class="explore-counts">focused macro blast radius</p>
+    {# cute-dbt#345 Slice 3 — the focus counts: the macro-calling models
+       (emphasized) and their full ref()-downstream closure (dimmed). #}
+    <p class="explore-counts">{{ user_count }} calling model{% if user_count != 1 %}s{% endif %}, {{ downstream_count }} downstream node{% if downstream_count != 1 %}s{% endif %}, {{ edge_count }} edge{% if edge_count != 1 %}s{% endif %}</p>
   </div>
   <nav class="explore-nav" aria-label="Explore pages">
     <a href="dag.html">&larr; Model lineage</a>
@@ -53,21 +103,72 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
   </nav>
 </header>
 
-{# cute-dbt#345 Slice 1 — the walking-skeleton placeholder. The focused
-   macro DAG + filtered directory land here in Slices 3–4; until then the
-   page renders only when --pr-diff carries a changed root-project macro
-   (the conditional emission in render_explore), and shows this honest
-   empty state. #}
-<p class="explore-empty">No focused macro view yet — this page is the
-explorer macro-view walking skeleton (cute-dbt#345).</p>
+<section class="lineage" aria-label="Focused macro lineage DAG">
+  {# The focused macro DAG reuses dag.html's canvas host + search combobox +
+     detail card + tooltip chrome verbatim so explore-lineage.js binds
+     unchanged (the engine queries .lineage-search-input / .lineage-search-
+     results and binds them at boot). The CTE view-toggle is OMITTED — the
+     macro page ships no explore-cte.js. The macro-role boot classes do the
+     emphasis/dim; search + click/Space lineage tracing compose on top. #}
+  <div class="lineage-toolbar">
+    <div class="lineage-search">
+      <input type="search" class="lineage-search-input" placeholder="Search nodes&hellip;"
+             aria-label="Search focused macro nodes" role="combobox" aria-expanded="false"
+             aria-controls="lineage-search-results" autocomplete="off" spellcheck="false">
+      <ul class="lineage-search-results" id="lineage-search-results" role="listbox"
+          aria-label="Matching nodes" hidden></ul>
+    </div>
+    <p class="lineage-hint">macro callers are emphasized; their <code>ref()</code>-downstream is dimmed as context &middot; click or <kbd>Space</kbd> a node to trace its lineage</p>
+  </div>
+  <div class="lineage-view">
+  <div class="lineage-canvas" tabindex="0" aria-label="Interactive focused macro lineage graph"></div>
+  <div class="lineage-tooltip" role="tooltip" aria-hidden="true" hidden></div>
+  <p class="lineage-empty" hidden>No focused nodes — no root-project model calls this macro.</p>
+  <div class="lineage-legend">
+    <span class="legend-chip macro-user">macro caller</span>
+    <span class="legend-chip macro-downstream">downstream</span>
+    &mdash; a <strong>caller</strong> is a root-project model that calls the changed macro; <strong>downstream</strong> nodes are everything its output reaches via <code>ref()</code> (dimmed as context, never excluded).
+  </div>
+  </div>
+  <aside class="model-detail-card" aria-label="Model detail" hidden></aside>
+</section>
+
+{# cute-dbt#101 — the focused lineage carrier. The SAME `explore-dag-data`
+   element id explore-lineage.js reads, so the engine boots over the
+   focused payload verbatim; each node additionally carries its
+   `macro_role` (the per-role boot-class hook). #}
+<script type="application/json" id="explore-dag-data">{{ dag_json|safe }}</script>
 
 <script>
 {# cute-dbt#242 — the SHARED appearance engine: reads the saved
    cute-dbt.appearance.v1 appearance and applies the html-level attributes
    the shared token partial keys on, so this page honors the same saved
    theme as the report. Read-only here — the explore-side settings
-   affordance is cute-dbt#219's lane. #}
+   affordance is cute-dbt#219's lane. Parses FIRST so the attributes are in
+   place before the lineage engine boots. #}
 {{ appearance_js|safe }}
+</script>
+<script>
+{# cute-dbt#101 — the vendored Cytoscape UMD core (the same pinned bundle;
+   see assets/MANIFEST.toml). Same embedding contract as every asset:
+   include_str! into .rodata, inline interpolation, never ESM, never a
+   runtime asset dir. #}
+{{ cytoscape_js|safe }}
+</script>
+<script>
+{# cute-dbt#101 — the vendored cytoscape-dagre UMD layout extension (dagre
+   bundled internally). Parses AFTER the core so its UMD tail auto-registers
+   the `dagre` layout against window.cytoscape. Explore-page only — the
+   report's init contract stays layout-plugin-free. #}
+{{ cytoscape_dagre_js|safe }}
+</script>
+<script>
+{# cute-dbt#101 — the first-party explore lineage engine, reused verbatim
+   over the focused carrier. The cute-dbt#345 macro-role boot block keys on
+   each node's `macroRole` and applies the .macro-user / .macro-downstream
+   class once at boot. Banner-pin + end-of-file sentinel tests guard the
+   include. #}
+{{ explore_lineage_js|safe }}
 </script>
 </body>
 </html>
