@@ -11401,7 +11401,7 @@ fn render_explore_theme_pages(stem: &str) -> PathBuf {
     );
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
     let _ = std::fs::remove_dir_all(&dir);
-    render_explore(&dir, &m, &models, None, &payload).expect("explore renders");
+    render_explore(&dir, &m, &models, None, &payload, false).expect("explore renders");
     dir
 }
 

@@ -89,7 +89,8 @@ table.expected-table th, table.expected-table td { border-color: var(--border); 
     <p class="explore-counts">full manifest — {{ model_count }} model{% if model_count != 1 %}s{% endif %}, {{ test_count }} unit test{% if test_count != 1 %}s{% endif %}</p>
   </div>
   <nav class="explore-nav" aria-label="Explore pages">
-    <a href="dag.html">&larr; Model lineage</a>
+    <a href="dag.html">&larr; Model lineage</a>{% if has_macro_focus %}
+    <a href="macro.html">Macro focus &rarr;</a>{% endif %}
   </nav>
 </header>
 

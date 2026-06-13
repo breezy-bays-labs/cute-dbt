@@ -74,7 +74,7 @@ fn malformed_patch(world: &mut World) {
 /// ONLY the `similarity index 100%` + `rename from`/`rename to`
 /// extended headers (no `---`/`+++`, no hunks — the real `git diff`
 /// shape the cute-dbt#80 parser collects).
-fn synthesize_explore_patch(world: &World) -> PathBuf {
+pub fn synthesize_explore_patch(world: &World) -> PathBuf {
     let mut patch = String::new();
     for p in &world.explore_changed_files {
         patch.push_str(&format!(

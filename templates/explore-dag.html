@@ -143,7 +143,8 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
     <p class="explore-counts">full manifest — {{ model_count }} model{% if model_count != 1 %}s{% endif %}{% if snapshot_count > 0 %}, {{ snapshot_count }} snapshot{% if snapshot_count != 1 %}s{% endif %}{% endif %}{% if seed_count > 0 %}, {{ seed_count }} seed{% if seed_count != 1 %}s{% endif %}{% endif %}{% if source_count > 0 %}, {{ source_count }} source{% if source_count != 1 %}s{% endif %}{% endif %}{% if exposure_count > 0 %}, {{ exposure_count }} exposure{% if exposure_count != 1 %}s{% endif %}{% endif %}, {{ edge_count }} edge{% if edge_count != 1 %}s{% endif %}{% if not_compiled_count > 0 %}, {{ not_compiled_count }} not compiled{% endif %}{% if has_change_context %}, {{ changed_count }} changed in this diff{% endif %}</p>
   </div>
   <nav class="explore-nav" aria-label="Explore pages">
-    <a href="tests.html">Unit tests &rarr;</a>
+    <a href="tests.html">Unit tests &rarr;</a>{% if has_macro_focus %}
+    <a href="macro.html">Macro focus &rarr;</a>{% endif %}
   </nav>
 </header>
 
