@@ -1318,7 +1318,12 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
         // cute-dbt#106 — PR-diff change context. The payload omits the
         // key entirely on a no-context render, so `n.changed` is
         // undefined there and every node maps to 0.
-        changed: n.changed ? 1 : 0
+        changed: n.changed ? 1 : 0,
+        // cute-dbt#345 — the focused-macro-DAG role ("user" / "downstream").
+        // Present ONLY on the macro.html carrier (the dag.html payload omits
+        // it, so it is undefined there → "" → no macro-role class). Drives
+        // the boot-time .macro-user / .macro-downstream class below.
+        macroRole: String(n.macro_role || "")
       }
     });
   });
@@ -1402,6 +1407,21 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
       "underlay-padding": 5,
       "underlay-shape": "round-rectangle"
     }},
+    // cute-dbt#345 — the focused-macro-DAG roles (macro.html only). A
+    // SEPARATE visual channel from the highlight vocabulary (.dim/.trace/
+    // .sel) and the change-context underlay, so all compose: clicking a
+    // node still dims the complement, and clearing returns to this static
+    // macro-role dim (see clearHighlight). .macro-user EMPHASIZES the macro
+    // callers (a stronger blue fill + thicker border that pops above the
+    // base node style); .macro-downstream is a SOFT static dim (0.45,
+    // softer than .dim's 0.15) so the context stays legible but recessive.
+    // Applied once at boot from data(macroRole) — never per click.
+    { selector: "node.macro-user", style: {
+      "background-color": "#d4e7f5",
+      "border-color": "#0072B2",
+      "border-width": 3
+    }},
+    { selector: "node.macro-downstream", style: { "opacity": 0.45 } },
     { selector: "edge", style: {
       "curve-style": "bezier",
       "width": 1.8,
@@ -1433,6 +1453,19 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
     minZoom: 0.2,
     maxZoom: 2.5,
     boxSelectionEnabled: false
+  });
+
+  // cute-dbt#345 — the focused-macro-DAG role classes, applied ONCE at
+  // boot from data(macroRole). On dag.html the key is absent (macroRole
+  // === "") so this is a no-op; on macro.html it emphasizes the macro
+  // callers (.macro-user) and dims the downstream closure
+  // (.macro-downstream). These static classes are NEVER removed by
+  // clearHighlight (it touches only dim/sel/trace), so clearing an
+  // interactive highlight returns to this macro-role dim — never to
+  // all-visible (the interactive .dim/.trace composes on top, in place).
+  cy.batch(function () {
+    cy.nodes('[macroRole = "user"]').addClass("macro-user");
+    cy.nodes('[macroRole = "downstream"]').addClass("macro-downstream");
   });
 
   // ---- HIGHLIGHT (click / search-select; in-place, never a commit) --------
