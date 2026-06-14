@@ -74,3 +74,24 @@ Feature: explore emits a macro-focus sub-page only when a root macro changed
     And macro.html marks the model "dim_claims" as a macro "downstream"
     And macro.html does not render the model "unrelated"
     And the focused macro DAG carries exactly 2 nodes
+
+  # cute-dbt#345 (AC1 + AC3) — the filtered artifact directory. The macro
+  # page lists ONLY the models + tests that call the macro, grouped by
+  # project folder, the two kinds surfaced as SEPARATE partitions (never
+  # merged — the get_where_subquery non-merge rule). Here `stg_claims`
+  # (a model caller) appears in the models partition under its folder; no
+  # root-project test calls the macro, so the tests partition is an honest
+  # empty state.
+  @no-baseline-usage-error
+  Scenario: the macro page lists the calling models in a folder-grouped directory
+    Given the explore manifest declares the model "stg_claims"
+    And the explore model "stg_claims" has source path "models/staging/stg_claims.sql"
+    And the explore manifest carries the root-project macro "add_dq_flags" at "macros/add_dq_flags.sql"
+    And the explore model "stg_claims" calls the macro "add_dq_flags"
+    And the PR diff changes the explore file "macros/add_dq_flags.sql"
+    When I run cute-dbt explore on the macro manifest with the PR diff
+    Then the exit code is 0
+    And the explore out directory contains "macro.html"
+    And macro.html renders the filtered artifact directory
+    And the macro directory models partition lists "stg_claims" under "models/staging"
+    And the macro directory tests partition is empty

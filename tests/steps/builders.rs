@@ -295,6 +295,22 @@ pub fn model_node_with_original_file_path(
     )
 }
 
+/// Like [`model_node_with_original_file_path`] but also carries a
+/// `patch_path` (the model's scheme-stripped `schema.yml`) — the
+/// cute-dbt#413 `config` change-axis matches the diff against this. The
+/// builder mirrors the dbt-emitted package-relative, scheme-stripped form.
+#[must_use]
+pub fn model_node_with_ofp_and_patch_path(
+    bare: &str,
+    checksum: &str,
+    compiled: Option<&str>,
+    original_file_path: &str,
+    patch_path: &str,
+) -> Node {
+    model_node_with_original_file_path(bare, checksum, compiled, original_file_path)
+        .with_patch_path(Some(patch_path.to_owned()))
+}
+
 /// A deterministic multi-line `raw_code` (raw Jinja, dbt-core shape:
 /// trailing newline already stripped) for the model-SQL-diff scenarios
 /// (cute-dbt#111). Line 2 is the value a `ModelSqlTargetKind::Edit` /

@@ -100,6 +100,36 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     Then the exit code is 0
     And the rendered report shows "stg_payments" with the "no unit tests wired" empty state
 
+  # --- cute-dbt#413 (Slice B): per-model change-axis attribution ---
+  #
+  # The Models lens attributes each in-scope model across three axes —
+  # body (its .sql changed), config (its schema.yml / patch_path changed),
+  # unit_test (it hosts an in-scope test). A PR that changes BOTH a model's
+  # .sql AND its schema.yml fires body + config on that one model — the
+  # multi-axis case the report renders as distinct chips. The render payload
+  # carries the per-model `axes` object + the `config_file` (the optgroup
+  # grouping key); the axis chips + optgroup grouping are verified in a real
+  # browser by tests/headless_toggle.rs. The `config` axis is the model's
+  # schema.yml ONLY (NOT the dbt_project.yml config-tree — that keeps its
+  # own provenance chip).
+
+  Scenario: A model whose .sql and schema.yml both change is attributed to body and config
+    Given a PR diff that changes "models/marts/fct_revenue.sql" and "models/marts/_marts__models.yml"
+    And the manifest contains a model with original_file_path "models/marts/fct_revenue.sql" and schema file "models/marts/_marts__models.yml"
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report's models-in-scope listing contains "fct_revenue"
+    And the model "fct_revenue" is attributed to the axes "body,config"
+    And the model "fct_revenue" carries the config file "models/marts/_marts__models.yml"
+
+  Scenario: A model whose only its schema.yml changes is attributed to config (not body)
+    Given a PR diff that changes "models/marts/_marts__models.yml"
+    And the manifest contains a model with original_file_path "models/marts/fct_revenue.sql" and schema file "models/marts/_marts__models.yml"
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report's models-in-scope listing contains "fct_revenue"
+    And the model "fct_revenue" is attributed to the axes "config"
+
   # --- Project-root path rewriting (load-bearing for the Action wrapper) ---
 
   Scenario: --project-root rewrites PR-diff paths so a sub-directory dbt project is in scope

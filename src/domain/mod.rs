@@ -50,6 +50,7 @@ pub mod manifest;
 pub mod model_yaml;
 pub mod path;
 pub mod pr_comment;
+pub mod pr_comment_anchor;
 pub mod pr_dag;
 pub mod pr_diff;
 pub mod preflight;
@@ -103,7 +104,7 @@ pub use governance::{
 pub use grain::{GrainKind, GrainSignal, model_grain_signals, test_is_enabled};
 pub use macro_lens::{
     MacroFocusSet, changed_macros_baseline, changed_macros_pr_diff, macro_blast_radius,
-    macro_focus_set,
+    macro_focus_set, macro_test_consumers,
 };
 pub use manifest::{
     Checksum, ColumnFacts, Constraint, ConstraintKind, DependsOn, DisabledEntry, Exposure, Group,
@@ -113,6 +114,7 @@ pub use manifest::{
 pub use model_yaml::ModelYamlOutcome;
 pub use path::{match_changed_path, normalize_path};
 pub use pr_comment::{DiffSide, PrComment, PrCommentThread, PrComments};
+pub use pr_comment_anchor::{ResolvedThread, ThreadAnchor, anchor_comment_thread};
 pub use pr_dag::{
     DEFAULT_PR_DAG_NODE_CAP, LineDelta, PrDagEdge, PrDagGraph, PrDagNode, PrDagState,
     compute_pr_dag, populate_line_counts, pr_dag_lines_from_diff, pr_dag_lines_from_raw_code,
@@ -134,7 +136,7 @@ pub use project_def::{
     attribute_config_tree_changes, diff_project_definitions, hook_operations,
 };
 pub use scope::{
-    ScopeInput, ScopeSelection, all_models, all_seeds, changed_models, select_in_scope,
+    ChangeAxes, ScopeInput, ScopeSelection, all_models, all_seeds, changed_models, select_in_scope,
     select_seeds_in_scope, widen_with_config_attributions,
 };
 pub use seed_card::SeedCard;
