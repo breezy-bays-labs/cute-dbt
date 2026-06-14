@@ -84,24 +84,71 @@ use crate::domain::pr_diff::NormalizedDiffIndex;
 /// models).
 #[must_use]
 pub fn macro_blast_radius(manifest: &Manifest, changed_macro_id: &str) -> BTreeSet<NodeId> {
+    // Models only — the `model` resource-type partition (the module-doc's
+    // first mandatory filter). The shared walk does the root-project gate
+    // and the transitive reachability.
+    macro_resource_consumers(manifest, changed_macro_id, |rt| rt == "model")
+}
+
+/// Every root-project **test** node (`resource_type ∈ {"test",
+/// "unit_test"}`) whose `depends_on.macros` transitive closure contains
+/// the changed macro `changed_macro_id` (**M**) — the cute-dbt#345 *tests*
+/// partition of the explore macro directory.
+///
+/// The deliberate twin of [`macro_blast_radius`]: same transitive walk
+/// (forward BFS over [`Manifest::macro_refs`], cycle-guarded) and same
+/// root-project fail-open package filter, differing ONLY in the
+/// resource-type predicate. The shaping (`get_where_subquery`-style
+/// pollution) makes the partition mandatory: surfacing the test consumers
+/// **separately** keeps them from flooding the model view. Generic
+/// schema-test macros (`macro.dbt.get_where_subquery`, the `dbt_expectations`
+/// `test_*` helpers) live in the `dbt`/`dbt_expectations` packages, not the
+/// root project, so a root-project macro M (the only thing the lens
+/// focuses on) typically reaches **only** the handful of singular/generic
+/// tests that genuinely call it — an honest, scoped set.
+///
+/// Returns node ids in deterministic id order ([`BTreeSet`]); an unknown
+/// macro yields an empty set (fail-open, same as the model partition).
+#[must_use]
+pub fn macro_test_consumers(manifest: &Manifest, changed_macro_id: &str) -> BTreeSet<NodeId> {
+    macro_resource_consumers(manifest, changed_macro_id, |rt| {
+        rt == "test" || rt == "unit_test"
+    })
+}
+
+/// The shared reverse-macro reachability walk behind both
+/// [`macro_blast_radius`] (models) and [`macro_test_consumers`] (tests) —
+/// the ONE pure-domain authority (cute-dbt#345 AC4). Returns every
+/// root-project node whose `resource_type` satisfies `accept` and whose
+/// `depends_on.macros` transitive closure contains `changed_macro_id`.
+///
+/// `accept` is the only axis the two callers differ on; the root-project
+/// fail-open package filter (cute-dbt#366) and the cycle-guarded forward
+/// BFS over [`Manifest::macro_refs`] are shared so the two partitions can
+/// never drift on the transitive-reachability semantics.
+fn macro_resource_consumers(
+    manifest: &Manifest,
+    changed_macro_id: &str,
+    accept: impl Fn(&str) -> bool,
+) -> BTreeSet<NodeId> {
     let Some(project) = manifest.metadata().project_name() else {
         // No root project name ⇒ the root-project filter cannot pass for
-        // any model. Fail-open empty rather than leaking vendor models.
+        // any node. Fail-open empty rather than leaking vendor nodes.
         return BTreeSet::new();
     };
     // Memo: macro id → does its forward closure reach M? Shared across
-    // every model's walk so each macro body is visited at most once.
+    // every node's walk so each macro body is visited at most once.
     let mut reaches: HashMap<String, bool> = HashMap::new();
     manifest
         .nodes()
         .iter()
-        .filter(|(_, node)| node.resource_type() == "model")
-        // Fail-open on a null/unset package: a root-project model whose
+        .filter(|(_, node)| accept(node.resource_type()))
+        // Fail-open on a null/unset package: a root-project node whose
         // package fusion left unset must still surface — only a *vendor*
         // package (`Some(other)`) is dropped. Mirrors the macro-side
         // `is_root_project_macro` fail-open so both filters for this feature
         // share null-package semantics; strict `== Some(project)` would
-        // under-claim the blast radius (cute-dbt#366).
+        // under-claim the radius (cute-dbt#366).
         .filter(|(_, node)| node.package_name().is_none_or(|pkg| pkg == project))
         .filter(|(_, node)| {
             direct_set_reaches(
@@ -494,6 +541,45 @@ mod tests {
         .with_identity(None, Some(PROJECT.to_owned()))
     }
 
+    /// A `test`-typed node carrying macro deps in a NAMED package (the
+    /// vendor-test exclusion case for the tests partition).
+    fn test_node_in_pkg(full_id: &str, direct_macros: &[&str], pkg: &str) -> Node {
+        let macros = direct_macros.iter().map(|m| (*m).to_owned()).collect();
+        Node::new(
+            NodeId::new(full_id),
+            "test",
+            Checksum::new("sha256", "abc"),
+            None,
+            None,
+            DependsOn::new(macros, vec![]),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(None, Some(pkg.to_owned()))
+    }
+
+    /// A `test`-typed node carrying macro deps with an UNSET package
+    /// (`None`, the fusion-degraded shape) — the fail-open case for the
+    /// tests partition.
+    fn test_node_null_pkg(full_id: &str, direct_macros: &[&str]) -> Node {
+        let macros = direct_macros.iter().map(|m| (*m).to_owned()).collect();
+        Node::new(
+            NodeId::new(full_id),
+            "test",
+            Checksum::new("sha256", "abc"),
+            None,
+            None,
+            DependsOn::new(macros, vec![]),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(None, None)
+    }
+
     /// Build a manifest with the given nodes + macro→macro reference edges.
     fn manifest_with(
         nodes: Vec<Node>,
@@ -746,6 +832,162 @@ mod tests {
             "only the model surfaces, never the test node"
         );
         assert!(radius.contains(&id("model.shop.orders")));
+    }
+
+    // ----- macro_test_consumers (cute-dbt#345 — the tests partition) ----
+    //
+    // The deliberate twin of macro_blast_radius: same transitive walk +
+    // root-project filter, accepting `test`/`unit_test` resource types
+    // instead of `model`. The two partitions are disjoint by resource type
+    // (a node is never both a model and a test), which is the whole point
+    // of surfacing them separately (the get_where_subquery pollution guard).
+
+    #[test]
+    fn test_consumers_includes_a_direct_test_caller() {
+        // A generic/singular test node that calls the root macro directly
+        // surfaces in the tests partition — the symmetric case to the
+        // model partition's direct caller.
+        let m = manifest_with(
+            vec![
+                typed_node_with_macros(
+                    "test.shop.dq_orders.abc",
+                    "test",
+                    &["macro.shop.add_dq_flags"],
+                ),
+                model_with_macros("model.shop.orders", &["macro.shop.add_dq_flags"]),
+            ],
+            &[],
+            &[],
+        );
+        let tests = macro_test_consumers(&m, "macro.shop.add_dq_flags");
+        assert_eq!(
+            tests.len(),
+            1,
+            "only the test node surfaces, never the model"
+        );
+        assert!(tests.contains(&id("test.shop.dq_orders.abc")));
+    }
+
+    #[test]
+    fn test_consumers_accepts_unit_test_resource_type() {
+        // `unit_test` nodes are tests too (a different resource_type) — the
+        // partition accepts both `test` and `unit_test`.
+        let m = manifest_with(
+            vec![typed_node_with_macros(
+                "unit_test.shop.ut_orders",
+                "unit_test",
+                &["macro.shop.add_dq_flags"],
+            )],
+            &[],
+            &[],
+        );
+        let tests = macro_test_consumers(&m, "macro.shop.add_dq_flags");
+        assert!(tests.contains(&id("unit_test.shop.ut_orders")));
+    }
+
+    #[test]
+    fn test_consumers_includes_a_test_reaching_m_only_transitively() {
+        // The same transitive channel the model partition walks: a test
+        // node that reaches M only via an intermediate macro must surface,
+        // proving the tests partition shares the ONE reachability authority.
+        let m = manifest_with(
+            vec![typed_node_with_macros(
+                "test.shop.dq_orders.abc",
+                "test",
+                &["macro.shop.is_incremental"],
+            )],
+            &[(
+                "macro.shop.is_incremental",
+                &["macro.shop.should_full_refresh"],
+            )],
+            &[
+                (
+                    "macro.shop.is_incremental",
+                    "{% macro is_incremental() %}{% endmacro %}",
+                ),
+                (
+                    "macro.shop.should_full_refresh",
+                    "{% macro should_full_refresh() %}{% endmacro %}",
+                ),
+            ],
+        );
+        let tests = macro_test_consumers(&m, "macro.shop.should_full_refresh");
+        assert!(
+            tests.contains(&id("test.shop.dq_orders.abc")),
+            "a test reaching M only transitively must surface (shared walk)",
+        );
+    }
+
+    #[test]
+    fn test_consumers_excludes_models_and_vendor_tests() {
+        // The partition is tests-only AND root-project-only: a model caller
+        // never appears here (that's the model partition), and a vendor-
+        // package test (the dbt/dbt_expectations get_where_subquery family)
+        // is dropped.
+        let m = manifest_with(
+            vec![
+                model_with_macros("model.shop.orders", &["macro.shop.add_dq_flags"]),
+                typed_node_with_macros(
+                    "test.shop.dq_orders.abc",
+                    "test",
+                    &["macro.shop.add_dq_flags"],
+                ),
+                test_node_in_pkg(
+                    "test.dbt.where_filter.def",
+                    &["macro.shop.add_dq_flags"],
+                    "dbt",
+                ),
+            ],
+            &[],
+            &[],
+        );
+        let tests = macro_test_consumers(&m, "macro.shop.add_dq_flags");
+        assert_eq!(
+            tests.len(),
+            1,
+            "only the root-project test surfaces; the model and the vendor test do not"
+        );
+        assert!(tests.contains(&id("test.shop.dq_orders.abc")));
+    }
+
+    #[test]
+    fn test_consumers_includes_a_null_package_root_project_test() {
+        // The fail-open package semantics carry to the tests partition: a
+        // test whose package fusion left unset surfaces; a vendor one does
+        // not (mirrors the model partition's null-package test).
+        let m = manifest_with(
+            vec![
+                test_node_null_pkg("test.shop.dq_orders.abc", &["macro.shop.add_dq_flags"]),
+                test_node_in_pkg(
+                    "test.dbt.where_filter.def",
+                    &["macro.shop.add_dq_flags"],
+                    "dbt",
+                ),
+            ],
+            &[],
+            &[],
+        );
+        let tests = macro_test_consumers(&m, "macro.shop.add_dq_flags");
+        assert_eq!(
+            tests.len(),
+            1,
+            "the null-package root-project test surfaces"
+        );
+        assert!(tests.contains(&id("test.shop.dq_orders.abc")));
+    }
+
+    #[test]
+    fn test_consumers_unknown_macro_is_empty() {
+        let m = manifest_with(
+            vec![typed_node_with_macros(
+                "test.shop.dq_orders.abc",
+                "test",
+                &["macro.shop.add_dq_flags"],
+            )],
+            &[],
+            &[],
+        );
+        assert!(macro_test_consumers(&m, "macro.shop.nonexistent").is_empty());
     }
 
     #[test]
