@@ -140,6 +140,22 @@ cucumber = "0.23"
 # meta-crate; cucumber already pulls in the underlying primitives
 # transitively, so this is a near-zero footprint addition.
 futures = "0.3"
+# First fuzz target (cute-dbt#383, the Q4 bring-into-shape move):
+#   bolero -> stable-Rust fuzz/property front-end for the `--pr-diff`
+#            patch parser, cute-dbt's highest-risk untrusted-input
+#            surface. Chosen over `cargo-fuzz` because its `DefaultEngine`
+#            runs under plain `cargo test` / `cargo nextest` on STABLE
+#            (MSRV 1.88) — no nightly, no libFuzzer, no `cargo-bolero`
+#            binary required to exercise the corpus. Default features only
+#            (`std` + `alloc`); the afl/honggfuzz/kani/libfuzzer plugin
+#            crates it lists are inert unless their fuzzer is selected via
+#            `cargo bolero`. All 15 transitive crates are MIT / MIT-OR-
+#            Apache-2.0 (already in deny.toml's allowlist). The fuzz target
+#            is `harness = false` (a `fn main()` driving `bolero::check!`),
+#            invoked via `cargo test --test fuzz_pr_diff_parser` — NOT a
+#            blocking merge gate (fuzz is schedule/manual). See
+#            `tests/fuzz_pr_diff_parser/main.rs` and `.claude/rules/testing.md`.
+bolero = "0.13.4"
 
 # Cucumber-rs requires `harness = false` (the cucumber runner replaces
 # libtest's harness with its own dispatcher). This declaration tells
@@ -151,6 +167,30 @@ futures = "0.3"
 name = "bdd"
 path = "tests/bdd.rs"
 harness = false
+
+# The cute-dbt#383 fuzz target. Bolero's `check!` macro owns `main()`
+# (it dispatches the corpus replay + bounded random run itself), so the
+# target is `harness = false` exactly like `bdd`. `cargo nextest` cannot
+# enumerate a `harness = false` binary, so — like `bdd` — it is invoked
+# via `cargo test --test fuzz_pr_diff_parser` (or `cargo bolero test
+# fuzz_pr_diff_parser` for an extended campaign). The default-profile
+# nextest run (and CI's `cargo test`) still BUILDS it, so the seam stays
+# compiled; the committed `corpus/` replays as a regression suite there.
+[[test]]
+name = "fuzz_pr_diff_parser"
+path = "tests/fuzz_pr_diff_parser/main.rs"
+harness = false
+
+# Bolero's recommended optimized fuzzing profile (inherits dev so the
+# crate's debug-assertions stay on — a fuzz run wants overflow/panic
+# checks armed). Used by `cargo bolero test … --profile fuzz`; the plain
+# `cargo test` corpus-replay path does not need it. LTO is intentionally
+# omitted (bolero notes it is poorly supported for fuzzing).
+[profile.fuzz]
+inherits = "dev"
+opt-level = 3
+incremental = false
+codegen-units = 1
 
 # Crate-wide lint config. `clippy::pedantic` + `clippy::cargo` fire via
 # the crate-root `#![warn(...)]` in `src/lib.rs`, so `clippy -D warnings`

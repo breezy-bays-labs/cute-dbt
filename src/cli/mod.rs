@@ -46,6 +46,27 @@ mod pr_diff;
 mod review;
 mod skill;
 
+/// Fuzz seam (cute-dbt#383): drive the **pure** `--pr-diff` unified-diff
+/// parser ([`pr_diff::parse_unified_diff`]) with adversarial text.
+///
+/// The `--pr-diff` patch parser is cute-dbt's highest-risk untrusted-input
+/// surface — in CI/PR-review mode arbitrary diff text is fed in. This
+/// `#[doc(hidden)]` re-export lets the `tests/fuzz_pr_diff_parser` bolero
+/// target (stable Rust, no nightly) feed it random bytes and assert the
+/// fail-closed contract: parsing never panics / hangs, only ever returns
+/// `Ok(PrDiff)` or `Err(String)`. It targets `parse_unified_diff`, **not**
+/// the public `parse_diff` value-parser, so the fuzzed path is pure (no
+/// `@file` filesystem I/O). Not part of the v0.x public API surface — it
+/// exists solely so a test target outside the crate can reach the private
+/// parser, the same internal-reach motivation the `bdd` target has.
+///
+/// See `.claude/rules/testing.md` (the **Fuzz** rung) for the Q4
+/// bring-into-shape context.
+#[doc(hidden)]
+pub fn fuzz_parse_unified_diff(raw: &str) -> Result<crate::domain::PrDiff, String> {
+    pr_diff::parse_unified_diff(raw)
+}
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};

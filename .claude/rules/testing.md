@@ -24,7 +24,7 @@ ladder: **shipped** (in CI, gating) · **in-progress** · **planned** ·
 |-------|------|--------|-------|
 | **Unit** | `cargo nextest` | **shipped** | ~2040 tests across domain POD, render, adapter, cli. |
 | **Property** | hand-rolled **exhaustive structured enumeration** (no `proptest` crate) | **shipped** | The property *invariants* (JSON serde round-trip; StateComparator union semantics over the 2⁴×2⁵ kind×facet cube; exhaustive struct-attr coverage) are pinned — but by a deliberate **"exhaustive over sampling, no proptest dev-dep"** house style, not generative `proptest`. A bounded domain is enumerated in full, which is strictly stronger than sampling for these spaces. AGENTS.md / CLAUDE.md require these invariants; this row records *how* they're discharged. |
-| **Fuzz** | `cargo-fuzz` / `bolero` | **aspirational** `—` | No fuzz target yet. The honest first-pilot candidates are the untrusted-input parsers: the **manifest JSON reader**, the **hand-rolled RFC-4180 CSV parser**, and the **`--pr-diff` patch parser**. This is the org-wide Q4 default blind spot — cute-dbt fits it exactly. |
+| **Fuzz** | `bolero` (stable Rust) | **in-progress** | **First target landed (cute-dbt#383):** `tests/fuzz_pr_diff_parser` fuzzes the `--pr-diff` unified-diff parser (`cli::pr_diff::parse_unified_diff`, the highest-risk untrusted-input surface) via the `bolero::check!` `DefaultEngine` — runs under plain `cargo test`/`cargo nextest` on MSRV 1.88 (no nightly, no libFuzzer, no `cargo-bolero` binary required), replaying the committed `corpus/` and asserting the fail-closed contract (never panics/hangs; `Ok`/`Err` only; deterministic). NOT a blocking merge gate (fuzz is schedule/manual; the corpus replays as a cheap regression). **Remaining first-pilot candidates:** the **manifest JSON reader** and the **hand-rolled RFC-4180 CSV parser** (`src/domain/unit_test_table.rs`). This is the org-wide Q4 default blind spot — cute-dbt fits it exactly. |
 | **Integration** | `cargo nextest` integration tests under `tests/` | **shipped** | Real fixtures, exit-code contract, shelling the built bin (e.g. `changed_files_provider.rs`, `path_matching.rs`, `review_cli.rs`, `run_loop.rs`). |
 | **Acceptance (BDD)** | `cucumber-rs` (`cargo test --test bdd`, `harness = false`) | **shipped / in-progress** | 30 `.feature` files / ~219 scenarios — the executable product spec. NOT nextest-compatible (`harness = false`); the `mutants`/default nextest profiles exclude the `bdd` binary by design. |
 | **End-to-end / smoke** | shell the built binary; **headless_chrome** browser-E2E (see below) | **shipped** | The CLI's own exit-code/output contract is exercised by the integration suites; the rendered artifact is exercised by the browser leg. |
@@ -99,7 +99,7 @@ product tests:
 | **Q1** (unit / integration) | **strong** — nextest unit + integration suites. |
 | **Q2** (acceptance / BDD) | **strong** — 30 features / ~219 scenarios as the executable spec. |
 | **Q3** (exploratory / UAT) | **manual today** — the founder dogfoods each release; the orchestrator runs live Playwright probes ad-hoc. Not yet a deliberate pass. |
-| **Q4** (fuzz / perf / security) | **WEAK** — the framework's named default blind spot, and cute-dbt fits it exactly: **no fuzz target** on the three parsers, **no performance budget**. The zero-egress headless test is the one Q4-adjacent (security) leg, and it is load-bearing. |
+| **Q4** (fuzz / perf / security) | **improving** — was the framework's named default blind spot; **the first fuzz target landed (cute-dbt#383)** on the highest-risk parser (`--pr-diff`, via `bolero` on stable). Still: **no fuzz on the other two parsers** (manifest JSON, RFC-4180 CSV), **no performance budget**. The zero-egress headless test remains the load-bearing Q4-adjacent (security) leg. |
 
 ## Five-leg health (the §7 dashboard, cute-dbt instance)
 
@@ -116,10 +116,14 @@ product tests:
 
 ## Bring-into-shape (prioritized)
 
-- **Wire-now (highest value):** a first **`cargo-fuzz`/`bolero`** target on
-  the **`--pr-diff` patch parser** or the **RFC-4180 CSV parser** — the
-  highest-risk untrusted-input surface, and the org's named first fuzz
-  pilot. This is the single most valuable Q4 move.
+- **Done (highest value, cute-dbt#383):** the first **`bolero`** fuzz
+  target on the **`--pr-diff` patch parser** — the highest-risk
+  untrusted-input surface, the org's named first fuzz pilot, and the
+  single most valuable Q4 move. Lands as `tests/fuzz_pr_diff_parser` on
+  stable Rust (no nightly), corpus committed.
+- **Next (extend the fuzz leg):** a second target on the **RFC-4180 CSV
+  parser** (`src/domain/unit_test_table.rs`), then the **manifest JSON
+  reader** — the same `bolero`-on-stable harness pattern.
 - **Defer (aspirational):** `criterion` performance budgets — no
   established hot path under a regression ceiling yet.
 - **Watch:** the **mis-leveling** Boundary-Rule call stays review-time —

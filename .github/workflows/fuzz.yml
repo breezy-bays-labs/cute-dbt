@@ -1,0 +1,74 @@
+# Fuzz — the scheduled / manual extended fuzz campaign (cute-dbt#383).
+#
+# DELIBERATELY NOT A MERGE GATE. Fuzzing is a schedule/manual activity, not
+# a per-PR blocking check (the framework's rule: fuzz is Q4 critique-side,
+# run on a cadence, not on the critical path of every PR). The cheap
+# regression guard — replaying the committed `corpus/` — already runs inside
+# the normal `Test` job (`cargo nextest`/`cargo test` builds the
+# `fuzz_pr_diff_parser` target and the committed corpus replays there). This
+# workflow is the *extended search*: a high-iteration bounded run that can
+# discover NEW crashing inputs, on a weekly cron and on manual dispatch.
+#
+# It runs the bolero `DefaultEngine` via plain `cargo test` on STABLE Rust —
+# no nightly, no libFuzzer, and no `cargo-bolero` binary install — by setting
+# a large `BOLERO_RANDOM_ITERATIONS`. Every `uses:` here is already present
+# in ci.yml (checkout / rust-toolchain / rust-cache), so no new org Actions
+# allowlist entry is needed. This job is intentionally absent from
+# branch-protection required checks.
+name: Fuzz
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "BOLERO_RANDOM_ITERATIONS for the bounded run"
+        required: false
+        default: "5000000"
+  schedule:
+    # Mondays 06:00 UTC — a weekly extended pass, off the PR critical path.
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  pr-diff-parser:
+    name: Fuzz the --pr-diff patch parser
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: cute-dbt
+          save-if: false
+      # Replays the committed corpus AND generates fresh random inputs; a
+      # discovered crash fails the job and is written under
+      # `tests/fuzz_pr_diff_parser/crashes/` (commit it as a regression).
+      # The dispatch input is taken via `env:` (never interpolated into the
+      # script body) and validated to digits-only before use, so a malformed
+      # value fails fast rather than reaching the shell.
+      - name: Bounded fuzz run (stable, no cargo-bolero binary)
+        env:
+          ITERATIONS_INPUT: ${{ github.event.inputs.iterations || '5000000' }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$ITERATIONS_INPUT" =~ ^[0-9]+$ ]]; then
+            echo "::error::iterations must be a positive integer, got: $ITERATIONS_INPUT"
+            exit 1
+          fi
+          BOLERO_RANDOM_ITERATIONS="$ITERATIONS_INPUT" cargo test --test fuzz_pr_diff_parser --locked

@@ -1,0 +1,7 @@
+diff --git a/m.sql b/m.sql
+index 1..2 100644
+--- a/m.sql
++++ b/m.sql
+@@ -1 +1 @@
+-old
++new
