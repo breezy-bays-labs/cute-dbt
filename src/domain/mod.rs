@@ -42,6 +42,7 @@ pub mod config;
 pub mod cte;
 pub mod experimental;
 pub mod finding_anchor;
+pub mod findings_envelope;
 pub mod governance;
 pub mod grain;
 pub mod macro_lens;
@@ -75,7 +76,10 @@ pub use checks::{
     checks_index_markdown, evaluate_all, filter_for_display, model_findings, registry_toml,
     resolve_supersedes, supersedes_is_acyclic,
 };
-pub use config::{AnalysisConfig, DEFAULT_REPORT_TITLE, PrConfig, PrRef, ReportConfig};
+pub use config::{
+    AnalysisConfig, DEFAULT_REPORT_TITLE, DEFAULT_SEED_ROW_CAP, PrConfig, PrRef, ReportConfig,
+    SeedsConfig,
+};
 pub use cte::{
     CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, Span, SubqueryFact,
     SubqueryKind,
@@ -85,6 +89,10 @@ pub use experimental::{
     parse_experimental_env, resolve_experimental_config,
 };
 pub use finding_anchor::{AnchorSide, ResolvedAnchor, resolve_finding_anchor};
+pub use findings_envelope::{
+    DiffContext, EnvelopeFinding, EnvelopeMetadata, EnvelopeScope, FindingAnchor, FindingsEnvelope,
+    ID_STABILITY, SCHEMA_VERSION, has_total_uncovered,
+};
 pub use governance::{
     BlastRadius, BreakingReason, ColumnMetaTags, ConstraintSupport, ContractChange, ContractClass,
     ContractColumnDiff, DepDate, GovChip, GovernanceFacts, GroupChip, MetaPair, ModelMetaTags,

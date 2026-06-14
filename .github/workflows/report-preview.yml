@@ -102,6 +102,17 @@ jobs:
             pr_diff: tests/fixtures/macro-heavy-pr-diff.patch
             project_root: tests/fixtures/macro-heavy-source
             experimental: "1"
+          # cute-dbt#350 — the seed-data "Data tables" showcase, mirrored
+          # from ci.yml's example-report-check seed-showcase row. A dedicated
+          # minimal manifest (one seed + one consuming model) rendered in
+          # --pr-diff mode with the `seeds` experiment on, so the preview
+          # card offers the gated seed section (current table + cell-diff).
+          - name: seed-showcase
+            current: tests/fixtures/seed-showcase-current.json
+            baseline: ""
+            pr_diff: tests/fixtures/seed-showcase-pr-diff.patch
+            project_root: tests/fixtures/seed-showcase-source
+            experimental: "1"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:

@@ -612,3 +612,224 @@ fn flat_pre_verb_invocation_is_a_usage_error() {
         "the flat pre-verb shape is a usage error: {output:?}",
     );
 }
+
+// ===== cute-dbt#386 — findings envelope + coverage gate =================
+//
+// The playground manifest under `--pr-diff` carries exactly one Total-tier
+// `Uncovered` finding (`model.healthcare_analytics.mart_dq_summary`, the
+// `grain.unique-key-unbacked` check), so it exercises both consumers: the
+// `--findings-out` sidecar shape and the `--fail-on-uncovered` gate trip.
+
+/// The four shared args for the playground `--pr-diff` showcase run.
+fn playground_pr_diff_args(out: &Path) -> Vec<String> {
+    vec![
+        "report".to_owned(),
+        "--manifest".to_owned(),
+        s(&fixture("playground-current.json")).to_owned(),
+        "--pr-diff".to_owned(),
+        format!("@{}", s(&fixture("playground-pr-diff.patch"))),
+        "--project-root".to_owned(),
+        s(&fixture("playground-source")).to_owned(),
+        "--out".to_owned(),
+        s(out).to_owned(),
+    ]
+}
+
+#[test]
+fn findings_out_writes_the_envelope_sidecar_alongside_the_html() {
+    // The HTML report AND the machine-readable envelope are both written
+    // in one invocation (the sidecar delivery shape, decision D1).
+    let html = tmp("envelope_sidecar.html");
+    let sidecar = tmp("envelope_sidecar.json");
+    clear(&html);
+    clear(&sidecar);
+    let mut args = playground_pr_diff_args(&html);
+    args.push("--findings-out".to_owned());
+    args.push(s(&sidecar).to_owned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&refs);
+    assert!(
+        output.status.success(),
+        "findings-out alone (no gate) exits 0: {output:?}"
+    );
+    assert!(html.exists(), "the HTML report is still written");
+    let json = std::fs::read_to_string(&sidecar).expect("the envelope sidecar was written");
+    // The versioned header (decision D2 — the integer stability anchor +
+    // the id-instability notice) and the flat findings list.
+    assert!(
+        json.contains("\"schema_version\": 1"),
+        "integer schema_version header: {json}"
+    );
+    assert!(
+        json.contains("\"id_stability\": \"unstable-v0.x\""),
+        "the machine-readable id-instability notice: {json}"
+    );
+    assert!(
+        json.contains("\"mode\": \"pr-diff\""),
+        "the pr-diff scope mode: {json}"
+    );
+    assert!(
+        json.contains("\"grain.unique-key-unbacked\""),
+        "the in-scope grain finding rides the envelope: {json}"
+    );
+    assert!(json.ends_with("}\n"), "trailing newline (diff-friendly)");
+}
+
+#[test]
+fn fail_on_uncovered_exits_the_gate_code_and_still_writes_the_report() {
+    // Decision D3: a Total-tier `Uncovered` finding in scope exits the
+    // dedicated gate code (3) — distinct from the usage (2) and fail-closed
+    // (1) codes — AFTER the HTML report (and any sidecar) is written.
+    let html = tmp("gate_trips.html");
+    let sidecar = tmp("gate_trips.json");
+    clear(&html);
+    clear(&sidecar);
+    let mut args = playground_pr_diff_args(&html);
+    args.push("--fail-on-uncovered".to_owned());
+    args.push("--findings-out".to_owned());
+    args.push(s(&sidecar).to_owned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&refs);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a Total-tier uncovered gap exits the dedicated gate code: {output:?}"
+    );
+    assert!(
+        html.exists(),
+        "the HTML report is written before the gate trips (gate ≠ fail-closed)"
+    );
+    assert!(
+        sidecar.exists(),
+        "the sidecar is also written before the gate"
+    );
+}
+
+#[test]
+fn fail_on_uncovered_exits_zero_when_no_total_uncovered_finding_is_in_scope() {
+    // The jaffle-shop diff carries no Total-tier uncovered finding, so the
+    // gate passes (exit 0) — the gate is silent on covered/unknown/empty.
+    let html = tmp("gate_passes.html");
+    clear(&html);
+    let output = run(&[
+        "report",
+        "--manifest",
+        s(&fixture("jaffle-shop-current.json")),
+        "--baseline-manifest",
+        s(&fixture("jaffle-shop-baseline.json")),
+        "--out",
+        s(&html),
+        "--fail-on-uncovered",
+    ]);
+    assert!(
+        output.status.success(),
+        "no Total-tier uncovered gap ⇒ exit 0: {output:?}"
+    );
+    assert!(html.exists(), "the report is written");
+}
+
+#[test]
+fn default_path_writes_no_envelope_sidecar() {
+    // Neither flag set ⇒ the envelope path is skipped entirely (zero added
+    // work) and no sidecar JSON is produced.
+    let html = tmp("no_envelope.html");
+    let phantom_sidecar = tmp("no_envelope.json");
+    clear(&html);
+    clear(&phantom_sidecar);
+    let refs: Vec<String> = playground_pr_diff_args(&html);
+    let borrowed: Vec<&str> = refs.iter().map(String::as_str).collect();
+    let output = run(&borrowed);
+    assert!(output.status.success(), "default run exits 0: {output:?}");
+    assert!(html.exists(), "the HTML report is written");
+    assert!(
+        !phantom_sidecar.exists(),
+        "no sidecar is written without --findings-out"
+    );
+}
+
+#[test]
+fn an_unwritable_findings_out_path_is_reported() {
+    // The --findings-out twin of `an_unwritable_output_path_is_reported`:
+    // a sidecar path under a directory that does not exist makes
+    // `write_sidecar` fail, so the run loop reports the write error (exit 1)
+    // instead of swallowing it. Without this test a future `let _ =
+    // write_sidecar(...)` would silently regress the surfaced-error
+    // contract. The HTML --out path IS writable here, so the failure is
+    // specifically the sidecar's.
+    let html = tmp("envelope_unwritable.html");
+    let sidecar = tmp("no_such_dir/findings.json");
+    clear(&html);
+    let mut args = playground_pr_diff_args(&html);
+    args.push("--findings-out".to_owned());
+    args.push(s(&sidecar).to_owned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&refs);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "an unwritable findings-out path exits 1: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not write"),
+        "stderr reports the sidecar-write failure: {stderr}"
+    );
+}
+
+#[test]
+fn findings_out_equal_to_out_is_a_usage_error_before_any_write() {
+    // CodeRabbit on PR #388: `--out X --findings-out X` would clobber the
+    // just-rendered HTML with the envelope JSON. Rejected as a usage error
+    // (exit 2 — the parse-time class, NOT the fail-closed code 1) BEFORE
+    // anything is written, so the report is never produced-then-destroyed.
+    let collide = tmp("collision_report.html");
+    clear(&collide);
+    let mut args = playground_pr_diff_args(&collide);
+    args.push("--findings-out".to_owned());
+    args.push(s(&collide).to_owned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&refs);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a --findings-out == --out collision is a usage error: {output:?}"
+    );
+    assert!(
+        !collide.exists(),
+        "the collision is rejected before any artifact is written"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--findings-out") && stderr.contains("--out"),
+        "stderr names the conflicting flags: {stderr}"
+    );
+}
+
+#[test]
+fn an_unwritable_findings_out_path_wins_over_the_uncovered_gate() {
+    // Write-failure precedence: the playground pr-diff carries a Total-tier
+    // uncovered finding (so --fail-on-uncovered would otherwise exit 3), but
+    // the sidecar write fails FIRST (finalize_findings writes the sidecar
+    // before evaluating the gate), so the run exits 1 (the surfaced write
+    // error) — never the gate code. A swallowed sidecar error would let the
+    // gate's exit 3 leak through and mask the real I/O failure.
+    let html = tmp("gate_vs_unwritable.html");
+    let sidecar = tmp("no_such_dir/gate_findings.json");
+    clear(&html);
+    let mut args = playground_pr_diff_args(&html);
+    args.push("--findings-out".to_owned());
+    args.push(s(&sidecar).to_owned());
+    args.push("--fail-on-uncovered".to_owned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&refs);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the sidecar write failure (1) wins over the gate code (3): {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not write"),
+        "stderr reports the write failure, not a silent gate trip: {stderr}"
+    );
+}

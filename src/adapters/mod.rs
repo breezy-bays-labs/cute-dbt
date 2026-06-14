@@ -27,6 +27,21 @@
 //!   (`tests.html`). Reuses [`render`]'s engine-agnostic
 //!   `build_payload` output; fail-open on uncompiled models (rendered
 //!   as "not compiled").
+//! - [`findings_emit`] — the machine-readable findings-envelope sidecar
+//!   (cute-dbt#386, epic #261): collects the in-scope findings via the
+//!   SAME `model_findings → apply_check_policy` pipeline the renderer
+//!   runs, wraps them in the versioned `FindingsEnvelope` POD, and writes
+//!   the JSON beside the HTML report (`--findings-out`). Purely additive
+//!   — never touches `report.html` or [`render`].
+//! - [`github_annotations`] — the GitHub workflow-command annotation
+//!   projection (cute-dbt#393, epic #261): a pure formatter turning the
+//!   in-scope findings + their resolved
+//!   [`finding_anchor`](crate::domain::finding_anchor) lines into
+//!   `::warning file=,line=,title=::message` lines GitHub renders inline
+//!   on the Files-changed tab (zero auth, zero API call) plus the
+//!   check-run summary roll-up. A gen-time stdout emit (`--annotations`);
+//!   never touches `report.html`, so the view-time zero-egress gate is
+//!   untouched.
 //! - [`project_file`] — the v0.2 `ProjectFileReader` port impl
 //!   (`FsProjectFileReader`). Reads project-relative files for the
 //!   authoring-YAML drawer (cute-dbt#69) and the external unit-test
@@ -44,6 +59,7 @@ pub mod asset_embed;
 pub mod config_reader;
 pub mod cte_engine;
 pub mod explore;
+pub mod findings_emit;
 pub mod github_annotations;
 pub mod manifest;
 pub mod project_def;
