@@ -71,12 +71,12 @@ use crate::domain::{
     DEFAULT_SEED_ROW_CAP, DiffLine, DiffLineKind, EdgeType, Finding, FixtureTable,
     FixtureTableDiff, GovernanceFacts, HeuristicId, HookChangeFacts, HookManifestPresence,
     InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet, ModelYamlOutcome, Node,
-    NodeId, NormalizedDiffIndex, PrRef, ProjectChange, ProjectChangeCategory, ProjectChangePanel,
-    ProjectDefinition, ProjectFacts, ProjectFallbackReason, SeedCard, SourceNode, TestMetadata,
-    Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock,
-    VarAttribution, VarChangeFacts, VarReference, VarScanFootprint, apply_check_policy,
-    macro_blast_radius, model_findings, reconstruct_macro_sql_diff, resolve_target_model,
-    resolve_tested_model, table_from_manifest_rows,
+    NodeId, NormalizedDiffIndex, PrDagGraph, PrRef, ProjectChange, ProjectChangeCategory,
+    ProjectChangePanel, ProjectDefinition, ProjectFacts, ProjectFallbackReason, SeedCard,
+    SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
+    UnitTestYamlBlock, VarAttribution, VarChangeFacts, VarReference, VarScanFootprint,
+    apply_check_policy, macro_blast_radius, model_findings, reconstruct_macro_sql_diff,
+    resolve_target_model, resolve_tested_model, table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -1423,6 +1423,80 @@ pub struct ReportPayload {
     /// byte-identical (the `macro_lens` / governance precedent).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub seed_cards: Vec<SeedSectionCard>,
+    /// The PR-scope lineage mini-DAG render view (cute-dbt#404, epic #352) —
+    /// the focused cross-model subgraph (modified ∪ connectors ∪ deleted) the
+    /// report puts at the top. Gated behind
+    /// [`Experiment::PrScopeMiniDag`](crate::domain::Experiment::PrScopeMiniDag):
+    /// the cli passes `None` when the experiment is off, so the key is omitted
+    /// from JSON and the `{% match pr_dag %}` section emits zero bytes —
+    /// keeping every default golden byte-identical (the `macro_lens` /
+    /// governance / seeds precedent). When `Some`, the same payload rides the
+    /// JSON (the JS `renderPrDag` reads `DATA.pr_dag`) AND drives the
+    /// server-rendered descriptor line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_dag: Option<PrDagPayload>,
+}
+
+/// The PR-scope lineage mini-DAG render view (cute-dbt#404) — the domain
+/// [`PrDagGraph`] plus the render-time facts the top-of-report section needs:
+/// the per-state counts for the one-line descriptor and the size-bound
+/// collapse decision.
+///
+/// The graph itself ([`PrDagGraph`]) is the pure-domain topology + per-node
+/// line counts; this render POD wraps it with the descriptor counts (so the
+/// server-rendered "N modified · M connectors · K deleted" line is composed
+/// in Rust, the house rule) and the `collapsed` flag (the size-bound: when the
+/// node count exceeds the cap the inline Mermaid render is replaced by a
+/// summary line, but the full graph still rides the JSON for any downstream
+/// consumer). `Serialize`-only — an additive render payload, never round-tripped.
+#[derive(Debug, Clone, Serialize)]
+pub struct PrDagPayload {
+    /// The computed mini-DAG: nodes (modified ∪ connectors ∪ deleted, with
+    /// per-node line counts) + induced model→model edges, both deterministic.
+    pub graph: PrDagGraph,
+    /// Count of genuinely modified models (new + modified, not connectors,
+    /// not deleted) — the emphasized tier in the descriptor.
+    pub modified_count: usize,
+    /// Count of connector models (the quiet between-modified carriers).
+    pub connector_count: usize,
+    /// Count of deleted models (the ghosts).
+    pub deleted_count: usize,
+    /// `true` when the node count exceeded the size-bound cap
+    /// ([`DEFAULT_PR_DAG_NODE_CAP`](crate::domain::DEFAULT_PR_DAG_NODE_CAP)):
+    /// the inline Mermaid graph is suppressed in favor of the summary line,
+    /// while the graph data still rides the JSON payload.
+    pub collapsed: bool,
+}
+
+impl PrDagPayload {
+    /// Build the render view from a computed [`PrDagGraph`] and the size-bound
+    /// node cap. Derives the per-state descriptor counts from the graph's own
+    /// nodes (so the counts can never drift from what renders) and sets
+    /// `collapsed` when the node count exceeds `node_cap`.
+    #[must_use]
+    pub fn from_graph(graph: PrDagGraph, node_cap: usize) -> Self {
+        let mut modified_count = 0;
+        let mut connector_count = 0;
+        let mut deleted_count = 0;
+        for node in &graph.nodes {
+            if node.is_connector {
+                connector_count += 1;
+            } else if node.state == crate::domain::PrDagState::Deleted {
+                deleted_count += 1;
+            } else {
+                // New + Modified both count as "modified" for the descriptor.
+                modified_count += 1;
+            }
+        }
+        let collapsed = graph.nodes.len() > node_cap;
+        Self {
+            graph,
+            modified_count,
+            connector_count,
+            deleted_count,
+            collapsed,
+        }
+    }
 }
 
 /// One seed's render view for the "Data tables" section (cute-dbt#350) — the
@@ -2863,6 +2937,20 @@ struct ReportTemplate<'a> {
     /// non-macro goldens byte-identical. Rides the JSON payload too (the
     /// `governance` both-surfaces precedent).
     macro_lens: Option<MacroLensPayload>,
+    /// The PR-scope lineage mini-DAG (cute-dbt#404, epic #352) — `Some`
+    /// exactly when [`Experiment::PrScopeMiniDag`](crate::domain::Experiment::PrScopeMiniDag)
+    /// is on AND the scope set is non-empty. The `{% match pr_dag %}` section
+    /// reads the per-state counts (the descriptor line) + the `collapsed` flag
+    /// (the size-bound: a summary line replaces the inline graph). The graph
+    /// itself renders client-side (Mermaid, the static default) from the JSON
+    /// payload (`DATA.pr_dag.graph`); the server side carries the descriptor +
+    /// the static Mermaid host. `None` emits zero bytes (the off-gate default),
+    /// keeping the non-experimental goldens byte-identical (the `macro_lens`
+    /// precedent). Rides the JSON payload too. The settings panel's mini-DAG
+    /// display-toggle row gates on `pr_dag.is_some()` directly (an askama
+    /// method call), so no separate `has_pr_dag` bool is needed — keeping the
+    /// template's bool count under the clippy `struct_excessive_bools` ceiling.
+    pr_dag: Option<PrDagPayload>,
 }
 
 /// Serialize `payload` to JSON for safe embedding inside an HTML
@@ -3092,6 +3180,12 @@ pub fn build_payload_with_externals(
         // `macro_lens` / `pr_ref`. Empty ⇒ omitted from JSON, so seed-free
         // payloads stay byte-identical.
         seed_cards: Vec::new(),
+        // cute-dbt#404 — the PR-scope mini-DAG defaults `None` here; the gated
+        // value (the cli's `gather_pr_dag` output) is threaded in by
+        // `render_report_with_externals`, mirroring `macro_lens`. `None` ⇒
+        // omitted from JSON + zero DOM via `{% match pr_dag %}`, keeping the
+        // non-experimental goldens byte-identical.
+        pr_dag: None,
     }
 }
 
@@ -3157,6 +3251,8 @@ pub fn render_report(
         // No seed cards flow through this convenience wrapper, so the cap is
         // inert — pass the default (cute-dbt#350).
         DEFAULT_SEED_ROW_CAP,
+        // No PR-scope mini-DAG through this convenience wrapper (cute-dbt#404).
+        None,
     )
 }
 
@@ -3193,6 +3289,7 @@ pub fn render_report_with_externals(
     pr_ref: Option<&PrRef>,
     seed_cards: &[SeedCard],
     seed_row_cap: usize,
+    pr_dag: Option<&PrDagPayload>,
 ) -> io::Result<()> {
     let mut payload = build_payload_with_externals(
         current,
@@ -3236,6 +3333,13 @@ pub fn render_report_with_externals(
     // and every seed-free golden stays byte-identical (the macro_lens / governance
     // precedent).
     payload.seed_cards = build_seed_section(seed_cards, seed_row_cap);
+    // cute-dbt#404 — the gated PR-scope mini-DAG (modified ∪ connectors ∪
+    // deleted, with per-node line counts + the size-bound collapse decision,
+    // all built in the cli's `gather_pr_dag`). `None` (the off-gate default,
+    // or an empty scope) ⇒ omitted from JSON + zero DOM via `{% match pr_dag %}`,
+    // keeping the non-experimental goldens byte-identical (the `macro_lens`
+    // precedent).
+    payload.pr_dag = pr_dag.cloned();
     // The empty-scope banner contract reads the TRUE in-scope set, not the
     // widened render set or the changed subset (cute-dbt#91).
     let banner_text = compose_banner_text(in_scope);
@@ -3271,6 +3375,7 @@ pub fn render_report_with_externals(
         has_governance: governance.has_content(),
         governance: governance.clone(),
         macro_lens: macro_lens.cloned(),
+        pr_dag: pr_dag.cloned(),
     };
     let html = template
         .render()
@@ -6909,6 +7014,7 @@ mod tests {
             macro_lens: None,
             pr_ref: None,
             seed_cards: Vec::new(),
+            pr_dag: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6934,6 +7040,7 @@ mod tests {
             macro_lens: None,
             pr_ref: None,
             seed_cards: Vec::new(),
+            pr_dag: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -6961,6 +7068,7 @@ mod tests {
             macro_lens: None,
             pr_ref: None,
             seed_cards: Vec::new(),
+            pr_dag: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(serialized.contains("a < b"), "bare `<` is preserved");
@@ -6983,6 +7091,7 @@ mod tests {
             macro_lens: None,
             pr_ref: None,
             seed_cards: Vec::new(),
+            pr_dag: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -7018,6 +7127,7 @@ mod tests {
             macro_lens: None,
             pr_ref: None,
             seed_cards: Vec::new(),
+            pr_dag: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -7051,6 +7161,7 @@ mod tests {
             macro_lens: None,
             pr_ref: None,
             seed_cards: Vec::new(),
+            pr_dag: None,
         };
         let serialized = payload_json_for_html_script(&original).unwrap();
         let parsed: serde_json::Value =
@@ -7080,6 +7191,7 @@ mod tests {
             macro_lens: None,
             pr_ref: None,
             seed_cards,
+            pr_dag: None,
         }
     }
 
@@ -7289,6 +7401,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8233,6 +8346,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8570,6 +8684,143 @@ mod tests {
         );
     }
 
+    // ===== subject-lens tab shell (cute-dbt#402, epic #360) =====
+
+    /// Render a one-model report, returning the HTML. Reuses the macro-lens
+    /// manifest helper for a minimal in-scope model so the Models lens panel
+    /// has real content to wrap. The tab shell is an UNGATED part of the
+    /// report (cute-dbt#402), so every report carries it.
+    fn render_html_for_lens_shell(filename: &str) -> String {
+        let node = macro_model(
+            "model.shop.orders",
+            "models/staging/orders.sql",
+            &["macro.shop.add_dq_flags"],
+        );
+        let manifest = macro_lens_manifest(vec![node]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.orders")]);
+        let tmp = std::env::temp_dir().join(filename);
+        let _ = std::fs::remove_file(&tmp);
+        render_report_with_externals(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &InScopeSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+            ScopeSource::PrDiff,
+            "t",
+            None,
+            &CheckPolicy::default(),
+            &ProjectFacts::default(),
+            &GovernanceFacts::default(),
+            None,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+            // cute-dbt#404 — no PR-scope mini-DAG in this lens-shell helper.
+            None,
+        )
+        .expect("report renders");
+        std::fs::read_to_string(&tmp).expect("read rendered report")
+    }
+
+    #[test]
+    fn lens_shell_renders_three_subject_tabs_with_models_active() {
+        let html = render_html_for_lens_shell("lensshell_tabs.html");
+        // The tab strip with all three subject lenses.
+        assert!(
+            html.contains(r#"data-testid="lens-tabs""#),
+            "the tab strip renders on every report",
+        );
+        assert!(
+            html.contains(r#"data-testid="lens-tab-models""#)
+                && html.contains(r#"data-testid="lens-tab-macros""#)
+                && html.contains(r#"data-testid="lens-tab-project""#),
+            "all three subject-lens tabs render",
+        );
+        // Models is the active tab by default.
+        assert!(
+            html.contains(
+                r#"<button type="button" class="lens-tab is-active" role="tab" id="lens-tab-models" aria-selected="true""#
+            ),
+            "the Models tab is active by default",
+        );
+        // WAI-ARIA roving tabindex: the active (Models) tab is the single
+        // Tab-order stop (`tabindex="0"`); the inactive tabs are `-1`,
+        // reachable only via the Arrow/Home/End keyboard pattern.
+        assert!(
+            html.contains(
+                r#"id="lens-tab-models" aria-selected="true" aria-controls="lens-panel-models" tabindex="0""#
+            ),
+            "the active Models tab carries the roving tabindex=0",
+        );
+        assert!(
+            html.contains(r#"id="lens-tab-macros" aria-selected="false" aria-controls="lens-panel-macros" tabindex="-1""#)
+                && html.contains(r#"id="lens-tab-project" aria-selected="false" aria-controls="lens-panel-project" tabindex="-1""#),
+            "the inactive tabs are removed from the Tab order (tabindex=-1)",
+        );
+        // The Models lens panel is the active panel; Macros/Project are hidden.
+        assert!(
+            html.contains(
+                r#"<div class="lens-panel is-active" role="tabpanel" id="lens-panel-models""#
+            ),
+            "the Models lens panel is active",
+        );
+        assert!(
+            html.contains(r#"id="lens-panel-macros" aria-labelledby="lens-tab-macros" data-lens="macros" data-testid="lens-panel-macros" hidden"#),
+            "the Macros lens panel is present and hidden by default",
+        );
+        assert!(
+            html.contains(r#"id="lens-panel-project" aria-labelledby="lens-tab-project" data-lens="project" data-testid="lens-panel-project" hidden"#),
+            "the Project lens panel is present and hidden by default",
+        );
+    }
+
+    #[test]
+    fn lens_shell_nests_the_existing_report_sections_inside_models() {
+        // The Models lens = today's whole report: the existing sections render
+        // UNCHANGED inside the Models panel. Assert the nesting order — the
+        // Models panel opens before the test-selection section, and the Macros
+        // panel opens after it (so the existing report sits between the two).
+        let html = render_html_for_lens_shell("lensshell_nesting.html");
+        let models_open = html
+            .find(r#"id="lens-panel-models""#)
+            .expect("Models panel present");
+        let test_selection = html
+            .find(r#"<section class="test-selection""#)
+            .expect("test-selection section present");
+        let macros_open = html
+            .find(r#"id="lens-panel-macros""#)
+            .expect("Macros panel present");
+        assert!(
+            models_open < test_selection && test_selection < macros_open,
+            "the existing report sections are nested inside the Models lens panel \
+             (models_open={models_open} test_selection={test_selection} macros_open={macros_open})",
+        );
+    }
+
+    #[test]
+    fn lens_shell_macros_and_project_are_honest_empty_states() {
+        // First pass: the Macros + Project lenses are scaffolded empty-states
+        // (a heading + a one-line "populated in the design phase" note), NOT
+        // invested lens content. Assert the empty-state hooks render.
+        let html = render_html_for_lens_shell("lensshell_empty.html");
+        assert!(
+            html.contains(r#"data-testid="lens-macros-empty""#),
+            "the Macros lens shows its honest empty-state",
+        );
+        assert!(
+            html.contains(r#"data-testid="lens-project-empty""#),
+            "the Project lens shows its honest empty-state",
+        );
+    }
+
     // ===== change-context banner PR link (cute-dbt#346) =====
 
     /// Render a one-model report carrying `pr_ref` on the given scope arm,
@@ -8612,6 +8863,7 @@ mod tests {
             pr_ref,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8745,6 +8997,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -10646,5 +10899,149 @@ mod tests {
             !json.contains("description"),
             "undescribed models stay byte-stable: {json}"
         );
+    }
+
+    // ===== PrDagPayload::from_graph (cute-dbt#404) =====
+
+    /// Build a [`PrDagNode`] with the given id/state/connector flag and a
+    /// fixed `±` line delta — the minimum a `from_graph` descriptor-count
+    /// test needs. `name` is derived from the id's leaf for legibility.
+    fn pr_dag_node(
+        id: &str,
+        state: crate::domain::PrDagState,
+        is_connector: bool,
+        lines_added: usize,
+        lines_removed: usize,
+    ) -> crate::domain::PrDagNode {
+        crate::domain::PrDagNode {
+            id: id.to_owned(),
+            name: id.rsplit('.').next().unwrap_or(id).to_owned(),
+            state,
+            is_connector,
+            lines_added,
+            lines_removed,
+        }
+    }
+
+    #[test]
+    fn from_graph_classifies_each_node_state_into_its_descriptor_tier() {
+        use crate::domain::PrDagState;
+        // One of every classifiable shape: New + Modified both fold into the
+        // "modified" tier; Deleted into deleted; a connector (regardless of
+        // its placeholder state) into connectors.
+        let graph = PrDagGraph {
+            nodes: vec![
+                pr_dag_node("model.shop.a_new", PrDagState::New, false, 9, 0),
+                pr_dag_node("model.shop.b_mod", PrDagState::Modified, false, 3, 2),
+                pr_dag_node("model.shop.c_conn", PrDagState::Modified, true, 0, 0),
+                pr_dag_node("model.shop.d_del", PrDagState::Deleted, false, 0, 7),
+            ],
+            edges: vec![
+                crate::domain::PrDagEdge {
+                    from: "model.shop.a_new".to_owned(),
+                    to: "model.shop.c_conn".to_owned(),
+                },
+                crate::domain::PrDagEdge {
+                    from: "model.shop.c_conn".to_owned(),
+                    to: "model.shop.b_mod".to_owned(),
+                },
+            ],
+        };
+
+        let payload = PrDagPayload::from_graph(graph.clone(), 48);
+
+        // New + Modified collapse to the modified tier; connector and deleted
+        // each go to their own.
+        assert_eq!(payload.modified_count, 2, "New + Modified ⇒ modified tier");
+        assert_eq!(payload.connector_count, 1, "is_connector wins over state");
+        assert_eq!(payload.deleted_count, 1, "Deleted ⇒ deleted tier");
+        // The descriptor tiers partition the node set exactly.
+        assert_eq!(
+            payload.modified_count + payload.connector_count + payload.deleted_count,
+            graph.nodes.len(),
+            "tiers partition the node set"
+        );
+        // The graph rides through verbatim — nodes, edges, and per-node
+        // line deltas are not mutated by the wrap.
+        assert_eq!(payload.graph.nodes, graph.nodes, "nodes carried verbatim");
+        assert_eq!(payload.graph.edges, graph.edges, "edges carried verbatim");
+        assert_eq!(payload.graph.nodes[0].lines_added, 9);
+        assert_eq!(payload.graph.nodes[3].lines_removed, 7);
+        // 4 nodes ≤ cap 48 ⇒ not collapsed.
+        assert!(!payload.collapsed, "node count under cap ⇒ inline render");
+    }
+
+    #[test]
+    fn from_graph_connector_flag_overrides_a_deleted_state() {
+        use crate::domain::PrDagState;
+        // A connector is counted as a connector even if its placeholder state
+        // is Deleted — `is_connector` is the first branch, so it wins. This
+        // pins the branch order (the else-if on Deleted is unreachable for a
+        // connector node).
+        let graph = PrDagGraph {
+            nodes: vec![pr_dag_node(
+                "model.shop.weird",
+                PrDagState::Deleted,
+                true,
+                0,
+                0,
+            )],
+            ..PrDagGraph::default()
+        };
+        let payload = PrDagPayload::from_graph(graph, 48);
+        assert_eq!(payload.connector_count, 1);
+        assert_eq!(payload.deleted_count, 0, "connector flag wins over Deleted");
+        assert_eq!(payload.modified_count, 0);
+    }
+
+    #[test]
+    fn from_graph_collapses_only_when_node_count_strictly_exceeds_cap() {
+        use crate::domain::PrDagState;
+        let nodes: Vec<crate::domain::PrDagNode> = (0..3)
+            .map(|i| {
+                pr_dag_node(
+                    &format!("model.shop.m{i}"),
+                    PrDagState::Modified,
+                    false,
+                    1,
+                    0,
+                )
+            })
+            .collect();
+
+        // count == cap ⇒ NOT collapsed (the bound is `> cap`, not `>= cap`).
+        let at_cap = PrDagPayload::from_graph(
+            PrDagGraph {
+                nodes: nodes.clone(),
+                ..PrDagGraph::default()
+            },
+            3,
+        );
+        assert!(!at_cap.collapsed, "node_count == cap ⇒ inline render");
+
+        // count > cap ⇒ collapsed (Mermaid suppressed; data still rides JSON).
+        let over_cap = PrDagPayload::from_graph(
+            PrDagGraph {
+                nodes,
+                ..PrDagGraph::default()
+            },
+            2,
+        );
+        assert!(over_cap.collapsed, "node_count > cap ⇒ summary line");
+        assert_eq!(
+            over_cap.modified_count, 3,
+            "counts computed even when collapsed"
+        );
+    }
+
+    #[test]
+    fn from_graph_on_empty_graph_yields_all_zero_counts_uncollapsed() {
+        let payload = PrDagPayload::from_graph(PrDagGraph::default(), 48);
+        assert_eq!(payload.modified_count, 0);
+        assert_eq!(payload.connector_count, 0);
+        assert_eq!(payload.deleted_count, 0);
+        assert!(!payload.collapsed, "0 nodes ≤ any cap ⇒ not collapsed");
+        assert!(payload.graph.nodes.is_empty());
+        assert!(payload.graph.edges.is_empty());
     }
 }

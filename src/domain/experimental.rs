@@ -72,6 +72,17 @@ pub enum Experiment {
     /// byte-identical. The "Data tables" section is seed-only + gated, so
     /// the default goldens never move (no pre-existing label is renamed).
     Seeds,
+    /// The PR-scope lineage mini-DAG (cute-dbt#404, epic #352): the focused
+    /// cross-model lineage subgraph at the top of the report — the models
+    /// the PR modified (emphasized), the connectors between them (a quiet
+    /// tier), and the deleted models (ghosts), each with its lines ± chip.
+    /// Built from the already-computed scope sets via
+    /// [`compute_pr_dag`](crate::domain::compute_pr_dag) (Slice A) + the
+    /// per-node line counts (Slice B); gated empty so the cli passes `None`
+    /// when off, the `{% match pr_dag %}` section emits zero bytes, and
+    /// every default golden stays byte-identical (the `macro_lens` /
+    /// governance / seeds precedent).
+    PrScopeMiniDag,
 }
 
 impl Experiment {
@@ -82,6 +93,7 @@ impl Experiment {
         Experiment::Governance,
         Experiment::MacroLens,
         Experiment::Seeds,
+        Experiment::PrScopeMiniDag,
     ];
 
     /// The kebab-case wire id this experiment is named by in the
@@ -94,6 +106,7 @@ impl Experiment {
             Self::Governance => "governance",
             Self::MacroLens => "macro-lens",
             Self::Seeds => "seeds",
+            Self::PrScopeMiniDag => "pr-scope-mini-dag",
         }
     }
 
@@ -363,6 +376,20 @@ mod tests {
         assert_eq!(Experiment::Seeds.id(), "seeds");
         assert_eq!(Experiment::from_id("seeds"), Some(Experiment::Seeds));
         assert!(Experiment::ALL.contains(&Experiment::Seeds));
+    }
+
+    #[test]
+    fn pr_scope_mini_dag_is_a_registered_experiment_with_its_wire_id() {
+        // cute-dbt#404 (epic #352) — the gating seam for the PR-scope
+        // lineage mini-DAG at the report top. The id round-trips and the
+        // variant is in the closed vocabulary (so `1`/`all` enables it on
+        // the prdiff-minidag golden row).
+        assert_eq!(Experiment::PrScopeMiniDag.id(), "pr-scope-mini-dag");
+        assert_eq!(
+            Experiment::from_id("pr-scope-mini-dag"),
+            Some(Experiment::PrScopeMiniDag)
+        );
+        assert!(Experiment::ALL.contains(&Experiment::PrScopeMiniDag));
     }
 
     // ----- [experimental] TOML resolution -----

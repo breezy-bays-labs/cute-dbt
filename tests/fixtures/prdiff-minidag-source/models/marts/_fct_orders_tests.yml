@@ -1,0 +1,11 @@
+unit_tests:
+  - name: test_revenue_rollup
+    model: fct_orders
+    given:
+      - input: ref('int_order_items')
+        rows:
+          - { order_id: 1, customer_id: 7, amount: 12 }
+          - { order_id: 2, customer_id: 7, amount: 8 }
+    expect:
+      rows:
+        - { customer_id: 7, order_count: 2, gross_revenue: 20 }

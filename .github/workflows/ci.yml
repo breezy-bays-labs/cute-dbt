@@ -692,6 +692,24 @@ jobs:
             output: examples/seed-showcase-report.html
             project_root: tests/fixtures/seed-showcase-source
             experimental: "1"
+          # cute-dbt#404 (epic #352) — the GOLDEN PR-scope lineage mini-DAG.
+          # A dedicated minimal manifest with a CONNECTOR PATH
+          # (stg_orders → int_order_items → fct_orders): stg_orders and
+          # fct_orders are modified, int_order_items is the unchanged connector
+          # between them. Rendered in --pr-diff mode against a synthetic patch
+          # touching only the two modified models' files, with the
+          # `pr-scope-mini-dag` experiment on, so the committed golden exercises
+          # the gated top-of-report mini-DAG: the modified models emphasized, the
+          # connector in the quiet tier, the induced lineage edges, and the
+          # per-node lines ± chips. No baseline — the showcase is --pr-diff only.
+          - name: prdiff-minidag
+            mode: report
+            current: tests/fixtures/prdiff-minidag-current.json
+            baseline: ""
+            pr_diff: tests/fixtures/prdiff-minidag-pr-diff.patch
+            output: examples/prdiff-minidag-report.html
+            project_root: tests/fixtures/prdiff-minidag-source
+            experimental: "1"
           # cute-dbt#100 — the GOLDEN explore pages: the full synthetic
           # playground manifest rendered to the two-file --out-dir shape
           # (examples/explore/dag.html + tests.html), each independently

@@ -809,6 +809,128 @@ generic state codes, no real records.\
 """
 
 [[fixture]]
+path = "prdiff-minidag-current.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/404"
+sha256 = "83f71e702fa432a02614842490b5f2d2f4327d1132d96bb8711c9d3e6b9d8895"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The dedicated dogfood manifest for cute-dbt#404's PR-scope lineage mini-DAG \
+(the prdiff-minidag GOLDEN example row, epic #352). A minimal hand-authored \
+v12 manifest with a CONNECTOR PATH: stg_orders → int_order_items → fct_orders \
+(model→model `depends_on` edges). stg_orders and fct_orders are the modified \
+models; int_order_items is the unchanged CONNECTOR between them, so the \
+mini-DAG renders all three (modified emphasized, connector quiet) and the \
+induced lineage edges. Each model carries a multi-line `raw_code` (for the ± \
+chip + inline SQL diff) and an `original_file_path` (so the pr-diff hunks key \
+onto it). Two unit tests (one per modified model) put both in render scope. \
+Rendered in --pr-diff mode against prdiff-minidag-pr-diff.patch under the \
+`pr-scope-mini-dag` experiment so the golden shows the gated section. Pure \
+synthetic data — a generic orders pipeline, no real records.\
+"""
+
+[[fixture]]
+path = "prdiff-minidag-pr-diff.patch"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/404"
+sha256 = "b7571ccd5adb6b3fddbfa93440a45a469009a8d4b80011a77b32901764012a7d"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The hand-crafted PR diff for the prdiff-minidag GOLDEN (cute-dbt#404). A \
+--unified=0 patch with one edit hunk on each of the two MODIFIED models' \
+files: `models/staging/stg_orders.sql` (a column added) and \
+`models/marts/fct_orders.sql` (a column renamed). It deliberately does NOT \
+touch `models/intermediate/int_order_items.sql` — that model is the unchanged \
+CONNECTOR, pulled into the mini-DAG only because it lies on the lineage path \
+between the two modified models. The `+` sides are byte-aligned to the \
+manifest `raw_code` (the same-revision contract). No baseline — the showcase \
+is --pr-diff only. Synthetic, no real records.\
+"""
+
+[[fixture]]
+path = "prdiff-minidag-source/models/staging/stg_orders.sql"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/404"
+sha256 = "1912a35f1c74f02afd2b373e313a36735afa167e3ff0f4989c8ce667c0dff80c"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The working-tree source for the modified upstream model in the prdiff-minidag \
+GOLDEN (cute-dbt#404). Byte-aligned to the `model.shop.stg_orders` `raw_code` \
+in prdiff-minidag-current.json (the same-revision contract), so reading it \
+through `--project-root tests/fixtures/prdiff-minidag-source` matches the \
+manifest + the pr-diff patch's `+` side. Pure synthetic SQL — no real data.\
+"""
+
+[[fixture]]
+path = "prdiff-minidag-source/models/intermediate/int_order_items.sql"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/404"
+sha256 = "0ed47262a7a8b4c59d32c2a33b157f886564e1c45af5fa46e871bbaef80ba97a"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The working-tree source for the unchanged CONNECTOR model in the \
+prdiff-minidag GOLDEN (cute-dbt#404). Byte-aligned to the \
+`model.shop.int_order_items` `raw_code` in prdiff-minidag-current.json. This \
+model is NOT in the PR diff — it enters the mini-DAG solely as the connector \
+on the lineage path between the two modified models. Pure synthetic SQL.\
+"""
+
+[[fixture]]
+path = "prdiff-minidag-source/models/marts/fct_orders.sql"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/404"
+sha256 = "23e9919d76b3c94e4e623c866903c4917e2b19edb2ff21fd665164754ea66c0c"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The working-tree source for the modified downstream model in the \
+prdiff-minidag GOLDEN (cute-dbt#404). Byte-aligned to the \
+`model.shop.fct_orders` `raw_code` in prdiff-minidag-current.json (the \
+same-revision contract), so its inline SQL diff reconstructs against the \
+pr-diff patch's hunk. Pure synthetic SQL — no real data.\
+"""
+
+[[fixture]]
+path = "prdiff-minidag-source/models/staging/_stg_orders_tests.yml"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/404"
+sha256 = "58c0c9dea4e3995f864078eeac7fc8f0db8338ae6739936337dc0ae7b424ad1e"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The authoring YAML for the stg_orders unit test in the prdiff-minidag GOLDEN \
+(cute-dbt#404). Sliced by the authoring-YAML drawer at \
+`models/staging/_stg_orders_tests.yml` (the manifest unit test's \
+original_file_path). Pure synthetic data — a generic orders row, no real \
+records.\
+"""
+
+[[fixture]]
+path = "prdiff-minidag-source/models/marts/_fct_orders_tests.yml"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/404"
+sha256 = "f8f96291a179fdeac3189b700374479d9c6aaae383362b2a81d2289f5a360f58"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The authoring YAML for the fct_orders unit test in the prdiff-minidag GOLDEN \
+(cute-dbt#404). Sliced by the authoring-YAML drawer at \
+`models/marts/_fct_orders_tests.yml`. Pure synthetic data — generic order \
+rollup rows, no real records.\
+"""
+
+[[fixture]]
 path = "playground-source/macros/data_quality/quarantine_filter.sql"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/265"

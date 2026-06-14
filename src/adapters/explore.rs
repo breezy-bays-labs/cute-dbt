@@ -1001,20 +1001,12 @@ fn focused_typed_node_map<'a>(
     let mut typed: BTreeMap<&NodeId, LineageNodeType> = BTreeMap::new();
     let in_focus = |id: &NodeId| focus.users.contains(id) || focus.downstream.contains(id);
     for (id, node) in current.nodes() {
-        if !in_focus(id) {
-            continue;
+        if let Some(node_type) = in_focus(id)
+            .then(|| lineage_vertex_type(node.resource_type()))
+            .flatten()
+        {
+            typed.insert(id, node_type);
         }
-        let node_type = match node.resource_type() {
-            "model" => LineageNodeType::Model,
-            "snapshot" => LineageNodeType::Snapshot,
-            "seed" => LineageNodeType::Seed,
-            // Any other consumer type the closure reached (`test`,
-            // `operation`, …) is not a lineage vertex vocabulary member —
-            // skip it (the same silent-skip the full edge builder applies
-            // to non-vertex deps).
-            _ => continue,
-        };
-        typed.insert(id, node_type);
     }
     for id in current.sources().keys() {
         if in_focus(id) {
@@ -1027,6 +1019,25 @@ fn focused_typed_node_map<'a>(
         }
     }
     typed
+}
+
+/// Classify a manifest node's `resource_type` into its lineage-vertex
+/// vocabulary member, or `None` when the type is not a vertex (a `test` /
+/// `operation` / any other consumer the closure reached — silently skipped,
+/// the same posture the edge builder applies to non-vertex deps).
+///
+/// Only the `nodes()`-borne resource types are classified here; `source` and
+/// `exposure` are keyed off their own manifest maps by the callers (they are
+/// not `nodes()` entries), so they are deliberately absent from this match.
+/// Factored out of [`focused_typed_node_map`] so the focus loop stays a thin
+/// driver and the classification is unit-testable in isolation.
+fn lineage_vertex_type(resource_type: &str) -> Option<LineageNodeType> {
+    match resource_type {
+        "model" => Some(LineageNodeType::Model),
+        "snapshot" => Some(LineageNodeType::Snapshot),
+        "seed" => Some(LineageNodeType::Seed),
+        _ => None,
+    }
 }
 
 /// Assemble a [`Lineage`] (typed nodes + forward edges) from a prebuilt
@@ -3656,5 +3667,30 @@ mod tests {
             "the seed table is keyed by the seed node id",
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ===== lineage_vertex_type (cute-dbt#404 extraction) =====
+
+    #[test]
+    fn lineage_vertex_type_maps_each_vertex_resource_type() {
+        assert_eq!(lineage_vertex_type("model"), Some(LineageNodeType::Model));
+        assert_eq!(
+            lineage_vertex_type("snapshot"),
+            Some(LineageNodeType::Snapshot)
+        );
+        assert_eq!(lineage_vertex_type("seed"), Some(LineageNodeType::Seed));
+    }
+
+    #[test]
+    fn lineage_vertex_type_skips_non_vertex_resource_types() {
+        // `test`/`operation`/anything else the focus closure reached is not a
+        // lineage vertex — the silent-skip arm. `source`/`exposure` are keyed
+        // off their own manifest maps, not `nodes()`, so they are `None` here.
+        assert_eq!(lineage_vertex_type("test"), None);
+        assert_eq!(lineage_vertex_type("unit_test"), None);
+        assert_eq!(lineage_vertex_type("operation"), None);
+        assert_eq!(lineage_vertex_type("source"), None);
+        assert_eq!(lineage_vertex_type("exposure"), None);
+        assert_eq!(lineage_vertex_type(""), None);
     }
 }
