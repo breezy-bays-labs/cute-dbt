@@ -642,6 +642,28 @@
       "check": "grain.unique-key-unbacked",
       "tier": "total",
       "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_provider_scorecard",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "uncovered"
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "provider_metrics_key"
+        }
+      ],
+      "recommendation": "Add a uniqueness data test at the declared grain: `unique` on a single-column key, or `dbt_utils.unique_combination_of_columns` over the composite key columns.",
+      "anchor": {
+        "path": "models/marts/analytics/fct_provider_scorecard.sql",
+        "line": 1,
+        "diff_context": "added"
+      }
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
       "model_id": "model.healthcare_analytics.mart_dq_summary",
       "construct": "config.unique_key",
       "verdict": {

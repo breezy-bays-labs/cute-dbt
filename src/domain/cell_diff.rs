@@ -1461,6 +1461,7 @@ mod tests {
         let diff = PrDiff {
             renames: Vec::new(),
             deleted: Vec::new(),
+            added: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![Hunk {

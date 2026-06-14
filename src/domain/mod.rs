@@ -137,8 +137,8 @@ pub use project_def::{
     resolve_model_configs,
 };
 pub use scope::{
-    ChangeAxes, ScopeInput, ScopeSelection, all_models, all_seeds, changed_models, select_in_scope,
-    select_seeds_in_scope, widen_with_config_attributions,
+    ChangeAxes, ModelState, ScopeInput, ScopeSelection, all_models, all_seeds, changed_models,
+    select_in_scope, select_seeds_in_scope, widen_with_config_attributions,
 };
 pub use seed_card::SeedCard;
 pub use state::{

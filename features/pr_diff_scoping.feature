@@ -170,6 +170,45 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the model "fct_revenue" is admitted by the filter axis "all"
     And the model "fct_revenue" is rejected by the filter axis "body"
 
+  # --- cute-dbt#416: the NEW/MODIFIED/REMOVED state taxonomy ---
+  #
+  # The Models lens attributes each in-scope model a mutually-exclusive
+  # top-level state (NEW | MODIFIED | REMOVED), completing the PR-scope
+  # state taxonomy the 3-axis #411/#413/#414 attribution (MODIFIED) sits
+  # underneath. NEW = the PR adds the model's source file (its
+  # original_file_path is in the diff's `added` set); MODIFIED = an existing
+  # model whose body/config/unit-test axes fired; REMOVED = a deleted model
+  # path that names no current node (node-less, surfaced as a Models-lens
+  # summary, never a dropdown option). The NEW state chip + the REMOVED
+  # summary are verified in a real browser by tests/headless_toggle.rs;
+  # these scenarios pin the payload contract those surfaces read.
+
+  Scenario: A model added in the PR is attributed the NEW state
+    Given a PR diff that adds a new model at "models/marts/fct_scorecard.sql"
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report's models-in-scope listing contains "fct_scorecard"
+    And the model "fct_scorecard" has the state "new"
+
+  Scenario: An existing model changed in the PR is attributed the MODIFIED state
+    Given a PR diff that changes "models/marts/fct_revenue.sql"
+    And the manifest contains a model with original_file_path "models/marts/fct_revenue.sql"
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the model "fct_revenue" has the state "modified"
+
+  Scenario: A model deleted in the PR is surfaced as a REMOVED model
+    Given a PR diff that deletes the model at "models/marts/fct_legacy.sql"
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report lists "models/marts/fct_legacy.sql" as a removed model
+
+  Scenario: A deleted non-model file is not surfaced as a REMOVED model
+    Given a PR diff that deletes the model at "macros/util.sql"
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report lists no removed models
+
   # --- Project-root path rewriting (load-bearing for the Action wrapper) ---
 
   Scenario: --project-root rewrites PR-diff paths so a sub-directory dbt project is in scope

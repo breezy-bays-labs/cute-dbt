@@ -70,8 +70,8 @@ use crate::domain::{
     BANNER_EMPTY_SCOPE, BlockDiff, ChangeAxes, CheckId, CheckPolicy, ConfigAttribution, CteGraph,
     DEFAULT_SEED_ROW_CAP, DiffLine, DiffLineKind, EdgeType, Finding, FixtureTable,
     FixtureTableDiff, GovernanceFacts, HeuristicId, HookChangeFacts, HookManifestPresence,
-    InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet, ModelYamlOutcome, Node,
-    NodeId, NormalizedDiffIndex, PrDagGraph, PrRef, ProjectChange, ProjectChangeCategory,
+    InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet, ModelState, ModelYamlOutcome,
+    Node, NodeId, NormalizedDiffIndex, PrDagGraph, PrRef, ProjectChange, ProjectChangeCategory,
     ProjectChangePanel, ProjectDefinition, ProjectFacts, ProjectFallbackReason, SeedCard,
     SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
     UnitTestYamlBlock, VarAttribution, VarChangeFacts, VarReference, VarScanFootprint,
@@ -424,6 +424,21 @@ pub struct ModelPayload {
     /// cute-dbt#414 Slice C).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_file: Option<String>,
+    /// The model's mutually-exclusive top-level state (cute-dbt#416) — the
+    /// wire form of the domain [`ModelState`]: `"new"` or `"modified"`. The
+    /// Models lens renders a NEW state chip (alongside the 3-axis MODIFIED
+    /// chips) when this is `"new"`; `"modified"` renders no extra state chip
+    /// (the axis chips already say MODIFIED). `None` (key omitted) outside
+    /// the `--pr-diff` arm — the baseline arm produces an empty
+    /// `ScopeSelection.model_states` map (the `axes` Option-A gap), so every
+    /// baseline golden stays byte-identical. Attached by
+    /// `build_payload_with_externals` from the threaded `model_states` map.
+    /// [`ModelState::Removed`] never appears here — removed models are
+    /// node-less and surfaced via [`ReportPayload::removed_models`].
+    ///
+    /// [`ModelState`]: crate::domain::ModelState
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<&'static str>,
 }
 
 /// The Model-YAML section's render shape (cute-dbt#247): the model's
@@ -1490,6 +1505,21 @@ pub struct ReportPayload {
     /// server-rendered descriptor line.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_dag: Option<PrDagPayload>,
+    /// The REMOVED model paths (cute-dbt#416) — the PR-deleted model files
+    /// that name no current node (node-less, so they cannot be
+    /// [`ModelPayload`]s / model-dropdown entries). The Models lens renders
+    /// these as a summary chip/count + a short path list, NOT as dropdown
+    /// options. Sorted (the domain `ScopeSelection::removed_models` is
+    /// pre-sorted). Empty ⇒ omitted from JSON (the baseline arm + every
+    /// addition-free PR), keeping non-removal goldens byte-identical (the
+    /// `seed_cards` precedent).
+    ///
+    /// **Design note (cute-dbt#360-revisitable):** chip-only placement is a
+    /// sensible default — a removed model has no current detail to show. The
+    /// final REMOVED presentation (and whether it ever enters the dropdown)
+    /// is a #360 design decision.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed_models: Vec<String>,
 }
 
 /// The PR-scope lineage mini-DAG render view (cute-dbt#404) — the domain
@@ -2125,7 +2155,7 @@ fn project_fallback_copy(reason: ProjectFallbackReason) -> &'static str {
 /// names ride inline in the config-tree row's sentence; past it the
 /// names collapse into a `<details>` listing with the count stated
 /// explicitly ("listed, not individually rendered"). Calibrated from the
-/// diff-showcase dogfood (its marts edit affects 20 models).
+/// diff-showcase dogfood (its marts edit affects 21 models).
 const CONFIG_AFFECTED_CAP: usize = 10;
 
 /// Invert the per-model attribution map into per-(subtree-path, key)
@@ -3138,6 +3168,9 @@ pub fn build_payload(
         // explore/test path with no per-axis attribution passes an empty
         // map, so `ModelPayload::axes` / `config_file` stay omitted.
         &BTreeMap::new(),
+        // cute-dbt#416 — the no-state convenience: empty `model_states` map,
+        // so `ModelPayload::state` stays omitted (the `axes` precedent).
+        &BTreeMap::new(),
     )
 }
 
@@ -3176,6 +3209,7 @@ pub fn build_payload_with_externals(
     check_policy: &CheckPolicy<HeuristicId>,
     project_facts: &ProjectFacts,
     axes: &BTreeMap<NodeId, ChangeAxes>,
+    model_states: &BTreeMap<NodeId, ModelState>,
 ) -> ReportPayload {
     let model_tests = index_tests_for_models(current, models_in_scope);
     let empty: Vec<(&str, &UnitTest)> = Vec::new();
@@ -3220,6 +3254,15 @@ pub fn build_payload_with_externals(
         if let Some(model_axes) = axes.get(model_id) {
             model_payload.axes = Some(AxesPayload::from(*model_axes));
             model_payload.config_file = model.patch_path().map(str::to_owned);
+        }
+        // cute-dbt#416 — the per-model NEW/MODIFIED state chip. Present only
+        // on the `--pr-diff` arm (the `model_states` map is empty in baseline
+        // mode, the `axes` Option-A gap), so this is skipped and baseline
+        // goldens stay byte-identical. NEW renders an extra state chip;
+        // MODIFIED carries no chip (the axis chips already say MODIFIED), but
+        // is serialized so the wire form is unambiguous.
+        if let Some(state) = model_states.get(model_id) {
+            model_payload.state = Some(model_state_wire(*state));
         }
         models.push(model_payload);
     }
@@ -3272,6 +3315,25 @@ pub fn build_payload_with_externals(
         // omitted from JSON + zero DOM via `{% match pr_dag %}`, keeping the
         // non-experimental goldens byte-identical.
         pr_dag: None,
+        // cute-dbt#416 — the REMOVED model paths default empty here; the
+        // value (the cli's `removed_models`) is threaded in by
+        // `render_report_with_externals` (it is a payload-level summary, not
+        // per-model — removed models are node-less). Empty ⇒ omitted from JSON,
+        // keeping non-removal goldens byte-identical.
+        removed_models: Vec::new(),
+    }
+}
+
+/// The wire form of a [`ModelState`] for the JSON payload (cute-dbt#416) —
+/// render owns the vocabulary (the `AxesPayload` precedent). `Removed` is
+/// never serialized per-model (removed models are node-less and surfaced via
+/// [`ReportPayload::removed_models`]); it maps to `"removed"` only for
+/// completeness should a future baseline-arm slice attribute a removed node.
+fn model_state_wire(state: ModelState) -> &'static str {
+    match state {
+        ModelState::New => "new",
+        ModelState::Modified => "modified",
+        ModelState::Removed => "removed",
     }
 }
 
@@ -3343,6 +3405,11 @@ pub fn render_report(
         // (cute-dbt#413) — baseline mode + the headless render helpers pass
         // the empty map, so `axes` / `config_file` stay omitted.
         &BTreeMap::new(),
+        // No per-model state + no REMOVED model paths through this convenience
+        // wrapper (cute-dbt#416) — the empty map + empty slice keep `state` /
+        // `removed_models` omitted (the `axes` precedent).
+        &BTreeMap::new(),
+        &[],
     )
 }
 
@@ -3381,6 +3448,8 @@ pub fn render_report_with_externals(
     seed_row_cap: usize,
     pr_dag: Option<&PrDagPayload>,
     axes: &BTreeMap<NodeId, ChangeAxes>,
+    model_states: &BTreeMap<NodeId, ModelState>,
+    removed_models: &[String],
 ) -> io::Result<()> {
     let mut payload = build_payload_with_externals(
         current,
@@ -3396,6 +3465,7 @@ pub fn render_report_with_externals(
         check_policy,
         project_facts,
         axes,
+        model_states,
     );
     // cute-dbt#260 — the gated governance facts (group chips + blast
     // radius + Slice 2's contract classifications, all built in
@@ -3432,6 +3502,11 @@ pub fn render_report_with_externals(
     // keeping the non-experimental goldens byte-identical (the `macro_lens`
     // precedent).
     payload.pr_dag = pr_dag.cloned();
+    // cute-dbt#416 — the node-less REMOVED model paths, threaded in here (a
+    // payload-level summary, not per-model). Empty on the baseline arm + any
+    // addition/removal-free PR ⇒ omitted from JSON, keeping non-removal
+    // goldens byte-identical (the `seed_cards` / `pr_dag` precedent).
+    payload.removed_models = removed_models.to_vec();
     // The empty-scope banner contract reads the TRUE in-scope set, not the
     // widened render set or the changed subset (cute-dbt#91).
     let banner_text = compose_banner_text(in_scope);
@@ -3574,6 +3649,9 @@ fn build_model_payload(
         // builder never sees the scope selection's per-axis record).
         axes: None,
         config_file: None,
+        // cute-dbt#416 — the NEW/MODIFIED state is attached by
+        // build_payload_with_externals from the threaded `model_states` map.
+        state: None,
     }
 }
 
@@ -4702,6 +4780,7 @@ mod tests {
             &CheckPolicy::default(),
             &facts,
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
         let fct = payload
             .models
@@ -4790,6 +4869,7 @@ mod tests {
             &CheckPolicy::default(),
             &ProjectFacts::default(),
             &axes,
+            &BTreeMap::new(),
         );
         let fct = payload
             .models
@@ -4839,6 +4919,7 @@ mod tests {
             &ProjectFacts::default(),
             // Empty axes map ⇒ the baseline-mode shape.
             &BTreeMap::new(),
+            &BTreeMap::new(),
         );
         let fct = &payload.models[0];
         assert!(fct.axes.is_none(), "baseline mode carries no axes");
@@ -4861,6 +4942,156 @@ mod tests {
         });
         let json = serde_json::to_string(&payload).expect("serialize");
         assert_eq!(json, r#"{"body":true,"config":false,"unit_test":true}"#);
+    }
+
+    // ===== cute-dbt#416 — NEW/MODIFIED state + REMOVED model paths =====
+
+    #[test]
+    fn build_payload_attaches_new_and_modified_state_to_in_scope_models() {
+        // A NEW model carries `state: "new"`; a MODIFIED model carries
+        // `state: "modified"`. Both serialize their wire form.
+        let manifest = manifest_for(
+            vec![
+                model_node("model.shop.fct_new", "b1", Some("select 1")),
+                model_node("model.shop.dim_mod", "b2", Some("select 1")),
+            ],
+            vec![],
+        );
+        let models = ModelInScopeSet::from_iter([
+            NodeId::new("model.shop.fct_new"),
+            NodeId::new("model.shop.dim_mod"),
+        ]);
+        let states = BTreeMap::from([
+            (NodeId::new("model.shop.fct_new"), ModelState::New),
+            (NodeId::new("model.shop.dim_mod"), ModelState::Modified),
+        ]);
+        let payload = build_payload_with_externals(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+            &CheckPolicy::default(),
+            &ProjectFacts::default(),
+            &BTreeMap::new(),
+            &states,
+        );
+        let new_model = payload
+            .models
+            .iter()
+            .find(|m| m.name == "fct_new")
+            .expect("model renders");
+        assert_eq!(new_model.state, Some("new"));
+        let mod_model = payload
+            .models
+            .iter()
+            .find(|m| m.name == "dim_mod")
+            .expect("model renders");
+        assert_eq!(mod_model.state, Some("modified"));
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert!(json.contains(r#""state":"new""#), "{json}");
+        assert!(json.contains(r#""state":"modified""#), "{json}");
+    }
+
+    #[test]
+    fn build_payload_omits_state_in_baseline_mode() {
+        // An empty `model_states` map (the baseline arm) ⇒ no `state` key on
+        // any model, so baseline goldens stay byte-identical.
+        let manifest = manifest_for(
+            vec![model_node("model.shop.fct_orders", "b1", Some("select 1"))],
+            vec![],
+        );
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.fct_orders")]);
+        let payload = build_payload_with_externals(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+            &CheckPolicy::default(),
+            &ProjectFacts::default(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        );
+        assert!(payload.models[0].state.is_none());
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert_eq!(json.matches("\"state\"").count(), 0, "{json}");
+    }
+
+    #[test]
+    fn model_state_wire_maps_every_variant() {
+        // Exhaustive enumeration of the wire vocabulary (house style).
+        assert_eq!(model_state_wire(ModelState::New), "new");
+        assert_eq!(model_state_wire(ModelState::Modified), "modified");
+        assert_eq!(model_state_wire(ModelState::Removed), "removed");
+    }
+
+    #[test]
+    fn render_threads_removed_models_into_the_payload() {
+        // The REMOVED model paths flow through render_report_with_externals
+        // into the payload, sorted, and serialize; an empty slice omits the
+        // key (baseline + non-removal goldens stay byte-identical).
+        let manifest = manifest_for(
+            vec![model_node("model.shop.dim_kept", "b1", Some("select 1"))],
+            vec![],
+        );
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.dim_kept")]);
+        let tmp = std::env::temp_dir().join(format!(
+            "cute-dbt-removed-{}-{}.html",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        ));
+        render_report_with_externals(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &InScopeSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+            ScopeSource::PrDiff,
+            "t",
+            None,
+            &CheckPolicy::default(),
+            &ProjectFacts::default(),
+            &GovernanceFacts::default(),
+            None,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+            None,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &["models/marts/dim_gone.sql".to_owned()],
+        )
+        .expect("report renders");
+        let html = std::fs::read_to_string(&tmp).expect("read report");
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            html.contains("models/marts/dim_gone.sql"),
+            "the removed model path is inlined into the payload",
+        );
+        assert!(
+            html.contains("removed_models"),
+            "the removed_models key serializes when non-empty",
+        );
     }
 
     // ===== cute-dbt#268 — vars attribution render surfaces =====
@@ -5132,6 +5363,7 @@ mod tests {
             "",
             &CheckPolicy::default(),
             &facts,
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
         let mart = payload
@@ -7242,6 +7474,7 @@ mod tests {
             pr_ref: None,
             seed_cards: Vec::new(),
             pr_dag: None,
+            removed_models: Vec::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -7268,6 +7501,7 @@ mod tests {
             pr_ref: None,
             seed_cards: Vec::new(),
             pr_dag: None,
+            removed_models: Vec::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -7296,6 +7530,7 @@ mod tests {
             pr_ref: None,
             seed_cards: Vec::new(),
             pr_dag: None,
+            removed_models: Vec::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(serialized.contains("a < b"), "bare `<` is preserved");
@@ -7319,6 +7554,7 @@ mod tests {
             pr_ref: None,
             seed_cards: Vec::new(),
             pr_dag: None,
+            removed_models: Vec::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -7355,6 +7591,7 @@ mod tests {
             pr_ref: None,
             seed_cards: Vec::new(),
             pr_dag: None,
+            removed_models: Vec::new(),
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -7389,6 +7626,7 @@ mod tests {
             pr_ref: None,
             seed_cards: Vec::new(),
             pr_dag: None,
+            removed_models: Vec::new(),
         };
         let serialized = payload_json_for_html_script(&original).unwrap();
         let parsed: serde_json::Value =
@@ -7419,6 +7657,7 @@ mod tests {
             pr_ref: None,
             seed_cards,
             pr_dag: None,
+            removed_models: Vec::new(),
         }
     }
 
@@ -7630,6 +7869,8 @@ mod tests {
             DEFAULT_SEED_ROW_CAP,
             None,
             &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8199,6 +8440,7 @@ mod tests {
         let diff = PrDiff {
             renames: Vec::new(),
             deleted: Vec::new(),
+            added: Vec::new(),
             files: vec![FileHunks {
                 path: "macros/dq.sql".to_owned(),
                 hunks: vec![Hunk {
@@ -8576,6 +8818,8 @@ mod tests {
             DEFAULT_SEED_ROW_CAP,
             None,
             &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8991,6 +9235,8 @@ mod tests {
             // cute-dbt#404 — no PR-scope mini-DAG in this lens-shell helper.
             None,
             &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -9151,6 +9397,8 @@ mod tests {
             DEFAULT_SEED_ROW_CAP,
             None,
             &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -9286,6 +9534,8 @@ mod tests {
             DEFAULT_SEED_ROW_CAP,
             None,
             &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")

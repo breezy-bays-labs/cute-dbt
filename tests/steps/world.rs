@@ -119,6 +119,18 @@ pub struct World {
     /// and a minimal hunk for a rename-with-edit (`edited: true`).
     pub renames: Vec<RenameDirective>,
 
+    /// cute-dbt#416: added-file directives. The synthesizer emits a
+    /// `--- /dev/null` / `+++ b/<path>` block (the NEW-detection signal) for
+    /// each, with a minimal `+`-only hunk. A model whose `original_file_path`
+    /// matches an added path is attributed `ModelState::New`.
+    pub added_files: Vec<String>,
+
+    /// cute-dbt#416: deleted-file directives. The synthesizer emits a
+    /// `--- a/<path>` / `+++ /dev/null` block (the REMOVED-detection signal)
+    /// for each, with a minimal `-`-only hunk. A deleted model path that
+    /// names no current node is a `ModelState::Removed` (node-less) model.
+    pub deleted_files: Vec<String>,
+
     // --- Cell-level data-table diff (cell_table_diff) -------------------
     /// cute-dbt#98: the scenario's fixture-cell-diff plan, set by a
     /// `Given a unit test … with a … given row …` step and consumed by the

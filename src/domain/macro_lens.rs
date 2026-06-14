@@ -1158,6 +1158,7 @@ mod tests {
                 files,
                 renames: vec![],
                 deleted: vec![],
+                added: Vec::new(),
             },
             None,
         )

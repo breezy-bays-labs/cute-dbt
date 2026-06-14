@@ -1559,6 +1559,7 @@ mod tests {
         let diff = PrDiff {
             renames: Vec::new(),
             deleted: Vec::new(),
+            added: Vec::new(),
             files: files
                 .into_iter()
                 .map(|(path, hunks)| FileHunks {

@@ -1515,6 +1515,28 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
   overflow-wrap: anywhere;
 }
 
+/* cute-dbt#416 — the top-level NEW/REMOVED state chips, reusing the
+   .axis-chip pill base so they compose coherently with the 3-axis MODIFIED
+   chips. NEW leads the model-axes row (accent left-border, the
+   "added" affordance); REMOVED leads the report-level removed-models
+   summary (muted left-border + line-through path list, the "gone"
+   affordance). Existing AA-gated semantic tokens only, so the chips theme
+   with the chassis. The visual polish is a #360 design pass. */
+.state-chip { font-weight: 700; }
+.state-chip-new { border-left: 3px solid var(--accent); }
+.state-chip-removed { border-left: 3px solid var(--text-muted); }
+.removed-models-row {
+  margin: 0.4rem 0 0; display: flex; flex-wrap: wrap; gap: 0.35rem;
+  align-items: center;
+}
+.removed-path-chip {
+  font-family: var(--font-mono); font-size: 0.78em;
+  background: var(--bg-alt); color: var(--text-muted);
+  border: var(--rule-w) solid var(--border);
+  border-radius: var(--radius-sm); padding: 0.1rem 0.45rem;
+  text-decoration: line-through; overflow-wrap: anywhere;
+}
+
 /* ============================================================================
    cute-dbt#402 (epic #360) — the subject-lens tab shell. Tabs are subject
    JOURNEYS (Models / Macros / Project), not change-state sections. First

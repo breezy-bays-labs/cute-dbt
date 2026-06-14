@@ -292,7 +292,7 @@ test. Pure synthetic data only — the `sql_literal_demo` package, `dq_flags` / 
 path = "playground-baseline.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "69092f7505c8edff814e72f99e471259fb7390f09fde1290d0f76036d51b8b32"
+sha256 = "19a8043db65ed9c88852f57f163f0bb35bcb32201067cf496e8aef046dc5b884"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -338,7 +338,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "35edfe6423fccbb9e0072bf5ff53b3ace1d9c849572c2010df1fbf28db5d174a"
+sha256 = "8d1988e49a887fd6c77fbca6d40a8f518156f0f61fc892ffba0b720aedf57c29"
 synthetic_only = true
 license = "MIT"
 description = """
@@ -494,7 +494,7 @@ is unchanged.\
 path = "playground-pr-diff.patch"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/134"
-sha256 = "65489edf84ab4ebdf66a0bfdcdade1a9b86c79c17565fa4c1d8c4620ddf887aa"
+sha256 = "4feb1f49c1348b0db1c776e6aaa9c77a3799048dbcbb645c62aeff32a5540116"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"

@@ -31,7 +31,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::domain::manifest::{Manifest, NodeId};
+use crate::domain::manifest::{Manifest, Node, NodeId};
 use crate::domain::pr_diff::NormalizedDiffIndex;
 use crate::domain::project_def::ConfigAttribution;
 use crate::domain::state::{
@@ -120,6 +120,46 @@ impl ChangeAxes {
     }
 }
 
+/// The mutually-exclusive top-level lifecycle state of an in-scope model in
+/// `--pr-diff` mode (cute-dbt#416) — the PR-scope state taxonomy the
+/// 3-axis [`ChangeAxes`] attribution (cute-dbt#411) sits *underneath*.
+///
+/// Exactly one state per in-scope model:
+/// - **`New`** — the PR adds the model's `.sql`/`.py` (its
+///   `original_file_path` is in the diff's `added` keyset). Supersedes
+///   `Modified` even when the added file also carries body hunks: a brand-new
+///   file is NEW, not MODIFIED.
+/// - **`Modified`** — an existing model (not in `added`) whose body/config/
+///   unit-test axes fired. The default state and the cute-dbt#411 path.
+/// - **`Removed`** — the PR deletes a model path that names no current node
+///   (it's gone). REMOVED models are **node-less** (no current manifest
+///   entry), so they are carried as a separate `removed_models` path list,
+///   never an in-scope `Node` / a `model_states` entry.
+///
+/// `New`/`Modified` attach to a real in-scope model node (via
+/// [`ScopeSelection::model_states`]); `Removed` has no node, so it never
+/// appears in that map — its paths live in
+/// [`ScopeSelection::removed_models`]. The variant exists on the enum for
+/// vocabulary completeness (render reuses the same chip family) and so a
+/// future baseline-arm parity slice can attribute a removed node a state.
+///
+/// The **baseline arm** produces no model states (the documented gap, the
+/// `ChangeAxes` Option-A precedent): the always-on body checksum can't tell
+/// add-vs-modify, and deletion ghosts there are the separate `pr_dag`
+/// baseline−current set-diff. PR-diff is the primary CI/PR-review path, so
+/// it owns the NEW/REMOVED signal here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelState {
+    /// A model the PR **adds** (its source file is in the diff's `added`).
+    New,
+    /// An existing model the PR **modifies** (the cute-dbt#411 axes path).
+    Modified,
+    /// A model the PR **removes** — a node-less ghost (carried only as a
+    /// path in [`ScopeSelection::removed_models`], never in
+    /// [`ScopeSelection::model_states`]).
+    Removed,
+}
+
 /// The resolved scope selection: the in-scope unit tests, the in-scope
 /// models, and the **changed** (PR-updated) subset of the in-scope tests.
 ///
@@ -174,6 +214,26 @@ pub struct ScopeSelection {
     /// `StateComparator::modified_set`'s `.any()`); `state.rs` is
     /// deliberately untouched here. Pinned by `baseline_arm_produces_empty_axes`.
     pub axes: BTreeMap<NodeId, ChangeAxes>,
+    /// Per-in-scope-model mutually-exclusive top-level state (cute-dbt#416)
+    /// — [`ModelState::New`] or [`ModelState::Modified`] for each model node
+    /// with a current manifest entry. Additive POD (ADR-5), the
+    /// `axes` precedent (a parallel `BTreeMap<NodeId, _>`).
+    ///
+    /// **Invariant:** `model_states.keys() == axes.keys() == models_in_scope`
+    /// on the `PrDiff` arm — every in-scope model node carries exactly one
+    /// state. NEW supersedes MODIFIED (a model in `added` is `New` even when
+    /// it also has body hunks). [`ModelState::Removed`] never appears here —
+    /// removed models are node-less, carried in `removed_models`. The
+    /// `Baseline` arm produces an **empty** map (the `axes` Option-A gap).
+    pub model_states: BTreeMap<NodeId, ModelState>,
+    /// The model **paths** the PR deletes (cute-dbt#416) — REMOVED models.
+    /// Node-less by nature (no current manifest entry), so they cannot be
+    /// `Node`s / `model_states` entries; they are diff `deleted` paths
+    /// inferred to be model paths (`.sql`/`.py` under the dbt-default
+    /// `models/` prefix) that resolve to no current node. Sorted for
+    /// deterministic golden output. Empty on the `Baseline` arm (deletion
+    /// ghosts there are the separate `pr_dag` baseline−current set-diff).
+    pub removed_models: Vec<String>,
 }
 
 /// Resolve the [`ScopeSelection`] for the current manifest and the given
@@ -207,6 +267,12 @@ pub fn select_in_scope(current: &Manifest, input: &ScopeInput) -> ScopeSelection
                 // config-only change is invisible to the body checksum.
                 // See the `ScopeSelection::axes` documented-gap note.
                 axes: BTreeMap::new(),
+                // cute-dbt#416: the baseline arm produces no NEW/REMOVED
+                // model states either — the same documented gap. PR-diff
+                // owns the add/remove signal; the baseline-arm deletion
+                // ghosts are the separate pr_dag set-diff.
+                model_states: BTreeMap::new(),
+                removed_models: Vec::new(),
             }
         }
         ScopeInput::PrDiff { index } => select_in_scope_pr_diff(current, index),
@@ -413,6 +479,21 @@ pub fn widen_with_config_attributions(
             })
             .map(|(id, _)| id.clone()),
     );
+    // cute-dbt#416: a config-tree-widened model is an existing node edited
+    // via `dbt_project.yml` — a MODIFIED model. Give each one a state entry
+    // (unless the `PrDiff` arm already attributed it NEW/MODIFIED) so the
+    // `model_states.keys() == models_in_scope` invariant survives the
+    // widening. A config-tree edit can never make a model NEW (the model
+    // node already exists in the current manifest), so `Modified` is the
+    // correct default. The `Baseline` arm passes empty `model_states`, so
+    // this is inert there (`config_attributions` is project-state-gated and
+    // never set on the baseline path).
+    for id in &widened {
+        selection
+            .model_states
+            .entry(id.clone())
+            .or_insert(ModelState::Modified);
+    }
     selection.models_in_scope.extend(widened);
     selection
 }
@@ -539,6 +620,13 @@ fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> S
     // test carries `unit_test: true` with body/config false rather than
     // being absent.
     let mut axes: BTreeMap<NodeId, ChangeAxes> = BTreeMap::new();
+    // Per-model top-level state (cute-dbt#416), in lockstep with `axes`
+    // (`model_states.keys() == axes.keys() == models_in_scope`). A model
+    // whose `original_file_path` is in the diff's `added` keyset is NEW
+    // (supersedes MODIFIED even with body hunks); every other in-scope
+    // model node is MODIFIED. REMOVED is node-less and handled separately
+    // below — it never enters this map.
+    let mut model_states: BTreeMap<NodeId, ModelState> = BTreeMap::new();
     for model_id in &model_ids {
         axes.insert(
             model_id.clone(),
@@ -548,7 +636,21 @@ fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> S
                 unit_test: models_with_in_scope_test.contains(model_id),
             },
         );
+        let is_new = current
+            .node(model_id)
+            .and_then(Node::original_file_path)
+            .is_some_and(|ofp| index.contains_added(ofp));
+        model_states.insert(
+            model_id.clone(),
+            if is_new {
+                ModelState::New
+            } else {
+                ModelState::Modified
+            },
+        );
     }
+
+    let removed_models = removed_model_paths(current, index);
 
     let models_in_scope: ModelInScopeSet = model_ids.into_iter().collect();
     ScopeSelection {
@@ -556,7 +658,82 @@ fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> S
         models_in_scope,
         changed,
         axes,
+        model_states,
+        removed_models,
     }
+}
+
+/// The dbt-default model directory prefix (cute-dbt#416). Used by the
+/// REMOVED model-path heuristic when no ingested `model-paths` config is
+/// threadable into the scope path. dbt's own default is `model-paths:
+/// ["models"]` (dbt-core `dbt_project.yml` default), so a deleted
+/// `.sql`/`.py` under `models/` is overwhelmingly a model deletion.
+const DEFAULT_MODEL_PATH_PREFIX: &str = "models/";
+
+/// The model file extensions cute-dbt treats as a model definition
+/// (cute-dbt#416): SQL models and Python models. A deleted file with any
+/// other extension (a `schema.yml`, a `.csv` seed, a `.md` doc) is never a
+/// REMOVED **model**.
+const MODEL_FILE_EXTENSIONS: [&str; 2] = [".sql", ".py"];
+
+/// Infer the **REMOVED** model paths from a diff's `deleted` keyset
+/// (cute-dbt#416).
+///
+/// A REMOVED model is node-less — the PR deleted it, so it has no current
+/// manifest node to anchor an `original_file_path` or a `resource_type`
+/// check. With **no baseline manifest** in `--pr-diff` mode, "is this a
+/// model?" can only be inferred from the deleted path itself. The
+/// heuristic, documented and deliberately conservative:
+///
+/// 1. the path ends in `.sql` or `.py` (a model definition extension), and
+/// 2. the path is under the dbt-default `models/` prefix (the
+///    [`DEFAULT_MODEL_PATH_PREFIX`]), and
+/// 3. the path names **no current node** (it really is gone — a path still
+///    present as a node is a modify/rename, not a removal).
+///
+/// The `models/`-prefix fallback is used because the ingested
+/// `model-paths` config (cute-dbt#262/#270 `ProjectDefinition`) is gated
+/// behind the project-state experiment and is **not** threaded into the
+/// core scope path; the dbt default covers the overwhelming majority of
+/// projects. A custom-`model-paths` project under-reports REMOVED models
+/// (conservative: a false negative drops a chip, never a false claim) —
+/// threading the config here is a clean additive follow-up.
+///
+/// The deleted paths are already strip-normalized (the index applied the
+/// `--project-root` strip at construction), so the `models/` prefix test
+/// is project-relative, matching the manifest's `original_file_path`
+/// scheme. The result is sorted for deterministic golden output.
+fn removed_model_paths(current: &Manifest, index: &NormalizedDiffIndex) -> Vec<String> {
+    // Materialize the current model paths once (cute-dbt#437 review) so the
+    // node-membership test is an O(1) set lookup per deleted path instead of
+    // an O(model-nodes) re-traversal — O(D + N) overall, not O(D × N). A
+    // deleted path that still resolves to a current model node is a
+    // modify/rename, NOT a removal — only genuinely node-less deletions are
+    // REMOVED models, so those are excluded.
+    let current_model_paths: BTreeSet<&str> = current
+        .nodes()
+        .iter()
+        .filter(|(_, node)| node.resource_type() == "model")
+        .filter_map(|(_, node)| node.original_file_path())
+        .collect();
+    let mut removed: Vec<String> = index
+        .deleted_paths()
+        .filter(|path| is_model_path(path))
+        .filter(|path| !current_model_paths.contains(path))
+        .map(str::to_owned)
+        .collect();
+    removed.sort_unstable();
+    removed.dedup();
+    removed
+}
+
+/// Whether `path` looks like a dbt model definition file (cute-dbt#416) —
+/// a `.sql`/`.py` under the dbt-default `models/` prefix. See
+/// [`removed_model_paths`] for why this heuristic (no baseline manifest in
+/// pr-diff mode).
+fn is_model_path(path: &str) -> bool {
+    path.starts_with(DEFAULT_MODEL_PATH_PREFIX)
+        && MODEL_FILE_EXTENSIONS.iter().any(|ext| path.ends_with(ext))
 }
 
 #[cfg(test)]
@@ -577,6 +754,7 @@ mod tests {
         PrDiff {
             renames: Vec::new(),
             deleted: Vec::new(),
+            added: Vec::new(),
             files: paths
                 .iter()
                 .map(|p| FileHunks {
@@ -979,6 +1157,27 @@ mod tests {
                 to: (*t).to_owned(),
             })
             .collect();
+        ScopeInput::PrDiff {
+            index: NormalizedDiffIndex::new(&diff, strip),
+        }
+    }
+
+    /// A `PrDiff` scope input carrying `files` (the changed-file keyset),
+    /// `added`, and `deleted` paths — the NEW/REMOVED state-attribution
+    /// fixture builder (cute-dbt#416). `added` paths ALSO seed a `files`
+    /// entry (a real addition is a changed file with `+`-only hunks), so a
+    /// model in `added` is also path-modified, mirroring real git output.
+    fn pr_diff_input_with_added_deleted(
+        added: &[&str],
+        deleted: &[&str],
+        strip: Option<&Path>,
+    ) -> ScopeInput {
+        // An addition is also a changed file (its `+++ b/<path>` opens a
+        // `files` entry); seed both so the body axis can fire for a NEW
+        // model exactly as the parser would produce.
+        let mut diff = prdiff_from_paths(added);
+        diff.added = added.iter().map(|p| (*p).to_owned()).collect();
+        diff.deleted = deleted.iter().map(|p| (*p).to_owned()).collect();
         ScopeInput::PrDiff {
             index: NormalizedDiffIndex::new(&diff, strip),
         }
@@ -1759,6 +1958,256 @@ mod tests {
         assert!(
             selection.axes.is_empty(),
             "Option A: the baseline arm produces empty axes (documented gap)",
+        );
+        assert!(
+            selection.model_states.is_empty(),
+            "cute-dbt#416: the baseline arm produces no NEW/MODIFIED states",
+        );
+        assert!(
+            selection.removed_models.is_empty(),
+            "cute-dbt#416: the baseline arm surfaces no REMOVED model paths",
+        );
+    }
+
+    // ----- select_in_scope: NEW/MODIFIED/REMOVED states (cute-dbt#416) -----
+
+    #[test]
+    fn pr_diff_arm_added_model_is_new_not_modified() {
+        // A model whose `.sql` is in the diff's `added` keyset is NEW —
+        // even though its added file also carries body hunks (so the body
+        // axis fires). NEW supersedes MODIFIED.
+        let added = NodeId::new("model.shop.fct_new");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            added.clone(),
+            model_node_with_path(&added, "ck1", "models/marts/fct_new.sql"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let input = pr_diff_input_with_added_deleted(&["models/marts/fct_new.sql"], &[], None);
+        let selection = select_in_scope(&current, &input);
+
+        assert!(
+            selection.models_in_scope.contains(&added),
+            "a NEW model is in scope (full current node + detail)",
+        );
+        assert_eq!(
+            selection.model_states.get(&added),
+            Some(&ModelState::New),
+            "an added-file model is NEW, not MODIFIED",
+        );
+        assert!(
+            selection.axes.get(&added).is_some_and(|a| a.body),
+            "the NEW model still carries its body axis (the added file has hunks)",
+        );
+        assert!(
+            selection.removed_models.is_empty(),
+            "no deletions → no REMOVED models",
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_modified_model_is_modified_not_new() {
+        // An existing model (not in `added`) whose `.sql` is in the diff is
+        // MODIFIED — the cute-dbt#411 path.
+        let dim = NodeId::new("model.shop.dim_payers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim.clone(),
+            model_node_with_path(&dim, "ck1", "models/marts/dim_payers.sql"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        // The body file is changed but NOT in `added` — a modify.
+        let input = pr_diff_input(&["models/marts/dim_payers.sql"], None);
+        let selection = select_in_scope(&current, &input);
+
+        assert_eq!(
+            selection.model_states.get(&dim),
+            Some(&ModelState::Modified),
+            "a changed-but-not-added model is MODIFIED",
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_deleted_model_path_is_removed_node_less() {
+        // A deleted `.sql` under `models/` that names no current node is a
+        // REMOVED model — carried as a path, never a node / a model_states
+        // entry.
+        let kept = NodeId::new("model.shop.dim_kept");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            kept.clone(),
+            model_node_with_path(&kept, "ck1", "models/marts/dim_kept.sql"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let input = pr_diff_input_with_added_deleted(&[], &["models/marts/dim_gone.sql"], None);
+        let selection = select_in_scope(&current, &input);
+
+        assert_eq!(
+            selection.removed_models,
+            vec!["models/marts/dim_gone.sql".to_owned()],
+            "the deleted model path is a REMOVED model",
+        );
+        assert!(
+            !selection
+                .model_states
+                .values()
+                .any(|s| *s == ModelState::Removed),
+            "REMOVED is node-less — never a model_states entry",
+        );
+        assert!(
+            selection.models_in_scope.is_empty(),
+            "a REMOVED model contributes no in-scope NODE (it's gone)",
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_deleted_non_model_path_is_not_removed() {
+        // A deleted file that is NOT a model path (a `schema.yml`, a doc, a
+        // file outside `models/`) is never a REMOVED model.
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let input = pr_diff_input_with_added_deleted(
+            &[],
+            &[
+                "models/marts/_schema.yml", // a schema.yml, not a .sql/.py
+                "macros/util.sql",          // a .sql but outside models/
+                "README.md",                // a doc
+                "seeds/raw.csv",            // a seed
+            ],
+            None,
+        );
+        let selection = select_in_scope(&current, &input);
+        assert!(
+            selection.removed_models.is_empty(),
+            "non-model deleted paths are not REMOVED models",
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_deleted_path_still_a_node_is_not_removed() {
+        // A deleted path that STILL resolves to a current node (a modify or
+        // rename mis-classified, or a re-added file) is not a removal —
+        // only genuinely node-less deletions are REMOVED.
+        let dim = NodeId::new("model.shop.dim_payers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim.clone(),
+            model_node_with_path(&dim, "ck1", "models/marts/dim_payers.sql"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let input = pr_diff_input_with_added_deleted(
+            &[],
+            &["models/marts/dim_payers.sql"], // deleted, but still a node
+            None,
+        );
+        let selection = select_in_scope(&current, &input);
+        assert!(
+            selection.removed_models.is_empty(),
+            "a deleted path that still names a current node is not REMOVED",
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_removed_model_paths_honor_project_root_strip() {
+        // The REMOVED heuristic runs on strip-normalized deleted paths, so a
+        // project-root-prefixed deleted path resolves to the project-relative
+        // `models/` prefix (mirror of `pr_diff_arm_config_axis_honors_project_root_strip`).
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let input = pr_diff_input_with_added_deleted(
+            &[],
+            &["dbt_project/models/marts/dim_gone.sql"],
+            Some(Path::new("dbt_project")),
+        );
+        let selection = select_in_scope(&current, &input);
+        assert_eq!(
+            selection.removed_models,
+            vec!["models/marts/dim_gone.sql".to_owned()],
+            "the strip rebases the deleted path under the `models/` prefix",
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_model_states_keys_equal_models_in_scope() {
+        // The structural invariant `model_states.keys() == models_in_scope`
+        // on the PrDiff arm — every in-scope model NODE carries exactly one
+        // state. Exhaustively enumerated over NEW + MODIFIED + REMOVED with a
+        // deletion that does NOT add a node-state key.
+        let new_id = NodeId::new("model.shop.fct_new");
+        let mod_id = NodeId::new("model.shop.dim_mod");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            new_id.clone(),
+            model_node_with_path(&new_id, "ck1", "models/marts/fct_new.sql"),
+        );
+        nodes.insert(
+            mod_id.clone(),
+            model_node_with_path(&mod_id, "ck2", "models/marts/dim_mod.sql"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        // fct_new added; dim_mod modified (changed but not added); a third
+        // path deleted (REMOVED, node-less).
+        let mut diff = prdiff_from_paths(&["models/marts/fct_new.sql", "models/marts/dim_mod.sql"]);
+        diff.added = vec!["models/marts/fct_new.sql".to_owned()];
+        diff.deleted = vec!["models/marts/dim_gone.sql".to_owned()];
+        let input = ScopeInput::PrDiff {
+            index: NormalizedDiffIndex::new(&diff, None),
+        };
+        let selection = select_in_scope(&current, &input);
+
+        let state_keys: BTreeSet<NodeId> = selection.model_states.keys().cloned().collect();
+        let model_set: BTreeSet<NodeId> = selection.models_in_scope.iter().cloned().collect();
+        assert_eq!(
+            state_keys, model_set,
+            "model_states.keys() == models_in_scope (every node has one state)",
+        );
+        assert_eq!(selection.model_states.get(&new_id), Some(&ModelState::New));
+        assert_eq!(
+            selection.model_states.get(&mod_id),
+            Some(&ModelState::Modified)
+        );
+        assert_eq!(
+            selection.removed_models,
+            vec!["models/marts/dim_gone.sql".to_owned()],
+            "the node-less deletion is a REMOVED path, not a state key",
         );
     }
 
