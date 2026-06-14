@@ -73,6 +73,53 @@ pub enum ScopeInput {
     },
 }
 
+/// The change-axes that fired for one in-scope model (cute-dbt#411) —
+/// which of dbt's `state:modified` sub-selectors this PR touched, rolled
+/// up to the model level for the Models lens.
+///
+/// Three axes in v0.1:
+/// - **`body`** — the model's `.sql` (`original_file_path`) is in the diff.
+/// - **`config`** — the model's `schema.yml` (its [`Node::patch_path`]) is
+///   in the diff. **This is the load-bearing axis the bug fix adds**: today
+///   `patch_path` is never a scope signal, so a config-only change vanishes.
+///   Scoped strictly to the model's `schema.yml`; the `dbt_project.yml`
+///   config-tree (cute-dbt#267) and `var` references (cute-dbt#268) keep
+///   their own provenance chips and never set this bit.
+/// - **`unit_test`** — the model hosts ≥1 in-scope unit test.
+///
+/// **Field-extensible by design (ADR-3/ADR-5 additive-never-rewrite).**
+/// The future axes are dbt's remaining `state:modified` sub-selectors —
+/// **contract**, **relation**, **macros**. Adding one is a new `bool`
+/// field here plus a new detection arm in `select_in_scope_pr_diff`; no
+/// comparator/scope/render rewrite. (A contract-only change lives in the
+/// same `schema.yml` as `config`, so it is already caught by the `config`
+/// axis today — the model is never dropped; labeling it distinctly is the
+/// later additive block-level YAML attribution.) Render iterates the axes
+/// generically, so a new field flows through without a render branch.
+///
+/// [`Node::patch_path`]: crate::domain::manifest::Node::patch_path
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChangeAxes {
+    /// The model's `.sql` (`original_file_path`) is in the diff.
+    pub body: bool,
+    /// The model's `schema.yml` (`patch_path`) is in the diff.
+    pub config: bool,
+    /// The model hosts ≥1 in-scope unit test.
+    pub unit_test: bool,
+}
+
+impl ChangeAxes {
+    /// `true` when any axis fired (the "is this model attributed at all"
+    /// guard). Under the lean-(b) encoding every `models_in_scope` member
+    /// gets an `axes` entry, so a member can carry all-false (in scope only
+    /// via a sibling in-scope test on the same model resolving it) — this
+    /// guard distinguishes that case.
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.body || self.config || self.unit_test
+    }
+}
+
 /// The resolved scope selection: the in-scope unit tests, the in-scope
 /// models, and the **changed** (PR-updated) subset of the in-scope tests.
 ///
@@ -102,6 +149,31 @@ pub struct ScopeSelection {
     /// The subset of `in_scope` whose definition this diff updated — the
     /// report's "updated" tests (the rest are "context").
     pub changed: InScopeSet,
+    /// Per-model change-axis attribution (cute-dbt#411) — which of
+    /// `{body, config, unit_test}` fired for each in-scope model. Additive
+    /// POD (ADR-5), the cute-dbt#91 `changed` precedent generalized from a
+    /// set-membership bit to a map-to-record. `BTreeMap` for deterministic
+    /// iteration (every other scope set here is `BTree`-backed for golden
+    /// stability).
+    ///
+    /// **Invariant:** `axes.keys() ⊆ models_in_scope`. Under the lean-(b)
+    /// encoding the `PrDiff` arm populates an entry for *every*
+    /// `models_in_scope` member, so `axes.keys() == models_in_scope`
+    /// exactly — a model in scope only via an in-scope test (no own body /
+    /// config change) carries an all-false-but-`unit_test` (or all-false)
+    /// `ChangeAxes` rather than being absent, killing the "absent means
+    /// false" ambiguity for the render lookup.
+    ///
+    /// **Documented baseline gap (Option A, cute-dbt#411):** the
+    /// `Baseline` arm produces an **empty** map. A config-only change is
+    /// byte-invisible to the always-on SHA-256 `BodyChecksumModifier`
+    /// (the body checksum is unchanged), so a baseline `config` axis could
+    /// only ever come from a default-on `.configs` `StateModifier` — which
+    /// is opt-in/off-by-default today. Baseline-side per-axis attribution
+    /// awaits that future parity slice (an un-collapse of
+    /// `StateComparator::modified_set`'s `.any()`); `state.rs` is
+    /// deliberately untouched here. Pinned by `baseline_arm_produces_empty_axes`.
+    pub axes: BTreeMap<NodeId, ChangeAxes>,
 }
 
 /// Resolve the [`ScopeSelection`] for the current manifest and the given
@@ -130,6 +202,11 @@ pub fn select_in_scope(current: &Manifest, input: &ScopeInput) -> ScopeSelection
                 in_scope: cmp.in_scope_unit_tests(current, baseline),
                 models_in_scope: cmp.models_in_scope(current, baseline),
                 changed: StateComparator::changed_unit_tests(current, baseline),
+                // Option A (cute-dbt#411): the baseline arm produces no
+                // per-axis attribution — `state.rs` is untouched and a
+                // config-only change is invisible to the body checksum.
+                // See the `ScopeSelection::axes` documented-gap note.
+                axes: BTreeMap::new(),
             }
         }
         ScopeInput::PrDiff { index } => select_in_scope_pr_diff(current, index),
@@ -294,6 +371,16 @@ fn changed_seeds(current: &Manifest, index: &NormalizedDiffIndex) -> SeedInScope
 /// (belt-and-braces). An empty map returns the selection unchanged —
 /// baseline mode and panel-degrade arms widen nothing.
 ///
+/// **Does NOT populate `selection.axes` (cute-dbt#411, locked Q4):** the
+/// `config` change-axis is the model's `schema.yml` (`patch_path`) ONLY.
+/// The `dbt_project.yml` config-tree this function widens on is a distinct
+/// 4th provenance with its own `config_attribution` chip row — folding it
+/// into the `config` axis would make that chip ambiguous across
+/// schema.yml-config vs dbt_project.yml-config-tree vs vars (cute-dbt#268).
+/// The widened models join `models_in_scope`; their `axes` entries (if
+/// they have one from the `PrDiff` arm) are left exactly as the `PrDiff`
+/// arm set them, and a config-tree-only model gains no `axes` entry here.
+///
 /// [`attribute_config_tree_changes`]: crate::domain::project_def::attribute_config_tree_changes
 #[must_use]
 pub fn widen_with_config_attributions(
@@ -344,27 +431,58 @@ fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> S
     // — one matching authority for both verbs.
     let path_modified_models = changed_models(current, index);
 
+    // Identify config-modified models (cute-dbt#411 — THE BUG FIX): every
+    // `model` node whose `schema.yml` (its `patch_path`) is in the diff
+    // keyset. Before this, `patch_path` was never a scope signal (0 refs
+    // in scope.rs/state.rs), so a model whose ONLY change is its
+    // `schema.yml` `config:` block vanished from the report. Matched
+    // through the SAME `index.contains_changed` authority as the body/test
+    // arms, so the config-side and diff-side keysets cannot diverge
+    // (the `--project-root` strip is applied uniformly diff-side at index
+    // construction; the manifest-side `patch_path` is already
+    // package-relative scheme-stripped at ingestion — `manifest.rs`). One
+    // `schema.yml` fans out to EVERY model it patches (file-granular).
+    // Maps id → patch_path string (the value is the grouping key the
+    // render layer reads off `Node::patch_path()` directly — kept here
+    // only for the `config` axis membership probe).
+    let config_modified_models: BTreeMap<NodeId, String> = current
+        .nodes()
+        .iter()
+        .filter(|(_, node)| node.resource_type() == "model")
+        .filter_map(|(id, node)| {
+            node.patch_path()
+                .filter(|p| index.contains_changed(p))
+                .map(|p| (id.clone(), p.to_owned()))
+        })
+        .collect();
+
     // In-scope unit tests + the changed subset, in ONE traversal so
     // `changed ⊆ in_scope` holds by construction (cute-dbt#91). A test is
-    // in scope when its target model is path-modified OR its own
-    // `original_file_path` (the declaring YAML file) is in the change set
-    // (the dbt OR-semantics of the baseline path). It is *changed* when
-    // that declaring YAML appears in the diff — file-granular here (a
-    // changed multi-test YAML marks every test it declares; cute-dbt#96
-    // narrows this to block-precise via diff-hunk overlap in a post-scope
-    // run-loop step, leaving `changed ⊆ in_scope` intact).
+    // in scope when its target model is path-modified OR config-modified
+    // (a config-only `schema.yml` edit pulls the model's tests in as
+    // context — the dbt OR-semantics, the cute-dbt#267 shape) OR its own
+    // `original_file_path` (the declaring YAML file) is in the change set.
+    // It is *changed* only when that declaring YAML appears in the diff —
+    // file-granular here (cute-dbt#96 narrows it to block-precise in a
+    // post-scope run-loop step, leaving `changed ⊆ in_scope` intact). A
+    // config-only model edit updates no test definition, so the new
+    // `target_config_modified` disjunct never touches `changed` —
+    // `changed ⊆ in_scope` is preserved (the cute-dbt#267 invariant).
     let mut in_scope_ids: Vec<String> = Vec::new();
     let mut changed_ids: Vec<String> = Vec::new();
     for (test_id, ut) in current.unit_tests() {
-        let target_path_modified = resolve_tested_model(current, ut)
-            .is_some_and(|model| path_modified_models.contains(model.id()));
+        let target_model = resolve_tested_model(current, ut);
+        let target_path_modified =
+            target_model.is_some_and(|model| path_modified_models.contains(model.id()));
+        let target_config_modified =
+            target_model.is_some_and(|model| config_modified_models.contains_key(model.id()));
         let test_yaml_changed = ut
             .original_file_path()
             .is_some_and(|p| index.contains_changed(p));
         if test_yaml_changed {
             changed_ids.push(test_id.clone());
         }
-        if target_path_modified || test_yaml_changed {
+        if target_path_modified || target_config_modified || test_yaml_changed {
             in_scope_ids.push(test_id.clone());
         }
     }
@@ -376,6 +494,11 @@ fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> S
     //          renderer has the model context for the test).
     //   Arm 2: every path-modified model with zero unit tests targeting
     //          it (the "no tests wired" explorer signal).
+    //   Arm 3: every config-modified model with zero unit tests targeting
+    //          it (cute-dbt#411 — the silent-drop fix for the no-tests
+    //          path; the with-tests case enters via Arm 1 once its tests
+    //          join `in_scope` through the `target_config_modified`
+    //          disjunct above). Mirrors Arm 2 exactly.
     let tests_per_model: HashMap<NodeId, usize> = current
         .unit_tests()
         .values()
@@ -384,20 +507,47 @@ fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> S
             *acc.entry(id).or_insert(0) += 1;
             acc
         });
+    let has_tests = |model_id: &NodeId| tests_per_model.get(model_id).copied().unwrap_or(0) > 0;
 
-    let mut model_ids: BTreeSet<NodeId> = BTreeSet::new();
+    // Arm 1 is also the `unit_test`-axis reverse rollup (model → "hosts ≥1
+    // in-scope test"): one pass over `in_scope` seeds both `model_ids` and
+    // `models_with_in_scope_test` (compute-once — the cute-dbt#167/#485
+    // discipline).
+    let mut models_with_in_scope_test: BTreeSet<NodeId> = BTreeSet::new();
     for test_id in in_scope.iter() {
         if let Some(ut) = current.unit_test(test_id)
             && let Some(model) = resolve_tested_model(current, ut)
         {
-            model_ids.insert(model.id().clone());
+            models_with_in_scope_test.insert(model.id().clone());
         }
     }
+    let mut model_ids: BTreeSet<NodeId> = models_with_in_scope_test.clone();
     for model_id in path_modified_models.iter() {
-        let has_tests = tests_per_model.get(model_id).copied().unwrap_or(0) > 0;
-        if !has_tests {
+        if !has_tests(model_id) {
             model_ids.insert(model_id.clone());
         }
+    }
+    for model_id in config_modified_models.keys() {
+        if !has_tests(model_id) {
+            model_ids.insert(model_id.clone());
+        }
+    }
+
+    // Per-model axis assembly (cute-dbt#411). Under the lean-(b) encoding
+    // EVERY `models_in_scope` member gets an `axes` entry
+    // (`axes.keys() == models_in_scope`), so a model in scope only via a
+    // test carries `unit_test: true` with body/config false rather than
+    // being absent.
+    let mut axes: BTreeMap<NodeId, ChangeAxes> = BTreeMap::new();
+    for model_id in &model_ids {
+        axes.insert(
+            model_id.clone(),
+            ChangeAxes {
+                body: path_modified_models.contains(model_id),
+                config: config_modified_models.contains_key(model_id),
+                unit_test: models_with_in_scope_test.contains(model_id),
+            },
+        );
     }
 
     let models_in_scope: ModelInScopeSet = model_ids.into_iter().collect();
@@ -405,6 +555,7 @@ fn select_in_scope_pr_diff(current: &Manifest, index: &NormalizedDiffIndex) -> S
         in_scope,
         models_in_scope,
         changed,
+        axes,
     }
 }
 
@@ -1107,6 +1258,529 @@ mod tests {
         );
     }
 
+    // ----- select_in_scope: 3-axis change attribution (cute-dbt#411) -----
+
+    /// A model node with both an `original_file_path` (the `.sql`) and a
+    /// `patch_path` (the `schema.yml` patching it) — the config-axis test
+    /// input. Builds on `model_node_with_path` + the `with_patch_path`
+    /// builder (cute-dbt#105).
+    fn model_node_with_patch_path(id: &NodeId, ck: &str, ofp: &str, patch_path: &str) -> Node {
+        model_node_with_path(id, ck, ofp).with_patch_path(Some(patch_path.to_owned()))
+    }
+
+    #[test]
+    fn pr_diff_arm_scopes_a_schema_yml_config_only_change() {
+        // THE RED-FIRST TEST (cute-dbt#411): a model whose ONLY diff hit
+        // is its `schema.yml` (`patch_path`) — `.sql` untouched — must
+        // enter scope, drag its tests in as context, and carry
+        // `config: true`. Before the fix `patch_path` was never a scope
+        // signal, so this model + its tests vanished from the report.
+        let dim_payers = NodeId::new("model.shop.dim_payers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim_payers.clone(),
+            model_node_with_patch_path(
+                &dim_payers,
+                "ck1",
+                "models/marts/dim_payers.sql",
+                "models/marts/_core__models.yml",
+            ),
+        );
+
+        let test_id = "unit_test.shop.dim_payers.injects_unknown";
+        let mut tests = HashMap::new();
+        tests.insert(
+            test_id.to_owned(),
+            test_with_path(
+                "injects_unknown",
+                "dim_payers",
+                Some("models/marts/_unit_tests.yml"),
+            ),
+        );
+
+        let current = Manifest::new(ManifestMetadata::new("v12"), nodes, tests, HashMap::new());
+
+        // ONLY the schema.yml is in the diff — the model's .sql and the
+        // test's own declaring YAML are both untouched.
+        let input = pr_diff_input(&["models/marts/_core__models.yml"], None);
+        let selection = select_in_scope(&current, &input);
+
+        assert!(
+            selection.models_in_scope.contains(&dim_payers),
+            "a config-only model must be in scope (was silently dropped)",
+        );
+        assert!(
+            selection.in_scope.contains(test_id),
+            "the config-only model's tests join in_scope as context",
+        );
+        assert!(
+            !selection.changed.contains(test_id),
+            "a config edit updates no test definition — context, never changed",
+        );
+        let axes = selection.axes.get(&dim_payers).copied().unwrap_or_default();
+        assert!(axes.config, "the config axis fired");
+        assert!(!axes.body, "the body axis did not fire (sql untouched)");
+        assert!(axes.unit_test, "the model has an in-scope test");
+    }
+
+    #[test]
+    fn pr_diff_arm_shared_schema_yml_fans_out_to_all_models() {
+        // One `schema.yml` patches three models; the diff touches ONLY
+        // that file → all three are in scope with `config: true`; a fourth
+        // model under a DIFFERENT schema.yml stays out.
+        let shared_yml = "models/marts/_analytics__models.yml";
+        let other_yml = "models/staging/_staging__models.yml";
+        let m1 = NodeId::new("model.shop.fct_a");
+        let m2 = NodeId::new("model.shop.fct_b");
+        let m3 = NodeId::new("model.shop.fct_c");
+        let m4 = NodeId::new("model.shop.stg_other");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            m1.clone(),
+            model_node_with_patch_path(&m1, "ck1", "models/marts/fct_a.sql", shared_yml),
+        );
+        nodes.insert(
+            m2.clone(),
+            model_node_with_patch_path(&m2, "ck2", "models/marts/fct_b.sql", shared_yml),
+        );
+        nodes.insert(
+            m3.clone(),
+            model_node_with_patch_path(&m3, "ck3", "models/marts/fct_c.sql", shared_yml),
+        );
+        nodes.insert(
+            m4.clone(),
+            model_node_with_patch_path(&m4, "ck4", "models/staging/stg_other.sql", other_yml),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let input = pr_diff_input(&[shared_yml], None);
+        let selection = select_in_scope(&current, &input);
+
+        for m in [&m1, &m2, &m3] {
+            assert!(selection.models_in_scope.contains(m), "{m:?} fans out");
+            assert!(
+                selection.axes.get(m).is_some_and(|a| a.config),
+                "{m:?} carries config:true",
+            );
+        }
+        assert!(
+            !selection.models_in_scope.contains(&m4),
+            "a model under a different schema.yml stays out",
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_axes_body_only_for_a_sql_only_change() {
+        // A `.sql`-only change (schema.yml untouched) → body:true,
+        // config:false. Pins body↔config independence.
+        let dim = NodeId::new("model.shop.dim_payers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim.clone(),
+            model_node_with_patch_path(
+                &dim,
+                "ck1",
+                "models/marts/dim_payers.sql",
+                "models/marts/_models.yml",
+            ),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let input = pr_diff_input(&["models/marts/dim_payers.sql"], None);
+        let selection = select_in_scope(&current, &input);
+
+        let axes = selection.axes.get(&dim).copied().unwrap_or_default();
+        assert!(axes.body, "the body axis fired");
+        assert!(
+            !axes.config,
+            "the config axis did not fire (yaml untouched)"
+        );
+        assert!(!axes.unit_test, "no tests target this model");
+    }
+
+    #[test]
+    fn pr_diff_arm_axes_all_three_fire_independently() {
+        // The 3-axis cube corner: a model whose `.sql`, whose `schema.yml`,
+        // AND whose test's own YAML are all in the diff → all three axes.
+        let dim = NodeId::new("model.shop.dim_payers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim.clone(),
+            model_node_with_patch_path(
+                &dim,
+                "ck1",
+                "models/marts/dim_payers.sql",
+                "models/marts/_core__models.yml",
+            ),
+        );
+        let test_id = "unit_test.shop.dim_payers.injects_unknown";
+        let mut tests = HashMap::new();
+        tests.insert(
+            test_id.to_owned(),
+            test_with_path(
+                "injects_unknown",
+                "dim_payers",
+                Some("models/marts/_unit_tests.yml"),
+            ),
+        );
+        let current = Manifest::new(ManifestMetadata::new("v12"), nodes, tests, HashMap::new());
+
+        let input = pr_diff_input(
+            &[
+                "models/marts/dim_payers.sql",
+                "models/marts/_core__models.yml",
+                "models/marts/_unit_tests.yml",
+            ],
+            None,
+        );
+        let selection = select_in_scope(&current, &input);
+
+        let axes = selection.axes.get(&dim).copied().unwrap_or_default();
+        assert!(axes.body, "body fired");
+        assert!(axes.config, "config fired");
+        assert!(axes.unit_test, "unit_test fired");
+        assert!(axes.any());
+        // The all-three corner also marks the test changed (its own YAML
+        // is in the diff).
+        assert!(selection.changed.contains(test_id));
+    }
+
+    #[test]
+    fn pr_diff_arm_test_only_axis_for_a_changed_test_yaml() {
+        // A test-only change (the test's declaring YAML is in the diff,
+        // the model's .sql and schema.yml untouched) → unit_test:true,
+        // body:false, config:false. The model is in scope ONLY because it
+        // hosts the in-scope test → lean-(b) gives it an all-but-unit_test
+        // axes entry rather than dropping it.
+        let dim = NodeId::new("model.shop.dim_payers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim.clone(),
+            model_node_with_patch_path(
+                &dim,
+                "ck1",
+                "models/marts/dim_payers.sql",
+                "models/marts/_core__models.yml",
+            ),
+        );
+        let test_id = "unit_test.shop.dim_payers.injects_unknown";
+        let mut tests = HashMap::new();
+        tests.insert(
+            test_id.to_owned(),
+            test_with_path(
+                "injects_unknown",
+                "dim_payers",
+                Some("models/marts/_unit_tests.yml"),
+            ),
+        );
+        let current = Manifest::new(ManifestMetadata::new("v12"), nodes, tests, HashMap::new());
+
+        let input = pr_diff_input(&["models/marts/_unit_tests.yml"], None);
+        let selection = select_in_scope(&current, &input);
+
+        assert!(selection.models_in_scope.contains(&dim));
+        let axes = selection.axes.get(&dim).copied().unwrap_or_default();
+        assert!(axes.unit_test, "the unit_test axis fired");
+        assert!(!axes.body, "the body axis did not fire");
+        assert!(!axes.config, "the config axis did not fire");
+    }
+
+    #[test]
+    fn pr_diff_arm_model_with_no_patch_path_never_gets_config_axis() {
+        // A model with `patch_path == None` (in-SQL `config()` block, no
+        // schema.yml entry). Even when the diff touches its `.sql`, the
+        // config axis must NOT fire — an in-SQL config() change is a BODY
+        // change (it lives in the .sql, changes the checksum). No false
+        // config-positive.
+        let dim = NodeId::new("model.shop.dim_payers");
+        let mut nodes = HashMap::new();
+        // model_node_with_path leaves patch_path = None.
+        nodes.insert(
+            dim.clone(),
+            model_node_with_path(&dim, "ck1", "models/marts/dim_payers.sql"),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let input = pr_diff_input(&["models/marts/dim_payers.sql"], None);
+        let selection = select_in_scope(&current, &input);
+
+        let axes = selection.axes.get(&dim).copied().unwrap_or_default();
+        assert!(axes.body, "an in-SQL config() change is a body change");
+        assert!(
+            !axes.config,
+            "no patch_path ⇒ the config axis can never fire (no false positive)",
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_config_modified_model_with_zero_tests_is_in_scope() {
+        // The exact silent-drop the bug opens with, on the no-tests path:
+        // a config-only change on a model with ZERO unit tests still puts
+        // the model in `models_in_scope` (via the new Arm 3), with
+        // config:true and unit_test:false.
+        let stg = NodeId::new("model.shop.stg_payments");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            stg.clone(),
+            model_node_with_patch_path(
+                &stg,
+                "ck1",
+                "models/staging/stg_payments.sql",
+                "models/staging/_staging__models.yml",
+            ),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let input = pr_diff_input(&["models/staging/_staging__models.yml"], None);
+        let selection = select_in_scope(&current, &input);
+
+        assert!(
+            selection.models_in_scope.contains(&stg),
+            "a config-only no-tests model must be in scope (Arm 3)",
+        );
+        assert_eq!(selection.in_scope.len(), 0, "no tests to scope");
+        let axes = selection.axes.get(&stg).copied().unwrap_or_default();
+        assert!(axes.config);
+        assert!(!axes.unit_test);
+        assert!(!axes.body);
+    }
+
+    #[test]
+    fn pr_diff_arm_axes_keys_equal_models_in_scope_over_a_kind_cube() {
+        // The structural invariant `axes.keys() ⊆ models_in_scope`, and
+        // under lean-(b) exactly `axes.keys() == models_in_scope`.
+        // Exhaustively enumerated (house style — no proptest) over a small
+        // cube of model kinds: body-only, config-only, test-only,
+        // all-three, and an out-of-scope model. The selection's `axes` key
+        // set must equal its model-scope set for EVERY constructed shape.
+        let id = |kind: &str| NodeId::new(format!("model.shop.{kind}"));
+        let (body_only, config_only, test_only, all_three, untouched) = (
+            id("body_only"),
+            id("config_only"),
+            id("test_only"),
+            id("all_three"),
+            id("untouched"),
+        );
+
+        let mut nodes = HashMap::new();
+        // patch_path = models/_<kind>.yml; sql = models/<kind>.sql.
+        for (n, (m, ck)) in [
+            (&body_only, ("b", "ck1")),
+            (&config_only, ("c", "ck2")),
+            (&test_only, ("t", "ck3")),
+            (&all_three, ("a", "ck4")),
+            (&untouched, ("u", "ck5")),
+        ] {
+            let stem = n.as_str().rsplit('.').next().unwrap();
+            nodes.insert(
+                n.clone(),
+                model_node_with_patch_path(
+                    n,
+                    ck,
+                    &format!("models/{stem}.sql"),
+                    &format!("models/_{m}.yml"),
+                ),
+            );
+        }
+
+        let mut tests = HashMap::new();
+        for kind in ["test_only", "all_three"] {
+            tests.insert(
+                format!("unit_test.shop.{kind}.checks"),
+                test_with_path("checks", kind, Some(&format!("models/_{kind}_tests.yml"))),
+            );
+        }
+        let current = Manifest::new(ManifestMetadata::new("v12"), nodes, tests, HashMap::new());
+
+        let input = pr_diff_input(
+            &[
+                "models/body_only.sql",        // body_only: body
+                "models/_c.yml",               // config_only: config
+                "models/_test_only_tests.yml", // test_only: unit_test
+                "models/all_three.sql",        // all_three: body
+                "models/_a.yml",               // all_three: config
+                "models/_all_three_tests.yml", // all_three: unit_test
+            ],
+            None,
+        );
+        let selection = select_in_scope(&current, &input);
+
+        // ⊆ in both directions ⇒ equality (lean-(b)).
+        let key_set: BTreeSet<NodeId> = selection.axes.keys().cloned().collect();
+        let model_set: BTreeSet<NodeId> = selection.models_in_scope.iter().cloned().collect();
+        assert_eq!(
+            key_set, model_set,
+            "axes.keys() == models_in_scope under lean-(b)",
+        );
+        for id in selection.axes.keys() {
+            assert!(
+                selection.models_in_scope.contains(id),
+                "axes key {id:?} ⊆ models_in_scope",
+            );
+        }
+        assert!(
+            !selection.models_in_scope.contains(&untouched),
+            "the untouched model stays out of scope",
+        );
+
+        // Per-kind axis truth (the cube corners) as (body, config, unit_test).
+        let ax = |n: &NodeId| {
+            let a = selection.axes.get(n).copied().unwrap_or_default();
+            (a.body, a.config, a.unit_test)
+        };
+        assert_eq!(ax(&body_only), (true, false, false));
+        assert_eq!(ax(&config_only), (false, true, false));
+        assert_eq!(ax(&test_only), (false, false, true));
+        assert_eq!(ax(&all_three), (true, true, true));
+    }
+
+    #[test]
+    fn pr_diff_arm_config_axis_honors_project_root_strip() {
+        // U2 strip-uniformity: `patch_path` reaches `index.contains_changed`
+        // exactly as `original_file_path` does. The diff-side keyset is
+        // built with a `--project-root` strip; the manifest-side
+        // `patch_path` is already project-relative (scheme-stripped at
+        // ingestion). The config axis must fire just as the body axis does
+        // under the same strip (mirror of `pr_diff_arm_honors_project_root_strip`).
+        let dim = NodeId::new("model.shop.dim_payers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim.clone(),
+            model_node_with_patch_path(
+                &dim,
+                "ck1",
+                "models/marts/dim_payers.sql",
+                "models/marts/_core__models.yml",
+            ),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        // The diff carries the project-root-prefixed schema.yml path ONLY;
+        // strip removes the `dbt_project/` prefix so it matches the
+        // model's project-relative `patch_path`.
+        let input = pr_diff_input(
+            &["dbt_project/models/marts/_core__models.yml"],
+            Some(Path::new("dbt_project")),
+        );
+        let selection = select_in_scope(&current, &input);
+
+        assert!(
+            selection.models_in_scope.contains(&dim),
+            "the config-modified model is in scope under the project-root strip",
+        );
+        assert!(
+            selection.axes.get(&dim).is_some_and(|a| a.config),
+            "the config axis fires identically to body under the strip",
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_rename_of_schema_yml_still_fires_config_axis() {
+        // A pure rename of a model's schema.yml: both sides join the index
+        // keyset (cute-dbt#80), so the model's current `patch_path` (the
+        // NEW path) matches → config axis fires.
+        let dim = NodeId::new("model.shop.dim_payers");
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            dim.clone(),
+            model_node_with_patch_path(
+                &dim,
+                "ck1",
+                "models/marts/dim_payers.sql",
+                "models/marts/_renamed__models.yml",
+            ),
+        );
+        let current = Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        );
+
+        let input = pr_diff_input_with_renames(
+            &[],
+            &[(
+                "models/marts/_old__models.yml",
+                "models/marts/_renamed__models.yml",
+            )],
+            None,
+        );
+        let selection = select_in_scope(&current, &input);
+
+        assert!(selection.models_in_scope.contains(&dim));
+        assert!(
+            selection.axes.get(&dim).is_some_and(|a| a.config),
+            "a renamed schema.yml fires the config axis at the new path",
+        );
+    }
+
+    #[test]
+    fn baseline_arm_produces_empty_axes() {
+        // Option A pin (cute-dbt#411): the baseline arm carries NO per-axis
+        // attribution. A future un-collapse of `modified_set` must change
+        // this test deliberately, never silently. Uses the config_only_pair
+        // WITH the `.configs` sub-selector so the model IS in scope — yet
+        // `axes` stays empty (the gap is the attribution, not the scoping).
+        let (current, baseline) = config_only_pair();
+        let input = ScopeInput::Baseline {
+            manifest: Box::new(baseline),
+            sub_selectors: vec![ModifierKind::Configs],
+        };
+        let selection = select_in_scope(&current, &input);
+        assert!(
+            !selection.models_in_scope.is_empty(),
+            "precondition: the .configs selector put the model in scope",
+        );
+        assert!(
+            selection.axes.is_empty(),
+            "Option A: the baseline arm produces empty axes (documented gap)",
+        );
+    }
+
+    #[test]
+    fn change_axes_any_is_true_iff_some_axis_fired() {
+        // Exhaustive enumeration of the 2^3 ChangeAxes cube (house style):
+        // `any()` is the OR of the three bools.
+        for body in [false, true] {
+            for config in [false, true] {
+                for unit_test in [false, true] {
+                    let axes = ChangeAxes {
+                        body,
+                        config,
+                        unit_test,
+                    };
+                    assert_eq!(axes.any(), body || config || unit_test);
+                }
+            }
+        }
+        assert!(!ChangeAxes::default().any(), "the default is all-false");
+    }
+
     // ----- widen_with_config_attributions (cute-dbt#267) -----
 
     use crate::domain::project_def::ConfigAttribution;
@@ -1257,6 +1931,33 @@ mod tests {
         assert!(
             widened.models_in_scope.is_empty(),
             "an unresolvable id widens nothing (belt-and-braces)",
+        );
+    }
+
+    #[test]
+    fn widen_does_not_populate_axes_for_a_config_tree_model() {
+        // A7 / locked Q4 (cute-dbt#411): the dbt_project.yml config-tree
+        // widening adds the model to `models_in_scope` but must NOT set its
+        // `config` axis — the `config` axis is the model's schema.yml
+        // (`patch_path`) ONLY. The config-tree keeps its own provenance
+        // chip row. So a model in scope SOLELY via the config-tree
+        // attribution has no `axes` entry from this function.
+        let (current, selection) = widening_fixture();
+        assert!(selection.axes.is_empty(), "fixture precondition: no axes");
+        let widened = widen_with_config_attributions(
+            selection,
+            &current,
+            &attributions_for(&["model.shop.dim_payers"]),
+        );
+        assert!(
+            widened
+                .models_in_scope
+                .contains(&NodeId::new("model.shop.dim_payers")),
+            "the config-tree model joins model scope",
+        );
+        assert!(
+            widened.axes.is_empty(),
+            "config-tree widening never populates the config axis (locked Q4)",
         );
     }
 
