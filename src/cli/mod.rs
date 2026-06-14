@@ -47,6 +47,7 @@
 
 mod args;
 mod exit;
+mod pr_comments;
 mod pr_diff;
 mod review;
 mod skill;
@@ -94,7 +95,7 @@ use crate::adapters::render::{
     build_payload, index_tests_for_models, render_report_with_externals,
 };
 use crate::domain::{
-    BlockDiff, ChangeAxes, CheckPolicy, ConfigAttribution, DEFAULT_MACRO_BODY_CAP,
+    BlockDiff, ChangeAxes, CheckPolicy, CommentsView, ConfigAttribution, DEFAULT_MACRO_BODY_CAP,
     DEFAULT_PR_DAG_NODE_CAP, DEFAULT_REPORT_TITLE, DEFAULT_SEED_ROW_CAP, DepDate,
     EnabledExperiments, EnvelopeScope, Experiment, Finding, FixtureTableDiff, GovernanceFacts,
     HeuristicId, InScopeSet, Manifest, ModelInScopeSet, ModelState, ModelYamlOutcome,
@@ -106,12 +107,13 @@ use crate::domain::{
     attribute_var_changes, build_seed_cards, changed_macros_baseline, changed_macros_pr_diff,
     changed_models, check_by_id, compute_pr_dag, diff_project_definitions,
     effective_fixture_format, external_fixture_table, extract_model_block, extract_unit_test_block,
-    gather_governance, has_total_uncovered, hook_operations, macro_focus_set, macro_test_consumers,
-    populate_line_counts, pr_dag_lines_from_diff, pr_dag_lines_from_raw_code, preflight_compiled,
-    raw_hunk_lines, reconstruct_block_diffs, reconstruct_external_fixture_diff,
-    reconstruct_model_sql_diffs, reconstruct_table_diffs, refine_changed_by_hunks,
-    resolve_check_policy, resolve_experimental_config, resolve_finding_anchor, reverse_apply,
-    scan_pragmas, select_in_scope, select_seeds_in_scope, widen_with_config_attributions,
+    gather_governance, group_comment_threads, has_total_uncovered, hook_operations,
+    macro_focus_set, macro_test_consumers, populate_line_counts, pr_dag_lines_from_diff,
+    pr_dag_lines_from_raw_code, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
+    reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
+    refine_changed_by_hunks, resolve_check_policy, resolve_experimental_config,
+    resolve_finding_anchor, reverse_apply, scan_pragmas, select_in_scope, select_seeds_in_scope,
+    widen_with_config_attributions,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -389,6 +391,15 @@ fn execute_report(args: &ReportArgs) -> Result<ReportOutcome, RunError> {
     // (off, or empty scope) ⇒ omitted from JSON + zero DOM, keeping the
     // non-experimental goldens byte-identical (the `macro_lens` precedent).
     let pr_dag = gather_pr_dag(&current, &scope_input, &experiments, &axes);
+    // PR review-comments (cute-dbt#419–#422, epic #353) — the ingested
+    // GitHub review threads, anchored onto the rendered diff (the shipped
+    // cute-dbt#418 anchoring) and grouped per model, gated behind the
+    // `pr-comments` experiment + the `--pr-diff` arm (the single gating source
+    // lives inside `gather_pr_comments`). `None` (off, baseline arm, no PR
+    // context, or no comments) ⇒ omitted from JSON + the static count
+    // container stays empty, keeping every default golden byte-identical (the
+    // `pr_dag` precedent).
+    let pr_comments = gather_pr_comments(args, &current, &scope_input, &experiments);
 
     // Stage-2 fail-closed reads the TRUE in-scope set (cute-dbt#91): the
     // widened render set is only for what the report displays. Config-tree
@@ -553,6 +564,7 @@ fn execute_report(args: &ReportArgs) -> Result<ReportOutcome, RunError> {
         &axes,
         &model_states,
         &removed_models,
+        pr_comments.as_ref(),
     )
     .map_err(|err| RunError::output(&args.out, err))?;
     // cute-dbt#386 — the machine-readable findings envelope. Purely
@@ -2007,6 +2019,104 @@ fn gather_macro_lens(
 /// widens scope (it *consumes* the scope sets, the `pr_dag` module contract).
 /// `None` whenever the scope set is empty (nothing to draw), so an empty-scope
 /// report carries no mini-DAG bytes.
+/// Gather the PR review-comments render view (cute-dbt#419–#422, epic
+/// #353), gated behind the `pr-comments` experiment.
+///
+/// **This is the single gating source** — the function returns `None`
+/// before resolving anything when the experiment is off, so nothing
+/// crosses to the render payload, the static count container stays empty
+/// (the JS never fills it), and every default golden stays byte-identical
+/// (the `gather_pr_dag` precedent).
+///
+/// The comment surface anchors onto a **rendered diff**, so it is the
+/// **`--pr-diff` arm only**: the baseline arm has no diff hunks to anchor a
+/// thread to (the `pr_ref` / annotations precedent). On the baseline arm
+/// (or with no diff) this returns `None`.
+///
+/// The ingested threads come from one of two surfaces, in precedence
+/// order:
+/// 1. `--pr-comments @<file>` (the deterministic golden / test seam, the
+///    `--pr-diff @file` precedent) — already parsed into a
+///    [`PrComments`](crate::domain::PrComments) by the clap value-parser;
+/// 2. a live `gh api graphql` fetch
+///    ([`fetch_pr_comments`](crate::adapters::pr_comments::fetch_pr_comments))
+///    when a PR can be identified from `--pr-url` + `--pr-number` (or
+///    `[pr]`-config-derived) and `gh` is available — fail-soft to empty if
+///    not (PR comments are context, never a dependency).
+///
+/// The threads are then anchored + grouped per model by the pure domain
+/// [`group_comment_threads`] (which re-uses the shipped
+/// [`anchor_comment_thread`](crate::domain::anchor_comment_thread), never
+/// re-anchoring). An empty result ⇒ `None` so the section stays byte-quiet.
+fn gather_pr_comments(
+    args: &ReportArgs,
+    current: &Manifest,
+    scope_input: &ScopeInput,
+    experiments: &EnabledExperiments,
+) -> Option<CommentsView> {
+    if !experiments.is_enabled(Experiment::PrComments) {
+        return None;
+    }
+    // Comments anchor to a rendered diff → PrDiff arm only.
+    let ScopeInput::PrDiff { index } = scope_input else {
+        return None;
+    };
+    let comments = resolve_pr_comments(args);
+    if comments.threads.is_empty() {
+        // No line-anchored review threads to surface (general issue-level
+        // comments are not part of this inline-anchoring slice).
+        return None;
+    }
+    // The project-root strip the diff index was built with (cute-dbt#418):
+    // GitHub thread paths are repo-relative; the diff index + manifest are
+    // project-relative. Resolve the same way the diff index was built so a
+    // sub-directory dbt project's thread paths reconcile.
+    let project_root = args.project_root.clone();
+    let view = group_comment_threads(&comments.threads, current, index, project_root.as_deref());
+    if view.is_empty() { None } else { Some(view) }
+}
+
+/// Resolve the PR review comments to ingest (cute-dbt#419): the
+/// `--pr-comments @file` payload when supplied (the deterministic golden /
+/// test seam), else a live `gh api graphql` fetch when a PR can be
+/// identified from `--pr-url` / `--pr-number` (or `[pr]` config). Fail-soft
+/// to empty when neither is available — PR comments are context, never a
+/// dependency.
+fn resolve_pr_comments(args: &ReportArgs) -> crate::domain::PrComments {
+    if let Some(comments) = &args.pr_comments {
+        return comments.clone();
+    }
+    // The live fetch path: identify the PR (owner/repo/number) and shell
+    // `gh`. The owner/repo come from the resolved PR url; the number from
+    // `--pr-number` / the url's `/pull/<n>` segment (the `resolve_pr_ref`
+    // merge). With no resolvable PR, ingest nothing (the file seam is the
+    // canonical golden path; the live path is best-effort).
+    let Some(pr_ref) = resolve_pr_ref(args) else {
+        return crate::domain::PrComments::default();
+    };
+    let Some((owner, repo)) = owner_repo_from_url(&pr_ref.url) else {
+        return crate::domain::PrComments::default();
+    };
+    let (resolved_root, _derived) =
+        self::args::resolve_project_root(args.project_root.as_deref(), &args.manifest);
+    let cwd = resolved_root.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    crate::adapters::pr_comments::fetch_pr_comments(&cwd, &owner, &repo, pr_ref.number)
+}
+
+/// Extract `(owner, repo)` from a GitHub PR url
+/// (`https://github.com/<owner>/<repo>/pull/<n>`). `None` for any url that
+/// does not carry both segments before `/pull/`.
+fn owner_repo_from_url(url: &str) -> Option<(String, String)> {
+    // Take the path after the host, then the first two non-empty segments
+    // before `/pull/`.
+    let after_host = url.split("github.com/").nth(1)?;
+    let before_pull = after_host.split("/pull/").next()?;
+    let mut segs = before_pull.split('/').filter(|s| !s.is_empty());
+    let owner = segs.next()?.to_owned();
+    let repo = segs.next()?.to_owned();
+    Some((owner, repo))
+}
+
 fn gather_pr_dag(
     current: &Manifest,
     scope_input: &ScopeInput,
@@ -2294,6 +2404,7 @@ fn render(
     axes: &BTreeMap<NodeId, ChangeAxes>,
     model_states: &BTreeMap<NodeId, ModelState>,
     removed_models: &[String],
+    pr_comments: Option<&CommentsView>,
 ) -> Result<(), io::Error> {
     render_report_with_externals(
         out,
@@ -2322,6 +2433,7 @@ fn render(
         axes,
         model_states,
         removed_models,
+        pr_comments,
     )
 }
 
@@ -2343,6 +2455,7 @@ mod tests {
             pr_url: None,
             pr_title: None,
             pr_number: None,
+            pr_comments: None,
             findings_out: None,
             fail_on_uncovered: false,
             annotations: false,

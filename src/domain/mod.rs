@@ -51,6 +51,7 @@ pub mod model_yaml;
 pub mod path;
 pub mod pr_comment;
 pub mod pr_comment_anchor;
+pub mod pr_comment_render;
 pub mod pr_dag;
 pub mod pr_diff;
 pub mod preflight;
@@ -115,6 +116,9 @@ pub use model_yaml::ModelYamlOutcome;
 pub use path::{match_changed_path, normalize_path};
 pub use pr_comment::{DiffSide, PrComment, PrCommentThread, PrComments};
 pub use pr_comment_anchor::{ResolvedThread, ThreadAnchor, anchor_comment_thread};
+pub use pr_comment_render::{
+    CommentsView, ModelCommentBucket, RenderedComment, RenderedThread, group_comment_threads,
+};
 pub use pr_dag::{
     DEFAULT_PR_DAG_NODE_CAP, LineDelta, PrDagEdge, PrDagGraph, PrDagNode, PrDagState,
     compute_pr_dag, populate_line_counts, pr_dag_lines_from_diff, pr_dag_lines_from_raw_code,

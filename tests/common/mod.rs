@@ -39,6 +39,11 @@ pub const COMMITTED_EXAMPLES: &[&str] = &[
     // cute-dbt#404 — the PR-scope lineage mini-DAG golden (experiment-on,
     // --pr-diff). The zero-egress + resource-ref gates scan it like any other.
     "prdiff-minidag-report.html",
+    // cute-dbt#419–#422 — the PR review-comments golden (experiment-on,
+    // --pr-diff, --pr-comments). The zero-egress gate proves the inlined
+    // comments make ZERO outbound requests at file:// view-time (the comments
+    // are baked in at gen-time; any navigate-to-comment is in-page JS).
+    "comments-showcase-report.html",
 ];
 
 /// The committed `cute-dbt explore` example pages under `examples/`

@@ -264,6 +264,8 @@ fn render_pr_diff_with_axes_to_file(
         &axes,
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -317,6 +319,8 @@ fn render_pr_diff_with_states_to_file(
         &axes,
         &model_states,
         removed_models,
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -1870,7 +1874,10 @@ fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
     );
     assert!(
         folded_html.contains("diff-folded fold-0")
-            && folded_html.contains("diff-folded fold-0\" hidden>"),
+            // cute-dbt#419 — the per-line `data-oldline`/`data-newline`
+            // anchor attributes now sit between the class and the `hidden`
+            // attribute, so the folded line ends `… data-newline="N" hidden>`.
+            && folded_html.contains("hidden><span class=\"diff-gutter\""),
         "the folded middle lines carry `diff-folded fold-0` and the hidden attribute: {folded_html}",
     );
 
@@ -5510,6 +5517,8 @@ fn render_with_external_fixtures(
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -6004,6 +6013,8 @@ fn report_seed_import_node_shelf_shows_the_seed_data_table() {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let url = format!(
@@ -6126,6 +6137,8 @@ fn report_non_seed_import_node_shelf_is_unchanged() {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let url = format!(
@@ -8971,6 +8984,8 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -9549,6 +9564,8 @@ fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -13725,6 +13742,8 @@ fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -13772,6 +13791,8 @@ fn render_governance_to_file(
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -13989,6 +14010,8 @@ fn render_macro_lens_to_file(filename: &str) -> String {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -14290,6 +14313,8 @@ fn render_two_macro_lens_to_file(filename: &str) -> String {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -14456,6 +14481,8 @@ fn render_capped_macro_lens_to_file(filename: &str, model_count: usize, body_cap
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -15853,6 +15880,8 @@ fn render_seed_report(filename: &str, seed_cards: &[SeedCard]) -> String {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -16216,6 +16245,8 @@ fn render_minidag_report(filename: &str) -> String {
         &axes,
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -16621,6 +16652,8 @@ fn render_lens_shell_to_file(filename: &str) -> String {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -16793,5 +16826,167 @@ fn lens_tabs_switch_the_active_panel_in_a_real_browser() {
         1,
         "Home jumps back to the first (Models) lens",
     );
+    let _ = tab.close(true);
+}
+
+// ===== cute-dbt#419 / #420 / #421 / #422 — PR review comments =========
+//
+// Drives the committed comments-showcase golden in a real headless
+// Chromium. The golden renders the prdiff-minidag manifest in --pr-diff
+// mode with the `pr-comments` experiment on and a synthetic
+// --pr-comments review-threads payload, so the JS surface is live:
+//   * #419 — an anchored review thread renders INLINE at its Model-SQL
+//     diff line (the resolved thread on fct_orders new-side line 4), and
+//     an OUTDATED thread lands in the per-model "unplaced" tail;
+//   * #420 — the top-of-report count button shows the total and NAVIGATES
+//     (selects the comment's model + scrolls to the inline thread);
+//   * #421 — the per-model count tooltip reveals on FOCUS (the
+//     load-bearing a11y guard — a focusable bubble, never a native title).
+
+/// Wait until renderForSelectedModel has injected (or cleared) the comment
+/// threads for the current model — `renderModelSql` + `anchorModelCommentThreads`
+/// run synchronously on a model switch, so a short readyState settle suffices.
+fn settle_comments(tab: &Tab) {
+    wait_for_document_ready(tab);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn pr_comments_render_inline_count_and_navigate() {
+    let browser = launch_browser();
+    let url = committed_example_url("comments-showcase-report.html");
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // ---- #420 — the top count button is present, shows the total (3),
+    // and is a focusable navigation button (not a native title). ----
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"pr-comments-count\"]').hidden"
+        ),
+        "the top-of-report comment-count button is visible when comments exist",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"pr-comments-count\"]').getAttribute('data-total')"
+        ),
+        "3",
+        "the count button reports the report-wide total (3 review comments)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"pr-comments-count\"]').tagName"
+        ),
+        "BUTTON",
+        "the count affordance is a focusable <button>, never a native title",
+    );
+
+    // ---- #419 — the default model (fct_orders) carries the RESOLVED inline
+    // thread at new-side line 4 and the OUTDATED thread in the tail. ----
+    select_model(&tab, "fct_orders");
+    settle_comments(&tab);
+    assert!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.model-sql .pr-comment-thread').length"
+        ) >= 1,
+        "at least one review thread renders inline within the Model SQL section",
+    );
+    // The resolved thread is anchored right after the new-side line-4 diff line.
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){var l=document.querySelector('.model-sql .sql-diff-view .diff-line[data-newline=\"4\"]');\
+             return !!(l && l.nextElementSibling && l.nextElementSibling.classList.contains('pr-comment-thread'));})()"
+        ),
+        "the resolved thread is injected immediately after its anchored diff line (new line 4)",
+    );
+    // The outdated thread (no live line) is surfaced in the per-model tail,
+    // never dropped and never mis-anchored.
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-sql [data-testid=\"pr-comment-tail\"] .pr-comment-outdated') !== null"
+        ),
+        "the outdated thread is surfaced honestly in the per-model tail",
+    );
+
+    // ---- #421 — the per-model count tooltip reveals on FOCUS (a11y). ----
+    // fct_orders carries 2 comments → the focusable count chip is present.
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"model-comments\"]').hidden"
+        ),
+        "the per-model comment-count row is shown for a model with comments",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"model-comment-count\"]').getAttribute('data-count')"
+        ),
+        "2",
+        "fct_orders shows its 2-comment count",
+    );
+    // The bubble is hidden until the chip is FOCUSED (keyboard reach), then
+    // becomes visible — the load-bearing a11y guard (never a native title).
+    let bubble_visible = "(function(){var b=document.querySelector('[data-testid=\"model-comment-bubble\"]');\
+        if(!b)return false;var s=getComputedStyle(b);return s.visibility==='visible'&&parseFloat(s.opacity)>0.5;})()";
+    assert!(
+        !eval_bool(&tab, bubble_visible),
+        "the per-model count bubble is hidden before focus",
+    );
+    eval(
+        &tab,
+        "document.querySelector('[data-testid=\"model-comment-count\"]').focus()",
+    );
+    assert!(
+        eval_bool(&tab, bubble_visible),
+        "focusing the count chip REVEALS the bubble (keyboard-reachable, not a native title)",
+    );
+
+    // ---- #420 — clicking the top count button NAVIGATES to a comment. ----
+    // It selects the first navigable bucket's model and scrolls to the inline
+    // thread. After the click, a model with comments is selected and the
+    // Model SQL section carries an inline thread.
+    eval(
+        &tab,
+        "document.querySelector('[data-testid=\"pr-comments-count\"]').click()",
+    );
+    settle_comments(&tab);
+    assert!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.model-sql .pr-comment-thread, .model-sql [data-testid=\"pr-comment-tail\"] .pr-comment-thread').length"
+        ) >= 1,
+        "after clicking the count button, the navigated model shows its inline comment thread(s)",
+    );
+
+    // ---- the OPEN thread on stg_orders renders with both its comments. ----
+    select_model(&tab, "stg_orders");
+    settle_comments(&tab);
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){var l=document.querySelector('.model-sql .sql-diff-view .diff-line[data-newline=\"2\"]');\
+             return !!(l && l.nextElementSibling && l.nextElementSibling.classList.contains('pr-comment-thread'));})()"
+        ),
+        "the open thread on stg_orders is injected after its anchored diff line (new line 2)",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "(function(){var t=document.querySelector('.model-sql .pr-comment-thread');\
+             return t?t.querySelectorAll('.pr-comment').length:0;})()"
+        ),
+        2,
+        "the open stg_orders thread renders both of its comments",
+    );
+
     let _ = tab.close(true);
 }

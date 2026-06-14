@@ -67,16 +67,17 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, BlockDiff, ChangeAxes, CheckId, CheckPolicy, ConfigAttribution, CteGraph,
-    DEFAULT_SEED_ROW_CAP, DiffLine, DiffLineKind, EdgeType, Finding, FixtureTable,
-    FixtureTableDiff, GovernanceFacts, HeuristicId, HookChangeFacts, HookManifestPresence,
-    InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet, ModelState, ModelYamlOutcome,
-    Node, NodeId, NormalizedDiffIndex, PrDagGraph, PrRef, ProjectChange, ProjectChangeCategory,
-    ProjectChangePanel, ProjectDefinition, ProjectFacts, ProjectFallbackReason, SeedCard,
-    SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
-    UnitTestYamlBlock, VarAttribution, VarChangeFacts, VarReference, VarScanFootprint,
-    apply_check_policy, macro_blast_radius, model_findings, reconstruct_macro_sql_diff,
-    resolve_target_model, resolve_tested_model, table_from_manifest_rows,
+    BANNER_EMPTY_SCOPE, BlockDiff, ChangeAxes, CheckId, CheckPolicy, CommentsView,
+    ConfigAttribution, CteGraph, DEFAULT_SEED_ROW_CAP, DiffLine, DiffLineKind, EdgeType, Finding,
+    FixtureTable, FixtureTableDiff, GovernanceFacts, HeuristicId, HookChangeFacts,
+    HookManifestPresence, InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet,
+    ModelState, ModelYamlOutcome, Node, NodeId, NormalizedDiffIndex, PrDagGraph, PrRef,
+    ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition, ProjectFacts,
+    ProjectFallbackReason, SeedCard, SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff,
+    UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock, VarAttribution, VarChangeFacts,
+    VarReference, VarScanFootprint, apply_check_policy, macro_blast_radius, model_findings,
+    reconstruct_macro_sql_diff, resolve_target_model, resolve_tested_model,
+    table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -1520,6 +1521,22 @@ pub struct ReportPayload {
     /// is a #360 design decision.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub removed_models: Vec<String>,
+    /// The PR review-comments render view (cute-dbt#419–#422, epic #353) —
+    /// the ingested GitHub review threads, anchored onto the rendered diff
+    /// (the shipped [`anchor_comment_thread`](crate::domain::anchor_comment_thread),
+    /// never re-anchored) and grouped per model. Gated behind
+    /// [`Experiment::PrComments`](crate::domain::Experiment::PrComments): the
+    /// cli passes `None` when the experiment is off, when there is no PR
+    /// context, or when no comments were ingested — so the key is omitted
+    /// from JSON, the static count container stays empty (the JS never fills
+    /// it), and every default golden stays byte-identical (the `pr_dag` /
+    /// `seed_cards` precedent). When `Some`, the JS (`renderPrComments`)
+    /// reads `DATA.pr_comments` and (1) injects each thread inline at its
+    /// anchored Model-SQL diff line, (2) fills the top-of-report total-count
+    /// navigation button, and (3) sets each model's per-model count tooltip.
+    /// Inlined at gen-time, view-time zero-egress (any navigate is in-page JS).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_comments: Option<CommentsView>,
 }
 
 /// The PR-scope lineage mini-DAG render view (cute-dbt#404) — the domain
@@ -3543,6 +3560,13 @@ pub fn build_payload_with_externals(
         // per-model — removed models are node-less). Empty ⇒ omitted from JSON,
         // keeping non-removal goldens byte-identical.
         removed_models: Vec::new(),
+        // cute-dbt#419 — the PR review-comments view defaults None here; the
+        // value (the cli's `gather_pr_comments` → `group_comment_threads`
+        // output) is threaded in by `render_report_with_externals` exactly
+        // like `pr_dag`. None ⇒ omitted from JSON, keeping the
+        // non-experimental / no-PR-context / no-comments goldens
+        // byte-identical.
+        pr_comments: None,
     }
 }
 
@@ -3632,6 +3656,10 @@ pub fn render_report(
         // `removed_models` omitted (the `axes` precedent).
         &BTreeMap::new(),
         &[],
+        // No PR review-comments through this convenience wrapper
+        // (cute-dbt#419) — `None` keeps `pr_comments` omitted (the `pr_dag`
+        // precedent).
+        None,
     )
 }
 
@@ -3672,6 +3700,7 @@ pub fn render_report_with_externals(
     axes: &BTreeMap<NodeId, ChangeAxes>,
     model_states: &BTreeMap<NodeId, ModelState>,
     removed_models: &[String],
+    pr_comments: Option<&CommentsView>,
 ) -> io::Result<()> {
     let mut payload = build_payload_with_externals(
         current,
@@ -3729,6 +3758,14 @@ pub fn render_report_with_externals(
     // addition/removal-free PR ⇒ omitted from JSON, keeping non-removal
     // goldens byte-identical (the `seed_cards` / `pr_dag` precedent).
     payload.removed_models = removed_models.to_vec();
+    // cute-dbt#419 — the gated PR review-comments view (anchored review
+    // threads grouped per model, built in the cli's `gather_pr_comments`).
+    // `None` (the off-gate default, no PR context, or no comments) ⇒ omitted
+    // from JSON, so the static count container stays empty (the JS never fills
+    // it) and every default golden stays byte-identical (the `pr_dag` /
+    // `seed_cards` precedent). The whole comment surface renders client-side
+    // from `DATA.pr_comments`, so there is no server-rendered template field.
+    payload.pr_comments = pr_comments.cloned();
     // The empty-scope banner contract reads the TRUE in-scope set, not the
     // widened render set or the changed subset (cute-dbt#91).
     let banner_text = compose_banner_text(in_scope);
@@ -5302,6 +5339,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &["models/marts/dim_gone.sql".to_owned()],
+            None,
         )
         .expect("report renders");
         let html = std::fs::read_to_string(&tmp).expect("read report");
@@ -7697,6 +7735,7 @@ mod tests {
             seed_cards: Vec::new(),
             pr_dag: None,
             removed_models: Vec::new(),
+            pr_comments: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -7724,6 +7763,7 @@ mod tests {
             seed_cards: Vec::new(),
             pr_dag: None,
             removed_models: Vec::new(),
+            pr_comments: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -7753,6 +7793,7 @@ mod tests {
             seed_cards: Vec::new(),
             pr_dag: None,
             removed_models: Vec::new(),
+            pr_comments: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(serialized.contains("a < b"), "bare `<` is preserved");
@@ -7777,6 +7818,7 @@ mod tests {
             seed_cards: Vec::new(),
             pr_dag: None,
             removed_models: Vec::new(),
+            pr_comments: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -7814,6 +7856,7 @@ mod tests {
             seed_cards: Vec::new(),
             pr_dag: None,
             removed_models: Vec::new(),
+            pr_comments: None,
         };
         let serialized = payload_json_for_html_script(&payload).unwrap();
         assert!(
@@ -7849,6 +7892,7 @@ mod tests {
             seed_cards: Vec::new(),
             pr_dag: None,
             removed_models: Vec::new(),
+            pr_comments: None,
         };
         let serialized = payload_json_for_html_script(&original).unwrap();
         let parsed: serde_json::Value =
@@ -7880,6 +7924,7 @@ mod tests {
             seed_cards,
             pr_dag: None,
             removed_models: Vec::new(),
+            pr_comments: None,
         }
     }
 
@@ -8093,6 +8138,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -9135,6 +9181,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -9552,6 +9599,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -9714,6 +9762,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -9851,6 +9900,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")

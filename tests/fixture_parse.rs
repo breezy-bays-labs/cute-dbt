@@ -64,7 +64,14 @@ enum ContainerShape {
 ///   `reviewThreads` response for the PR review-thread ingestion adapter
 ///   (cute-dbt#395); pinned by `tests/pr_comments_ingestion.rs` and the
 ///   `adapters::pr_comments` unit suite.
-const NON_MANIFEST_JSON_FIXTURES: &[&str] = &["pr-review-threads.json"];
+/// - `comments-showcase-pr-comments.json` — the synthetic `gh api graphql`
+///   `reviewThreads` payload that drives the comments-showcase GOLDEN
+///   (cute-dbt#419–#422); fed to `report --pr-comments @<file>` and pinned
+///   by the `example-report-check` byte gate (the comments-showcase row).
+const NON_MANIFEST_JSON_FIXTURES: &[&str] = &[
+    "pr-review-threads.json",
+    "comments-showcase-pr-comments.json",
+];
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")

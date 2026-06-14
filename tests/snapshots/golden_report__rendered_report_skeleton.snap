@@ -1,6 +1,5 @@
 ---
 source: tests/golden_report.rs
-assertion_line: 115
 expression: skeleton
 ---
 <!DOCTYPE html>
@@ -24,6 +23,9 @@ expression: skeleton
     <span class="diff-scope-text">Showing 1 unit test in scope</span> —
     vs baseline manifest <code class="diff-scope-baseline">jaffle-shop-baseline.json</code>.
   </p>
+
+  
+  <button type="button" class="pr-comments-count" data-testid="pr-comments-count" hidden></button>
 </section>
 
 
@@ -140,6 +142,8 @@ expression: skeleton
     </div>
   </div>
   <p class="model-axes-row" data-testid="model-axes" hidden></p>
+  
+  <p class="model-comments-row" data-testid="model-comments" hidden></p>
   <p class="model-attribution-row" data-testid="model-attribution" hidden></p>
   <p class="zero-updated-hint" data-testid="zero-updated-hint" hidden></p>
 </section>
