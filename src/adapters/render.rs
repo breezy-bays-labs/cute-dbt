@@ -1498,7 +1498,7 @@ pub struct SeedSectionCard {
 /// it would hide the change under review), and carry the degrade state
 /// (`table: None`) verbatim. The cap is applied here, render-side, from the
 /// `--config`-resolved value the cli threads in (default
-/// [`DEFAULT_SEED_ROW_CAP`](crate::domain::DEFAULT_SEED_ROW_CAP)).
+/// [`DEFAULT_SEED_ROW_CAP`]).
 fn build_seed_section(cards: &[SeedCard], cap: usize) -> Vec<SeedSectionCard> {
     cards
         .iter()
