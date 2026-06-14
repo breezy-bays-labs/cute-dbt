@@ -2663,6 +2663,7 @@ fn reconstruct_fusion_data_diffs(
     };
     let diff = PrDiff {
         renames: Vec::new(),
+        deleted: Vec::new(),
         files: vec![FileHunks {
             path: "models/marts/_unit_tests.yml".to_owned(),
             hunks: vec![hunk],
@@ -12666,6 +12667,7 @@ fn render_macro_lens_to_file(filename: &str) -> String {
     // reconstructs (the `+` matches the working-tree body).
     let diff = PrDiff {
         renames: Vec::new(),
+        deleted: Vec::new(),
         files: vec![FileHunks {
             path: "macros/dq.sql".to_owned(),
             hunks: vec![Hunk {
@@ -14293,6 +14295,93 @@ fn seed_data_tables_section_renders_when_seed_cards_present() {
         ),
         "3",
         "the rowcap note carries the capped shown count",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn seed_config_display_chips_render_the_authored_keys() {
+    // cute-dbt#397 — the seed config-display chips. A seed whose render
+    // payload carries the non-default config strings (delimiter / quote_columns
+    // / column_types) renders one chip per authored key, the keys verbatim and
+    // the values as the Rust-composed display strings. The dead
+    // `buildSeedConfigChips` path made live by threading the config through
+    // `build_seed_cards`.
+    let mut card = seed_card_with_rows("raw_chips", 2);
+    card.delimiter = Some("|".to_owned());
+    card.quote_columns = Some("true".to_owned());
+    card.column_types = Some("region: varchar(16), state_code: varchar(2)".to_owned());
+    let url = render_seed_report("headless_seed_config_chips.html", &[card]);
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate seed report");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // The config block renders with exactly three chips (one per authored key).
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"seed-data-config\"]') !== null",
+        ),
+        "the seed config-display block renders when config is authored",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "String(document.querySelectorAll('.seed-data-config .seed-config-chip').length)"
+        ),
+        "3",
+        "one chip per authored config key (delimiter / quote_columns / column_types)",
+    );
+    // Each chip's key + value renders the verbatim key and the composed value.
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.seed-config-chip[data-key=\"delimiter\"] .seed-config-val').textContent"
+        ),
+        "|",
+        "the delimiter chip shows the composed separator",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.seed-config-chip[data-key=\"quote_columns\"] .seed-config-val').textContent"
+        ),
+        "true",
+        "the quote_columns chip shows the composed value",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('.seed-config-chip[data-key=\"column_types\"] .seed-config-val').textContent"
+        ),
+        "region: varchar(16), state_code: varchar(2)",
+        "the column_types chip shows the sorted col: type list",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn seed_config_display_block_absent_when_no_config_authored() {
+    // cute-dbt#397 — the truthful empty state: a seed that authored no
+    // non-default config (every chip None) renders NO config block at all,
+    // never an empty container.
+    let url = render_seed_report(
+        "headless_seed_no_config.html",
+        &[seed_card_with_rows("raw_plain", 2)],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate seed report");
+    tab.wait_until_navigated().expect("await navigation");
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"seed-data-config\"]') === null",
+        ),
+        "no config block renders when the seed authored no non-default config",
     );
     let _ = tab.close(true);
 }

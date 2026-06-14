@@ -1460,6 +1460,7 @@ mod tests {
         // working-tree line 7, so N7b aligns; the hunk sits inside the block.
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![Hunk {

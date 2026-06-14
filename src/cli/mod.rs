@@ -3235,6 +3235,7 @@ mod tests {
         use crate::domain::{FileHunks, Hunk, PrDiff};
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: path.to_owned(),
                 hunks: vec![Hunk {
@@ -3352,6 +3353,7 @@ mod tests {
     fn project_diff_index(hunks: Vec<Hunk>) -> NormalizedDiffIndex {
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "dbt_project.yml".to_owned(),
                 hunks,
@@ -3386,6 +3388,7 @@ mod tests {
     fn project_facts_panel_absent_when_file_not_in_diff() {
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "models/dim_users.sql".to_owned(),
                 hunks: vec![replacement_hunk(1, "a", "b")],

@@ -724,7 +724,7 @@ Pure synthetic data — fictitious patient ids, no real records.\
 path = "seed-showcase-current.json"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/350"
-sha256 = "6965733d8e5635ae5e8e735767356d62bf1bc23fd9d2cfb15686715714301d6b"
+sha256 = "7c9c6902e890901c94e0cd349a1074a1dcab7e0aefa98fc0862385b202d2ed7d"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"
@@ -732,14 +732,17 @@ description = """
 The dedicated dogfood manifest for cute-dbt#350's "Data tables" seed section \
 (the seed-showcase GOLDEN example row). A minimal hand-authored v12 manifest: \
 one `seed` node (seed.analytics.raw_state_codes, original_file_path \
-seeds/raw_state_codes.csv, config.delimiter "," + quote_columns false) and \
-one `model` node (stg_states) that `ref()`s it, so the seed reports \
-"feeds 1 model". A SEPARATE fixture (not the shared playground manifest) so \
-the playground / explore goldens stay untouched — the explorer seed node-type \
-is a later epic #350 slice. Rendered in --pr-diff mode against \
-seed-showcase-pr-diff.patch under the `seeds` experiment so the golden shows \
-the gated seed section. Pure synthetic data — generic state codes, no real \
-records.\
+seeds/raw_state_codes.csv) and one `model` node (stg_states) that `ref()`s \
+it, so the seed reports "feeds 1 model". The seed authors NON-DEFAULT config \
+(cute-dbt#397: quote_columns true + a column_types override mapping is_active \
+→ boolean, state_code → varchar(2)) so the golden visibly renders the seed \
+config-display chips; delimiter stays the default "," (the CSV is \
+comma-delimited) so that chip correctly suppresses. A SEPARATE fixture (not \
+the shared playground manifest) so the playground / explore goldens stay \
+untouched — the explorer seed node-type is a later epic #350 slice. Rendered \
+in --pr-diff mode against seed-showcase-pr-diff.patch under the `seeds` \
+experiment so the golden shows the gated seed section. Pure synthetic data — \
+generic state codes, no real records.\
 """
 
 [[fixture]]
@@ -957,6 +960,26 @@ Synthetic working-tree source for the `macro.analytics.mask_pii` macro \
 reading it through `--project-root tests/fixtures/macro-heavy-source` \
 reconstructs the body diff against the macro-heavy pr-diff patch. Pure \
 synthetic Jinja — no real data.\
+"""
+
+[[fixture]]
+path = "pr-review-threads.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/395"
+sha256 = "45212b7f3c7ca840b79bf41d59137ade36bffed12f860f90e223250eaf8540b3"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+Synthetic `gh api graphql` response for the GitHub PR review-thread \
+ingestion adapter (cute-dbt#395, epic #353). Matches the live GraphQL \
+shape introspected against GitHub's schema: \
+`data.repository.pullRequest.{reviewThreads,comments}.nodes`. Three review \
+threads (an open RIGHT-side thread with two comments, a resolved+outdated \
+LEFT-side thread whose `line` is null, and a thread whose comment author is \
+null to exercise the deleted-account path) plus two general PR comments (one \
+with a login, one with a null author). All logins, bodies, paths, and commit \
+oids are invented — no real repository, account, or PR data.\
 """
 
 # ---------------------------------------------------------------------------
