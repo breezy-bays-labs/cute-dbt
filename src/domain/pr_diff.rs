@@ -51,8 +51,9 @@ use crate::domain::unit_test_yaml::UnitTestYamlBlock;
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PrDiff {
     /// One entry per changed file the diff names on its new side
-    /// (`+++ b/<path>`). `/dev/null` (pure deletion of a whole file) is
-    /// dropped by the parser.
+    /// (`+++ b/<path>`). `/dev/null` (pure deletion of a whole file) names
+    /// no changed-content path here — its old-side path is captured on
+    /// [`deleted`](Self::deleted) instead (cute-dbt#396).
     pub files: Vec<FileHunks>,
     /// Git-detected renames — the `rename from <old>` / `rename to <new>`
     /// extended-header pairs (cute-dbt#80). A **pure** rename (100%
@@ -64,6 +65,30 @@ pub struct PrDiff {
     /// byte-identical to the pre-#80 shape.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub renames: Vec<RenamePair>,
+    /// Files the diff **deletes** — a file hunk whose new side is
+    /// `+++ /dev/null` (cute-dbt#396). The new side carries no path, so the
+    /// deleted path is recovered from the old-side `--- a/<path>` header
+    /// (`a/` prefix and a trailing `\t<timestamp>` stripped, exactly like
+    /// `parse_plus_path` does for the new side). Repo-relative and verbatim,
+    /// the same fidelity level as [`FileHunks::path`].
+    ///
+    /// A deletion appears here and NOT in [`files`](Self::files) (the
+    /// `/dev/null` new side names no changed-content path). It is distinct
+    /// from a [`renames`](Self::renames) entry (a rename's new side is a
+    /// real `+++ b/<path>`) and from an addition (whose **old** side is
+    /// `/dev/null`).
+    ///
+    /// The REMOVED-detection prerequisite for the scope taxonomy (epic
+    /// #344): dbt selectors walk the current graph only, so a removed model
+    /// is cute-dbt-synthesized from this diff-arm signal. **Parser-only in
+    /// this slice** — no render consumption yet (the deferred S4-render
+    /// half).
+    ///
+    /// `#[serde(default)]` keeps pre-#396 payloads deserializable;
+    /// `skip_serializing_if` keeps deletion-free payloads byte-identical to
+    /// the pre-#396 shape (so the committed goldens are unaffected).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted: Vec<String>,
 }
 
 /// One git-detected rename, as named by a `rename from`/`rename to`
@@ -1441,6 +1466,7 @@ mod tests {
     fn pr_diff_round_trips_through_json() {
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "models/marts/core/_core__models.yml".to_owned(),
                 hunks: vec![Hunk {
@@ -1493,9 +1519,49 @@ mod tests {
                 from: "models/dim_a.sql".to_owned(),
                 to: "models/dim_b.sql".to_owned(),
             }],
+            deleted: Vec::new(),
             files: Vec::new(),
         };
         let json = serde_json::to_string(&diff).expect("serialize");
+        let back: PrDiff = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(diff, back);
+    }
+
+    // ----- deleted serde compatibility (cute-dbt#396) -----
+
+    #[test]
+    fn deletion_free_pr_diff_serializes_without_a_deleted_field() {
+        // `skip_serializing_if` keeps the deletion-free wire shape
+        // byte-identical to the pre-#396 POD — no `"deleted":[]` noise, so
+        // the committed goldens (which carry no deletions) are unaffected.
+        let diff = PrDiff::default();
+        let json = serde_json::to_string(&diff).expect("serialize");
+        assert!(
+            !json.contains("deleted"),
+            "an empty deleted vec must not serialize: {json}",
+        );
+    }
+
+    #[test]
+    fn pre_deleted_payload_without_a_deleted_field_deserializes() {
+        // `#[serde(default)]` — a payload from before the field existed
+        // round-trips with an empty `deleted` (additive-field invariant).
+        let back: PrDiff = serde_json::from_str(r#"{"files":[]}"#).expect("deserialize");
+        assert!(back.deleted.is_empty());
+    }
+
+    #[test]
+    fn deletion_carrying_pr_diff_round_trips_through_json() {
+        let diff = PrDiff {
+            renames: Vec::new(),
+            deleted: vec!["models/old_model.sql".to_owned()],
+            files: Vec::new(),
+        };
+        let json = serde_json::to_string(&diff).expect("serialize");
+        assert!(
+            json.contains("deleted"),
+            "a non-empty deleted vec serializes: {json}",
+        );
         let back: PrDiff = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(diff, back);
     }
@@ -1506,6 +1572,7 @@ mod tests {
     fn index_changed_paths_lists_normalized_file_set() {
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![
                 FileHunks {
                     path: "./models/a.sql".to_owned(),
@@ -1527,6 +1594,7 @@ mod tests {
     fn index_contains_changed_matches_normalized_manifest_path() {
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "models/marts/dim_payers.sql".to_owned(),
                 hunks: vec![hunk(1, 1)],
@@ -1541,6 +1609,7 @@ mod tests {
     fn index_hunks_for_returns_the_files_hunks() {
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "models/_ut.yml".to_owned(),
                 hunks: vec![hunk(5, 2), hunk(12, 1)],
@@ -1564,6 +1633,7 @@ mod tests {
         // (BDD non-identity-strip scenario, at the unit level).
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "dbt_project/models/marts/core/_core__models.yml".to_owned(),
                 hunks: vec![hunk(7, 1)],
@@ -1588,6 +1658,7 @@ mod tests {
         // its hunks rather than dropping one.
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![
                 FileHunks {
                     path: "models/_ut.yml".to_owned(),
@@ -1617,6 +1688,7 @@ mod tests {
         // manifest declares `./dbt_project.yml`.
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "dbt_project.yml".to_owned(),
                 hunks: vec![hunk(11, 1)],
@@ -1634,6 +1706,7 @@ mod tests {
         // must meet at the same key.
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "dbt-project/dbt_project.yml".to_owned(),
                 hunks: vec![hunk(3, 1)],
@@ -1791,6 +1864,7 @@ mod tests {
                 from: "models/marts/dim_a.sql".to_owned(),
                 to: "models/marts/dim_b.sql".to_owned(),
             }],
+            deleted: Vec::new(),
             files: Vec::new(),
         };
         let index = NormalizedDiffIndex::new(&diff, None);
@@ -1812,6 +1886,7 @@ mod tests {
                 from: "dbt_project/models/dim_a.sql".to_owned(),
                 to: "dbt_project/models/dim_b.sql".to_owned(),
             }],
+            deleted: Vec::new(),
             files: Vec::new(),
         };
         let index = NormalizedDiffIndex::new(&diff, Some(Path::new("dbt_project")));
@@ -1829,6 +1904,7 @@ mod tests {
                 from: "models/dim_a.sql".to_owned(),
                 to: "models/dim_b.sql".to_owned(),
             }],
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "models/dim_b.sql".to_owned(),
                 hunks: vec![hunk(3, 1)],
@@ -1874,7 +1950,11 @@ mod tests {
                             to: format!("{prefix}models/{t}.sql"),
                         })
                         .collect();
-                    let diff = PrDiff { files, renames };
+                    let diff = PrDiff {
+                        files,
+                        renames,
+                        deleted: Vec::new(),
+                    };
                     let index = NormalizedDiffIndex::new(&diff, strip.map(Path::new));
 
                     let expected: std::collections::HashSet<String> = file_pool[..n_files]
@@ -1903,6 +1983,7 @@ mod tests {
         // predicate → count 0.
         let unified_zero = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![
                 FileHunks {
                     path: "models/a.sql".to_owned(),
@@ -1931,6 +2012,7 @@ mod tests {
         };
         let mixed = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![
                 FileHunks {
                     path: "models/a.sql".to_owned(),
@@ -2231,6 +2313,7 @@ mod tests {
         // touches test_in's block [1,3] but not test_out's block [5,7].
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![
                 FileHunks {
                     path: "models/_a.yml".to_owned(),
@@ -2300,6 +2383,7 @@ mod tests {
 
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![
                 FileHunks {
                     path: "models/_a.yml".to_owned(),
@@ -2781,6 +2865,7 @@ mod tests {
 
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![
                 // _a.yml: hunk replaces line 2 with t_edit's working-tree
                 // body line → aligned + touches block [1,3].
@@ -2876,6 +2961,7 @@ mod tests {
     fn attach_model_yaml_diffs_attaches_only_for_edited_aligned_blocks() {
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![
                 // _a.yml: hunk replaces line 2 with the working-tree body
                 // line → aligned + touches the edited block [1,3].
@@ -2972,6 +3058,7 @@ mod tests {
         // attach untouched even when their (unreadable) file has hunks.
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "models/_zz.yml".to_owned(),
                 hunks: vec![replace(1, &["old"], &["new"])],
@@ -3011,6 +3098,7 @@ mod tests {
         // section keeps the plain File view.
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "models/_a.yml".to_owned(),
                 hunks: vec![replace(
@@ -3317,6 +3405,7 @@ mod tests {
         // their new-side positions for N7b to hold.
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![replace(2, &["from t"], &["from u"])],
@@ -3358,6 +3447,7 @@ mod tests {
 
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![
                 // edit.sql: line 2 replaced, `+` matches working tree → aligned + touched.
                 FileHunks {
@@ -3427,6 +3517,7 @@ mod tests {
 
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![replace(2, &["from t"], &["    from t"])],
@@ -3461,6 +3552,7 @@ mod tests {
         let current = manifest_with_models(vec![m]);
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![replace(1, &["old"], &["new"])],
@@ -3481,6 +3573,7 @@ mod tests {
         let current = manifest_with_models(vec![m]);
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![replace(1, &["old"], &["new"])],
@@ -3501,6 +3594,7 @@ mod tests {
         let body = "{% macro dq() %}\n  where flag is true\n{% endmacro %}";
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![replace(
@@ -3533,6 +3627,7 @@ mod tests {
         let fusion_body = "{% macro m() %}\nfrom u\n{% endmacro %}\n";
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![replace(2, &["from t"], &["from u"])],
@@ -3553,6 +3648,7 @@ mod tests {
         let body = "{% macro m() %}\nx\n{% endmacro %}";
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "macros/OTHER.sql".to_owned(),
                 hunks: vec![replace(2, &["old"], &["new"])],
@@ -3570,6 +3666,7 @@ mod tests {
         let body = "{% macro m() %}\nfrom u\n{% endmacro %}";
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![replace(2, &["from was"], &["from DRIFTED"])],
@@ -3586,6 +3683,7 @@ mod tests {
         let body = "{% macro m() %}\n    from u\n{% endmacro %}";
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![replace(2, &["from u"], &["    from u"])],
@@ -3599,6 +3697,7 @@ mod tests {
     fn reconstruct_macro_sql_diff_empty_body_is_none() {
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "macros/m.sql".to_owned(),
                 hunks: vec![replace(1, &["old"], &["new"])],
@@ -3660,6 +3759,7 @@ mod tests {
         // only one `+` body is recorded (parser drops context lines).
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: ofp.to_owned(),
                 hunks: vec![context_bearing(1, 3, &["from was"], &["from t"])],
