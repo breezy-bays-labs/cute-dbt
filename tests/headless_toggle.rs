@@ -786,6 +786,59 @@ fn axes_row_hidden(tab: &Tab) -> bool {
     )
 }
 
+// --- cute-dbt#414 (Slice C): single-select 3-axis filter toggle -------
+
+/// `|`-joined `option` VALUES (model names) of `#model-select`, in DOM
+/// order — the filter re-scopes the dropdown by REBUILDING it from the
+/// admitted models, so the present options ARE the filtered set (no hidden
+/// options to discount). A model the active axis filter drops is simply
+/// absent here.
+fn model_option_values(tab: &Tab) -> String {
+    eval_string(
+        tab,
+        "Array.from(document.querySelectorAll('#model-select option'))\
+         .map(function(o){return o.value;}).join('|')",
+    )
+}
+
+/// Click one filter segment by its `data-axis` (`all`/`body`/`config`/
+/// `unit_test`).
+fn click_axis_filter(tab: &Tab, axis: &str) {
+    let _ = eval(
+        tab,
+        &format!(
+            "document.querySelector('[data-testid=\"axis-filter\"] [data-axis=\"{axis}\"]').click()"
+        ),
+    );
+}
+
+/// The `data-axis` of the active (aria-pressed="true") filter segment, or
+/// "" when the filter is absent / none active.
+fn active_axis_segment(tab: &Tab) -> String {
+    eval_string(
+        tab,
+        "(function(){var b=document.querySelector('[data-testid=\"axis-filter\"] [aria-pressed=\"true\"]');\
+          return b ? b.getAttribute('data-axis') : '';})()",
+    )
+}
+
+fn axis_filter_hidden(tab: &Tab) -> bool {
+    eval_bool(
+        tab,
+        "document.querySelector('[data-testid=\"axis-filter\"]').hidden",
+    )
+}
+
+/// `|`-joined `data-axis` of the filter's segments, in DOM order — proves
+/// the four-segment single-select control built (and its order).
+fn axis_filter_segments(tab: &Tab) -> String {
+    eval_string(
+        tab,
+        "Array.from(document.querySelectorAll('[data-testid=\"axis-filter\"] [data-axis]'))\
+         .map(function(b){return b.getAttribute('data-axis');}).join('|')",
+    )
+}
+
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn pr_diff_models_lens_renders_axis_chips_and_optgroup_grouping() {
@@ -953,6 +1006,197 @@ fn baseline_mode_renders_no_axis_chips() {
         "",
         "baseline mode renders a flat dropdown (no shared-schema grouping)",
     );
+    // cute-dbt#414 — the axis filter is gated to the same --pr-diff arm as
+    // the chips: baseline mode builds no segments and the container stays
+    // hidden, so the dropdown is never re-scoped.
+    assert!(
+        axis_filter_hidden(&tab),
+        "baseline mode hides the axis-filter toggle (no per-axis attribution)",
+    );
+    assert_eq!(
+        axis_filter_segments(&tab),
+        "",
+        "baseline mode builds zero filter segments",
+    );
+    let _ = tab.close(true);
+}
+
+/// cute-dbt#414 (Slice C) — the single-select 3-axis filter toggle drives a
+/// real re-scope of the model dropdown in a real browser. The fixture seeds
+/// three models across distinct axis triples so EACH segment is assertable:
+/// mart_dq fires body+config; mart_grid fires config+unit_test (no body);
+/// stg_raw fires body only.
+///
+/// So: Body → {mart_dq, stg_raw}; Config → {mart_dq, mart_grid}; Unit test →
+/// {mart_grid}; All → {mart_dq, mart_grid, stg_raw}. The Config segment also
+/// covers the empty-optgroup case (the staging group, holding only the
+/// body-only stg_raw, drops out entirely), and the Unit-test segment covers
+/// the selected-model fallback (mart_dq, the default selection, is filtered
+/// out, so the dropdown falls back to the first visible model).
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn pr_diff_axis_filter_rescopes_model_dropdown() {
+    let schema_marts = "models/marts/_marts__models.yml";
+    let schema_staging = "models/staging/_staging__models.yml";
+    let nodes = vec![
+        model_node_with_raw_and_path("model.shop.mart_dq", "select 1", "models/marts/mart_dq.sql")
+            .with_patch_path(Some(schema_marts.to_owned())),
+        model_node_with_raw_and_path(
+            "model.shop.mart_grid",
+            "select 2",
+            "models/marts/mart_grid.sql",
+        )
+        .with_patch_path(Some(schema_marts.to_owned())),
+        model_node_with_raw_and_path(
+            "model.shop.stg_raw",
+            "select 3",
+            "models/staging/stg_raw.sql",
+        )
+        .with_patch_path(Some(schema_staging.to_owned())),
+    ];
+    let tests = vec![(
+        "unit_test.shop.mart_grid.test_grid",
+        unit_test("test_grid", "mart_grid"),
+    )];
+    let axes = BTreeMap::from([
+        (
+            NodeId::new("model.shop.mart_dq"),
+            ChangeAxes {
+                body: true,
+                config: true,
+                unit_test: false,
+            },
+        ),
+        (
+            NodeId::new("model.shop.mart_grid"),
+            ChangeAxes {
+                body: false,
+                config: true,
+                unit_test: true,
+            },
+        ),
+        (
+            NodeId::new("model.shop.stg_raw"),
+            ChangeAxes {
+                body: true,
+                config: false,
+                unit_test: false,
+            },
+        ),
+    ]);
+    let url = render_pr_diff_with_axes_to_file(
+        "headless_axis_filter.html",
+        nodes,
+        tests,
+        &[
+            "model.shop.mart_dq",
+            "model.shop.mart_grid",
+            "model.shop.stg_raw",
+        ],
+        &[],
+        axes,
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate axis filter");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // The four-segment single-select control built, in order, defaulting to
+    // `All` (every in-scope model present, both <optgroup>s intact).
+    assert_eq!(
+        axis_filter_segments(&tab),
+        "all|body|config|unit_test",
+        "the four-segment single-select filter built in order",
+    );
+    assert!(
+        !axis_filter_hidden(&tab),
+        "the axis filter shows in --pr-diff mode"
+    );
+    assert_eq!(active_axis_segment(&tab), "all", "default segment is All");
+    assert_eq!(
+        model_option_values(&tab),
+        "mart_dq|mart_grid|stg_raw",
+        "All shows every in-scope model",
+    );
+    assert_eq!(
+        optgroups_of(&tab, "model-select"),
+        format!("{schema_marts}:mart_dq,mart_grid|{schema_staging}:stg_raw"),
+        "All keeps both schema <optgroup>s",
+    );
+
+    // Body → {mart_dq, stg_raw}: the two body-firing models, each under its
+    // own schema group (both groups survive, each with one member).
+    click_axis_filter(&tab, "body");
+    assert_eq!(active_axis_segment(&tab), "body", "Body segment is pressed");
+    assert_eq!(
+        model_option_values(&tab),
+        "mart_dq|stg_raw",
+        "Body re-scopes to the models whose .sql changed",
+    );
+    assert_eq!(
+        optgroups_of(&tab, "model-select"),
+        format!("{schema_marts}:mart_dq|{schema_staging}:stg_raw"),
+        "Body keeps both groups, each down to its one body-firing member",
+    );
+
+    // Config → {mart_dq, mart_grid}: both under the marts schema. The
+    // staging <optgroup> (only stg_raw, which does NOT fire config) drops
+    // out entirely — the empty-optgroup case.
+    click_axis_filter(&tab, "config");
+    assert_eq!(active_axis_segment(&tab), "config");
+    assert_eq!(
+        model_option_values(&tab),
+        "mart_dq|mart_grid",
+        "Config re-scopes to the models whose schema.yml changed",
+    );
+    assert_eq!(
+        optgroups_of(&tab, "model-select"),
+        format!("{schema_marts}:mart_dq,mart_grid"),
+        "Config drops the now-empty staging <optgroup> (no config-firing member)",
+    );
+
+    // Unit test → {mart_grid} only. mart_dq (the default selection) is
+    // filtered out, so the dropdown FALLS BACK to the first visible model
+    // (mart_grid) rather than landing on an empty selection.
+    click_axis_filter(&tab, "unit_test");
+    assert_eq!(active_axis_segment(&tab), "unit_test");
+    assert_eq!(
+        model_option_values(&tab),
+        "mart_grid",
+        "Unit test re-scopes to the test-hosting model",
+    );
+    assert_eq!(
+        eval_string(&tab, "document.querySelector('#model-select').value"),
+        "mart_grid",
+        "the dropdown falls back to the first visible model when the selection is filtered out",
+    );
+    // The selected model's axis chips repaint for the fallback model.
+    assert_eq!(
+        axis_chips(&tab),
+        "config|unit_test",
+        "the axis chips reflect the fallback model (mart_grid)",
+    );
+
+    // All resets to the full in-scope set + both <optgroup>s.
+    click_axis_filter(&tab, "all");
+    assert_eq!(
+        active_axis_segment(&tab),
+        "all",
+        "All segment is pressed again"
+    );
+    assert_eq!(
+        model_option_values(&tab),
+        "mart_dq|mart_grid|stg_raw",
+        "All resets to the full in-scope set",
+    );
+    assert_eq!(
+        optgroups_of(&tab, "model-select"),
+        format!("{schema_marts}:mart_dq,mart_grid|{schema_staging}:stg_raw"),
+        "All restores both schema <optgroup>s",
+    );
+
     let _ = tab.close(true);
 }
 

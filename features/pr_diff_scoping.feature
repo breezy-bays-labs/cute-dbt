@@ -130,6 +130,46 @@ Feature: Diff-scope unit tests and models via PR file diff (CI path)
     And the rendered report's models-in-scope listing contains "fct_revenue"
     And the model "fct_revenue" is attributed to the axes "config"
 
+  # --- cute-dbt#414 (Slice C): the single-select 3-axis filter toggle ---
+  #
+  # The Models lens carries a single-select segmented toggle
+  # [All][Body][Config][Unit test] that re-scopes the model dropdown to the
+  # models whose selected change-axis fired ("All" shows every in-scope
+  # model). The toggle is JS-built into a static container and gated to the
+  # same `axes`-present (--pr-diff) arm as the #413 chips, so a payload that
+  # carries per-model axes also carries the filter affordance. The LIVE
+  # re-scope behavior (each segment narrowing the dropdown, the empty-optgroup
+  # drop, the selected-model fallback, the All reset) is driven in a real
+  # browser by tests/headless_toggle.rs; these scenarios pin the
+  # payload-and-markup contract the filter reads — the per-model axis bits
+  # that decide which segment admits each model, plus the four-segment
+  # toggle's presence in the rendered report.
+
+  Scenario: The Models lens renders the single-select 3-axis filter toggle in pr-diff mode
+    Given a PR diff that changes "models/marts/fct_revenue.sql" and "models/marts/_marts__models.yml"
+    And the manifest contains a model with original_file_path "models/marts/fct_revenue.sql" and schema file "models/marts/_marts__models.yml"
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the rendered report carries the 3-axis filter toggle with segments "all,body,config,unit_test"
+
+  Scenario: The Body filter axis admits a model whose .sql changed
+    Given a PR diff that changes "models/marts/fct_revenue.sql"
+    And the manifest contains a model with original_file_path "models/marts/fct_revenue.sql" and schema file "models/marts/_marts__models.yml"
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the model "fct_revenue" is admitted by the filter axis "body"
+    And the model "fct_revenue" is admitted by the filter axis "all"
+    And the model "fct_revenue" is rejected by the filter axis "unit_test"
+
+  Scenario: The Config filter axis admits a model whose schema.yml changed
+    Given a PR diff that changes "models/marts/_marts__models.yml"
+    And the manifest contains a model with original_file_path "models/marts/fct_revenue.sql" and schema file "models/marts/_marts__models.yml"
+    When I run cute-dbt report with --manifest current.json --pr-diff @diff.patch --project-root . --out report.html
+    Then the exit code is 0
+    And the model "fct_revenue" is admitted by the filter axis "config"
+    And the model "fct_revenue" is admitted by the filter axis "all"
+    And the model "fct_revenue" is rejected by the filter axis "body"
+
   # --- Project-root path rewriting (load-bearing for the Action wrapper) ---
 
   Scenario: --project-root rewrites PR-diff paths so a sub-directory dbt project is in scope

@@ -121,7 +121,13 @@
     // cute-dbt#91 — false: show only updated tests (default); true: show
     // all tests on the in-scope models. Global + persistent across model
     // switches. Auto-set to true at boot when the diff updated 0 tests.
-    showAll:        false
+    showAll:        false,
+    // cute-dbt#414 (Slice C) — the single-select 3-axis filter. One of
+    // "all" | "body" | "config" | "unit_test"; "all" (default) shows every
+    // in-scope model. Re-scopes the model <select> to the models whose
+    // selected change-axis fired. Inert in baseline mode (no model carries
+    // `axes`, so the segments are never built and the filter never narrows).
+    axisFilter:     "all"
   };
 
   // cute-dbt#139 — report-settings menu state. Both settings are PURE
@@ -231,6 +237,7 @@
       fontFamily: 'system-ui,-apple-system,"Segoe UI",sans-serif'
     });
     renderTestModeToggle();
+    renderAxisFilter();
     renderModelSelector();
     renderTestSelector();
     renderForSelectedModel();
@@ -369,20 +376,43 @@
     return m.name + "  (" + n + ")";
   }
 
+  // cute-dbt#414 (Slice C) — does this model fire the active filter axis?
+  // "all" matches every in-scope model; a specific axis matches only when
+  // the model's `axes.<axis>` bool is true. Baseline-mode models carry no
+  // `axes` object, so a specific axis never matches there — but the filter
+  // is never built in baseline mode (see renderAxisFilter), so the active
+  // filter is always "all" and every model matches.
+  function modelMatchesAxis(m) {
+    if (state.axisFilter === "all") return true;
+    return !!(m && m.axes && m.axes[state.axisFilter]);
+  }
+
+  // The in-scope models the active axis filter admits (DATA.models order
+  // preserved). "all" yields the full set; the dropdown is re-scoped to
+  // exactly these.
+  function filteredModels() {
+    return DATA.models.filter(modelMatchesAxis);
+  }
+
   // cute-dbt#413 — group the model dropdown by shared schema.yml. Every
   // model patched by the same `config_file` (its scheme-stripped
   // patch_path) lands under one native <optgroup label="…">. Presentation
-  // only (never a re-scope — the filter toggle is the separate #414): in
-  // baseline mode no model carries a `config_file`, so this falls back to
-  // the flat list and the baseline goldens stay byte-identical. Order is
-  // preserved from DATA.models (deterministic, BTreeMap-backed), so the
-  // first model under each schema seeds that group's position; ungrouped
-  // models (no patch_path) keep their inline position.
+  // only as far as #413 went; cute-dbt#414 layers the single-select axis
+  // filter on top — the dropdown is built from filteredModels(), so a
+  // selected axis re-scopes BOTH the flat options AND the <optgroup>s
+  // (a group with zero matching models under the active filter is never
+  // emitted, never an empty <optgroup>). In baseline mode no model carries
+  // a `config_file` OR `axes`, so this falls back to the flat, unfiltered
+  // list and the baseline goldens stay byte-identical. Order is preserved
+  // from DATA.models (deterministic, BTreeMap-backed), so the first model
+  // under each schema seeds that group's position; ungrouped models (no
+  // patch_path) keep their inline position.
   function renderModelSelector() {
     var $sel = $("#model-select").empty();
-    var anyGroup = DATA.models.some(function (m) { return m.config_file; });
+    var models = filteredModels();
+    var anyGroup = models.some(function (m) { return m.config_file; });
     if (!anyGroup) {
-      DATA.models.forEach(function (m) {
+      models.forEach(function (m) {
         $sel.append($("<option>").val(m.name).text(modelOptionLabel(m)));
       });
     } else {
@@ -394,7 +424,7 @@
       // collide with an inherited member (gemini, PR #423).
       var groups = Object.create(null);
       var order = [];
-      DATA.models.forEach(function (m) {
+      models.forEach(function (m) {
         var key = m.config_file || "";
         if (!(key in groups)) { groups[key] = []; order.push(key); }
         groups[key].push(m);
@@ -414,6 +444,16 @@
         $sel.append($og);
       });
     }
+    // cute-dbt#414 — if the active axis filter dropped the currently-selected
+    // model, fall back to the first VISIBLE model (the #91/#413 default-
+    // selection logic) so the dropdown never lands on an empty selection.
+    // Reselect the test under the new model too, so the test card + DAG +
+    // findings all repaint for a model the filter actually admits.
+    var stillVisible = models.some(function (m) { return m.name === state.selectedModel; });
+    if (!stillVisible) {
+      state.selectedModel = models.length ? models[0].name : null;
+      state.selectedTestId = firstVisibleTestId(currentModel());
+    }
     $sel.val(state.selectedModel);
     $sel.off("change.cuteDbt").on("change.cuteDbt", function () {
       state.selectedModel = $(this).val();
@@ -423,6 +463,46 @@
       renderTestSelector();
       renderForSelectedModel();
     });
+  }
+
+  // cute-dbt#414 (Slice C) — the single-select 3-axis filter toggle. One
+  // segment per axis plus an `All` reset, single-select (radiogroup
+  // semantics: aria-pressed marks the active segment). JS-BUILT into the
+  // static empty `.axis-filter` container, and ONLY when some in-scope
+  // model carries an `axes` object — i.e. --pr-diff mode (the #413
+  // axis-chip gating, mirrored exactly). In baseline mode the container
+  // stays empty + hidden, so the baseline goldens are byte-identical and
+  // state.axisFilter is permanently "all" (no segment to flip it). The
+  // segment labels mirror the #413 axis-chip labels (AXIS_LABELS). The
+  // active state is synced from state.axisFilter so a re-render after a
+  // filter flip repaints the pressed segment without rebuilding handlers.
+  var FILTER_SEGMENTS = [
+    { axis: "all", label: "All" },
+    { axis: "body", label: "Body" },
+    { axis: "config", label: "Config" },
+    { axis: "unit_test", label: "Unit test" }
+  ];
+  function renderAxisFilter() {
+    var $filter = $('[data-testid="axis-filter"]').empty();
+    var anyAxes = DATA.models.some(function (m) { return m.axes; });
+    if (!anyAxes) {
+      // Baseline mode (or a payload predating #413): no axis attribution,
+      // so the filter never appears and never narrows the dropdown.
+      $filter.prop("hidden", true);
+      return;
+    }
+    FILTER_SEGMENTS.forEach(function (seg) {
+      var active = seg.axis === state.axisFilter;
+      $filter.append(
+        $("<button>")
+          .attr("type", "button")
+          .attr("data-axis", seg.axis)
+          .attr("aria-pressed", active ? "true" : "false")
+          .toggleClass("is-active", active)
+          .text(seg.label)
+      );
+    });
+    $filter.prop("hidden", false);
   }
 
   // cute-dbt#201 — size a <select> to its WIDEST option (+ arrow/padding)
@@ -1447,6 +1527,24 @@
       var stillVisible = vis.some(function (t) { return t.id === state.selectedTestId; });
       if (!stillVisible) state.selectedTestId = vis.length ? vis[0].id : null;
       renderTestModeToggle();
+      renderModelSelector();
+      renderTestSelector();
+      renderForSelectedModel();
+    });
+    // cute-dbt#414 (Slice C) — the single-select 3-axis filter. Re-scopes
+    // the model <select> to the models whose chosen change-axis fired
+    // ("all" restores every in-scope model). Pure client-side: flips
+    // state.axisFilter, repaints the segments + re-builds the dropdown
+    // (renderModelSelector reads filteredModels() + handles the
+    // selected-model fallback when the active model is filtered out), then
+    // re-renders the test selector + the selected model's content. A click
+    // on the already-active segment is a no-op. Delegated on .axis-filter so
+    // it survives the JS rebuild of its buttons.
+    $(".axis-filter").on("click", "[data-axis]", function () {
+      var next = $(this).attr("data-axis");
+      if (next === state.axisFilter) return;
+      state.axisFilter = next;
+      renderAxisFilter();
       renderModelSelector();
       renderTestSelector();
       renderForSelectedModel();

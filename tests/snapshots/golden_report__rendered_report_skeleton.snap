@@ -129,6 +129,7 @@ expression: skeleton
 
 <section class="test-selection" aria-label="Test selection">
   
+  <div class="axis-filter" role="radiogroup" aria-label="Filter models by change axis" data-testid="axis-filter" hidden></div>
   <div class="test-selector-row">
     <div class="selector-field">
       <label for="model-select">Model</label>

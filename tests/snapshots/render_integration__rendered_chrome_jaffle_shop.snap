@@ -545,6 +545,7 @@ html[data-style="terminal"] input,
 html[data-style="terminal"] .theme-chip,
 html[data-style="terminal"] .seg-radio,
 html[data-style="terminal"] .test-mode-toggle,
+html[data-style="terminal"] .axis-filter,
 html[data-style="terminal"] .settings-cog,
 html[data-style="terminal"] .settings-panel,
 html[data-style="terminal"] .cte-dag-cyto,
@@ -590,6 +591,7 @@ html[data-style="swiss"] select,
 html[data-style="swiss"] input,
 html[data-style="swiss"] .seg-radio,
 html[data-style="swiss"] .test-mode-toggle,
+html[data-style="swiss"] .axis-filter,
 html[data-style="swiss"] .theme-chip,
 html[data-style="swiss"] .settings-cog,
 html[data-style="swiss"] .settings-panel,
@@ -622,8 +624,10 @@ html[data-style="soft"] .expected-panel {
 }
 html[data-style="soft"] .expected-panel { border-width: 2px; border-color: var(--accent); }
 html[data-style="soft"] .test-mode-toggle,
+html[data-style="soft"] .axis-filter,
 html[data-style="soft"] .seg-radio { border-radius: 999px; overflow: hidden; }
 html[data-style="soft"] .test-mode-toggle button,
+html[data-style="soft"] .axis-filter button,
 html[data-style="soft"] .seg-radio button { padding-left: 14px; padding-right: 14px; }
 html[data-style="soft"] select,
 html[data-style="soft"] input,
@@ -1024,6 +1028,21 @@ g.dag-node:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3p
 .test-mode-toggle button + button { border-left: var(--rule-w) solid var(--control-border); }
 .test-mode-toggle button:not(.is-active) { opacity: 0.85; color: var(--text-muted); }
 .test-mode-toggle button.is-active { background: var(--control-active-bg); color: var(--control-active-fg); }
+
+/* cute-dbt#414 (Slice C) — the single-select 3-axis filter toggle, reusing
+   the #91 test-mode-toggle segmented recipe (one bordered group, zero-gap
+   buttons, the active segment inverts). JS-built + hidden until any model
+   carries `axes` (--pr-diff mode only), so baseline goldens stay
+   byte-identical. */
+.axis-filter { display: inline-flex; gap: 0; border: var(--rule-w) solid var(--control-border); border-radius: var(--radius-sm); overflow: hidden; margin-bottom: 0.75rem; }
+.axis-filter button {
+  font-size: 0.85em; padding: 4px 12px; border: none; border-radius: 0;
+  background: var(--control-bg); color: var(--control-fg); cursor: pointer; opacity: 1;
+  font-family: var(--font-ui);
+}
+.axis-filter button + button { border-left: var(--rule-w) solid var(--control-border); }
+.axis-filter button:not(.is-active) { opacity: 0.85; color: var(--text-muted); }
+.axis-filter button.is-active { background: var(--control-active-bg); color: var(--control-active-fg); }
 
 .zero-updated-hint, .zero-updated-affirm { margin: 0.5rem 0 0; color: var(--text-muted); font-style: italic; font-size: 0.9em; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
@@ -2113,6 +2132,7 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
 
 <section class="test-selection" aria-label="Test selection">
   
+  <div class="axis-filter" role="radiogroup" aria-label="Filter models by change axis" data-testid="axis-filter" hidden></div>
   <div class="test-selector-row">
     <div class="selector-field">
       <label for="model-select">Model</label>
@@ -2376,7 +2396,13 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     // cute-dbt#91 — false: show only updated tests (default); true: show
     // all tests on the in-scope models. Global + persistent across model
     // switches. Auto-set to true at boot when the diff updated 0 tests.
-    showAll:        false
+    showAll:        false,
+    // cute-dbt#414 (Slice C) — the single-select 3-axis filter. One of
+    // "all" | "body" | "config" | "unit_test"; "all" (default) shows every
+    // in-scope model. Re-scopes the model <select> to the models whose
+    // selected change-axis fired. Inert in baseline mode (no model carries
+    // `axes`, so the segments are never built and the filter never narrows).
+    axisFilter:     "all"
   };
 
   // cute-dbt#139 — report-settings menu state. Both settings are PURE
@@ -2486,6 +2512,7 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
       fontFamily: 'system-ui,-apple-system,"Segoe UI",sans-serif'
     });
     renderTestModeToggle();
+    renderAxisFilter();
     renderModelSelector();
     renderTestSelector();
     renderForSelectedModel();
@@ -2624,20 +2651,43 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     return m.name + "  (" + n + ")";
   }
 
+  // cute-dbt#414 (Slice C) — does this model fire the active filter axis?
+  // "all" matches every in-scope model; a specific axis matches only when
+  // the model's `axes.<axis>` bool is true. Baseline-mode models carry no
+  // `axes` object, so a specific axis never matches there — but the filter
+  // is never built in baseline mode (see renderAxisFilter), so the active
+  // filter is always "all" and every model matches.
+  function modelMatchesAxis(m) {
+    if (state.axisFilter === "all") return true;
+    return !!(m && m.axes && m.axes[state.axisFilter]);
+  }
+
+  // The in-scope models the active axis filter admits (DATA.models order
+  // preserved). "all" yields the full set; the dropdown is re-scoped to
+  // exactly these.
+  function filteredModels() {
+    return DATA.models.filter(modelMatchesAxis);
+  }
+
   // cute-dbt#413 — group the model dropdown by shared schema.yml. Every
   // model patched by the same `config_file` (its scheme-stripped
   // patch_path) lands under one native <optgroup label="…">. Presentation
-  // only (never a re-scope — the filter toggle is the separate #414): in
-  // baseline mode no model carries a `config_file`, so this falls back to
-  // the flat list and the baseline goldens stay byte-identical. Order is
-  // preserved from DATA.models (deterministic, BTreeMap-backed), so the
-  // first model under each schema seeds that group's position; ungrouped
-  // models (no patch_path) keep their inline position.
+  // only as far as #413 went; cute-dbt#414 layers the single-select axis
+  // filter on top — the dropdown is built from filteredModels(), so a
+  // selected axis re-scopes BOTH the flat options AND the <optgroup>s
+  // (a group with zero matching models under the active filter is never
+  // emitted, never an empty <optgroup>). In baseline mode no model carries
+  // a `config_file` OR `axes`, so this falls back to the flat, unfiltered
+  // list and the baseline goldens stay byte-identical. Order is preserved
+  // from DATA.models (deterministic, BTreeMap-backed), so the first model
+  // under each schema seeds that group's position; ungrouped models (no
+  // patch_path) keep their inline position.
   function renderModelSelector() {
     var $sel = $("#model-select").empty();
-    var anyGroup = DATA.models.some(function (m) { return m.config_file; });
+    var models = filteredModels();
+    var anyGroup = models.some(function (m) { return m.config_file; });
     if (!anyGroup) {
-      DATA.models.forEach(function (m) {
+      models.forEach(function (m) {
         $sel.append($("<option>").val(m.name).text(modelOptionLabel(m)));
       });
     } else {
@@ -2649,7 +2699,7 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
       // collide with an inherited member (gemini, PR #423).
       var groups = Object.create(null);
       var order = [];
-      DATA.models.forEach(function (m) {
+      models.forEach(function (m) {
         var key = m.config_file || "";
         if (!(key in groups)) { groups[key] = []; order.push(key); }
         groups[key].push(m);
@@ -2669,6 +2719,16 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
         $sel.append($og);
       });
     }
+    // cute-dbt#414 — if the active axis filter dropped the currently-selected
+    // model, fall back to the first VISIBLE model (the #91/#413 default-
+    // selection logic) so the dropdown never lands on an empty selection.
+    // Reselect the test under the new model too, so the test card + DAG +
+    // findings all repaint for a model the filter actually admits.
+    var stillVisible = models.some(function (m) { return m.name === state.selectedModel; });
+    if (!stillVisible) {
+      state.selectedModel = models.length ? models[0].name : null;
+      state.selectedTestId = firstVisibleTestId(currentModel());
+    }
     $sel.val(state.selectedModel);
     $sel.off("change.cuteDbt").on("change.cuteDbt", function () {
       state.selectedModel = $(this).val();
@@ -2678,6 +2738,46 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
       renderTestSelector();
       renderForSelectedModel();
     });
+  }
+
+  // cute-dbt#414 (Slice C) — the single-select 3-axis filter toggle. One
+  // segment per axis plus an `All` reset, single-select (radiogroup
+  // semantics: aria-pressed marks the active segment). JS-BUILT into the
+  // static empty `.axis-filter` container, and ONLY when some in-scope
+  // model carries an `axes` object — i.e. --pr-diff mode (the #413
+  // axis-chip gating, mirrored exactly). In baseline mode the container
+  // stays empty + hidden, so the baseline goldens are byte-identical and
+  // state.axisFilter is permanently "all" (no segment to flip it). The
+  // segment labels mirror the #413 axis-chip labels (AXIS_LABELS). The
+  // active state is synced from state.axisFilter so a re-render after a
+  // filter flip repaints the pressed segment without rebuilding handlers.
+  var FILTER_SEGMENTS = [
+    { axis: "all", label: "All" },
+    { axis: "body", label: "Body" },
+    { axis: "config", label: "Config" },
+    { axis: "unit_test", label: "Unit test" }
+  ];
+  function renderAxisFilter() {
+    var $filter = $('[data-testid="axis-filter"]').empty();
+    var anyAxes = DATA.models.some(function (m) { return m.axes; });
+    if (!anyAxes) {
+      // Baseline mode (or a payload predating #413): no axis attribution,
+      // so the filter never appears and never narrows the dropdown.
+      $filter.prop("hidden", true);
+      return;
+    }
+    FILTER_SEGMENTS.forEach(function (seg) {
+      var active = seg.axis === state.axisFilter;
+      $filter.append(
+        $("<button>")
+          .attr("type", "button")
+          .attr("data-axis", seg.axis)
+          .attr("aria-pressed", active ? "true" : "false")
+          .toggleClass("is-active", active)
+          .text(seg.label)
+      );
+    });
+    $filter.prop("hidden", false);
   }
 
   // cute-dbt#201 — size a <select> to its WIDEST option (+ arrow/padding)
@@ -3702,6 +3802,24 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
       var stillVisible = vis.some(function (t) { return t.id === state.selectedTestId; });
       if (!stillVisible) state.selectedTestId = vis.length ? vis[0].id : null;
       renderTestModeToggle();
+      renderModelSelector();
+      renderTestSelector();
+      renderForSelectedModel();
+    });
+    // cute-dbt#414 (Slice C) — the single-select 3-axis filter. Re-scopes
+    // the model <select> to the models whose chosen change-axis fired
+    // ("all" restores every in-scope model). Pure client-side: flips
+    // state.axisFilter, repaints the segments + re-builds the dropdown
+    // (renderModelSelector reads filteredModels() + handles the
+    // selected-model fallback when the active model is filtered out), then
+    // re-renders the test selector + the selected model's content. A click
+    // on the already-active segment is a no-op. Delegated on .axis-filter so
+    // it survives the JS rebuild of its buttons.
+    $(".axis-filter").on("click", "[data-axis]", function () {
+      var next = $(this).attr("data-axis");
+      if (next === state.axisFilter) return;
+      state.axisFilter = next;
+      renderAxisFilter();
       renderModelSelector();
       renderTestSelector();
       renderForSelectedModel();
