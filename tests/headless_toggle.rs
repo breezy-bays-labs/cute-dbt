@@ -7322,6 +7322,128 @@ fn explore_seed_node_detail_card_shows_the_seed_data_table() {
     let _ = tab.close(true);
 }
 
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_project_pane_renders_inventory_provenance_and_reference_filter() {
+    // cute-dbt#270 — the committed explore project-pane golden
+    // (`explore-macro/dag.html`, rendered with `--project-root
+    // playground-source`, which carries a dbt_project.yml). It surfaces
+    // FOUR things this test exercises in a real browser:
+    //   1. the project-info pane (name / version / require-dbt-version);
+    //   2. the standing vars inventory (names + values + per-tier counts);
+    //   3. config provenance on a model's detail card;
+    //   4. the var/macro reference filter dimming the complement.
+    let browser = launch_browser();
+    let url = committed_example_url("explore-macro/dag.html");
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(
+        ".lineage-canvas canvas",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("the explore Cytoscape canvas renders");
+
+    // 1. The project pane is visible and carries the project identity.
+    assert!(
+        !eval_bool(&tab, "document.querySelector('.project-pane').hidden"),
+        "the project pane unhides once explore-lineage.js fills it from the carrier",
+    );
+    let pane_text = eval_string(
+        &tab,
+        "(document.querySelector('.project-pane')||{}).textContent||''",
+    );
+    assert!(
+        pane_text.contains("healthcare_analytics"),
+        "the pane shows the project name: {pane_text}",
+    );
+    assert!(
+        pane_text.contains("1.0.0") && pane_text.contains(">=1.8.0"),
+        "the pane shows version + require-dbt-version: {pane_text}",
+    );
+
+    // 2. The vars inventory lists the project's two vars with their values.
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.project-pane .vars-table') !== null",
+        ),
+        "the vars inventory table renders",
+    );
+    assert!(
+        pane_text.contains("dq_quarantine_threshold")
+            && pane_text.contains("default_state_grid_density"),
+        "the inventory lists every project var: {pane_text}",
+    );
+
+    // AC #3 — the pane themes correctly on all 8 themes: every measured
+    // pane surface clears WCAG AA on its effective backdrop, and the page
+    // consumes the token layer. The pane is default-open so its table is
+    // visible (checkVisibility) under the sweep.
+    assert_explore_page_themes(
+        &tab,
+        "explore-macro/dag.html (project pane)",
+        "[[\"pane summary\", \".project-pane > summary\"], \
+          [\"pane identity\", \".project-pane .project-identity dt\"], \
+          [\"vars table header\", \".project-pane .vars-table th\"], \
+          [\"vars footprint\", \".project-pane .project-footprint\"]]",
+        4,
+    );
+
+    // 3. Config provenance on a model detail card: highlight a marts model
+    //    (which inherits +materialized=table from the project config tree).
+    let tapped = eval_bool(
+        &tab,
+        "(function(){var cy=window.CuteExploreLineage.cyInstance();\
+          var n=cy.getElementById('model.healthcare_analytics.dim_conditions');\
+          if(!n||!n.length){return false;}n.emit('tap');return true;})()",
+    );
+    assert!(tapped, "a marts model is present + tappable");
+    let card_text = eval_string(
+        &tab,
+        "(document.querySelector('.model-detail-card')||{}).textContent||''",
+    );
+    assert!(
+        card_text.contains("project config") && card_text.contains("+materialized"),
+        "the detail card shows the standing config provenance: {card_text}",
+    );
+
+    // 4. The reference filter dims the complement: filter to the models
+    //    referencing `dq_quarantine_threshold` and assert SOME nodes carry
+    //    the .dim class while the matched set carries .sel/.trace.
+    let filtered = eval_bool(
+        &tab,
+        "window.CuteExploreLineage.filterByReference('var:dq_quarantine_threshold')",
+    );
+    assert!(filtered, "the var reference filter applies");
+    let dimmed = eval(
+        &tab,
+        "window.CuteExploreLineage.cyInstance().nodes('.dim').length",
+    )
+    .as_u64()
+    .unwrap_or(0);
+    let selected = eval(
+        &tab,
+        "window.CuteExploreLineage.cyInstance().nodes('.sel').length",
+    )
+    .as_u64()
+    .unwrap_or(0);
+    assert!(
+        dimmed > 0 && selected > 0,
+        "the filter dims the complement ({dimmed}) and selects the referencing set ({selected})",
+    );
+    let active = eval_string(
+        &tab,
+        "(window.CuteExploreLineage.activeFilter()||{}).label||''",
+    );
+    assert_eq!(
+        active, "var:dq_quarantine_threshold",
+        "the active filter records its label",
+    );
+
+    let _ = tab.close(true);
+}
+
 /// Poll until the cy instance reached via `cy_expr` reports `expected`
 /// nodes (a model switch / re-layout is async). Mirrors the
 /// readiness-poll discipline of `wait_for_document_ready` — a 10s cap is
@@ -12072,6 +12194,7 @@ fn render_explore_theme_pages(stem: &str) -> PathBuf {
         None,
         &[],
         DEFAULT_SEED_ROW_CAP,
+        &ProjectFacts::default(),
     )
     .expect("explore renders");
     dir

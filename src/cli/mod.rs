@@ -744,6 +744,11 @@ fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
     // are no seeds or no `--project-root` ⇒ the side-map serde-skips ⇒ the
     // seed-free `dag.html` golden stays byte-identical.
     let seed_cards = gather_explore_seeds(args, &current);
+    // cute-dbt#270 — standing project facts (the parsed dbt_project.yml)
+    // drive the explore project pane / vars inventory / config provenance.
+    // Resolved from --project-root (the --pr-diff arm) or derived from the
+    // manifest's <root>/target/manifest.json layout; absent ⇒ no pane.
+    let project_facts = gather_explore_project_facts(args);
     render_explore(
         &args.out_dir,
         &current,
@@ -753,6 +758,7 @@ fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
         macro_focus.as_ref(),
         &seed_cards,
         DEFAULT_SEED_ROW_CAP,
+        &project_facts,
     )
     .map_err(|err| RunError::output(&args.out_dir, err))?;
     Ok(())
@@ -1151,6 +1157,67 @@ fn gather_explore_seeds(args: &ExploreArgs, current: &Manifest) -> Vec<SeedCard>
     };
     let reader = FsProjectFileReader::new(project_root.to_path_buf());
     gather_seeds_with_reader(&reader, cards, None)
+}
+
+/// Gather the explore-side standing project facts (cute-dbt#270): the
+/// parsed working-tree `dbt_project.yml`, the SAME [`ProjectDefinition`]
+/// the report reads (R4), driving the explore project pane / vars
+/// inventory / config provenance.
+///
+/// Project-root resolution mirrors the report's standing-metadata path
+/// ([`gather_project_facts`]): the explicit `--project-root` (present
+/// only on the explore `--pr-diff` arm, clap-gated) wins, else the root is
+/// derived from the conventional `<root>/target/manifest.json` layout via
+/// [`crate::cli::args::resolve_project_root`]. With no resolvable root
+/// nothing is read and the pane stays absent (the no-pane golden shape).
+///
+/// Explore takes no baseline and renders no project-change panel — only
+/// the `definition` arm of [`ProjectFacts`] is populated; `panel` /
+/// attributions stay empty (no diff is threaded here). The manifest is
+/// not needed: the parse reads the file alone (the per-model attribution
+/// happens later, in the renderer, against the threaded manifest).
+fn gather_explore_project_facts(args: &ExploreArgs) -> ProjectFacts {
+    let (resolved, _derived) =
+        self::args::resolve_project_root(args.project_root.as_deref(), &args.manifest);
+    let Some(project_root) = resolved else {
+        return ProjectFacts::default();
+    };
+    let reader = FsProjectFileReader::new(project_root);
+    explore_project_facts_with_reader(&reader)
+}
+
+/// Pure composition step over the [`ProjectFileReader`] port — testable
+/// without touching the filesystem. Reads + parses `dbt_project.yml` into
+/// the standing [`ProjectFacts::definition`]; a missing/unreadable or
+/// unparseable file degrades to [`ProjectFacts::default`] (no pane), the
+/// report's fail-open posture (cute-dbt#266) without the diff panel.
+fn explore_project_facts_with_reader(reader: &dyn ProjectFileReader) -> ProjectFacts {
+    let new_text = match reader.read(DBT_PROJECT_YML) {
+        Ok(text) => text,
+        Err(err)
+            if err.kind() == io::ErrorKind::NotFound
+                || err.kind() == io::ErrorKind::InvalidInput =>
+        {
+            return ProjectFacts::default();
+        }
+        Err(err) => {
+            eprintln!("cute-dbt: warning: could not read dbt_project.yml: {err}");
+            return ProjectFacts::default();
+        }
+    };
+    match parse_project_definition(&new_text) {
+        Ok(def) => ProjectFacts {
+            definition: Some(def),
+            ..ProjectFacts::default()
+        },
+        Err(err) => {
+            eprintln!(
+                "cute-dbt: warning: could not parse dbt_project.yml ({err:?}); \
+                 the explore project pane is omitted"
+            );
+            ProjectFacts::default()
+        }
+    }
 }
 
 /// Pure composition step over the [`ProjectFileReader`] port — testable
@@ -3574,6 +3641,44 @@ mod tests {
         let def = facts.definition.expect("standing metadata parsed");
         assert_eq!(def.name.as_deref(), Some("playground"));
         assert!(facts.panel.is_none(), "no diff, no panel");
+    }
+
+    // ----- explore standing project facts (cute-dbt#270) -----
+
+    #[test]
+    fn explore_project_facts_parse_standing_definition_only() {
+        // The explore gather reads only the definition — no panel, no diff.
+        let facts = explore_project_facts_with_reader(&project_reader(PROJECT_NEW));
+        let def = facts.definition.expect("standing metadata parsed");
+        assert_eq!(def.name.as_deref(), Some("playground"));
+        assert!(facts.panel.is_none(), "explore renders no project panel");
+        assert!(facts.config_attributions.is_empty());
+        assert!(facts.var_references.is_empty());
+    }
+
+    #[test]
+    fn explore_project_facts_degrade_to_default_when_file_absent() {
+        // A NotFound read ⇒ no pane (ProjectFacts::default), fail-open.
+        let reader = StubReader {
+            entries: StdHashMap::new(),
+        };
+        let facts = explore_project_facts_with_reader(&reader);
+        assert!(facts.definition.is_none());
+    }
+
+    #[test]
+    fn explore_project_facts_degrade_to_default_on_unparseable_yaml() {
+        // A present-but-unparseable file ⇒ no pane (the warning path).
+        let mut entries = StdHashMap::new();
+        entries.insert(
+            "dbt_project.yml".to_owned(),
+            StubResult::Ok("name: [unterminated\n".to_owned()),
+        );
+        let facts = explore_project_facts_with_reader(&StubReader { entries });
+        assert!(
+            facts.definition.is_none(),
+            "an unparseable project file degrades to no pane, never a failed run",
+        );
     }
 
     #[test]

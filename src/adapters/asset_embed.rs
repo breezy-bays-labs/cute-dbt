@@ -365,7 +365,7 @@ mod tests {
         assert!(
             EXPLORE_TESTS_JS
                 .trim_end()
-                .ends_with("/* end of cute-dbt explore tests viewer v1 (cute-dbt#102) */"),
+                .ends_with("/* end of cute-dbt#270 explore project pane (tests.html) */"),
             "explore-tests.js end-of-file sentinel (truncation guard)",
         );
         // The viewer builds DOM with createElement + textContent only —

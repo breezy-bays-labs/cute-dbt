@@ -938,6 +938,93 @@ pub fn attribute_config_tree_changes(
     out
 }
 
+// ---------------------------------------------------------------------
+// Standing config provenance (cute-dbt#270, epic #262)
+// ---------------------------------------------------------------------
+
+/// One standing config-provenance fact for a model (cute-dbt#270): a
+/// `models:` config key whose value resolves to this model, the resolved
+/// value, and the dotted path of the **winning** (deepest) subtree that
+/// sets it — e.g. `materialized = view via models.healthcare_analytics`.
+/// Rendered on the explore model-detail pane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigProvenance {
+    /// The `+`-stripped config key (`materialized`, `tags`, …).
+    pub key: String,
+    /// The resolved value, verbatim.
+    pub value: Value,
+    /// Dotted path of the contributing subtree — `models` for a
+    /// section-root key, else `models.seg1.seg2…`.
+    pub path: String,
+}
+
+/// Every config key the `models:` tree sets along `fqn`, paired with its
+/// resolved value (fusion's deepest-match-wins) — the key universe is the
+/// union of `+key`s on every node the fqn descent visits.
+fn keys_along_fqn<'t>(tree: &'t ConfigTree, fqn: &[String]) -> BTreeSet<&'t String> {
+    let mut keys: BTreeSet<&String> = tree.configs.keys().collect();
+    let mut node = tree;
+    for segment in fqn {
+        let Some(child) = node.children.get(segment) else {
+            break;
+        };
+        node = child;
+        keys.extend(node.configs.keys());
+    }
+    keys
+}
+
+/// Resolve every `models:` config key that applies to ONE model's fqn,
+/// fusion's deepest-match-wins (the same private `resolve_key_for_fqn`
+/// descent the change-attribution uses). Sorted by key for deterministic
+/// rendering.
+fn provenance_for_fqn(tree: &ConfigTree, fqn: &[String]) -> Vec<ConfigProvenance> {
+    keys_along_fqn(tree, fqn)
+        .into_iter()
+        .filter_map(|key| {
+            resolve_key_for_fqn(tree, fqn, key).map(|(depth, value)| ConfigProvenance {
+                key: key.clone(),
+                value: value.clone(),
+                path: dotted_tree_path(MODELS_SECTION, &fqn[..depth]),
+            })
+        })
+        .collect()
+}
+
+/// Resolve the standing `models:` config provenance for every model node
+/// (cute-dbt#270 — the explore-pane decoration of epic #262).
+///
+/// Pure computation over the parsed project definition + the manifest
+/// (zero-compute), reusing the SAME fusion `get_config_for_fqn` descent
+/// (`resolve_key_for_fqn`) the diff-gated config attribution uses, so the
+/// report's "affected models" listing and the explore detail pane resolve
+/// configs identically. Returns node-id → its resolved configs (sorted by
+/// key). A model with an empty `fqn` resolves only section-root keys (the
+/// descent breaks immediately — never a guess). Empty when the project
+/// sets no `models:` configs.
+#[must_use]
+pub fn resolve_model_configs(
+    current: &Manifest,
+    def: &ProjectDefinition,
+) -> BTreeMap<String, Vec<ConfigProvenance>> {
+    let empty = ConfigTree::default();
+    let tree = def.config_trees.get(MODELS_SECTION).unwrap_or(&empty);
+    if tree.configs.is_empty() && tree.children.is_empty() {
+        return BTreeMap::new();
+    }
+    let mut out = BTreeMap::new();
+    for (id, node) in current.nodes() {
+        if node.resource_type() != "model" {
+            continue;
+        }
+        let provenance = provenance_for_fqn(tree, node.fqn());
+        if !provenance.is_empty() {
+            out.insert(id.as_str().to_owned(), provenance);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2102,5 +2189,89 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ----- standing config provenance (cute-dbt#270) -----
+
+    #[test]
+    fn provenance_resolves_deepest_match_wins_per_key() {
+        // The section root sets materialized=view; marts overrides to
+        // table. A marts model resolves table via models.shop.marts; a
+        // staging model resolves view via the section root.
+        let current = manifest_of(vec![
+            fqn_model("model.shop.fct_orders", &["shop", "marts", "fct_orders"]),
+            fqn_model("model.shop.stg_raw", &["shop", "staging", "stg_raw"]),
+        ]);
+        let def = def_with_models_tree(&[
+            (&[], "materialized", json!("view")),
+            (&["shop", "marts"], "materialized", json!("table")),
+        ]);
+        let map = resolve_model_configs(&current, &def);
+        assert_eq!(
+            map["model.shop.fct_orders"],
+            vec![ConfigProvenance {
+                key: "materialized".to_owned(),
+                value: json!("table"),
+                path: "models.shop.marts".to_owned(),
+            }],
+            "the marts model wins the deepest setter",
+        );
+        assert_eq!(
+            map["model.shop.stg_raw"],
+            vec![ConfigProvenance {
+                key: "materialized".to_owned(),
+                value: json!("view"),
+                path: "models".to_owned(),
+            }],
+            "the staging model resolves the section-root value",
+        );
+    }
+
+    #[test]
+    fn provenance_collects_every_applicable_key_sorted() {
+        let current = manifest_of(vec![fqn_model(
+            "model.shop.fct_orders",
+            &["shop", "marts", "fct_orders"],
+        )]);
+        let def = def_with_models_tree(&[
+            (&["shop"], "tags", json!(["core"])),
+            (&["shop", "marts"], "materialized", json!("table")),
+        ]);
+        let map = resolve_model_configs(&current, &def);
+        assert_eq!(
+            map["model.shop.fct_orders"],
+            vec![
+                ConfigProvenance {
+                    key: "materialized".to_owned(),
+                    value: json!("table"),
+                    path: "models.shop.marts".to_owned(),
+                },
+                ConfigProvenance {
+                    key: "tags".to_owned(),
+                    value: json!(["core"]),
+                    path: "models.shop".to_owned(),
+                },
+            ],
+            "both keys resolve, sorted by key",
+        );
+    }
+
+    #[test]
+    fn provenance_is_empty_for_a_config_free_project() {
+        let current = manifest_of(vec![fqn_model("model.shop.m", &["shop", "m"])]);
+        let map = resolve_model_configs(&current, &ProjectDefinition::default());
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn provenance_round_trips_through_json() {
+        let prov = ConfigProvenance {
+            key: "materialized".to_owned(),
+            value: json!("incremental"),
+            path: "models.shop.marts".to_owned(),
+        };
+        let json = serde_json::to_string(&prov).expect("serialize");
+        let back: ConfigProvenance = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(prov, back);
     }
 }
