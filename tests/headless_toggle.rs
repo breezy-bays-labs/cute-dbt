@@ -738,13 +738,24 @@ fn pr_diff_zero_updated_affirms_block_precision() {
 
 // --- cute-dbt#413: per-model axis chips + optgroup grouping ----------
 
-/// `|`-joined `<optgroup label="…">` labels of a `<select>`, in DOM order.
+/// `|`-joined `<optgroup>` membership of a `<select>`, in DOM order.
+///
+/// Each group serializes as `label:opt1,opt2` where `optN` is the
+/// `<option>` `value` (the model id this codebase keys options by —
+/// `m.name`, the same value `select_model` drives the `<select>` to), so
+/// the assertion proves BOTH which models fall under each `<optgroup>` AND
+/// their order — not merely that the labels exist. A model landing under
+/// the wrong group, or an empty group, now fails the round-trip.
 fn optgroups_of(tab: &Tab, select_id: &str) -> String {
     eval_string(
         tab,
         &format!(
             "Array.from(document.querySelectorAll('#{select_id} optgroup'))\
-             .map(function(g){{return g.getAttribute('label');}}).join('|')"
+             .map(function(g){{\
+               var members=Array.from(g.querySelectorAll('option'))\
+                 .map(function(o){{return o.value;}}).join(',');\
+               return g.getAttribute('label')+':'+members;\
+             }}).join('|')"
         ),
     )
 }
@@ -852,11 +863,13 @@ fn pr_diff_models_lens_renders_axis_chips_and_optgroup_grouping() {
     wait_for_document_ready(&tab);
 
     // The model <select> groups by shared schema.yml: the two marts models
-    // share one <optgroup>, stg_raw is under the staging one.
+    // (mart_dq, mart_grid) share one <optgroup>, stg_raw sits under the
+    // staging one. Asserting `label:members` proves membership + order, so
+    // a model landing under the wrong group (or an empty group) fails here.
     assert_eq!(
         optgroups_of(&tab, "model-select"),
-        format!("{schema_marts}|{schema_staging}"),
-        "the dropdown groups models by their shared schema.yml via <optgroup>",
+        format!("{schema_marts}:mart_dq,mart_grid|{schema_staging}:stg_raw"),
+        "the dropdown groups each model under its shared schema.yml <optgroup>",
     );
 
     // mart_dq: body + config (no unit_test) — the multi-axis case.
@@ -904,9 +917,18 @@ fn baseline_mode_renders_no_axis_chips() {
     // The baseline arm produces an empty `axes` map (the documented
     // Option-A gap), so the Models lens renders zero axis chips and the
     // model-axes row stays hidden even when the model carries a patch_path.
+    // The fixture deliberately CARRIES a `patch_path` (its schema.yml): the
+    // `config_file` optgroup key is gated to the `--pr-diff` arm (set only
+    // for axis-attributed models in render.rs), so a regression that leaked
+    // it for a patched model in baseline mode would now surface an
+    // <optgroup> here and fail the no-grouping assertion below — without a
+    // patch_path the no-grouping assertion would pass vacuously.
     let url = render_to_file(
         "headless_axis_chips_baseline.html",
-        vec![model_node("model.shop.dim_b")],
+        vec![
+            model_node_with_raw_and_path("model.shop.dim_b", "select 1", "models/marts/dim_b.sql")
+                .with_patch_path(Some("models/marts/_marts__models.yml".to_owned())),
+        ],
         vec![("unit_test.shop.dim_b.t", unit_test("t", "dim_b"))],
         &["model.shop.dim_b"],
         &[],
