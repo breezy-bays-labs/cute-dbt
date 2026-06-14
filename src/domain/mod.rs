@@ -130,10 +130,11 @@ pub use preflight::{PreflightError, preflight_compiled};
 // already owns the bare name at the domain root; consumers address the
 // YAML source span as `project_def::Span`.
 pub use project_def::{
-    ConfigAttribution, ConfigLeafPath, ConfigTree, HookChangeFacts, HookManifestPresence,
-    HookOperation, HookOperations, ProjectChange, ProjectChangeCategory, ProjectChangePanel,
-    ProjectDefinition, ProjectFacts, ProjectFallbackReason, attach_hook_facts,
+    ConfigAttribution, ConfigLeafPath, ConfigProvenance, ConfigTree, HookChangeFacts,
+    HookManifestPresence, HookOperation, HookOperations, ProjectChange, ProjectChangeCategory,
+    ProjectChangePanel, ProjectDefinition, ProjectFacts, ProjectFallbackReason, attach_hook_facts,
     attribute_config_tree_changes, diff_project_definitions, hook_operations,
+    resolve_model_configs,
 };
 pub use scope::{
     ChangeAxes, ScopeInput, ScopeSelection, all_models, all_seeds, changed_models, select_in_scope,
@@ -154,7 +155,8 @@ pub use unit_test_table::{
 };
 pub use unit_test_yaml::{UnitTestYamlBlock, extract_model_block, extract_unit_test_block};
 pub use vars::{
-    MacroVarHit, VarAnalysis, VarAttribution, VarChangeFacts, VarEdit, VarPrecedence, VarReference,
-    VarScanFootprint, VarTier, attach_var_facts, attribute_var_changes, changed_vars,
+    MacroVarHit, VarAnalysis, VarAttribution, VarChangeFacts, VarEdit, VarInventory,
+    VarInventoryEntry, VarPrecedence, VarReference, VarScanFootprint, VarScope, VarTier,
+    attach_var_facts, attribute_var_changes, changed_vars, project_var_inventory,
     resolve_project_var,
 };

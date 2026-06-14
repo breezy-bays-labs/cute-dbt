@@ -52,9 +52,11 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::render::{DagPayload, ReportPayload};
 use crate::domain::{
-    FixtureTable, GrainKind, MacroFocusSet, Manifest, ModelInScopeSet, Node, NodeId, SeedCard,
-    SourceNode, model_grain_signals, resolve_tested_model,
+    ConfigProvenance, FixtureTable, GrainKind, MacroFocusSet, Manifest, ModelInScopeSet, Node,
+    NodeId, ProjectFacts, SeedCard, SourceNode, VarInventory, VarInventoryEntry, VarScanFootprint,
+    model_grain_signals, project_var_inventory, resolve_model_configs, resolve_tested_model,
 };
+use serde_json::Value;
 
 /// The explorer's external-drive contract version (cute-dbt#105).
 ///
@@ -744,7 +746,10 @@ pub struct LineageEdgePayload {
 /// exposures, cute-dbt#253), edges = forward dependency edges. An empty
 /// `nodes` array selects the page's empty-state message instead of a
 /// Cytoscape render.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+///
+/// Not `Eq` since cute-dbt#270 — [`ProjectPanePayload`] carries
+/// `serde_json::Value` vars/configs (no `Eq`); `PartialEq` is retained.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct LineagePayload {
     /// Every typed lineage node, in deterministic full-id order.
     pub nodes: Vec<LineageNodePayload>,
@@ -774,6 +779,60 @@ pub struct LineagePayload {
     /// (which the client could not distinguish from a non-seed node).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub seed_tables: BTreeMap<String, SeedTablePayload>,
+    /// Per-model standing config provenance (cute-dbt#270) — node id →
+    /// the `models:` config keys the parsed `dbt_project.yml` resolves to
+    /// that model, each with its winning subtree path
+    /// ([`crate::domain::resolve_model_configs`]). A SIDE-MAP (the
+    /// `seed_tables` precedent), absent entirely when no project file was
+    /// read or it sets no `models:` configs ⇒ the side-map serde-skips ⇒
+    /// the pre-#270 `dag.html` golden stays byte-identical. The model
+    /// detail card reads `data.config_provenance[id]`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub config_provenance: BTreeMap<String, Vec<ConfigProvenance>>,
+    /// The project-info + vars-inventory + reference-filter pane
+    /// (cute-dbt#270) — `Some` exactly when a project file was read and
+    /// parsed (standing metadata; both scope arms). `None` (the default)
+    /// leaves the payload byte-identical to the pre-#270 shape, so the
+    /// no-project-root explore goldens are untouched. Drives the
+    /// project-info header pane, the vars inventory table, and the
+    /// `var:`/`macro:` reference filter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_pane: Option<ProjectPanePayload>,
+}
+
+/// The explore project pane (cute-dbt#270, epic #262 C-arc): project
+/// identity, the standing vars inventory, and the var/macro
+/// reference-filter indices. Built from the SAME
+/// [`ProjectDefinition`](crate::domain::ProjectDefinition) POD the report
+/// consumes (R4), so the two surfaces never disagree.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ProjectPanePayload {
+    /// `name:` from `dbt_project.yml` — `null` when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `version:` rendered to a display string (verbatim for a string,
+    /// compact JSON for a number — dbt accepts both) — `null` when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// `require-dbt-version:` rendered to a display string (a bare string
+    /// verbatim, a range list joined with `, `) — `null` when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_dbt_version: Option<String>,
+    /// The standing vars inventory — every project var with its
+    /// precedence-resolved value and per-tier reference counts
+    /// ([`crate::domain::VarInventory::entries`]).
+    pub vars: Vec<VarInventoryEntry>,
+    /// What the vars scan covered (the honest-residual footprint).
+    pub vars_footprint: VarScanFootprint,
+    /// Var name → referencing node ids (the `var:NAME` filter index).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub var_models: BTreeMap<String, Vec<String>>,
+    /// Bare macro name → the node ids that depend on a macro of that name
+    /// (the `macro:NAME` filter index) — built from each model's
+    /// `depends_on.macros` (the bare last-segment name, so the filter
+    /// reads `macro:quarantine_filter`, not the full id).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub macro_models: BTreeMap<String, Vec<String>>,
 }
 
 /// One seed's data-table payload for the explorer's seed-node detail card
@@ -840,6 +899,74 @@ pub fn seed_tables_by_id(cards: &[SeedCard], cap: usize) -> BTreeMap<String, See
             )
         })
         .collect()
+}
+
+/// Render a `dbt_project.yml` scalar (`version:` / `require-dbt-version:`)
+/// to a display string (cute-dbt#270): a string verbatim, a string array
+/// joined with `, ` (the `require-dbt-version` range-list shape), anything
+/// else compact JSON. Pure formatting — the engine never evaluates these.
+fn render_project_scalar(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(|v| match v {
+                Value::String(s) => s.clone(),
+                other => serde_json::to_string(other).unwrap_or_default(),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// Build the bare-macro-name → referencing node ids index (cute-dbt#270 —
+/// the `macro:NAME` reference filter). Each model's `depends_on.macros`
+/// (full ids `macro.<pkg>.<name>`) contributes its bare last-segment name,
+/// so the filter reads `macro:quarantine_filter`. Node ids are sorted +
+/// deduped per macro name (a model that lists the same macro twice counts
+/// once). Empty when no model depends on any macro.
+fn macro_models_index(current: &Manifest) -> BTreeMap<String, Vec<String>> {
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (id, node) in current.nodes() {
+        if node.resource_type() != "model" {
+            continue;
+        }
+        for macro_id in node.depends_on().macros() {
+            out.entry(leaf_segment(macro_id).to_owned())
+                .or_default()
+                .push(id.as_str().to_owned());
+        }
+    }
+    for ids in out.values_mut() {
+        ids.sort();
+        ids.dedup();
+    }
+    out
+}
+
+/// Build the explore project pane (cute-dbt#270) from the parsed
+/// `dbt_project.yml`: project identity, the standing vars inventory
+/// ([`project_var_inventory`]), and the var/macro reference-filter
+/// indices. Consumes the SAME [`ProjectFacts::definition`] POD the report
+/// reads (R4). Pure computation over owned data — no I/O.
+#[must_use]
+pub fn build_project_pane(current: &Manifest, facts: &ProjectFacts) -> Option<ProjectPanePayload> {
+    let def = facts.definition.as_ref()?;
+    let VarInventory {
+        entries,
+        footprint,
+        var_models,
+    } = project_var_inventory(current, def);
+    Some(ProjectPanePayload {
+        name: def.name.clone(),
+        version: def.version.as_ref().map(render_project_scalar),
+        require_dbt_version: def.require_dbt_version.as_ref().map(render_project_scalar),
+        vars: entries,
+        vars_footprint: footprint,
+        var_models,
+        macro_models: macro_models_index(current),
+    })
 }
 
 /// Build the serializable lineage payload for `dag.html` (cute-dbt#101).
@@ -943,6 +1070,8 @@ fn lineage_payload_from(
         edges,
         cte_dags: BTreeMap::new(),
         seed_tables: BTreeMap::new(),
+        config_provenance: BTreeMap::new(),
+        project_pane: None,
     }
 }
 
@@ -1366,6 +1495,14 @@ struct ExploreTestsTemplate<'a> {
     /// `true` iff the run emitted `macro.html` (cute-dbt#345). Gates the
     /// third nav anchor — see [`ExploreDagTemplate::has_macro_focus`].
     has_macro_focus: bool,
+    /// `true` iff a project pane was built (cute-dbt#270) — gates the
+    /// project-pane shell + its JSON carrier. `false` (no project file
+    /// read) emits nothing, keeping the no-project-root golden shape.
+    has_project_pane: bool,
+    /// Pre-escaped JSON for the `explore-project-data` carrier (the
+    /// [`ProjectPanePayload`]) — emitted only when `has_project_pane`.
+    /// `"null"` (and inert) otherwise.
+    project_pane_json: &'a str,
 }
 
 /// askama binding for `templates/explore-macro.html`.
@@ -1542,6 +1679,7 @@ pub fn render_explore(
     macro_focus: Option<MacroFocus<'_>>,
     seed_cards: &[SeedCard],
     seed_row_cap: usize,
+    project_facts: &ProjectFacts,
 ) -> io::Result<()> {
     fs::create_dir_all(out_dir)?;
 
@@ -1550,10 +1688,32 @@ pub fn render_explore(
     // no anchor, no macro.html when `None`).
     let has_macro_focus = macro_focus.is_some();
 
+    // cute-dbt#270 — the standing project pane (project info + vars
+    // inventory + reference-filter indices) + the per-model config
+    // provenance, both off the SAME ProjectFacts::definition the report
+    // reads (R4). Both `None`/empty when no project file was read, so the
+    // no-project-root goldens stay byte-identical (the serde-skip). The
+    // pane is serialized once here for the tests.html carrier, then MOVED
+    // into the lineage carrier below (no clone).
+    let project_pane = build_project_pane(current, project_facts);
+    let has_project_pane = project_pane.is_some();
+    let project_pane_json = match &project_pane {
+        Some(pane) => json_for_html_script(pane)
+            .map_err(|err| io::Error::other(format!("project pane serialization: {err}")))?,
+        None => "null".to_owned(),
+    };
+    let config_provenance = project_facts
+        .definition
+        .as_ref()
+        .map(|def| resolve_model_configs(current, def))
+        .unwrap_or_default();
+
     let mut lineage = build_lineage_payload(current, models, changed);
     // cute-dbt#102 — the CTE ⇄ model toggle's per-model CTE DAGs ride
     // the same carrier (the payload's graphs, parsed once upstream).
     lineage.cte_dags = cte_dags_by_model(models, payload);
+    lineage.config_provenance = config_provenance;
+    lineage.project_pane = project_pane;
     // cute-dbt#398 — per-seed data tables ride the SAME carrier (the
     // `cte_dags` side-map precedent): the gathered working-tree CSVs,
     // capped to the resolved row cap. The seed-node detail card reads
@@ -1606,6 +1766,10 @@ pub fn render_explore(
     let test_count = models_pod.iter().map(|m| m.tests.len()).sum();
     let payload_json = json_for_html_script(payload)
         .map_err(|err| io::Error::other(format!("payload serialization: {err}")))?;
+    // cute-dbt#270 — the project pane rides tests.html too (the same pane
+    // dag.html carries), via its own `explore-project-data` carrier
+    // (serialized once above; `"null"` + the shell gated off when no
+    // project file was read, so the no-root tests.html golden is stable).
     let tests_html = ExploreTestsTemplate {
         sakura_css: SAKURA_CSS,
         appearance_js: APPEARANCE_JS,
@@ -1616,6 +1780,8 @@ pub fn render_explore(
         explore_tests_js: EXPLORE_TESTS_JS,
         payload_json: &payload_json,
         has_macro_focus,
+        has_project_pane,
+        project_pane_json: &project_pane_json,
     }
     .render()
     .map_err(|err| io::Error::other(format!("render tests.html: {err}")))?;
@@ -1624,57 +1790,68 @@ pub fn render_explore(
     // cute-dbt#345 — the third explore sub-page. Emitted only when the
     // run carried a `--pr-diff` changing a root-project macro; the
     // no-macro path writes just dag.html/tests.html (the goldens' shape).
-    // Renders the focused macro DAG (the `users ∪ downstream` subgraph,
-    // role-stamped, through the same vendored Cytoscape + cytoscape-dagre
-    // engine `dag.html` uses) PLUS the filtered artifact directory — the
-    // folder-grouped model + test partitions of everything that calls the
-    // macro, surfaced separately below the DAG.
     if let Some(macro_focus) = macro_focus {
-        let focus = macro_focus.focus;
-        let macro_lineage = build_macro_lineage_payload(current, focus);
-        // The displayed counts must reflect what RENDERS, not the domain
-        // closure: `focus.downstream` crosses every consumer node type
-        // (incl. `test` nodes), but `focused_typed_node_map` keeps only
-        // lineage-vertex types (model/snapshot/seed/source/exposure). A
-        // closure with N test nodes would inflate `focus.downstream.len()`
-        // far above the rendered vertex count — an over-claim (the
-        // never-a-false-claim invariant). So count the roles that actually
-        // materialized in the focused payload (qodo #4, cute-dbt#345).
-        let user_count = macro_lineage
-            .nodes
-            .iter()
-            .filter(|n| n.macro_role == Some(MacroRole::User))
-            .count();
-        let downstream_count = macro_lineage
-            .nodes
-            .iter()
-            .filter(|n| n.macro_role == Some(MacroRole::Downstream))
-            .count();
-        let macro_dag_json = json_for_html_script(&macro_lineage)
-            .map_err(|err| io::Error::other(format!("macro dag payload serialization: {err}")))?;
-        // The filtered artifact directory (AC1 + AC3): the models partition
-        // IS the focus set's `users` (the blast radius — one authority,
-        // AC4); the tests partition is the pre-resolved `macro_test_consumers`
-        // set. Both grouped into folders independently, never merged.
-        let directory = build_macro_directory(current, &focus.users, macro_focus.tests);
-        let macro_html = ExploreMacroTemplate {
-            sakura_css: SAKURA_CSS,
-            appearance_js: APPEARANCE_JS,
-            cytoscape_js: CYTOSCAPE_JS,
-            cytoscape_dagre_js: CYTOSCAPE_DAGRE_JS,
-            explore_lineage_js: EXPLORE_LINEAGE_JS,
-            favicon_data_uri: FAVICON_DATA_URI,
-            dag_json: &macro_dag_json,
-            directory: &directory,
-            user_count,
-            downstream_count,
-            edge_count: macro_lineage.edges.len(),
-        }
-        .render()
-        .map_err(|err| io::Error::other(format!("render macro.html: {err}")))?;
-        fs::write(out_dir.join("macro.html"), macro_html)?;
+        render_macro_page(out_dir, current, &macro_focus)?;
     }
 
+    Ok(())
+}
+
+/// Render the focused macro DAG sub-page (`macro.html`, cute-dbt#345):
+/// the `users ∪ downstream` subgraph (role-stamped) through the same
+/// vendored Cytoscape + cytoscape-dagre engine `dag.html` uses, PLUS the
+/// filtered artifact directory — the folder-grouped model + test
+/// partitions of everything that calls the macro, surfaced separately
+/// below the DAG. Extracted from `render_explore` to keep that composer
+/// short (cute-dbt#270/#345 merge).
+fn render_macro_page(
+    out_dir: &Path,
+    current: &Manifest,
+    macro_focus: &MacroFocus<'_>,
+) -> io::Result<()> {
+    let focus = macro_focus.focus;
+    let macro_lineage = build_macro_lineage_payload(current, focus);
+    // The displayed counts must reflect what RENDERS, not the domain
+    // closure: `focus.downstream` crosses every consumer node type (incl.
+    // `test` nodes), but `focused_typed_node_map` keeps only lineage-vertex
+    // types (model/snapshot/seed/source/exposure). A closure with N test
+    // nodes would inflate `focus.downstream.len()` far above the rendered
+    // vertex count — an over-claim (the never-a-false-claim invariant). So
+    // count the roles that actually materialized in the focused payload
+    // (qodo #4, cute-dbt#345).
+    let user_count = macro_lineage
+        .nodes
+        .iter()
+        .filter(|n| n.macro_role == Some(MacroRole::User))
+        .count();
+    let downstream_count = macro_lineage
+        .nodes
+        .iter()
+        .filter(|n| n.macro_role == Some(MacroRole::Downstream))
+        .count();
+    let macro_dag_json = json_for_html_script(&macro_lineage)
+        .map_err(|err| io::Error::other(format!("macro dag payload serialization: {err}")))?;
+    // The filtered artifact directory (AC1 + AC3): the models partition
+    // IS the focus set's `users` (the blast radius — one authority, AC4);
+    // the tests partition is the pre-resolved `macro_test_consumers` set.
+    // Both grouped into folders independently, never merged.
+    let directory = build_macro_directory(current, &focus.users, macro_focus.tests);
+    let macro_html = ExploreMacroTemplate {
+        sakura_css: SAKURA_CSS,
+        appearance_js: APPEARANCE_JS,
+        cytoscape_js: CYTOSCAPE_JS,
+        cytoscape_dagre_js: CYTOSCAPE_DAGRE_JS,
+        explore_lineage_js: EXPLORE_LINEAGE_JS,
+        favicon_data_uri: FAVICON_DATA_URI,
+        dag_json: &macro_dag_json,
+        directory: &directory,
+        user_count,
+        downstream_count,
+        edge_count: macro_lineage.edges.len(),
+    }
+    .render()
+    .map_err(|err| io::Error::other(format!("render macro.html: {err}")))?;
+    fs::write(out_dir.join("macro.html"), macro_html)?;
     Ok(())
 }
 
@@ -2343,6 +2520,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("explore renders");
 
@@ -2406,6 +2584,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("first render");
         render_explore(
@@ -2417,6 +2596,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("second render");
         for page in ["dag.html", "tests.html"] {
@@ -2443,6 +2623,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("creates out-dir");
         assert!(dir.join("dag.html").exists());
@@ -2465,6 +2646,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("empty manifest renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
@@ -2551,6 +2733,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
@@ -2616,6 +2799,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("explore renders");
         let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html");
@@ -3197,6 +3381,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
@@ -3312,6 +3497,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
@@ -3355,6 +3541,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
@@ -3537,6 +3724,7 @@ mod tests {
             }),
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("explore renders");
         let macro_html = fs::read_to_string(dir.join("macro.html")).expect("macro.html written");
@@ -3580,6 +3768,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("explore renders");
         assert!(
@@ -3643,6 +3832,7 @@ mod tests {
             }),
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("explore renders");
         let macro_html = fs::read_to_string(dir.join("macro.html")).expect("macro.html");
@@ -3841,6 +4031,7 @@ mod tests {
             }),
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("explore renders");
         let macro_html = fs::read_to_string(dir.join("macro.html")).expect("macro.html");
@@ -3883,6 +4074,7 @@ mod tests {
             None,
             &[],
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
@@ -3991,6 +4183,7 @@ mod tests {
             None,
             &cards,
             DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
         )
         .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
@@ -4028,5 +4221,95 @@ mod tests {
         assert_eq!(lineage_vertex_type("source"), None);
         assert_eq!(lineage_vertex_type("exposure"), None);
         assert_eq!(lineage_vertex_type(""), None);
+    }
+
+    // ----- cute-dbt#270: project pane builders -----
+
+    /// A model node carrying the given `depends_on.macros` ids.
+    fn model_with_macros(id: &str, macros: &[&str]) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "model",
+            Checksum::new("sha256", "ck"),
+            Some("select 1".to_owned()),
+            Some("select 1".to_owned()),
+            DependsOn::new(macros.iter().map(|m| (*m).to_owned()).collect(), Vec::new()),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn render_project_scalar_strings_arrays_and_other() {
+        use serde_json::json;
+        assert_eq!(render_project_scalar(&json!("1.0.0")), "1.0.0");
+        assert_eq!(
+            render_project_scalar(&json!([">=1.8.0", "<2.0.0"])),
+            ">=1.8.0, <2.0.0",
+            "a require-dbt-version range list joins with ', '",
+        );
+        assert_eq!(render_project_scalar(&json!(2)), "2", "a bare number");
+        assert_eq!(
+            render_project_scalar(&json!([1, "x"])),
+            "1, x",
+            "mixed array elements: non-strings serialize compactly",
+        );
+    }
+
+    #[test]
+    fn macro_models_index_keys_bare_names_and_dedups() {
+        let m = manifest_of(vec![
+            model_with_macros(
+                "model.shop.a",
+                &["macro.shop.add_flags", "macro.dbt.unique"],
+            ),
+            model_with_macros("model.shop.b", &["macro.shop.add_flags"]),
+        ]);
+        let index = macro_models_index(&m);
+        assert_eq!(
+            index["add_flags"],
+            vec!["model.shop.a", "model.shop.b"],
+            "the bare macro name keys both referencing models, sorted",
+        );
+        assert_eq!(index["unique"], vec!["model.shop.a"]);
+    }
+
+    #[test]
+    fn build_project_pane_is_none_without_a_definition() {
+        let m = manifest_of(vec![model("model.shop.a", Some("select 1"), &[])]);
+        assert!(build_project_pane(&m, &ProjectFacts::default()).is_none());
+    }
+
+    #[test]
+    fn build_project_pane_carries_identity_vars_and_filter_indices() {
+        use serde_json::json;
+        let m = manifest_of(vec![model_with_macros(
+            "model.shop.reader",
+            &["macro.shop.helper"],
+        )]);
+        let def = crate::domain::ProjectDefinition {
+            name: Some("shop".to_owned()),
+            version: Some(json!("1.2.3")),
+            require_dbt_version: Some(json!(">=1.8.0")),
+            vars: BTreeMap::from([("threshold".to_owned(), json!(5))]),
+            ..Default::default()
+        };
+        let facts = ProjectFacts {
+            definition: Some(def),
+            ..Default::default()
+        };
+        let pane = build_project_pane(&m, &facts).expect("a pane is built");
+        assert_eq!(pane.name.as_deref(), Some("shop"));
+        assert_eq!(pane.version.as_deref(), Some("1.2.3"));
+        assert_eq!(pane.require_dbt_version.as_deref(), Some(">=1.8.0"));
+        assert_eq!(pane.vars.len(), 1);
+        assert_eq!(pane.vars[0].name, "threshold");
+        assert_eq!(
+            pane.macro_models["helper"],
+            vec!["model.shop.reader"],
+            "the macro filter index is populated from depends_on.macros",
+        );
     }
 }

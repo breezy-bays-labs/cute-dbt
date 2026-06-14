@@ -736,6 +736,22 @@ table.expected-table th, table.expected-table td { border-color: var(--border); 
 .sql-block { font-size: 0.85rem; background: var(--code-bg); color: var(--text); }
 .test-jump { background: none; border: none; padding: 0; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
 .test-jump:hover, .test-jump:focus { color: var(--accent-hover); }
+/* cute-dbt#270 — the project pane (identity + standing vars inventory).
+   Re-expressed on the shared tokens (all 8 themes); the tests page omits
+   the dag page's reference filter + config chips. */
+.project-pane { margin: 0.5rem 0 0.75rem; padding: 0.5rem 0.85rem; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); font-size: 0.9rem; }
+.project-pane > summary { cursor: pointer; font-weight: 600; color: var(--text); }
+.project-pane .project-identity { display: grid; grid-template-columns: max-content 1fr; gap: 0.1rem 0.8rem; margin: 0.5rem 0; }
+.project-pane .project-identity dt { color: var(--text-muted); font-weight: 600; }
+.project-pane .project-identity dd { margin: 0; overflow-wrap: anywhere; }
+.project-pane .project-section-title { margin: 0.6rem 0 0.2rem; font-size: 0.85rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+.project-pane .vars-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.project-pane .vars-table th, .project-pane .vars-table td { text-align: left; padding: 0.15rem 0.6rem 0.15rem 0; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+.project-pane .vars-table th { color: var(--text-muted); font-weight: 600; }
+.project-pane .vars-table .vars-count { text-align: right; font-variant-numeric: tabular-nums; }
+.project-pane .vars-table .vars-scope { color: var(--text-muted); font-size: 0.8rem; }
+.project-pane .vars-empty { color: var(--text-faint); font-style: italic; margin: 0.25rem 0; }
+.project-pane .project-footprint { color: var(--text-muted); font-size: 0.8rem; margin: 0.35rem 0 0; }
 </style>
 </head>
 <body>
@@ -749,6 +765,9 @@ table.expected-table th, table.expected-table td { border-color: var(--border); 
     <a href="dag.html">&larr; Model lineage</a>
   </nav>
 </header>
+
+
+
 
 
 
@@ -1297,6 +1316,85 @@ table.expected-table th, table.expected-table td { border-color: var(--border); 
   selectTest(select.value);
 })();
 /* end of cute-dbt explore tests viewer v1 (cute-dbt#102) */
+
+/* cute-dbt#270 — the project pane on tests.html (identity + standing vars
+   inventory). A SEPARATE IIFE so it renders independently of the unit-test
+   viewer's guard (a test-free manifest still shows project context). Reads
+   the `explore-project-data` carrier; absent ⇒ no-op (the pane shell is
+   gated off server-side). createElement / textContent only. */
+(function () {
+  "use strict";
+  var carrier = document.getElementById("explore-project-data");
+  var paneEl = document.querySelector(".project-pane");
+  if (!carrier || !paneEl) return;
+  var pane = JSON.parse(carrier.textContent);
+  if (!pane) return;
+
+  function el(tag, className, text) {
+    var out = document.createElement(tag);
+    if (className) out.className = className;
+    if (text !== undefined && text !== null) out.textContent = String(text);
+    return out;
+  }
+  function fact(dl, label, valueNode) {
+    dl.appendChild(el("dt", null, label));
+    var dd = document.createElement("dd");
+    dd.appendChild(valueNode);
+    dl.appendChild(dd);
+  }
+  function formatValue(value) {
+    if (typeof value === "string") return value;
+    try { return JSON.stringify(value); } catch (e) { return String(value); }
+  }
+
+  while (paneEl.firstChild) paneEl.removeChild(paneEl.firstChild);
+  paneEl.appendChild(el("summary", null, "Project"));
+
+  var identity = el("dl", "project-identity", null);
+  fact(identity, "name", el("code", null, pane.name || "—"));
+  if (pane.version) fact(identity, "version", el("code", null, pane.version));
+  if (pane.require_dbt_version) {
+    fact(identity, "require-dbt-version", el("code", null, pane.require_dbt_version));
+  }
+  paneEl.appendChild(identity);
+
+  paneEl.appendChild(el("p", "project-section-title", "vars"));
+  if (pane.vars && pane.vars.length) {
+    var table = el("table", "vars-table", null);
+    var head = document.createElement("tr");
+    ["var", "value", "direct", "config", "macro"].forEach(function (h) {
+      head.appendChild(el("th", h === "var" || h === "value" ? null : "vars-count", h));
+    });
+    table.appendChild(head);
+    pane.vars.forEach(function (v) {
+      var row = document.createElement("tr");
+      var nameCell = document.createElement("td");
+      nameCell.appendChild(el("code", null, v.name));
+      if (v.scope && v.scope.package) {
+        nameCell.appendChild(document.createTextNode(" "));
+        nameCell.appendChild(el("span", "vars-scope", "(" + v.scope.package + ")"));
+      }
+      row.appendChild(nameCell);
+      row.appendChild(el("td", null, formatValue(v.value)));
+      row.appendChild(el("td", "vars-count", String(v.direct)));
+      row.appendChild(el("td", "vars-count", String(v.config)));
+      row.appendChild(el("td", "vars-count", String(v.macros)));
+      table.appendChild(row);
+    });
+    paneEl.appendChild(table);
+    var fp = pane.vars_footprint || {};
+    var note = "scanned " + (fp.models_scanned || 0) + " model(s), "
+      + (fp.macros_scanned || 0) + " macro body(ies)";
+    if (fp.python_models) { note += " — " + fp.python_models + " python model(s) not SQL-scanned"; }
+    paneEl.appendChild(el("p", "project-footprint", note));
+  } else {
+    paneEl.appendChild(el("p", "vars-empty", "this project declares no vars"));
+  }
+
+  paneEl.open = true;
+  paneEl.hidden = false;
+})();
+/* end of cute-dbt#270 explore project pane (tests.html) */
 
 </script>
 </body>

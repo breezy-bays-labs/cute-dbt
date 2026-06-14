@@ -63,7 +63,7 @@ use cute_dbt::adapters::explore::{MacroFocus, render_explore};
 use cute_dbt::adapters::render::build_payload;
 use cute_dbt::domain::{
     Checksum, DEFAULT_SEED_ROW_CAP, DependsOn, Exposure, InScopeSet, Manifest, ManifestMetadata,
-    ModelInScopeSet, Node, NodeConfig, NodeId, SourceNode, TestMetadata, all_models,
+    ModelInScopeSet, Node, NodeConfig, NodeId, ProjectFacts, SourceNode, TestMetadata, all_models,
 };
 
 fn report_file_url(filename: &str) -> String {
@@ -582,6 +582,7 @@ fn render_explore_pages(
         None,
         &[],
         DEFAULT_SEED_ROW_CAP,
+        &ProjectFacts::default(),
     )
     .expect("explore renders");
     dir
@@ -623,6 +624,7 @@ fn render_explore_dag_manifest(stem: &str, manifest: &Manifest) -> String {
         None,
         &[],
         DEFAULT_SEED_ROW_CAP,
+        &ProjectFacts::default(),
     )
     .expect("explore renders");
     let p = dir.join("dag.html");
@@ -1848,6 +1850,7 @@ fn render_explore_macro_page(
         }),
         &[],
         DEFAULT_SEED_ROW_CAP,
+        &ProjectFacts::default(),
     )
     .expect("explore renders");
     let p = dir.join("macro.html");

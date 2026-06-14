@@ -789,6 +789,34 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
 .model-detail-card .detail-seed-table th { color: var(--text-muted); font-weight: 600; }
 .model-detail-card .detail-seed-rowcap { margin: 0.15rem 0; font-size: 0.8rem; color: var(--text-muted); }
 .model-detail-card .detail-seed-unavailable { margin: 0.15rem 0; }
+/* cute-dbt#270 — the standing config-provenance section on the detail
+   card: each chip names a project-config key, its resolved value, and the
+   winning subtree path. The chip mirrors the report's
+   .config-attribution-chip look (border-left accent), re-expressed on the
+   explore tokens. */
+.model-detail-card .detail-provenance { margin: 0.25rem 0 0; padding: 0; list-style: none; }
+.model-detail-card .detail-provenance li { margin: 0 0 0.2rem; }
+.model-detail-card .detail-config-chip { display: inline-block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; padding: 0.05rem 0.45rem; border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 4px; background: var(--bg-alt); color: var(--text); overflow-wrap: anywhere; }
+.model-detail-card .detail-config-via { color: var(--text-muted); }
+/* cute-dbt#270 — the project pane: identity grid + vars inventory table +
+   the reference-filter row. Re-expressed on the shared tokens (all 8
+   themes). */
+.project-pane { margin: 0.5rem 0 0.75rem; padding: 0.5rem 0.85rem; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); font-size: 0.9rem; }
+.project-pane > summary { cursor: pointer; font-weight: 600; color: var(--text); }
+.project-pane .project-identity { display: grid; grid-template-columns: max-content 1fr; gap: 0.1rem 0.8rem; margin: 0.5rem 0; }
+.project-pane .project-identity dt { color: var(--text-muted); font-weight: 600; }
+.project-pane .project-identity dd { margin: 0; overflow-wrap: anywhere; }
+.project-pane .project-section-title { margin: 0.6rem 0 0.2rem; font-size: 0.85rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+.project-pane .vars-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.project-pane .vars-table th, .project-pane .vars-table td { text-align: left; padding: 0.15rem 0.6rem 0.15rem 0; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+.project-pane .vars-table th { color: var(--text-muted); font-weight: 600; }
+.project-pane .vars-table .vars-count { text-align: right; font-variant-numeric: tabular-nums; }
+.project-pane .vars-table .vars-scope { color: var(--text-muted); font-size: 0.8rem; }
+.project-pane .vars-empty { color: var(--text-faint); font-style: italic; margin: 0.25rem 0; }
+.project-pane .project-footprint { color: var(--text-muted); font-size: 0.8rem; margin: 0.35rem 0 0; }
+.project-pane .ref-filter { margin: 0.4rem 0 0; }
+.project-pane .ref-filter button { margin: 0 0.3rem 0.3rem 0; padding: 0.05rem 0.5rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); color: var(--text); cursor: pointer; }
+.project-pane .ref-filter button:hover, .project-pane .ref-filter button:focus { border-color: var(--accent); }
 </style>
 </head>
 
@@ -804,6 +832,9 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
     <a href="tests.html">Unit tests &rarr;</a>
   </nav>
 </header>
+
+
+<details class="project-pane" data-testid="explore-project-pane" hidden></details>
 
 <section class="lineage" aria-label="Model lineage DAG">
   <div class="lineage-toolbar">
@@ -1482,6 +1513,9 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
 
   // ---- HIGHLIGHT (click / search-select; in-place, never a commit) --------
   var highlighted = null;
+  // cute-dbt#270 — the active reference filter ({ label, matched }) or
+  // null. Declared here so clearHighlight (below) can reset it.
+  var activeFilter = null;
 
   // cute-dbt#102 — page-local highlight observer hook: the CTE-view
   // engine (explore-cte.js) gates + retargets its view off this event.
@@ -1496,6 +1530,9 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
   function clearHighlight() {
     cy.elements().removeClass("dim sel trace");
     highlighted = null;
+    // cute-dbt#270 — clearing also drops the active reference filter (so a
+    // filter chip toggles, and an empty-canvas tap restores all nodes).
+    activeFilter = null;
     hideDetailCard();
     notifyHighlight(null);
   }
@@ -1531,6 +1568,14 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
     var dd = document.createElement("dd");
     dd.appendChild(valueNode);
     dl.appendChild(dd);
+  }
+
+  // cute-dbt#270 — render a project-config / var value for display: a
+  // string verbatim, everything else compact JSON. Never evaluated (zero-
+  // compute); a hostile value still lands through textContent downstream.
+  function formatConfigValue(value) {
+    if (typeof value === "string") return value;
+    try { return JSON.stringify(value); } catch (e) { return String(value); }
   }
 
   function grainValueNode(grain) {
@@ -1642,6 +1687,30 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
         fact(pathFacts, t.name, holder);
       });
       card.appendChild(pathFacts);
+    }
+
+    // cute-dbt#270 — standing config provenance: the dbt_project.yml
+    // `models:` config keys that resolve to THIS model (fusion's
+    // deepest-match-wins), each with its resolved value and the winning
+    // subtree path. A side-map keyed by node id (the seed_tables
+    // precedent); absent ⇒ the section is skipped (no project file, or the
+    // model inherits no project-level config). textContent only.
+    if (codeBearing) {
+      var provenance = (data.config_provenance || {})[id];
+      if (provenance && provenance.length) {
+        card.appendChild(el("p", "detail-section-title", "project config"));
+        var provList = el("ul", "detail-provenance", null);
+        provenance.forEach(function (p) {
+          var li = document.createElement("li");
+          var chip = el("span", "detail-config-chip", null);
+          chip.appendChild(el("code", null, "+" + p.key + " = " + formatConfigValue(p.value)));
+          li.appendChild(chip);
+          li.appendChild(document.createTextNode(" "));
+          li.appendChild(el("span", "detail-config-via", "via " + p.path));
+          provList.appendChild(li);
+        });
+        card.appendChild(provList);
+      }
     }
 
     card.appendChild(el("p", "detail-section-title", "columns"));
@@ -1966,11 +2035,179 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
     closeList();
   });
 
+  // ---- cute-dbt#270: reference filter (var:NAME / macro:NAME) -------------
+  // Dim every node except the matched model set + its lineage (the
+  // highlight vocabulary, applied to a SET rather than one node). Composes
+  // with the static macro-role dim, in place — never a re-render, never a
+  // commit. `clearHighlight` clears it (the same .dim/.trace/.sel classes).
+  function filterByModels(ids, label) {
+    var present = (ids || []).filter(function (id) {
+      var n = cy.getElementById(id);
+      return n && n.length;
+    });
+    cy.batch(function () {
+      cy.elements().removeClass("dim sel trace");
+      if (!present.length) { return; }
+      var set = cy.collection();
+      present.forEach(function (id) {
+        var n = cy.getElementById(id);
+        set = set.union(n).union(n.predecessors()).union(n.successors());
+      });
+      cy.elements().addClass("dim");
+      set.removeClass("dim").addClass("trace");
+      present.forEach(function (id) { cy.getElementById(id).removeClass("dim").addClass("sel"); });
+    });
+    highlighted = null;
+    hideDetailCard();
+    activeFilter = { label: label, matched: present.slice() };
+    notifyHighlight(null);
+  }
+
+  // A `var:NAME` / `macro:NAME` query in the search box resolves against
+  // the project pane's filter indices. Returns true when handled as a
+  // reference filter (so the fuzzy node search is skipped for that query).
+  function tryReferenceFilter(q) {
+    var m = /^(var|macro):(.+)$/.exec(q);
+    if (!m) { return false; }
+    var kind = m[1], name = m[2].trim();
+    var index = pane && (kind === "var" ? pane.var_models : pane.macro_models);
+    var ids = (index && index[name]) || [];
+    filterByModels(ids, kind + ":" + name);
+    closeList();
+    return true;
+  }
+
+  // ---- cute-dbt#270: the project pane (info + vars inventory + filter) ----
+  // Reads the embedded `data.project_pane` carrier; absent ⇒ the shell
+  // stays hidden (the no-project-root golden shape). createElement /
+  // textContent only.
+  var pane = data.project_pane || null;
+  var paneEl = document.querySelector(".project-pane");
+
+  function renderProjectPane() {
+    if (!pane || !paneEl) { return; }
+    while (paneEl.firstChild) paneEl.removeChild(paneEl.firstChild);
+    paneEl.appendChild(el("summary", null, "Project"));
+
+    var identity = el("dl", "project-identity", null);
+    fact(identity, "name", el("code", null, pane.name || "—"));
+    if (pane.version) fact(identity, "version", el("code", null, pane.version));
+    if (pane.require_dbt_version) {
+      fact(identity, "require-dbt-version", el("code", null, pane.require_dbt_version));
+    }
+    paneEl.appendChild(identity);
+
+    paneEl.appendChild(el("p", "project-section-title", "vars"));
+    if (pane.vars && pane.vars.length) {
+      paneEl.appendChild(renderVarsTable(pane.vars));
+      paneEl.appendChild(renderFootprint(pane.vars_footprint));
+    } else {
+      paneEl.appendChild(el("p", "vars-empty", "this project declares no vars"));
+    }
+
+    renderFilterRow();
+    paneEl.open = true;
+    paneEl.hidden = false;
+  }
+
+  function renderVarsTable(vars) {
+    var table = el("table", "vars-table", null);
+    var head = document.createElement("tr");
+    ["var", "value", "direct", "config", "macro"].forEach(function (h) {
+      head.appendChild(el("th", h === "var" || h === "value" ? null : "vars-count", h));
+    });
+    table.appendChild(head);
+    vars.forEach(function (v) {
+      var row = document.createElement("tr");
+      var nameCell = document.createElement("td");
+      nameCell.appendChild(el("code", null, v.name));
+      if (v.scope && v.scope.package) {
+        nameCell.appendChild(document.createTextNode(" "));
+        nameCell.appendChild(el("span", "vars-scope", "(" + v.scope.package + ")"));
+      }
+      row.appendChild(nameCell);
+      row.appendChild(el("td", null, formatConfigValue(v.value)));
+      row.appendChild(el("td", "vars-count", String(v.direct)));
+      row.appendChild(el("td", "vars-count", String(v.config)));
+      row.appendChild(el("td", "vars-count", String(v.macros)));
+      table.appendChild(row);
+    });
+    return table;
+  }
+
+  function renderFootprint(fp) {
+    fp = fp || {};
+    var note = "scanned " + (fp.models_scanned || 0) + " model(s), "
+      + (fp.macros_scanned || 0) + " macro body(ies)";
+    if (fp.python_models) { note += " — " + fp.python_models + " python model(s) not SQL-scanned"; }
+    return el("p", "project-footprint", note);
+  }
+
+  // The reference-filter chips: one per var (filter the graph to its
+  // referencing models) and one per referenced macro name. Clicking a chip
+  // dims the complement; clicking again (or any clear) restores.
+  function renderFilterRow() {
+    var varNames = pane.var_models ? Object.keys(pane.var_models) : [];
+    var macroNames = pane.macro_models ? Object.keys(pane.macro_models) : [];
+    if (!varNames.length && !macroNames.length) { return; }
+    paneEl.appendChild(el("p", "project-section-title", "reference filter"));
+    var row = el("div", "ref-filter", null);
+    varNames.sort().forEach(function (name) {
+      row.appendChild(filterChip("var:" + name, pane.var_models[name]));
+    });
+    macroNames.sort().forEach(function (name) {
+      row.appendChild(filterChip("macro:" + name, pane.macro_models[name]));
+    });
+    paneEl.appendChild(row);
+  }
+
+  function filterChip(label, ids) {
+    var btn = el("button", null, label);
+    btn.type = "button";
+    btn.setAttribute("data-ref-filter", label);
+    btn.addEventListener("click", function () {
+      if (activeFilter && activeFilter.label === label) { clearHighlight(); }
+      else { filterByModels(ids, label); }
+    });
+    return btn;
+  }
+
+  renderProjectPane();
+
+  // Search-box `var:`/`macro:` queries route to the reference filter; a
+  // plain query keeps the fuzzy node search (the input listener above runs
+  // first, so re-check here on Enter via a capture wrapper).
+  input.addEventListener("input", function () {
+    var q = input.value.trim();
+    if (q.indexOf("var:") === 0 || q.indexOf("macro:") === 0) {
+      closeList();
+    }
+  });
+  input.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Enter") { return; }
+    var q = input.value.trim();
+    if (q.indexOf("var:") === 0 || q.indexOf("macro:") === 0) {
+      ev.preventDefault();
+      if (tryReferenceFilter(q)) { input.blur(); host.focus(); }
+    }
+  }, true);
+
   // Public seam: the headless suites read the live instance + the
   // highlight through it (mirrors the report's window.CuteCyto precedent).
   window.CuteExploreLineage = {
     cyInstance: function () { return cy; },
-    highlightedId: function () { return highlighted ? highlighted.id() : null; }
+    highlightedId: function () { return highlighted ? highlighted.id() : null; },
+    // cute-dbt#270 — the active reference filter ({ label, matched }) or
+    // null, plus a programmatic apply for the headless geometry asserts.
+    activeFilter: function () { return activeFilter; },
+    filterByReference: function (label) {
+      var m = /^(var|macro):(.+)$/.exec(label);
+      if (!m || !pane) { return false; }
+      var index = m[1] === "var" ? pane.var_models : pane.macro_models;
+      var ids = (index && index[m[2]]) || [];
+      filterByModels(ids, label);
+      return true;
+    }
   };
 })();
 /* end of cute-dbt explore lineage engine v1 (cute-dbt#101) */
