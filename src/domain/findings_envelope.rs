@@ -130,27 +130,114 @@ impl EnvelopeMetadata {
     }
 }
 
+/// Which side of a diff a finding's anchor sits on (cute-dbt#386 — the
+/// reserved finding→line projection slot).
+///
+/// Reserved for the follow-on resolver that maps a finding onto a concrete
+/// `(path, line)` in a PR diff; this slice emits **no** value (every
+/// envelope `anchor` is `None`). serde `snake_case` (`added` / `removed` /
+/// `modified`) so a future projection (GitHub annotations, #353 PR
+/// comments, SARIF) keys on a stable wire token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffContext {
+    /// The anchored line is a `+` addition.
+    Added,
+    /// The anchored line is a `-` removal.
+    Removed,
+    /// The anchored construct spans a modified region.
+    Modified,
+}
+
+/// The reserved **finding→line projection anchor** (cute-dbt#386).
+///
+/// The envelope is the canonical agent channel, and downstream projections
+/// — GitHub annotations, #353 PR comments, SARIF — all need a finding's
+/// concrete `(path, line)`. This POD **reserves that slot now**; a follow-on
+/// resolver populates it. In this slice every field is `None`/reserved — no
+/// resolver logic, no value emitted — so an `EnvelopeFinding` with
+/// `anchor: None` serializes byte-identically to a bare [`Finding`] (the
+/// committed envelope golden is unchanged). Pure data, no methods beyond the
+/// constructor.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+pub struct FindingAnchor {
+    /// The project-relative source path the finding anchors to. Omitted from
+    /// JSON when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The 1-based line within `path`. Omitted from JSON when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    /// Which diff side the line sits on (PR-diff projections). Omitted from
+    /// JSON when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_context: Option<DiffContext>,
+    /// A content-addressed hash stabilizing the anchor across reformatting
+    /// (the resolver's drift guard). Omitted from JSON when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_hash: Option<String>,
+}
+
+/// One envelope finding: the existing [`Finding`] wire shape plus the
+/// reserved [`FindingAnchor`] slot (cute-dbt#386).
+///
+/// The `Finding` is `#[serde(flatten)]`ed, so its keys sit directly on the
+/// finding object exactly as before; `anchor` is `skip_serializing_if =
+/// "Option::is_none"`, so an unresolved anchor (every anchor in this slice)
+/// emits **zero** added bytes — the committed envelope golden stays
+/// byte-identical. A populated anchor adds a single nested `anchor` object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EnvelopeFinding {
+    /// The finding itself — flattened so its keys (`check` / `tier` /
+    /// `model_id` / `verdict` / …) sit on this object directly.
+    #[serde(flatten)]
+    pub finding: Finding<HeuristicId>,
+    /// The reserved finding→line projection anchor. `None` (omitted) in this
+    /// slice; populated by a follow-on resolver.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<FindingAnchor>,
+}
+
+impl EnvelopeFinding {
+    /// Wrap a [`Finding`] with no anchor (the v0.1 emit — the slot is
+    /// reserved but unpopulated).
+    #[must_use]
+    pub fn new(finding: Finding<HeuristicId>) -> Self {
+        Self {
+            finding,
+            anchor: None,
+        }
+    }
+}
+
 /// The findings envelope: a `metadata` header + a flat `findings` list.
 ///
-/// Each [`Finding`] already carries `model_id` / `check` / `tier` /
-/// `verdict` / `evidence` / `recommendation` / `degraded` / `suppressed`,
-/// so consumers group by `model_id` / `check` / `tier` themselves — the
-/// envelope adds no grouping, only the versioned header.
+/// Each [`EnvelopeFinding`] flattens the existing [`Finding`] (which already
+/// carries `model_id` / `check` / `tier` / `verdict` / `evidence` /
+/// `recommendation` / `degraded` / `suppressed`) and adds the reserved
+/// `anchor` slot — so consumers group by `model_id` / `check` / `tier`
+/// themselves; the envelope adds the versioned header and the (currently
+/// unpopulated) anchor slot, nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FindingsEnvelope {
     /// The versioned header (decision D2 stability anchor lives here).
     pub metadata: EnvelopeMetadata,
     /// The flat in-scope finding set, in the order the run loop collected
     /// it (deterministic over the in-scope model set + each model's
-    /// `model_findings` output).
-    pub findings: Vec<Finding<HeuristicId>>,
+    /// `model_findings` output). Each entry flattens a [`Finding`] + the
+    /// reserved anchor slot.
+    pub findings: Vec<EnvelopeFinding>,
 }
 
 impl FindingsEnvelope {
-    /// Assemble an envelope from its already-computed parts.
+    /// Assemble an envelope from a header + the already-computed findings,
+    /// wrapping each [`Finding`] in an anchor-less [`EnvelopeFinding`].
     #[must_use]
     pub fn new(metadata: EnvelopeMetadata, findings: Vec<Finding<HeuristicId>>) -> Self {
-        Self { metadata, findings }
+        Self {
+            metadata,
+            findings: findings.into_iter().map(EnvelopeFinding::new).collect(),
+        }
     }
 }
 
@@ -237,10 +324,18 @@ mod tests {
         assert_eq!(json["metadata"]["scope"]["baseline"], "baseline.json");
         assert!(json["findings"].is_array());
         assert_eq!(json["findings"].as_array().unwrap().len(), 1);
-        // The wrapped Finding keeps its existing serialized shape.
+        // The wrapped Finding keeps its existing serialized shape — the
+        // anchor wrapper flattens transparently.
         assert_eq!(json["findings"][0]["model_id"], "model.shop.dim_x");
         assert_eq!(json["findings"][0]["tier"], "total");
         assert_eq!(json["findings"][0]["verdict"]["status"], "uncovered");
+        // cute-dbt#386 byte-safety: an unpopulated anchor emits NO `anchor`
+        // key, so the envelope stays byte-identical to the pre-anchor shape.
+        assert!(
+            json["findings"][0].get("anchor").is_none(),
+            "an unresolved anchor must be omitted entirely: {}",
+            json["findings"][0]
+        );
     }
 
     #[test]
@@ -339,5 +434,89 @@ mod tests {
             finding(Verdict::Uncovered),
         ];
         assert!(has_total_uncovered(&findings));
+    }
+
+    // ---- reserved anchor slot (cute-dbt#386) ------------------------
+
+    #[test]
+    fn an_anchor_less_envelope_finding_is_byte_identical_to_a_bare_finding() {
+        // The byte-safety invariant: flattening the Finding + omitting the
+        // None anchor reproduces the bare Finding's wire shape exactly, so
+        // the committed envelope golden is unchanged by the anchor slot.
+        let bare = finding(Verdict::Uncovered);
+        let wrapped = EnvelopeFinding::new(bare.clone());
+        let bare_json = serde_json::to_string(&bare).expect("serializes");
+        let wrapped_json = serde_json::to_string(&wrapped).expect("serializes");
+        assert_eq!(
+            bare_json, wrapped_json,
+            "an anchor-less EnvelopeFinding must serialize byte-identically \
+             to the bare Finding"
+        );
+        // And explicitly: no `anchor` key surfaces.
+        let value = serde_json::to_value(&wrapped).expect("serializes");
+        assert!(
+            value.get("anchor").is_none(),
+            "None anchor must be omitted: {value}"
+        );
+    }
+
+    #[test]
+    fn a_populated_anchor_round_trips_and_nests_under_anchor() {
+        let mut wrapped = EnvelopeFinding::new(finding(Verdict::Uncovered));
+        wrapped.anchor = Some(FindingAnchor {
+            path: Some("models/marts/dim_x.sql".to_owned()),
+            line: Some(42),
+            diff_context: Some(DiffContext::Added),
+            anchor_hash: Some("abc123".to_owned()),
+        });
+        let value = serde_json::to_value(&wrapped).expect("serializes");
+        // The finding keys still flatten onto the entry; the anchor nests.
+        assert_eq!(value["model_id"], "model.shop.dim_x");
+        assert_eq!(value["anchor"]["path"], "models/marts/dim_x.sql");
+        assert_eq!(value["anchor"]["line"], 42);
+        assert_eq!(value["anchor"]["diff_context"], "added");
+        assert_eq!(value["anchor"]["anchor_hash"], "abc123");
+    }
+
+    #[test]
+    fn a_default_anchor_omits_every_unset_field() {
+        // The resolver may populate fields incrementally; an all-None anchor
+        // (the Default) serializes to an empty object — every field is
+        // skip_serializing_if None.
+        let value = serde_json::to_value(FindingAnchor::default()).expect("serializes");
+        assert_eq!(
+            value,
+            serde_json::json!({}),
+            "empty anchor is {{}}: {value}"
+        );
+    }
+
+    #[test]
+    fn diff_context_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(DiffContext::Modified).expect("serializes"),
+            serde_json::json!("modified")
+        );
+        assert_eq!(
+            serde_json::to_value(DiffContext::Removed).expect("serializes"),
+            serde_json::json!("removed")
+        );
+    }
+
+    #[test]
+    fn envelope_new_wraps_each_finding_with_a_none_anchor() {
+        let envelope = FindingsEnvelope::new(
+            EnvelopeMetadata::new(
+                "0.1.0",
+                "2026-01-15",
+                EnvelopeScope::PrDiff { source: None },
+            ),
+            vec![finding(Verdict::Uncovered), finding(Verdict::Unknown)],
+        );
+        assert_eq!(envelope.findings.len(), 2);
+        assert!(
+            envelope.findings.iter().all(|f| f.anchor.is_none()),
+            "every wrapped finding starts anchor-less"
+        );
     }
 }

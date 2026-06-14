@@ -77,11 +77,13 @@ output and exactly one parser in the dependency graph. Several pieces of
 common Rust apparatus exist for projects whose shape cute-dbt does not have
 — multi-crate workspaces for crates with multiple linkage-level consumers,
 public-API shims for library consumers, AST-purity bans for shared cores
-with rival adapter parsers, JSON wire envelopes for machine-readable output.
-cute-dbt deliberately does **not** adopt them. The absences are documented
-architectural choices, not accidents — recording them stops a future
-contributor (human or agent) from "completing the pattern" by adding
-machinery that guards no invariant here.
+with rival adapter parsers. cute-dbt deliberately does **not** adopt them.
+The absences are documented architectural choices, not accidents —
+recording them stops a future contributor (human or agent) from "completing
+the pattern" by adding machinery that guards no invariant here. (One former
+member of this list — a JSON wire envelope for machine-readable output —
+was **consciously reversed** at cute-dbt#386; it is now present as the
+findings-envelope sidecar. See row 5 and the row-5-reversal note below.)
 
 | # | Apparatus | cute-dbt | Why N/A | Enforcement |
 |---|---|---|---|---|

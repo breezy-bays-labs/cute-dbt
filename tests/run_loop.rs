@@ -746,3 +746,61 @@ fn default_path_writes_no_envelope_sidecar() {
         "no sidecar is written without --findings-out"
     );
 }
+
+#[test]
+fn an_unwritable_findings_out_path_is_reported() {
+    // The --findings-out twin of `an_unwritable_output_path_is_reported`:
+    // a sidecar path under a directory that does not exist makes
+    // `write_sidecar` fail, so the run loop reports the write error (exit 1)
+    // instead of swallowing it. Without this test a future `let _ =
+    // write_sidecar(...)` would silently regress the surfaced-error
+    // contract. The HTML --out path IS writable here, so the failure is
+    // specifically the sidecar's.
+    let html = tmp("envelope_unwritable.html");
+    let sidecar = tmp("no_such_dir/findings.json");
+    clear(&html);
+    let mut args = playground_pr_diff_args(&html);
+    args.push("--findings-out".to_owned());
+    args.push(s(&sidecar).to_owned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&refs);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "an unwritable findings-out path exits 1: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not write"),
+        "stderr reports the sidecar-write failure: {stderr}"
+    );
+}
+
+#[test]
+fn an_unwritable_findings_out_path_wins_over_the_uncovered_gate() {
+    // Write-failure precedence: the playground pr-diff carries a Total-tier
+    // uncovered finding (so --fail-on-uncovered would otherwise exit 3), but
+    // the sidecar write fails FIRST (finalize_findings writes the sidecar
+    // before evaluating the gate), so the run exits 1 (the surfaced write
+    // error) — never the gate code. A swallowed sidecar error would let the
+    // gate's exit 3 leak through and mask the real I/O failure.
+    let html = tmp("gate_vs_unwritable.html");
+    let sidecar = tmp("no_such_dir/gate_findings.json");
+    clear(&html);
+    let mut args = playground_pr_diff_args(&html);
+    args.push("--findings-out".to_owned());
+    args.push(s(&sidecar).to_owned());
+    args.push("--fail-on-uncovered".to_owned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&refs);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "the sidecar write failure (1) wins over the gate code (3): {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not write"),
+        "stderr reports the write failure, not a silent gate trip: {stderr}"
+    );
+}

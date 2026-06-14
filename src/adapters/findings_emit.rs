@@ -78,6 +78,24 @@ pub fn build_findings_envelope(
     scope: EnvelopeScope,
 ) -> FindingsEnvelope {
     let findings = collect_in_scope_findings(manifest, models_in_scope, check_policy);
+    envelope_from_findings(findings, cute_dbt_version, generated_at, scope)
+}
+
+/// Assemble a [`FindingsEnvelope`] from an **already-collected** finding set.
+///
+/// The same builder as [`build_findings_envelope`] but over a finding `Vec`
+/// the caller already holds — so the cli run loop can collect once, run the
+/// `--fail-on-uncovered` gate on the raw `Finding`s
+/// ([`has_total_uncovered`](crate::domain::has_total_uncovered) operates on
+/// `&[Finding]`, not the anchor-wrapped envelope entries), and build the
+/// envelope from the same `Vec` without a second collection pass.
+#[must_use]
+pub fn envelope_from_findings(
+    findings: Vec<Finding<HeuristicId>>,
+    cute_dbt_version: impl Into<String>,
+    generated_at: impl Into<String>,
+    scope: EnvelopeScope,
+) -> FindingsEnvelope {
     let metadata = EnvelopeMetadata::new(cute_dbt_version, generated_at, scope);
     FindingsEnvelope::new(metadata, findings)
 }

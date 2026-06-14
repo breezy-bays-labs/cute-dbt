@@ -85,8 +85,8 @@ pub use experimental::{
     parse_experimental_env, resolve_experimental_config,
 };
 pub use findings_envelope::{
-    EnvelopeMetadata, EnvelopeScope, FindingsEnvelope, ID_STABILITY, SCHEMA_VERSION,
-    has_total_uncovered,
+    DiffContext, EnvelopeFinding, EnvelopeMetadata, EnvelopeScope, FindingAnchor, FindingsEnvelope,
+    ID_STABILITY, SCHEMA_VERSION, has_total_uncovered,
 };
 pub use governance::{
     BlastRadius, BreakingReason, ColumnMetaTags, ConstraintSupport, ContractChange, ContractClass,

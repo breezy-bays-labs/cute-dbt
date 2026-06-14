@@ -80,7 +80,9 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::adapters::explore::render_explore;
-use crate::adapters::findings_emit::{build_findings_envelope, write_sidecar};
+use crate::adapters::findings_emit::{
+    collect_in_scope_findings, envelope_from_findings, write_sidecar,
+};
 use crate::adapters::manifest::{FileManifestSource, load_baseline};
 use crate::adapters::project_def::parse as parse_project_definition;
 use crate::adapters::project_file::FsProjectFileReader;
@@ -541,23 +543,29 @@ fn finalize_findings(
     if args.findings_out.is_none() && !args.fail_on_uncovered {
         return Ok(ReportOutcome::Success);
     }
+    // Collect the in-scope findings once. The gate reads the raw `Finding`s
+    // (`has_total_uncovered` operates on `&[Finding]`); the envelope wraps
+    // the SAME vec into anchor-bearing entries (cute-dbt#386). One pass.
+    let findings = collect_in_scope_findings(current, models_in_scope, check_policy);
     // `generated_at` is the I/O-boundary date — the `--generated-at`
     // override (golden regeneration / reproducible builds) over today's
     // computed civil date. Threaded into the pure envelope builder so the
     // committed golden is byte-stable.
     let generated_at = args.generated_at.clone().unwrap_or_else(today_rfc3339_date);
-    let envelope = build_findings_envelope(
-        current,
-        models_in_scope,
-        check_policy,
-        env!("CARGO_PKG_VERSION"),
-        generated_at,
-        envelope_scope(args, scope_input),
-    );
+    // The gate decision is read off the raw findings BEFORE the sidecar is
+    // written, but a sidecar write failure still wins (returns below via `?`
+    // before the gate outcome is returned) — the write-failure-over-gate
+    // precedence the run_loop tests pin.
+    let gate_tripped = args.fail_on_uncovered && has_total_uncovered(&findings);
     if let Some(path) = &args.findings_out {
+        let envelope = envelope_from_findings(
+            findings,
+            env!("CARGO_PKG_VERSION"),
+            generated_at,
+            envelope_scope(args, scope_input),
+        );
         write_sidecar(&envelope, path).map_err(|err| RunError::output(path, err))?;
     }
-    let gate_tripped = args.fail_on_uncovered && has_total_uncovered(&envelope.findings);
     Ok(if gate_tripped {
         ReportOutcome::UncoveredGate
     } else {

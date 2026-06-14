@@ -145,10 +145,20 @@ is **strict**:
   mapping, and the run-loop composition. Application orchestration lives
   here (single-crate composition choice — see ARCHITECTURE).
 
-The five **conscious design simplifications** (no workspace, no per-crate
-versioning, no public-API shim, no AST-purity grep, no JSON envelope ADR)
-are documented in `ARCHITECTURE.md` and enforced by the `non-mirror-guard`
-CI job. Adding one is a regression, not a "pattern completion."
+The four **conscious design simplifications** (no workspace, no per-crate
+versioning, no public-API shim, no AST-purity grep) are documented in
+`ARCHITECTURE.md`. The `non-mirror-guard` CI job enforces three of them by
+rejecting their tripwires (`[workspace]`, `pub use crate::…::…`,
+`bans.deny.wrappers`); per-crate versioning is enforced by absence. Adding
+one is a regression, not a "pattern completion."
+
+A sixth original simplification — **no JSON wire envelope** — was
+**consciously reversed** at cute-dbt#386 (founder ADR-4 amendment): the
+machine-readable findings-envelope sidecar (`--findings-out`) now lands. Its
+shape is pinned not by absence but by a **byte-identity golden**
+(`examples/diff-showcase-findings.json`, gated in `example-report-check`),
+the same gate class as the HTML examples. See `ARCHITECTURE.md` §2 (row 5 +
+the row-5-reversal note).
 
 ## Exclusions and tracking-issue rule
 
