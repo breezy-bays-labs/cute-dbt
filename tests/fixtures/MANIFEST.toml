@@ -812,13 +812,14 @@ generic state codes, no real records.\
 path = "prdiff-minidag-current.json"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/404"
-sha256 = "83f71e702fa432a02614842490b5f2d2f4327d1132d96bb8711c9d3e6b9d8895"
+sha256 = "0e626aac41cca50e48575670ca18a2b00494c1434d035dd20e023372ae89f601"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"
 description = """
 The dedicated dogfood manifest for cute-dbt#404's PR-scope lineage mini-DAG \
-(the prdiff-minidag GOLDEN example row, epic #352). A minimal hand-authored \
+(the prdiff-minidag GOLDEN example row, epic #352, extended for the epic #427 \
+tab-scoped + filter-reactive mini-DAG). A minimal hand-authored \
 v12 manifest with a CONNECTOR PATH: stg_orders → int_order_items → fct_orders \
 (model→model `depends_on` edges). stg_orders and fct_orders are the modified \
 models; int_order_items is the unchanged CONNECTOR between them, so the \
@@ -826,6 +827,11 @@ mini-DAG renders all three (modified emphasized, connector quiet) and the \
 induced lineage edges. Each model carries a multi-line `raw_code` (for the ± \
 chip + inline SQL diff) and an `original_file_path` (so the pr-diff hunks key \
 onto it). Two unit tests (one per modified model) put both in render scope. \
+fct_orders ALSO carries a `patch_path` to its `_fct_orders_tests.yml` schema, \
+so the cute-dbt#430 per-axis filter genuinely DIVERGES in the golden: the \
+`config` filter scopes to fct_orders alone (a disconnected model that pulls \
+int_order_items in as a #428 HALO), distinct from the `body`/`unit_test` \
+filters (both modified models + the connector). \
 Rendered in --pr-diff mode against prdiff-minidag-pr-diff.patch under the \
 `pr-scope-mini-dag` experiment so the golden shows the gated section. Pure \
 synthetic data — a generic orders pipeline, no real records.\
@@ -835,20 +841,25 @@ synthetic data — a generic orders pipeline, no real records.\
 path = "prdiff-minidag-pr-diff.patch"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/404"
-sha256 = "b7571ccd5adb6b3fddbfa93440a45a469009a8d4b80011a77b32901764012a7d"
+sha256 = "cb5761a96cb1295324619c995f48b0d1d54c60a93baece4ed7fc4f533b3fedd7"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"
 description = """
-The hand-crafted PR diff for the prdiff-minidag GOLDEN (cute-dbt#404). A \
---unified=0 patch with one edit hunk on each of the two MODIFIED models' \
-files: `models/staging/stg_orders.sql` (a column added) and \
-`models/marts/fct_orders.sql` (a column renamed). It deliberately does NOT \
-touch `models/intermediate/int_order_items.sql` — that model is the unchanged \
-CONNECTOR, pulled into the mini-DAG only because it lies on the lineage path \
-between the two modified models. The `+` sides are byte-aligned to the \
-manifest `raw_code` (the same-revision contract). No baseline — the showcase \
-is --pr-diff only. Synthetic, no real records.\
+The hand-crafted PR diff for the prdiff-minidag GOLDEN (cute-dbt#404, extended \
+for epic #427). A --unified=0 patch with one body-edit hunk on each of the two \
+MODIFIED models' files: `models/staging/stg_orders.sql` (a column added) and \
+`models/marts/fct_orders.sql` (a column renamed), PLUS a config-only hunk on \
+`models/marts/_fct_orders_tests.yml` (a `models:` config block added). The \
+schema hunk fires fct_orders' `config` change-axis WITHOUT touching its body \
+checksum, so the cute-dbt#430 per-axis filter diverges (config = fct_orders \
+alone; body/unit_test = both modified models + the connector). It deliberately \
+does NOT touch `models/intermediate/int_order_items.sql` — that model is the \
+unchanged CONNECTOR, pulled into the mini-DAG only because it lies on the \
+lineage path between the two modified models (and becomes a HALO neighbor in \
+the config-filtered view). The `+` sides are byte-aligned to the \
+manifest `raw_code` / the working-tree schema (the same-revision contract). \
+No baseline — the showcase is --pr-diff only. Synthetic, no real records.\
 """
 
 [[fixture]]
@@ -919,15 +930,19 @@ records.\
 path = "prdiff-minidag-source/models/marts/_fct_orders_tests.yml"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/404"
-sha256 = "f8f96291a179fdeac3189b700374479d9c6aaae383362b2a81d2289f5a360f58"
+sha256 = "7d5505be4424a8accf5d5cc037df3c70d693146b837c0eef49d2809621544d72"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "MIT"
 description = """
 The authoring YAML for the fct_orders unit test in the prdiff-minidag GOLDEN \
 (cute-dbt#404). Sliced by the authoring-YAML drawer at \
-`models/marts/_fct_orders_tests.yml`. Pure synthetic data — generic order \
-rollup rows, no real records.\
+`models/marts/_fct_orders_tests.yml`. Since epic #427 it ALSO carries a \
+top-level `models:` config block (`materialized: incremental`) that the \
+pr-diff patch adds — fct_orders' `patch_path` points here, so the added hunk \
+fires the model's `config` change-axis (the cute-dbt#430 filter-reactive \
+mini-DAG divergence). Pure synthetic data — generic order rollup rows, no real \
+records.\
 """
 
 [[fixture]]

@@ -1558,41 +1558,146 @@ pub struct PrDagPayload {
     /// the inline Mermaid graph is suppressed in favor of the summary line,
     /// while the graph data still rides the JSON payload.
     pub collapsed: bool,
+    /// The **per-axis** pre-computed mini-DAG subgraphs (cute-dbt#430 — the
+    /// #414 segmented-filter-reactive mini-DAG), keyed by the change-axis
+    /// token (`"body"` / `"config"` / `"unit_test"`). Each entry is the
+    /// mini-DAG **recomputed over the subset of modified models whose
+    /// `axes.<token>` fired** — connectors + halo re-derived over that smaller
+    /// seed set in Rust (the compute-in-Rust→toggle-in-JS architecture: the JS
+    /// only shows/hides these pre-emitted sets, never re-deriving the topology).
+    /// The `"all"` view IS the top-level [`graph`](Self::graph) + counts above,
+    /// so it is intentionally absent from the map (the JS reads the top-level
+    /// payload for `all`).
+    ///
+    /// Populated **only on the `--pr-diff` arm** (the one arm that carries the
+    /// per-model [`ChangeAxes`] attribution); empty on the baseline arm, so the
+    /// `#[serde(skip_serializing_if)]` keeps every baseline + pre-#430 golden
+    /// byte-identical (the `axes` / `seed_tables` precedent).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub by_axis: BTreeMap<String, PrDagAxisView>,
+}
+
+/// The descriptor counts + collapse flag for one PR-scope mini-DAG view — the
+/// shared shape of the top-level [`PrDagPayload`] *and* each per-axis
+/// [`PrDagAxisView`] (cute-dbt#430), derived once from a graph's own nodes so a
+/// count can never drift from what renders.
+#[derive(Debug, Clone, Copy, Default)]
+// The `_count` postfix is intentional — these fields are copied verbatim onto
+// the public `PrDagPayload` / `PrDagAxisView` fields of the same names (the
+// descriptor's "N modified · M connectors" tiers), so renaming them here would
+// only obscure the 1:1 mapping.
+#[allow(clippy::struct_field_names)]
+struct PrDagTierCounts {
+    modified_count: usize,
+    connector_count: usize,
+    halo_count: usize,
+    deleted_count: usize,
+}
+
+impl PrDagTierCounts {
+    /// Classify every node of `graph` into its descriptor tier. `is_connector`
+    /// is the first branch (it wins over any placeholder state), then `is_halo`
+    /// (the dimmed-context tier), then `Deleted`, else the emphasized
+    /// modified tier (New + Modified collapse together).
+    fn from_graph(graph: &PrDagGraph) -> Self {
+        let mut counts = Self::default();
+        for node in &graph.nodes {
+            if node.is_connector {
+                counts.connector_count += 1;
+            } else if node.is_halo {
+                counts.halo_count += 1;
+            } else if node.state == crate::domain::PrDagState::Deleted {
+                counts.deleted_count += 1;
+            } else {
+                counts.modified_count += 1;
+            }
+        }
+        counts
+    }
+}
+
+/// One per-axis pre-computed mini-DAG view (cute-dbt#430) — the recomputed
+/// subgraph for the models whose selected change-axis fired, plus its own
+/// descriptor counts and collapse flag. The JS swaps the rendered mini-DAG to
+/// this view when the #414 axis filter selects the matching axis; the topology
+/// (connectors + halo over the subset) is **already computed in Rust**, so the
+/// JS only shows/hides — never re-derives.
+#[derive(Debug, Clone, Serialize)]
+pub struct PrDagAxisView {
+    /// The recomputed mini-DAG over the axis-filtered modified subset.
+    pub graph: PrDagGraph,
+    /// Count of genuinely modified models in this axis subset.
+    pub modified_count: usize,
+    /// Count of connector models recomputed over the subset.
+    pub connector_count: usize,
+    /// Count of 1-hop context halo models recomputed over the subset.
+    pub halo_count: usize,
+    /// Count of deleted models in this view (always `0` on the pr-diff arm,
+    /// which surfaces no deletion ghosts — kept for descriptor symmetry).
+    pub deleted_count: usize,
+    /// `true` when this subset's node count exceeded the size-bound cap.
+    pub collapsed: bool,
+}
+
+impl PrDagAxisView {
+    /// Build a per-axis view from a recomputed subset graph + the size-bound
+    /// cap, deriving its descriptor counts from the graph's own nodes.
+    #[must_use]
+    pub fn from_graph(graph: PrDagGraph, node_cap: usize) -> Self {
+        let counts = PrDagTierCounts::from_graph(&graph);
+        let collapsed = graph.nodes.len() > node_cap;
+        Self {
+            graph,
+            modified_count: counts.modified_count,
+            connector_count: counts.connector_count,
+            halo_count: counts.halo_count,
+            deleted_count: counts.deleted_count,
+            collapsed,
+        }
+    }
 }
 
 impl PrDagPayload {
     /// Build the render view from a computed [`PrDagGraph`] and the size-bound
     /// node cap. Derives the per-state descriptor counts from the graph's own
     /// nodes (so the counts can never drift from what renders) and sets
-    /// `collapsed` when the node count exceeds `node_cap`.
+    /// `collapsed` when the node count exceeds `node_cap`. The per-axis
+    /// `by_axis` map is left empty (the baseline-arm / no-axis-attribution
+    /// shape, cute-dbt#430); [`from_graph_with_axes`](Self::from_graph_with_axes)
+    /// is the pr-diff-arm constructor that fills it.
     #[must_use]
     pub fn from_graph(graph: PrDagGraph, node_cap: usize) -> Self {
-        let mut modified_count = 0;
-        let mut connector_count = 0;
-        let mut halo_count = 0;
-        let mut deleted_count = 0;
-        for node in &graph.nodes {
-            if node.is_connector {
-                connector_count += 1;
-            } else if node.is_halo {
-                // A 1-hop context halo neighbor (cute-dbt#428) — counted in the
-                // dimmed-context tier, never the emphasized "modified" tier.
-                halo_count += 1;
-            } else if node.state == crate::domain::PrDagState::Deleted {
-                deleted_count += 1;
-            } else {
-                // New + Modified both count as "modified" for the descriptor.
-                modified_count += 1;
-            }
-        }
+        Self::from_graph_with_axes(graph, BTreeMap::new(), node_cap)
+    }
+
+    /// Build the render view with the per-axis pre-computed subgraphs
+    /// (cute-dbt#430). `by_axis_graphs` maps each change-axis token (`"body"` /
+    /// `"config"` / `"unit_test"`) to the mini-DAG **recomputed over the
+    /// modified models whose `axes.<token>` fired** (the cli derives + computes
+    /// these); this constructor wraps each in a [`PrDagAxisView`] with its own
+    /// descriptor counts. The `"all"` view is the top-level graph + counts —
+    /// callers pass the full modified set as `graph` and never key it under
+    /// `"all"` in the map.
+    #[must_use]
+    pub fn from_graph_with_axes(
+        graph: PrDagGraph,
+        by_axis_graphs: BTreeMap<String, PrDagGraph>,
+        node_cap: usize,
+    ) -> Self {
+        let counts = PrDagTierCounts::from_graph(&graph);
         let collapsed = graph.nodes.len() > node_cap;
+        let by_axis = by_axis_graphs
+            .into_iter()
+            .map(|(axis, g)| (axis, PrDagAxisView::from_graph(g, node_cap)))
+            .collect();
         Self {
             graph,
-            modified_count,
-            connector_count,
-            halo_count,
-            deleted_count,
+            modified_count: counts.modified_count,
+            connector_count: counts.connector_count,
+            halo_count: counts.halo_count,
+            deleted_count: counts.deleted_count,
             collapsed,
+            by_axis,
         }
     }
 }
@@ -1839,6 +1944,114 @@ pub struct ChangedMacroView {
     /// D5). Equals [`impacted_count`](Self::impacted_count) when the cap is
     /// not exceeded (then the "showing N of M" affordance is omitted).
     pub inlined_count: usize,
+    /// The macro-scoped lineage DAG (cute-dbt#431, epic #427) — this macro's
+    /// impacted root-project models
+    /// ([`MacroRole::User`](crate::adapters::explore::MacroRole::User)) + their
+    /// `ref()`-downstream closure
+    /// ([`MacroRole::Downstream`](crate::adapters::explore::MacroRole::Downstream)),
+    /// role-dimmed,
+    /// as a slim engine-aware DAG the Macros tab renders. Built by projecting
+    /// the SAME [`build_macro_lineage_payload`](crate::adapters::explore::build_macro_lineage_payload)
+    /// the explore macro page consumes (payload reuse, not topology
+    /// re-derivation), narrowed to the `{id,name,role}` + edges the report
+    /// tab-DAG renderer needs (the explore-only `cte_dags` / `project_pane` /
+    /// path / badge fields stay out of the report payload). Empty when the
+    /// blast radius is empty (a materialization macro, or an edit reaching no
+    /// root-project model) — the tab then shows the honest "no impacted
+    /// models" copy, never a DAG canvas. **Report-page Cytoscape contract:
+    /// the first-party preset layout (`cyto-dag.js`), NEVER `cytoscape-dagre`
+    /// (dagre is the explore page's layout only — AGENTS.md).**
+    pub macro_dag: MacroDagPayload,
+}
+
+/// The slim macro-scoped lineage DAG one [`ChangedMacroView`] carries
+/// (cute-dbt#431) — `{nodes,edges}` in the engine-aware report tab-DAG shape,
+/// projected from the explore [`LineagePayload`](crate::adapters::explore::LineagePayload).
+///
+/// Deliberately NOT the full `LineagePayload`: the report only needs each
+/// node's id/name/role + the dependency edges to draw the role-dimmed DAG, so
+/// the explore-only surfaces (per-model CTE DAGs, the project pane, file paths,
+/// the pre-formatted test badge) are dropped — keeping the report payload lean
+/// and the two surfaces' shapes independent. `Serialize`-only render payload.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct MacroDagPayload {
+    /// The role-stamped DAG vertices (impacted models + downstream closure),
+    /// in deterministic full-id order. Empty when the blast radius is empty.
+    pub nodes: Vec<MacroDagNode>,
+    /// Forward dependency edges between entries of `nodes`, ordered.
+    pub edges: Vec<MacroDagEdge>,
+}
+
+/// One vertex of a [`MacroDagPayload`] (cute-dbt#431) — id, render label,
+/// role, and the fail-open `not_compiled` flag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MacroDagNode {
+    /// Full manifest node id — the tab-DAG element id + the
+    /// click→`#model-select` selection key (parity with the mini-DAG node).
+    pub id: String,
+    /// Rendered label — the bare model name (canvas-text / Mermaid label).
+    pub name: String,
+    /// The macro-DAG role: `"user"` (an impacted, macro-calling model —
+    /// emphasized) or `"downstream"` (a `ref()`-downstream context node —
+    /// dimmed). The slim string form of
+    /// [`MacroRole`](crate::adapters::explore::MacroRole), composed in Rust so
+    /// the JS stays a pure renderer.
+    pub role: &'static str,
+    /// The fail-open "not compiled" flag (cute-dbt#100) — rendered as a
+    /// dashed node, never raised.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_compiled: bool,
+}
+
+/// One directed edge of a [`MacroDagPayload`] (producer → consumer), both
+/// endpoints in the node set (cute-dbt#431).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MacroDagEdge {
+    /// Full node id of the upstream (depended-on) model.
+    pub from: String,
+    /// Full node id of the downstream (depending) model.
+    pub to: String,
+}
+
+/// Project the explore
+/// [`build_macro_lineage_payload`](crate::adapters::explore::build_macro_lineage_payload)
+/// role-stamped subgraph into the slim [`MacroDagPayload`] the report's
+/// Macros-tab DAG renders (cute-dbt#431).
+///
+/// Reuses the explore lineage builder verbatim (the payload-reuse seam — the
+/// macro focus set, the role classification, and the edge induction are all
+/// shared), then narrows each node to `{id,name,role,not_compiled}` and each
+/// `(from_index,to_index)` edge to a `{from,to}` id pair. An empty focus set
+/// (a materialization macro / no root-project caller) yields an empty DAG, so
+/// the tab shows the honest no-models copy.
+fn build_macro_dag(current: &Manifest, macro_id: &str) -> MacroDagPayload {
+    let focus = crate::domain::macro_focus_set(current, macro_id);
+    let lineage = crate::adapters::explore::build_macro_lineage_payload(current, &focus);
+    let nodes: Vec<MacroDagNode> = lineage
+        .nodes
+        .iter()
+        .map(|n| MacroDagNode {
+            id: n.id.clone(),
+            name: n.name.clone(),
+            role: match n.macro_role {
+                Some(crate::adapters::explore::MacroRole::User) => "user",
+                // Downstream is the default for any focus node that is not a
+                // user; a node with no role (never produced by the focused
+                // builder, but exhaustive) reads as context.
+                _ => "downstream",
+            },
+            not_compiled: n.not_compiled,
+        })
+        .collect();
+    let edges: Vec<MacroDagEdge> = lineage
+        .edges
+        .iter()
+        .map(|e| MacroDagEdge {
+            from: e.from.clone(),
+            to: e.to.clone(),
+        })
+        .collect();
+    MacroDagPayload { nodes, edges }
 }
 
 /// One impacted (macro-calling) root-project model in a
@@ -2683,6 +2896,11 @@ fn changed_macro_view(
     // "showing N of M bodies" copy. When it equals impacted_count the cap
     // is not exceeded and the template omits the over-cap affordance.
     let inlined_count = impacted_count.min(body_cap);
+    // cute-dbt#431 — the macro-scoped lineage DAG for the Macros tab. Reuses
+    // the explore `build_macro_lineage_payload` focus + role classification,
+    // projected to the slim report tab-DAG shape. Independent of the body cap
+    // (the DAG is bounded by the blast radius, already counted above).
+    let macro_dag = build_macro_dag(current, macro_id);
     ChangedMacroView {
         name,
         package,
@@ -2693,6 +2911,7 @@ fn changed_macro_view(
         tree,
         impacted_models,
         inlined_count,
+        macro_dag,
     }
 }
 
@@ -8381,6 +8600,99 @@ mod tests {
         .with_macro_identity(identity)
     }
 
+    /// A root-project `model` calling `direct_macros` AND consuming
+    /// `producers` (its `ref()` parents) — the macro-DAG downstream edges
+    /// ride `depends_on.nodes`. File `<id-leaf>.sql`, package `shop`.
+    fn macro_model_with_refs(id: &str, direct_macros: &[&str], producers: &[&str]) -> Node {
+        let leaf = id.rsplit('.').next().unwrap_or(id);
+        Node::new(
+            NodeId::new(id),
+            "model",
+            Checksum::new("sha256", "abc"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::new(
+                direct_macros.iter().map(|m| (*m).to_owned()).collect(),
+                producers.iter().map(|p| NodeId::new(*p)).collect(),
+            ),
+            Some(format!("models/{leaf}.sql")),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(None, Some("shop".to_owned()))
+    }
+
+    #[test]
+    fn build_macro_dag_role_stamps_users_and_downstream() {
+        // add_dq_flags is called by `staged` (a User). `mart` consumes
+        // `staged` via ref() ⇒ `mart` is in the downstream closure
+        // (Downstream). `island` calls no macro and is unrelated ⇒ absent.
+        let manifest = macro_lens_manifest(vec![
+            macro_model_with_refs("model.shop.staged", &["macro.shop.add_dq_flags"], &[]),
+            macro_model_with_refs("model.shop.mart", &[], &["model.shop.staged"]),
+            macro_model_with_refs("model.shop.island", &[], &[]),
+        ]);
+        let dag = build_macro_dag(&manifest, "macro.shop.add_dq_flags");
+        let by_id: std::collections::BTreeMap<&str, &MacroDagNode> =
+            dag.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+        assert_eq!(
+            by_id.get("model.shop.staged").map(|n| n.role),
+            Some("user"),
+            "the macro-calling model is a User",
+        );
+        assert_eq!(
+            by_id.get("model.shop.mart").map(|n| n.role),
+            Some("downstream"),
+            "the ref()-downstream model is Downstream context",
+        );
+        assert!(
+            !by_id.contains_key("model.shop.island"),
+            "an unrelated model is not in the focus set",
+        );
+        // The dependency edge staged -> mart is induced in the DAG.
+        assert!(
+            dag.edges
+                .iter()
+                .any(|e| e.from == "model.shop.staged" && e.to == "model.shop.mart"),
+            "the staged -> mart ref() edge is induced: {:?}",
+            dag.edges,
+        );
+    }
+
+    #[test]
+    fn build_macro_dag_empty_when_no_root_model_calls_the_macro() {
+        // No model calls the macro ⇒ empty blast radius ⇒ empty focus ⇒ empty
+        // DAG (the Macros tab shows the honest no-models copy).
+        let manifest =
+            macro_lens_manifest(vec![macro_model_with_refs("model.shop.island", &[], &[])]);
+        let dag = build_macro_dag(&manifest, "macro.shop.add_dq_flags");
+        assert!(dag.nodes.is_empty(), "no caller ⇒ no DAG nodes");
+        assert!(dag.edges.is_empty(), "no caller ⇒ no DAG edges");
+    }
+
+    #[test]
+    fn changed_macro_view_carries_the_macro_dag() {
+        // The macro DAG rides on the ChangedMacroView (so the Macros tab can
+        // render it from the JSON payload).
+        let manifest = macro_lens_manifest(vec![macro_model_with_refs(
+            "model.shop.staged",
+            &["macro.shop.add_dq_flags"],
+            &[],
+        )]);
+        let changed = BTreeSet::from(["macro.shop.add_dq_flags".to_owned()]);
+        let lens = build_macro_lens(&manifest, &changed, ScopeSource::PrDiff, None, usize::MAX)
+            .expect("a changed macro builds the lens");
+        let mac = &lens.macros[0];
+        assert!(
+            mac.macro_dag
+                .nodes
+                .iter()
+                .any(|n| n.id == "model.shop.staged"),
+            "the impacted model is in the macro DAG",
+        );
+    }
+
     #[test]
     fn build_macro_lens_empty_changed_set_is_none() {
         // The off-gate / no-macro-changed contract: an empty set ⇒ None ⇒
@@ -11669,5 +11981,117 @@ mod tests {
         assert!(!payload.collapsed, "0 nodes ≤ any cap ⇒ not collapsed");
         assert!(payload.graph.nodes.is_empty());
         assert!(payload.graph.edges.is_empty());
+    }
+
+    #[test]
+    fn from_graph_leaves_by_axis_empty_so_baseline_goldens_stay_byte_identical() {
+        // The baseline-arm / no-axis constructor: `by_axis` is empty, so the
+        // serde-skip keeps every pre-#430 + baseline golden byte-identical.
+        use crate::domain::PrDagState;
+        let graph = PrDagGraph {
+            nodes: vec![pr_dag_node(
+                "model.shop.a",
+                PrDagState::Modified,
+                false,
+                1,
+                0,
+            )],
+            ..PrDagGraph::default()
+        };
+        let payload = PrDagPayload::from_graph(graph, 48);
+        assert!(payload.by_axis.is_empty(), "no per-axis views on this arm");
+        // serde-skip: the key never appears in JSON for an empty map.
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert!(
+            !json.contains("by_axis"),
+            "empty by_axis is omitted from JSON (byte-identity)"
+        );
+    }
+
+    #[test]
+    fn from_graph_with_axes_wraps_each_axis_subgraph_with_its_own_counts() {
+        use crate::domain::{PrDagEdge, PrDagState};
+        // The "all" view: stg_orders + fct_orders modified, int_order_items the
+        // connector between them.
+        let all = PrDagGraph {
+            nodes: vec![
+                pr_dag_node("model.shop.stg", PrDagState::Modified, false, 2, 1),
+                pr_dag_node("model.shop.int", PrDagState::Modified, true, 0, 0),
+                pr_dag_node("model.shop.fct", PrDagState::Modified, false, 3, 0),
+            ],
+            edges: vec![
+                PrDagEdge {
+                    from: "model.shop.stg".to_owned(),
+                    to: "model.shop.int".to_owned(),
+                },
+                PrDagEdge {
+                    from: "model.shop.int".to_owned(),
+                    to: "model.shop.fct".to_owned(),
+                },
+            ],
+        };
+        // The "config" subset: only fct_orders fired config — a single
+        // disconnected modified model, no connectors.
+        let config = PrDagGraph {
+            nodes: vec![pr_dag_node(
+                "model.shop.fct",
+                PrDagState::Modified,
+                false,
+                0,
+                0,
+            )],
+            ..PrDagGraph::default()
+        };
+        let mut by_axis = BTreeMap::new();
+        by_axis.insert("config".to_owned(), config);
+
+        let payload = PrDagPayload::from_graph_with_axes(all, by_axis, 48);
+        // The top-level "all" view: 2 modified + 1 connector.
+        assert_eq!(payload.modified_count, 2);
+        assert_eq!(payload.connector_count, 1);
+        // The per-axis "config" view: just the one modified model, no
+        // connector recomputed over the subset.
+        let cfg = payload.by_axis.get("config").expect("config view present");
+        assert_eq!(cfg.modified_count, 1, "config subset is one modified model");
+        assert_eq!(
+            cfg.connector_count, 0,
+            "no connector in a single-seed subset"
+        );
+        assert_eq!(cfg.graph.nodes.len(), 1);
+        assert!(!cfg.collapsed);
+        // The map is serialized under `by_axis` when non-empty.
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert!(json.contains("by_axis"), "non-empty by_axis is serialized");
+    }
+
+    #[test]
+    fn from_graph_with_axes_view_counts_halo_separately() {
+        use crate::domain::{PrDagNode, PrDagState};
+        // A per-axis subset where the one modified model is disconnected and
+        // pulls in a halo neighbor — the halo lands in its own tier, never
+        // inflating the subset's modified_count.
+        let halo = PrDagNode {
+            id: "model.shop.up".to_owned(),
+            name: "up".to_owned(),
+            state: PrDagState::Modified,
+            is_connector: false,
+            is_halo: true,
+            lines_added: 0,
+            lines_removed: 0,
+        };
+        let body = PrDagGraph {
+            nodes: vec![
+                pr_dag_node("model.shop.m", PrDagState::Modified, false, 4, 0),
+                halo,
+            ],
+            ..PrDagGraph::default()
+        };
+        let mut by_axis = BTreeMap::new();
+        by_axis.insert("body".to_owned(), body);
+        let payload = PrDagPayload::from_graph_with_axes(PrDagGraph::default(), by_axis, 48);
+        let v = payload.by_axis.get("body").expect("body view");
+        assert_eq!(v.modified_count, 1);
+        assert_eq!(v.halo_count, 1, "the 1-hop neighbor is dimmed context");
+        assert_eq!(v.connector_count, 0);
     }
 }

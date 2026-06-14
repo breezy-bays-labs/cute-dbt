@@ -49,157 +49,6 @@
   {%- endif %}
 </section>
 
-{% match pr_dag %}{% when Some with (pr_dag) %}{#- cute-dbt#404 (epic #352) — the PR-scope lineage mini-DAG, placed at the top
-    of the report (after the title + the diff-scope banner). Modified models
-    emphasized, connectors quiet, deleted as ghosts, each with its lines ± chip.
-    Gated behind the `pr-scope-mini-dag` experiment: when off the cli passes
-    `pr_dag = None`, so this `{% match %}` arm emits ZERO bytes and the
-    non-experimental goldens stay byte-identical (the macro-lens precedent). The
-    descriptor + static Mermaid host are server-rendered; the graph paints
-    client-side from the JSON payload (`DATA.pr_dag.graph`) via the gated inline
-    script (Mermaid, the static default engine — one engine per page). A node
-    click selects that model in the report's existing `<select>` (zero-egress).
-    The bare `{% match` above (no trim) preserves the blank line so the OFF
-    render is byte-for-byte identical to pre-#404; `{% endmatch -%}` trims its
-    own trailing newline so the settings comment follows exactly as before. -#}
-<section class="pr-minidag-panel" aria-label="PR-scope lineage" data-testid="pr-minidag-panel">
-  <div class="pr-minidag-header">
-    <h2>PR scope lineage <span class="pr-minidag-experimental" data-testid="pr-minidag-experimental">experimental</span></h2>
-    <button type="button" class="expect-tooltip pr-minidag-hint" aria-label="Click a node to select that model below.">ⓘ<span class="expect-tooltip-bubble" aria-hidden="true">Click a node to select that model below.</span></button>
-  </div>
-  <p class="pr-minidag-descriptor" data-testid="pr-minidag-descriptor" data-modified="{{ pr_dag.modified_count }}" data-connectors="{{ pr_dag.connector_count }}" data-halo="{{ pr_dag.halo_count }}" data-deleted="{{ pr_dag.deleted_count }}">{{ pr_dag.modified_count }} modified {% if pr_dag.modified_count == 1 %}model{% else %}models{% endif %}{% if pr_dag.connector_count > 0 %} · {{ pr_dag.connector_count }} connector {% if pr_dag.connector_count == 1 %}model{% else %}models{% endif %}{% endif %}{% if pr_dag.halo_count > 0 %} · {{ pr_dag.halo_count }} context {% if pr_dag.halo_count == 1 %}model{% else %}models{% endif %}{% endif %}{% if pr_dag.deleted_count > 0 %} · {{ pr_dag.deleted_count }} deleted{% endif %} — modified emphasized, connectors quiet, context dimmed, deleted as ghosts. Click a node to select it below.</p>
-{%- if pr_dag.collapsed %}
-  <p class="pr-minidag-collapsed" data-testid="pr-minidag-collapsed" data-nodes="{{ pr_dag.graph.nodes.len() }}">PR scope spans {{ pr_dag.graph.nodes.len() }} models — too large to render inline. Use the model selector below to navigate.</p>
-{%- else %}
-  {#- The Mermaid host: empty static markup the GATED inline script (below) fills
-      from the JSON payload (`DATA.pr_dag.graph`) on DOMContentLoaded — after the
-      bottom-of-document jQuery/Mermaid/interaction.js have parsed. No `src`, no
-      inline graph bytes here — the zero-egress posture (the per-model CTE DAG
-      host precedent). -#}
-  <div class="pr-minidag-canvas" data-testid="pr-minidag-canvas"></div>
-{%- endif %}
-{#- cute-dbt#404 — the mini-DAG renderer + click→select wiring, inlined in the
-    GATED section (not the shared interaction.js engine) so the non-experimental
-    goldens stay byte-identical: when the experiment is off this whole
-    `{% match %}` arm — script included — emits ZERO bytes. Deferred to
-    DOMContentLoaded so the bottom-of-document Mermaid + jQuery + the
-    #model-select change handler exist before this runs. Reads the graph from
-    the JSON payload (`#cute-dbt-data`), renders it with Mermaid (the static
-    default engine — no second engine, the one-engine-per-page posture), and
-    wires each node's click to the report's existing model <select> via the #91
-    `change.cuteDbt` event (zero-egress, no fetch). A collapsed mini-DAG renders
-    no canvas, so this no-ops there. -#}
-  <script>
-  (function () {
-    document.addEventListener("DOMContentLoaded", function () {
-      var host = document.querySelector(".pr-minidag-canvas");
-      if (!host) return; // collapsed / no canvas — nothing to render
-      var dataEl = document.getElementById("cute-dbt-data");
-      if (!dataEl) return;
-      var data;
-      try { data = JSON.parse(dataEl.textContent); } catch (e) { return; }
-      var pd = data && data.pr_dag;
-      if (!pd || !pd.graph || !pd.graph.nodes.length) return;
-      if (typeof window.mermaid === "undefined") return;
-      var graph = pd.graph;
-      var safeIds = {};
-      graph.nodes.forEach(function (n, i) { safeIds[n.id] = "p" + i; });
-      var lines = ["graph LR"];
-      graph.nodes.forEach(function (n) {
-        var label = String(n.name || n.id).replace(/"/g, "&quot;");
-        var a = n.lines_added || 0, r = n.lines_removed || 0;
-        if (a !== 0 || r !== 0) label += " (+" + a + "/-" + r + ")";
-        var cls, shape;
-        if (n.is_connector) { cls = "prdag_connector"; shape = '["' + label + '"]'; }
-        else if (n.is_halo) { cls = "prdag_halo"; shape = '["' + label + '"]'; }
-        else if (n.state === "deleted") { cls = "prdag_deleted"; shape = '["' + label + '"]'; }
-        else { cls = "prdag_modified"; shape = '(["' + label + '"])'; }
-        lines.push("    " + safeIds[n.id] + shape + ":::" + cls);
-      });
-      graph.edges.forEach(function (e) {
-        var f = safeIds[e.from], t = safeIds[e.to];
-        if (f && t) lines.push("    " + f + " --> " + t);
-      });
-      lines.push("    classDef prdag_modified fill:#fdf2dc,stroke:#b07400,stroke-width:2.5px,color:#1c1c1f;");
-      lines.push("    classDef prdag_connector fill:#f4f4f5,stroke:#8a8a90,stroke-width:1.2px,color:#5a5a5f;");
-      lines.push("    classDef prdag_halo fill:#fafafb,stroke:#b8b8be,stroke-width:1px,stroke-dasharray:3 2,color:#6a6a70;");
-      lines.push("    classDef prdag_deleted fill:#f7f7f8,stroke:#b0392c,stroke-width:1.5px,stroke-dasharray:5 3,color:#7a3a33;");
-      var src = lines.join("\n");
-      var id = "prdag-" + Math.random().toString(36).slice(2, 9);
-      window.mermaid.render(id, src).then(function (out) {
-        host.innerHTML = out.svg;
-        if (out.bindFunctions) out.bindFunctions(host);
-        bindNodes(host, id);
-      }).catch(function (err) {
-        host.textContent = "Mermaid render failed: " + String(err);
-      });
-
-      function bindNodes(svgHost, svgId) {
-        var prefix = svgId + "-flowchart-";
-        var groups = svgHost.querySelectorAll('g.node[id^="' + prefix + '"]');
-        if (!groups.length) groups = svgHost.querySelectorAll('g.node[id*="-flowchart-"]');
-        var safeToName = {}, safeToSelectable = {};
-        graph.nodes.forEach(function (n, i) {
-          safeToName["p" + i] = n.name;
-          safeToSelectable["p" + i] = n.state !== "deleted";
-        });
-        Array.prototype.forEach.call(groups, function (g) {
-          var raw = g.getAttribute("id") || "";
-          var m2 = raw.replace(prefix, "").match(/^(.+?)-\d+$/);
-          if (!m2) return;
-          var name = safeToName[m2[1]];
-          if (name === undefined) return;
-          g.classList.add("pr-minidag-node");
-          g.setAttribute("data-model", name);
-          if (!safeToSelectable[m2[1]]) {
-            g.setAttribute("aria-label", "Deleted model: " + name);
-            return;
-          }
-          g.setAttribute("tabindex", "0");
-          g.setAttribute("role", "button");
-          g.setAttribute("aria-label", "Select model: " + name);
-          g.style.cursor = "pointer";
-          function activate() {
-            var sel = document.getElementById("model-select");
-            if (!sel) return;
-            var has = false;
-            for (var i = 0; i < sel.options.length; i++) {
-              if (sel.options[i].value === name) { has = true; break; }
-            }
-            if (!has) return;
-            if (window.jQuery) {
-              window.jQuery(sel).val(name).trigger("change.cuteDbt");
-            } else {
-              sel.value = name;
-              sel.dispatchEvent(new Event("change"));
-            }
-            var anchor = document.querySelector(".test-selection");
-            if (anchor && anchor.scrollIntoView) {
-              anchor.scrollIntoView({ behavior: "smooth", block: "start" });
-            }
-          }
-          g.addEventListener("click", activate);
-          g.addEventListener("keydown", function (ev) {
-            if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); activate(); }
-          });
-        });
-      }
-
-      // The viewer toggle: show/hide the whole panel (cute-dbt#404). The
-      // checkbox is server-rendered in the settings panel (gated by has_pr_dag).
-      var toggle = document.getElementById("settings-prdag-input");
-      var panel = document.querySelector(".pr-minidag-panel");
-      if (toggle && panel) {
-        toggle.addEventListener("change", function () {
-          panel.hidden = !toggle.checked;
-        });
-      }
-    });
-  })();
-  </script>
-</section>
-{% when None %}{% endmatch -%}
-
 {# cute-dbt#139 / cute-dbt#178 — report settings menu. A cog button (top-right,
    keyboard-accessible, aria-labelled) toggles a non-blocking panel. The
    APPEARANCE section (theme / style / accent / density / diff-layout, wired
@@ -511,6 +360,42 @@
      A radiogroup of buttons (single-select, aria-pressed per segment) —
      the #91 test-mode-toggle recipe family, reused. -#}
   <div class="axis-filter" role="radiogroup" aria-label="Filter models by change axis" data-testid="axis-filter" hidden></div>
+{%- match pr_dag %}{% when Some with (pr_dag) %}{#- cute-dbt#429 (epic #427) — the PR-scope lineage mini-DAG, RELOCATED out of
+    the report top into the Models lens (beside the #414 axis filter + the #423
+    axis chips it re-scopes with). Modified models emphasized, connectors quiet,
+    halo dimmed (#428), deleted as ghosts, each with its lines ± chip. Still
+    gated behind the `pr-scope-mini-dag` experiment: off ⇒ cli passes
+    `pr_dag = None`, this `{% match %}` arm emits ZERO bytes. ENGINE-AWARE
+    (#429): a Mermaid host (the static default) AND a Cytoscape host (the
+    settings-panel picker, the CTE-DAG engine-swap precedent) — the renderer in
+    interaction.js (renderPrMiniDag) dispatches on the persisted `engine` pref
+    and swaps live, zero-egress. FILTER-REACTIVE (#430): the #414 axis filter
+    re-scopes the DAG to `DATA.pr_dag.by_axis[axis]` (`all` = the top-level
+    graph), the per-axis connector/halo sets PRE-COMPUTED in Rust — the JS only
+    swaps the pre-emitted set, never re-derives topology. A node click selects
+    that model in the report's `<select>`. The descriptor + static hosts are
+    server-rendered; the graph paints client-side from `DATA.pr_dag`. -#}
+  <section class="pr-minidag-panel" aria-label="PR-scope lineage" data-testid="pr-minidag-panel">
+    <div class="pr-minidag-header">
+      <h2>PR scope lineage <span class="pr-minidag-experimental" data-testid="pr-minidag-experimental">experimental</span></h2>
+      <button type="button" class="expect-tooltip pr-minidag-hint" aria-label="Click a node to select that model below.">ⓘ<span class="expect-tooltip-bubble" aria-hidden="true">Click a node to select that model below.</span></button>
+    </div>
+    <p class="pr-minidag-descriptor" data-testid="pr-minidag-descriptor" data-modified="{{ pr_dag.modified_count }}" data-connectors="{{ pr_dag.connector_count }}" data-halo="{{ pr_dag.halo_count }}" data-deleted="{{ pr_dag.deleted_count }}">{{ pr_dag.modified_count }} modified {% if pr_dag.modified_count == 1 %}model{% else %}models{% endif %}{% if pr_dag.connector_count > 0 %} · {{ pr_dag.connector_count }} connector {% if pr_dag.connector_count == 1 %}model{% else %}models{% endif %}{% endif %}{% if pr_dag.halo_count > 0 %} · {{ pr_dag.halo_count }} context {% if pr_dag.halo_count == 1 %}model{% else %}models{% endif %}{% endif %}{% if pr_dag.deleted_count > 0 %} · {{ pr_dag.deleted_count }} deleted{% endif %} — modified emphasized, connectors quiet, context dimmed, deleted as ghosts. Click a node to select it below.</p>
+    {#- The two engine hosts: empty static markup the shared renderPrMiniDag
+        (interaction.js) fills on boot + on every engine / axis-filter change.
+        The Mermaid host is the static default; the Cytoscape host (canvas +
+        node card) is revealed when the settings-panel picker selects Cytoscape
+        (the CTE-DAG `.cte-dag-mermaid` / `.cte-dag-cyto` precedent). A collapsed
+        mini-DAG (over the node cap) renders the summary line instead, but the
+        graph data still rides the JSON for any consumer. -#}
+    <div class="pr-minidag-collapsed" data-testid="pr-minidag-collapsed" hidden></div>
+    <div class="pr-minidag-mermaid" data-testid="pr-minidag-canvas"></div>
+    <div class="pr-minidag-cyto is-hidden" data-testid="pr-minidag-cyto">
+      <div class="pr-minidag-cyto-canvas cyto-canvas"></div>
+      <div class="pr-minidag-cyto-card cyto-node-card" aria-hidden="true"></div>
+    </div>
+  </section>
+{% when None %}{% endmatch %}
   {# cute-dbt#416 — the REMOVED models summary: a count chip + a short path
      list for the models this PR deleted. Removed models are node-less (no
      current node → no dropdown detail), so they surface ONCE here at the
@@ -734,6 +619,28 @@
 {% endfor %}</pre>
 {%- endmatch %}
     <p class="macro-lens-count" data-testid="macro-lens-count" data-count="{{ mac.impacted_count }}">Impacts {{ mac.impacted_count }} root-project {% if mac.impacted_count == 1 %}model{% else %}models{% endif %}.</p>
+{#- cute-dbt#431 (epic #427) — the macro-scoped lineage DAG: this macro's
+    impacted (calling) models emphasized as USERS, their ref()-downstream
+    closure dimmed as DOWNSTREAM context, role-stamped from the SAME
+    build_macro_lineage_payload the explore macro page consumes (payload reuse).
+    ENGINE-AWARE (Mermaid default + Cytoscape via the settings picker), driven
+    by the #424 macro selector — picking a macro re-targets the rendered DAG.
+    REPORT-PAGE Cytoscape contract: the first-party preset layout (cyto-dag.js),
+    NEVER cytoscape-dagre (dagre is the explore page's layout only, AGENTS.md).
+    Empty blast radius ⇒ the renderer leaves the host empty + shows the honest
+    no-models copy (the renderer reads `macro_dag.nodes.length`). Static empty
+    hosts only — the graph paints client-side from
+    `DATA.macro_lens.macros[i].macro_dag` (zero-egress, the mini-DAG precedent). -#}
+{%- if !mac.macro_dag.nodes.is_empty() %}
+    <div class="macro-lens-dag-panel" data-testid="macro-lens-dag-panel" data-macro="{{ mac.name }}">
+      <p class="macro-lens-dag-caption" data-testid="macro-lens-dag-caption">Impacted-model lineage — callers emphasized, downstream dimmed.</p>
+      <div class="macro-lens-dag-mermaid" data-testid="macro-lens-dag-mermaid"></div>
+      <div class="macro-lens-dag-cyto is-hidden" data-testid="macro-lens-dag-cyto">
+        <div class="macro-lens-dag-cyto-canvas cyto-canvas"></div>
+        <div class="macro-lens-dag-cyto-card cyto-node-card" aria-hidden="true"></div>
+      </div>
+    </div>
+{%- endif %}
 {%- if !mac.tree.is_empty() %}
     <details class="macro-lens-tree-details" data-testid="macro-lens-tree-details" open>
       <summary>impacted models</summary>

@@ -391,6 +391,29 @@ fn section_names_macro(world: &mut World) {
     );
 }
 
+#[then("the macro-lens section carries the macro-scoped lineage DAG")]
+fn section_carries_macro_dag(world: &mut World) {
+    let html = html(world);
+    // cute-dbt#431 — the Macros-tab macro DAG host (engine-aware; rendered
+    // client-side from DATA.macro_lens.macros[i].macro_dag). Both engine hosts
+    // are present in the static markup; the role-stamped graph rides the JSON
+    // payload (the impacted models as User vertices).
+    assert!(
+        html.contains(r#"data-testid="macro-lens-dag-panel""#),
+        "the section must carry the macro-scoped lineage DAG panel (#431)",
+    );
+    assert!(
+        html.contains(r#"data-testid="macro-lens-dag-mermaid""#)
+            && html.contains(r#"data-testid="macro-lens-dag-cyto""#),
+        "the macro DAG carries BOTH engine hosts (Mermaid default + Cytoscape)",
+    );
+    // The role-stamped DAG payload carries the impacted models as User vertices.
+    assert!(
+        html.contains(r#""role":"user""#),
+        "the macro DAG payload role-stamps the impacted models as User vertices",
+    );
+}
+
 #[then("the macro-lens section carries the macro body diff")]
 fn section_carries_body_diff(world: &mut World) {
     let html = html(world);

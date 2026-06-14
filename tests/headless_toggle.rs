@@ -16135,17 +16135,57 @@ fn render_minidag_report(filename: &str) -> String {
     ]
     .into_iter()
     .collect();
-    let mut graph = compute_pr_dag(&m, &modified, &std::collections::BTreeSet::new(), &[]);
-    // Give the modified nodes a nonzero line delta (old -> new) so the ± chip
-    // renders; the connector keeps 0/0.
-    populate_line_counts(&mut graph, |node| match node.id.as_str() {
+    // The per-node baseline line counts the "all" + per-axis graphs share.
+    let line_counts = |node: &cute_dbt::domain::PrDagNode| match node.id.as_str() {
         "model.shop.stg_orders" => {
             pr_dag_lines_from_raw_code(Some("select order_id\nfrom raw_orders"), Some("a\nb\nc"))
         }
         "model.shop.fct_orders" => pr_dag_lines_from_raw_code(Some("select x"), Some("a\nb")),
         _ => pr_dag_lines_from_raw_code(Some("same"), Some("same")),
-    });
-    let pr_dag = PrDagPayload::from_graph(graph, 48);
+    };
+    let mut graph = compute_pr_dag(&m, &modified, &std::collections::BTreeSet::new(), &[]);
+    populate_line_counts(&mut graph, line_counts);
+
+    // cute-dbt#430 — the PRE-COMPUTED per-axis subgraphs (exactly as the cli's
+    // `pr_dag_axis_subgraphs` derives them). `body` + `unit_test` fired for both
+    // modified models ⇒ the full 3-node connector graph; `config` fired for
+    // fct_orders ALONE ⇒ a single disconnected model that pulls int_order_items
+    // in as a HALO neighbor (2 nodes). The headless filter-reactivity test swaps
+    // between these.
+    let fct_only: ModelInScopeSet = [NodeId::new("model.shop.fct_orders")].into_iter().collect();
+    let empty_new = std::collections::BTreeSet::new();
+    let mut by_axis: BTreeMap<String, cute_dbt::domain::PrDagGraph> = BTreeMap::new();
+    for (axis, subset) in [
+        ("body", &modified),
+        ("config", &fct_only),
+        ("unit_test", &modified),
+    ] {
+        let mut g = compute_pr_dag(&m, subset, &empty_new, &[]);
+        populate_line_counts(&mut g, line_counts);
+        by_axis.insert(axis.to_owned(), g);
+    }
+    let pr_dag = PrDagPayload::from_graph_with_axes(graph, by_axis, 48);
+
+    // The `axes` map drives the #414 segmented filter's appearance (the JS
+    // builds it only when ≥1 in-scope model carries `axes`). stg fired
+    // body+unit_test; fct fired body+config+unit_test (the per-axis divergence).
+    let mut axes: BTreeMap<NodeId, ChangeAxes> = BTreeMap::new();
+    axes.insert(
+        NodeId::new("model.shop.stg_orders"),
+        ChangeAxes {
+            body: true,
+            config: false,
+            unit_test: true,
+        },
+    );
+    axes.insert(
+        NodeId::new("model.shop.fct_orders"),
+        ChangeAxes {
+            body: true,
+            config: true,
+            unit_test: true,
+        },
+    );
 
     let out = tmp(filename);
     let _ = std::fs::remove_file(&out);
@@ -16173,7 +16213,7 @@ fn render_minidag_report(filename: &str) -> String {
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         Some(&pr_dag),
-        &BTreeMap::new(),
+        &axes,
         &std::collections::BTreeMap::new(),
         &[],
     )
@@ -16189,7 +16229,7 @@ fn wait_for_minidag_nodes(tab: &Tab) -> i64 {
     for _ in 0..40 {
         let n = eval(
             tab,
-            "document.querySelectorAll('.pr-minidag-canvas g.node').length",
+            "document.querySelectorAll('.pr-minidag-mermaid g.node').length",
         )
         .as_i64()
         .unwrap_or(0);
@@ -16253,7 +16293,7 @@ fn pr_minidag_renders_and_node_click_selects_the_model() {
     let clicked = eval_bool(
         &tab,
         "(function () { \
-           var g = document.querySelector('.pr-minidag-canvas g.node[data-model=\"fct_orders\"]'); \
+           var g = document.querySelector('.pr-minidag-mermaid g.node[data-model=\"fct_orders\"]'); \
            if (!g) return false; \
            g.dispatchEvent(new MouseEvent('click', { bubbles: true })); \
            return true; \
@@ -16289,6 +16329,255 @@ fn pr_minidag_renders_and_node_click_selects_the_model() {
             "document.querySelector('.pr-minidag-panel').hidden === true",
         ),
         "the viewer toggle hides the mini-DAG panel",
+    );
+
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#429/#430/#431 (epic #427) — tab-scoped change DAGs --------
+
+/// Poll until the live tab-Cytoscape instance for `canvasSel` reports
+/// `>= expect` nodes (the engine-flip render is async). Returns the count.
+fn wait_for_tab_cy_nodes(tab: &Tab, canvas_sel: &str, expect: i64) -> i64 {
+    let expr = format!(
+        "(function(){{var c=document.querySelector('{canvas_sel}');\
+          var cy=c&&window.CuteTabDags&&window.CuteTabDags.cyForCanvas(c);\
+          return cy?cy.nodes().length:0;}})()"
+    );
+    for _ in 0..50 {
+        let n = eval(tab, &expr).as_i64().unwrap_or(0);
+        if n >= expect {
+            return n;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    eval(tab, &expr).as_i64().unwrap_or(0)
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn pr_minidag_renders_in_both_engines() {
+    // cute-dbt#429 — the relocated Models-tab mini-DAG is ENGINE-AWARE: Mermaid
+    // is the static default (an SVG paints), and flipping the settings-panel
+    // engine picker to Cytoscape swaps it to a live cy canvas IN PLACE (the CTE
+    // DAG's engine-swap contract, now mirrored on the mini-DAG). Both engines
+    // render the same 3-node connector graph.
+    let url = render_minidag_report("headless_minidag_engines.html");
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // It lives INSIDE the Models lens panel now (relocated out of the report
+    // top, cute-dbt#429).
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('#lens-panel-models [data-testid=\"pr-minidag-panel\"]') !== null",
+        ),
+        "the mini-DAG panel is inside the Models lens (relocated #429)",
+    );
+
+    // Default engine: Mermaid renders the 3-node SVG.
+    let mermaid_nodes = wait_for_minidag_nodes(&tab);
+    assert!(
+        mermaid_nodes >= 3,
+        "Mermaid renders the 3-node mini-DAG by default (got {mermaid_nodes})",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.pr-minidag-cyto').classList.contains('is-hidden')",
+        ),
+        "the Cytoscape host starts hidden (Mermaid is the default)",
+    );
+
+    // Flip to Cytoscape: a live cy instance for the mini-DAG canvas appears
+    // with the same 3 nodes, the Mermaid host hides.
+    let sentinel_before = "window.__cuteMiniSentinel = 7";
+    let _ = eval(&tab, sentinel_before);
+    click_engine(&tab, "cytoscape");
+    let cy_nodes = wait_for_tab_cy_nodes(&tab, ".pr-minidag-cyto .cyto-canvas", 3);
+    assert_eq!(
+        cy_nodes, 3,
+        "Cytoscape renders the same 3-node mini-DAG after the engine flip",
+    );
+    assert_eq!(
+        eval(&tab, "window.__cuteMiniSentinel"),
+        serde_json::json!(7),
+        "the engine swap is in place — no reload",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('.pr-minidag-cyto').classList.contains('is-hidden')",
+        ),
+        "the Cytoscape host is revealed after the flip",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.pr-minidag-mermaid').classList.contains('is-hidden')",
+        ),
+        "the Mermaid host hides while Cytoscape is active",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn pr_minidag_rescopes_on_axis_filter_change() {
+    // cute-dbt#430 — picking a change-axis filter re-scopes the Models-tab
+    // mini-DAG to the PRE-COMPUTED per-axis subgraph (the JS swaps the
+    // Rust-emitted `by_axis` set; it never re-derives topology). The fixture's
+    // `config` axis fired for fct_orders ALONE ⇒ a 2-node view (fct + the
+    // int_order_items HALO), distinct from the 3-node `all`/`body` view.
+    let url = render_minidag_report("headless_minidag_filter.html");
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // Default (all): 3 nodes, descriptor reports 2 modified + 1 connector.
+    let all_nodes = wait_for_minidag_nodes(&tab);
+    assert!(all_nodes >= 3, "the all-axis view renders 3 nodes");
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"pr-minidag-descriptor\"]').getAttribute('data-connectors')",
+        ),
+        "1",
+        "all-axis descriptor reports the 1 connector",
+    );
+
+    // Click the `config` axis segment — the mini-DAG re-scopes to fct_orders +
+    // its halo neighbor (2 nodes), and the descriptor flips to 1 modified · 0
+    // connectors · 1 context (halo).
+    let clicked = eval_bool(
+        &tab,
+        "(function(){var b=document.querySelector('[data-testid=\"axis-filter\"] [data-axis=\"config\"]');\
+          if(!b)return false;b.click();return true;})()",
+    );
+    assert!(clicked, "the config axis segment is present and clickable");
+    // The re-render is synchronous on click for the descriptor; the Mermaid SVG
+    // repaints async — poll for the 2-node shape.
+    let mut config_nodes = 0;
+    for _ in 0..50 {
+        config_nodes = eval(
+            &tab,
+            "document.querySelectorAll('.pr-minidag-mermaid g.node').length",
+        )
+        .as_i64()
+        .unwrap_or(0);
+        if config_nodes == 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(
+        config_nodes, 2,
+        "the config-axis view re-scopes to the 2-node (fct + halo) subgraph",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"pr-minidag-descriptor\"]').getAttribute('data-connectors')",
+        ),
+        "0",
+        "config-axis descriptor reports 0 connectors (single-seed subset)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"pr-minidag-descriptor\"]').getAttribute('data-halo')",
+        ),
+        "1",
+        "config-axis descriptor reports the 1 halo (dimmed context) neighbor",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn macro_dag_renders_and_retargets_on_macro_selection() {
+    // cute-dbt#431 — the Macros-tab macro DAG renders the picked macro's
+    // impacted-model lineage (engine-aware), and the #424 macro picker RETARGETS
+    // it. The two-macro fixture: add_dq_flags → stg_orders, mask_pii →
+    // dim_customers; each macro DAG is a single user node, and switching the
+    // picker re-renders the DAG for the other macro's model.
+    let url = render_two_macro_lens_to_file("headless_macro_dag.html");
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // Activate the Macros lens so the DAG host is visible (its canvas needs a
+    // non-zero size for the Cytoscape re-fit; Mermaid renders regardless).
+    let _ = eval(
+        &tab,
+        "document.querySelector('.lens-tab[data-lens=\"macros\"]').click()",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    // The default-visible macro (first = add_dq_flags) renders its DAG host +
+    // a Mermaid node for stg_orders.
+    let mut nodes = 0;
+    for _ in 0..50 {
+        nodes = eval(
+            &tab,
+            "(function(){var p=document.querySelector('.macro-lens-dag-panel[data-macro=\"add_dq_flags\"]:not([hidden])')||\
+               document.querySelector('.macro-lens-dag-panel[data-macro=\"add_dq_flags\"]');\
+              return p?p.querySelectorAll('.macro-lens-dag-mermaid g.node').length:0;})()",
+        )
+        .as_i64()
+        .unwrap_or(0);
+        if nodes >= 1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        nodes >= 1,
+        "the default macro's DAG renders its impacted-model node (got {nodes})",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "Array.from(document.querySelectorAll('.macro-lens-dag-panel[data-macro=\"add_dq_flags\"] .macro-lens-dag-mermaid g.node'))\
+              .some(function(g){return (g.getAttribute('data-model')||'')==='stg_orders';})",
+        ),
+        "the add_dq_flags DAG carries the stg_orders user node",
+    );
+
+    // Retarget: pick mask_pii in the #424 macro selector. A real <select>
+    // change BUBBLES (the delegated re-render handler listens on document), so
+    // the synthetic event must bubble too. The macro DAG re-renders for
+    // dim_customers.
+    let _ = eval(
+        &tab,
+        "(function(){var s=document.querySelector('.macro-select');\
+          s.value='mask_pii';s.dispatchEvent(new Event('change',{bubbles:true}));return true;})()",
+    );
+    let mut retargeted = false;
+    for _ in 0..50 {
+        retargeted = eval_bool(
+            &tab,
+            "Array.from(document.querySelectorAll('.macro-lens-dag-panel[data-macro=\"mask_pii\"] .macro-lens-dag-mermaid g.node'))\
+              .some(function(g){return (g.getAttribute('data-model')||'')==='dim_customers';})",
+        );
+        if retargeted {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        retargeted,
+        "picking mask_pii retargets the macro DAG to its dim_customers user node",
     );
 
     let _ = tab.close(true);

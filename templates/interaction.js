@@ -110,6 +110,11 @@
   // var is only the render dispatcher's current target.
   var dagEngine = "mermaid";
 
+  // cute-dbt#429 — Mermaid is initialized once (the tab-DAG boot above the
+  // zero-models early return may run it before the with-models path); this
+  // guard keeps the initialize() call once-only across both entry points.
+  var cuteMermaidInitialized = false;
+
   var state = {
     selectedModel:  null,
     selectedTestId: null,
@@ -208,6 +213,34 @@
     // the binding is unconditional (a pure in-place class/hidden/aria toggle,
     // distinct from the DAG-shelf handler — territory partition with #398).
     bindLensTabs();
+    // cute-dbt#429/#430/#431 — the tab-scoped change DAGs (the Models-tab
+    // mini-DAG + the Macros-tab macro DAG) are wired ABOVE the zero-models
+    // early return: a macro-only PR (zero in-scope models) must still render
+    // its Macros-tab DAG, and the mini-DAG is a standalone overview. Mermaid
+    // must be initialized before they render — init it ONCE here (idempotent;
+    // the with-models path no longer re-inits). bindTabDagHandlers wires the
+    // axis-filter + macro-pick re-render (delegated, so they survive the
+    // dropdown/section rebuilds) and __cuteRerenderDagTabs the engine flip.
+    if (typeof window.mermaid !== "undefined" && !cuteMermaidInitialized) {
+      window.mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: "base",
+        fontFamily: 'system-ui,-apple-system,"Segoe UI",sans-serif'
+      });
+      cuteMermaidInitialized = true;
+    }
+    bindTabDagHandlers();
+    renderTabDags();
+    // The engine-flip + theme-re-tint hook must re-render the tab DAGs too
+    // (the settings picker swaps engines live). theme.js calls
+    // window.__cuteRerenderDag after pushing the engine via
+    // __cuteSetDagEngine; chain the tab-DAG re-render onto whatever the
+    // with-models path installs (or install a tab-only hook here when there
+    // are zero models, so the macro-only Macros-tab DAG still swaps engines).
+    if (!DATA.models.length) {
+      window.__cuteRerenderDag = function () { renderTabDags(); };
+    }
     if (!DATA.models.length) {
       $(".test-selection").hide();
       $(".model-sql").hide();
@@ -229,13 +262,18 @@
     // real selected test with content, not the empty panel).
     state.selectedTestId = firstVisibleTestId(currentModel());
     // Mermaid config is static across model switches — initialize once
-    // (cute-dbt#40 CR-4). renderDag() then only invokes mermaid.render.
-    window.mermaid.initialize({
-      startOnLoad: false,
-      securityLevel: "strict",
-      theme: "base",
-      fontFamily: 'system-ui,-apple-system,"Segoe UI",sans-serif'
-    });
+    // (cute-dbt#40 CR-4). renderDag() then only invokes mermaid.render. The
+    // tab-DAG boot above (cute-dbt#429) may already have run this; the
+    // `cuteMermaidInitialized` guard keeps it once-only either way.
+    if (typeof window.mermaid !== "undefined" && !cuteMermaidInitialized) {
+      window.mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: "base",
+        fontFamily: 'system-ui,-apple-system,"Segoe UI",sans-serif'
+      });
+      cuteMermaidInitialized = true;
+    }
     renderTestModeToggle();
     renderAxisFilter();
     // cute-dbt#416 — the node-less REMOVED models summary renders once at
@@ -250,7 +288,10 @@
     // the ACTIVE engine so edge/anchor colours pick up the light/dark
     // variant. theme.js calls this hook after flipping [data-theme] /
     // the .dark class (and after an engine flip, cute-dbt#180).
-    window.__cuteRerenderDag = function () { renderDagLegend(); renderDag(); };
+    // cute-dbt#429 — chain the tab-scoped DAGs (mini-DAG + macro DAG) onto the
+    // same engine-flip / theme-re-tint hook so the settings picker swaps them
+    // live alongside the CTE DAG.
+    window.__cuteRerenderDag = function () { renderDagLegend(); renderDag(); renderTabDags(); };
     // cute-dbt#180 — theme.js pushes the picker's engine here, then calls
     // __cuteRerenderDag. A pure state setter: the render itself always goes
     // through the renderDag() dispatcher (engine swap = destroy + rebuild,
@@ -1552,6 +1593,437 @@
     }
   }
 
+  // ===================================================================
+  // cute-dbt#429 / #430 / #431 — the tab-scoped change DAGs (epic #427).
+  //
+  // ONE engine-aware renderer family shared by the Models-tab PR-scope
+  // mini-DAG (#429) and the Macros-tab macro lineage DAG (#431). Both
+  // dispatch on the SAME persisted `dagEngine` pref the CTE DAG uses (the
+  // settings-panel Mermaid <-> Cytoscape picker, #180), and both build their
+  // OWN independent Cytoscape instances (the CTE DAG keeps its `CuteCyto`
+  // singleton; the tab DAGs each create + own a cy in `tabCyInstances`, keyed
+  // by host element). REPORT-PAGE Cytoscape contract: the first-party preset
+  // longest-path layout (CuteCyto.layoutPositions) — NEVER cytoscape-dagre
+  // (dagre is the explore page's layout only, AGENTS.md).
+  //
+  // Each DAG node carries a render-tier (`tierOf`): the mini-DAG uses the
+  // modified/connector/halo/deleted state taxonomy; the macro DAG uses the
+  // user/downstream role. The tier drives both engines' node styling AND the
+  // legend, kept 1:1 across Mermaid + Cytoscape (the CTE-DAG dual-engine rule).
+  // A node click selects that model in the report's #model-select (zero-egress,
+  // the mini-DAG click contract) — deleted ghosts are not selectable.
+  // ===================================================================
+
+  // Tier palettes (fill / stroke / dashed-border) for the tab DAGs. Light
+  // fills + dark labels read at AA on any theme (the CTE-DAG node posture);
+  // only structural dashing distinguishes the dimmed/ghost tiers. Mirrored 1:1
+  // between the Mermaid classDefs and the Cytoscape stylesheet below.
+  var TAB_DAG_TIERS = {
+    modified:   { fill: "#fdf2dc", stroke: "#b07400", w: 2.5, dash: null, round: true },
+    connector:  { fill: "#f4f4f5", stroke: "#8a8a90", w: 1.2, dash: null, round: false },
+    halo:       { fill: "#fafafb", stroke: "#b8b8be", w: 1.0, dash: "3 2", round: false },
+    deleted:    { fill: "#f7f7f8", stroke: "#b0392c", w: 1.5, dash: "5 3", round: false },
+    user:       { fill: "#fdf2dc", stroke: "#b07400", w: 2.5, dash: null, round: true },
+    downstream: { fill: "#f4f4f5", stroke: "#8a8a90", w: 1.2, dash: null, round: false }
+  };
+
+  // The render tier for a tab-DAG node. Mini-DAG nodes carry state +
+  // is_connector/is_halo; macro-DAG nodes carry a `role` string. The first
+  // matching predicate wins (connector/halo before deleted before modified —
+  // the Rust descriptor's branch order, kept in lockstep).
+  function tabDagTierOf(n) {
+    if (n.role) return n.role === "user" ? "user" : "downstream";
+    if (n.is_connector) return "connector";
+    if (n.is_halo) return "halo";
+    if (n.state === "deleted") return "deleted";
+    return "modified";
+  }
+
+  // Build a `graph LR` Mermaid source for a tab DAG `{nodes,edges}`. Labels
+  // are tier-classed; the mini-DAG appends the per-node ±lines chip. Node ids
+  // are mapped to safe `t<i>` handles (the CTE-DAG safeId idiom).
+  function buildTabDagMermaid(graph) {
+    var lines = ["graph LR"];
+    var safeIds = {};
+    graph.nodes.forEach(function (n, i) { safeIds[n.id] = "t" + i; });
+    graph.nodes.forEach(function (n) {
+      var label = String(n.name || n.id).replace(/"/g, "&quot;");
+      var a = n.lines_added || 0, r = n.lines_removed || 0;
+      if (a !== 0 || r !== 0) label += " (+" + a + "/-" + r + ")";
+      var tier = tabDagTierOf(n);
+      var t = TAB_DAG_TIERS[tier];
+      var shape = t.round ? '(["' + label + '"])' : '["' + label + '"]';
+      lines.push("    " + safeIds[n.id] + shape + ":::tabdag_" + tier);
+    });
+    graph.edges.forEach(function (e) {
+      var f = safeIds[e.from], tt = safeIds[e.to];
+      if (f && tt) lines.push("    " + f + " --> " + tt);
+    });
+    Object.keys(TAB_DAG_TIERS).forEach(function (tier) {
+      var t = TAB_DAG_TIERS[tier];
+      var dash = t.dash ? ",stroke-dasharray:" + t.dash : "";
+      lines.push("    classDef tabdag_" + tier + " fill:" + t.fill + ",stroke:" + t.stroke +
+        ",stroke-width:" + t.w + "px,color:#1c1c1f" + dash + ";");
+    });
+    return lines.join("\n");
+  }
+
+  // The independent Cytoscape instances for the tab DAGs — one per CANVAS
+  // element (NOT the CTE-DAG singleton). Tracked as {canvas, cy} pairs so the
+  // mini-DAG and the macro DAG can each be Cytoscape simultaneously without one
+  // tearing down the other (the panels are mutually exclusive in the UI, but
+  // the renderers run independently). `destroyTabCyFor(canvas)` tears down only
+  // that canvas's prior instance before a rebuild; the headless seam below
+  // exposes the live instances.
+  var tabCyInstances = [];
+  function destroyTabCyFor(canvas) {
+    tabCyInstances = tabCyInstances.filter(function (rec) {
+      if (rec.canvas === canvas) { try { rec.cy.destroy(); } catch (e) { /* ignore */ } return false; }
+      return true;
+    });
+  }
+
+  // The Cytoscape stylesheet for the tab DAGs — the tier fills/strokes above,
+  // plus the shared edge color (the palette hook's fallback edge). Canvas-text
+  // labels, system fonts, no workers (the report-page #180 contract).
+  function tabDagStyleSheet() {
+    var pal = window.cuteDagPalette ? window.cuteDagPalette() : { nodeText: "#1c1c1f", fallbackEdge: "#9aa0ab" };
+    var sheet = [
+      { selector: "node", style: {
+        "label": "data(label)",
+        "text-valign": "center",
+        "text-halign": "center",
+        "font-family": 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        "font-size": 12,
+        "color": pal.nodeText,
+        "text-wrap": "wrap",
+        "text-max-width": 150,
+        "width": "label",
+        "height": "label",
+        "padding": "9px",
+        "shape": "rectangle"
+      }},
+      { selector: "edge", style: {
+        "curve-style": "bezier",
+        "width": 1.6,
+        "target-arrow-shape": "triangle",
+        "line-color": pal.fallbackEdge,
+        "target-arrow-color": pal.fallbackEdge,
+        "arrow-scale": 1.0
+      }}
+    ];
+    Object.keys(TAB_DAG_TIERS).forEach(function (tier) {
+      var t = TAB_DAG_TIERS[tier];
+      var style = {
+        "background-color": t.fill,
+        "border-color": t.stroke,
+        "border-width": t.w,
+        "shape": t.round ? "round-rectangle" : "rectangle"
+      };
+      if (t.dash) {
+        style["border-style"] = "dashed";
+      }
+      sheet.push({ selector: 'node[tier = "' + tier + '"]', style: style });
+    });
+    return sheet;
+  }
+
+  // Render a tab DAG into `hostEl` with Cytoscape (an independent instance).
+  // `onSelect(id)` is the click handler (model selection). Uses the first-party
+  // preset layout — NO dagre.
+  function renderTabDagCyto(hostEl, graph, onSelect) {
+    if (typeof window.cytoscape !== "function" || !window.CuteCyto ||
+        typeof window.CuteCyto.layoutPositions !== "function") {
+      return false;
+    }
+    var canvas = hostEl.querySelector(".cyto-canvas");
+    if (!canvas) return false;
+    destroyTabCyFor(canvas); // tear down only THIS canvas's prior instance
+    var pos = window.CuteCyto.layoutPositions(graph.nodes, graph.edges || []);
+    var els = [];
+    graph.nodes.forEach(function (n) {
+      els.push({
+        group: "nodes",
+        data: { id: n.id, label: String(n.name || n.id), tier: tabDagTierOf(n) },
+        position: pos[n.id] || { x: 0, y: 0 }
+      });
+    });
+    (graph.edges || []).forEach(function (e, i) {
+      els.push({ group: "edges", data: { id: "te" + i, source: e.from, target: e.to } });
+    });
+    canvas.textContent = "";
+    var cy = window.cytoscape({
+      container: canvas,
+      elements: els,
+      style: tabDagStyleSheet(),
+      layout: { name: "preset", fit: true, padding: 24 },
+      minZoom: 0.35,
+      maxZoom: 2.2,
+      boxSelectionEnabled: false,
+      autoungrabify: true
+    });
+    cy.on("tap", "node", function (evt) {
+      var id = evt.target.id();
+      var n = graph.nodes.filter(function (g) { return g.id === id; })[0];
+      // Deleted ghosts are not selectable (the mini-DAG click contract).
+      if (n && n.state === "deleted") return;
+      if (typeof onSelect === "function") onSelect(n);
+    });
+    window.requestAnimationFrame(function () { try { cy.fit(24); } catch (e) { /* ignore */ } });
+    tabCyInstances.push({ canvas: canvas, cy: cy });
+    return true;
+  }
+
+  // Render a tab DAG into `hostEl` with Mermaid (the static default).
+  // `mermaidHost` is the .…-mermaid div; `cytoWrap` the .…-cyto wrapper.
+  // `onSelect(node)` is the model-selection click handler.
+  function renderTabDag(mermaidHost, cytoWrap, graph, onSelect) {
+    var useCyto = dagEngine === "cytoscape" &&
+      typeof window.cytoscape === "function" && window.CuteCyto;
+    if (mermaidHost) mermaidHost.classList.toggle("is-hidden", !!useCyto);
+    if (cytoWrap) cytoWrap.classList.toggle("is-hidden", !useCyto);
+    if (useCyto && cytoWrap) {
+      if (mermaidHost) mermaidHost.innerHTML = "";
+      var ok = renderTabDagCyto(cytoWrap, graph, onSelect);
+      if (ok) return;
+      // Cytoscape unavailable — fall back to Mermaid in place.
+      if (mermaidHost) mermaidHost.classList.remove("is-hidden");
+      if (cytoWrap) cytoWrap.classList.add("is-hidden");
+    }
+    // Mermaid path: tear down any prior Cytoscape instance for this host's
+    // canvas (a flip back to Mermaid, or a re-render with no engine change).
+    if (cytoWrap) {
+      var staleCanvas = cytoWrap.querySelector(".cyto-canvas");
+      if (staleCanvas) destroyTabCyFor(staleCanvas);
+    }
+    if (!mermaidHost || typeof window.mermaid === "undefined") return;
+    var src = buildTabDagMermaid(graph);
+    var id = "tabdag-" + Math.random().toString(36).slice(2, 9);
+    window.mermaid.render(id, src).then(function (out) {
+      mermaidHost.innerHTML = out.svg;
+      if (out.bindFunctions) out.bindFunctions(mermaidHost);
+      bindTabDagNodeClicks(mermaidHost, graph, id, onSelect);
+    }).catch(function (err) {
+      mermaidHost.textContent = "Mermaid render failed: " + String(err);
+    });
+  }
+
+  // Bind click/keyboard selection to the Mermaid-rendered tab-DAG node groups
+  // (the CTE-DAG bindDagNodeClicks idiom, model-selection variant).
+  function bindTabDagNodeClicks(svgHost, graph, svgId, onSelect) {
+    var prefix = svgId + "-flowchart-";
+    var groups = svgHost.querySelectorAll('g.node[id^="' + prefix + '"]');
+    if (!groups.length) groups = svgHost.querySelectorAll('g.node[id*="-flowchart-"]');
+    var safeToNode = {};
+    graph.nodes.forEach(function (n, i) { safeToNode["t" + i] = n; });
+    Array.prototype.forEach.call(groups, function (g) {
+      var raw = g.getAttribute("id") || "";
+      var m2 = raw.replace(prefix, "").match(/^(.+?)-\d+$/);
+      if (!m2) return;
+      var n = safeToNode[m2[1]];
+      if (!n) return;
+      g.classList.add("tab-dag-node");
+      g.setAttribute("data-model", n.name);
+      if (n.state === "deleted") {
+        g.setAttribute("aria-label", "Deleted model: " + n.name);
+        return;
+      }
+      g.setAttribute("tabindex", "0");
+      g.setAttribute("role", "button");
+      g.setAttribute("aria-label", "Select model: " + n.name);
+      g.style.cursor = "pointer";
+      function activate() { if (typeof onSelect === "function") onSelect(n); }
+      g.addEventListener("click", activate);
+      g.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); activate(); }
+      });
+    });
+  }
+
+  // Select a model in the report's #model-select by bare name (the mini-DAG /
+  // macro-DAG node click contract — zero-egress, no fetch). No-op when the
+  // model is not an option (a downstream/halo context model the filter dropped,
+  // or a node not in scope). Scrolls the test selection into view on success.
+  function selectModelByName(name) {
+    var sel = document.getElementById("model-select");
+    if (!sel) return;
+    var has = false;
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === name) { has = true; break; }
+    }
+    if (!has) return;
+    if (window.jQuery) {
+      window.jQuery(sel).val(name).trigger("change.cuteDbt");
+    } else {
+      sel.value = name;
+      sel.dispatchEvent(new Event("change"));
+    }
+    var anchor = document.querySelector(".test-selection");
+    if (anchor && anchor.scrollIntoView) {
+      anchor.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
+  // ---- the Models-tab PR-scope mini-DAG (#429 / #430) ----------------
+
+  // The mini-DAG view (graph + descriptor counts + collapse flag) for the
+  // ACTIVE axis filter (#430). "all" reads the top-level payload; a specific
+  // axis reads the PRE-COMPUTED `by_axis[axis]` set (connectors + halo already
+  // derived in Rust — the JS only swaps, never re-derives topology). A payload
+  // predating #430 carries no `by_axis`, so a specific axis falls back to the
+  // top-level "all" view (graceful, byte-identity-safe).
+  function activeMiniDagView() {
+    var pd = DATA.pr_dag;
+    if (!pd) return null;
+    if (state.axisFilter !== "all" && pd.by_axis && pd.by_axis[state.axisFilter]) {
+      return pd.by_axis[state.axisFilter];
+    }
+    return pd;
+  }
+
+  // Render the Models-tab mini-DAG for the active axis filter + engine.
+  // Repaints the descriptor counts to the active view, renders (or collapses)
+  // the graph, and wires node clicks to the model selector. Safe to call with
+  // no pr_dag payload (no-op) and with zero in-scope models (the mini-DAG is
+  // a standalone overview).
+  function renderPrMiniDag() {
+    var panel = document.querySelector(".pr-minidag-panel");
+    if (!panel) return;
+    var view = activeMiniDagView();
+    if (!view) return;
+    // Descriptor: reflect the ACTIVE view's counts (the #430 filtered subset).
+    var desc = panel.querySelector(".pr-minidag-descriptor");
+    if (desc) {
+      desc.setAttribute("data-modified", view.modified_count);
+      desc.setAttribute("data-connectors", view.connector_count);
+      desc.setAttribute("data-halo", view.halo_count);
+      desc.setAttribute("data-deleted", view.deleted_count);
+    }
+    var mermaidHost = panel.querySelector(".pr-minidag-mermaid");
+    var cytoWrap = panel.querySelector(".pr-minidag-cyto");
+    var collapsed = panel.querySelector(".pr-minidag-collapsed");
+    var graph = view.graph || { nodes: [], edges: [] };
+    // Collapsed (over the Rust node cap) OR empty subset: show the summary /
+    // empty line, hide both engine hosts.
+    if (view.collapsed || !graph.nodes.length) {
+      if (mermaidHost) { mermaidHost.classList.add("is-hidden"); mermaidHost.innerHTML = ""; }
+      if (cytoWrap) {
+        cytoWrap.classList.add("is-hidden");
+        var emptyCanvas = cytoWrap.querySelector(".cyto-canvas");
+        if (emptyCanvas) destroyTabCyFor(emptyCanvas);
+      }
+      if (collapsed) {
+        collapsed.hidden = false;
+        collapsed.textContent = view.collapsed
+          ? ("PR scope spans " + graph.nodes.length + " models — too large to render inline. Use the model selector below to navigate.")
+          : "No models match this change-axis filter.";
+      }
+      return;
+    }
+    if (collapsed) collapsed.hidden = true;
+    renderTabDag(mermaidHost, cytoWrap, graph, function (n) {
+      if (n && n.name) selectModelByName(n.name);
+    });
+  }
+
+  // ---- the Macros-tab macro lineage DAG (#431) ----------------------
+
+  // The macro_dag for the currently-visible macro (#424 picker). The selector
+  // reveals exactly one `.macro-lens-macro` section; we read its data-macro and
+  // match it against DATA.macro_lens.macros[i].macro_dag. Returns null when no
+  // macro lens / no visible macro / empty DAG.
+  function activeMacroDag() {
+    var ml = DATA.macro_lens;
+    if (!ml || !ml.macros || !ml.macros.length) return null;
+    var sel = document.querySelector(".macro-select");
+    var name = sel ? sel.value : null;
+    if (!name) {
+      // No picker (degenerate) — the first macro is the default-visible one.
+      name = ml.macros[0].name;
+    }
+    var mac = ml.macros.filter(function (m) { return m.name === name; })[0];
+    if (!mac || !mac.macro_dag || !mac.macro_dag.nodes || !mac.macro_dag.nodes.length) return null;
+    return { name: name, dag: mac.macro_dag };
+  }
+
+  // Render the Macros-tab macro DAG for the selected macro + active engine.
+  // Hosts are per-macro (keyed by data-macro), so only the visible macro's
+  // host is painted; the others stay empty static markup (zero bytes of cy).
+  function renderMacroDag() {
+    var active = activeMacroDag();
+    if (!active) return;
+    var host = document.querySelector('.macro-lens-dag-panel[data-macro="' +
+      String(active.name).replace(/["\\]/g, "\\$&") + '"]');
+    if (!host) return;
+    var mermaidHost = host.querySelector(".macro-lens-dag-mermaid");
+    var cytoWrap = host.querySelector(".macro-lens-dag-cyto");
+    renderTabDag(mermaidHost, cytoWrap, active.dag, function (n) {
+      if (n && n.name) selectModelByName(n.name);
+    });
+  }
+
+  // Re-render every visible tab DAG (mini-DAG + macro DAG) — the hook the
+  // engine-switch / theme re-tint / axis-filter / macro-pick paths call.
+  function renderTabDags() {
+    renderPrMiniDag();
+    renderMacroDag();
+  }
+
+  // cute-dbt#429/#430/#431 — the headless-test introspection seam for the
+  // tab-scoped DAGs (the CuteCyto.cyInstance() precedent). `cyForCanvas`
+  // returns the live Cytoscape instance painted into a given `.cyto-canvas`
+  // element (null when none / Mermaid is active); `count` is the live tab-cy
+  // instance count. Lets the headless suite assert both engines render + the
+  // mini-DAG re-scopes on a filter change without coupling to internals.
+  window.CuteTabDags = {
+    cyForCanvas: function (canvas) {
+      for (var i = 0; i < tabCyInstances.length; i++) {
+        if (tabCyInstances[i].canvas === canvas) return tabCyInstances[i].cy;
+      }
+      return null;
+    },
+    count: function () { return tabCyInstances.length; }
+  };
+
+  // cute-dbt#430/#431 — wire the tab-DAG re-render to the affordances that
+  // re-scope them: the #414 axis filter (mini-DAG → the pre-computed per-axis
+  // subgraph) and the #424 macro picker (macro DAG → the picked macro's
+  // lineage) + lens-tab activation (a freshly-revealed tab's Cytoscape canvas
+  // may have been 0-sized while hidden, so a re-render re-fits it). All
+  // DELEGATED on `document` so they survive the JS rebuilds of the filter
+  // buttons / the macro <select> sections (and a macro-only PR, where the
+  // model-bearing handlers never bind). state.axisFilter is updated by the
+  // existing `.axis-filter` handler in bindGlobalHandlers BEFORE this fires
+  // (jQuery preserves bind order), so the mini-DAG reads the new filter.
+  function bindTabDagHandlers() {
+    // The #424 macro picker re-targets the Macros-tab DAG to the picked
+    // macro's lineage. Delegated so it survives the gated macro <select>
+    // markup + binds in the macro-only path (no model-bearing handlers).
+    $(document).on("change", ".macro-select", function () {
+      // Defer one tick so the gated inline macro-picker script (which unhides
+      // the picked macro's `.macro-lens-macro` section) runs first — Mermaid
+      // must render into the now-VISIBLE section, not the still-hidden one.
+      window.setTimeout(renderMacroDag, 0);
+    });
+    // A newly-shown Cytoscape canvas needs a re-fit (it was 0-sized while the
+    // lens panel was hidden). Defer one tick so the panel is `hidden=false`
+    // first (bindLensTabs flips it on the same click).
+    $(document).on("click", ".lens-tab", function () {
+      window.setTimeout(renderTabDags, 0);
+    });
+    // cute-dbt#404/#429 — the settings-panel viewer toggle (show/hide the
+    // PR-scope mini-DAG panel). Server-rendered in the settings panel, gated
+    // by has_pr_dag; the panel now lives in the Models lens (relocated #429),
+    // but the toggle's show/hide contract is unchanged.
+    var prdagToggle = document.getElementById("settings-prdag-input");
+    var prdagPanel = document.querySelector(".pr-minidag-panel");
+    if (prdagToggle && prdagPanel) {
+      prdagToggle.addEventListener("change", function () {
+        prdagPanel.hidden = !prdagToggle.checked;
+      });
+    }
+  }
+
   // cute-dbt#91 — sync the Updated-only ↔ All-tests toggle's active state
   // to state.showAll. (renderSegmentedToggle is retired with the
   // Inspect/All-inputs panel toggle — cute-dbt#201.)
@@ -1600,6 +2072,12 @@
       renderModelSelector();
       renderTestSelector();
       renderForSelectedModel();
+      // cute-dbt#430 — re-scope the Models-tab mini-DAG to the PRE-COMPUTED
+      // per-axis subgraph (connectors + halo already derived in Rust). Bound
+      // here (in the with-models path) so it runs synchronously right after
+      // state.axisFilter flips; the macro-only path relies on the delegated
+      // bindTabDagHandlers fallback.
+      renderPrMiniDag();
     });
     // cute-dbt#132 / cute-dbt#199 — hunk-fold reveal. ONE delegated listener
     // set (diff blocks are .empty()'d and rebuilt on model/test switch, so
