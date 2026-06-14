@@ -59,7 +59,7 @@ use headless_chrome::browser::tab::point::Point;
 use headless_chrome::protocol::cdp::types::Event;
 use headless_chrome::protocol::cdp::{Network, Runtime};
 
-use cute_dbt::adapters::explore::render_explore;
+use cute_dbt::adapters::explore::{MacroFocus, render_explore};
 use cute_dbt::adapters::render::build_payload;
 use cute_dbt::domain::{
     Checksum, DEFAULT_SEED_ROW_CAP, DependsOn, Exposure, InScopeSet, Manifest, ManifestMetadata,
@@ -1831,6 +1831,11 @@ fn render_explore_macro_page(
         users: users.iter().map(|s| NodeId::new(*s)).collect(),
         downstream: downstream.iter().map(|s| NodeId::new(*s)).collect(),
     };
+    // cute-dbt#345 — the headless render-path helper threads no test
+    // consumers (the focused-DAG zero-egress arm exercises the lineage
+    // engine, not the directory); the empty set renders an honest empty
+    // tests partition.
+    let macro_tests = std::collections::BTreeSet::new();
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
     let _ = std::fs::remove_dir_all(&dir);
     render_explore(
@@ -1839,7 +1844,10 @@ fn render_explore_macro_page(
         &models,
         None,
         &payload,
-        Some(&focus),
+        Some(MacroFocus {
+            focus: &focus,
+            tests: &macro_tests,
+        }),
         &[],
         DEFAULT_SEED_ROW_CAP,
         &ProjectFacts::default(),

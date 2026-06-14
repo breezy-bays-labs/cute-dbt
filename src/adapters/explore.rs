@@ -1258,6 +1258,120 @@ struct ExploreTest {
     shape: String,
 }
 
+/// The filtered artifact "directory" for the explore macro view
+/// (cute-dbt#345 — AC1 + AC3). For a focused macro: a folder-grouped
+/// listing of ONLY the models and ONLY the tests that (transitively) call
+/// it, surfaced as **two separate partitions** so the
+/// `get_where_subquery`-style test consumers never flood the model view.
+///
+/// The two partitions are populated from the ONE pure-domain authority
+/// (cute-dbt#345 AC4): `models` from `macro_blast_radius` (= the focus
+/// set's `users`) and `tests` from `macro_test_consumers`. This struct is
+/// pure presentation — the folder grouping + the per-partition counts —
+/// computed in the renderer over already-resolved domain id sets.
+struct MacroDirectory {
+    /// The model partition: folders of models whose `depends_on.macros`
+    /// closure reaches the macro. Mirrors the project's `models/**` tree.
+    models: Vec<MacroDirFolder>,
+    /// The tests partition: folders of `test`/`unit_test` nodes that reach
+    /// the macro — kept separate from `models` (the AC3 non-merge rule).
+    tests: Vec<MacroDirFolder>,
+    /// Total model entries across `models` (the partition header count).
+    model_count: usize,
+    /// Total test entries across `tests` (the partition header count).
+    test_count: usize,
+}
+
+/// One collapsible folder in a [`MacroDirectory`] partition — the
+/// directory portion of the members' `original_file_path`, with its
+/// entries (the `<details>`/`<summary>` group the template renders).
+struct MacroDirFolder {
+    /// The display folder path (e.g. `models/marts/core`), or the
+    /// `"(no path)"` sentinel for members whose manifest carries no
+    /// `original_file_path` (synthetic / pre-1.8 nodes — surfaced, never
+    /// silently dropped).
+    folder: String,
+    /// The members declared under this folder, in id order.
+    entries: Vec<MacroDirEntry>,
+}
+
+/// One artifact row in a [`MacroDirFolder`] — a model or test that calls
+/// the focused macro.
+struct MacroDirEntry {
+    /// Full manifest node id (the stable handle).
+    id: String,
+    /// Bare display name (the id's leaf segment).
+    name: String,
+    /// The member's file name (the last `original_file_path` segment), or
+    /// `None` when the manifest carries no path.
+    file: Option<String>,
+}
+
+/// Sentinel folder label for members the manifest gives no
+/// `original_file_path` (synthetic / pre-1.8 nodes). Surfacing them under
+/// a labeled bucket keeps the never-silently-dropped contract.
+const MACRO_DIR_NO_PATH: &str = "(no path)";
+
+/// Build a folder-grouped [`MacroDirectory`] partition from a set of node
+/// ids (cute-dbt#345). Each id is grouped by the directory portion of its
+/// `original_file_path`; folders sort by path and entries by id, so the
+/// output is deterministic (golden stability). An id absent from the
+/// manifest is skipped defensively (a dangling id never becomes a row).
+fn macro_dir_partition(
+    current: &Manifest,
+    ids: &std::collections::BTreeSet<NodeId>,
+) -> Vec<MacroDirFolder> {
+    // Group entries by folder path; BTreeMap keeps folders path-sorted and
+    // the BTreeSet input keeps each folder's entries id-sorted.
+    let mut by_folder: BTreeMap<String, Vec<MacroDirEntry>> = BTreeMap::new();
+    for id in ids {
+        let Some(node) = current.node(id) else {
+            continue;
+        };
+        let path = node.original_file_path();
+        let (folder, file) = match path {
+            Some(p) => p.rsplit_once('/').map_or_else(
+                // A path with no slash is a project-root file: group it
+                // under "." so it still mirrors the tree honestly.
+                || (".".to_owned(), Some(p.to_owned())),
+                |(dir, file_name)| (dir.to_owned(), Some(file_name.to_owned())),
+            ),
+            None => (MACRO_DIR_NO_PATH.to_owned(), None),
+        };
+        by_folder.entry(folder).or_default().push(MacroDirEntry {
+            id: id.as_str().to_owned(),
+            name: leaf_segment(id.as_str()).to_owned(),
+            file,
+        });
+    }
+    by_folder
+        .into_iter()
+        .map(|(folder, entries)| MacroDirFolder { folder, entries })
+        .collect()
+}
+
+/// Build the filtered artifact directory for the focused macro
+/// (cute-dbt#345). `models` is the blast-radius model set (the focus
+/// `users`); `tests` is the [`macro_test_consumers`](crate::domain::macro_test_consumers)
+/// set. Both are grouped into folders independently — the two partitions
+/// never merge (AC3).
+fn build_macro_directory(
+    current: &Manifest,
+    models: &std::collections::BTreeSet<NodeId>,
+    tests: &std::collections::BTreeSet<NodeId>,
+) -> MacroDirectory {
+    let model_folders = macro_dir_partition(current, models);
+    let test_folders = macro_dir_partition(current, tests);
+    let model_count = model_folders.iter().map(|f| f.entries.len()).sum();
+    let test_count = test_folders.iter().map(|f| f.entries.len()).sum();
+    MacroDirectory {
+        models: model_folders,
+        tests: test_folders,
+        model_count,
+        test_count,
+    }
+}
+
 /// The one-line fixture-shape summary for a test row
 /// (`"2 givens, expects 1 row"`).
 fn test_shape(given_count: usize, expect_rows: Option<usize>) -> String {
@@ -1394,14 +1508,15 @@ struct ExploreTestsTemplate<'a> {
 /// askama binding for `templates/explore-macro.html`.
 ///
 /// The third explore sub-page (cute-dbt#345, epic cute-dbt#99). Emitted
-/// only when a `--pr-diff` changed a root-project macro. Slice 3 renders
-/// the focused macro DAG: the [`build_macro_lineage_payload`] carrier (the
-/// `users ∪ downstream` subgraph, role-stamped) driven by the SAME
-/// vendored Cytoscape + cytoscape-dagre core and `explore-lineage.js`
+/// only when a `--pr-diff` changed a root-project macro. Renders the
+/// focused macro DAG (Slice 3): the [`build_macro_lineage_payload`]
+/// carrier (the `users ∪ downstream` subgraph, role-stamped) driven by the
+/// SAME vendored Cytoscape + cytoscape-dagre core and `explore-lineage.js`
 /// engine as `dag.html`, with the macro-callers emphasized and the
-/// downstream closure dimmed-as-context. The filtered model+test
-/// directory (Slice 4) and the legibility banner (Slice 5) land in this
-/// shell later.
+/// downstream closure dimmed-as-context — PLUS the filtered artifact
+/// directory (AC1 + AC3): the folder-grouped model and test partitions of
+/// everything that calls the macro, surfaced separately as collapsible
+/// `<details>` groups below the DAG.
 #[derive(Template)]
 #[template(path = "explore-macro.html", escape = "html")]
 struct ExploreMacroTemplate<'a> {
@@ -1423,6 +1538,10 @@ struct ExploreMacroTemplate<'a> {
     /// carries its `macro_role` (`"user"`/`"downstream"`), the per-role
     /// boot-class hook in `explore-lineage.js`.
     dag_json: &'a str,
+    /// The filtered artifact directory (cute-dbt#345 AC1 + AC3) — the
+    /// folder-grouped model + test partitions of everything that calls the
+    /// focused macro, the two partitions never merged.
+    directory: &'a MacroDirectory,
     /// The macro-caller (`users`) count — the emphasized models.
     user_count: usize,
     /// The downstream-closure count — the dimmed-as-context nodes.
@@ -1503,6 +1622,26 @@ fn explore_models(
         .collect()
 }
 
+/// The resolved macro-view input for `render_explore` (cute-dbt#345) — the
+/// pre-walked domain id sets the macro sub-page renders, bundled so the
+/// renderer never performs a domain walk (the explore-lane pure-renderer
+/// posture).
+///
+/// Both fields are resolved upstream in `cli::execute_explore`:
+/// `focus` from [`macro_focus_set`](crate::domain::macro_focus_set) (the
+/// DAG's `users ∪ downstream`) and `tests` from
+/// [`macro_test_consumers`](crate::domain::macro_test_consumers) (the
+/// directory's tests partition). `focus.users` doubles as the directory's
+/// models partition — one pure-domain authority feeds both surfaces
+/// (cute-dbt#345 AC4).
+pub struct MacroFocus<'a> {
+    /// The focused-DAG node set (`users ∪ downstream`, role-stamped).
+    pub focus: &'a MacroFocusSet,
+    /// The `test`/`unit_test` consumers of the macro — the directory's
+    /// tests partition (kept disjoint from the models partition, AC3).
+    pub tests: &'a std::collections::BTreeSet<NodeId>,
+}
+
 /// Render the explore pages into `out_dir` (created if absent).
 ///
 /// Writes `dag.html` then `tests.html`, and — when `macro_focus` is
@@ -1518,14 +1657,14 @@ fn explore_models(
 /// page. Either way the full `models` set renders — context never
 /// narrows scope.
 ///
-/// `macro_focus` (cute-dbt#345) is the resolved
-/// [`MacroFocusSet`] for the macro a
-/// `--pr-diff` changed: `Some(focus)` renders the focused macro DAG into
-/// `macro.html` (and the third nav anchor on every page); `None` keeps
-/// the two-page output (and its byte-identical goldens) unchanged. The
-/// renderer takes the pre-resolved focus set, not the raw changed-macro
-/// ids — scope resolution (and the domain walk) stays in `cli/mod.rs`, so
-/// this layer is a pure renderer (the explore-lane posture).
+/// `macro_focus` (cute-dbt#345) is the resolved [`MacroFocus`] for the
+/// macro a `--pr-diff` changed: `Some(focus)` renders the focused macro
+/// DAG **and** the filtered artifact directory into `macro.html` (and the
+/// third nav anchor on every page); `None` keeps the two-page output (and
+/// its byte-identical goldens) unchanged. The renderer takes the
+/// pre-resolved domain id sets, not the raw changed-macro ids — scope
+/// resolution (and the domain walk) stays in `cli/mod.rs`, so this layer
+/// is a pure renderer (the explore-lane posture).
 ///
 /// # Errors
 ///
@@ -1537,7 +1676,7 @@ pub fn render_explore(
     models: &ModelInScopeSet,
     changed: Option<&ModelInScopeSet>,
     payload: &ReportPayload,
-    macro_focus: Option<&MacroFocusSet>,
+    macro_focus: Option<MacroFocus<'_>>,
     seed_cards: &[SeedCard],
     seed_row_cap: usize,
     project_facts: &ProjectFacts,
@@ -1651,17 +1790,26 @@ pub fn render_explore(
     // cute-dbt#345 — the third explore sub-page. Emitted only when the
     // run carried a `--pr-diff` changing a root-project macro; the
     // no-macro path writes just dag.html/tests.html (the goldens' shape).
-    if let Some(focus) = macro_focus {
-        render_macro_page(out_dir, current, focus)?;
+    if let Some(macro_focus) = macro_focus {
+        render_macro_page(out_dir, current, &macro_focus)?;
     }
 
     Ok(())
 }
 
-/// Render the focused macro DAG sub-page (`macro.html`, cute-dbt#345
-/// Slice 3): the `users ∪ downstream` subgraph (role-stamped) through the
-/// same vendored Cytoscape + cytoscape-dagre engine `dag.html` uses.
-fn render_macro_page(out_dir: &Path, current: &Manifest, focus: &MacroFocusSet) -> io::Result<()> {
+/// Render the focused macro DAG sub-page (`macro.html`, cute-dbt#345):
+/// the `users ∪ downstream` subgraph (role-stamped) through the same
+/// vendored Cytoscape + cytoscape-dagre engine `dag.html` uses, PLUS the
+/// filtered artifact directory — the folder-grouped model + test
+/// partitions of everything that calls the macro, surfaced separately
+/// below the DAG. Extracted from `render_explore` to keep that composer
+/// short (cute-dbt#270/#345 merge).
+fn render_macro_page(
+    out_dir: &Path,
+    current: &Manifest,
+    macro_focus: &MacroFocus<'_>,
+) -> io::Result<()> {
+    let focus = macro_focus.focus;
     let macro_lineage = build_macro_lineage_payload(current, focus);
     // The displayed counts must reflect what RENDERS, not the domain
     // closure: `focus.downstream` crosses every consumer node type (incl.
@@ -1683,6 +1831,11 @@ fn render_macro_page(out_dir: &Path, current: &Manifest, focus: &MacroFocusSet) 
         .count();
     let macro_dag_json = json_for_html_script(&macro_lineage)
         .map_err(|err| io::Error::other(format!("macro dag payload serialization: {err}")))?;
+    // The filtered artifact directory (AC1 + AC3): the models partition
+    // IS the focus set's `users` (the blast radius — one authority, AC4);
+    // the tests partition is the pre-resolved `macro_test_consumers` set.
+    // Both grouped into folders independently, never merged.
+    let directory = build_macro_directory(current, &focus.users, macro_focus.tests);
     let macro_html = ExploreMacroTemplate {
         sakura_css: SAKURA_CSS,
         appearance_js: APPEARANCE_JS,
@@ -1691,6 +1844,7 @@ fn render_macro_page(out_dir: &Path, current: &Manifest, focus: &MacroFocusSet) 
         explore_lineage_js: EXPLORE_LINEAGE_JS,
         favicon_data_uri: FAVICON_DATA_URI,
         dag_json: &macro_dag_json,
+        directory: &directory,
         user_count,
         downstream_count,
         edge_count: macro_lineage.edges.len(),
@@ -1704,7 +1858,7 @@ fn render_macro_page(out_dir: &Path, current: &Manifest, focus: &MacroFocusSet) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, HashMap as StdHashMap};
+    use std::collections::{BTreeMap, BTreeSet, HashMap as StdHashMap};
 
     use crate::adapters::render::build_payload;
     use crate::domain::{
@@ -3556,6 +3710,7 @@ mod tests {
             &["model.shop.stg_orders"],
             &["model.shop.dim_orders", "model.shop.mart_orders"],
         );
+        let macro_tests = BTreeSet::new();
         let dir = tmp_dir("macro-focus");
         render_explore(
             &dir,
@@ -3563,7 +3718,10 @@ mod tests {
             &models,
             None,
             &payload,
-            Some(&focus),
+            Some(MacroFocus {
+                focus: &focus,
+                tests: &macro_tests,
+            }),
             &[],
             DEFAULT_SEED_ROW_CAP,
             &ProjectFacts::default(),
@@ -3660,6 +3818,7 @@ mod tests {
         // the over-claim source if counted directly.
         assert_eq!(focus.downstream.len(), 2, "closure includes the test node");
 
+        let macro_tests = BTreeSet::new();
         let dir = tmp_dir("macro-count-vertex");
         render_explore(
             &dir,
@@ -3667,7 +3826,10 @@ mod tests {
             &models,
             None,
             &payload,
-            Some(&focus),
+            Some(MacroFocus {
+                focus: &focus,
+                tests: &macro_tests,
+            }),
             &[],
             DEFAULT_SEED_ROW_CAP,
             &ProjectFacts::default(),
@@ -3707,6 +3869,187 @@ mod tests {
         assert!(
             !macro_html.contains("2 downstream node"),
             "the count must NOT over-claim the test node as a downstream vertex",
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ----- the filtered artifact directory (cute-dbt#345 AC1 + AC3) -----
+
+    /// A node with an `original_file_path` — the directory's grouping key.
+    fn node_with_path(id: &str, resource_type: &str, path: Option<&str>) -> Node {
+        Node::new(
+            NodeId::new(id),
+            resource_type,
+            Checksum::new("sha256", "ck"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            path.map(str::to_owned),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn macro_directory_groups_entries_by_folder_path() {
+        // Two models under distinct folders + one under a third: the
+        // partition is folder-sorted, each folder's entries id-sorted, and
+        // the file name is the path's last segment.
+        let current = manifest_of(vec![
+            node_with_path(
+                "model.shop.fct_b",
+                "model",
+                Some("models/marts/core/fct_b.sql"),
+            ),
+            node_with_path(
+                "model.shop.fct_a",
+                "model",
+                Some("models/marts/core/fct_a.sql"),
+            ),
+            node_with_path("model.shop.stg", "model", Some("models/staging/stg.sql")),
+        ]);
+        let ids: std::collections::BTreeSet<NodeId> = [
+            NodeId::new("model.shop.fct_b"),
+            NodeId::new("model.shop.fct_a"),
+            NodeId::new("model.shop.stg"),
+        ]
+        .into_iter()
+        .collect();
+        let folders = macro_dir_partition(&current, &ids);
+        assert_eq!(folders.len(), 2, "two distinct folders");
+        assert_eq!(folders[0].folder, "models/marts/core");
+        // Entries are id-sorted: fct_a before fct_b.
+        assert_eq!(folders[0].entries[0].name, "fct_a");
+        assert_eq!(folders[0].entries[0].file.as_deref(), Some("fct_a.sql"));
+        assert_eq!(folders[0].entries[1].name, "fct_b");
+        assert_eq!(folders[1].folder, "models/staging");
+        assert_eq!(folders[1].entries[0].name, "stg");
+    }
+
+    #[test]
+    fn macro_directory_partitions_models_and_tests_separately() {
+        // The two partitions never merge (AC3): a model and a test that
+        // both reach the macro land in disjoint partitions.
+        let current = manifest_of(vec![
+            node_with_path("model.shop.orders", "model", Some("models/orders.sql")),
+            node_with_path("test.shop.dq_orders", "test", Some("tests/dq_orders.sql")),
+        ]);
+        let models: std::collections::BTreeSet<NodeId> =
+            [NodeId::new("model.shop.orders")].into_iter().collect();
+        let tests: std::collections::BTreeSet<NodeId> =
+            [NodeId::new("test.shop.dq_orders")].into_iter().collect();
+        let dir = build_macro_directory(&current, &models, &tests);
+        assert_eq!(dir.model_count, 1);
+        assert_eq!(dir.test_count, 1);
+        assert_eq!(dir.models[0].entries[0].name, "orders");
+        assert_eq!(dir.tests[0].entries[0].name, "dq_orders");
+        // The model never appears in the tests partition and vice versa.
+        let in_tests = dir
+            .tests
+            .iter()
+            .flat_map(|f| &f.entries)
+            .any(|e| e.id == "model.shop.orders");
+        assert!(
+            !in_tests,
+            "the model must not leak into the tests partition"
+        );
+    }
+
+    #[test]
+    fn macro_directory_surfaces_pathless_nodes_under_a_sentinel() {
+        // A node with no original_file_path (synthetic / pre-1.8) is
+        // surfaced under the "(no path)" bucket, never silently dropped.
+        let current = manifest_of(vec![
+            node_with_path("model.shop.synthetic", "model", None),
+            // A project-root file (no slash) groups under ".".
+            node_with_path("model.shop.root", "model", Some("root.sql")),
+        ]);
+        let ids: std::collections::BTreeSet<NodeId> = [
+            NodeId::new("model.shop.synthetic"),
+            NodeId::new("model.shop.root"),
+        ]
+        .into_iter()
+        .collect();
+        let folders = macro_dir_partition(&current, &ids);
+        let labels: Vec<&str> = folders.iter().map(|f| f.folder.as_str()).collect();
+        assert!(
+            labels.contains(&MACRO_DIR_NO_PATH),
+            "pathless node bucket: {labels:?}"
+        );
+        assert!(labels.contains(&"."), "root-file bucket: {labels:?}");
+        // The pathless entry carries no file name.
+        let no_path = folders
+            .iter()
+            .find(|f| f.folder == MACRO_DIR_NO_PATH)
+            .expect("the no-path folder");
+        assert_eq!(no_path.entries[0].file, None);
+    }
+
+    #[test]
+    fn macro_directory_is_empty_for_empty_id_sets() {
+        let current = manifest_of(vec![node_with_path(
+            "model.shop.orders",
+            "model",
+            Some("models/orders.sql"),
+        )]);
+        let empty = std::collections::BTreeSet::new();
+        let dir = build_macro_directory(&current, &empty, &empty);
+        assert_eq!(dir.model_count, 0);
+        assert_eq!(dir.test_count, 0);
+        assert!(dir.models.is_empty() && dir.tests.is_empty());
+    }
+
+    #[test]
+    fn render_explore_macro_page_renders_the_filtered_directory() {
+        // End-to-end render assertion: a focus set with a user model + a
+        // test consumer renders BOTH partitions into macro.html with the
+        // folder grouping and the partition headers.
+        let current = manifest_of(vec![
+            node_with_path(
+                "model.shop.stg_orders",
+                "model",
+                Some("models/staging/stg_orders.sql"),
+            ),
+            node_with_path("test.shop.dq_orders", "test", Some("tests/dq_orders.sql")),
+        ]);
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let focus = focus_of(&["model.shop.stg_orders"], &[]);
+        let macro_tests: std::collections::BTreeSet<NodeId> =
+            [NodeId::new("test.shop.dq_orders")].into_iter().collect();
+        let dir = tmp_dir("macro-directory");
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            None,
+            &payload,
+            Some(MacroFocus {
+                focus: &focus,
+                tests: &macro_tests,
+            }),
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+            &ProjectFacts::default(),
+        )
+        .expect("explore renders");
+        let macro_html = fs::read_to_string(dir.join("macro.html")).expect("macro.html");
+        assert!(
+            macro_html.contains("class=\"macro-directory\""),
+            "macro.html renders the filtered artifact directory",
+        );
+        assert!(
+            macro_html.contains("<summary>models/staging</summary>"),
+            "the models partition groups the caller under its folder: {macro_html}",
+        );
+        assert!(
+            macro_html.contains("<summary>tests</summary>"),
+            "the tests partition groups the test consumer under its folder",
+        );
+        assert!(
+            macro_html.contains(">stg_orders</span>") && macro_html.contains(">dq_orders</span>"),
+            "both the model caller and the test consumer render as entries",
         );
         let _ = fs::remove_dir_all(&dir);
     }
