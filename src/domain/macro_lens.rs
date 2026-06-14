@@ -915,6 +915,7 @@ mod tests {
             &PrDiff {
                 files,
                 renames: vec![],
+                deleted: vec![],
             },
             None,
         )

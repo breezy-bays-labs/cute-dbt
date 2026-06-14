@@ -7841,6 +7841,7 @@ mod tests {
         // working-tree body so the reconstruction splices the old line.
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: vec![FileHunks {
                 path: "macros/dq.sql".to_owned(),
                 hunks: vec![Hunk {

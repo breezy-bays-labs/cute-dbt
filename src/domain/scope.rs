@@ -403,6 +403,7 @@ mod tests {
     fn prdiff_from_paths(paths: &[&str]) -> PrDiff {
         PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: paths
                 .iter()
                 .map(|p| FileHunks {

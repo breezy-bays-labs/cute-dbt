@@ -685,12 +685,15 @@ fn unit_test_targets(manifest: &Manifest) -> HashMap<NodeId, Vec<String>> {
 ///
 /// For each seed id in `seeds` (in deterministic [`SeedInScopeSet`] order),
 /// resolves the seed node and emits a [`SeedCard`] carrying its bare name,
-/// project-relative `original_file_path`, and the bare names of the
+/// project-relative `original_file_path`, the bare names of the
 /// **direct** downstream models that `ref()` it (the `seed_consumers`-derived
-/// "feeds N models" line). The data-bearing
-/// fields ([`SeedCard::table`] / [`SeedCard::diff`]) and the config-display
-/// strings stay empty here — the CLI gather stage fills them from the
-/// working-tree CSV in a later slice.
+/// "feeds N models" line), and the **config-display strings**
+/// ([`SeedCard::delimiter`] / [`SeedCard::quote_columns`] /
+/// [`SeedCard::column_types`]) composed by `seed_config_displays` from the
+/// seed node's `config` (cute-dbt#397 — only the **non-default** keys, so a
+/// reviewer sees deviations, not noise). The data-bearing fields
+/// ([`SeedCard::table`] / [`SeedCard::diff`]) stay empty here — the CLI
+/// gather stage fills them from the working-tree CSV in a later slice.
 ///
 /// A seed id with no matching node is skipped (defensive — the projection
 /// only emits ids that resolve, but `current` is the single source of
@@ -703,14 +706,78 @@ pub fn build_seed_cards(current: &Manifest, seeds: &SeedInScopeSet) -> Vec<SeedC
         .filter_map(|seed_id| {
             let node = current.node(seed_id)?;
             let feeds_models = consumers.get(seed_id).cloned().unwrap_or_default();
-            Some(SeedCard::new(
+            let mut card = SeedCard::new(
                 seed_id.clone(),
                 node.bare_name(),
                 node.original_file_path().map(str::to_owned),
                 feeds_models,
-            ))
+            );
+            let (delimiter, quote_columns, column_types) = seed_config_displays(node.config());
+            card.delimiter = delimiter;
+            card.quote_columns = quote_columns;
+            card.column_types = column_types;
+            Some(card)
         })
         .collect()
+}
+
+/// Compose a seed's three config-display strings from its
+/// [`NodeConfig`](crate::domain::manifest::NodeConfig) (cute-dbt#397) — the
+/// values the report's seed config-display chips render.
+///
+/// Returns `(delimiter, quote_columns, column_types)`, each `Some` **only
+/// when the seed authored a non-default value** so the chips surface
+/// deviations from dbt's defaults, never noise on every seed:
+///
+/// - `delimiter` — `Some` only when present AND not the dbt default `","`.
+///   The display string is the raw separator (e.g. `"|"`, `";"`, `"\t"`).
+/// - `quote_columns` — `Some("true")` only when the seed enabled quoting
+///   (the dbt default is `false`); the off case is suppressed.
+/// - `column_types` — `Some` only when the override map is **non-empty**
+///   (the dbt default is `{}`); rendered as a sorted, comma-joined
+///   `col: type` list so the chip is deterministic regardless of wire order.
+///
+/// Pure POD composition over the config dict — `std` + `serde` only, no
+/// adapter dependency (the domain-purity invariant). The display strings
+/// are composed here, in Rust, so the report JS is a pure renderer that
+/// never interprets a config value (the cute-dbt#350 house rule).
+fn seed_config_displays(
+    config: &crate::domain::manifest::NodeConfig,
+) -> (Option<String>, Option<String>, Option<String>) {
+    // delimiter: suppress the default comma; surface any other separator.
+    let delimiter = config.delimiter().filter(|d| *d != ",").map(str::to_owned);
+
+    // quote_columns: the dbt default is `false` — only chip the enabled case.
+    let quote_columns = match config.quote_columns() {
+        Some(true) => Some("true".to_owned()),
+        _ => None,
+    };
+
+    // column_types: suppress the empty default; render a deterministic,
+    // sorted `col: type` list. Values are passed through as their displayed
+    // form (a string verbatim, anything non-string via its JSON form) —
+    // never interpreted as a type, only displayed.
+    let column_types = config.column_types().and_then(|map| {
+        if map.is_empty() {
+            return None;
+        }
+        let mut entries: Vec<(&String, &serde_json::Value)> = map.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        let joined = entries
+            .iter()
+            .map(|(col, ty)| {
+                let ty_str = match ty {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                format!("{col}: {ty_str}")
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(joined)
+    });
+
+    (delimiter, quote_columns, column_types)
 }
 
 /// Map each seed node id to the **sorted, deduplicated bare names** of the
@@ -2820,6 +2887,23 @@ mod tests {
         )
     }
 
+    /// A `seed` node carrying an explicit `config` map (cute-dbt#397) — the
+    /// fixture for the config-display-chip threading tests.
+    fn seed_with_config(full_id: &str, file_path: &str, config: BTreeMap<String, Value>) -> Node {
+        Node::new(
+            NodeId::new(full_id),
+            "seed",
+            Checksum::new("sha256", "new"),
+            None,
+            None,
+            DependsOn::default(),
+            Some(file_path.to_owned()),
+            NodeConfig::new(config, false),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
     /// A `model` node that directly `ref()`s the given dependency node ids
     /// (the downstream edge that records seed consumption).
     fn model_with_deps(full_id: &str, checksum: &str, deps: &[&str]) -> Node {
@@ -3064,6 +3148,114 @@ mod tests {
         );
         let cards = build_seed_cards(&current, &SeedInScopeSet::new());
         assert!(cards.is_empty());
+    }
+
+    // ----- cute-dbt#397: config-display-chip threading ----------------
+
+    #[test]
+    fn build_seed_cards_threads_non_default_config_displays() {
+        // A seed authoring a non-comma delimiter, quote_columns: true, and a
+        // non-empty column_types override — all three chips populate.
+        let mut config = BTreeMap::new();
+        config.insert("delimiter".to_owned(), Value::String("|".to_owned()));
+        config.insert("quote_columns".to_owned(), Value::Bool(true));
+        let mut types = serde_json::Map::new();
+        types.insert(
+            "state_code".to_owned(),
+            Value::String("varchar(2)".to_owned()),
+        );
+        types.insert("region".to_owned(), Value::String("varchar(16)".to_owned()));
+        config.insert("column_types".to_owned(), Value::Object(types));
+        let current = manifest(
+            vec![seed_with_config(
+                "seed.shop.raw_states",
+                "seeds/raw_states.csv",
+                config,
+            )],
+            vec![],
+        );
+        let seeds = SeedInScopeSet::from_iter([id("seed.shop.raw_states")]);
+        let cards = build_seed_cards(&current, &seeds);
+        assert_eq!(cards.len(), 1);
+        let c = &cards[0];
+        assert_eq!(c.delimiter.as_deref(), Some("|"));
+        assert_eq!(c.quote_columns.as_deref(), Some("true"));
+        // Sorted by column name: region before state_code.
+        assert_eq!(
+            c.column_types.as_deref(),
+            Some("region: varchar(16), state_code: varchar(2)"),
+        );
+    }
+
+    #[test]
+    fn build_seed_cards_suppresses_default_config_displays() {
+        // dbt-core null-fills the seed config with the DEFAULTS (comma
+        // delimiter, quote_columns: false, empty column_types). None of the
+        // three chips should populate — the reviewer sees deviations only.
+        let mut config = BTreeMap::new();
+        config.insert("materialized".to_owned(), Value::String("seed".to_owned()));
+        config.insert("delimiter".to_owned(), Value::String(",".to_owned()));
+        config.insert("quote_columns".to_owned(), Value::Bool(false));
+        config.insert(
+            "column_types".to_owned(),
+            Value::Object(serde_json::Map::new()),
+        );
+        let current = manifest(
+            vec![seed_with_config(
+                "seed.shop.raw_states",
+                "seeds/raw_states.csv",
+                config,
+            )],
+            vec![],
+        );
+        let seeds = SeedInScopeSet::from_iter([id("seed.shop.raw_states")]);
+        let cards = build_seed_cards(&current, &seeds);
+        assert!(cards[0].delimiter.is_none());
+        assert!(cards[0].quote_columns.is_none());
+        assert!(cards[0].column_types.is_none());
+    }
+
+    #[test]
+    fn build_seed_cards_leaves_config_displays_none_when_config_absent() {
+        // A synthetic seed with no config map (fusion omits unset keys) keeps
+        // every config-display string None.
+        let current = manifest(
+            vec![seed("seed.shop.raw_orders", "new", "seeds/raw_orders.csv")],
+            vec![],
+        );
+        let seeds = SeedInScopeSet::from_iter([id("seed.shop.raw_orders")]);
+        let cards = build_seed_cards(&current, &seeds);
+        assert!(cards[0].delimiter.is_none());
+        assert!(cards[0].quote_columns.is_none());
+        assert!(cards[0].column_types.is_none());
+    }
+
+    #[test]
+    fn seed_config_displays_partial_authoring_chips_only_the_non_default_key() {
+        // Only delimiter is non-default; quote_columns: false and an empty
+        // column_types both suppress. Pins the per-key independence of the
+        // suppression policy.
+        let mut config = BTreeMap::new();
+        config.insert("delimiter".to_owned(), Value::String(";".to_owned()));
+        config.insert("quote_columns".to_owned(), Value::Bool(false));
+        let nc = NodeConfig::new(config, false);
+        let (delimiter, quote_columns, column_types) = seed_config_displays(&nc);
+        assert_eq!(delimiter.as_deref(), Some(";"));
+        assert!(quote_columns.is_none());
+        assert!(column_types.is_none());
+    }
+
+    #[test]
+    fn seed_config_displays_renders_non_string_column_type_via_json_form() {
+        // A column_types value that is not a JSON string (tolerant — ADR-5)
+        // displays via its JSON form rather than panicking or dropping.
+        let mut types = serde_json::Map::new();
+        types.insert("flags".to_owned(), Value::from(42));
+        let mut config = BTreeMap::new();
+        config.insert("column_types".to_owned(), Value::Object(types));
+        let nc = NodeConfig::new(config, false);
+        let (_, _, column_types) = seed_config_displays(&nc);
+        assert_eq!(column_types.as_deref(), Some("flags: 42"));
     }
 
     #[test]

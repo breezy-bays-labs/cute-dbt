@@ -71,7 +71,15 @@ fn not_a_diff(detail: &str) -> String {
 struct DiffScan {
     files: Vec<FileHunks>,
     renames: Vec<RenamePair>,
+    deleted: Vec<String>,
     pending_rename_from: Option<String>,
+    /// The old-side path staged by the most recent `--- a/<path>` header,
+    /// awaiting its `+++` partner (cute-dbt#396). A `+++ /dev/null`
+    /// converts it into a [`deleted`](Self::deleted) entry; a real
+    /// `+++ b/<path>` (modify / rename-with-edit) clears it via
+    /// [`start_file_with_path`]; a `--- /dev/null` (addition) never stages
+    /// anything.
+    pending_old_path: Option<String>,
     current: Option<FileHunks>,
     in_hunk: bool,
     saw_structure: bool,
@@ -96,9 +104,10 @@ impl DiffScan {
     }
 
     /// `diff --git` — start of a new file's header block. Resets `in_hunk`
-    /// and drops any dangling `rename from` (never adjacent across files in
-    /// real git output) so a malformed header cannot leak across files,
-    /// then flushes the in-progress file. Returns `true` when consumed.
+    /// and drops any dangling `rename from` / staged `--- ` old path (never
+    /// adjacent across files in real git output) so a malformed header
+    /// cannot leak across files, then flushes the in-progress file. Returns
+    /// `true` when consumed.
     fn feed_file_marker(&mut self, line: &str) -> bool {
         if !line.starts_with("diff --git") {
             return false;
@@ -106,6 +115,7 @@ impl DiffScan {
         self.saw_structure = true;
         self.in_hunk = false;
         self.pending_rename_from = None;
+        self.pending_old_path = None;
         flush(&mut self.current, &mut self.files);
         true
     }
@@ -140,11 +150,18 @@ impl DiffScan {
 
     /// Header block (`in_hunk == false`). `--- `/`+++ ` are the path
     /// headers; `rename from`/`rename to` pair into a `RenamePair`
-    /// (cute-dbt#80). `index`, mode, `similarity …`, blank → ignored. Marks
-    /// `saw_structure` when the line was a recognized header.
+    /// (cute-dbt#80). A `--- a/<path>` then `+++ /dev/null` pair becomes a
+    /// deletion (cute-dbt#396). `index`, mode, `similarity …`, blank →
+    /// ignored. Marks `saw_structure` when the line was a recognized
+    /// header.
     fn feed_header_line(&mut self, line: &str) {
-        if consume_path_header(line, &mut self.current, &mut self.files)
-            || consume_rename_header(line, &mut self.pending_rename_from, &mut self.renames)
+        if consume_path_header(
+            line,
+            &mut self.current,
+            &mut self.files,
+            &mut self.deleted,
+            &mut self.pending_old_path,
+        ) || consume_rename_header(line, &mut self.pending_rename_from, &mut self.renames)
         {
             self.saw_structure = true;
         }
@@ -161,6 +178,7 @@ impl DiffScan {
         Ok(PrDiff {
             files: self.files,
             renames: self.renames,
+            deleted: self.deleted,
         })
     }
 }
@@ -212,20 +230,46 @@ fn open_hunk(
 }
 
 /// Classify one header-territory path-header line (`in_hunk == false`).
-/// A `--- ` (old-side path) is consumed as a no-op; a `+++ ` starts a new
-/// file via [`start_file`]. Returns `true` when the line was one of the
-/// two (the caller marks `saw_structure` and moves on); `false` for any
-/// other header line.
+///
+/// A `--- ` (old-side path) **stages** its path in `pending_old_path` for
+/// the `+++` partner to resolve (cute-dbt#396): a `/dev/null` old side (an
+/// addition) clears the staging. A `+++ ` either:
+/// - `+++ /dev/null` (a deletion) → records the staged old path on `deleted`;
+/// - `+++ b/<path>` (a real new side: add / modify / rename-with-edit) →
+///   starts a new file via [`start_file_with_path`] (which also clears the
+///   staging).
+///
+/// Returns `true` when the line was a `--- `/`+++ ` header (the caller marks
+/// `saw_structure` and moves on); `false` for any other header line.
 fn consume_path_header(
     line: &str,
     current: &mut Option<FileHunks>,
     files: &mut Vec<FileHunks>,
+    deleted: &mut Vec<String>,
+    pending_old_path: &mut Option<String>,
 ) -> bool {
-    if line.starts_with("--- ") {
+    if let Some(rest) = line.strip_prefix("--- ") {
+        // Stage the old-side path (None for `/dev/null` — an addition).
+        *pending_old_path = parse_minus_path(rest);
         return true;
     }
     if let Some(rest) = line.strip_prefix("+++ ") {
-        start_file(rest, current, files);
+        match parse_plus_path(rest) {
+            // `+++ /dev/null` — a deletion. Recover the path from the staged
+            // old side (`take` so it can't pair with a later file).
+            None => {
+                if let Some(old) = pending_old_path.take() {
+                    deleted.push(old);
+                }
+            }
+            // `+++ b/<path>` — a real new side; open the file. The staged
+            // old path is now consumed (a modify / rename-with-edit, never a
+            // deletion).
+            Some(path) => {
+                *pending_old_path = None;
+                start_file_with_path(path, current, files);
+            }
+        }
         return true;
     }
     false
@@ -259,11 +303,12 @@ fn consume_rename_header(
     false
 }
 
-/// Flush the in-progress file and begin a new one from a `+++ ` header
-/// (`/dev/null` — a deleted file's new side — yields no new file).
-fn start_file(rest: &str, current: &mut Option<FileHunks>, files: &mut Vec<FileHunks>) {
+/// Flush the in-progress file and begin a new one from an already-parsed
+/// new-side `+++ b/<path>` path (cute-dbt#396 split `parse_plus_path` out so
+/// the caller can branch on the `/dev/null` deletion case first).
+fn start_file_with_path(path: String, current: &mut Option<FileHunks>, files: &mut Vec<FileHunks>) {
     flush(current, files);
-    *current = parse_plus_path(rest).map(|path| FileHunks {
+    *current = Some(FileHunks {
         path,
         hunks: Vec::new(),
     });
@@ -317,6 +362,20 @@ fn parse_plus_path(rest: &str) -> Option<String> {
         return None;
     }
     Some(path.strip_prefix("b/").unwrap_or(path).to_owned())
+}
+
+/// Parse a `--- ` header's old-side path (cute-dbt#396): strip an optional
+/// `a/` prefix and a trailing `\t<timestamp>` section. `/dev/null` (a newly
+/// **added** file's old side) yields `None` — the same shape as
+/// [`parse_plus_path`] but with the `a/` (not `b/`) prefix git uses on the
+/// old side. The staged path lets a `+++ /dev/null` (deletion) recover the
+/// path the new side dropped.
+fn parse_minus_path(rest: &str) -> Option<String> {
+    let path = rest.split('\t').next().unwrap_or(rest).trim_end();
+    if path == "/dev/null" {
+        return None;
+    }
+    Some(path.strip_prefix("a/").unwrap_or(path).to_owned())
 }
 
 /// Parse the new-side range from a hunk header's text (everything after
@@ -669,6 +728,234 @@ index 3333333..4444444 100644\n\
         assert!(
             diff.files.is_empty(),
             "a file deleted on the new side names no changed-content path"
+        );
+        // cute-dbt#396: the deleted path is captured on the additive
+        // `deleted` field (the new-side `/dev/null` loses the path, so it
+        // is recovered from the old-side `--- a/<path>` header).
+        assert_eq!(
+            diff.deleted,
+            vec!["d.yml".to_owned()],
+            "the deleted file's old-side path is captured on `deleted`",
+        );
+    }
+
+    // ----- cute-dbt#396: deletion detection (the REMOVED-arm signal) -----
+
+    #[test]
+    fn pure_deletion_captures_the_old_side_path_on_deleted() {
+        // The minimal deletion shape: `--- a/<path>` then `+++ /dev/null`.
+        // The new side is `/dev/null` (no path), so the deleted path is
+        // recovered from the old-side header.
+        let diff = parse_diff(
+            "diff --git a/models/old_model.sql b/models/old_model.sql\ndeleted file mode 100644\n--- a/models/old_model.sql\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-select 1\n-select 2\n",
+        )
+        .expect("a pure-deletion diff parses");
+        assert!(
+            diff.files.is_empty(),
+            "a deleted file names no changed-content path"
+        );
+        assert!(diff.renames.is_empty(), "a deletion is not a rename");
+        assert_eq!(
+            diff.deleted,
+            vec!["models/old_model.sql".to_owned()],
+            "the `a/`-stripped old-side path is the deleted path",
+        );
+    }
+
+    #[test]
+    fn rename_is_not_a_deletion() {
+        // A rename-with-edit carries `--- a/old` / `+++ b/new` (the new side
+        // is a REAL path, not `/dev/null`), so it is a rename, NOT a
+        // deletion — `deleted` stays empty.
+        let diff = parse_diff(
+            "diff --git a/old_name.yml b/new_name.yml\nsimilarity index 80%\nrename from old_name.yml\nrename to new_name.yml\n--- a/old_name.yml\n+++ b/new_name.yml\n@@ -1 +1 @@\n-a\n+b\n",
+        )
+        .expect("a rename-with-change diff parses");
+        assert!(
+            diff.deleted.is_empty(),
+            "a rename (new side is a real path) is not a deletion",
+        );
+        assert_eq!(diff.files[0].path, "new_name.yml");
+        assert_eq!(diff.renames.len(), 1);
+    }
+
+    #[test]
+    fn pure_rename_is_not_a_deletion() {
+        // A pure rename (100% similarity) emits ONLY the rename headers — no
+        // `---`/`+++`, no hunks — so it cannot be a deletion.
+        let diff = parse_diff(
+            "diff --git a/old.yml b/new.yml\nsimilarity index 100%\nrename from old.yml\nrename to new.yml\n",
+        )
+        .expect("a pure-rename diff parses");
+        assert!(diff.deleted.is_empty(), "a pure rename names no deletion");
+        assert_eq!(diff.renames.len(), 1);
+    }
+
+    #[test]
+    fn add_is_not_a_deletion() {
+        // A file CREATION carries `--- /dev/null` / `+++ b/<path>` (the OLD
+        // side is `/dev/null`). The old-side `/dev/null` must NOT stage a
+        // deleted path, and the real `+++ b/` opens a normal file entry —
+        // `deleted` stays empty.
+        let diff = parse_diff(
+            "diff --git a/n.yml b/n.yml\nnew file mode 100644\n--- /dev/null\n+++ b/n.yml\n@@ -0,0 +1,2 @@\n+line 1\n+line 2\n",
+        )
+        .expect("a new-file diff parses");
+        assert!(
+            diff.deleted.is_empty(),
+            "an addition (old side is /dev/null) is not a deletion",
+        );
+        assert_eq!(diff.files[0].path, "n.yml");
+    }
+
+    #[test]
+    fn modify_is_not_a_deletion() {
+        // A plain modification carries `--- a/x` / `+++ b/x` (BOTH sides are
+        // the same real path). The real `+++ b/` clears the staged old path,
+        // so `deleted` stays empty.
+        let diff = parse_diff(
+            "diff --git a/m.sql b/m.sql\nindex 1111..2222 100644\n--- a/m.sql\n+++ b/m.sql\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .expect("a modify diff parses");
+        assert!(
+            diff.deleted.is_empty(),
+            "a modification (new side is the same real path) is not a deletion",
+        );
+        assert_eq!(diff.files[0].path, "m.sql");
+    }
+
+    #[test]
+    fn deleted_path_strips_a_prefix_and_trailing_timestamp() {
+        // The old-side `--- ` header is shaped like the `+++ ` header: an
+        // `a/` prefix and an optional trailing `\t<timestamp>` section, both
+        // stripped (parity with `parse_plus_path`).
+        let diff = parse_diff(
+            "diff --git a/dir/sub/gone.sql b/dir/sub/gone.sql\ndeleted file mode 100644\n--- a/dir/sub/gone.sql\t2026-01-01 00:00:00\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n",
+        )
+        .expect("a deletion with a timestamped old-side header parses");
+        assert_eq!(
+            diff.deleted,
+            vec!["dir/sub/gone.sql".to_owned()],
+            "the `a/` prefix and the trailing `\\t<timestamp>` are stripped",
+        );
+    }
+
+    #[test]
+    fn crlf_deletion_old_side_path_carries_no_trailing_cr() {
+        let diff = parse_diff(
+            "diff --git a/d.yml b/d.yml\r\ndeleted file mode 100644\r\n--- a/d.yml\r\n+++ /dev/null\r\n@@ -1 +0,0 @@\r\n-x\r\n",
+        )
+        .expect("a CRLF deletion diff parses");
+        assert_eq!(
+            diff.deleted,
+            vec!["d.yml".to_owned()],
+            "no trailing \\r in the deleted path",
+        );
+    }
+
+    #[test]
+    fn multiple_deletions_are_all_collected() {
+        let diff = parse_diff(
+            "diff --git a/a.sql b/a.sql\ndeleted file mode 100644\n--- a/a.sql\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\ndiff --git a/b.yml b/b.yml\ndeleted file mode 100644\n--- a/b.yml\n+++ /dev/null\n@@ -1 +0,0 @@\n-y\n",
+        )
+        .expect("a two-deletion diff parses");
+        assert_eq!(
+            diff.deleted,
+            vec!["a.sql".to_owned(), "b.yml".to_owned()],
+            "every deleted file is captured in diff order",
+        );
+        assert!(diff.files.is_empty());
+    }
+
+    #[test]
+    fn mixed_patch_classifies_each_file_kind() {
+        // One diff carrying a deletion, an addition, a modification, and a
+        // rename-with-edit — the all-cases mutation-kill fixture. Only the
+        // deletion lands in `deleted`; the rename in `renames`; the add and
+        // modify (and the rename's new path) in `files`.
+        let diff = parse_diff(concat!(
+            // (1) deletion
+            "diff --git a/gone.sql b/gone.sql\n",
+            "deleted file mode 100644\n",
+            "--- a/gone.sql\n",
+            "+++ /dev/null\n",
+            "@@ -1 +0,0 @@\n",
+            "-bye\n",
+            // (2) addition
+            "diff --git a/added.sql b/added.sql\n",
+            "new file mode 100644\n",
+            "--- /dev/null\n",
+            "+++ b/added.sql\n",
+            "@@ -0,0 +1 @@\n",
+            "+hello\n",
+            // (3) modification
+            "diff --git a/kept.sql b/kept.sql\n",
+            "index 1111..2222 100644\n",
+            "--- a/kept.sql\n",
+            "+++ b/kept.sql\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+            // (4) rename-with-edit
+            "diff --git a/from.yml b/to.yml\n",
+            "similarity index 90%\n",
+            "rename from from.yml\n",
+            "rename to to.yml\n",
+            "--- a/from.yml\n",
+            "+++ b/to.yml\n",
+            "@@ -1 +1 @@\n",
+            "-p\n",
+            "+q\n",
+        ))
+        .expect("a mixed patch parses");
+        assert_eq!(
+            diff.deleted,
+            vec!["gone.sql".to_owned()],
+            "only the pure deletion lands in `deleted`",
+        );
+        let file_paths: Vec<&str> = diff.files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            file_paths,
+            vec!["added.sql", "kept.sql", "to.yml"],
+            "the add, the modify, and the rename's new path are files",
+        );
+        assert_eq!(
+            diff.renames,
+            vec![RenamePair {
+                from: "from.yml".to_owned(),
+                to: "to.yml".to_owned(),
+            }],
+            "only the rename lands in `renames`",
+        );
+    }
+
+    #[test]
+    fn deletion_marker_does_not_leak_across_files() {
+        // A `--- a/x` not followed by `+++ /dev/null` (a modify whose `+++`
+        // is a real path) must not let a LATER file's `+++ /dev/null` pair
+        // with the stale old path. The modify clears staging via its real
+        // `+++ b/x`; the second file's deletion uses ITS own `--- a/y`.
+        let diff = parse_diff(
+            "diff --git a/x.sql b/x.sql\n--- a/x.sql\n+++ b/x.sql\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/y.sql b/y.sql\ndeleted file mode 100644\n--- a/y.sql\n+++ /dev/null\n@@ -1 +0,0 @@\n-c\n",
+        )
+        .expect("parses");
+        assert_eq!(
+            diff.deleted,
+            vec!["y.sql".to_owned()],
+            "the deletion captures y.sql, not the earlier modified x.sql",
+        );
+        assert_eq!(diff.files[0].path, "x.sql");
+    }
+
+    #[test]
+    fn dev_null_plus_without_a_staged_old_path_records_no_deletion() {
+        // Defensive: a `+++ /dev/null` with no preceding `--- a/<path>`
+        // (never real git output) records no deletion rather than panicking
+        // or capturing a phantom empty path.
+        let diff = parse_diff("diff --git a/z b/z\n+++ /dev/null\n").expect("parses");
+        assert!(
+            diff.deleted.is_empty(),
+            "no staged old path → no phantom deletion",
         );
     }
 
