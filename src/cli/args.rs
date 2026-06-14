@@ -265,6 +265,52 @@ pub struct ReportArgs {
     /// Overrides `[pr].number` in `--config`.
     #[arg(long, value_name = "N")]
     pub pr_number: Option<u64>,
+
+    /// Emit the machine-readable **findings envelope** JSON to this path,
+    /// alongside the HTML `--out` report in the same run (cute-dbt#386).
+    ///
+    /// Additive sidecar — NOT a format swap: the HTML report is written
+    /// exactly as before, and this writes a second `{ metadata, findings }`
+    /// JSON file beside it. The envelope wraps the same in-scope findings
+    /// the report surfaces in a versioned header
+    /// (`metadata.schema_version` — the integer stability anchor; check-ids
+    /// themselves are unstable until v1.0, so pin `schema_version`, not
+    /// individual ids). The file's parent directory must already exist (the
+    /// same contract as `--out`).
+    #[arg(long, value_name = "PATH")]
+    pub findings_out: Option<PathBuf>,
+
+    /// Exit non-zero when the in-scope set carries any **Total-tier
+    /// `Uncovered`** finding (cute-dbt#386) — the deterministic
+    /// coverage-gap gate for CI.
+    ///
+    /// `Total` checks are zero-false-positive by construction, so this gate
+    /// never trips on a heuristic guess. The exit code is dedicated
+    /// (distinct from the usage-error and fail-closed codes); the HTML
+    /// report and the `--findings-out` sidecar (if requested) are still
+    /// written first. Not configurable — `Total`-only is the design tenet
+    /// (no tier knob in v0.1).
+    #[arg(long)]
+    pub fail_on_uncovered: bool,
+
+    /// Override the findings envelope's `metadata.generated_at` with a
+    /// fixed `YYYY-MM-DD` date (cute-dbt#386).
+    ///
+    /// The envelope timestamp is normally "today" computed at the I/O
+    /// boundary. This flag pins it to a fixed value so the committed
+    /// envelope golden stays byte-identical across CI runs regardless of
+    /// the wall-clock date (the golden-determinism rule: the domain is a
+    /// pure function of `(facts, generated_at)`; this is the I/O-boundary
+    /// injection point). Hidden — it exists only for golden regeneration /
+    /// reproducible builds, never a normal user surface. Inert unless
+    /// `--findings-out` is also set.
+    ///
+    /// Validated at parse time ([`parse_generated_at`]): a malformed
+    /// value is a clap usage error (exit 2), never an envelope that
+    /// violates the documented `YYYY-MM-DD` contract — fail fast before
+    /// the run starts (cute-dbt#386, `CodeRabbit` on PR #388).
+    #[arg(long, value_name = "YYYY-MM-DD", hide = true, value_parser = parse_generated_at)]
+    pub generated_at: Option<String>,
 }
 
 /// Arguments for `cute-dbt explore` (cute-dbt#100) — full-manifest,
@@ -393,6 +439,92 @@ fn parse_project_root(s: &str) -> Result<PathBuf, String> {
         return Err(format!("project root is not a directory: {s}"));
     }
     Ok(p)
+}
+
+/// Post-parse validation clap's derive cannot express: reject a
+/// `report --findings-out` that resolves to the same path as `--out`
+/// (cute-dbt#386, `CodeRabbit` on PR #388).
+///
+/// The findings sidecar is written *after* the HTML report, so
+/// `--out report.html --findings-out report.html` would silently clobber
+/// the just-rendered HTML with the envelope JSON on an otherwise
+/// successful run — destroying the primary artifact and breaking the
+/// additive-sidecar contract. This is a usage error, not a runtime
+/// `PreflightError` (the enum stays at four variants — the
+/// `--config` / baseline-missing precedent: a conflict between two flags
+/// is a clap-level [`ArgGroup`]-style usage error, exit 2). It is raised
+/// here rather than in the derive because clap cannot compare two
+/// `PathBuf` arguments for equality.
+///
+/// The comparison is **syntactic** (the as-typed [`PathBuf`]s), not a
+/// canonicalized filesystem resolve: it catches the literal footgun
+/// without an I/O round-trip (neither path is required to exist yet — the
+/// same write-time `--out` contract). Only the `report` verb carries the
+/// two flags; every other verb is a no-op here.
+///
+/// # Errors
+///
+/// Returns a [`clap::error::ErrorKind::ArgumentConflict`] error (exit 2)
+/// when `report`'s `--findings-out` equals its `--out`.
+pub fn validate_argument_conflicts(cli: &Cli) -> Result<(), clap::Error> {
+    use clap::CommandFactory;
+    if let Command::Report(report) = &cli.command
+        && report.findings_out.as_ref() == Some(&report.out)
+    {
+        return Err(Cli::command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            format!(
+                "--findings-out must differ from --out (both resolve to {}); \
+                 the sidecar JSON would overwrite the HTML report",
+                report.out.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// clap value-parser: validate the `--generated-at` override against the
+/// envelope's documented `YYYY-MM-DD` (RFC3339 `full-date`) contract
+/// (cute-dbt#386, `CodeRabbit` on PR #388).
+///
+/// `--generated-at` is the one override path for the findings-envelope
+/// `metadata.generated_at` (golden regeneration / reproducible builds), so
+/// an unvalidated string would flow straight into the emitted JSON and
+/// produce an envelope that violates its own documented date shape. This
+/// fails fast at parse time (a clap usage error, exit 2 — the
+/// `--config` / baseline-missing precedent) rather than letting a malformed
+/// date reach the I/O boundary. Strict shape: exactly `NNNN-NN-NN`, all
+/// ASCII digits, with month in `[1, 12]` and day in `[1, 31]` (a calendar
+/// upper bound — the envelope contract is the textual `full-date` shape,
+/// not a per-month length check). Returns the validated string unchanged.
+fn parse_generated_at(s: &str) -> Result<String, String> {
+    let bytes = s.as_bytes();
+    // Exact `YYYY-MM-DD` layout: 10 chars, dashes at 4 and 7, digits
+    // everywhere else.
+    let well_shaped = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit());
+    if !well_shaped {
+        return Err(format!(
+            "--generated-at must be an RFC3339 date in YYYY-MM-DD form, got {s:?}"
+        ));
+    }
+    // Shape guarantees these slices are valid ASCII-digit runs.
+    let month: u32 = s[5..7].parse().map_err(|_| invalid_generated_at(s))?;
+    let day: u32 = s[8..10].parse().map_err(|_| invalid_generated_at(s))?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err(invalid_generated_at(s));
+    }
+    Ok(s.to_owned())
+}
+
+/// The shared `--generated-at` rejection message (cute-dbt#386).
+fn invalid_generated_at(s: &str) -> String {
+    format!("--generated-at must be a valid YYYY-MM-DD date, got {s:?}")
 }
 
 /// Resolve the effective dbt project root.
@@ -1496,5 +1628,158 @@ tilte = "typo'd"
         ])
         .expect_err("explore takes no experimental flag");
         assert_eq!(err.kind(), ErrorKind::UnknownArgument);
+    }
+
+    // ----- cute-dbt#386 — CodeRabbit PR #388 hardening -----
+
+    /// A valid `report` arg set carrying `--generated-at`.
+    fn report_with_generated_at(value: &str) -> Result<ReportArgs, clap::Error> {
+        parse_report(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "o.html",
+            "--findings-out",
+            "f.json",
+            "--generated-at",
+            value,
+        ])
+    }
+
+    #[test]
+    fn generated_at_accepts_a_well_formed_date() {
+        let report = report_with_generated_at("2026-06-13").expect("a YYYY-MM-DD date parses");
+        assert_eq!(report.generated_at.as_deref(), Some("2026-06-13"));
+    }
+
+    #[test]
+    fn generated_at_accepts_a_far_future_golden_date() {
+        // The golden fixtures pin a far-future date so the byte-identity
+        // gate never drifts with wall-clock — that value must still parse.
+        let report = report_with_generated_at("2999-12-31").expect("a far-future date parses");
+        assert_eq!(report.generated_at.as_deref(), Some("2999-12-31"));
+    }
+
+    #[test]
+    fn generated_at_rejects_a_non_date_string() {
+        // The CodeRabbit footgun: `--generated-at not-a-date` must fail
+        // fast at parse time, never flow into the envelope JSON.
+        let err = report_with_generated_at("not-a-date").expect_err("a non-date is rejected");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        assert!(err.use_stderr(), "a bad --generated-at is a usage error");
+        assert!(
+            err.to_string().contains("YYYY-MM-DD"),
+            "the error names the expected shape: {err}"
+        );
+    }
+
+    #[test]
+    fn generated_at_rejects_a_datetime() {
+        // A full RFC3339 date-time exceeds the documented `full-date`
+        // contract; the envelope's `generated_at` is a date only.
+        let err =
+            report_with_generated_at("2026-06-13T00:00:00Z").expect_err("a date-time is rejected");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn generated_at_rejects_an_out_of_range_month() {
+        let err = report_with_generated_at("2026-13-01").expect_err("month 13 is rejected");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn generated_at_rejects_an_out_of_range_day() {
+        let err = report_with_generated_at("2026-06-00").expect_err("day 00 is rejected");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn generated_at_rejects_a_non_digit_in_the_year() {
+        let err = report_with_generated_at("20x6-06-13").expect_err("a non-digit year is rejected");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn findings_out_equal_to_out_is_an_argument_conflict() {
+        // The CodeRabbit footgun: the sidecar JSON would clobber the HTML
+        // report. Rejected as a usage error (exit 2) BEFORE the run starts.
+        let cli = parse(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "report.html",
+            "--findings-out",
+            "report.html",
+        ])
+        .expect("the args themselves parse — the collision is a post-parse check");
+        let err = validate_argument_conflicts(&cli)
+            .expect_err("--findings-out == --out is a usage conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        assert!(err.use_stderr(), "the path collision is a usage error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--findings-out") && msg.contains("--out"),
+            "the error names both flags: {msg}"
+        );
+    }
+
+    #[test]
+    fn distinct_findings_out_and_out_pass_validation() {
+        let cli = parse(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "report.html",
+            "--findings-out",
+            "findings.json",
+        ])
+        .expect("distinct output paths parse");
+        validate_argument_conflicts(&cli).expect("distinct paths are not a conflict");
+    }
+
+    #[test]
+    fn findings_out_absent_passes_validation() {
+        // The default path (no sidecar) can never collide.
+        let cli = parse(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "report.html",
+        ])
+        .expect("a report without --findings-out parses");
+        validate_argument_conflicts(&cli).expect("no sidecar ⇒ no possible collision");
+    }
+
+    #[test]
+    fn argument_conflict_validation_is_a_no_op_for_explore() {
+        // Only `report` carries the two flags; the validation must not
+        // misfire on any other verb.
+        let cli = parse(&[
+            "cute-dbt",
+            "explore",
+            "--manifest",
+            "m.json",
+            "--out-dir",
+            "d",
+        ])
+        .expect("an explore invocation parses");
+        validate_argument_conflicts(&cli).expect("explore has no --findings-out/--out collision");
     }
 }

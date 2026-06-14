@@ -1,0 +1,678 @@
+{
+  "metadata": {
+    "schema_version": 1,
+    "cute_dbt_version": "0.1.0",
+    "generated_at": "2099-01-01",
+    "scope": {
+      "mode": "pr-diff"
+    },
+    "id_stability": "unstable-v0.x"
+  },
+  "findings": [
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.dim_conditions",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_dim_conditions_condition_key.93802fac5a"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "condition_key"
+        }
+      ]
+    },
+    {
+      "check": "union.arm-coverage",
+      "tier": "high",
+      "instrument": "unit-test",
+      "model_id": "model.healthcare_analytics.dim_conditions",
+      "construct": "union[final]",
+      "verdict": {
+        "status": "uncovered"
+      },
+      "evidence": [
+        {
+          "label": "union",
+          "value": "final (2 arms: sequenced, unknown_member)"
+        },
+        {
+          "label": "unexercised arm",
+          "value": "sequenced — no given row reaches ref('stg_synthea__conditions')"
+        },
+        {
+          "label": "suggested given",
+          "value": "- input: ref('stg_synthea__conditions')\n  rows:\n    - {_loaded_at: ..., condition_code: ..., condition_description: ..., condition_end_date: ..., condition_id: ..., condition_start_date: ..., encounter_id: ..., patient_id: ...}"
+        },
+        {
+          "label": "unattributable arm",
+          "value": "unknown_member — no resolvable upstream relation"
+        }
+      ],
+      "recommendation": "Add (or fill) a given row for each unexercised UNION arm's input so every arm contributes at least one row, then extend `expect` with the row(s) that arm should emit. This finding's evidence carries the per-arm input and a given-row sketch."
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.dim_date",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_dim_date_date_key.0869fd48f9"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "date_key"
+        }
+      ]
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.dim_organizations",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_dim_organizations_organization_key.096582bf56"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "organization_key"
+        }
+      ]
+    },
+    {
+      "check": "union.arm-coverage",
+      "tier": "high",
+      "instrument": "unit-test",
+      "model_id": "model.healthcare_analytics.dim_organizations",
+      "construct": "union[final]",
+      "verdict": {
+        "status": "uncovered"
+      },
+      "evidence": [
+        {
+          "label": "union",
+          "value": "final (2 arms: sequenced, unknown_member)"
+        },
+        {
+          "label": "unexercised arm",
+          "value": "sequenced — no given row reaches ref('stg_synthea__organizations')"
+        },
+        {
+          "label": "suggested given",
+          "value": "- input: ref('stg_synthea__organizations')\n  rows:\n    - {_loaded_at: ..., address: ..., city: ..., latitude: ..., longitude: ..., organization_id: ..., organization_name: ..., phone: ..., revenue: ..., state: ..., utilization: ..., zip_code: ...}"
+        },
+        {
+          "label": "unattributable arm",
+          "value": "unknown_member — no resolvable upstream relation"
+        }
+      ],
+      "recommendation": "Add (or fill) a given row for each unexercised UNION arm's input so every arm contributes at least one row, then extend `expect` with the row(s) that arm should emit. This finding's evidence carries the per-arm input and a given-row sketch."
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.dim_patients",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_dim_patients_patient_key.a372c8896a"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "patient_key"
+        }
+      ]
+    },
+    {
+      "check": "union.arm-coverage",
+      "tier": "high",
+      "instrument": "unit-test",
+      "model_id": "model.healthcare_analytics.dim_patients",
+      "construct": "union[final]",
+      "verdict": {
+        "status": "uncovered"
+      },
+      "evidence": [
+        {
+          "label": "union",
+          "value": "final (2 arms: sequenced, unknown_member)"
+        },
+        {
+          "label": "unexercised arm",
+          "value": "sequenced — no given row reaches ref('stg_synthea__patients')"
+        },
+        {
+          "label": "suggested given",
+          "value": "- input: ref('stg_synthea__patients')\n  rows:\n    - {_loaded_at: ..., address: ..., birth_date: ..., birth_place: ..., city: ..., county: ..., death_date: ..., drivers_license: ..., ethnicity: ..., first_name: ..., gender: ..., healthcare_coverage: ..., healthcare_expenses: ..., last_name: ..., latitude: ..., longitude: ..., maiden_name: ..., marital_status: ..., name_prefix: ..., name_suffix: ..., passport_number: ..., patient_id: ..., race: ..., ssn_hash: ..., state: ..., zip_code: ...}"
+        },
+        {
+          "label": "unattributable arm",
+          "value": "unknown_member — no resolvable upstream relation"
+        }
+      ],
+      "recommendation": "Add (or fill) a given row for each unexercised UNION arm's input so every arm contributes at least one row, then extend `expect` with the row(s) that arm should emit. This finding's evidence carries the per-arm input and a given-row sketch."
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.dim_payers",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_dim_payers_payer_key.953b1f5fd2"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "payer_key"
+        }
+      ],
+      "degraded": [
+        {
+          "by": "test.healthcare_analytics.unique_dim_payers_payer_key.953b1f5fd2",
+          "causes": [
+            "severity: warn — a failing run warns instead of failing, so this backing is advisory, not gating"
+          ]
+        }
+      ]
+    },
+    {
+      "check": "union.arm-coverage",
+      "tier": "high",
+      "instrument": "unit-test",
+      "model_id": "model.healthcare_analytics.dim_payers",
+      "construct": "union[final]",
+      "verdict": {
+        "status": "unknown"
+      },
+      "evidence": [
+        {
+          "label": "union",
+          "value": "final (2 arms: sequenced, unknown_member)"
+        },
+        {
+          "label": "unattributable arm",
+          "value": "unknown_member — no resolvable upstream relation"
+        }
+      ],
+      "suppressed": {
+        "source": "pragma",
+        "reason": "unknown_member is a constant sentinel arm, exercised by design"
+      }
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.dim_providers",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_dim_providers_provider_key.02ac65c919"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "provider_key"
+        }
+      ]
+    },
+    {
+      "check": "union.arm-coverage",
+      "tier": "high",
+      "instrument": "unit-test",
+      "model_id": "model.healthcare_analytics.dim_providers",
+      "construct": "union[final]",
+      "verdict": {
+        "status": "uncovered"
+      },
+      "evidence": [
+        {
+          "label": "union",
+          "value": "final (2 arms: sequenced, unknown_member)"
+        },
+        {
+          "label": "unexercised arm",
+          "value": "sequenced — no given row reaches ref('dim_organizations'), ref('stg_synthea__providers')"
+        },
+        {
+          "label": "suggested given",
+          "value": "- input: ref('dim_organizations')\n  rows:\n    - {_loaded_at: ..., address: ..., city: ..., latitude: ..., longitude: ..., organization_id: ..., organization_key: ..., organization_name: ..., phone: ..., revenue: ..., state: ..., utilization: ..., zip_code: ...}\n- input: ref('stg_synthea__providers')\n  rows:\n    - {_loaded_at: ..., address: ..., city: ..., gender: ..., latitude: ..., longitude: ..., organization_id: ..., provider_id: ..., provider_name: ..., specialty: ..., state: ..., utilization: ..., zip_code: ...}"
+        },
+        {
+          "label": "unattributable arm",
+          "value": "unknown_member — no resolvable upstream relation"
+        }
+      ],
+      "recommendation": "Add (or fill) a given row for each unexercised UNION arm's input so every arm contributes at least one row, then extend `expect` with the row(s) that arm should emit. This finding's evidence carries the per-arm input and a given-row sketch."
+    },
+    {
+      "check": "join.left-null-propagation",
+      "tier": "high",
+      "instrument": "both",
+      "model_id": "model.healthcare_analytics.dim_providers",
+      "construct": "left_join[sequenced:organizations]",
+      "verdict": {
+        "status": "uncovered"
+      },
+      "evidence": [
+        {
+          "label": "left join",
+          "value": "sequenced — LEFT JOIN organizations ON providers.organization_id = organizations.organization_id"
+        },
+        {
+          "label": "suggested given",
+          "value": "- input: ref('stg_synthea__providers')\n  rows:\n    - {organization_id: 404}   # 404 has no match below — the no-match path\n- input: ref('dim_organizations')\n  rows:\n    - {organization_id: 1}\n# expect: the no-match row with NULL dim_organizations columns (or the intended fallback)"
+        }
+      ],
+      "recommendation": "Add a no-match given: one left-side row whose join key is absent from the right-side given rows, then extend `expect` with that row carrying NULL right-side columns (or the intended fallback). This finding's evidence carries a copy-pasteable given sketch."
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_clinical_events",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_fct_clinical_events_clinical_event_key.2af827606b"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "clinical_event_key"
+        }
+      ]
+    },
+    {
+      "check": "union.arm-coverage",
+      "tier": "high",
+      "instrument": "unit-test",
+      "model_id": "model.healthcare_analytics.fct_clinical_events",
+      "construct": "union[all_events]",
+      "verdict": {
+        "status": "uncovered"
+      },
+      "evidence": [
+        {
+          "label": "union",
+          "value": "all_events (3 arms: conditions, medications, procedures)"
+        },
+        {
+          "label": "unexercised arm",
+          "value": "conditions — no given row reaches ref('stg_synthea__conditions')"
+        },
+        {
+          "label": "suggested given",
+          "value": "- input: ref('stg_synthea__conditions')\n  rows:\n    - {_loaded_at: ..., condition_code: ..., condition_description: ..., condition_end_date: ..., condition_id: ..., condition_start_date: ..., encounter_id: ..., patient_id: ...}"
+        },
+        {
+          "label": "unexercised arm",
+          "value": "medications — no given row reaches ref('stg_synthea__medications')"
+        },
+        {
+          "label": "suggested given",
+          "value": "- input: ref('stg_synthea__medications')\n  rows:\n    - {_loaded_at: ..., base_cost: ..., dispenses: ..., encounter_id: ..., medication_code: ..., medication_description: ..., medication_end_at: ..., medication_id: ..., medication_start_at: ..., patient_id: ..., payer_coverage: ..., payer_id: ..., reason_code: ..., reason_description: ..., total_cost: ...}"
+        },
+        {
+          "label": "unexercised arm",
+          "value": "procedures — no given row reaches ref('stg_synthea__procedures')"
+        },
+        {
+          "label": "suggested given",
+          "value": "- input: ref('stg_synthea__procedures')\n  rows:\n    - {_loaded_at: ..., base_cost: ..., encounter_id: ..., patient_id: ..., procedure_at: ..., procedure_code: ..., procedure_description: ..., procedure_id: ..., reason_code: ..., reason_description: ...}"
+        }
+      ],
+      "recommendation": "Add (or fill) a given row for each unexercised UNION arm's input so every arm contributes at least one row, then extend `expect` with the row(s) that arm should emit. This finding's evidence carries the per-arm input and a given-row sketch."
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_condition_cohorts",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_fct_condition_cohorts_condition_cohort_key.f8c8f721d9"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "condition_cohort_key"
+        }
+      ]
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_cost_analysis",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_fct_cost_analysis_cost_analysis_key.2aecf62159"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "cost_analysis_key"
+        }
+      ]
+    },
+    {
+      "check": "join.left-null-propagation",
+      "tier": "high",
+      "instrument": "both",
+      "model_id": "model.healthcare_analytics.fct_cost_analysis",
+      "construct": "left_join[encounters_enriched:dim_date]",
+      "verdict": {
+        "status": "unknown"
+      },
+      "evidence": [
+        {
+          "label": "left join",
+          "value": "encounters_enriched — LEFT JOIN dim_date ON encounters.encounter_start_date_key = dim_date.date_key"
+        },
+        {
+          "label": "unattributable join",
+          "value": "encounters_enriched — join key or side binding not statically recoverable"
+        }
+      ]
+    },
+    {
+      "check": "join.left-null-propagation",
+      "tier": "high",
+      "instrument": "both",
+      "model_id": "model.healthcare_analytics.fct_cost_analysis",
+      "construct": "left_join[encounters_enriched:procedures]",
+      "verdict": {
+        "status": "uncovered"
+      },
+      "evidence": [
+        {
+          "label": "left join",
+          "value": "encounters_enriched — LEFT JOIN procedures ON encounters.encounter_id = procedures.encounter_id"
+        },
+        {
+          "label": "suggested given",
+          "value": "- input: ref('fct_encounters')\n  rows:\n    - {encounter_id: 404}   # 404 has no match below — the no-match path\n- input: ref('stg_synthea__procedures')\n  rows:\n    - {encounter_id: 1}\n# expect: the no-match row with NULL stg_synthea__procedures columns (or the intended fallback)"
+        }
+      ],
+      "recommendation": "Add a no-match given: one left-side row whose join key is absent from the right-side given rows, then extend `expect` with that row carrying NULL right-side columns (or the intended fallback). This finding's evidence carries a copy-pasteable given sketch."
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_encounters",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_fct_encounters_encounter_key.a3b77e9141"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "encounter_key"
+        }
+      ]
+    },
+    {
+      "check": "enforcement.constraint-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_encounters",
+      "construct": "constraint.primary_key[encounter_key]",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_fct_encounters_encounter_key.a3b77e9141"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "constraint",
+          "value": "primary_key on encounter_key"
+        },
+        {
+          "label": "adapter",
+          "value": "duckdb (metadata-only)"
+        },
+        {
+          "label": "backing-test",
+          "value": "present"
+        }
+      ]
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_encounters_incremental",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_fct_encounters_incremental_encounter_id.a165c01d01"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "encounter_id"
+        }
+      ]
+    },
+    {
+      "check": "incremental.branch-coverage",
+      "tier": "high",
+      "instrument": "unit-test",
+      "model_id": "model.healthcare_analytics.fct_encounters_incremental",
+      "construct": "config.materialized",
+      "verdict": {
+        "status": "uncovered"
+      },
+      "evidence": [
+        {
+          "label": "materialized",
+          "value": "incremental (strategy: merge)"
+        },
+        {
+          "label": "branch coverage",
+          "value": "true-only — 1 test(s) override is_incremental to true; none exercise the initial full-build (false) branch"
+        },
+        {
+          "label": "missing branch",
+          "value": "the initial full-build branch (is_incremental() = false) runs in no unit test"
+        },
+        {
+          "label": "suggested given",
+          "value": "- name: test_fct_encounters_incremental_initial_build\n  model: fct_encounters_incremental\n  # no overrides block — dbt compiles is_incremental() as false by default\n  given:\n    - input: ref('...')\n      rows:\n        - {...}\n  # expect: the full first-build output"
+        }
+      ],
+      "recommendation": "Add a unit test for each missing is_incremental() branch: one with `overrides: macros: is_incremental: true` (mock the prior model state with a `given: - input: this` entry) to exercise the incremental branch, and one without the override for the initial full build (dbt compiles is_incremental() as false by default). This finding's evidence carries a copy-pasteable unit-test sketch per missing branch."
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_encounters_monthly",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "uncovered"
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "year_month, encounter_class"
+        }
+      ],
+      "recommendation": "Add a uniqueness data test at the declared grain: `unique` on a single-column key, or `dbt_utils.unique_combination_of_columns` over the composite key columns."
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_encounters_yearly",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "uncovered"
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "year_actual, encounter_class"
+        }
+      ],
+      "recommendation": "Add a uniqueness data test at the declared grain: `unique` on a single-column key, or `dbt_utils.unique_combination_of_columns` over the composite key columns."
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_patient_summary",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_fct_patient_summary_patient_summary_key.e532e1ff45"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "patient_summary_key"
+        }
+      ]
+    },
+    {
+      "check": "enforcement.constraint-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_patient_summary",
+      "construct": "constraint.primary_key[(patient_id, year_actual)]",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.dbt_utils_unique_combination_of_columns_fct_patient_summary_patient_id__year_actual.cdb3418166"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "constraint",
+          "value": "primary_key on (patient_id, year_actual)"
+        },
+        {
+          "label": "adapter",
+          "value": "duckdb (metadata-only)"
+        },
+        {
+          "label": "backing-test",
+          "value": "present"
+        }
+      ]
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.fct_provider_metrics",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "test.healthcare_analytics.unique_fct_provider_metrics_provider_metrics_key.d58939d602"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "provider_metrics_key"
+        }
+      ],
+      "degraded": [
+        {
+          "by": "test.healthcare_analytics.unique_fct_provider_metrics_provider_metrics_key.d58939d602",
+          "causes": [
+            "where-filtered — only rows matching `year_actual >= 2024` are checked; the grain is unverified outside the filter",
+            "limit: 100 — failing-row reporting caps at 100 rows; the test still trips on the first failure, but the failure surface is truncated"
+          ]
+        }
+      ]
+    },
+    {
+      "check": "grain.unique-key-unbacked",
+      "tier": "total",
+      "instrument": "data-test",
+      "model_id": "model.healthcare_analytics.mart_dq_summary",
+      "construct": "config.unique_key",
+      "verdict": {
+        "status": "uncovered"
+      },
+      "evidence": [
+        {
+          "label": "unique_key",
+          "value": "entity_type"
+        },
+        {
+          "label": "exists but disabled",
+          "value": "test.healthcare_analytics.unique_mart_dq_summary_entity_type.4f2a9c7d10 — a uniqueness test on (entity_type) is declared but disabled (config.enabled: false); it asserts nothing and never counts as coverage"
+        }
+      ],
+      "recommendation": "Add a uniqueness data test at the declared grain: `unique` on a single-column key, or `dbt_utils.unique_combination_of_columns` over the composite key columns."
+    },
+    {
+      "check": "union.arm-coverage",
+      "tier": "high",
+      "instrument": "unit-test",
+      "model_id": "model.healthcare_analytics.mart_dq_summary",
+      "construct": "union[combined_metrics]",
+      "verdict": {
+        "status": "covered",
+        "by": [
+          "unit_test.healthcare_analytics.mart_dq_summary.test_mart_dq_summary_combines_encounter_and_medication_metrics",
+          "unit_test.healthcare_analytics.mart_dq_summary.test_mart_dq_summary_zero_quarantined_when_all_valid"
+        ]
+      },
+      "evidence": [
+        {
+          "label": "union",
+          "value": "combined_metrics (2 arms: encounter_metrics, medication_metrics)"
+        }
+      ]
+    }
+  ]
+}

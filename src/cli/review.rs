@@ -1544,6 +1544,16 @@ impl ComposeInputs {
             pr_url: self.pr.as_ref().map(|p| p.url.clone()),
             pr_title: self.pr.as_ref().map(|p| p.title.clone()),
             pr_number: self.pr.as_ref().map(|p| p.number),
+            // cute-dbt#386 — the findings-envelope sidecar + coverage gate
+            // are `report`-verb surfaces; `review` does not emit the
+            // envelope or apply the gate in this slice (both off). A future
+            // slice can wire `review`'s own `--findings-out` / gate flags
+            // through here.
+            findings_out: None,
+            fail_on_uncovered: false,
+            // No envelope on `review` ⇒ the `--generated-at` override is
+            // inert; `None` defers to the I/O-boundary date either way.
+            generated_at: None,
         }
     }
 }
