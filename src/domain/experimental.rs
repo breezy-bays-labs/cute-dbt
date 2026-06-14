@@ -60,6 +60,18 @@ pub enum Experiment {
     /// over already-parsed wire data + the PR diff index; gated empty so
     /// the non-macro goldens stay byte-identical.
     MacroLens,
+    /// The seed-data surfaces (cute-dbt#350, epic #350): the "Data tables"
+    /// section's seed CONTENT — each in-scope seed's current data table
+    /// (row-capped, with an honest "showing N of M rows" label) plus its
+    /// old→new cell-diff on the pr-diff arm, rendered via the vendored
+    /// `DataTables` + the #98/#127 NULL-aware cell-diff engine. The seed
+    /// payload is gathered unconditionally at the data layer (#367/#370);
+    /// this experiment gates whether it CROSSES to the render payload — the
+    /// cli passes an empty `seed_cards` vec when off, so the section emits
+    /// zero DOM (`DATA.seed_cards` absent) and every seed-free golden stays
+    /// byte-identical. The "Data tables" section is seed-only + gated, so
+    /// the default goldens never move (no pre-existing label is renamed).
+    Seeds,
 }
 
 impl Experiment {
@@ -69,6 +81,7 @@ impl Experiment {
         Experiment::ProjectState,
         Experiment::Governance,
         Experiment::MacroLens,
+        Experiment::Seeds,
     ];
 
     /// The kebab-case wire id this experiment is named by in the
@@ -80,6 +93,7 @@ impl Experiment {
             Self::ProjectState => "project-state",
             Self::Governance => "governance",
             Self::MacroLens => "macro-lens",
+            Self::Seeds => "seeds",
         }
     }
 
@@ -339,6 +353,16 @@ mod tests {
             Some(Experiment::MacroLens)
         );
         assert!(Experiment::ALL.contains(&Experiment::MacroLens));
+    }
+
+    #[test]
+    fn seeds_is_a_registered_experiment_with_its_wire_id() {
+        // cute-dbt#350 — the gating seam for the "Data tables" seed
+        // content. The id round-trips and the variant is in the closed
+        // vocabulary (so `1`/`all` enables it on the seed-showcase row).
+        assert_eq!(Experiment::Seeds.id(), "seeds");
+        assert_eq!(Experiment::from_id("seeds"), Some(Experiment::Seeds));
+        assert!(Experiment::ALL.contains(&Experiment::Seeds));
     }
 
     // ----- [experimental] TOML resolution -----

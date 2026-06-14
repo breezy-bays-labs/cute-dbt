@@ -2371,6 +2371,12 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     // zero-models early return: a dbt_project.yml-only PR still renders
     // its hook SQL diff.
     renderProjectHookDiffs();
+    // cute-dbt#350 — the "Data tables" seed section, built before the
+    // zero-models early return: a seeds-only PR (no in-scope model) still
+    // renders its seed data. JS-built (no static markup) so the default
+    // HTML carries zero seed bytes — the section appears only when the
+    // gated `DATA.seed_cards` payload is present.
+    renderSeedDataTables();
     if (!DATA.models.length) {
       $(".test-selection").hide();
       $(".model-sql").hide();
@@ -4976,6 +4982,168 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
         )
       );
     });
+  }
+
+  // cute-dbt#350 — the "Data tables" section: each in-scope seed's CURRENT
+  // table (capped, with an honest "showing N of M rows" note) + its old→new
+  // cell-diff (pr-diff arm), reusing the unit-test fixture machinery
+  // wholesale (buildFixtureView → the #98/#127 NULL-aware grids + the
+  // Current↔Diff toggle + the same vendored DataTables). JS-built (no static
+  // markup), so the default HTML carries zero seed bytes — the section is
+  // created only when the gated `DATA.seed_cards` payload is present. A seed
+  // whose data could not be read (`table` null) renders a LABELED
+  // "data unavailable" state, never a silent empty grid (the cute-dbt#126
+  // lesson). The section is inserted once, ABOVE the per-model surfaces, so a
+  // seeds-only PR (zero in-scope models) still shows its seed data.
+  function renderSeedDataTables() {
+    var cards = DATA.seed_cards;
+    if (!cards || !cards.length) return;
+    var $section = $("<section>")
+      .addClass("data-tables-section")
+      .attr("aria-label", "Data tables")
+      .attr("data-testid", "data-tables-section");
+    $section.append($("<h2>").text("Data tables"));
+    $section.append(
+      $("<p>").addClass("data-tables-subtitle").append(
+        document.createTextNode(
+          "Seed CSVs and unit-test fixtures the engine loads as data. "
+        )
+      ).append(
+        $("<span>").addClass("data-tables-experimental")
+          .attr("data-testid", "data-tables-experimental").text("experimental")
+      )
+    );
+    cards.forEach(function (card) {
+      $section.append(buildSeedCard(card));
+    });
+    // Insert above the always-present .error-card landmark (which sits
+    // before the per-model surfaces) so the section lands near the top.
+    var $anchor = $(".error-card").first();
+    if ($anchor.length) {
+      $anchor.before($section);
+    } else {
+      $("body").append($section);
+    }
+    // The seed grids are visible immediately (no toggle gate), so initialize
+    // their DataTables now — initDataTablesIn skips already-hidden tables and
+    // is a no-op for the diff-view's lazy-init Current grid.
+    initDataTablesIn($section);
+  }
+
+  // One seed's card in the "Data tables" section: an identity + lineage
+  // header, the config-display chips, and the fixture-view grid (current
+  // table capped + the optional cell-diff toggle) OR the labeled
+  // data-unavailable state.
+  function buildSeedCard(card) {
+    var $card = $("<div>")
+      .addClass("data-table-card seed-data-card")
+      .attr("data-testid", "seed-data-card")
+      .attr("data-seed", card.name);
+    // Header: the seed name + project-relative path.
+    var $head = $("<div>").addClass("seed-data-head");
+    $head.append($("<code>").addClass("seed-data-name").text(card.name));
+    if (card.original_file_path) {
+      $head.append(
+        $("<code>").addClass("seed-data-path").text(card.original_file_path)
+      );
+    }
+    $card.append($head);
+    // Lineage: the direct downstream models the seed feeds (the immediate
+    // blast radius — never a percentage, just the names).
+    var feeds = card.feeds_models || [];
+    var $lineage = $("<p>")
+      .addClass("seed-data-lineage")
+      .attr("data-testid", "seed-data-lineage");
+    if (feeds.length) {
+      $lineage.append(
+        document.createTextNode(
+          "Feeds " + feeds.length + (feeds.length === 1 ? " model: " : " models: ")
+        )
+      );
+      feeds.forEach(function (name, i) {
+        if (i) $lineage.append(document.createTextNode(", "));
+        $lineage.append($("<code>").text(name));
+      });
+    } else {
+      $lineage.append(
+        document.createTextNode("Feeds no models (no model ref()s this seed).")
+      );
+    }
+    $card.append($lineage);
+    // Config-display chips (delimiter / quote_columns / column_types), each
+    // shown only when authored — the payload carries a display string or null.
+    var $config = buildSeedConfigChips(card);
+    if ($config) $card.append($config);
+    // The data grid OR the truthful degrade.
+    if (!card.table) {
+      $card.append(
+        $("<p>")
+          .addClass("seed-data-unavailable")
+          .attr("data-testid", "seed-data-unavailable")
+          .text(
+            "Data unavailable — the seed CSV could not be read "
+            + "(run with --project-root, and ensure the file exists)."
+          )
+      );
+      return $card;
+    }
+    // The honest "showing N of M rows" note — only when the cap truncated.
+    if (card.capped) {
+      $card.append(
+        $("<p>")
+          .addClass("seed-data-rowcap")
+          .attr("data-testid", "seed-data-rowcap")
+          .attr("data-shown", card.shown_rows)
+          .attr("data-total", card.total_rows)
+          .text(
+            "Showing " + card.shown_rows + " of " + card.total_rows
+            + " rows (raise [seeds] row_cap to show more)."
+          )
+      );
+    } else {
+      $card.append(
+        $("<p>")
+          .addClass("seed-data-rowcount")
+          .attr("data-testid", "seed-data-rowcount")
+          .attr("data-total", card.total_rows)
+          .text(
+            card.total_rows + (card.total_rows === 1 ? " row" : " rows")
+          )
+      );
+    }
+    // The grid: reuse the unit-test fixture machinery wholesale — the
+    // Current table (given-table class so the shared DataTables init + the
+    // reflow path pick it up) plus, on the pr-diff arm, the cell-diff toggle.
+    // `card.name` is the column-tooltip owner; no per-column metadata map for
+    // seeds (the #240 truthful fallback names the seed).
+    $card.append(buildFixtureView(card.table, "given-table", card.diff, null, card.name));
+    return $card;
+  }
+
+  // The seed's config-display chips, or null when the seed authored none.
+  // Each value is a Rust-composed display string (or null); the JS only
+  // renders, every interpolation through jQuery .text() (never parsed as
+  // HTML — a hostile config value draws as a glyph).
+  function buildSeedConfigChips(card) {
+    var rows = [
+      ["delimiter", card.delimiter],
+      ["quote_columns", card.quote_columns],
+      ["column_types", card.column_types]
+    ].filter(function (r) { return r[1] != null; });
+    if (!rows.length) return null;
+    var $wrap = $("<p>")
+      .addClass("seed-data-config")
+      .attr("data-testid", "seed-data-config");
+    rows.forEach(function (r) {
+      $wrap.append(
+        $("<span>").addClass("seed-config-chip")
+          .attr("data-key", r[0])
+          .append($("<code>").addClass("seed-config-key").text(r[0]))
+          .append(document.createTextNode(": "))
+          .append($("<span>").addClass("seed-config-val").text(String(r[1])))
+      );
+    });
+    return $wrap;
   }
 
   // cute-dbt#178 / cute-dbt#199 — SPLIT (side-by-side) diff. Old lines on
