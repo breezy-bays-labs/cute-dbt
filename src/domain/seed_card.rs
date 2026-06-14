@@ -17,10 +17,10 @@
 //! renderer consumes. This slice (the walking-skeleton domain core) defines
 //! the POD plus the [`seeds_in_scope`](crate::domain::state::StateComparator::seeds_in_scope)
 //! projection and the `feeds_models` derivation; the working-tree CSV read,
-//! the report section, and the cell-diff wiring land in later slices. Until
-//! then [`SeedCard::table`] and [`SeedCard::diff`] stay `None` and the
-//! config-display strings stay `None` (the adapter fills them once the
-//! real-fusion seed-config wire shape is pinned — cute-dbt#350 S2/S5).
+//! the report section, and the cell-diff wiring land in later slices. The
+//! config-display strings are filled by `build_seed_cards` from the seed
+//! node's `config` (cute-dbt#397); [`SeedCard::table`] and [`SeedCard::diff`]
+//! stay `None` until the CLI gather stage reads the working-tree CSV.
 //!
 //! POD-only (ADR-2): owned data + a constructor, no method machinery beyond
 //! what the run loop reads. `std` + `serde` derive only (the domain-purity
@@ -66,17 +66,21 @@ pub struct SeedCard {
     /// "feeds N models" line. Empty for an unreferenced seed.
     pub feeds_models: Vec<String>,
     /// The seed's `delimiter` config, as a pre-composed display string —
-    /// `None` when unauthored (the `jaffle_shop` default; the key is absent
-    /// from the real fusion config map, not present-but-null — cute-dbt#350
-    /// critique S2). Filled by the adapter once the wire shape is pinned.
+    /// `None` when unauthored OR the dbt default `","` (cute-dbt#397). Filled
+    /// by `build_seed_cards` (`seed_config_displays`) from the seed node's
+    /// `config.delimiter`, which suppresses the default so a chip surfaces a
+    /// deviation, never noise (cute-dbt#350 critique S2: when unauthored the
+    /// key is absent from the real fusion config map, not present-but-null).
     pub delimiter: Option<String>,
     /// The seed's `quote_columns` config, as a display string — `None` when
-    /// unauthored. Same provenance caveat as [`Self::delimiter`].
+    /// unauthored OR the dbt default `false` (cute-dbt#397). Same provenance
+    /// as [`Self::delimiter`] (`config.quote_columns`, default suppressed).
     pub quote_columns: Option<String>,
-    /// The seed's `column_types` config, as a display string — `None` when
-    /// unauthored. **Display only**: cell types are value-normalized from the
-    /// CSV tokens, never derived from this declared/inferred schema (the
-    /// cute-dbt#127 finding). Same provenance caveat as [`Self::delimiter`].
+    /// The seed's `column_types` config, as a pre-composed display string (a
+    /// sorted `col: type` list) — `None` when unauthored OR the empty default
+    /// map (cute-dbt#397). **Display only**: cell types are value-normalized
+    /// from the CSV tokens, never derived from this declared/inferred schema
+    /// (the cute-dbt#127 finding). Same provenance as [`Self::delimiter`].
     pub column_types: Option<String>,
     /// The parsed CSV rows, filled by the CLI gather stage from the
     /// working-tree file. `None` until that slice lands, and `None` at render
@@ -94,7 +98,8 @@ impl SeedCard {
     /// `seeds_in_scope` projection: id, bare name, project-relative path, and
     /// the direct downstream model names. The data-bearing fields
     /// ([`Self::table`], [`Self::diff`]) and the config-display strings start
-    /// empty — the adapter fills them.
+    /// empty — `build_seed_cards` fills the config strings from the node
+    /// `config` (cute-dbt#397); the CLI gather stage fills the table/diff.
     #[must_use]
     pub fn new(
         id: NodeId,
