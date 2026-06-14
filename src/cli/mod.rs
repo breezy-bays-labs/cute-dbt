@@ -81,7 +81,10 @@ use clap::Parser;
 
 use crate::adapters::explore::render_explore;
 use crate::adapters::findings_emit::{
-    collect_in_scope_findings, envelope_from_findings, write_sidecar,
+    collect_in_scope_findings, envelope_from_findings_anchored, write_sidecar,
+};
+use crate::adapters::github_annotations::{
+    AnnotationLevels, DEFAULT_ANNOTATION_CAP, emit_annotations,
 };
 use crate::adapters::manifest::{FileManifestSource, load_baseline};
 use crate::adapters::project_def::parse as parse_project_definition;
@@ -92,20 +95,21 @@ use crate::adapters::render::{
 };
 use crate::domain::{
     BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_MACRO_BODY_CAP, DEFAULT_REPORT_TITLE,
-    DEFAULT_SEED_ROW_CAP, DepDate, EnabledExperiments, EnvelopeScope, Experiment, FixtureTableDiff,
-    GovernanceFacts, HeuristicId, InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome,
-    NamedTableDiff, NormalizedDiffIndex, PrConfig, PrRef, PreflightError, ProjectChangePanel,
-    ProjectFacts, ProjectFallbackReason, ScopeInput, ScopeSelection, SeedCard, SeedInScopeSet,
-    SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock, VarReference,
-    all_models, attach_hook_facts, attach_model_yaml_diffs, attach_var_facts,
-    attribute_config_tree_changes, attribute_var_changes, build_seed_cards,
-    changed_macros_baseline, changed_macros_pr_diff, changed_models, check_by_id,
-    diff_project_definitions, effective_fixture_format, external_fixture_table,
-    extract_model_block, extract_unit_test_block, gather_governance, has_total_uncovered,
-    hook_operations, macro_focus_set, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
-    reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
-    refine_changed_by_hunks, resolve_check_policy, resolve_experimental_config, reverse_apply,
-    scan_pragmas, select_in_scope, select_seeds_in_scope, widen_with_config_attributions,
+    DEFAULT_SEED_ROW_CAP, DepDate, EnabledExperiments, EnvelopeScope, Experiment, Finding,
+    FixtureTableDiff, GovernanceFacts, HeuristicId, InScopeSet, Manifest, ModelInScopeSet,
+    ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex, PrConfig, PrRef, PreflightError,
+    ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ResolvedAnchor, ScopeInput,
+    ScopeSelection, SeedCard, SeedInScopeSet, SuppressRule, SuppressionSource, UnitTest,
+    UnitTestDataDiff, UnitTestYamlBlock, VarReference, all_models, attach_hook_facts,
+    attach_model_yaml_diffs, attach_var_facts, attribute_config_tree_changes,
+    attribute_var_changes, build_seed_cards, changed_macros_baseline, changed_macros_pr_diff,
+    changed_models, check_by_id, diff_project_definitions, effective_fixture_format,
+    external_fixture_table, extract_model_block, extract_unit_test_block, gather_governance,
+    has_total_uncovered, hook_operations, macro_focus_set, preflight_compiled, raw_hunk_lines,
+    reconstruct_block_diffs, reconstruct_external_fixture_diff, reconstruct_model_sql_diffs,
+    reconstruct_table_diffs, refine_changed_by_hunks, resolve_check_policy,
+    resolve_experimental_config, resolve_finding_anchor, reverse_apply, scan_pragmas,
+    select_in_scope, select_seeds_in_scope, widen_with_config_attributions,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -566,29 +570,66 @@ fn finalize_findings(
     check_policy: &CheckPolicy<HeuristicId>,
     scope_input: &ScopeInput,
 ) -> Result<ReportOutcome, RunError> {
-    if args.findings_out.is_none() && !args.fail_on_uncovered {
+    if args.findings_out.is_none() && !args.fail_on_uncovered && !args.annotations {
         return Ok(ReportOutcome::Success);
     }
     // Collect the in-scope findings once. The gate reads the raw `Finding`s
     // (`has_total_uncovered` operates on `&[Finding]`); the envelope wraps
-    // the SAME vec into anchor-bearing entries (cute-dbt#386). One pass.
+    // the SAME vec into anchor-bearing entries (cute-dbt#386 / #393). One
+    // pass feeds the gate, the `--annotations` emit, and the envelope.
     let findings = collect_in_scope_findings(current, models_in_scope, check_policy);
-    // `generated_at` is the I/O-boundary date — the `--generated-at`
-    // override (golden regeneration / reproducible builds) over today's
-    // computed civil date. Threaded into the pure envelope builder so the
-    // committed golden is byte-stable.
-    let generated_at = args.generated_at.clone().unwrap_or_else(today_rfc3339_date);
+    // The shared finding→line anchor resolver (cute-dbt#393, the #261
+    // one-resolver-two-projections arc): bound to the run's manifest + the
+    // `--pr-diff` index. Only the PrDiff arm has hunks; the baseline arm has
+    // no diff index, so the closure resolves nothing (no honest line to
+    // pin) — annotations stay summary-only and envelope anchors stay `None`.
+    let diff_index = match scope_input {
+        ScopeInput::PrDiff { index } => Some(index),
+        ScopeInput::Baseline { .. } => None,
+    };
+    let anchor_for = |finding: &Finding<HeuristicId>| -> Option<ResolvedAnchor> {
+        resolve_finding_anchor(finding, current, diff_index?)
+    };
     // The gate decision is read off the raw findings BEFORE the sidecar is
     // written, but a sidecar write failure still wins (returns below via `?`
     // before the gate outcome is returned) — the write-failure-over-gate
     // precedence the run_loop tests pin.
     let gate_tripped = args.fail_on_uncovered && has_total_uncovered(&findings);
+    // cute-dbt#393 — print the GitHub workflow-command annotations to
+    // stdout (gen-time, never in `report.html`). A Total-tier gap escalates
+    // to `::error` only when the uncovered-gate is enforcing; otherwise it
+    // rides as `::warning`. Capped at the per-step limit with an honest
+    // overflow notice. Emitted before the `--findings-out` sidecar write, so
+    // a sidecar-write failure below never swallows the annotations (the HTML
+    // render already ran in the caller — a render failure suppresses both).
+    if args.annotations {
+        let levels = if gate_tripped {
+            AnnotationLevels::enforcing()
+        } else {
+            AnnotationLevels::advisory()
+        };
+        let emit = emit_annotations(&findings, levels, DEFAULT_ANNOTATION_CAP, &anchor_for);
+        for line in &emit.lines {
+            println!("{line}");
+        }
+    }
+    // `generated_at` is the I/O-boundary date — the `--generated-at`
+    // override (golden regeneration / reproducible builds) over today's
+    // computed civil date. Threaded into the pure envelope builder so the
+    // committed golden is byte-stable.
+    let generated_at = args.generated_at.clone().unwrap_or_else(today_rfc3339_date);
     if let Some(path) = &args.findings_out {
-        let envelope = envelope_from_findings(
+        // cute-dbt#393 — populate each envelope finding's reserved anchor
+        // slot from the SAME resolver the annotations consume (the #261
+        // arc): a finding whose model file is in the diff carries a concrete
+        // `(path, line, diff_context)`; the rest stay anchor-less (an
+        // unpopulated anchor is omitted, keeping the golden byte-minimal).
+        let envelope = envelope_from_findings_anchored(
             findings,
             env!("CARGO_PKG_VERSION"),
             generated_at,
             envelope_scope(args, scope_input),
+            &anchor_for,
         );
         write_sidecar(&envelope, path).map_err(|err| RunError::output(path, err))?;
     }
@@ -1943,6 +1984,7 @@ mod tests {
             pr_number: None,
             findings_out: None,
             fail_on_uncovered: false,
+            annotations: false,
             generated_at: None,
         }
     }

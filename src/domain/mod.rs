@@ -41,6 +41,7 @@ pub mod checks;
 pub mod config;
 pub mod cte;
 pub mod experimental;
+pub mod finding_anchor;
 pub mod findings_envelope;
 pub mod governance;
 pub mod grain;
@@ -88,6 +89,7 @@ pub use experimental::{
     DEFAULT_MACRO_BODY_CAP, EnabledExperiments, Experiment, ExperimentalConfig, ExperimentalError,
     parse_experimental_env, resolve_experimental_config,
 };
+pub use finding_anchor::{AnchorSide, ResolvedAnchor, resolve_finding_anchor};
 pub use findings_envelope::{
     DiffContext, EnvelopeFinding, EnvelopeMetadata, EnvelopeScope, FindingAnchor, FindingsEnvelope,
     ID_STABILITY, SCHEMA_VERSION, has_total_uncovered,

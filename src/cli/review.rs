@@ -208,6 +208,19 @@ pub struct ReviewArgs {
         hide = true
     )]
     pub experimental: Option<BTreeSet<Experiment>>,
+
+    /// Print GitHub workflow-command annotations for the in-scope
+    /// uncovered findings to stdout (cute-dbt#393) — flows through to the
+    /// composed `report --pr-diff` run untouched.
+    ///
+    /// `review` is always the pr-diff arm, so the finding→line anchors
+    /// resolve against the diff `review` just computed: each annotatable
+    /// finding emits a `::warning file=,line=,title=cute-dbt: <id>::<rec>`
+    /// line GitHub renders inline on the PR Files-changed tab (zero auth,
+    /// public + private repos alike). See `report --annotations` for the
+    /// tier→level mapping and the per-step cap.
+    #[arg(long)]
+    pub annotations: bool,
 }
 
 /// Worked examples + the privacy posture, appended to `review --help`'s
@@ -1477,6 +1490,11 @@ pub struct ComposeInputs {
     /// banner renders link-free (graceful degradation: local review with no
     /// PR, or `gh` absent).
     pub pr: Option<PrInfo>,
+    /// Whether `review --annotations` (cute-dbt#393) was set — passed
+    /// straight through to the composed `report --pr-diff` run so it prints
+    /// the GitHub workflow-command annotations for the in-scope uncovered
+    /// findings to stdout.
+    pub annotations: bool,
 }
 
 /// Placeholder standing for the diff text in the displayed report
@@ -1551,6 +1569,11 @@ impl ComposeInputs {
             // through here.
             findings_out: None,
             fail_on_uncovered: false,
+            // cute-dbt#393 — `review --annotations` passes straight through
+            // to the composed `report --pr-diff` run, which resolves the
+            // finding→line anchors against this diff and prints the
+            // workflow-command annotations to stdout.
+            annotations: self.annotations,
             // No envelope on `review` ⇒ the `--generated-at` override is
             // inert; `None` defers to the I/O-boundary date either way.
             generated_at: None,
@@ -1763,6 +1786,7 @@ fn build_compose_inputs(
         out: resolve_out_path(args.out.as_deref(), cwd, &target_dir),
         config: args.config.clone(),
         pr,
+        annotations: args.annotations,
     }
 }
 
@@ -3258,6 +3282,7 @@ AM models/added_then_edited.sql
             out: PathBuf::from("/repo/proj/target/cute-dbt-report.html"),
             config: None,
             pr: None,
+            annotations: false,
         }
     }
 

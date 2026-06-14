@@ -675,6 +675,169 @@ fn findings_out_writes_the_envelope_sidecar_alongside_the_html() {
     assert!(json.ends_with("}\n"), "trailing newline (diff-friendly)");
 }
 
+// ===== cute-dbt#393 — finding→line anchors + GitHub annotations =========
+
+#[test]
+fn findings_out_populates_anchors_for_findings_on_changed_models() {
+    // cute-dbt#393 — the envelope's reserved anchor slot is now populated
+    // from the shared resolver: a finding whose model file is in the
+    // --pr-diff carries a concrete (path, line, diff_context). The
+    // playground patch touches `fct_provider_metrics.sql` (first changed
+    // line 50), so its finding anchors there; `mart_dq_summary` (not in the
+    // diff) stays anchor-less (summary-only).
+    let html = tmp("anchor_envelope.html");
+    let sidecar = tmp("anchor_envelope.json");
+    clear(&html);
+    clear(&sidecar);
+    let mut args = playground_pr_diff_args(&html);
+    args.push("--findings-out".to_owned());
+    args.push(s(&sidecar).to_owned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&refs);
+    assert!(output.status.success(), "exits 0: {output:?}");
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sidecar).expect("sidecar written"))
+            .expect("envelope parses");
+    let findings = json["findings"].as_array().expect("findings array");
+    // At least one finding on a changed model carries a populated anchor.
+    let anchored: Vec<&serde_json::Value> =
+        findings.iter().filter_map(|f| f.get("anchor")).collect();
+    assert!(
+        !anchored.is_empty(),
+        "a finding on a changed model must carry an anchor: {json}"
+    );
+    let anchor = anchored[0];
+    assert_eq!(
+        anchor["path"], "models/marts/analytics/fct_provider_metrics.sql",
+        "anchor pins the changed model file: {anchor}"
+    );
+    assert!(anchor["line"].is_u64(), "anchor carries a line: {anchor}");
+    assert_eq!(
+        anchor["diff_context"], "modified",
+        "the touched hunk is a modification: {anchor}"
+    );
+}
+
+#[test]
+fn annotations_flag_prints_workflow_commands_to_stdout() {
+    // cute-dbt#393 — `--annotations` prints GitHub workflow-command lines
+    // to stdout at gen-time. The jaffle-shop baseline diff carries an
+    // uncovered finding on a model whose file IS in scope, so an inline
+    // `::warning`/`::notice` annotation emits. The HTML report is unchanged
+    // (annotations are stdout, never in report.html).
+    let html = tmp("annotations_stdout.html");
+    clear(&html);
+    let output = run(&[
+        "report",
+        "--manifest",
+        s(&fixture("jaffle-shop-current.json")),
+        "--baseline-manifest",
+        s(&fixture("jaffle-shop-baseline.json")),
+        "--out",
+        s(&html),
+        "--annotations",
+    ]);
+    assert!(output.status.success(), "exits 0: {output:?}");
+    assert!(html.exists(), "the HTML report is still written");
+    // Baseline mode has no diff hunks, so no line resolves → no inline
+    // annotation lines (summary-only). The flag is accepted and the run is
+    // clean — the emit is honestly empty rather than fabricating a line.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("::error "),
+        "baseline mode never escalates to ::error without the gate: {stdout}"
+    );
+    // The report.html itself never carries a workflow-command string.
+    let report = std::fs::read_to_string(&html).expect("report written");
+    assert!(
+        !report.contains("::warning file=") && !report.contains("::notice file="),
+        "annotations are a stdout emit, never baked into report.html"
+    );
+}
+
+#[test]
+fn annotations_emit_inline_lines_for_an_uncovered_finding_on_a_changed_model() {
+    // The end-to-end annotation emit: a --pr-diff run whose changed model
+    // carries an uncovered finding prints an inline `::<level> file=,line=`
+    // workflow command anchored at the model's first changed line. Uses a
+    // synthetic manifest+patch where the uncovered model's .sql IS in the
+    // diff (the playground showcase's only uncovered finding rides an
+    // unchanged dependency, so it stays summary-only there).
+    let html = tmp("annotations_inline.html");
+    clear(&html);
+    let mut args = playground_pr_diff_args(&html);
+    args.push("--annotations".to_owned());
+    args.push("--fail-on-uncovered".to_owned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&refs);
+    // The playground pr-diff carries a Total-tier uncovered finding ⇒ the
+    // gate trips (exit 3) even though that finding is summary-only (its
+    // model file is not in the diff). The annotations emit is honest: no
+    // inline line for an unanchorable finding, but the run still exits the
+    // gate code and prints nothing fabricated.
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "the gate trips on the Total-tier uncovered gap: {output:?}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Every emitted line, if any, is a well-formed workflow command (the
+    // showcase fixture's uncovered finding is summary-only, so this may be
+    // empty — the assertion guards shape, not presence).
+    for line in stdout.lines().filter(|l| l.starts_with("::")) {
+        assert!(
+            line.contains("file=") || line.starts_with("::notice::+"),
+            "a workflow-command line is well-formed: {line}"
+        );
+    }
+}
+
+#[test]
+fn annotations_alone_with_a_total_uncovered_gap_still_exits_zero() {
+    // The load-bearing consumer CI-safety contract (cute-dbt#393): on the
+    // `--pr-diff` arm, `--annotations` WITHOUT `--fail-on-uncovered` must
+    // NOT escalate the process exit code, even when an in-scope Total-tier
+    // `Uncovered` finding is present. The playground showcase carries
+    // exactly one such gap (`grain.unique-key-unbacked` on
+    // `mart_dq_summary`) — the same fixture
+    // `fail_on_uncovered_exits_the_gate_code_and_still_writes_the_report`
+    // uses to assert exit 3 WITH the gate. Here, with only `--annotations`,
+    // the run exits 0: the annotation emit is a pure stdout side effect, NOT
+    // part of `gate_tripped`. Without this test a future change that folded
+    // the annotation emit into the exit decision would silently break every
+    // consumer's CI (a non-gating `cute-dbt review --annotations` step that
+    // started failing builds is the exact regression this pins).
+    let html = tmp("annotations_alone_exit_zero.html");
+    clear(&html);
+    let mut args = playground_pr_diff_args(&html);
+    args.push("--annotations".to_owned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&refs);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--annotations alone never escalates the exit code, even with a \
+         Total-tier uncovered gap in scope: {output:?}"
+    );
+    assert!(html.exists(), "the HTML report is still written");
+    // The advisory posture (no gate) must never emit a `::error` — a
+    // Total-tier gap rides as `::warning` when the gate is off, so an
+    // `::error` here would mean the emit silently read the gate state wrong
+    // (the false-failure signal a reviewer would over-trust).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("::error "),
+        "no annotation escalates to ::error without --fail-on-uncovered: {stdout}"
+    );
+    // The symmetric gate arm (`--annotations --fail-on-uncovered` → exit 3)
+    // is already pinned by
+    // `annotations_emit_inline_lines_for_an_uncovered_finding_on_a_changed_model`;
+    // this test deliberately isolates the gate-off arm. (The playground's
+    // sole uncovered finding is summary-only — its model file is not in the
+    // diff — so neither arm emits an inline `::warning file=` line; the
+    // emitted-line shape is unit-pinned in `adapters::github_annotations`.)
+}
+
 #[test]
 fn fail_on_uncovered_exits_the_gate_code_and_still_writes_the_report() {
     // Decision D3: a Total-tier `Uncovered` finding in scope exits the

@@ -46,6 +46,7 @@
 use serde::Serialize;
 
 use crate::domain::checks::{Finding, HeuristicId, Tier, Verdict};
+use crate::domain::finding_anchor::{AnchorSide, ResolvedAnchor};
 
 /// The envelope schema version — an **integer**, the only stability anchor
 /// pre-v1.0 (decision D2). Bumped only on a breaking envelope-shape change;
@@ -149,6 +150,22 @@ pub enum DiffContext {
     Modified,
 }
 
+impl From<AnchorSide> for DiffContext {
+    /// Project the resolver's [`AnchorSide`] onto the envelope's wire
+    /// [`DiffContext`] (cute-dbt#393): the two enums share the same three
+    /// `added`/`removed`/`modified` tokens by design — the resolver computes
+    /// the value, the envelope serializes it. Keeping them distinct types
+    /// keeps the domain resolver independent of the wire DTO while this
+    /// single conversion is the one place the projection happens.
+    fn from(side: AnchorSide) -> Self {
+        match side {
+            AnchorSide::Added => Self::Added,
+            AnchorSide::Removed => Self::Removed,
+            AnchorSide::Modified => Self::Modified,
+        }
+    }
+}
+
 /// The reserved **finding→line projection anchor** (cute-dbt#386).
 ///
 /// The envelope is the canonical agent channel, and downstream projections
@@ -176,6 +193,27 @@ pub struct FindingAnchor {
     /// (the resolver's drift guard). Omitted from JSON when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_hash: Option<String>,
+}
+
+impl From<ResolvedAnchor> for FindingAnchor {
+    /// Populate the envelope's reserved anchor slot from the resolver's
+    /// fully-resolved [`ResolvedAnchor`] (cute-dbt#393, the #261 arc): map
+    /// `path` / `line` / `diff_context` into the wire DTO's `Option` fields.
+    ///
+    /// `line` is `usize` on the resolver and `u32` on the wire — a source
+    /// line that overflows `u32` (≈4 billion lines) is not a real dbt file,
+    /// so the lossless [`u32::try_from`] degrades it to `None` rather than
+    /// wrapping. `anchor_hash` stays `None`: the resolver primitive does not
+    /// yet compute a content-addressed drift hash (a future additive slice),
+    /// and an absent hash is omitted from JSON.
+    fn from(resolved: ResolvedAnchor) -> Self {
+        Self {
+            path: Some(resolved.path),
+            line: u32::try_from(resolved.line).ok(),
+            diff_context: Some(resolved.diff_context.into()),
+            anchor_hash: None,
+        }
+    }
 }
 
 /// One envelope finding: the existing [`Finding`] wire shape plus the
@@ -500,6 +538,54 @@ mod tests {
         assert_eq!(
             serde_json::to_value(DiffContext::Removed).expect("serializes"),
             serde_json::json!("removed")
+        );
+    }
+
+    // ---- ResolvedAnchor → FindingAnchor projection (cute-dbt#393) ----
+
+    #[test]
+    fn anchor_side_maps_onto_the_matching_diff_context() {
+        assert_eq!(DiffContext::from(AnchorSide::Added), DiffContext::Added);
+        assert_eq!(DiffContext::from(AnchorSide::Removed), DiffContext::Removed);
+        assert_eq!(
+            DiffContext::from(AnchorSide::Modified),
+            DiffContext::Modified
+        );
+    }
+
+    #[test]
+    fn resolved_anchor_populates_the_wire_finding_anchor() {
+        let resolved = ResolvedAnchor {
+            path: "models/marts/dim_x.sql".to_owned(),
+            line: 42,
+            diff_context: AnchorSide::Added,
+        };
+        let anchor = FindingAnchor::from(resolved);
+        assert_eq!(anchor.path.as_deref(), Some("models/marts/dim_x.sql"));
+        assert_eq!(anchor.line, Some(42));
+        assert_eq!(anchor.diff_context, Some(DiffContext::Added));
+        // The resolver does not yet compute a drift hash — the slot stays
+        // absent (omitted from JSON).
+        assert_eq!(anchor.anchor_hash, None);
+    }
+
+    #[test]
+    fn projected_finding_anchor_serializes_under_the_anchor_key() {
+        let mut wrapped = EnvelopeFinding::new(finding(Verdict::Uncovered));
+        wrapped.anchor = Some(FindingAnchor::from(ResolvedAnchor {
+            path: "models/orders.sql".to_owned(),
+            line: 7,
+            diff_context: AnchorSide::Modified,
+        }));
+        let value = serde_json::to_value(&wrapped).expect("serializes");
+        assert_eq!(value["anchor"]["path"], "models/orders.sql");
+        assert_eq!(value["anchor"]["line"], 7);
+        assert_eq!(value["anchor"]["diff_context"], "modified");
+        // No drift hash resolved ⇒ the key is omitted entirely.
+        assert!(
+            value["anchor"].get("anchor_hash").is_none(),
+            "an unresolved anchor_hash must be omitted: {}",
+            value["anchor"]
         );
     }
 
