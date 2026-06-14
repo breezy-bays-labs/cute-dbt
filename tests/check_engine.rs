@@ -19,11 +19,12 @@ use std::path::{Path, PathBuf};
 
 use cute_dbt::adapters::cte_engine::parse_cte_graph;
 use cute_dbt::adapters::render::build_payload_with_externals;
+use cute_dbt::domain::findings_envelope::has_total_uncovered;
 use cute_dbt::domain::{
     CheckId, CheckPolicy, ChecksConfig, Checksum, DependsOn, Finding, HeuristicId, InScopeSet,
     Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId, SuppressRule,
-    SuppressionSource, UnitTest, UnitTestExpect, UnitTestGiven, Verdict, model_findings,
-    resolve_check_policy,
+    SuppressionSource, UnitTest, UnitTestExpect, UnitTestGiven, Verdict, apply_check_policy,
+    model_findings, resolve_check_policy,
 };
 use cute_dbt::ports::ManifestSource;
 
@@ -458,6 +459,44 @@ fn a_suppressed_finding_stays_in_the_real_payload_with_its_reason() {
     assert_eq!(
         finding["suppressed"]["reason"],
         "monthly grain duplicates accepted during backfill"
+    );
+}
+
+#[test]
+fn a_suppressed_only_total_gap_does_not_trip_the_gate_on_real_data() {
+    // cute-dbt#406 end-to-end on the real fixture: `fct_encounters_monthly`
+    // carries exactly one Total-tier (`grain.unique-key-unbacked`)
+    // UNCOVERED finding. Without any policy it trips `--fail-on-uncovered`;
+    // once the operator suppresses it (the SAME policy path the run loop
+    // applies, `apply_check_policy`), the gate must NOT trip — the suppressed
+    // gap is acknowledged, and the gate now shares the exact suppression
+    // check the annotation emit uses, so neither surfaces it.
+    let manifest = load("playground-current.json");
+    let raw = findings_for(&manifest, MONTHLY);
+    // Baseline: the unsuppressed Total gap trips the gate.
+    assert!(
+        has_total_uncovered(&raw),
+        "the unsuppressed Total gap trips the gate"
+    );
+
+    // Suppress it via the real policy stage, then re-check the gate.
+    let policy = CheckPolicy {
+        suppressions: vec![SuppressRule {
+            check: HeuristicId::GrainUniqueKeyUnbacked,
+            model: "fct_encounters_monthly".to_owned(),
+            reason: Some("monthly grain duplicates accepted during backfill".to_owned()),
+            source: SuppressionSource::Config,
+        }],
+        ..Default::default()
+    };
+    let suppressed = apply_check_policy(raw, &policy);
+    assert!(
+        suppressed.iter().all(|f| f.suppressed.is_some()),
+        "the policy stage marked the only finding suppressed"
+    );
+    assert!(
+        !has_total_uncovered(&suppressed),
+        "a suppressed-only Total gap must NOT trip --fail-on-uncovered (cute-dbt#406)"
     );
 }
 
