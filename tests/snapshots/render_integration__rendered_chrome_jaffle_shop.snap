@@ -1,6 +1,5 @@
 ---
 source: tests/render_integration.rs
-assertion_line: 227
 expression: chrome
 ---
 <!DOCTYPE html>
@@ -2103,9 +2102,7 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
   <button type="button" class="lens-tab" role="tab" id="lens-tab-macros" aria-selected="false" aria-controls="lens-panel-macros" tabindex="-1" data-lens="macros" data-testid="lens-tab-macros">Macros</button>
   <button type="button" class="lens-tab" role="tab" id="lens-tab-project" aria-selected="false" aria-controls="lens-panel-project" tabindex="-1" data-lens="project" data-testid="lens-tab-project">Project</button>
 </nav>
-<div class="lens-panel is-active" role="tabpanel" id="lens-panel-models" aria-labelledby="lens-tab-models" data-lens="models" data-testid="lens-panel-models">
-
-<section class="error-card" role="alert" aria-label="Manifest error">
+<div class="lens-panel is-active" role="tabpanel" id="lens-panel-models" aria-labelledby="lens-tab-models" data-lens="models" data-testid="lens-panel-models"><section class="error-card" role="alert" aria-label="Manifest error">
   <h2>This manifest can't be visualized</h2>
   <div class="error-node-id">node: <code>—</code></div>
   <p class="error-remediation">
@@ -2234,17 +2231,8 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
   </section>
 
 </div></div>
-<div class="lens-panel" role="tabpanel" id="lens-panel-macros" aria-labelledby="lens-tab-macros" data-lens="macros" data-testid="lens-panel-macros" hidden>
-  <section class="lens-scaffold lens-scaffold-macros" aria-label="Macros lens" data-testid="lens-scaffold-macros">
-    <h2>Macros</h2>
-    <p class="lens-scaffold-empty" data-testid="lens-macros-empty">PR-scoped macro lens &mdash; blast radius, the macro&rsquo;s own diff, and the impacted models &amp; tests. Populated in the cute-dbt#360 design phase.</p>
-  </section>
-</div>
+<div class="lens-panel" role="tabpanel" id="lens-panel-macros" aria-labelledby="lens-tab-macros" data-lens="macros" data-testid="lens-panel-macros" hidden></div>
 <div class="lens-panel" role="tabpanel" id="lens-panel-project" aria-labelledby="lens-tab-project" data-lens="project" data-testid="lens-panel-project" hidden>
-  <section class="lens-scaffold lens-scaffold-project" aria-label="Project lens" data-testid="lens-scaffold-project">
-    <h2>Project</h2>
-    <p class="lens-scaffold-empty" data-testid="lens-project-empty">Project lens &mdash; <code>dbt_project.yml</code>, vars, and governance changes. Populated in the cute-dbt#360 design phase.</p>
-  </section>
 </div>
 
 <script type="application/json" id="cute-dbt-data">{"baseline":"jaffle-shop-baseline.json","models":[{"name":"stg_customers","path":"models/staging/stg_customers.sql","dag":{"nodes":[{"id":"source","role":"import"},{"id":"renamed","role":"transform"},{"id":"(final select)","label":"stg_customers.sql","role":"final"}],"edges":[{"from":"source","to":"renamed","edge_type":"from"},{"from":"renamed","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select * from renamed","renamed":"renamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)","source":"source as (\n    select * from \"jaffle_shop\".\"main\".\"raw_customers\"\n\n)"},"raw_sql":"with source as (\n\n    {#-\n    Normally we would select from the table here, but we are using seeds to load\n    our data in this project. Modified body — adds a trim() pass on names so\n    PR 5's StateComparator sees the body checksum change.\n    #}\n    select * from {{ ref('raw_customers') }}\n\n),\n\nrenamed as (\n\n    select\n        id as customer_id,\n        trim(first_name) as first_name,\n        trim(last_name) as last_name\n\n    from source\n\n)\n\nselect * from renamed","tests":[{"id":"unit_test.jaffle_shop.stg_customers.test_stg_customers_renames_columns","name":"test_stg_customers_renames_columns","target_model":"stg_customers","changed":true,"description":"stg_customers renames raw_customers.id/first_name/last_name to\ncustomer_id/first_name/last_name and otherwise passes rows through.\nSynthetic fixture rows — no real customer data.\n","tags":["quality","smoke"],"meta":{"owner":"data-eng","priority":"high"},"defined_in":"models/staging/unit_tests.yml","given":[{"input":"ref('raw_customers')","bound_to_node":"source","table":{"columns":["first_name","id","last_name"],"rows":[{"cells":[{"display":"Alice","key":{"t":"str","v":"Alice"}},{"display":"1","key":{"t":"number","v":"1"}},{"display":"A.","key":{"t":"str","v":"A."}}]},{"cells":[{"display":"Bob","key":{"t":"str","v":"Bob"}},{"display":"2","key":{"t":"number","v":"2"}},{"display":"B.","key":{"t":"str","v":"B."}}]}]},"rows":[{"first_name":"Alice","id":1,"last_name":"A."},{"first_name":"Bob","id":2,"last_name":"B."}],"format":"dict"}],"expected":{"table":{"columns":["customer_id","first_name","last_name"],"rows":[{"cells":[{"display":"1","key":{"t":"number","v":"1"}},{"display":"Alice","key":{"t":"str","v":"Alice"}},{"display":"A.","key":{"t":"str","v":"A."}}]},{"cells":[{"display":"2","key":{"t":"number","v":"2"}},{"display":"Bob","key":{"t":"str","v":"Bob"}},{"display":"B.","key":{"t":"str","v":"B."}}]}]},"rows":[{"customer_id":1,"first_name":"Alice","last_name":"A."},{"customer_id":2,"first_name":"Bob","last_name":"B."}],"format":"dict","column_meta":{"customer_id":{"tests":[{"name":"not null"},{"name":"unique"}]}}}}],"is_recursive":false}],"manifest_nodes":{"stg_customers":{"materialized":"view","columns":[{"name":"customer_id","tests":[{"name":"not null"},{"name":"unique"}]}]}}}</script>
@@ -2461,6 +2449,14 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     // HTML carries zero seed bytes — the section appears only when the
     // gated `DATA.seed_cards` payload is present.
     renderSeedDataTables();
+    // cute-dbt#424 — wire the subject-lens tab strip BEFORE the zero-models
+    // early return. A macro-only PR (the macro lens's primary case) has zero
+    // in-scope models, but its content now lives in the Macros tab — which
+    // would be permanently unreachable if the toggle were only bound in the
+    // with-models path below. The lens tabs are always present in the DOM, so
+    // the binding is unconditional (a pure in-place class/hidden/aria toggle,
+    // distinct from the DAG-shelf handler — territory partition with #398).
+    bindLensTabs();
     if (!DATA.models.length) {
       $(".test-selection").hide();
       $(".model-sql").hide();
@@ -2530,11 +2526,11 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     // cute-dbt#232 — viewport-edge tagging for the pure-CSS bubble family
     // (geometry annotation only; visibility stays CSS :hover/:focus).
     bindTipEdgeTagger();
-    // cute-dbt#402 (epic #360) — the subject-lens tab strip (Models /
-    // Macros / Project). A pure in-place class/hidden/aria toggle; the
-    // Models lens (today's whole report) is active by default. Distinct
-    // handler from the DAG-shelf toggle (territory partition with #398).
-    bindLensTabs();
+    // cute-dbt#402 (epic #360) / cute-dbt#424 — the subject-lens tab strip
+    // (Models / Macros / Project) is wired ABOVE the zero-models early return
+    // (a macro-only PR must still reach its Macros tab), so it is NOT
+    // re-bound here: bindLensTabs uses delegated `$(document).on` handlers, so
+    // a second call would double-fire every tab click.
   });
 
   // cute-dbt#91 — scope-toggle helpers --------------------------------

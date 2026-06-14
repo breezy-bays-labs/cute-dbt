@@ -409,248 +409,6 @@
 </nav>
 <div class="lens-panel is-active" role="tabpanel" id="lens-panel-models" aria-labelledby="lens-tab-models" data-lens="models" data-testid="lens-panel-models">
 
-{# cute-dbt#266 — the "Project definition changed" panel. Server-rendered
-   (no JS dependency) whenever dbt_project.yml is in the PR diff: the
-   categorized rows (vars / config tree / dispatch / hooks / paths /
-   identity / other) come from the Rust-side structural diff of the
-   reverse-applied old side vs the working tree; every degrade arm shows
-   the Shape-A raw-diff fallback with explicit copy instead — the change
-   is NEVER silently invisible (fail-open display). Absent (None) the
-   match emits zero bytes, so baseline-mode and panel-free reports stay
-   byte-identical to the pre-#266 shape (this comment's closing trim and
-   the endmatch's trailing trim keep the surrounding newlines exact). -#}
-{% match project_panel %}{% when Some with (panel) %}<section class="project-def-panel" aria-label="Project definition changes" data-testid="project-def-panel">
-  <h2>Project definition changed</h2>
-  <p class="project-def-subtitle"><code>dbt_project.yml</code> is part of this PR&rsquo;s diff.</p>
-{%- if panel.is_empty_change %}
-  <p class="project-def-empty" data-testid="project-def-empty">No semantic configuration change detected &mdash; the edit touches formatting or comments only.</p>
-{%- endif %}
-{%- if !panel.rows.is_empty() %}
-  <ul class="project-def-rows">
-{%- for row in panel.rows %}
-    <li class="project-def-row{% if row.banner %} is-banner{% endif %}" data-category="{{ row.category_key }}">
-      <span class="project-def-chip project-def-chip-{{ row.category_key }}">{{ row.category_label }}</span>
-      {%- if !row.tier.is_empty() %}
-      <span class="tier-chip tier-unknown">{{ row.tier }}</span>
-      {%- endif %}
-      <code class="project-def-label">{{ row.label }}</code>
-      {%- if !row.detail.is_empty() %}
-      <span class="project-def-detail">{{ row.detail }}</span>
-      {%- endif %}
-      {%- if !row.note.is_empty() %}
-      <span class="project-def-note">{{ row.note }}</span>
-      {%- endif %}
-      {#- cute-dbt#268 — per-var attribution entries on vars rows: each
-          effective edit (global, or expanded per package-scoped inner
-          var) with its precedence-resolved old→new, tiered
-          affected-model lines (DIRECT / CONFIG / MACRO chips, "at least
-          N" framing, R1b cap with <details> overflow), and the masked /
-          insulated / dynamic statements. Contextualize-don't-widen: the
-          lists name models, they never pull them into scope. -#}
-      {%- for entry in row.var_entries %}
-      <div class="project-def-var-entry" data-testid="project-def-var-entry">
-        <code class="project-def-var-name">{{ entry.name }}</code>
-        {%- if !entry.scope.is_empty() %}
-        <span class="project-def-var-scope">{{ entry.scope }}</span>
-        {%- endif %}
-        {%- if !entry.detail.is_empty() %}
-        <span class="project-def-detail">{{ entry.detail }}</span>
-        {%- endif %}
-        {%- for line in entry.tier_lines %}
-        <p class="project-def-var-tier" data-testid="project-def-var-tier">
-          <span class="tier-chip tier-{{ line.tier_key }}">{{ line.tier_label }}</span>
-          <span class="project-def-var-tier-text">{{ line.text }}</span>
-          {%- if !line.overflow.is_empty() %}
-          <details class="project-def-affected-list" data-testid="project-def-var-overflow">
-            <summary>show referencing models</summary>
-            <span class="project-def-affected-names">{% for name in line.overflow %}<code>{{ name }}</code>{% if !loop.last %}, {% endif %}{% endfor %}</span>
-          </details>
-          {%- endif %}
-        </p>
-        {%- endfor %}
-        {%- for var_note in entry.notes %}
-        <p class="project-def-var-note" data-testid="project-def-var-note">{{ var_note }}</p>
-        {%- endfor %}
-      </div>
-      {%- endfor %}
-      {#- cute-dbt#267 — the affected-models listing on models:-section
-          config-tree rows: counts always explicit (TOTAL tier — fusion's
-          own fqn resolution); names inline up to the R1b cap, past it
-          collapsed into the <details> below ("listed, not individually
-          rendered"). Other categories/sections render no listing. -#}
-      {%- if !row.affected_text.is_empty() %}
-      <span class="project-def-affected" data-testid="project-def-affected">{{ row.affected_text }}</span>
-      {%- if !row.affected_overflow.is_empty() %}
-      <details class="project-def-affected-list" data-testid="project-def-affected-list">
-        <summary>show affected models</summary>
-        <span class="project-def-affected-names">{% for name in row.affected_overflow %}<code>{{ name }}</code>{% if !loop.last %}, {% endif %}{% endfor %}</span>
-      </details>
-      {%- endif %}
-      {%- endif %}
-      {%- if row.hook_slot %}
-      {#- cute-dbt#269 — the report JS fills this slot with the hook
-          bodies' inline SQL diff via the #111 renderer (renderBlockDiff
-          + tokenizeSql); the payload's project_change_panel carries the
-          Rust-computed BlockDiff. -#}
-      <div class="project-def-hook-slot" data-hook-slot="{{ row.label }}"></div>
-      {%- endif %}
-    </li>
-{%- endfor %}
-  </ul>
-{%- endif %}
-{%- if !panel.fallback_copy.is_empty() %}
-  <p class="project-def-fallback-copy" data-testid="project-def-fallback">{{ panel.fallback_copy }}</p>
-{%- if !panel.fallback_lines.is_empty() %}
-  <pre class="project-def-raw-diff">{% for line in panel.fallback_lines %}<span class="project-def-raw-line is-{{ line.kind }}">{{ line.text }}</span>
-{% endfor %}</pre>
-{%- endif %}
-{%- endif %}
-</section>
-{% when None %}{% endmatch -%}
-{#- cute-dbt#265 (Slice B) — the macro perspective lens. Server-rendered
-   (no JS dependency), positioned ABOVE the governance chips (the founder's
-   "near the top"). Gated behind the `macro-lens` experiment: when off the
-   cli passes `macro_lens = None`, so this `{% match %}` emits ZERO bytes
-   (every surrounding tag trims both sides), keeping the non-macro goldens
-   byte-identical — the project_panel / governance precedents. Marked
-   EXPERIMENTAL (founder D7). The copy says "macro changed", NEVER a
-   `state:modified.macros` selector name (critique S2). Impacted models are
-   a collapsible DIRECTORY TREE (founder D3) — count + names only, NO inline
-   model bodies (Slice D), NO focused DAG (explore-only, #345), NO
-   report→explore hyperlink (it would break the one-file zero-egress
-   contract). Intentionally unstyled beyond the chassis hooks — Claude
-   Design owns the visual pass; the data-testid / data-* hooks are the
-   stable selectors the headless guards key off. -#}
-{% match macro_lens %}{% when Some with (lens) %}<section class="macro-lens-panel" aria-label="Macro changes" data-testid="macro-lens-panel">
-  <h2>Macro changed <span class="macro-lens-experimental" data-testid="macro-lens-experimental">experimental</span></h2>
-  <p class="macro-lens-subtitle">A changed macro is invisible to model and unit-test scope selection &mdash; this section shows the macros this PR changed and the root-project models they reach. <span class="macro-lens-fidelity" data-testid="macro-lens-fidelity" data-fidelity="{{ lens.fidelity }}">fidelity: {{ lens.fidelity }}</span></p>
-{%- for mac in lens.macros %}
-  <div class="macro-lens-macro" data-testid="macro-lens-macro" data-macro="{{ mac.name }}">
-    <p class="macro-lens-macro-head"><code class="macro-lens-name">{{ mac.name }}</code> <span class="macro-lens-package" data-testid="macro-lens-package">{{ mac.package }}</span>{% if !mac.path.is_empty() %} <code class="macro-lens-path">{{ mac.path }}</code>{% endif %}</p>
-    {#- The body diff (pr-diff arm, touched + aligned + substantive) or the
-        plain current body as context lines (baseline arm / untouched). The
-        DiffLine kind drives the per-line CSS hook, mirroring the project-def
-        raw-diff fallback. -#}
-{%- match mac.diff %}{% when Some with (d) %}
-    <pre class="macro-lens-diff" data-testid="macro-lens-diff">{% for line in d.lines %}<span class="macro-lens-line is-{% match line.kind %}{% when DiffLineKind::Context %}context{% when DiffLineKind::Removed %}removed{% when DiffLineKind::Added %}added{% endmatch %}">{{ line.text }}</span>
-{% endfor %}</pre>
-{%- when None %}
-    <pre class="macro-lens-body" data-testid="macro-lens-body">{% for line in mac.body_lines %}<span class="macro-lens-line is-context">{{ line.text }}</span>
-{% endfor %}</pre>
-{%- endmatch %}
-    <p class="macro-lens-count" data-testid="macro-lens-count" data-count="{{ mac.impacted_count }}">Impacts {{ mac.impacted_count }} root-project {% if mac.impacted_count == 1 %}model{% else %}models{% endif %}.</p>
-{%- if !mac.tree.is_empty() %}
-    <details class="macro-lens-tree-details" data-testid="macro-lens-tree-details" open>
-      <summary>impacted models</summary>
-      <ul class="macro-lens-tree" data-testid="macro-lens-tree">
-{%- for row in mac.tree %}
-        <li class="macro-lens-tree-row macro-lens-tree-{{ row.kind }}" data-testid="macro-lens-tree-row" data-kind="{{ row.kind }}" data-depth="{{ row.depth }}"{% if !row.model_id.is_empty() %} data-model="{{ row.model_id }}"{% endif %} style="--macro-tree-depth: {{ row.depth }}">{% if row.kind == "dir" %}<span class="macro-lens-tree-dir">{{ row.label }}/</span>{% else %}<code class="macro-lens-tree-model">{{ row.label }}</code>{% endif %}</li>
-{%- endfor %}
-      </ul>
-    </details>
-{#- cute-dbt#265 Slice C (founder D4 + D6) — the impacted-model selector
-    + the per-model inline SQL and first-order call-site panels. ALL
-    panels are server-rendered (every model's SQL + call sites composed in
-    Rust — the "display strings composed in Rust" house rule + the
-    server-render-everything zero-egress posture); the gated inline script
-    below the loop is a pure renderer that toggles which model's panel is
-    visible on a <select> change — never a recompute, never a fetch. The
-    selector reuses the #91 changed-models <select> idiom. With
-    JS off the FIRST panel is the static fallback (the others carry
-    `hidden`), so the section degrades gracefully. The call sites are
-    first-order only (founder D6 — full ref()-lineage downstream is the
-    explorer, #345); the fidelity chip above already states the per-arm
-    confidence honestly (S2). -#}
-    <div class="macro-lens-models" data-testid="macro-lens-models" data-macro="{{ mac.name }}">
-{#- cute-dbt#265 Slice D (founder D5) — the inline-body cap. The selector
-    lists EVERY impacted model (cheap), but only the first
-    `mac.inlined_count` (= min(gen-time cap, impacted_count)) carry a
-    server-rendered SQL panel; past the cap the panel is identity-only. When
-    the cap is exceeded the "showing N of M bodies" line states it honestly,
-    bounding a widely-used macro's (single, frozen) report size. -#}
-{%- if mac.inlined_count < mac.impacted_count %}
-      <p class="macro-lens-body-cap" data-testid="macro-lens-body-cap" data-inlined="{{ mac.inlined_count }}" data-total="{{ mac.impacted_count }}">Showing {{ mac.inlined_count }} of {{ mac.impacted_count }} model bodies inline &mdash; the rest are listed in the directory tree above (raise <code>macro_body_cap</code> to inline more).</p>
-{%- endif %}
-      <div class="macro-lens-model-selector-row">
-        <label for="macro-lens-model-select-{{ loop.index0 }}">Impacted model</label>
-        <select id="macro-lens-model-select-{{ loop.index0 }}" class="macro-lens-model-select" data-testid="macro-lens-model-select">
-{%- for im in mac.impacted_models %}
-          <option value="{{ im.model_id }}">{{ im.name }}{% if im.call_site_total > 0 %}  ({{ im.call_site_total }}){% endif %}{% if !im.inline_body %}  &mdash; body not inlined{% endif %}</option>
-{%- endfor %}
-        </select>
-      </div>
-{%- for im in mac.impacted_models %}
-      <div class="macro-lens-model-panel" data-testid="macro-lens-model-panel" data-model="{{ im.model_id }}" data-inline-body="{{ im.inline_body }}"{% if !loop.first %} hidden{% endif %}>
-        <p class="macro-lens-model-head"><code class="macro-lens-model-name">{{ im.name }}</code>{% if !im.path.is_empty() %} <code class="macro-lens-model-path">{{ im.path }}</code>{% endif %}</p>
-{#- Slice D — past the gen-time cap the heavy surface (inline SQL +
-    call sites) is intentionally not server-rendered; show a compact
-    affordance instead so the report stays bounded for a widely-used
-    macro. The model still appears in the selector + the directory tree. -#}
-{%- if !im.inline_body %}
-        <p class="macro-lens-model-uninlined" data-testid="macro-lens-model-uninlined">Body not inlined (over the <code>macro_body_cap</code> limit) &mdash; this model is listed in the directory tree above.</p>
-{%- else %}
-{#- First-order call sites: the lines of THIS model's body that invoke the
-    changed macro. Shown up to the cap; the remainder fold behind a
-    <details> "more" disclosure so a heavily-calling model stays compact. -#}
-{%- if im.call_site_total > 0 %}
-        <p class="macro-lens-callsite-count" data-testid="macro-lens-callsite-count" data-total="{{ im.call_site_total }}">{% if im.call_site_total > im.call_site_cap %}Showing {{ im.call_sites.len() }} of {{ im.call_site_total }} call {% if im.call_site_total == 1 %}site{% else %}sites{% endif %}.{% else %}{{ im.call_site_total }} call {% if im.call_site_total == 1 %}site{% else %}sites{% endif %}.{% endif %}</p>
-        <ul class="macro-lens-callsites" data-testid="macro-lens-callsites">
-{%- for cs in im.call_sites %}
-          <li class="macro-lens-callsite" data-testid="macro-lens-callsite" data-line="{{ cs.line }}"><span class="macro-lens-callsite-line">{{ cs.line }}</span> <code class="macro-lens-callsite-text">{{ cs.text }}</code></li>
-{%- endfor %}
-        </ul>
-{%- else %}
-        <p class="macro-lens-callsite-none" data-testid="macro-lens-callsite-none">No first-order call site in this model's body &mdash; the macro is reached transitively (through another macro).</p>
-{%- endif %}
-{#- The model's inline raw SQL (manifest raw_code), server-rendered as
-    plain context lines — the same fallback shape the macro body uses. -#}
-{%- if !im.sql_lines.is_empty() %}
-        <pre class="macro-lens-model-sql" data-testid="macro-lens-model-sql">{% for line in im.sql_lines %}<span class="macro-lens-line is-context">{{ line.text }}</span>
-{% endfor %}</pre>
-{%- else %}
-        <p class="macro-lens-model-sql-none" data-testid="macro-lens-model-sql-none">No raw SQL recorded for this model in the manifest.</p>
-{%- endif %}
-{%- endif %}
-      </div>
-{%- endfor %}
-    </div>
-{%- else %}
-    <p class="macro-lens-empty" data-testid="macro-lens-empty">No root-project models reach this macro &mdash; a materialization macro, or a macro this PR added/removed rather than edited in place.</p>
-{%- endif %}
-  </div>
-{%- endfor %}
-{#- cute-dbt#265 Slice C — the impacted-model selector behaviour, inlined
-    in the GATED section (not the shared interaction.js engine) so the
-    non-macro goldens stay byte-identical: when the macro experiment is off
-    this whole `{% match %}` arm — script included — emits zero bytes. The
-    panels are all server-rendered (every model's SQL + call sites in the
-    DOM, only the first visible); this is a PURE renderer that flips
-    `hidden` on a <select> change — never a recompute, never a fetch (the
-    zero-egress posture, no `src`). Plain DOM (no jQuery dependency) so it
-    runs whether or not the model-bearing interaction engine booted (a
-    macro-only PR has zero in-scope models). Each `.macro-lens-models`
-    wrapper scopes its own selector + panels. -#}
-  <script>
-  (function () {
-    var wraps = document.querySelectorAll(".macro-lens-models");
-    for (var i = 0; i < wraps.length; i++) {
-      (function (wrap) {
-        var sel = wrap.querySelector(".macro-lens-model-select");
-        var panels = wrap.querySelectorAll(".macro-lens-model-panel");
-        if (!sel || !panels.length) return;
-        function show(modelId) {
-          for (var j = 0; j < panels.length; j++) {
-            panels[j].hidden = panels[j].getAttribute("data-model") !== modelId;
-          }
-        }
-        show(sel.value);
-        sel.addEventListener("change", function () { show(sel.value); });
-      })(wraps[i]);
-    }
-  })();
-  </script>
-</section>
-{% when None %}{% endmatch -%}
 {#- cute-dbt#260 (Slice 0 — the walking skeleton) — the governance
    surfaces section. Gated behind the `governance` experiment: when the
    experiment is off the cli passes an empty GovernanceFacts, so
@@ -894,25 +652,301 @@
    that separated the panel row from the payload carrier) — this
    report's bytes are unchanged, gated by the byte-identity golden. #}
 {% include "partials/test-card.html" %}
-{#- cute-dbt#402 (epic #360) — close the Models lens panel opened above and
-   emit the scaffolded Macros + Project lens panels. First pass: both are
-   HONEST empty-states (a heading + a one-line note) pointing at the #360
-   design phase — no lens content is invested here. The PR-scoped macro lens
-   (blast radius + macro diff + impacted models/tests) and the project /
-   governance lens are design-phase work. The lens-tab toggle script is
-   inlined just below the panels (plain DOM, zero-egress). -#}
+{#- cute-dbt#402 (epic #360) / cute-dbt#424 — close the Models lens panel
+   opened above and emit the Macros + Project lens panels. Each lens now
+   renders ITS OWN subject: the PR-scoped macro lens (blast radius + macro
+   diff + impacted models/tests + the #424 top-level macro picker) lives in
+   the Macros panel below; the project-definition + governance lens lives in
+   the Project panel. Both are gated `{% match %}` blocks (zero bytes when
+   absent, so the off-gate goldens stay byte-identical). The Macros / Project
+   tabs degrade to an empty panel when their lens is absent — the empty-state
+   COPY is the #365 design-phase work. The lens-tab toggle script
+   (bindLensTabs in interaction.js) is class-based, so it is position
+   independent across this relocation. -#}
 </div>
 <div class="lens-panel" role="tabpanel" id="lens-panel-macros" aria-labelledby="lens-tab-macros" data-lens="macros" data-testid="lens-panel-macros" hidden>
-  <section class="lens-scaffold lens-scaffold-macros" aria-label="Macros lens" data-testid="lens-scaffold-macros">
-    <h2>Macros</h2>
-    <p class="lens-scaffold-empty" data-testid="lens-macros-empty">PR-scoped macro lens &mdash; blast radius, the macro&rsquo;s own diff, and the impacted models &amp; tests. Populated in the cute-dbt#360 design phase.</p>
-  </section>
+{#- cute-dbt#265 (Slice B) — the macro perspective lens. Server-rendered
+   (no JS dependency beyond the in-page toggles). cute-dbt#424 relocated it
+   into the dedicated Macros lens panel (it formerly sat above the governance
+   chips in the Models panel). Gated behind the `macro-lens` experiment: when off the
+   cli passes `macro_lens = None`, so this `{% match %}` emits ZERO bytes
+   (every surrounding tag trims both sides), keeping the non-macro goldens
+   byte-identical — the project_panel / governance precedents. Marked
+   EXPERIMENTAL (founder D7). The copy says "macro changed", NEVER a
+   `state:modified.macros` selector name (critique S2). Impacted models are
+   a collapsible DIRECTORY TREE (founder D3) — count + names only, NO inline
+   model bodies (Slice D), NO focused DAG (explore-only, #345), NO
+   report→explore hyperlink (it would break the one-file zero-egress
+   contract). Intentionally unstyled beyond the chassis hooks — Claude
+   Design owns the visual pass; the data-testid / data-* hooks are the
+   stable selectors the headless guards key off. -#}
+{% match macro_lens %}{% when Some with (lens) %}<section class="macro-lens-panel" aria-label="Macro changes" data-testid="macro-lens-panel">
+  <h2>Macro changed <span class="macro-lens-experimental" data-testid="macro-lens-experimental">experimental</span></h2>
+  <p class="macro-lens-subtitle">A changed macro is invisible to model and unit-test scope selection &mdash; this section shows the macros this PR changed and the root-project models they reach. <span class="macro-lens-fidelity" data-testid="macro-lens-fidelity" data-fidelity="{{ lens.fidelity }}">fidelity: {{ lens.fidelity }}</span></p>
+{#- cute-dbt#424 (founder-directed) — the working top-level macro picker.
+   Functional core only (the stacked-vs-picker visual layout + styling is the
+   #365 Claude Design pass): a <select> of the changed macros; picking one
+   reveals that macro's section (`.macro-lens-macro`) and hides the others
+   (pure in-page DOM toggle, zero-egress — the per-macro model selector
+   idiom). Gated inside the same Some-arm, so it ships only when ≥1 macro
+   changed; a single changed macro yields a one-option (degenerate but
+   functional) picker. Default = the first macro visible on load. -#}
+  <div class="macro-lens-picker-row" data-testid="macro-lens-picker-row">
+    <label for="macro-select">Changed macro</label>
+    <select id="macro-select" class="macro-select" data-testid="macro-select">
+{%- for mac in lens.macros %}
+      <option value="{{ mac.name }}">{{ mac.name }}{% if !mac.package.is_empty() %} ({{ mac.package }}){% endif %}</option>
+{%- endfor %}
+    </select>
+  </div>
+{%- for mac in lens.macros %}
+  <div class="macro-lens-macro" data-testid="macro-lens-macro" data-macro="{{ mac.name }}"{% if !loop.first %} hidden{% endif %}>
+    <p class="macro-lens-macro-head"><code class="macro-lens-name">{{ mac.name }}</code> <span class="macro-lens-package" data-testid="macro-lens-package">{{ mac.package }}</span>{% if !mac.path.is_empty() %} <code class="macro-lens-path">{{ mac.path }}</code>{% endif %}</p>
+    {#- The body diff (pr-diff arm, touched + aligned + substantive) or the
+        plain current body as context lines (baseline arm / untouched). The
+        DiffLine kind drives the per-line CSS hook, mirroring the project-def
+        raw-diff fallback. -#}
+{%- match mac.diff %}{% when Some with (d) %}
+    <pre class="macro-lens-diff" data-testid="macro-lens-diff">{% for line in d.lines %}<span class="macro-lens-line is-{% match line.kind %}{% when DiffLineKind::Context %}context{% when DiffLineKind::Removed %}removed{% when DiffLineKind::Added %}added{% endmatch %}">{{ line.text }}</span>
+{% endfor %}</pre>
+{%- when None %}
+    <pre class="macro-lens-body" data-testid="macro-lens-body">{% for line in mac.body_lines %}<span class="macro-lens-line is-context">{{ line.text }}</span>
+{% endfor %}</pre>
+{%- endmatch %}
+    <p class="macro-lens-count" data-testid="macro-lens-count" data-count="{{ mac.impacted_count }}">Impacts {{ mac.impacted_count }} root-project {% if mac.impacted_count == 1 %}model{% else %}models{% endif %}.</p>
+{%- if !mac.tree.is_empty() %}
+    <details class="macro-lens-tree-details" data-testid="macro-lens-tree-details" open>
+      <summary>impacted models</summary>
+      <ul class="macro-lens-tree" data-testid="macro-lens-tree">
+{%- for row in mac.tree %}
+        <li class="macro-lens-tree-row macro-lens-tree-{{ row.kind }}" data-testid="macro-lens-tree-row" data-kind="{{ row.kind }}" data-depth="{{ row.depth }}"{% if !row.model_id.is_empty() %} data-model="{{ row.model_id }}"{% endif %} style="--macro-tree-depth: {{ row.depth }}">{% if row.kind == "dir" %}<span class="macro-lens-tree-dir">{{ row.label }}/</span>{% else %}<code class="macro-lens-tree-model">{{ row.label }}</code>{% endif %}</li>
+{%- endfor %}
+      </ul>
+    </details>
+{#- cute-dbt#265 Slice C (founder D4 + D6) — the impacted-model selector
+    + the per-model inline SQL and first-order call-site panels. ALL
+    panels are server-rendered (every model's SQL + call sites composed in
+    Rust — the "display strings composed in Rust" house rule + the
+    server-render-everything zero-egress posture); the gated inline script
+    below the loop is a pure renderer that toggles which model's panel is
+    visible on a <select> change — never a recompute, never a fetch. The
+    selector reuses the #91 changed-models <select> idiom. With
+    JS off the FIRST panel is the static fallback (the others carry
+    `hidden`), so the section degrades gracefully. The call sites are
+    first-order only (founder D6 — full ref()-lineage downstream is the
+    explorer, #345); the fidelity chip above already states the per-arm
+    confidence honestly (S2). -#}
+    <div class="macro-lens-models" data-testid="macro-lens-models" data-macro="{{ mac.name }}">
+{#- cute-dbt#265 Slice D (founder D5) — the inline-body cap. The selector
+    lists EVERY impacted model (cheap), but only the first
+    `mac.inlined_count` (= min(gen-time cap, impacted_count)) carry a
+    server-rendered SQL panel; past the cap the panel is identity-only. When
+    the cap is exceeded the "showing N of M bodies" line states it honestly,
+    bounding a widely-used macro's (single, frozen) report size. -#}
+{%- if mac.inlined_count < mac.impacted_count %}
+      <p class="macro-lens-body-cap" data-testid="macro-lens-body-cap" data-inlined="{{ mac.inlined_count }}" data-total="{{ mac.impacted_count }}">Showing {{ mac.inlined_count }} of {{ mac.impacted_count }} model bodies inline &mdash; the rest are listed in the directory tree above (raise <code>macro_body_cap</code> to inline more).</p>
+{%- endif %}
+      <div class="macro-lens-model-selector-row">
+        <label for="macro-lens-model-select-{{ loop.index0 }}">Impacted model</label>
+        <select id="macro-lens-model-select-{{ loop.index0 }}" class="macro-lens-model-select" data-testid="macro-lens-model-select">
+{%- for im in mac.impacted_models %}
+          <option value="{{ im.model_id }}">{{ im.name }}{% if im.call_site_total > 0 %}  ({{ im.call_site_total }}){% endif %}{% if !im.inline_body %}  &mdash; body not inlined{% endif %}</option>
+{%- endfor %}
+        </select>
+      </div>
+{%- for im in mac.impacted_models %}
+      <div class="macro-lens-model-panel" data-testid="macro-lens-model-panel" data-model="{{ im.model_id }}" data-inline-body="{{ im.inline_body }}"{% if !loop.first %} hidden{% endif %}>
+        <p class="macro-lens-model-head"><code class="macro-lens-model-name">{{ im.name }}</code>{% if !im.path.is_empty() %} <code class="macro-lens-model-path">{{ im.path }}</code>{% endif %}</p>
+{#- Slice D — past the gen-time cap the heavy surface (inline SQL +
+    call sites) is intentionally not server-rendered; show a compact
+    affordance instead so the report stays bounded for a widely-used
+    macro. The model still appears in the selector + the directory tree. -#}
+{%- if !im.inline_body %}
+        <p class="macro-lens-model-uninlined" data-testid="macro-lens-model-uninlined">Body not inlined (over the <code>macro_body_cap</code> limit) &mdash; this model is listed in the directory tree above.</p>
+{%- else %}
+{#- First-order call sites: the lines of THIS model's body that invoke the
+    changed macro. Shown up to the cap; the remainder fold behind a
+    <details> "more" disclosure so a heavily-calling model stays compact. -#}
+{%- if im.call_site_total > 0 %}
+        <p class="macro-lens-callsite-count" data-testid="macro-lens-callsite-count" data-total="{{ im.call_site_total }}">{% if im.call_site_total > im.call_site_cap %}Showing {{ im.call_sites.len() }} of {{ im.call_site_total }} call {% if im.call_site_total == 1 %}site{% else %}sites{% endif %}.{% else %}{{ im.call_site_total }} call {% if im.call_site_total == 1 %}site{% else %}sites{% endif %}.{% endif %}</p>
+        <ul class="macro-lens-callsites" data-testid="macro-lens-callsites">
+{%- for cs in im.call_sites %}
+          <li class="macro-lens-callsite" data-testid="macro-lens-callsite" data-line="{{ cs.line }}"><span class="macro-lens-callsite-line">{{ cs.line }}</span> <code class="macro-lens-callsite-text">{{ cs.text }}</code></li>
+{%- endfor %}
+        </ul>
+{%- else %}
+        <p class="macro-lens-callsite-none" data-testid="macro-lens-callsite-none">No first-order call site in this model's body &mdash; the macro is reached transitively (through another macro).</p>
+{%- endif %}
+{#- The model's inline raw SQL (manifest raw_code), server-rendered as
+    plain context lines — the same fallback shape the macro body uses. -#}
+{%- if !im.sql_lines.is_empty() %}
+        <pre class="macro-lens-model-sql" data-testid="macro-lens-model-sql">{% for line in im.sql_lines %}<span class="macro-lens-line is-context">{{ line.text }}</span>
+{% endfor %}</pre>
+{%- else %}
+        <p class="macro-lens-model-sql-none" data-testid="macro-lens-model-sql-none">No raw SQL recorded for this model in the manifest.</p>
+{%- endif %}
+{%- endif %}
+      </div>
+{%- endfor %}
+    </div>
+{%- else %}
+    <p class="macro-lens-empty" data-testid="macro-lens-empty">No root-project models reach this macro &mdash; a materialization macro, or a macro this PR added/removed rather than edited in place.</p>
+{%- endif %}
+  </div>
+{%- endfor %}
+{#- cute-dbt#265 Slice C — the impacted-model selector behaviour, inlined
+    in the GATED section (not the shared interaction.js engine) so the
+    non-macro goldens stay byte-identical: when the macro experiment is off
+    this whole `{% match %}` arm — script included — emits zero bytes. The
+    panels are all server-rendered (every model's SQL + call sites in the
+    DOM, only the first visible); this is a PURE renderer that flips
+    `hidden` on a <select> change — never a recompute, never a fetch (the
+    zero-egress posture, no `src`). Plain DOM (no jQuery dependency) so it
+    runs whether or not the model-bearing interaction engine booted (a
+    macro-only PR has zero in-scope models). Each `.macro-lens-models`
+    wrapper scopes its own selector + panels. -#}
+  <script>
+  (function () {
+    var wraps = document.querySelectorAll(".macro-lens-models");
+    for (var i = 0; i < wraps.length; i++) {
+      (function (wrap) {
+        var sel = wrap.querySelector(".macro-lens-model-select");
+        var panels = wrap.querySelectorAll(".macro-lens-model-panel");
+        if (!sel || !panels.length) return;
+        function show(modelId) {
+          for (var j = 0; j < panels.length; j++) {
+            panels[j].hidden = panels[j].getAttribute("data-model") !== modelId;
+          }
+        }
+        show(sel.value);
+        sel.addEventListener("change", function () { show(sel.value); });
+      })(wraps[i]);
+    }
+  })();
+  </script>
+  {#- cute-dbt#424 — the top-level macro-picker toggle. Same gated-inline,
+      plain-DOM, zero-egress posture as the per-macro model selector above:
+      flips `hidden` on each `.macro-lens-macro` section so exactly the
+      selected macro shows. Functional core (the #365 design pass owns the
+      visual layout). Defaults to the first macro (the others ship `hidden`
+      from the loop above, so the no-JS fallback already shows just the
+      first). -#}
+  <script>
+  (function () {
+    var sel = document.querySelector(".macro-select");
+    var sections = document.querySelectorAll(".macro-lens-panel .macro-lens-macro");
+    if (!sel || !sections.length) return;
+    function show(name) {
+      for (var i = 0; i < sections.length; i++) {
+        sections[i].hidden = sections[i].getAttribute("data-macro") !== name;
+      }
+    }
+    show(sel.value);
+    sel.addEventListener("change", function () { show(sel.value); });
+  })();
+  </script>
+</section>
+{% when None %}{% endmatch -%}
 </div>
 <div class="lens-panel" role="tabpanel" id="lens-panel-project" aria-labelledby="lens-tab-project" data-lens="project" data-testid="lens-panel-project" hidden>
-  <section class="lens-scaffold lens-scaffold-project" aria-label="Project lens" data-testid="lens-scaffold-project">
-    <h2>Project</h2>
-    <p class="lens-scaffold-empty" data-testid="lens-project-empty">Project lens &mdash; <code>dbt_project.yml</code>, vars, and governance changes. Populated in the cute-dbt#360 design phase.</p>
-  </section>
+{# cute-dbt#266 — the "Project definition changed" panel. Server-rendered
+   (no JS dependency) whenever dbt_project.yml is in the PR diff: the
+   categorized rows (vars / config tree / dispatch / hooks / paths /
+   identity / other) come from the Rust-side structural diff of the
+   reverse-applied old side vs the working tree; every degrade arm shows
+   the Shape-A raw-diff fallback with explicit copy instead — the change
+   is NEVER silently invisible (fail-open display). Absent (None) the
+   match emits zero bytes, so baseline-mode and panel-free reports stay
+   byte-identical to the pre-#266 shape (this comment's closing trim and
+   the endmatch's trailing trim keep the surrounding newlines exact). -#}
+{% match project_panel %}{% when Some with (panel) %}<section class="project-def-panel" aria-label="Project definition changes" data-testid="project-def-panel">
+  <h2>Project definition changed</h2>
+  <p class="project-def-subtitle"><code>dbt_project.yml</code> is part of this PR&rsquo;s diff.</p>
+{%- if panel.is_empty_change %}
+  <p class="project-def-empty" data-testid="project-def-empty">No semantic configuration change detected &mdash; the edit touches formatting or comments only.</p>
+{%- endif %}
+{%- if !panel.rows.is_empty() %}
+  <ul class="project-def-rows">
+{%- for row in panel.rows %}
+    <li class="project-def-row{% if row.banner %} is-banner{% endif %}" data-category="{{ row.category_key }}">
+      <span class="project-def-chip project-def-chip-{{ row.category_key }}">{{ row.category_label }}</span>
+      {%- if !row.tier.is_empty() %}
+      <span class="tier-chip tier-unknown">{{ row.tier }}</span>
+      {%- endif %}
+      <code class="project-def-label">{{ row.label }}</code>
+      {%- if !row.detail.is_empty() %}
+      <span class="project-def-detail">{{ row.detail }}</span>
+      {%- endif %}
+      {%- if !row.note.is_empty() %}
+      <span class="project-def-note">{{ row.note }}</span>
+      {%- endif %}
+      {#- cute-dbt#268 — per-var attribution entries on vars rows: each
+          effective edit (global, or expanded per package-scoped inner
+          var) with its precedence-resolved old→new, tiered
+          affected-model lines (DIRECT / CONFIG / MACRO chips, "at least
+          N" framing, R1b cap with <details> overflow), and the masked /
+          insulated / dynamic statements. Contextualize-don't-widen: the
+          lists name models, they never pull them into scope. -#}
+      {%- for entry in row.var_entries %}
+      <div class="project-def-var-entry" data-testid="project-def-var-entry">
+        <code class="project-def-var-name">{{ entry.name }}</code>
+        {%- if !entry.scope.is_empty() %}
+        <span class="project-def-var-scope">{{ entry.scope }}</span>
+        {%- endif %}
+        {%- if !entry.detail.is_empty() %}
+        <span class="project-def-detail">{{ entry.detail }}</span>
+        {%- endif %}
+        {%- for line in entry.tier_lines %}
+        <p class="project-def-var-tier" data-testid="project-def-var-tier">
+          <span class="tier-chip tier-{{ line.tier_key }}">{{ line.tier_label }}</span>
+          <span class="project-def-var-tier-text">{{ line.text }}</span>
+          {%- if !line.overflow.is_empty() %}
+          <details class="project-def-affected-list" data-testid="project-def-var-overflow">
+            <summary>show referencing models</summary>
+            <span class="project-def-affected-names">{% for name in line.overflow %}<code>{{ name }}</code>{% if !loop.last %}, {% endif %}{% endfor %}</span>
+          </details>
+          {%- endif %}
+        </p>
+        {%- endfor %}
+        {%- for var_note in entry.notes %}
+        <p class="project-def-var-note" data-testid="project-def-var-note">{{ var_note }}</p>
+        {%- endfor %}
+      </div>
+      {%- endfor %}
+      {#- cute-dbt#267 — the affected-models listing on models:-section
+          config-tree rows: counts always explicit (TOTAL tier — fusion's
+          own fqn resolution); names inline up to the R1b cap, past it
+          collapsed into the <details> below ("listed, not individually
+          rendered"). Other categories/sections render no listing. -#}
+      {%- if !row.affected_text.is_empty() %}
+      <span class="project-def-affected" data-testid="project-def-affected">{{ row.affected_text }}</span>
+      {%- if !row.affected_overflow.is_empty() %}
+      <details class="project-def-affected-list" data-testid="project-def-affected-list">
+        <summary>show affected models</summary>
+        <span class="project-def-affected-names">{% for name in row.affected_overflow %}<code>{{ name }}</code>{% if !loop.last %}, {% endif %}{% endfor %}</span>
+      </details>
+      {%- endif %}
+      {%- endif %}
+      {%- if row.hook_slot %}
+      {#- cute-dbt#269 — the report JS fills this slot with the hook
+          bodies' inline SQL diff via the #111 renderer (renderBlockDiff
+          + tokenizeSql); the payload's project_change_panel carries the
+          Rust-computed BlockDiff. -#}
+      <div class="project-def-hook-slot" data-hook-slot="{{ row.label }}"></div>
+      {%- endif %}
+    </li>
+{%- endfor %}
+  </ul>
+{%- endif %}
+{%- if !panel.fallback_copy.is_empty() %}
+  <p class="project-def-fallback-copy" data-testid="project-def-fallback">{{ panel.fallback_copy }}</p>
+{%- if !panel.fallback_lines.is_empty() %}
+  <pre class="project-def-raw-diff">{% for line in panel.fallback_lines %}<span class="project-def-raw-line is-{{ line.kind }}">{{ line.text }}</span>
+{% endfor %}</pre>
+{%- endif %}
+{%- endif %}
+</section>
+{% when None %}{% endmatch -%}
 </div>
 
 <script type="application/json" id="cute-dbt-data">{{ payload_json|safe }}</script>
