@@ -775,35 +775,79 @@
     });
   }
 
+  // A thread is a LIVE anchor candidate when it pins to a real new/old diff
+  // line (not outdated, has a line) — the navigation target the #420 button
+  // promises (an anchored diff line, never an outdated/unplaced tail entry).
+  // Visibility (folded-away) is resolved at injection time against the live
+  // DOM; here we pick by the payload's anchor facts.
+  function firstLiveThread(bucket) {
+    var threads = (bucket && bucket.threads) || [];
+    for (var j = 0; j < threads.length; j++) {
+      if (!threads[j].outdated && threads[j].line != null) { return threads[j]; }
+    }
+    return null;
+  }
+
   // Navigate to the first anchored review thread: select its model in the
   // dropdown (selectModelByName → renderForSelectedModel re-renders the
   // Model-SQL diff and re-injects the threads), then scroll to that thread's
-  // anchored diff line. In-page only (no fetch — the zero-egress contract).
+  // anchored diff line. Scans for the FIRST bucket that BOTH maps to a
+  // selectable dropdown model AND has a live-anchored thread (CodeRabbit #439:
+  // a bucket whose model isn't selectable, or whose threads are all
+  // outdated/unplaced, must not stop the search). Falls back to the bucket's
+  // first thread only when the loop finds a selectable model with no live
+  // anchor (so the count button is never a dead click). In-page only (no
+  // fetch — the zero-egress contract).
   function navigateToFirstComment() {
     var pc = DATA && DATA.pr_comments;
     if (!pc || !pc.by_model) { return; }
+    var fallback = null;
     for (var i = 0; i < pc.by_model.length; i++) {
       var bucket = pc.by_model[i];
       var name = modelNameForBucket(bucket);
       if (!name) { continue; }
-      selectModelByName(name);
-      var thread = bucket.threads && bucket.threads[0];
-      // Scroll to the injected thread once the Model-SQL diff has re-rendered.
-      scrollToThread(thread);
-      return;
+      var thread = firstLiveThread(bucket);
+      if (thread) {
+        selectModelByName(name);
+        scrollToThread(thread);
+        return;
+      }
+      // Remember the first selectable-but-anchorless bucket; only used if no
+      // bucket anywhere carries a live thread.
+      if (!fallback && bucket.threads && bucket.threads.length) {
+        fallback = { name: name, thread: bucket.threads[0] };
+      }
+    }
+    if (fallback) {
+      selectModelByName(fallback.name);
+      scrollToThread(fallback.thread);
     }
   }
 
   // Scroll the injected comment thread (or its anchored diff line) into view.
   // Defers a tick so the renderForSelectedModel re-render + injection settle.
+  // The thread is located by a NON-selector attribute scan (CodeRabbit #439):
+  // `thread.__key` is derived from the model path, which may contain `"`, `\`,
+  // or `]` — interpolating it into a CSS selector would break the query, so we
+  // compare `getAttribute("data-thread-key")` directly instead.
   function scrollToThread(thread) {
     setTimeout(function () {
-      var target = thread && thread.__key
-        ? document.querySelector('.pr-comment-thread[data-thread-key="' + thread.__key + '"]')
-        : null;
+      var target = null;
+      if (thread && thread.__key) {
+        target = Array.prototype.find.call(
+          document.querySelectorAll(".pr-comment-thread[data-thread-key]"),
+          function (el) { return el.getAttribute("data-thread-key") === thread.__key; }
+        ) || null;
+      }
       if (!target) {
         target = document.querySelector(".model-sql .pr-comment-thread");
       }
+      // Record the resolved navigation target's key so the headless test can
+      // assert the count button lands on the LIVE anchored thread (not an
+      // outdated/unplaced tail entry) — observability only, no behavior.
+      window.__cuteLastCommentNavKey = target
+        ? target.getAttribute("data-thread-key")
+        : null;
       if (target && target.scrollIntoView) {
         target.scrollIntoView({ behavior: "smooth", block: "start" });
       }
@@ -849,13 +893,30 @@
     $row.append($btn).prop("hidden", false);
   }
 
+  // Find the VISIBLE rendered diff line a thread anchors to (Right →
+  // data-newline, Left → data-oldline), or null when there is no live anchor
+  // (outdated, no line, no diff, or the only matching line is folded away /
+  // hidden). A `[hidden]` match is treated as NO anchor (CodeRabbit #439):
+  // injecting after an invisible line detaches the comment from its visible
+  // context, so such a thread is routed to the "not shown" tail instead.
+  function liveDiffAnchorFor(t, $diff) {
+    if (t.outdated || t.line == null || !$diff.length) { return null; }
+    var attr = (t.side === "Left") ? "data-oldline" : "data-newline";
+    // `:not([hidden])` excludes folded-away context lines, so a thread on a
+    // collapsed line falls through to `unplaced` (the tail) rather than being
+    // inserted after an invisible anchor.
+    var $line = $diff.find('.diff-line[' + attr + '="' + t.line + '"]:not([hidden])').first();
+    return ($line && $line.length) ? { $line: $line, key: attr + ":" + t.line } : null;
+  }
+
   // #419 — inject each anchored review thread inline at its Model-SQL diff
   // line. Runs AFTER renderModelSql has rebuilt the .model-sql diff for the
-  // selected model. A thread RESOLVED to a live line (Right → data-newline,
-  // Left → data-oldline) is inserted right after that diff line; an OUTDATED
-  // thread (no live line) — and any thread whose anchored line is not in the
-  // rendered diff — is appended to a per-model "outdated / unplaced comments"
-  // tail so reviewer context is never lost (the never-drop posture).
+  // selected model. A thread RESOLVED to a live, VISIBLE line (Right →
+  // data-newline, Left → data-oldline) is inserted right after that diff
+  // line; an OUTDATED thread (no live line), a thread whose line is folded
+  // away (hidden), and any thread whose anchored line is not in the rendered
+  // diff are appended to a per-model "outdated / unplaced comments" tail so
+  // reviewer context is never lost (the never-drop posture).
   function anchorModelCommentThreads(m) {
     var $section = $(".model-sql");
     // Always clear a prior model's injected threads first (the
@@ -865,17 +926,21 @@
     if (!bucket || !bucket.threads.length) { return; }
     var $diff = $section.find(".sql-diff-view");
     var unplaced = [];
+    // Track the last thread injected at each anchor so multiple threads on the
+    // SAME diff line keep `bucket.threads` order (CodeRabbit #439: repeated
+    // `$line.after(...)` reverses them — insert after the previously injected
+    // thread, not the raw anchor, each time).
+    var lastInsertedByAnchor = Object.create(null);
     bucket.threads.forEach(function (t, idx) {
       // Give each thread a stable per-model key so the navigation scroll can
       // target it (and the headless test can assert it).
       t.__key = (m.path || m.name || "model") + "#" + idx;
-      var $line = null;
-      if (!t.outdated && t.line != null && $diff.length) {
-        var attr = (t.side === "Left") ? "data-oldline" : "data-newline";
-        $line = $diff.find('.diff-line[' + attr + '="' + t.line + '"]').first();
-      }
-      if ($line && $line.length) {
-        $line.after(buildCommentThread(t));
+      var anchor = liveDiffAnchorFor(t, $diff);
+      if (anchor) {
+        var $thread = buildCommentThread(t);
+        var $insertAfter = lastInsertedByAnchor[anchor.key] || anchor.$line;
+        $insertAfter.after($thread);
+        lastInsertedByAnchor[anchor.key] = $thread;
       } else {
         unplaced.push(t);
       }

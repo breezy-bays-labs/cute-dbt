@@ -2069,10 +2069,15 @@ fn gather_pr_comments(
     }
     // The project-root strip the diff index was built with (cute-dbt#418):
     // GitHub thread paths are repo-relative; the diff index + manifest are
-    // project-relative. Resolve the same way the diff index was built so a
-    // sub-directory dbt project's thread paths reconcile.
-    let project_root = args.project_root.clone();
-    let view = group_comment_threads(&comments.threads, current, index, project_root.as_deref());
+    // project-relative. Pass the same strip the diff index was built with so a
+    // sub-directory dbt project's thread paths reconcile (a borrowed
+    // `Option<&Path>` — no clone, gemini #439).
+    let view = group_comment_threads(
+        &comments.threads,
+        current,
+        index,
+        args.project_root.as_deref(),
+    );
     if view.is_empty() { None } else { Some(view) }
 }
 
@@ -2736,6 +2741,123 @@ mod tests {
         assert_eq!(
             pr.url, "https://github.com/o/r/pull/9",
             "config url retained"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // owner_repo_from_url (cute-dbt#419) — the GitHub PR url → (owner,
+    // repo) parser feeding the live `gh api graphql` comment fetch.
+    // Exhaustive over its branches (the crap4rs strict-keyed coverage
+    // requirement): a well-formed url, the no-host arm, the
+    // owner-without-repo arm, the empty-segment arm, and the no-`/pull/`
+    // arm. (`split(..).next()` always yields at least one element, so the
+    // `before_pull` `?` is unreachable in practice — the `/pull/`-absent
+    // url instead exercises the "no second segment" path.)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn owner_repo_from_url_parses_a_well_formed_pr_url() {
+        assert_eq!(
+            owner_repo_from_url("https://github.com/acme/shop/pull/42"),
+            Some(("acme".to_owned(), "shop".to_owned())),
+        );
+    }
+
+    #[test]
+    fn owner_repo_from_url_tolerates_a_trailing_path_and_leading_slash() {
+        // A leading slash after the host (empty first segment) is skipped by
+        // the `filter(non-empty)`, and extra path after the repo is ignored.
+        assert_eq!(
+            owner_repo_from_url("https://github.com//acme/shop/pull/7/files"),
+            Some(("acme".to_owned(), "shop".to_owned())),
+        );
+    }
+
+    #[test]
+    fn owner_repo_from_url_is_none_without_the_github_host() {
+        // No `github.com/` ⇒ the first `split.nth(1)` is None.
+        assert_eq!(
+            owner_repo_from_url("https://gitlab.com/acme/shop/-/merge_requests/3"),
+            None,
+        );
+    }
+
+    #[test]
+    fn owner_repo_from_url_is_none_with_only_an_owner_segment() {
+        // Owner present but no repo before `/pull/` ⇒ the second `segs.next()`
+        // is None.
+        assert_eq!(owner_repo_from_url("https://github.com/acme/pull/1"), None);
+    }
+
+    #[test]
+    fn owner_repo_from_url_is_none_when_no_segments_precede_pull() {
+        // `github.com//pull/1` ⇒ all segments before `/pull/` are empty.
+        assert_eq!(owner_repo_from_url("https://github.com//pull/1"), None);
+    }
+
+    #[test]
+    fn owner_repo_from_url_resolves_owner_repo_even_without_a_pull_segment() {
+        // A url with no `/pull/` still yields the first two path segments
+        // (the `split("/pull/").next()` keeps the whole tail) — owner/repo are
+        // the first two non-empty segments.
+        assert_eq!(
+            owner_repo_from_url("https://github.com/acme/shop"),
+            Some(("acme".to_owned(), "shop".to_owned())),
+        );
+    }
+
+    #[test]
+    fn owner_repo_from_url_is_none_on_an_empty_url() {
+        assert_eq!(owner_repo_from_url(""), None);
+    }
+
+    // -----------------------------------------------------------------
+    // resolve_pr_comments (cute-dbt#419) — the comment-ingestion source
+    // selector: the `--pr-comments @file` payload wins; with no payload
+    // and no resolvable PR it fail-softs to an empty `PrComments` (the
+    // live `gh` fetch path is NOT exercised here — no PR is identified,
+    // so the function returns before spawning `gh`).
+    // -----------------------------------------------------------------
+
+    fn synthetic_pr_comments() -> crate::domain::PrComments {
+        crate::domain::PrComments {
+            threads: vec![crate::domain::PrCommentThread {
+                path: "models/orders.sql".to_owned(),
+                line: Some(3),
+                original_line: Some(3),
+                diff_side: crate::domain::DiffSide::Right,
+                is_resolved: false,
+                is_outdated: false,
+                commit_oid: None,
+                diff_hunk: None,
+                comments: vec![crate::domain::PrComment {
+                    author: Some("octocat".to_owned()),
+                    body: "nit".to_owned(),
+                }],
+            }],
+            general: vec![],
+        }
+    }
+
+    #[test]
+    fn resolve_pr_comments_returns_the_supplied_file_payload() {
+        let mut cli = cli("report.html");
+        cli.pr_comments = Some(synthetic_pr_comments());
+        let resolved = resolve_pr_comments(&cli);
+        assert_eq!(resolved.threads.len(), 1, "the @file payload is returned");
+        assert_eq!(resolved.threads[0].path, "models/orders.sql");
+    }
+
+    #[test]
+    fn resolve_pr_comments_fail_softs_to_empty_without_a_payload_or_pr() {
+        // No `--pr-comments` and no resolvable PR (`--pr-url`/`[pr]` unset) ⇒
+        // the live fetch path returns before spawning `gh` (no PR identified),
+        // so the result is the empty default — PR comments are context, never
+        // a dependency.
+        let cli = cli("report.html");
+        assert!(
+            resolve_pr_comments(&cli).is_empty(),
+            "no payload + no PR ⇒ empty PrComments",
         );
     }
 
