@@ -14808,5 +14808,87 @@ fn lens_tabs_switch_the_active_panel_in_a_real_browser() {
         0,
         "the Macros lens panel is hidden after switching to Project",
     );
+
+    // ===== WAI-ARIA tablist keyboard navigation =====
+    // Roving tabindex contract: the single active tab is the Tab-order stop
+    // (`tabindex="0"`); the others are `-1`. Reset to Models, then drive REAL
+    // Chromium key events (tab.press_key → CDP Input, so the keydown handler's
+    // arrow-key navigation fires natively, not a synthetic event).
+    let _ = eval(
+        &tab,
+        "document.querySelector('[data-testid=\"lens-tab-models\"]').click()",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-models\"]').getAttribute('tabindex')",
+        ),
+        "0",
+        "the active (Models) tab is the roving Tab-order stop",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-macros\"]').getAttribute('tabindex')",
+        ),
+        "-1",
+        "an inactive tab is removed from the Tab order (tabindex=-1)",
+    );
+    // Focus the Models tab and press ArrowRight → focus + activation moves to
+    // the Macros tab (the next tab), wrapping at the ends.
+    let _ = eval(
+        &tab,
+        "document.querySelector('[data-testid=\"lens-tab-models\"]').focus()",
+    );
+    tab.press_key("ArrowRight")
+        .expect("ArrowRight on the focused Models tab");
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-macros\"]"),
+        1,
+        "ArrowRight moves the active lens to Macros",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-models\"]"),
+        0,
+        "the Models lens is hidden after ArrowRight",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.activeElement === document.querySelector('[data-testid=\"lens-tab-macros\"]')",
+        ),
+        "focus moved to the Macros tab (roving focus follows ArrowRight)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-macros\"]').getAttribute('tabindex')",
+        ),
+        "0",
+        "the roving Tab-order stop moved to the now-active Macros tab",
+    );
+    // ArrowLeft wraps backward past Models to End-of-list is not it — from
+    // Macros (index 1) ArrowLeft lands on Models (index 0).
+    tab.press_key("ArrowLeft")
+        .expect("ArrowLeft on the focused Macros tab");
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-models\"]"),
+        1,
+        "ArrowLeft moves the active lens back to Models",
+    );
+    // End jumps to the last tab (Project); Home jumps back to the first.
+    tab.press_key("End").expect("End on the focused Models tab");
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-project\"]"),
+        1,
+        "End jumps to the last (Project) lens",
+    );
+    tab.press_key("Home")
+        .expect("Home on the focused Project tab");
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-models\"]"),
+        1,
+        "Home jumps back to the first (Models) lens",
+    );
     let _ = tab.close(true);
 }

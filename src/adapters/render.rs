@@ -8735,6 +8735,20 @@ mod tests {
             ),
             "the Models tab is active by default",
         );
+        // WAI-ARIA roving tabindex: the active (Models) tab is the single
+        // Tab-order stop (`tabindex="0"`); the inactive tabs are `-1`,
+        // reachable only via the Arrow/Home/End keyboard pattern.
+        assert!(
+            html.contains(
+                r#"id="lens-tab-models" aria-selected="true" aria-controls="lens-panel-models" tabindex="0""#
+            ),
+            "the active Models tab carries the roving tabindex=0",
+        );
+        assert!(
+            html.contains(r#"id="lens-tab-macros" aria-selected="false" aria-controls="lens-panel-macros" tabindex="-1""#)
+                && html.contains(r#"id="lens-tab-project" aria-selected="false" aria-controls="lens-panel-project" tabindex="-1""#),
+            "the inactive tabs are removed from the Tab order (tabindex=-1)",
+        );
         // The Models lens panel is the active panel; Macros/Project are hidden.
         assert!(
             html.contains(
