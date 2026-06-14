@@ -1225,6 +1225,7 @@ mod tests {
     fn index_of(files: Vec<(&str, Vec<Hunk>)>) -> NormalizedDiffIndex {
         let diff = PrDiff {
             renames: Vec::new(),
+            deleted: Vec::new(),
             files: files
                 .into_iter()
                 .map(|(path, hunks)| FileHunks {
