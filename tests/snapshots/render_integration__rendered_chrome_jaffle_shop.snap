@@ -5006,7 +5006,7 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     $section.append(
       $("<p>").addClass("data-tables-subtitle").append(
         document.createTextNode(
-          "Seed CSVs and unit-test fixtures the engine loads as data. "
+          "Seed CSVs the engine loads as data. "
         )
       ).append(
         $("<span>").addClass("data-tables-experimental")
