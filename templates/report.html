@@ -749,6 +749,15 @@
          JS-rendered from m.is_incremental. #}
     </div>
   </div>
+  {# cute-dbt#413 — per-model change-axis chips (Body / Config / Unit test)
+     + the non-interactive config-file chip naming the model's schema.yml.
+     JS-rendered per model selection (renderModelAxes, from m.axes /
+     m.config_file); present only in --pr-diff mode and hidden whenever the
+     selected model carries no axis attribution. A SEPARATE row from the
+     project-state attribution row below so the axis chips (a core
+     PR-review affordance) stay visible regardless of the project-state
+     display toggle (html[data-project=off]). -#}
+  <p class="model-axes-row" data-testid="model-axes" hidden></p>
   {# cute-dbt#267 — config-tree provenance chips for the selected model:
      why a config-widened model is in this report. JS-rendered per model
      selection (renderModelAttribution, from m.config_attributions);

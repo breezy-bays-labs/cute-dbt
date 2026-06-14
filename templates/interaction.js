@@ -354,14 +354,58 @@
     return m.tests.filter(function (t) { return t.id === state.selectedTestId; })[0];
   }
 
+  // cute-dbt#91 — the per-model selector count is toggle-dependent: the
+  // updated count in Updated-only mode, the total in All-tests mode.
+  function modelOptionLabel(m) {
+    var n = state.showAll ? m.tests.length : updatedCount(m);
+    return m.name + "  (" + n + ")";
+  }
+
+  // cute-dbt#413 — group the model dropdown by shared schema.yml. Every
+  // model patched by the same `config_file` (its scheme-stripped
+  // patch_path) lands under one native <optgroup label="…">. Presentation
+  // only (never a re-scope — the filter toggle is the separate #414): in
+  // baseline mode no model carries a `config_file`, so this falls back to
+  // the flat list and the baseline goldens stay byte-identical. Order is
+  // preserved from DATA.models (deterministic, BTreeMap-backed), so the
+  // first model under each schema seeds that group's position; ungrouped
+  // models (no patch_path) keep their inline position.
   function renderModelSelector() {
     var $sel = $("#model-select").empty();
-    DATA.models.forEach(function (m) {
-      // cute-dbt#91 — the per-model count is toggle-dependent: the updated
-      // count in Updated-only mode, the total in All-tests mode.
-      var n = state.showAll ? m.tests.length : updatedCount(m);
-      $sel.append($("<option>").val(m.name).text(m.name + "  (" + n + ")"));
-    });
+    var anyGroup = DATA.models.some(function (m) { return m.config_file; });
+    if (!anyGroup) {
+      DATA.models.forEach(function (m) {
+        $sel.append($("<option>").val(m.name).text(modelOptionLabel(m)));
+      });
+    } else {
+      // Build groups in first-seen order; ungrouped models flush inline so
+      // the dropdown never silently drops a model that lacks a schema.yml.
+      // `Object.create(null)` (not `{}`): the map is keyed by the
+      // manifest-derived config_file, so a prototype-less object is the
+      // right idiom — a key like "constructor" / "__proto__" can never
+      // collide with an inherited member (gemini, PR #423).
+      var groups = Object.create(null);
+      var order = [];
+      DATA.models.forEach(function (m) {
+        var key = m.config_file || "";
+        if (!(key in groups)) { groups[key] = []; order.push(key); }
+        groups[key].push(m);
+      });
+      order.forEach(function (key) {
+        var bucket = groups[key];
+        if (key === "") {
+          bucket.forEach(function (m) {
+            $sel.append($("<option>").val(m.name).text(modelOptionLabel(m)));
+          });
+          return;
+        }
+        var $og = $("<optgroup>").attr("label", key);
+        bucket.forEach(function (m) {
+          $og.append($("<option>").val(m.name).text(modelOptionLabel(m)));
+        });
+        $sel.append($og);
+      });
+    }
     $sel.val(state.selectedModel);
     $sel.off("change.cuteDbt").on("change.cuteDbt", function () {
       state.selectedModel = $(this).val();
@@ -439,6 +483,52 @@
   // model references an edited dbt_project.yml var at the named tier
   // ("reads var 'dq_threshold' · direct" / "· via add_dq_flags").
   // Context only — a var edit never widened this model into scope.
+  // cute-dbt#413 — the per-model change-axis chips (Body / Config / Unit
+  // test): one labeled chip per axis that fired for the selected model,
+  // reflecting exactly which of dbt's state:modified sub-selectors this PR
+  // touched. Plus a NON-interactive config-file chip naming the model's
+  // schema.yml (the optgroup grouping key, surfaced inline so the grouping
+  // is legible without opening the dropdown). Rendered from the
+  // Rust-computed m.axes / m.config_file (Rust computes, JS only renders);
+  // both are present only in --pr-diff mode, so baseline mode renders zero
+  // axis chips. The chips reuse the design-system chip recipe family.
+  //
+  // A SEPARATE row from renderModelAttribution: the axis chips are a core
+  // PR-review affordance that must stay visible regardless of the
+  // project-state display toggle (html[data-project=off] hides the
+  // attribution row, never this one).
+  var AXIS_LABELS = { body: "Body", config: "Config", unit_test: "Unit test" };
+  var AXIS_ORDER = ["body", "config", "unit_test"];
+  function renderModelAxes(m) {
+    var $row = $('[data-testid="model-axes"]').empty();
+    var axes = (m && m.axes) || null;
+    var configFile = (m && m.config_file) || null;
+    var firedAxes = axes
+      ? AXIS_ORDER.filter(function (k) { return axes[k]; })
+      : [];
+    if (!firedAxes.length && !configFile) { $row.prop("hidden", true); return; }
+    // Axis chips first — the primary 3-axis attribution affordance.
+    firedAxes.forEach(function (k) {
+      $row.append(
+        $("<span>").addClass("axis-chip axis-chip-" + k)
+          .attr("data-testid", "axis-chip")
+          .attr("data-axis", k)
+          .text(AXIS_LABELS[k])
+      );
+    });
+    // The non-interactive config-file chip — names the schema.yml that
+    // groups this model in the dropdown. NOT a button: it is contextual,
+    // never clickable (the filter toggle is the separate #414 Slice C).
+    if (configFile) {
+      $row.append(
+        $("<span>").addClass("config-file-chip")
+          .attr("data-testid", "config-file-chip")
+          .text(configFile)
+      );
+    }
+    $row.prop("hidden", false);
+  }
+
   function renderModelAttribution(m) {
     var $row = $('[data-testid="model-attribution"]').empty();
     var list = (m && m.config_attributions) || [];
@@ -485,6 +575,7 @@
     // DAG re-centers with no baked selection (the shelf's ✕ handler does
     // its own renderDag; this path lets the one below suffice).
     closeNodeShelf();
+    renderModelAxes(m);
     renderModelAttribution(m);
     renderTestDetails(t);
     renderModelSql(m);
