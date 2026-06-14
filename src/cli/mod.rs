@@ -1031,25 +1031,42 @@ fn gather_external_fixtures_with_reader(
         let Some(unit_test) = current.unit_test(id) else {
             continue;
         };
-        let mut ext = ExternalFixtures::default();
-        for (ordinal, given) in unit_test.given().iter().enumerate() {
-            if let Some(loaded) =
-                load_external_fixture(reader, id, given.fixture(), given.rows(), given.format())
-            {
-                ext.given.insert(ordinal, loaded);
-            }
-        }
-        let expect = unit_test.expect();
-        if let Some(loaded) =
-            load_external_fixture(reader, id, expect.fixture(), expect.rows(), expect.format())
-        {
-            ext.expect = Some(loaded);
-        }
+        let ext = external_fixtures_for_test(reader, id, unit_test);
         if !ext.given.is_empty() || ext.expect.is_some() {
             out.insert(id.to_owned(), ext);
         }
     }
     out
+}
+
+/// Build one unit test's [`ExternalFixtures`] — load each `given` block's
+/// external fixture (keyed by its positional ordinal) and the single
+/// `expect` block's, soft-failing per fixture (the [`load_external_fixture`]
+/// contract). Factored out of [`gather_external_fixtures_with_reader`] so the
+/// gather loop stays a thin per-test driver and this per-test assembly is
+/// unit-testable in isolation. An inline-rows or missing/unreadable fixture
+/// leaves its slot empty; the returned value may be wholly empty (the caller
+/// drops an all-empty test from the map).
+fn external_fixtures_for_test(
+    reader: &dyn ProjectFileReader,
+    id: &str,
+    unit_test: &UnitTest,
+) -> ExternalFixtures {
+    let mut ext = ExternalFixtures::default();
+    for (ordinal, given) in unit_test.given().iter().enumerate() {
+        if let Some(loaded) =
+            load_external_fixture(reader, id, given.fixture(), given.rows(), given.format())
+        {
+            ext.given.insert(ordinal, loaded);
+        }
+    }
+    let expect = unit_test.expect();
+    if let Some(loaded) =
+        load_external_fixture(reader, id, expect.fixture(), expect.rows(), expect.format())
+    {
+        ext.expect = Some(loaded);
+    }
+    ext
 }
 
 /// The `gather_seeds` stage (cute-dbt#350) — build the identity-and-lineage

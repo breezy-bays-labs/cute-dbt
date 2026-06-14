@@ -10747,4 +10747,148 @@ mod tests {
             "undescribed models stay byte-stable: {json}"
         );
     }
+
+    // ===== PrDagPayload::from_graph (cute-dbt#404) =====
+
+    /// Build a [`PrDagNode`] with the given id/state/connector flag and a
+    /// fixed `±` line delta — the minimum a `from_graph` descriptor-count
+    /// test needs. `name` is derived from the id's leaf for legibility.
+    fn pr_dag_node(
+        id: &str,
+        state: crate::domain::PrDagState,
+        is_connector: bool,
+        lines_added: usize,
+        lines_removed: usize,
+    ) -> crate::domain::PrDagNode {
+        crate::domain::PrDagNode {
+            id: id.to_owned(),
+            name: id.rsplit('.').next().unwrap_or(id).to_owned(),
+            state,
+            is_connector,
+            lines_added,
+            lines_removed,
+        }
+    }
+
+    #[test]
+    fn from_graph_classifies_each_node_state_into_its_descriptor_tier() {
+        use crate::domain::PrDagState;
+        // One of every classifiable shape: New + Modified both fold into the
+        // "modified" tier; Deleted into deleted; a connector (regardless of
+        // its placeholder state) into connectors.
+        let graph = PrDagGraph {
+            nodes: vec![
+                pr_dag_node("model.shop.a_new", PrDagState::New, false, 9, 0),
+                pr_dag_node("model.shop.b_mod", PrDagState::Modified, false, 3, 2),
+                pr_dag_node("model.shop.c_conn", PrDagState::Modified, true, 0, 0),
+                pr_dag_node("model.shop.d_del", PrDagState::Deleted, false, 0, 7),
+            ],
+            edges: vec![
+                crate::domain::PrDagEdge {
+                    from: "model.shop.a_new".to_owned(),
+                    to: "model.shop.c_conn".to_owned(),
+                },
+                crate::domain::PrDagEdge {
+                    from: "model.shop.c_conn".to_owned(),
+                    to: "model.shop.b_mod".to_owned(),
+                },
+            ],
+        };
+
+        let payload = PrDagPayload::from_graph(graph.clone(), 48);
+
+        // New + Modified collapse to the modified tier; connector and deleted
+        // each go to their own.
+        assert_eq!(payload.modified_count, 2, "New + Modified ⇒ modified tier");
+        assert_eq!(payload.connector_count, 1, "is_connector wins over state");
+        assert_eq!(payload.deleted_count, 1, "Deleted ⇒ deleted tier");
+        // The descriptor tiers partition the node set exactly.
+        assert_eq!(
+            payload.modified_count + payload.connector_count + payload.deleted_count,
+            graph.nodes.len(),
+            "tiers partition the node set"
+        );
+        // The graph rides through verbatim — nodes, edges, and per-node
+        // line deltas are not mutated by the wrap.
+        assert_eq!(payload.graph.nodes, graph.nodes, "nodes carried verbatim");
+        assert_eq!(payload.graph.edges, graph.edges, "edges carried verbatim");
+        assert_eq!(payload.graph.nodes[0].lines_added, 9);
+        assert_eq!(payload.graph.nodes[3].lines_removed, 7);
+        // 4 nodes ≤ cap 48 ⇒ not collapsed.
+        assert!(!payload.collapsed, "node count under cap ⇒ inline render");
+    }
+
+    #[test]
+    fn from_graph_connector_flag_overrides_a_deleted_state() {
+        use crate::domain::PrDagState;
+        // A connector is counted as a connector even if its placeholder state
+        // is Deleted — `is_connector` is the first branch, so it wins. This
+        // pins the branch order (the else-if on Deleted is unreachable for a
+        // connector node).
+        let graph = PrDagGraph {
+            nodes: vec![pr_dag_node(
+                "model.shop.weird",
+                PrDagState::Deleted,
+                true,
+                0,
+                0,
+            )],
+            ..PrDagGraph::default()
+        };
+        let payload = PrDagPayload::from_graph(graph, 48);
+        assert_eq!(payload.connector_count, 1);
+        assert_eq!(payload.deleted_count, 0, "connector flag wins over Deleted");
+        assert_eq!(payload.modified_count, 0);
+    }
+
+    #[test]
+    fn from_graph_collapses_only_when_node_count_strictly_exceeds_cap() {
+        use crate::domain::PrDagState;
+        let nodes: Vec<crate::domain::PrDagNode> = (0..3)
+            .map(|i| {
+                pr_dag_node(
+                    &format!("model.shop.m{i}"),
+                    PrDagState::Modified,
+                    false,
+                    1,
+                    0,
+                )
+            })
+            .collect();
+
+        // count == cap ⇒ NOT collapsed (the bound is `> cap`, not `>= cap`).
+        let at_cap = PrDagPayload::from_graph(
+            PrDagGraph {
+                nodes: nodes.clone(),
+                ..PrDagGraph::default()
+            },
+            3,
+        );
+        assert!(!at_cap.collapsed, "node_count == cap ⇒ inline render");
+
+        // count > cap ⇒ collapsed (Mermaid suppressed; data still rides JSON).
+        let over_cap = PrDagPayload::from_graph(
+            PrDagGraph {
+                nodes,
+                ..PrDagGraph::default()
+            },
+            2,
+        );
+        assert!(over_cap.collapsed, "node_count > cap ⇒ summary line");
+        assert_eq!(
+            over_cap.modified_count, 3,
+            "counts computed even when collapsed"
+        );
+    }
+
+    #[test]
+    fn from_graph_on_empty_graph_yields_all_zero_counts_uncollapsed() {
+        let payload = PrDagPayload::from_graph(PrDagGraph::default(), 48);
+        assert_eq!(payload.modified_count, 0);
+        assert_eq!(payload.connector_count, 0);
+        assert_eq!(payload.deleted_count, 0);
+        assert!(!payload.collapsed, "0 nodes ≤ any cap ⇒ not collapsed");
+        assert!(payload.graph.nodes.is_empty());
+        assert!(payload.graph.edges.is_empty());
+    }
 }
