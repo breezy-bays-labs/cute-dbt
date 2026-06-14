@@ -61,6 +61,22 @@ use crate::domain::manifest::{Manifest, NodeId};
 use crate::domain::pr_diff::{DiffLineKind, NormalizedDiffIndex, diff_lines};
 use crate::domain::state::ModelInScopeSet;
 
+/// The default node-count cap above which the PR-scope mini-DAG collapses
+/// to a one-line summary instead of rendering inline (cute-dbt#404).
+///
+/// The mini-DAG is an *overview*: a focused subgraph a reviewer reads at a
+/// glance before drilling into the model selector. Past a few dozen nodes a
+/// Mermaid `graph LR` stops being glanceable (it scrolls, overlaps, and
+/// inflates the single-file report's `.rodata`), so a large PR collapses the
+/// inline render to a "(N models in PR scope — too large to render inline)"
+/// line, with the graph data still on the JSON payload for any downstream
+/// consumer. `48` is an honest readability threshold (≈ a screenful of
+/// `graph LR` lanes), not a hard correctness bound — a PR touching 48+ models
+/// is better navigated through the selector than a wall-to-wall graph. The
+/// cap counts NODES (modified ∪ connectors ∪ deleted), the same population
+/// the inline render walks.
+pub const DEFAULT_PR_DAG_NODE_CAP: usize = 48;
+
 /// The lifecycle state of a node in the PR-scope mini-DAG.
 ///
 /// Reuses the scope taxonomy: a [`Self::Modified`] node changed in the PR
@@ -591,6 +607,27 @@ fn induced_edges(adjacency: &ModelAdjacency<'_>, nodes: &[PrDagNode]) -> Vec<PrD
             to: to.to_owned(),
         })
         .collect()
+}
+
+/// Fold a per-node [`LineDelta`] onto every node of `graph` in place (the
+/// Slice C population step, cute-dbt#404).
+///
+/// `delta_for` is the caller's arm-specific counter — the run loop binds it
+/// to [`pr_dag_lines_from_diff`] (pr-diff arm) or
+/// [`pr_dag_lines_from_raw_code`] (baseline arm), each keyed by the node's
+/// id. Keeping the fold here (rather than inline in the cli) keeps the
+/// population a pure, unit-testable domain step over the already-computed
+/// topology: [`compute_pr_dag`] emits `0/0` (byte-neutral to goldens), and
+/// this is the single place that overwrites them. A node whose
+/// `delta_for` returns `0/0` (a connector, or a node whose file is absent
+/// from the diff) keeps its zero counts — the documented unchanged-carrier
+/// contract.
+pub fn populate_line_counts(graph: &mut PrDagGraph, delta_for: impl Fn(&PrDagNode) -> LineDelta) {
+    for node in &mut graph.nodes {
+        let delta = delta_for(node);
+        node.lines_added = delta.added;
+        node.lines_removed = delta.removed;
+    }
 }
 
 #[cfg(test)]
@@ -1450,5 +1487,38 @@ mod tests {
                 .all(|n| n.lines_added == 0 && n.lines_removed == 0),
             "compute_pr_dag emits 0/0 line counts (Slice C populates them)",
         );
+    }
+
+    #[test]
+    fn populate_line_counts_overwrites_every_node_from_the_closure() {
+        // Slice C population: the topology emits 0/0, then `populate_line_counts`
+        // folds the arm-specific delta onto each node. The closure keys on the
+        // node id; an unkeyed node keeps 0/0 (the unchanged-carrier contract).
+        let manifest = chain_abcd();
+        let mut graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.a", "model.s.d"]),
+            &new_of(&[]),
+            NO_REMOVED,
+        );
+        populate_line_counts(&mut graph, |node| match node.id.as_str() {
+            "model.s.a" => LineDelta {
+                added: 5,
+                removed: 2,
+            },
+            "model.s.d" => LineDelta {
+                added: 0,
+                removed: 9,
+            },
+            // b, c are connectors — the closure returns 0/0 for them.
+            _ => LineDelta::default(),
+        });
+        let a = node_of(&graph, "model.s.a");
+        assert_eq!((a.lines_added, a.lines_removed), (5, 2));
+        let d = node_of(&graph, "model.s.d");
+        assert_eq!((d.lines_added, d.lines_removed), (0, 9));
+        // The connectors keep the zero default.
+        let b = node_of(&graph, "model.s.b");
+        assert_eq!((b.lines_added, b.lines_removed), (0, 0));
     }
 }
