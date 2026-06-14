@@ -570,7 +570,7 @@ fn finalize_findings(
 ///
 /// `Baseline` carries the `--baseline-manifest` path verbatim (empty when
 /// somehow absent — omitted from JSON). `PrDiff` deliberately carries NO
-/// source label (`source: None`, omitted): the parsed [`PrDiff`] retains
+/// source label (`source: None`, omitted): the parsed [`PrDiff`](crate::domain::pr_diff::PrDiff) retains
 /// only the changed-file facts, not the `@file` argument, and embedding the
 /// raw `@file` path could bake a CI-runner-absolute path into the committed
 /// artifact (the same `root_path`-leak class the manifest gitignore guards).
