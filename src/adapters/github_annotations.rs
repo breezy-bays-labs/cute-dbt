@@ -524,6 +524,38 @@ mod tests {
     }
 
     #[test]
+    fn advisory_posture_emits_a_total_gap_as_a_warning_line_not_an_error() {
+        // The gate-off twin of `emits_a_well_formed_workflow_command` (which
+        // uses the enforcing posture → `::error`): under the advisory posture
+        // a Total-tier uncovered finding with a resolvable anchor still emits
+        // an inline line, but at `::warning` — never `::error`. This is the
+        // emitted-COMMAND-string proof of the cute-dbt#393 CI-safety contract
+        // (`level_for` is unit-pinned separately; this pins the serialized
+        // workflow command the `--annotations`-without-the-gate run prints).
+        let findings = vec![uncovered(
+            HeuristicId::GrainUniqueKeyUnbacked, // Total tier
+            "model.shop.orders",
+        )];
+        let emit = emit_annotations(
+            &findings,
+            AnnotationLevels::advisory(),
+            DEFAULT_ANNOTATION_CAP,
+            &always("models/orders.sql", 7),
+        );
+        assert_eq!(emit.lines.len(), 1);
+        assert!(
+            emit.lines[0].starts_with("::warning file=models/orders.sql,line=7,"),
+            "a Total gap rides as ::warning under the advisory posture: {}",
+            emit.lines[0]
+        );
+        assert!(
+            !emit.lines[0].starts_with("::error "),
+            "the advisory posture never escalates a Total gap to ::error: {}",
+            emit.lines[0]
+        );
+    }
+
+    #[test]
     fn cap_truncates_and_emits_an_overflow_notice() {
         let findings: Vec<Finding<HeuristicId>> = (0..5)
             .map(|i| uncovered(HeuristicId::UnionArmCoverage, &format!("model.shop.m{i}")))

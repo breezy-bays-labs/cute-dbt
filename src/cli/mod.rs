@@ -599,8 +599,9 @@ fn finalize_findings(
     // stdout (gen-time, never in `report.html`). A Total-tier gap escalates
     // to `::error` only when the uncovered-gate is enforcing; otherwise it
     // rides as `::warning`. Capped at the per-step limit with an honest
-    // overflow notice. Emitted before the sidecar so the annotations land
-    // even if a later write fails.
+    // overflow notice. Emitted before the `--findings-out` sidecar write, so
+    // a sidecar-write failure below never swallows the annotations (the HTML
+    // render already ran in the caller — a render failure suppresses both).
     if args.annotations {
         let levels = if gate_tripped {
             AnnotationLevels::enforcing()

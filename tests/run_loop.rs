@@ -793,6 +793,52 @@ fn annotations_emit_inline_lines_for_an_uncovered_finding_on_a_changed_model() {
 }
 
 #[test]
+fn annotations_alone_with_a_total_uncovered_gap_still_exits_zero() {
+    // The load-bearing consumer CI-safety contract (cute-dbt#393): on the
+    // `--pr-diff` arm, `--annotations` WITHOUT `--fail-on-uncovered` must
+    // NOT escalate the process exit code, even when an in-scope Total-tier
+    // `Uncovered` finding is present. The playground showcase carries
+    // exactly one such gap (`grain.unique-key-unbacked` on
+    // `mart_dq_summary`) — the same fixture
+    // `fail_on_uncovered_exits_the_gate_code_and_still_writes_the_report`
+    // uses to assert exit 3 WITH the gate. Here, with only `--annotations`,
+    // the run exits 0: the annotation emit is a pure stdout side effect, NOT
+    // part of `gate_tripped`. Without this test a future change that folded
+    // the annotation emit into the exit decision would silently break every
+    // consumer's CI (a non-gating `cute-dbt review --annotations` step that
+    // started failing builds is the exact regression this pins).
+    let html = tmp("annotations_alone_exit_zero.html");
+    clear(&html);
+    let mut args = playground_pr_diff_args(&html);
+    args.push("--annotations".to_owned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&refs);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--annotations alone never escalates the exit code, even with a \
+         Total-tier uncovered gap in scope: {output:?}"
+    );
+    assert!(html.exists(), "the HTML report is still written");
+    // The advisory posture (no gate) must never emit a `::error` — a
+    // Total-tier gap rides as `::warning` when the gate is off, so an
+    // `::error` here would mean the emit silently read the gate state wrong
+    // (the false-failure signal a reviewer would over-trust).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("::error "),
+        "no annotation escalates to ::error without --fail-on-uncovered: {stdout}"
+    );
+    // The symmetric gate arm (`--annotations --fail-on-uncovered` → exit 3)
+    // is already pinned by
+    // `annotations_emit_inline_lines_for_an_uncovered_finding_on_a_changed_model`;
+    // this test deliberately isolates the gate-off arm. (The playground's
+    // sole uncovered finding is summary-only — its model file is not in the
+    // diff — so neither arm emits an inline `::warning file=` line; the
+    // emitted-line shape is unit-pinned in `adapters::github_annotations`.)
+}
+
+#[test]
 fn fail_on_uncovered_exits_the_gate_code_and_still_writes_the_report() {
     // Decision D3: a Total-tier `Uncovered` finding in scope exits the
     // dedicated gate code (3) — distinct from the usage (2) and fail-closed
