@@ -99,6 +99,12 @@ fn main() {
                 "a parsed rename path must not contain a newline: {rename:?}",
             );
         }
+        for path in &diff.deleted {
+            assert!(
+                !path.contains('\n'),
+                "a parsed deleted path must not contain a newline: {path:?}",
+            );
+        }
 
         // (3) Deterministic: parsing the same input twice yields the same
         // result. A parser with hidden state (or input-dependent

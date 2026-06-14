@@ -962,6 +962,26 @@ reconstructs the body diff against the macro-heavy pr-diff patch. Pure \
 synthetic Jinja — no real data.\
 """
 
+[[fixture]]
+path = "pr-review-threads.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/395"
+sha256 = "45212b7f3c7ca840b79bf41d59137ade36bffed12f860f90e223250eaf8540b3"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+Synthetic `gh api graphql` response for the GitHub PR review-thread \
+ingestion adapter (cute-dbt#395, epic #353). Matches the live GraphQL \
+shape introspected against GitHub's schema: \
+`data.repository.pullRequest.{reviewThreads,comments}.nodes`. Three review \
+threads (an open RIGHT-side thread with two comments, a resolved+outdated \
+LEFT-side thread whose `line` is null, and a thread whose comment author is \
+null to exercise the deleted-account path) plus two general PR comments (one \
+with a login, one with a null author). All logins, bodies, paths, and commit \
+oids are invented — no real repository, account, or PR data.\
+"""
+
 # ---------------------------------------------------------------------------
 # dbt-project/ data carriers (cute-dbt#114 / #115)
 #
