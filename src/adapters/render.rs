@@ -8608,8 +8608,44 @@ mod tests {
         assert!(html.contains(r#"data-testid="macro-lens-count""#));
         // Honest naming (critique S2): never a `state:` selector name.
         assert!(!html.contains("state:modified.macros"));
-        // The macro section is ABOVE the (absent) governance region — it
-        // simply renders; the placement is pinned by the template order.
+        // cute-dbt#424 — the macro-lens content lives in the Macros lens
+        // panel, NOT in the Models panel. The Macros panel opens before the
+        // macro-lens section, and the Project panel opens after it (so the
+        // macro section sits inside the Macros panel by document order).
+        let macros_open = html
+            .find(r#"id="lens-panel-macros""#)
+            .expect("Macros panel present");
+        let macro_section = html
+            .find(r#"data-testid="macro-lens-panel""#)
+            .expect("macro-lens section present");
+        let project_open = html
+            .find(r#"id="lens-panel-project""#)
+            .expect("Project panel present");
+        let models_open = html
+            .find(r#"id="lens-panel-models""#)
+            .expect("Models panel present");
+        let test_selection = html
+            .find(r#"<section class="test-selection""#)
+            .expect("test-selection present");
+        assert!(
+            macros_open < macro_section && macro_section < project_open,
+            "the macro-lens section is nested inside the Macros lens panel \
+             (macros_open={macros_open} macro_section={macro_section} project_open={project_open})",
+        );
+        // ...and it is NOT in the Models panel (which holds test-selection).
+        assert!(
+            models_open < test_selection && test_selection < macros_open,
+            "the macro section is after the Models panel's report, not inside it",
+        );
+        // cute-dbt#424 — the working top-level macro picker renders in the
+        // Macros panel with one option per changed macro.
+        let picker = html
+            .find(r#"data-testid="macro-select""#)
+            .expect("macro picker present");
+        assert!(
+            macros_open < picker && picker < project_open,
+            "the macro picker renders inside the Macros panel",
+        );
     }
 
     #[test]
@@ -9036,18 +9072,38 @@ mod tests {
     }
 
     #[test]
-    fn lens_shell_macros_and_project_are_honest_empty_states() {
-        // First pass: the Macros + Project lenses are scaffolded empty-states
-        // (a heading + a one-line "populated in the design phase" note), NOT
-        // invested lens content. Assert the empty-state hooks render.
+    fn lens_shell_macros_and_project_are_empty_when_no_lens_content() {
+        // cute-dbt#424 — the Macros + Project lenses now hold their own
+        // subject content (the relocated macro-lens / project-definition
+        // panels), gated `{% match %}` blocks that emit ZERO bytes when the
+        // payload is `None`. With no macro_lens and no project_panel (the
+        // helper passes `None` for both), the panels degrade to a sane EMPTY
+        // tab: present + `hidden`, carrying no macro-lens / project-def
+        // content (and no leftover scaffold copy — the empty-state COPY is
+        // the #365 design-phase work). The byte-identity / zero-egress
+        // posture of the off-gate render is unchanged.
         let html = render_html_for_lens_shell("lensshell_empty.html");
+        // Both panels are present + hidden by default.
         assert!(
-            html.contains(r#"data-testid="lens-macros-empty""#),
-            "the Macros lens shows its honest empty-state",
+            html.contains(r#"data-testid="lens-panel-macros""#)
+                && html.contains(r#"data-testid="lens-panel-project""#),
+            "both subject-lens panels are present",
+        );
+        // With no lens content, neither subject panel carries its content
+        // section — the empty tab shows nothing (the AC's sane degradation).
+        assert!(
+            !html.contains(r#"data-testid="macro-lens-panel""#),
+            "no macro-lens content when macro_lens is None",
         );
         assert!(
-            html.contains(r#"data-testid="lens-project-empty""#),
-            "the Project lens shows its honest empty-state",
+            !html.contains(r#"data-testid="project-def-panel""#),
+            "no project-definition content when project_panel is None",
+        );
+        // The retired scaffold hooks are gone (the relocation replaced them).
+        assert!(
+            !html.contains(r#"data-testid="lens-macros-empty""#)
+                && !html.contains(r#"data-testid="lens-project-empty""#),
+            "the placeholder scaffold copy is retired",
         );
     }
 
@@ -9233,6 +9289,50 @@ mod tests {
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
+    }
+
+    #[test]
+    fn project_panel_renders_inside_the_project_lens_tab() {
+        // cute-dbt#424 — the project-definition panel lives in the Project
+        // lens panel, NOT in the Models panel. Assert by document order: the
+        // Project panel opens before the project-def section, and the
+        // project-def section comes AFTER the Models panel's test-selection
+        // (so it is not nested in Models).
+        let facts = ProjectFacts {
+            definition: None,
+            panel: Some(ProjectChangePanel::Categorized {
+                changes: vec![ProjectChange {
+                    category: ProjectChangeCategory::Vars,
+                    label: "dq_threshold".to_owned(),
+                    old: Some(serde_json::json!(10)),
+                    new: Some(serde_json::json!(5)),
+                    hook: None,
+                    tree: None,
+                    vars: None,
+                }],
+            }),
+            config_attributions: BTreeMap::new(),
+            var_references: BTreeMap::new(),
+        };
+        let html = render_html_with_project_facts("cute_dbt_project_in_tab.html", &facts);
+        let project_open = html
+            .find(r#"id="lens-panel-project""#)
+            .expect("Project panel present");
+        let project_section = html
+            .find(r#"data-testid="project-def-panel""#)
+            .expect("project-def section present");
+        let test_selection = html
+            .find(r#"<section class="test-selection""#)
+            .expect("test-selection present");
+        assert!(
+            project_open < project_section,
+            "the project-def section is nested inside the Project lens panel \
+             (project_open={project_open} project_section={project_section})",
+        );
+        assert!(
+            test_selection < project_section,
+            "the project-def section is AFTER the Models panel's report, not inside it",
+        );
     }
 
     fn hooks_change_with_facts(presence: HookManifestPresence, ids: Vec<String>) -> ProjectChange {

@@ -13221,6 +13221,25 @@ fn visible_count(tab: &Tab, selector: &str) -> i64 {
     }
 }
 
+/// cute-dbt#424 — click a subject-lens tab (`"models" | "macros" | "project"`)
+/// so its panel becomes the active (visible) one, then confirm the panel is
+/// check-visible. Since #424 relocated the macro-lens and project-definition
+/// content into their dedicated tabs (formerly both lived in the Models
+/// panel), any guard asserting that relocated content RENDERS must first
+/// activate its owning tab — the panel ships `hidden` at boot. The toggle is
+/// `bindLensTabs` (interaction.js, class-based, position-independent).
+fn activate_lens(tab: &Tab, lens: &str) {
+    let _ = eval(
+        tab,
+        &format!("document.querySelector('[data-testid=\"lens-tab-{lens}\"]').click()"),
+    );
+    assert_eq!(
+        visible_count(tab, &format!("[data-testid=\"lens-panel-{lens}\"]")),
+        1,
+        "the {lens} lens panel is visible after activating its tab",
+    );
+}
+
 /// Render a minimal PR-diff report carrying the given project facts.
 fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
     let m = manifest(vec![model_node("model.shop.dim_a")], Vec::new());
@@ -13533,6 +13552,25 @@ fn macro_lens_section_renders_with_tree_in_a_real_browser() {
     tab.wait_until_navigated().expect("await navigation");
     wait_for_document_ready(&tab);
 
+    // cute-dbt#424 — the macro-lens content now lives in the Macros tab (it
+    // ships `hidden` at boot). Activate the tab, then assert the section is
+    // INSIDE the Macros panel and NOT in the Models panel.
+    activate_lens(&tab, "macros");
+    assert!(
+        eval_bool(
+            &tab,
+            "!!document.querySelector('[data-testid=\"lens-panel-macros\"] [data-testid=\"macro-lens-panel\"]')",
+        ),
+        "the macro-lens section lives inside the Macros lens panel",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "!document.querySelector('[data-testid=\"lens-panel-models\"] [data-testid=\"macro-lens-panel\"]')",
+        ),
+        "the macro-lens section is NOT in the Models lens panel",
+    );
+
     assert_eq!(
         visible_count(&tab, "[data-testid=\"macro-lens-panel\"]"),
         1,
@@ -13591,6 +13629,10 @@ fn macro_lens_model_selector_switches_the_shown_model_in_a_real_browser() {
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
     wait_for_document_ready(&tab);
+
+    // cute-dbt#424 — the macro lens lives in the Macros tab; activate it so
+    // the per-macro model selector and its panels are visible.
+    activate_lens(&tab, "macros");
 
     // The selector renders with both models as options.
     assert_eq!(
@@ -13652,6 +13694,223 @@ fn macro_lens_model_selector_switches_the_shown_model_in_a_real_browser() {
     assert_eq!(
         visible_after, "model.shop.stg_orders",
         "selecting the second model shows ITS panel",
+    );
+    let _ = tab.close(true);
+}
+
+/// cute-dbt#424 — render a macro-lens report where TWO root-project macros
+/// changed, so the top-level macro picker (#424 functional core) has a real
+/// multi-option choice to exercise. Built from the genuine `build_macro_lens`
+/// output (two changed macros, each reaching one model) so the picker's
+/// show/hide toggle is proven over real server-rendered sections.
+fn render_two_macro_lens_to_file(filename: &str) -> String {
+    let mac_a = "macro.shop.add_dq_flags";
+    let mac_b = "macro.shop.mask_pii";
+    let body_a = "{% macro add_dq_flags(col) %}\n  case when {{ col }} then 1 end\n{% endmacro %}";
+    let body_b = "{% macro mask_pii(col) %}\n  sha256({{ col }})\n{% endmacro %}";
+    let mut macros = HashMap::new();
+    macros.insert(mac_a.to_owned(), body_a.to_owned());
+    macros.insert(mac_b.to_owned(), body_b.to_owned());
+    let mut identity = std::collections::BTreeMap::new();
+    identity.insert(
+        mac_a.to_owned(),
+        MacroIdentity::new(
+            Some("macros/dq.sql".to_owned()),
+            Some("add_dq_flags".to_owned()),
+            Some("shop".to_owned()),
+        ),
+    );
+    identity.insert(
+        mac_b.to_owned(),
+        MacroIdentity::new(
+            Some("macros/pii.sql".to_owned()),
+            Some("mask_pii".to_owned()),
+            Some("shop".to_owned()),
+        ),
+    );
+    let model = |bare: &str, ofp: &str, mac: &str, raw: &str| {
+        Node::new(
+            NodeId::new(format!("model.shop.{bare}")),
+            "model",
+            Checksum::new("sha256", bare),
+            Some("select 1".to_owned()),
+            Some(raw.to_owned()),
+            DependsOn::new(vec![mac.to_owned()], Vec::new()),
+            Some(format!("models/{ofp}")),
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+        .with_identity(None, Some("shop".to_owned()))
+    };
+    let nodes = [
+        model(
+            "stg_orders",
+            "staging/stg_orders.sql",
+            mac_a,
+            "select *\nfrom raw_orders\n  {{ add_dq_flags() }}",
+        ),
+        model(
+            "dim_customers",
+            "marts/dim_customers.sql",
+            mac_b,
+            "select *\nfrom raw_customers\n  {{ mask_pii(email) }}",
+        ),
+    ];
+    let m = Manifest::new(
+        ManifestMetadata::new("v12").with_project_name(Some("shop".to_owned())),
+        nodes.into_iter().map(|n| (n.id().clone(), n)).collect(),
+        HashMap::new(),
+        macros,
+    )
+    .with_macro_identity(identity);
+    // A pr-diff index touching BOTH macro files' line 2, so each macro is a
+    // changed macro with a reconstructed body diff.
+    let diff = PrDiff {
+        renames: Vec::new(),
+        deleted: Vec::new(),
+        files: vec![
+            FileHunks {
+                path: "macros/dq.sql".to_owned(),
+                hunks: vec![Hunk {
+                    new_start: 2,
+                    new_len: 1,
+                    removed_lines: vec!["  case when {{ col }} then 0 end".to_owned()],
+                    added_lines: vec!["  case when {{ col }} then 1 end".to_owned()],
+                }],
+            },
+            FileHunks {
+                path: "macros/pii.sql".to_owned(),
+                hunks: vec![Hunk {
+                    new_start: 2,
+                    new_len: 1,
+                    removed_lines: vec!["  md5({{ col }})".to_owned()],
+                    added_lines: vec!["  sha256({{ col }})".to_owned()],
+                }],
+            },
+        ],
+    };
+    let index = NormalizedDiffIndex::new(&diff, None);
+    let changed = [mac_a.to_owned(), mac_b.to_owned()].into_iter().collect();
+    let lens: MacroLensPayload =
+        build_macro_lens(&m, &changed, ScopeSource::PrDiff, Some(&index), usize::MAX)
+            .expect("lens builds");
+    let models: ModelInScopeSet = [
+        NodeId::new("model.shop.stg_orders"),
+        NodeId::new("model.shop.dim_customers"),
+    ]
+    .into_iter()
+    .collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &InScopeSet::new(),
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        &cute_dbt::domain::ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
+        Some(&lens),
+        None,
+        &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        None,
+        &BTreeMap::new(),
+    )
+    .expect("render writes the report");
+    format!("file://{}", out.to_str().expect("UTF-8 path"))
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn macro_picker_switches_the_visible_macro_section_in_a_real_browser() {
+    // cute-dbt#424 — the working top-level macro picker (founder-directed
+    // functional core; the stacked-vs-picker visual polish is the #365
+    // design pass). With two changed macros the Macros tab renders a
+    // <select> of them; at boot the FIRST macro's section is visible and the
+    // other is `hidden`; selecting the second swaps which section shows —
+    // a pure in-page DOM toggle (zero-egress), proven in a real browser.
+    let url = render_two_macro_lens_to_file("cute_dbt_macro_picker.html");
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // The macro lens lives in the Macros tab; activate it.
+    activate_lens(&tab, "macros");
+
+    // The picker renders with both changed macros as options.
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"macro-select\"]"),
+        1,
+        "the top-level macro picker renders",
+    );
+    let option_count = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"macro-select\"] option').length",
+    );
+    assert_eq!(option_count.as_i64(), Some(2), "two macro options");
+    let option_values = eval_string(
+        &tab,
+        "Array.from(document.querySelectorAll('[data-testid=\"macro-select\"] option'))\
+           .map(o => o.value).join(',')",
+    );
+    // BTreeSet id order: macro.shop.add_dq_flags < macro.shop.mask_pii.
+    assert_eq!(
+        option_values, "add_dq_flags,mask_pii",
+        "the picker lists both changed macros in id order",
+    );
+
+    // At boot exactly one per-macro section is VISIBLE (the first); the other
+    // carries `hidden`.
+    assert_eq!(
+        visible_count(&tab, ".macro-lens-panel .macro-lens-macro"),
+        1,
+        "exactly one macro section is visible at boot",
+    );
+    let visible_at_boot = eval_string(
+        &tab,
+        "Array.from(document.querySelectorAll('.macro-lens-panel .macro-lens-macro'))\
+           .filter(el => el.checkVisibility()).map(el => el.getAttribute('data-macro'))[0]",
+    );
+    assert_eq!(
+        visible_at_boot, "add_dq_flags",
+        "the first (id-order) macro section is shown at boot",
+    );
+
+    // Select the OTHER macro — the visible section swaps in place.
+    let _ = eval(
+        &tab,
+        "(function(){var s=document.querySelector('[data-testid=\"macro-select\"]');\
+           s.value='mask_pii';s.dispatchEvent(new Event('change'));})()",
+    );
+    assert_eq!(
+        visible_count(&tab, ".macro-lens-panel .macro-lens-macro"),
+        1,
+        "still exactly one macro section visible after the switch",
+    );
+    let visible_after = eval_string(
+        &tab,
+        "Array.from(document.querySelectorAll('.macro-lens-panel .macro-lens-macro'))\
+           .filter(el => el.checkVisibility()).map(el => el.getAttribute('data-macro'))[0]",
+    );
+    assert_eq!(
+        visible_after, "mask_pii",
+        "selecting the second macro shows ITS section",
     );
     let _ = tab.close(true);
 }
@@ -13755,6 +14014,10 @@ fn macro_lens_inline_body_cap_bounds_the_panels_in_a_real_browser() {
     tab.wait_until_navigated().expect("await navigation");
     wait_for_document_ready(&tab);
 
+    // cute-dbt#424 — the macro lens is in the Macros tab; activate it before
+    // asserting per-model panel visibility.
+    activate_lens(&tab, "macros");
+
     // The selector lists ALL 14 impacted models (the cheap surface).
     let option_count = eval(
         &tab,
@@ -13835,6 +14098,55 @@ fn macro_lens_cap_renders_on_the_committed_heavy_golden_in_a_real_browser() {
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
     wait_for_document_ready(&tab);
+
+    // cute-dbt#424 — the macro lens now lives in the Macros tab. Prove the
+    // relocation on the committed golden: the section is INSIDE the Macros
+    // panel and NOT in the Models panel, the top-level macro picker renders,
+    // and (since the heavy golden has exactly one changed macro `mask_pii`)
+    // the picker carries one option. Activate the tab to make it visible.
+    assert!(
+        eval_bool(
+            &tab,
+            "!!document.querySelector('[data-testid=\"lens-panel-macros\"] [data-testid=\"macro-lens-panel\"]')",
+        ),
+        "the committed golden's macro-lens section lives in the Macros panel",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "!document.querySelector('[data-testid=\"lens-panel-models\"] [data-testid=\"macro-lens-panel\"]')",
+        ),
+        "the macro-lens section is NOT in the Models panel on the golden",
+    );
+    activate_lens(&tab, "macros");
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"macro-select\"]"),
+        1,
+        "the top-level macro picker renders in the Macros tab",
+    );
+    let picker_options = eval(
+        &tab,
+        "document.querySelectorAll('[data-testid=\"macro-select\"] option').length",
+    );
+    assert_eq!(
+        picker_options.as_i64(),
+        Some(1),
+        "the heavy golden's single changed macro yields one picker option",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"macro-select\"] option').value",
+        ),
+        "mask_pii",
+        "the picker option is the changed macro mask_pii",
+    );
+    // The single per-macro section is the visible one (default = first macro).
+    assert_eq!(
+        visible_count(&tab, ".macro-lens-panel .macro-lens-macro"),
+        1,
+        "the default (first) macro section is visible",
+    );
 
     assert_eq!(
         visible_count(&tab, "[data-testid=\"macro-lens-panel\"]"),
@@ -14092,6 +14404,26 @@ fn project_panel_renders_categorized_on_the_committed_showcase() {
     tab.wait_until_navigated().expect("await navigation");
     wait_for_document_ready(&tab);
 
+    // cute-dbt#424 — the project-definition panel now lives in the Project
+    // tab. Prove the relocation on the committed golden: the panel is INSIDE
+    // the Project panel and NOT in the Models panel, then activate the tab so
+    // its rows are visible.
+    assert!(
+        eval_bool(
+            &tab,
+            "!!document.querySelector('[data-testid=\"lens-panel-project\"] [data-testid=\"project-def-panel\"]')",
+        ),
+        "the project-definition panel lives in the Project lens panel",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "!document.querySelector('[data-testid=\"lens-panel-models\"] [data-testid=\"project-def-panel\"]')",
+        ),
+        "the project-definition panel is NOT in the Models lens panel",
+    );
+    activate_lens(&tab, "project");
+
     assert_eq!(
         visible_count(&tab, "[data-testid=\"project-def-panel\"]"),
         1,
@@ -14259,8 +14591,12 @@ fn project_panel_renders_categorized_on_the_committed_showcase() {
         "staging models are NOT under the edited marts subtree: {names}",
     );
 
-    // The landing model (first with an updated test — a marts model) is
-    // config-widened too, so its provenance chip row is visible on load.
+    // cute-dbt#424 — the per-model provenance chip is a MODELS-tab surface
+    // (the model-attribution row in the test-selection section), so switch
+    // back to the Models lens before asserting it. The landing model (first
+    // with an updated test — a marts model) is config-widened too, so its
+    // provenance chip row is visible once the Models lens is active.
+    activate_lens(&tab, "models");
     assert_eq!(
         visible_count(&tab, "[data-testid=\"model-attribution\"]"),
         1,
@@ -14577,6 +14913,9 @@ fn vars_row_attribution_renders_visible_in_the_panel() {
     tab.wait_until_navigated().expect("await navigation");
     wait_for_document_ready(&tab);
 
+    // cute-dbt#424 — the project panel lives in the Project tab; activate it.
+    activate_lens(&tab, "project");
+
     assert_eq!(
         visible_count(&tab, "[data-testid=\"project-def-var-entry\"]"),
         1,
@@ -14642,6 +14981,9 @@ fn project_panel_fallback_row_renders_for_unparseable_yaml() {
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
     wait_for_document_ready(&tab);
+
+    // cute-dbt#424 — the project panel lives in the Project tab; activate it.
+    activate_lens(&tab, "project");
 
     assert_eq!(
         visible_count(&tab, "[data-testid=\"project-def-fallback\"]"),
@@ -14719,6 +15061,9 @@ fn project_panel_hook_diff_renders_with_emphasis_via_the_111_renderer() {
     tab.wait_until_navigated().expect("await navigation");
     wait_for_document_ready(&tab);
 
+    // cute-dbt#424 — the project panel lives in the Project tab; activate it.
+    activate_lens(&tab, "project");
+
     assert_eq!(
         visible_count(&tab, ".project-def-hook-slot .project-hook-sql"),
         1,
@@ -14771,6 +15116,9 @@ fn project_panel_absence_note_renders_when_file_unreadable() {
     tab.navigate_to(&url).expect("navigate");
     tab.wait_until_navigated().expect("await navigation");
     wait_for_document_ready(&tab);
+
+    // cute-dbt#424 — the project panel lives in the Project tab; activate it.
+    activate_lens(&tab, "project");
 
     assert_eq!(
         visible_count(&tab, "[data-testid=\"project-def-panel\"]"),
@@ -14858,6 +15206,11 @@ fn project_state_display_toggle_hides_surfaces_and_renders_only_when_emitted() {
 
     const ROOT: &str = "document.documentElement";
     const INPUT: &str = "document.querySelector('#settings-project-input')";
+
+    // cute-dbt#424 — the project panel lives in the Project tab; activate it
+    // so the boot panel-visibility assertion below sees it. The data-project
+    // display toggle then hides/shows it in place WHILE the tab stays active.
+    activate_lens(&tab, "project");
 
     // ===== boot: row present (content was emitted), ON, panel visible =====
     assert!(

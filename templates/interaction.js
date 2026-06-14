@@ -194,6 +194,14 @@
     // HTML carries zero seed bytes — the section appears only when the
     // gated `DATA.seed_cards` payload is present.
     renderSeedDataTables();
+    // cute-dbt#424 — wire the subject-lens tab strip BEFORE the zero-models
+    // early return. A macro-only PR (the macro lens's primary case) has zero
+    // in-scope models, but its content now lives in the Macros tab — which
+    // would be permanently unreachable if the toggle were only bound in the
+    // with-models path below. The lens tabs are always present in the DOM, so
+    // the binding is unconditional (a pure in-place class/hidden/aria toggle,
+    // distinct from the DAG-shelf handler — territory partition with #398).
+    bindLensTabs();
     if (!DATA.models.length) {
       $(".test-selection").hide();
       $(".model-sql").hide();
@@ -263,11 +271,11 @@
     // cute-dbt#232 — viewport-edge tagging for the pure-CSS bubble family
     // (geometry annotation only; visibility stays CSS :hover/:focus).
     bindTipEdgeTagger();
-    // cute-dbt#402 (epic #360) — the subject-lens tab strip (Models /
-    // Macros / Project). A pure in-place class/hidden/aria toggle; the
-    // Models lens (today's whole report) is active by default. Distinct
-    // handler from the DAG-shelf toggle (territory partition with #398).
-    bindLensTabs();
+    // cute-dbt#402 (epic #360) / cute-dbt#424 — the subject-lens tab strip
+    // (Models / Macros / Project) is wired ABOVE the zero-models early return
+    // (a macro-only PR must still reach its Macros tab), so it is NOT
+    // re-bound here: bindLensTabs uses delegated `$(document).on` handlers, so
+    // a second call would double-fire every tab click.
   });
 
   // cute-dbt#91 — scope-toggle helpers --------------------------------
