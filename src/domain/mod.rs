@@ -134,7 +134,7 @@ pub use project_def::{
     attribute_config_tree_changes, diff_project_definitions, hook_operations,
 };
 pub use scope::{
-    ScopeInput, ScopeSelection, all_models, all_seeds, changed_models, select_in_scope,
+    ChangeAxes, ScopeInput, ScopeSelection, all_models, all_seeds, changed_models, select_in_scope,
     select_seeds_in_scope, widen_with_config_attributions,
 };
 pub use seed_card::SeedCard;

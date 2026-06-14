@@ -94,24 +94,24 @@ use crate::adapters::render::{
     build_payload, index_tests_for_models, render_report_with_externals,
 };
 use crate::domain::{
-    BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_MACRO_BODY_CAP, DEFAULT_PR_DAG_NODE_CAP,
-    DEFAULT_REPORT_TITLE, DEFAULT_SEED_ROW_CAP, DepDate, EnabledExperiments, EnvelopeScope,
-    Experiment, Finding, FixtureTableDiff, GovernanceFacts, HeuristicId, InScopeSet, Manifest,
-    ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, Node, NodeId, NormalizedDiffIndex, PrConfig,
-    PrRef, PreflightError, ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ResolvedAnchor,
-    ScopeInput, ScopeSelection, SeedCard, SeedInScopeSet, StateComparator, SuppressRule,
-    SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock, VarReference, all_models,
-    all_seeds, attach_hook_facts, attach_model_yaml_diffs, attach_var_facts,
-    attribute_config_tree_changes, attribute_var_changes, build_seed_cards,
-    changed_macros_baseline, changed_macros_pr_diff, changed_models, check_by_id, compute_pr_dag,
-    diff_project_definitions, effective_fixture_format, external_fixture_table,
-    extract_model_block, extract_unit_test_block, gather_governance, has_total_uncovered,
-    hook_operations, macro_focus_set, populate_line_counts, pr_dag_lines_from_diff,
-    pr_dag_lines_from_raw_code, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
-    reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
-    refine_changed_by_hunks, resolve_check_policy, resolve_experimental_config,
-    resolve_finding_anchor, reverse_apply, scan_pragmas, select_in_scope, select_seeds_in_scope,
-    widen_with_config_attributions,
+    BlockDiff, ChangeAxes, CheckPolicy, ConfigAttribution, DEFAULT_MACRO_BODY_CAP,
+    DEFAULT_PR_DAG_NODE_CAP, DEFAULT_REPORT_TITLE, DEFAULT_SEED_ROW_CAP, DepDate,
+    EnabledExperiments, EnvelopeScope, Experiment, Finding, FixtureTableDiff, GovernanceFacts,
+    HeuristicId, InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, Node,
+    NodeId, NormalizedDiffIndex, PrConfig, PrRef, PreflightError, ProjectChangePanel, ProjectFacts,
+    ProjectFallbackReason, ResolvedAnchor, ScopeInput, ScopeSelection, SeedCard, SeedInScopeSet,
+    StateComparator, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff,
+    UnitTestYamlBlock, VarReference, all_models, all_seeds, attach_hook_facts,
+    attach_model_yaml_diffs, attach_var_facts, attribute_config_tree_changes,
+    attribute_var_changes, build_seed_cards, changed_macros_baseline, changed_macros_pr_diff,
+    changed_models, check_by_id, compute_pr_dag, diff_project_definitions,
+    effective_fixture_format, external_fixture_table, extract_model_block, extract_unit_test_block,
+    gather_governance, has_total_uncovered, hook_operations, macro_focus_set, populate_line_counts,
+    pr_dag_lines_from_diff, pr_dag_lines_from_raw_code, preflight_compiled, raw_hunk_lines,
+    reconstruct_block_diffs, reconstruct_external_fixture_diff, reconstruct_model_sql_diffs,
+    reconstruct_table_diffs, refine_changed_by_hunks, resolve_check_policy,
+    resolve_experimental_config, resolve_finding_anchor, reverse_apply, scan_pragmas,
+    select_in_scope, select_seeds_in_scope, widen_with_config_attributions,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -312,12 +312,14 @@ fn execute_report(args: &ReportArgs) -> Result<ReportOutcome, RunError> {
         in_scope,
         models_in_scope,
         changed,
-        // cute-dbt#411 Slice A is domain-only: the per-model `axes`
-        // attribution is computed and contract-pinned in the domain, but
-        // not yet threaded into the render payload (that is Slice B). Bind
-        // it away here so the CLI behavior + every golden stay
-        // byte-identical until the render wiring lands.
-        axes: _,
+        // cute-dbt#413 Slice B — the per-model `axes` attribution the domain
+        // computed (cute-dbt#411 Slice A) is now threaded into the render
+        // payload (the Models-lens axis chips + the optgroup grouping key).
+        // The `--pr-diff` arm populates an entry for every in-scope model
+        // (`axes.keys() == models_in_scope`); the baseline arm produces an
+        // empty map (the documented Option-A gap), so baseline goldens stay
+        // byte-identical.
+        axes,
     } = widen_with_config_attributions(
         select_in_scope(&current, &scope_input),
         &current,
@@ -541,6 +543,7 @@ fn execute_report(args: &ReportArgs) -> Result<ReportOutcome, RunError> {
         &seed_cards,
         seed_row_cap,
         pr_dag.as_ref(),
+        &axes,
     )
     .map_err(|err| RunError::output(&args.out, err))?;
     // cute-dbt#386 — the machine-readable findings envelope. Purely
@@ -2128,6 +2131,7 @@ fn render(
     seed_cards: &[SeedCard],
     seed_row_cap: usize,
     pr_dag: Option<&PrDagPayload>,
+    axes: &BTreeMap<NodeId, ChangeAxes>,
 ) -> Result<(), io::Error> {
     render_report_with_externals(
         out,
@@ -2153,6 +2157,7 @@ fn render(
         seed_cards,
         seed_row_cap,
         pr_dag,
+        axes,
     )
 }
 

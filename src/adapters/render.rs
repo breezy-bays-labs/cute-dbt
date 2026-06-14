@@ -67,7 +67,7 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, ConfigAttribution, CteGraph,
+    BANNER_EMPTY_SCOPE, BlockDiff, ChangeAxes, CheckId, CheckPolicy, ConfigAttribution, CteGraph,
     DEFAULT_SEED_ROW_CAP, DiffLine, DiffLineKind, EdgeType, Finding, FixtureTable,
     FixtureTableDiff, GovernanceFacts, HeuristicId, HookChangeFacts, HookManifestPresence,
     InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet, ModelYamlOutcome, Node,
@@ -263,6 +263,40 @@ pub fn classify_node_role(graph: &CteGraph, node_index: usize) -> NodeRole {
     }
 }
 
+/// The per-model change-axis attribution as the JSON payload carries it
+/// (cute-dbt#413, Slice B of the 3-axis Models lens). A render-owned
+/// mirror of the domain [`ChangeAxes`] POD — render owns the wire
+/// vocabulary, the domain stays free of the serde shape (the
+/// `ModelYamlPayload` / `FindingPayload` precedent). The Models lens reads
+/// these three bits to render the per-model axis chips (Body / Config /
+/// Unit test), each reflecting exactly which of dbt's `state:modified`
+/// sub-selectors this PR touched for the model.
+///
+/// Present (serialized) only on the `--pr-diff` arm, where the domain
+/// populates `ScopeSelection.axes` for every in-scope model; the baseline
+/// arm produces an empty map (the documented Option-A gap in
+/// `scope.rs`), so its `ModelPayload::axes` is `None` and every baseline
+/// golden stays byte-identical.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct AxesPayload {
+    /// The model's `.sql` (`original_file_path`) is in the diff.
+    pub body: bool,
+    /// The model's `schema.yml` (`patch_path`) is in the diff.
+    pub config: bool,
+    /// The model hosts ≥1 in-scope unit test.
+    pub unit_test: bool,
+}
+
+impl From<ChangeAxes> for AxesPayload {
+    fn from(axes: ChangeAxes) -> Self {
+        Self {
+            body: axes.body,
+            config: axes.config,
+            unit_test: axes.unit_test,
+        }
+    }
+}
+
 /// Per-model entry in the JSON payload — mirrors the design's
 /// `window.CUTE_DBT_SAMPLE.models[i]` shape so the inlined interaction
 /// script consumes it without remapping.
@@ -369,6 +403,27 @@ pub struct ModelPayload {
     /// empty (baseline mode + every pre-#268 payload stays byte-stable).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub var_references: Vec<VarReference>,
+    /// Per-model change-axis attribution (cute-dbt#413) — which of
+    /// `{body, config, unit_test}` fired for this in-scope model. Drives
+    /// the Models-lens axis chips. `None` (key omitted) outside the
+    /// `--pr-diff` arm: the domain `ScopeSelection.axes` map is empty in
+    /// baseline mode (the documented Option-A gap), so every baseline
+    /// golden stays byte-identical. Attached by
+    /// `build_payload_with_externals` from the threaded `axes` map (this
+    /// builder never sees the scope selection's per-axis record).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub axes: Option<AxesPayload>,
+    /// The model's `schema.yml` (its scheme-stripped `patch_path`) — the
+    /// non-interactive config-file chip in the Models lens AND the shared
+    /// grouping key the model `<select>` uses to build its `<optgroup>`s
+    /// (every model patched by the same schema file groups together).
+    /// `None` (key omitted) outside the `--pr-diff` arm (gated to the same
+    /// `axes`-present models) and for any model with no `patch_path`, so
+    /// baseline goldens stay byte-identical. The grouping is presentation
+    /// only — it never re-scopes (the filter toggle is the separate
+    /// cute-dbt#414 Slice C).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_file: Option<String>,
 }
 
 /// The Model-YAML section's render shape (cute-dbt#247): the model's
@@ -3066,6 +3121,10 @@ pub fn build_payload(
         baseline_label,
         &CheckPolicy::default(),
         &ProjectFacts::default(),
+        // cute-dbt#413 — the no-axes convenience: baseline mode + every
+        // explore/test path with no per-axis attribution passes an empty
+        // map, so `ModelPayload::axes` / `config_file` stay omitted.
+        &BTreeMap::new(),
     )
 }
 
@@ -3103,6 +3162,7 @@ pub fn build_payload_with_externals(
     baseline_label: &str,
     check_policy: &CheckPolicy<HeuristicId>,
     project_facts: &ProjectFacts,
+    axes: &BTreeMap<NodeId, ChangeAxes>,
 ) -> ReportPayload {
     let model_tests = index_tests_for_models(current, models_in_scope);
     let empty: Vec<(&str, &UnitTest)> = Vec::new();
@@ -3134,6 +3194,19 @@ pub fn build_payload_with_externals(
         // (already in-scope) model references. Context, never scope.
         if let Some(references) = project_facts.var_references.get(model_id.as_str()) {
             model_payload.var_references.clone_from(references);
+        }
+        // cute-dbt#413 — the per-model axis chips + the config-file
+        // (optgroup grouping key). Present only on the `--pr-diff` arm: the
+        // baseline arm produces an empty `axes` map (the documented
+        // Option-A gap in scope.rs), so this whole block is skipped and the
+        // baseline goldens stay byte-identical. The config-file is gated to
+        // the SAME axes-present models — a model's `patch_path` is read off
+        // the manifest node (the model_yaml `path` precedent), but only
+        // surfaced as the grouping key when the model carries axis
+        // attribution, so the new fields never appear on a baseline payload.
+        if let Some(model_axes) = axes.get(model_id) {
+            model_payload.axes = Some(AxesPayload::from(*model_axes));
+            model_payload.config_file = model.patch_path().map(str::to_owned);
         }
         models.push(model_payload);
     }
@@ -3253,6 +3326,10 @@ pub fn render_report(
         DEFAULT_SEED_ROW_CAP,
         // No PR-scope mini-DAG through this convenience wrapper (cute-dbt#404).
         None,
+        // No per-model axis attribution through this convenience wrapper
+        // (cute-dbt#413) — baseline mode + the headless render helpers pass
+        // the empty map, so `axes` / `config_file` stay omitted.
+        &BTreeMap::new(),
     )
 }
 
@@ -3290,6 +3367,7 @@ pub fn render_report_with_externals(
     seed_cards: &[SeedCard],
     seed_row_cap: usize,
     pr_dag: Option<&PrDagPayload>,
+    axes: &BTreeMap<NodeId, ChangeAxes>,
 ) -> io::Result<()> {
     let mut payload = build_payload_with_externals(
         current,
@@ -3304,6 +3382,7 @@ pub fn render_report_with_externals(
         baseline_label,
         check_policy,
         project_facts,
+        axes,
     );
     // cute-dbt#260 — the gated governance facts (group chips + blast
     // radius + Slice 2's contract classifications, all built in
@@ -3477,6 +3556,11 @@ fn build_model_payload(
         // facts).
         config_attributions: Vec::new(),
         var_references: Vec::new(),
+        // cute-dbt#413 — the axis attribution + config-file are attached by
+        // build_payload_with_externals from the threaded `axes` map (this
+        // builder never sees the scope selection's per-axis record).
+        axes: None,
+        config_file: None,
     }
 }
 
@@ -4604,6 +4688,7 @@ mod tests {
             "",
             &CheckPolicy::default(),
             &facts,
+            &BTreeMap::new(),
         );
         let fct = payload
             .models
@@ -4635,6 +4720,134 @@ mod tests {
             ),
             "the attributed model serializes the full wire shape: {json}",
         );
+    }
+
+    // ===== cute-dbt#413 — per-model axis chips + config-file =====
+
+    #[test]
+    fn build_payload_attaches_axes_and_config_file_to_in_scope_models() {
+        // Two models patched by the SAME schema.yml: `fct_orders` fires
+        // body+config (its `.sql` changed AND its schema.yml changed),
+        // `stg_raw` fires config+unit_test (only its schema.yml changed,
+        // and it hosts an in-scope test). Both carry the same `config_file`
+        // (the grouping key the optgroup uses).
+        let schema = "models/shop/_shop__models.yml";
+        let manifest = manifest_for(
+            vec![
+                model_node("model.shop.fct_orders", "b1", Some("select 1"))
+                    .with_patch_path(Some(schema.to_owned())),
+                model_node("model.shop.stg_raw", "b2", Some("select 1"))
+                    .with_patch_path(Some(schema.to_owned())),
+            ],
+            vec![],
+        );
+        let models = ModelInScopeSet::from_iter([
+            NodeId::new("model.shop.fct_orders"),
+            NodeId::new("model.shop.stg_raw"),
+        ]);
+        let axes = BTreeMap::from([
+            (
+                NodeId::new("model.shop.fct_orders"),
+                ChangeAxes {
+                    body: true,
+                    config: true,
+                    unit_test: false,
+                },
+            ),
+            (
+                NodeId::new("model.shop.stg_raw"),
+                ChangeAxes {
+                    body: false,
+                    config: true,
+                    unit_test: true,
+                },
+            ),
+        ]);
+        let payload = build_payload_with_externals(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+            &CheckPolicy::default(),
+            &ProjectFacts::default(),
+            &axes,
+        );
+        let fct = payload
+            .models
+            .iter()
+            .find(|m| m.name == "fct_orders")
+            .expect("model renders");
+        let fct_axes = fct.axes.expect("axes present in pr-diff mode");
+        assert!(fct_axes.body && fct_axes.config && !fct_axes.unit_test);
+        assert_eq!(fct.config_file.as_deref(), Some(schema));
+        let stg = payload
+            .models
+            .iter()
+            .find(|m| m.name == "stg_raw")
+            .expect("model renders");
+        let stg_axes = stg.axes.expect("axes present in pr-diff mode");
+        assert!(!stg_axes.body && stg_axes.config && stg_axes.unit_test);
+        // Same schema.yml ⇒ same grouping key for both models.
+        assert_eq!(stg.config_file.as_deref(), Some(schema));
+    }
+
+    #[test]
+    fn build_payload_omits_axes_and_config_file_in_baseline_mode() {
+        // The baseline arm produces an empty `axes` map (the documented
+        // Option-A gap). Every model's `axes` / `config_file` is then
+        // absent, so the JSON omits both keys — baseline goldens stay
+        // byte-identical even when the model carries a `patch_path`.
+        let manifest = manifest_for(
+            vec![
+                model_node("model.shop.fct_orders", "b1", Some("select 1"))
+                    .with_patch_path(Some("models/shop/_shop__models.yml".to_owned())),
+            ],
+            vec![],
+        );
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.fct_orders")]);
+        let payload = build_payload_with_externals(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+            &CheckPolicy::default(),
+            &ProjectFacts::default(),
+            // Empty axes map ⇒ the baseline-mode shape.
+            &BTreeMap::new(),
+        );
+        let fct = &payload.models[0];
+        assert!(fct.axes.is_none(), "baseline mode carries no axes");
+        assert!(
+            fct.config_file.is_none(),
+            "config_file is gated to axes-present models"
+        );
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert_eq!(json.matches("\"axes\"").count(), 0, "{json}");
+        assert_eq!(json.matches("config_file").count(), 0, "{json}");
+    }
+
+    #[test]
+    fn axes_payload_serializes_the_three_axis_bits() {
+        // The exact wire shape the report JS reads for the axis chips.
+        let payload = AxesPayload::from(ChangeAxes {
+            body: true,
+            config: false,
+            unit_test: true,
+        });
+        let json = serde_json::to_string(&payload).expect("serialize");
+        assert_eq!(json, r#"{"body":true,"config":false,"unit_test":true}"#);
     }
 
     // ===== cute-dbt#268 — vars attribution render surfaces =====
@@ -4906,6 +5119,7 @@ mod tests {
             "",
             &CheckPolicy::default(),
             &facts,
+            &BTreeMap::new(),
         );
         let mart = payload
             .models
@@ -7402,6 +7616,7 @@ mod tests {
             &[],
             DEFAULT_SEED_ROW_CAP,
             None,
+            &BTreeMap::new(),
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8347,6 +8562,7 @@ mod tests {
             &[],
             DEFAULT_SEED_ROW_CAP,
             None,
+            &BTreeMap::new(),
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8725,6 +8941,7 @@ mod tests {
             DEFAULT_SEED_ROW_CAP,
             // cute-dbt#404 — no PR-scope mini-DAG in this lens-shell helper.
             None,
+            &BTreeMap::new(),
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8864,6 +9081,7 @@ mod tests {
             &[],
             DEFAULT_SEED_ROW_CAP,
             None,
+            &BTreeMap::new(),
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8998,6 +9216,7 @@ mod tests {
             &[],
             DEFAULT_SEED_ROW_CAP,
             None,
+            &BTreeMap::new(),
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")

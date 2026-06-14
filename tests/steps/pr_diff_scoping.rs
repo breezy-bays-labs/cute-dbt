@@ -39,8 +39,8 @@ use cute_dbt::domain::{Manifest, normalize_path};
 use super::super::common;
 use super::World;
 use super::builders::{
-    empty_manifest, model_node_with_original_file_path, serialize_to_tmp, unit_test_for,
-    unit_test_with_path, with_node, with_unit_test,
+    empty_manifest, model_node_with_ofp_and_patch_path, model_node_with_original_file_path,
+    serialize_to_tmp, unit_test_for, unit_test_with_path, with_node, with_unit_test,
 };
 use super::world::{
     BlockTarget, BlockTargetKind, ModelSqlTarget, ModelSqlTargetKind, RenameDirective,
@@ -559,6 +559,29 @@ fn manifest_contains_model(world: &mut World, ofp: String) {
     world.last_named_model = Some(bare);
 }
 
+#[given(
+    regex = r#"^the manifest contains a model with original_file_path "([^"]+)" and schema file "([^"]+)"$"#
+)]
+fn manifest_contains_model_with_schema(world: &mut World, ofp: String, patch_path: String) {
+    // cute-dbt#413 — the model carries a `patch_path` (its schema.yml), so a
+    // diff that touches that file fires the `config` change-axis for the
+    // model. The bare name is derived from the .sql stem as elsewhere.
+    let bare = bare_from_ofp(&ofp);
+    let manifest = take_current(world);
+    let manifest = with_node(
+        manifest,
+        model_node_with_ofp_and_patch_path(
+            &bare,
+            "ck-pr",
+            Some(COMPILED_WITH_CTE),
+            &ofp,
+            &patch_path,
+        ),
+    );
+    world.current_manifest = Some(manifest);
+    world.last_named_model = Some(bare);
+}
+
 #[given(regex = r#"^the manifest contains a model with no compiled SQL at "([^"]+)"$"#)]
 fn manifest_contains_uncompiled_model(world: &mut World, ofp: String) {
     // compiled_code: null — Stage-2 fail-closes when this model is the
@@ -1035,6 +1058,51 @@ fn find_model<'p>(payload: &'p Value, name: &str) -> Option<&'p Value> {
         .into_iter()
         .flatten()
         .find(|m| m["name"].as_str() == Some(name))
+}
+
+// --- cute-dbt#413: per-model change-axis attribution (payload-asserted) ---
+
+/// Assert the model's `axes` payload object carries EXACTLY the named axes
+/// set to `true` (and the others `false`). `axes` is a comma-separated
+/// list of `body` / `config` / `unit_test`. The render payload only carries
+/// `axes` in `--pr-diff` mode, so this also pins that the attribution
+/// threaded all the way through to the report.
+#[then(regex = r#"^the model "([^"]+)" is attributed to the axes "([^"]+)"$"#)]
+fn model_attributed_to_axes(world: &mut World, name: String, axes_csv: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let model = find_model(&p, &name)
+        .unwrap_or_else(|| panic!("model {name:?} not in payload; got {:?}", model_names(&p)));
+    let axes = model["axes"].as_object().unwrap_or_else(|| {
+        panic!("model {name:?} must carry an axes object in pr-diff mode; got {model:?}")
+    });
+    let expected: std::collections::BTreeSet<&str> = axes_csv.split(',').map(str::trim).collect();
+    for axis in ["body", "config", "unit_test"] {
+        let fired = axes.get(axis).and_then(Value::as_bool).unwrap_or_else(|| {
+            panic!("axes object for {name:?} is missing key {axis:?}; got {axes:?}")
+        });
+        let should_fire = expected.contains(axis);
+        assert_eq!(
+            fired, should_fire,
+            "model {name:?} axis {axis:?}: expected {should_fire}, got {fired} (full axes {axes:?})",
+        );
+    }
+}
+
+/// Assert the model's `config_file` payload field names the given
+/// schema.yml — the optgroup grouping key + the non-interactive
+/// config-file chip source.
+#[then(regex = r#"^the model "([^"]+)" carries the config file "([^"]+)"$"#)]
+fn model_carries_config_file(world: &mut World, name: String, config_file: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let model = find_model(&p, &name)
+        .unwrap_or_else(|| panic!("model {name:?} not in payload; got {:?}", model_names(&p)));
+    assert_eq!(
+        model["config_file"].as_str(),
+        Some(config_file.as_str()),
+        "model {name:?} should carry config_file {config_file:?}; got {model:?}",
+    );
 }
 
 #[then(

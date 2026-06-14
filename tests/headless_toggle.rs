@@ -47,8 +47,8 @@ use cute_dbt::adapters::render::{
     render_report, render_report_with_externals,
 };
 use cute_dbt::domain::{
-    BlockDiff, Cell, CellValue, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind,
-    FileHunks, FixtureTable, HookChangeFacts, HookManifestPresence, Hunk, InScopeSet,
+    BlockDiff, Cell, CellValue, ChangeAxes, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine,
+    DiffLineKind, FileHunks, FixtureTable, HookChangeFacts, HookManifestPresence, Hunk, InScopeSet,
     MacroIdentity, Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId,
     NormalizedDiffIndex, PrDiff, ProjectChange, ProjectChangeCategory, ProjectChangePanel,
     ProjectFacts, ProjectFallbackReason, SeedCard, SourceNode, TableRow, TestMetadata, UnitTest,
@@ -212,6 +212,60 @@ fn render_pr_diff_to_file(
         ScopeSource::PrDiff,
         "",
     )
+}
+
+/// PR-diff-mode render that threads a real per-model `axes` map +
+/// `patch_path`-bearing models (cute-dbt#413). Drives the Models-lens axis
+/// chips + the `<optgroup>` grouping in a real browser. Each `(model_id,
+/// axes)` pair seeds one in-scope model's attribution; the model's
+/// `config_file` (the optgroup key) comes off its `patch_path`. The
+/// `models` arg lists in-scope model ids; `tests` and `changed` mirror the
+/// other helpers.
+#[allow(clippy::too_many_arguments)]
+fn render_pr_diff_with_axes_to_file(
+    filename: &str,
+    nodes: Vec<Node>,
+    tests: Vec<(&str, UnitTest)>,
+    model_ids: &[&str],
+    changed_ids: &[&str],
+    axes: BTreeMap<NodeId, ChangeAxes>,
+) -> String {
+    let all_ids: Vec<String> = tests.iter().map(|(id, _)| (*id).to_owned()).collect();
+    let m = manifest(nodes, tests);
+    let in_scope: InScopeSet = all_ids.into_iter().collect();
+    let models: ModelInScopeSet = model_ids.iter().map(|id| NodeId::new(*id)).collect();
+    let changed: InScopeSet = changed_ids.iter().map(|s| (*s).to_owned()).collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &changed,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        &ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
+        None,
+        None,
+        &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        None,
+        &axes,
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    format!("file://{p}")
 }
 
 // --- headless evaluation helpers ------------------------------------
@@ -679,6 +733,204 @@ fn pr_diff_zero_updated_affirms_block_precision() {
         "baseline mode never renders the PR-diff-specific affirmation",
     );
 
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#413: per-model axis chips + optgroup grouping ----------
+
+/// `|`-joined `<optgroup label="…">` labels of a `<select>`, in DOM order.
+fn optgroups_of(tab: &Tab, select_id: &str) -> String {
+    eval_string(
+        tab,
+        &format!(
+            "Array.from(document.querySelectorAll('#{select_id} optgroup'))\
+             .map(function(g){{return g.getAttribute('label');}}).join('|')"
+        ),
+    )
+}
+
+/// `|`-joined `data-axis` values of the visible axis chips in the
+/// model-axes row (DOM order: body, config, unit_test).
+fn axis_chips(tab: &Tab) -> String {
+    eval_string(
+        tab,
+        "Array.from(document.querySelectorAll('[data-testid=\"model-axes\"] [data-testid=\"axis-chip\"]'))\
+         .map(function(c){return c.getAttribute('data-axis');}).join('|')",
+    )
+}
+
+/// Text of the non-interactive config-file chip, or "" when absent.
+fn config_file_chip_text(tab: &Tab) -> String {
+    eval_string(
+        tab,
+        "(function(){var c=document.querySelector('[data-testid=\"config-file-chip\"]');\
+          return c ? c.textContent.trim() : '';})()",
+    )
+}
+
+fn axes_row_hidden(tab: &Tab) -> bool {
+    eval_bool(
+        tab,
+        "document.querySelector('[data-testid=\"model-axes\"]').hidden",
+    )
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn pr_diff_models_lens_renders_axis_chips_and_optgroup_grouping() {
+    // Two models patched by the SAME schema.yml (so they group under one
+    // <optgroup>), one patched by another:
+    //   - mart_dq fires body+config (its .sql AND its schema.yml changed);
+    //   - mart_grid fires config+unit_test (only its schema.yml changed; it
+    //     hosts an in-scope test);
+    //   - stg_raw fires body only, patched by a different schema.yml.
+    let schema_marts = "models/marts/_marts__models.yml";
+    let schema_staging = "models/staging/_staging__models.yml";
+    let nodes = vec![
+        model_node_with_raw_and_path("model.shop.mart_dq", "select 1", "models/marts/mart_dq.sql")
+            .with_patch_path(Some(schema_marts.to_owned())),
+        model_node_with_raw_and_path(
+            "model.shop.mart_grid",
+            "select 2",
+            "models/marts/mart_grid.sql",
+        )
+        .with_patch_path(Some(schema_marts.to_owned())),
+        model_node_with_raw_and_path(
+            "model.shop.stg_raw",
+            "select 3",
+            "models/staging/stg_raw.sql",
+        )
+        .with_patch_path(Some(schema_staging.to_owned())),
+    ];
+    let tests = vec![(
+        "unit_test.shop.mart_grid.test_grid",
+        unit_test("test_grid", "mart_grid"),
+    )];
+    let axes = BTreeMap::from([
+        (
+            NodeId::new("model.shop.mart_dq"),
+            ChangeAxes {
+                body: true,
+                config: true,
+                unit_test: false,
+            },
+        ),
+        (
+            NodeId::new("model.shop.mart_grid"),
+            ChangeAxes {
+                body: false,
+                config: true,
+                unit_test: true,
+            },
+        ),
+        (
+            NodeId::new("model.shop.stg_raw"),
+            ChangeAxes {
+                body: true,
+                config: false,
+                unit_test: false,
+            },
+        ),
+    ]);
+    let url = render_pr_diff_with_axes_to_file(
+        "headless_axis_chips.html",
+        nodes,
+        tests,
+        &[
+            "model.shop.mart_dq",
+            "model.shop.mart_grid",
+            "model.shop.stg_raw",
+        ],
+        &[],
+        axes,
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate axis chips");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // The model <select> groups by shared schema.yml: the two marts models
+    // share one <optgroup>, stg_raw is under the staging one.
+    assert_eq!(
+        optgroups_of(&tab, "model-select"),
+        format!("{schema_marts}|{schema_staging}"),
+        "the dropdown groups models by their shared schema.yml via <optgroup>",
+    );
+
+    // mart_dq: body + config (no unit_test) — the multi-axis case.
+    select_model(&tab, "mart_dq");
+    assert!(
+        !axes_row_hidden(&tab),
+        "the axis row shows for an attributed model"
+    );
+    assert_eq!(
+        axis_chips(&tab),
+        "body|config",
+        "mart_dq renders exactly the Body + Config chips it fired",
+    );
+    assert_eq!(
+        config_file_chip_text(&tab),
+        schema_marts,
+        "the non-interactive config-file chip names the model's schema.yml",
+    );
+
+    // mart_grid: config + unit_test (no body) — a different axis triple,
+    // same schema.yml grouping key.
+    select_model(&tab, "mart_grid");
+    assert_eq!(
+        axis_chips(&tab),
+        "config|unit_test",
+        "mart_grid renders exactly the Config + Unit test chips it fired",
+    );
+    assert_eq!(config_file_chip_text(&tab), schema_marts);
+
+    // stg_raw: body only, under the other schema.yml.
+    select_model(&tab, "stg_raw");
+    assert_eq!(
+        axis_chips(&tab),
+        "body",
+        "stg_raw renders only the Body chip",
+    );
+    assert_eq!(config_file_chip_text(&tab), schema_staging);
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn baseline_mode_renders_no_axis_chips() {
+    // The baseline arm produces an empty `axes` map (the documented
+    // Option-A gap), so the Models lens renders zero axis chips and the
+    // model-axes row stays hidden even when the model carries a patch_path.
+    let url = render_to_file(
+        "headless_axis_chips_baseline.html",
+        vec![model_node("model.shop.dim_b")],
+        vec![("unit_test.shop.dim_b.t", unit_test("t", "dim_b"))],
+        &["model.shop.dim_b"],
+        &[],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate baseline axis");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    assert!(
+        axes_row_hidden(&tab),
+        "baseline mode hides the axis row (no per-axis attribution)",
+    );
+    assert_eq!(
+        axis_chips(&tab),
+        "",
+        "baseline mode renders zero axis chips"
+    );
+    // No <optgroup> grouping in baseline mode (no model carries a config_file).
+    assert_eq!(
+        optgroups_of(&tab, "model-select"),
+        "",
+        "baseline mode renders a flat dropdown (no shared-schema grouping)",
+    );
     let _ = tab.close(true);
 }
 
@@ -4791,6 +5043,7 @@ fn render_with_external_fixtures(
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
+        &BTreeMap::new(),
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -5282,6 +5535,7 @@ fn report_seed_import_node_shelf_shows_the_seed_data_table() {
         &seed_cards,
         DEFAULT_SEED_ROW_CAP,
         None,
+        &BTreeMap::new(),
     )
     .expect("render writes the report");
     let url = format!(
@@ -5401,6 +5655,7 @@ fn report_non_seed_import_node_shelf_is_unchanged() {
         &seed_cards,
         DEFAULT_SEED_ROW_CAP,
         None,
+        &BTreeMap::new(),
     )
     .expect("render writes the report");
     let url = format!(
@@ -8060,6 +8315,7 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
+        &BTreeMap::new(),
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -8635,6 +8891,7 @@ fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
+        &BTreeMap::new(),
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -12788,6 +13045,7 @@ fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
+        &BTreeMap::new(),
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -12832,6 +13090,7 @@ fn render_governance_to_file(
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
+        &BTreeMap::new(),
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -13045,6 +13304,7 @@ fn render_macro_lens_to_file(filename: &str) -> String {
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
+        &BTreeMap::new(),
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -13266,6 +13526,7 @@ fn render_capped_macro_lens_to_file(filename: &str, model_count: usize, body_cap
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
+        &BTreeMap::new(),
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -14566,6 +14827,7 @@ fn render_seed_report(filename: &str, seed_cards: &[SeedCard]) -> String {
         // A small cap so a >cap card exercises the "showing N of M" note.
         3,
         None,
+        &BTreeMap::new(),
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -14886,6 +15148,7 @@ fn render_minidag_report(filename: &str) -> String {
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         Some(&pr_dag),
+        &BTreeMap::new(),
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -15039,6 +15302,7 @@ fn render_lens_shell_to_file(filename: &str) -> String {
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         // cute-dbt#404 — no PR-scope mini-DAG in this lens-shell helper.
         None,
+        &BTreeMap::new(),
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
