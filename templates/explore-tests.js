@@ -265,3 +265,82 @@
   selectTest(select.value);
 })();
 /* end of cute-dbt explore tests viewer v1 (cute-dbt#102) */
+
+/* cute-dbt#270 — the project pane on tests.html (identity + standing vars
+   inventory). A SEPARATE IIFE so it renders independently of the unit-test
+   viewer's guard (a test-free manifest still shows project context). Reads
+   the `explore-project-data` carrier; absent ⇒ no-op (the pane shell is
+   gated off server-side). createElement / textContent only. */
+(function () {
+  "use strict";
+  var carrier = document.getElementById("explore-project-data");
+  var paneEl = document.querySelector(".project-pane");
+  if (!carrier || !paneEl) return;
+  var pane = JSON.parse(carrier.textContent);
+  if (!pane) return;
+
+  function el(tag, className, text) {
+    var out = document.createElement(tag);
+    if (className) out.className = className;
+    if (text !== undefined && text !== null) out.textContent = String(text);
+    return out;
+  }
+  function fact(dl, label, valueNode) {
+    dl.appendChild(el("dt", null, label));
+    var dd = document.createElement("dd");
+    dd.appendChild(valueNode);
+    dl.appendChild(dd);
+  }
+  function formatValue(value) {
+    if (typeof value === "string") return value;
+    try { return JSON.stringify(value); } catch (e) { return String(value); }
+  }
+
+  while (paneEl.firstChild) paneEl.removeChild(paneEl.firstChild);
+  paneEl.appendChild(el("summary", null, "Project"));
+
+  var identity = el("dl", "project-identity", null);
+  fact(identity, "name", el("code", null, pane.name || "—"));
+  if (pane.version) fact(identity, "version", el("code", null, pane.version));
+  if (pane.require_dbt_version) {
+    fact(identity, "require-dbt-version", el("code", null, pane.require_dbt_version));
+  }
+  paneEl.appendChild(identity);
+
+  paneEl.appendChild(el("p", "project-section-title", "vars"));
+  if (pane.vars && pane.vars.length) {
+    var table = el("table", "vars-table", null);
+    var head = document.createElement("tr");
+    ["var", "value", "direct", "config", "macro"].forEach(function (h) {
+      head.appendChild(el("th", h === "var" || h === "value" ? null : "vars-count", h));
+    });
+    table.appendChild(head);
+    pane.vars.forEach(function (v) {
+      var row = document.createElement("tr");
+      var nameCell = document.createElement("td");
+      nameCell.appendChild(el("code", null, v.name));
+      if (v.scope && v.scope.package) {
+        nameCell.appendChild(document.createTextNode(" "));
+        nameCell.appendChild(el("span", "vars-scope", "(" + v.scope.package + ")"));
+      }
+      row.appendChild(nameCell);
+      row.appendChild(el("td", null, formatValue(v.value)));
+      row.appendChild(el("td", "vars-count", String(v.direct)));
+      row.appendChild(el("td", "vars-count", String(v.config)));
+      row.appendChild(el("td", "vars-count", String(v.macros)));
+      table.appendChild(row);
+    });
+    paneEl.appendChild(table);
+    var fp = pane.vars_footprint || {};
+    var note = "scanned " + (fp.models_scanned || 0) + " model(s), "
+      + (fp.macros_scanned || 0) + " macro body(ies)";
+    if (fp.python_models) { note += " — " + fp.python_models + " python model(s) not SQL-scanned"; }
+    paneEl.appendChild(el("p", "project-footprint", note));
+  } else {
+    paneEl.appendChild(el("p", "vars-empty", "this project declares no vars"));
+  }
+
+  paneEl.open = true;
+  paneEl.hidden = false;
+})();
+/* end of cute-dbt#270 explore project pane (tests.html) */

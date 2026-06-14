@@ -79,6 +79,22 @@ table.expected-table th, table.expected-table td { border-color: var(--border); 
 .sql-block { font-size: 0.85rem; background: var(--code-bg); color: var(--text); }
 .test-jump { background: none; border: none; padding: 0; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
 .test-jump:hover, .test-jump:focus { color: var(--accent-hover); }
+/* cute-dbt#270 — the project pane (identity + standing vars inventory).
+   Re-expressed on the shared tokens (all 8 themes); the tests page omits
+   the dag page's reference filter + config chips. */
+.project-pane { margin: 0.5rem 0 0.75rem; padding: 0.5rem 0.85rem; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); font-size: 0.9rem; }
+.project-pane > summary { cursor: pointer; font-weight: 600; color: var(--text); }
+.project-pane .project-identity { display: grid; grid-template-columns: max-content 1fr; gap: 0.1rem 0.8rem; margin: 0.5rem 0; }
+.project-pane .project-identity dt { color: var(--text-muted); font-weight: 600; }
+.project-pane .project-identity dd { margin: 0; overflow-wrap: anywhere; }
+.project-pane .project-section-title { margin: 0.6rem 0 0.2rem; font-size: 0.85rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+.project-pane .vars-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.project-pane .vars-table th, .project-pane .vars-table td { text-align: left; padding: 0.15rem 0.6rem 0.15rem 0; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+.project-pane .vars-table th { color: var(--text-muted); font-weight: 600; }
+.project-pane .vars-table .vars-count { text-align: right; font-variant-numeric: tabular-nums; }
+.project-pane .vars-table .vars-scope { color: var(--text-muted); font-size: 0.8rem; }
+.project-pane .vars-empty { color: var(--text-faint); font-style: italic; margin: 0.25rem 0; }
+.project-pane .project-footprint { color: var(--text-muted); font-size: 0.8rem; margin: 0.35rem 0 0; }
 </style>
 </head>
 <body>
@@ -93,6 +109,15 @@ table.expected-table th, table.expected-table td { border-color: var(--border); 
     <a href="macro.html">Macro focus &rarr;</a>{% endif %}
   </nav>
 </header>
+
+{# cute-dbt#270 — the project pane (identity + standing vars inventory).
+   The tests page carries no lineage graph, so it omits the dag page's
+   reference filter — the inventory's per-tier counts still answer "which
+   vars matter". The shell is gated on has_project_pane so the
+   no-project-root tests.html golden stays byte-identical. #}
+{% if has_project_pane %}<details class="project-pane" data-testid="explore-project-pane" hidden></details>
+<script type="application/json" id="explore-project-data">{{ project_pane_json|safe }}</script>
+{% endif %}
 
 {% if models.is_empty() %}
 <p class="explore-empty">No models in this manifest.</p>

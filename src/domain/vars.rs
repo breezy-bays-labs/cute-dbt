@@ -918,6 +918,218 @@ pub fn attach_var_facts(changes: &mut [ProjectChange], analysis: &VarAnalysis) {
     }
 }
 
+// ---------------------------------------------------------------------
+// Standing vars inventory (cute-dbt#270, epic #262)
+// ---------------------------------------------------------------------
+
+/// The reference scope a `dbt_project.yml` var entry resolves to — the
+/// inventory twin of [`VarEdit::package`]: a global (root-namespace) var
+/// reaches every package's models (masking aside), a package-scoped var
+/// reaches only its own package's models.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VarScope {
+    /// `vars.{name}` — the root/global project entry.
+    #[default]
+    Global,
+    /// `vars.{package}.{name}` — the package-scoped entry.
+    Package(String),
+}
+
+/// One row of the standing vars inventory (cute-dbt#270): a var defined
+/// in `dbt_project.yml`, its precedence-resolved value, and the count of
+/// models referencing it at each evidence tier.
+///
+/// Counts are honest under-approximations off the SAME static scan the
+/// change-attribution uses (the private `scan_models` pass): a model
+/// counts at a tier when its scan carries a literal hit on the var name
+/// there. `dynamic`
+/// is the cannot-rule-out residual (a non-literal `var(` call with no
+/// literal hit on this var). Reference scope mirrors fusion's namespace
+/// reach: a global var counts models in every package, a package-scoped
+/// var only its own package's.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VarInventoryEntry {
+    /// The var's bare name.
+    pub name: String,
+    /// The reference scope (global vs package-scoped). Defaults to
+    /// [`VarScope::Global`] on the derive — the common case.
+    #[serde(default = "global_scope", skip_serializing_if = "is_global_scope")]
+    pub scope: VarScope,
+    /// The authored value, verbatim (quoted Jinja scalars stay opaque
+    /// strings; zero-compute never renders them).
+    pub value: Value,
+    /// DIRECT-tier model count (`var('x')` in a model's `raw_code`).
+    pub direct: usize,
+    /// CONFIG-tier model count (`var('x')` in a node's
+    /// `unrendered_config`).
+    pub config: usize,
+    /// MACRO-tier model count (`var('x')` in the model's macro closure).
+    pub macros: usize,
+    /// Cannot-rule-out residual: models with a non-literal `var(` call and
+    /// no literal hit on this var.
+    pub dynamic: usize,
+}
+
+/// serde default for [`VarInventoryEntry::scope`] — the global case.
+fn global_scope() -> VarScope {
+    VarScope::Global
+}
+
+/// serde skip predicate for [`VarInventoryEntry::scope`]: the global
+/// scope is the default and is omitted from JSON (payload hygiene).
+fn is_global_scope(scope: &VarScope) -> bool {
+    *scope == VarScope::Global
+}
+
+/// The full standing inventory (cute-dbt#270): every `dbt_project.yml`
+/// var with its tiered reference counts, plus the shared scan footprint
+/// and the var-name → referencing-models index for the explore filter.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VarInventory {
+    /// One entry per var, sorted by (name, scope) for deterministic
+    /// rendering.
+    pub entries: Vec<VarInventoryEntry>,
+    /// What the static scan covered (shared across all entries).
+    pub footprint: VarScanFootprint,
+    /// Var name → the sorted node ids referencing it at ANY literal tier
+    /// (direct/config/macro) — the explore `var:NAME` reference-filter
+    /// index. A var with zero literal references carries no entry. Names
+    /// collapse across scopes (a global and a package var of the same name
+    /// share the key); the filter is name-keyed, the inventory rows carry
+    /// the scope.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub var_models: BTreeMap<String, Vec<String>>,
+}
+
+/// Expand the parsed `vars:` block into (name, scope, value) triples,
+/// precedence-aware: a top-level key naming a manifest-known package whose
+/// value is a mapping is fusion's package scope (one triple per inner
+/// var); every other key is one global var. Tolerant ingestion: a
+/// package-named scalar degrades to a global-style entry (never dropped).
+fn inventory_entries(
+    def: &ProjectDefinition,
+    packages: &BTreeSet<String>,
+) -> Vec<(String, VarScope, Value)> {
+    let mut out = Vec::new();
+    for (key, value) in &def.vars {
+        if packages.contains(key)
+            && let Value::Object(scoped) = value
+        {
+            for (name, inner) in scoped {
+                out.push((name.clone(), VarScope::Package(key.clone()), inner.clone()));
+            }
+        } else {
+            out.push((key.clone(), VarScope::Global, value.clone()));
+        }
+    }
+    out
+}
+
+/// Whether a var in `scope` reaches a model in `model_pkg` — the
+/// inventory twin of [`edit_reaches`]: a global var reaches every
+/// package; a package-scoped var reaches exactly its package; a model
+/// with no package info is reached only by globals (no pin can be proven
+/// for it).
+fn scope_reaches(scope: &VarScope, model_pkg: Option<&str>) -> bool {
+    match scope {
+        VarScope::Global => true,
+        VarScope::Package(p) => model_pkg == Some(p.as_str()),
+    }
+}
+
+/// Compute the standing vars inventory (cute-dbt#270 — the C-arc explore
+/// surface of epic #262) for a parsed `dbt_project.yml` against the
+/// current manifest.
+///
+/// Pure computation over data already in hand (zero-compute: no Jinja
+/// rendering, no filesystem, no engine), reusing the SAME static scan the
+/// change-attribution uses ([`attribute_var_changes`]) so the explore
+/// inventory and the report's change panel can never disagree about which
+/// models reference a var. Every `dbt_project.yml` var becomes one entry
+/// with its precedence-resolved value and per-tier reference counts;
+/// reference scope mirrors fusion's namespace reach. Entries sort by
+/// (name, scope) for deterministic rendering.
+#[must_use]
+pub fn project_var_inventory(current: &Manifest, def: &ProjectDefinition) -> VarInventory {
+    let packages = package_names(current);
+    let triples = inventory_entries(def, &packages);
+    if triples.is_empty() {
+        return VarInventory::default();
+    }
+    let (scans, footprint) = scan_models(current);
+    let root = current.metadata().project_name();
+    let mut var_models: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut entries: Vec<VarInventoryEntry> = triples
+        .into_iter()
+        .map(|(name, scope, value)| {
+            inventory_entry(current, &scans, root, name, scope, value, &mut var_models)
+        })
+        .collect();
+    entries.sort_by(|a, b| {
+        (&a.name, scope_sort_key(&a.scope)).cmp(&(&b.name, scope_sort_key(&b.scope)))
+    });
+    for ids in var_models.values_mut() {
+        ids.sort();
+        ids.dedup();
+    }
+    VarInventory {
+        entries,
+        footprint,
+        var_models,
+    }
+}
+
+/// Tally one inventory var across the per-model scans: fill its tiered
+/// counts and append every literal-referencing model into the shared
+/// `var_models` filter index.
+fn inventory_entry(
+    current: &Manifest,
+    scans: &BTreeMap<String, ModelScan>,
+    root: Option<&str>,
+    name: String,
+    scope: VarScope,
+    value: Value,
+    var_models: &mut BTreeMap<String, Vec<String>>,
+) -> VarInventoryEntry {
+    let mut entry = VarInventoryEntry {
+        name,
+        scope,
+        value,
+        ..VarInventoryEntry::default()
+    };
+    for (id, scan) in scans {
+        let model_pkg = current
+            .nodes()
+            .get(&crate::domain::manifest::NodeId::new(id.clone()))
+            .and_then(|n| n.package_name())
+            .or(root);
+        if !scope_reaches(&entry.scope, model_pkg) {
+            continue;
+        }
+        entry.direct += usize::from(scan.direct.names.contains(&entry.name));
+        entry.config += usize::from(scan.config.names.contains(&entry.name));
+        entry.macros += usize::from(scan.macro_hits.contains_key(&entry.name));
+        entry.dynamic += usize::from(scan.dynamic_for(&entry.name));
+        if scan.references(&entry.name) {
+            var_models
+                .entry(entry.name.clone())
+                .or_default()
+                .push(id.clone());
+        }
+    }
+    entry
+}
+
+/// Sort key for [`VarScope`]: globals first (`""`), then package-scoped by
+/// package name — a total order for the inventory's deterministic sort.
+fn scope_sort_key(scope: &VarScope) -> &str {
+    match scope {
+        VarScope::Global => "",
+        VarScope::Package(p) => p,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1754,5 +1966,115 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a", "b"],
         );
+    }
+
+    // ----- standing vars inventory (cute-dbt#270) -----
+
+    /// A definition with the scenario manifest's read var plus an unread
+    /// one — the inventory must list BOTH (standing, not change-gated).
+    fn inventory_def() -> ProjectDefinition {
+        def_with_vars(&[("dq_threshold", json!(5)), ("unused", json!("none"))])
+    }
+
+    #[test]
+    fn inventory_lists_every_var_with_tiered_counts() {
+        // The scenario manifest references dq_threshold at all three tiers
+        // (one model each); `unused` is referenced by none. Both list.
+        let current = scenario_manifest();
+        let inventory = project_var_inventory(&current, &inventory_def());
+        assert_eq!(
+            inventory
+                .entries
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["dq_threshold", "unused"],
+            "every var lists, sorted by name — standing, never change-gated",
+        );
+        let dq = &inventory.entries[0];
+        assert_eq!(dq.value, json!(5), "the authored value, verbatim");
+        assert_eq!((dq.direct, dq.config, dq.macros), (1, 1, 1));
+        assert_eq!(dq.dynamic, 0);
+        let unused = &inventory.entries[1];
+        assert_eq!((unused.direct, unused.config, unused.macros), (0, 0, 0));
+        // The footprint mirrors attribute_var_changes' scan.
+        assert_eq!(inventory.footprint.models_scanned, 4);
+        assert_eq!(inventory.footprint.macros_scanned, 2);
+        // The filter index: dq_threshold's three literal-referencing
+        // models (sorted), and `unused` carries no entry.
+        assert_eq!(
+            inventory.var_models["dq_threshold"],
+            vec![
+                "model.shop.config_driven",
+                "model.shop.reads_direct",
+                "model.shop.via_macro",
+            ],
+        );
+        assert!(!inventory.var_models.contains_key("unused"));
+    }
+
+    #[test]
+    fn inventory_is_empty_for_a_var_free_project() {
+        let current = scenario_manifest();
+        let inventory = project_var_inventory(&current, &ProjectDefinition::default());
+        assert!(inventory.entries.is_empty());
+    }
+
+    #[test]
+    fn inventory_scopes_a_package_var_to_its_own_package() {
+        // A package-scoped var reaches only its package's models; a global
+        // var of the same name would reach both. Pin the scope reach.
+        let (pkg_id, pkg) = model(
+            "model.dbt_utils.helper",
+            Some("select {{ var('grid') }}"),
+            Some("dbt_utils"),
+            None,
+            &[],
+        );
+        let (own_id, own) = model(
+            "model.shop.reader",
+            Some("select {{ var('grid') }}"),
+            Some("shop"),
+            None,
+            &[],
+        );
+        let current = manifest_of(vec![(pkg_id, pkg), (own_id, own)]);
+        let def = def_with_vars(&[("dbt_utils", json!({ "grid": 7 }))]);
+        let inventory = project_var_inventory(&current, &def);
+        assert_eq!(inventory.entries.len(), 1);
+        let entry = &inventory.entries[0];
+        assert_eq!(entry.name, "grid");
+        assert_eq!(entry.scope, VarScope::Package("dbt_utils".to_owned()));
+        assert_eq!(
+            entry.direct, 1,
+            "only the dbt_utils model is in scope for a dbt_utils-scoped var",
+        );
+    }
+
+    #[test]
+    fn inventory_entry_round_trips_and_global_scope_is_omitted() {
+        let entry = VarInventoryEntry {
+            name: "x".to_owned(),
+            scope: VarScope::Global,
+            value: json!(1),
+            direct: 2,
+            config: 0,
+            macros: 1,
+            dynamic: 0,
+        };
+        let json = serde_json::to_string(&entry).expect("serialize");
+        assert!(!json.contains("scope"), "global scope is omitted: {json}");
+        let back: VarInventoryEntry = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(entry, back);
+        // A package scope DOES serialize.
+        let scoped = VarInventoryEntry {
+            scope: VarScope::Package("dbt_utils".to_owned()),
+            ..entry
+        };
+        let scoped_json = serde_json::to_string(&scoped).expect("serialize");
+        assert!(scoped_json.contains(r#""scope":{"package":"dbt_utils"}"#));
+        let scoped_back: VarInventoryEntry =
+            serde_json::from_str(&scoped_json).expect("deserialize");
+        assert_eq!(scoped, scoped_back);
     }
 }

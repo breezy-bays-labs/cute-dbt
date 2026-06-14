@@ -763,10 +763,13 @@ table.expected-table th, table.expected-table td { border-color: var(--border); 
   </div>
   <nav class="explore-nav" aria-label="Explore pages">
     <a href="dag.html">&larr; Model lineage</a>
+    <a href="macro.html">Macro focus &rarr;</a>
   </nav>
 </header>
 
 
+<details class="project-pane" data-testid="explore-project-pane" hidden></details>
+<script type="application/json" id="explore-project-data">{"name":"healthcare_analytics","version":"1.0.0","require_dbt_version":">=1.8.0","vars":[{"name":"default_state_grid_density","value":"monthly","direct":0,"config":1,"macros":0,"dynamic":0},{"name":"dq_quarantine_threshold","value":5,"direct":1,"config":0,"macros":2,"dynamic":0}],"vars_footprint":{"models_scanned":34,"macros_scanned":89,"python_models":0},"var_models":{"default_state_grid_density":["model.healthcare_analytics.mart_date_state_grid"],"dq_quarantine_threshold":["model.healthcare_analytics.mart_dq_summary","model.healthcare_analytics.stg_synthea__encounters","model.healthcare_analytics.stg_synthea__medications"]},"macro_models":{"add_dq_flags":["model.healthcare_analytics.stg_synthea__encounters","model.healthcare_analytics.stg_synthea__medications"],"generate_quarantine_model":["model.healthcare_analytics.int_dq_quarantine__encounters","model.healthcare_analytics.int_dq_quarantine__medications"],"generate_surrogate_key":["model.healthcare_analytics.stg_synthea__conditions","model.healthcare_analytics.stg_synthea__medications","model.healthcare_analytics.stg_synthea__observations","model.healthcare_analytics.stg_synthea__procedures"],"get_date_dimension":["model.healthcare_analytics.dim_date"],"quarantine_filter":["model.healthcare_analytics.fct_clinical_events","model.healthcare_analytics.fct_encounters","model.healthcare_analytics.int_encounters__enriched"]}}</script>
 
 
 

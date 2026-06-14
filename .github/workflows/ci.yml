@@ -729,9 +729,14 @@ jobs:
           # vertices, 1 an exposure sink) emits the third sub-page,
           # examples/explore-macro/macro.html — the dagre-justifying
           # focused subgraph (macro callers emphasized, downstream dimmed).
-          # Only macro.html is committed here (the row's dag/tests carry
-          # change context, so they are not byte-twins of the no-diff
-          # explore row's). Headless page-aware-liveness + resource-ref
+          # cute-dbt#270 — dag.html + tests.html are ALSO committed here:
+          # the --project-root (playground-source, which carries a
+          # dbt_project.yml) makes these pages render the project pane
+          # (project info + vars inventory + reference filter) and the
+          # per-model config provenance — the canonical visual proof of the
+          # explore project-pane surface. The gate diffs every *.html under
+          # the committed dir against the renderer twin, so all three are
+          # byte-identity-gated. Headless page-aware-liveness + resource-ref
           # gated. No baseline — explore takes none, ever (cute-dbt#106).
           - name: explore-macro
             mode: explore

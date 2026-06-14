@@ -53,11 +53,20 @@ pub const COMMITTED_EXAMPLES: &[&str] = &[
 /// `explore-macro/macro.html` (cute-dbt#345) is the focused macro DAG,
 /// rendered with `--pr-diff` against `playground-macro-pr-diff.patch` (a
 /// root macro `quarantine_filter` change) by its own matrix row — the
-/// no-`--pr-diff` `explore` row can never emit it.
+/// no-`--pr-diff` `explore` row can never emit it. cute-dbt#270 — its
+/// `dag.html` + `tests.html` are committed too: the `--project-root`
+/// (playground-source, which carries a `dbt_project.yml`) makes them
+/// render the project pane + config provenance, so the zero-egress +
+/// resource-ref gates scan the project-pane surface as well.
 pub const COMMITTED_EXPLORE_PAGES: &[&str] = &[
     "explore/dag.html",
     "explore/tests.html",
     "explore-macro/macro.html",
+    // cute-dbt#270 — the project-pane golden pages (dag.html / tests.html
+    // rendered with --project-root playground-source): project info + vars
+    // inventory + reference filter + per-model config provenance.
+    "explore-macro/dag.html",
+    "explore-macro/tests.html",
     // cute-dbt#398 — the seed-data explore golden (seed-showcase manifest,
     // --pr-diff + --project-root so the seed CSV is read and inlined). The
     // seed-typed DAG node's detail card shows the seed data table; both pages
