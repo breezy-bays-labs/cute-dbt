@@ -109,7 +109,7 @@ use crate::domain::{
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
-use args::{Cli, Command, ExploreArgs, ReportArgs};
+use args::{Cli, Command, ExploreArgs, ReportArgs, validate_argument_conflicts};
 
 /// Exit code for a run-time failure: a fail-closed manifest (Stage-1 or
 /// Stage-2) or an unwritable `--out` path.
@@ -134,6 +134,13 @@ pub fn run() -> ExitCode {
         Ok(cli) => cli,
         Err(err) => return report_arg_error(&err),
     };
+    // Post-parse usage validation clap's derive cannot express
+    // (cute-dbt#386): `report --findings-out` must differ from `--out`,
+    // or the sidecar JSON would clobber the HTML report. Routed through
+    // the same exit-2 usage-error path as a parse failure.
+    if let Err(err) = validate_argument_conflicts(&cli) {
+        return report_arg_error(&err);
+    }
     // Per-verb dispatch; every run-time failure is mapped to one
     // stderr message + exit 1 here. `review` wraps its own cli-layer
     // `ReviewError` (cute-dbt#300) alongside the composed report's

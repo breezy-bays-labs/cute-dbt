@@ -777,6 +777,35 @@ fn an_unwritable_findings_out_path_is_reported() {
 }
 
 #[test]
+fn findings_out_equal_to_out_is_a_usage_error_before_any_write() {
+    // CodeRabbit on PR #388: `--out X --findings-out X` would clobber the
+    // just-rendered HTML with the envelope JSON. Rejected as a usage error
+    // (exit 2 — the parse-time class, NOT the fail-closed code 1) BEFORE
+    // anything is written, so the report is never produced-then-destroyed.
+    let collide = tmp("collision_report.html");
+    clear(&collide);
+    let mut args = playground_pr_diff_args(&collide);
+    args.push("--findings-out".to_owned());
+    args.push(s(&collide).to_owned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = run(&refs);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a --findings-out == --out collision is a usage error: {output:?}"
+    );
+    assert!(
+        !collide.exists(),
+        "the collision is rejected before any artifact is written"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--findings-out") && stderr.contains("--out"),
+        "stderr names the conflicting flags: {stderr}"
+    );
+}
+
+#[test]
 fn an_unwritable_findings_out_path_wins_over_the_uncovered_gate() {
     // Write-failure precedence: the playground pr-diff carries a Total-tier
     // uncovered finding (so --fail-on-uncovered would otherwise exit 3), but
