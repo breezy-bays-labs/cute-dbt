@@ -38,6 +38,12 @@
 //!   authoring-YAML drawer (cute-dbt#69) and the external unit-test
 //!   fixture reader (cute-dbt#126). Soft failure path: `NotFound` is the
 //!   "no content to surface for this test" signal, not a fatal error.
+//! - [`pr_comments`] — the gen-time GitHub PR review-thread ingestion
+//!   rung (cute-dbt#395): spawns `gh api graphql` to pull a PR's
+//!   `reviewThreads` + general comments into the [`crate::domain::PrComments`]
+//!   POD. Fail-soft like the `review` verb's `gh pr view` rung (`gh`
+//!   missing / non-zero exit / unparseable response ⇒ empty result,
+//!   never a panic). Ingestion only — anchoring lands a later slice.
 //! - [`project_def`] — the `dbt_project.yml` parser (cute-dbt#266):
 //!   dbt-yaml (the engine's own published serde-yaml fork — fusion's
 //!   exact loading semantics: Overwrite duplicate-key policy +
@@ -52,6 +58,7 @@ pub mod cte_engine;
 pub mod explore;
 pub mod findings_emit;
 pub mod manifest;
+pub mod pr_comments;
 pub mod project_def;
 pub mod project_file;
 pub mod render;
