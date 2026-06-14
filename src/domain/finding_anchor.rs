@@ -230,6 +230,7 @@ mod tests {
                 hunks,
             }],
             renames: Vec::new(),
+            deleted: Vec::new(),
         };
         NormalizedDiffIndex::new(&diff, None)
     }

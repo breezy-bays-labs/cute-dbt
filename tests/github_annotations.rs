@@ -66,6 +66,7 @@ fn diff_touching(path: &str, line: usize) -> NormalizedDiffIndex {
             }],
         }],
         renames: Vec::new(),
+        deleted: Vec::new(),
     };
     NormalizedDiffIndex::new(&diff, None)
 }
