@@ -1,0 +1,11 @@
+version: 2
+
+# cute-dbt live-dogfood — GOVERNANCE group/owner chips: a `groups:`
+# definition with an owner. order_metrics' config sets `group: finance` +
+# `access: public` (see _marts__models.yml), so the Governance lens renders
+# the group/owner header chip + an access/public-surface lifecycle chip.
+groups:
+  - name: finance
+    owner:
+      name: Finance Analytics
+      email: finance-analytics@example.test

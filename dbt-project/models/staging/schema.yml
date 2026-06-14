@@ -6,6 +6,12 @@ version: 2
 # preview report.
 models:
   - name: stg_customers
+    # cute-dbt live-dogfood — a CONFIG-ONLY axis change: stg_customers has
+    # zero unit tests and this schema.yml has no `unit_tests:` block, so this
+    # config edit can't drag a test into scope. The Models lens shows a lone
+    # [Config] chip on stg_customers + a config-file chip naming this file.
+    config:
+      tags: ['staging', 'dogfood']
     columns:
       - name: customer_id
         description: Unique identifier for a customer (staging grain)

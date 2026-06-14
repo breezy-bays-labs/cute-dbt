@@ -17,7 +17,11 @@ with orders as (
 select
     customer_id,
     order_date,
-    count(*) as orders_placed
+    count(*) as orders_placed,
+    -- cute-dbt live-dogfood body change: an additive aggregate so this model
+    -- is unambiguously body-modified in the PR diff (a clear comment-target
+    -- line). Counts the distinct order statuses seen on that customer-day.
+    count(distinct status) as status_variety
 from orders
 {% if is_incremental() %}
 -- delete+insert reprocesses whole key partitions: take every order day at

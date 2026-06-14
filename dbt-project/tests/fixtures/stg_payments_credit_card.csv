@@ -1,2 +1,2 @@
 payment_id,order_id,payment_method,amount
-1,1,credit_card,10
+1,1,credit_card,20

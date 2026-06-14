@@ -1215,19 +1215,22 @@ records — pure synthetic data.\
 path = "dbt-project/seeds/raw_payments.csv"
 origin = "jaffle-shop"
 origin_url = "https://github.com/dbt-labs/jaffle_shop_duckdb"
-sha256 = "03fd407f3135f84456431a923f22fc185a2154079e210c20b690e3ab11687d11"
+sha256 = "fa8ea34bd7d6eaf39e99260f45dec23018d5ed2700f69bf58722da028331edd1"
 synthetic_only = true
 license = "Apache-2.0"
 description = """
-jaffle_shop_duckdb `raw_payments` seed (verbatim). Faker-style demo \
-payment records — pure synthetic data.\
+jaffle_shop_duckdb `raw_payments` seed (jaffle-shop-derived demo data). \
+cute-dbt live-dogfood: two cell VALUES edited (row 1 amount 1000 -> 1200; \
+row 113 amount blanked to an empty/NULL cell) so the live --pr-diff preview \
+renders the seed "Data tables" section's cell-diff + a NULL-aware cell. \
+Pure synthetic Faker-style payment records — no real data.\
 """
 
 [[project_data]]
 path = "dbt-project/tests/fixtures/stg_payments_credit_card.csv"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/126"
-sha256 = "865a7523c0dd9f4ce487a543cdc54c46756a453b304b7f7ebaf1a6923ad9c1bf"
+sha256 = "1d1d7cb0b7b631623c1cba9d1de358dd00ad6766f40060803e72204bb1e0b301"
 synthetic_only = true
 synthetic_handcrafted = true
 license = "Apache-2.0"

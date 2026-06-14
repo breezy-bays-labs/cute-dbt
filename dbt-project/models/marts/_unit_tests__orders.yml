@@ -1,0 +1,35 @@
+version: 2
+
+# cute-dbt live-dogfood — a UNIT-TEST-ONLY YAML (no `models:` block), so it
+# is no model's patch_path. Editing it marks ONLY the test's
+# original_file_path changed → ChangeAxes{body:false, config:false,
+# unit_test:true} on `orders`. The Models lens then shows a lone [Unit test]
+# chip on `orders` — the clean single-axis unit-test model. The test below
+# was moved out of _marts__models.yml (the companion edit there) and its CSV
+# cells were value-changed (10 -> 20) so it is unambiguously in the diff
+# keyset and renders a CSV cell diff.
+unit_tests:
+  - name: test_orders_sums_payment_methods
+    description: |
+      orders pivots payments into per-method columns and a total amount.
+      A single order paid once by credit_card for $20 yields
+      credit_card_amount = 20 and amount (total) = 20, with the other
+      method columns zeroed. Uses csv format for GIVEN and EXPECT —
+      compact tabular form across the four payment-method columns.
+    model: orders
+    given:
+      - input: ref('stg_orders')
+        format: csv
+        rows: |
+          order_id,customer_id,order_date,status
+          1,1,2024-01-01,completed
+      - input: ref('stg_payments')
+        format: csv
+        rows: |
+          payment_id,order_id,payment_method,amount
+          1,1,credit_card,20
+    expect:
+      format: csv
+      rows: |
+        order_id,customer_id,order_date,status,credit_card_amount,coupon_amount,bank_transfer_amount,gift_card_amount,amount
+        1,1,2024-01-01,completed,20,0,0,0,20

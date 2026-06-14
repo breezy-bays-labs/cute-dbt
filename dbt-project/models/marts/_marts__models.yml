@@ -7,21 +7,53 @@ models:
       every cute-dbt v0.1 EdgeType (From / Inner / Left / Right / Full /
       Cross / UnionAll / UnionDistinct) plus a comma cross-join
       (cute-dbt#40 heuristic). Built to exercise the CTE DAG + JoinType
-      legend rendering.
+      legend rendering. cute-dbt live-dogfood: this is the default-selected
+      model on first paint (its rich multi-JoinType CTE graph + Jinja body
+      foreground the CTE DAG + Model-SQL drawer).
     # cute-dbt#200 dogfood — model tags so the report's manifest_nodes
     # lookup (and the #201/#202 shelf/hover consumers) renders a
     # non-empty tags row on the live PR-preview report. The compiled
     # manifest's top-level `tags` (the deduplicated resolved list) is
     # what cute-dbt ingests — never `config.tags`.
+    # cute-dbt live-dogfood: extend tags + add meta so the Governance lens
+    # renders gov-tag + gov-meta chips, and the Model-YAML drawer shows the
+    # tags/meta diff.
+    # cute-dbt live-dogfood — GOVERNANCE group/owner + access: order_metrics
+    # joins the `finance` group (defined in _groups.yml) and is a public
+    # surface, so the Governance lens renders a group/owner header chip and
+    # an access/public lifecycle chip. fusion requires access under config:.
     config:
-      tags: ['marts', 'dogfood']
+      access: public
+      group: finance
+      tags: ['marts', 'dogfood', 'finance', 'revenue']
+      meta:
+        owner: 'analytics-eng'
+        maturity: 'production'
+        pii: false
+      # cute-dbt live-dogfood: a TEXT-ONLY (unenforced) contract block so the
+      # Model-YAML drawer renders the raw contract YAML WITHOUT requiring a
+      # data_type on every column (enforced:true would force that and could
+      # break the whole fusion compile — kept off here deliberately; the
+      # enforced-contract demo lives in the optional order_metrics_pk model).
+      contract:
+        enforced: false
     columns:
       - name: order_id
         description: Order identifier (may be null for full-outer non-matches).
+        # cute-dbt live-dogfood: column-level tests + meta + tags so the
+        # Model-YAML drawer renders the column tests as raw YAML and the
+        # Governance lens renders gov-meta-col / column-tag chips. fusion
+        # requires column meta/tags under a `config:` block (not bare keys).
+        config:
+          meta:
+            grain: true
+          tags: ['key']
+        tests:
+          - not_null
       - name: status
         description: Order status.
       - name: amount
-        description: Paid amount in dollars.
+        description: Paid amount in dollars (the order's settled total).
       - name: all_orders_amount
         description: Grand total of all paid orders (cross-joined constant).
       - name: amount_share
@@ -49,23 +81,63 @@ models:
           The right-side join key — always NULL on kept rows; projected so
           the general left-null check provably fires and is superseded.
 
-  # cute-dbt#196 dogfood — the NOT IN membership anti-join. Carries a
-  # unit test whose givens include a MATCHING outer↔inner pair, so the
-  # PR preview renders join.anti-join COVERED on the not_in construct
-  # (the satisfied twin of customers_with_no_orders' UNCOVERED arm).
-  - name: orders_never_refunded
+  # cute-dbt live-dogfood — a BRAND-NEW model (added in this PR) so the
+  # Models lens renders it with the NEW state chip (cute-dbt#416
+  # ModelState::New on the --pr-diff arm). It calls the new
+  # cents_to_dollars() macro, so it is a second macro user in the Macros
+  # lens.
+  - name: order_metrics_audit
     description: >
-      Orders that were never refunded — the <col> NOT IN (SELECT …)
-      membership anti-join idiom (cute-dbt#196 subquery evidence family).
+      Per-payment audit projection (a NEW model in this PR). Applies the
+      new cents_to_dollars() macro to the already-dollars amount.
     columns:
       - name: order_id
-        description: Order identifier (natural key of the kept rows).
-      - name: customer_id
-        description: Customer who placed the order.
-      - name: order_date
-        description: Date the order was placed.
+        description: Order identifier.
+      - name: payment_method
+        description: Payment instrument used.
+      - name: amount_audit
+        description: Amount after the cents_to_dollars() macro (a no-op here).
+
+  # cute-dbt live-dogfood — a BRAND-NEW, deliberately ISOLATED mart (added
+  # in this PR) for the mini-DAG HALO demo: it refs ONLY the UNCHANGED
+  # stg_payments, so stg_payments renders as the dimmed 1-hop halo context
+  # node. Also a NEW state chip in the Models lens.
+  - name: payment_audit
+    description: >
+      Per-method payment rollup (a NEW, isolated model in this PR — the
+      mini-DAG halo anchor).
+    columns:
+      - name: payment_method
+        description: Payment instrument used.
+      - name: payment_count
+        description: Number of payments of this method.
+      - name: total_amount
+        description: Total amount across payments of this method.
+
+  # cute-dbt live-dogfood — the enforcement.constraint-unbacked check
+  # (governance-gated): an ENFORCED contract with a primary_key constraint on
+  # order_id but NO unique/not_null data test backing it. enforced:true forces
+  # a data_type on every column. OPTIONAL: dropped if the fusion compile
+  # rejects the enforced contract (see the PR body outcome note).
+  - name: order_metrics_pk
+    description: >
+      Primary-key audit projection (a NEW model in this PR) with an enforced
+      contract and an unbacked primary_key constraint.
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: order_id
+        description: Order identifier (the declared, unbacked primary key).
+        data_type: integer
+        constraints:
+          - type: primary_key
       - name: status
         description: Order status.
+        data_type: varchar
+      - name: amount
+        description: Order total amount.
+        data_type: integer
 
 unit_tests:
   # DICT format (given + expect). dict only compares listed columns, so
@@ -85,9 +157,12 @@ unit_tests:
     # are inert here (these models read neither) but are valid dbt and
     # demonstrate the surface; meaningful macro overrides (is_incremental)
     # arrive with the incremental-model work (cute-dbt#145).
+    # cute-dbt live-dogfood: edit the override value (USD -> EUR). This
+    # surfaces in the Authoring-YAML Authored<->Diff drawer as a yaml_diff
+    # ONLY — it must NOT produce a data_diff (the #125 override-only guard).
     overrides:
       vars:
-        reporting_currency: 'USD'
+        reporting_currency: 'EUR'
       env_vars:
         DBT_ORDERS_REGION: 'us-east-1'
     given:
@@ -108,7 +183,9 @@ unit_tests:
           - payment_id: 1
             order_id: 1
             payment_method: 'credit_card'
-            amount: 10
+            # cute-dbt live-dogfood: a DICT cell VALUE change (10 -> 20) so
+            # the report renders a dict given-cell diff (not a reformat).
+            amount: 20
       - input: ref('stg_customers')
         format: dict
         rows:
@@ -127,35 +204,20 @@ unit_tests:
       rows:
         - order_id: 1
           status: 'completed'
-          amount: 10
-          all_orders_amount: 10
+          # cute-dbt live-dogfood: EXPECT cell VALUE changes (10 -> 20) paired
+          # with the given amount change above, so the report renders dict
+          # expect-cell diffs.
+          amount: 20
+          all_orders_amount: 20
           amount_share: 1.0
-          distinct_status_count: 1
+          # cute-dbt live-dogfood: a NULL-aware cell — UNQUOTED yaml `null`
+          # (NOT the string 'null'), so the report renders OLD=1 NEW=NULL with
+          # the cell-null styling.
+          distinct_status_count: null
 
-  - name: test_orders_sums_payment_methods
-    description: |
-      orders pivots payments into per-method columns and a total amount.
-      A single order paid once by credit_card for $10 yields
-      credit_card_amount = 10 and amount (total) = 10, with the other
-      method columns zeroed. Uses csv format for GIVEN and EXPECT —
-      compact tabular form across the four payment-method columns.
-    model: orders
-    given:
-      - input: ref('stg_orders')
-        format: csv
-        rows: |
-          order_id,customer_id,order_date,status
-          1,1,2024-01-01,completed
-      - input: ref('stg_payments')
-        format: csv
-        rows: |
-          payment_id,order_id,payment_method,amount
-          1,1,credit_card,10
-    expect:
-      format: csv
-      rows: |
-        order_id,customer_id,order_date,status,credit_card_amount,coupon_amount,bank_transfer_amount,gift_card_amount,amount
-        1,1,2024-01-01,completed,10,0,0,0,10
+  # NOTE: test_orders_sums_payment_methods was MOVED to the standalone
+  # _unit_tests__orders.yml (a unit-test-only YAML, no models: block) so
+  # editing it gives `orders` a clean single [Unit test] axis chip.
 
   - name: test_customers_aggregates_orders_and_payments
     description: |
@@ -197,43 +259,9 @@ unit_tests:
           number_of_orders: 1
           customer_lifetime_value: 10
 
-  # cute-dbt#196 dogfood — the anti-join SATISFACTION case: the givens
-  # carry a matching pair (order 1 IS refunded) and expect proves the
-  # matched row is excluded. This is exactly the inverted fixture the
-  # join.anti-join recommendation asks for, so the live preview shows
-  # the not_in construct COVERED with attribution to this test.
-  - name: test_orders_never_refunded_excludes_refunded_orders
-    description: |
-      orders_never_refunded keeps only orders absent from the refunded
-      set. Order 1 is refunded (its id appears in stg_refunds) and order
-      2 is clean, so the output carries order 2 alone — the matched row
-      is provably excluded (the anti-join's risk class, exercised).
-    model: orders_never_refunded
-    given:
-      - input: ref('stg_orders')
-        format: dict
-        rows:
-          - order_id: 1
-            customer_id: 1
-            order_date: '2024-01-01'
-            status: 'completed'
-          - order_id: 2
-            customer_id: 2
-            order_date: '2024-01-02'
-            status: 'completed'
-      - input: ref('stg_refunds')
-        format: dict
-        rows:
-          - refund_id: 1
-            order_id: 1
-            amount: -10
-    expect:
-      format: dict
-      rows:
-        - order_id: 2
-          customer_id: 2
-          order_date: '2024-01-02'
-          status: 'completed'
+  # NOTE: test_orders_never_refunded_excludes_refunded_orders was REMOVED in
+  # this PR alongside its model orders_never_refunded.sql (the REMOVED-model
+  # state demo — the Models lens renders a "removed" summary entry).
 
   # EXTERNAL FIXTURE format (cute-dbt#126). Same shape as
   # test_orders_sums_payment_methods, but the stg_payments GIVEN is sourced
@@ -258,8 +286,12 @@ unit_tests:
       - input: ref('stg_payments')
         format: csv
         fixture: stg_payments_credit_card
+    # cute-dbt live-dogfood: the external fixture file's own credit_card amount
+    # is bumped 10 -> 20 (see tests/fixtures/stg_payments_credit_card.csv), so
+    # the report splices the external file's hunk as an old->new cell diff. The
+    # inline expect is bumped to match (10 -> 20) so the test stays consistent.
     expect:
       format: csv
       rows: |
         order_id,customer_id,order_date,status,credit_card_amount,coupon_amount,bank_transfer_amount,gift_card_amount,amount
-        1,1,2024-01-01,completed,10,0,0,0,10
+        1,1,2024-01-01,completed,20,0,0,0,20

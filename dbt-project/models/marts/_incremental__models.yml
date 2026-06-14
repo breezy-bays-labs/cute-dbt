@@ -18,7 +18,8 @@ models:
       Per-customer order-day rollup at the (customer_id, order_date)
       grain. Incremental delete+insert keyed on the composite unique_key;
       no uniqueness test backs the declared grain — the cute-dbt#169
-      walking-skeleton coverage gap.
+      walking-skeleton coverage gap. cute-dbt live-dogfood: description +
+      body both touched so this model stays in scope (grain UNCOVERED).
     columns:
       - name: customer_id
         description: Customer identifier (half of the composite grain).
@@ -28,6 +29,8 @@ models:
         description: Order date (the other half of the composite grain).
       - name: orders_placed
         description: Number of orders the customer placed that day.
+      - name: status_variety
+        description: Count of distinct order statuses seen that customer-day.
 
   - name: order_events_incremental
     description: >
@@ -67,13 +70,17 @@ unit_tests:
       macros:
         is_incremental: true
     given:
+      # cute-dbt live-dogfood: edit a `given: - input: this` cell (the prior
+      # model-state mock) — status 'completed' -> 'shipped' on the
+      # high-water-mark row, so the report renders a `this` pseudo-input cell
+      # diff (the incremental override drawer + branch-coverage COVERED).
       - input: this
         format: dict
         rows:
           - order_id: 1
             customer_id: 1
             order_date: '2024-01-01'
-            status: 'completed'
+            status: 'shipped'
       - input: ref('stg_orders')
         format: dict
         rows:

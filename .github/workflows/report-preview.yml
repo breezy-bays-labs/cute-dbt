@@ -276,6 +276,13 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      # cute-dbt#419 — the live PR-comment dogfood: the render step's
+      # gen-time `gh api graphql` fetch (gather_pr_comments → fetch_pr_comments)
+      # reads this PR's review threads. Requires the GITHUB_TOKEN to carry
+      # pull-requests:read (the report still makes zero outbound requests when
+      # opened — this is a gen-time spawn, exactly like the review verb's
+      # `gh pr view` rung).
+      pull-requests: read
     outputs:
       # Surfaced so `sticky-comment` can tell "PR changed dbt-project/" (a real
       # dbt-project row was uploaded) from "didn't" (no row). This job has NO
@@ -380,6 +387,14 @@ jobs:
           # visible on the sticky preview even though the family is
           # default-OFF for consumers.
           CUTE_DBT_EXPERIMENTAL: "1"
+          # cute-dbt#419 — the live PR-comment dogfood: cute-dbt's gen-time
+          # `gh api graphql` fetch (gather_pr_comments) reads GITHUB_TOKEN from
+          # the environment to pull THIS PR's review threads. `pr-comments` is
+          # already enabled (CUTE_DBT_EXPERIMENTAL=1 ⇒ every experiment); the
+          # only missing piece was the token + the job's pull-requests:read
+          # scope (added above). Fail-soft: no token / no comments ⇒ the
+          # comment section stays byte-quiet, the report still renders.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # cute-dbt#346 — link the live dogfood report back to THIS PR.
           # html_url + title come straight off the PR event. The title is
           # attacker-controllable, so it rides env: (the safe pattern) and is

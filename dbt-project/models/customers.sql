@@ -49,8 +49,12 @@ final as (
 
     select
         customers.customer_id,
-        customers.first_name,
-        customers.last_name,
+        -- cute-dbt live-dogfood: wrap the PII name columns in the new
+        -- mask_pii() macro so `customers` is a direct macro caller (the
+        -- emphasized "user" in the report's Macros lens). mask_pii ->
+        -- is_authorized is the transitive blast-radius edge.
+        {{ mask_pii('customers.first_name') }} as first_name,
+        {{ mask_pii('customers.last_name') }} as last_name,
         customer_orders.first_order,
         customer_orders.most_recent_order,
         customer_orders.number_of_orders,
