@@ -380,7 +380,11 @@
     } else {
       // Build groups in first-seen order; ungrouped models flush inline so
       // the dropdown never silently drops a model that lacks a schema.yml.
-      var groups = {};
+      // `Object.create(null)` (not `{}`): the map is keyed by the
+      // manifest-derived config_file, so a prototype-less object is the
+      // right idiom — a key like "constructor" / "__proto__" can never
+      // collide with an inherited member (gemini, PR #423).
+      var groups = Object.create(null);
       var order = [];
       DATA.models.forEach(function (m) {
         var key = m.config_file || "";
