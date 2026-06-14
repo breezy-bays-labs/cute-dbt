@@ -311,6 +311,12 @@ fn execute_report(args: &ReportArgs) -> Result<ReportOutcome, RunError> {
         in_scope,
         models_in_scope,
         changed,
+        // cute-dbt#411 Slice A is domain-only: the per-model `axes`
+        // attribution is computed and contract-pinned in the domain, but
+        // not yet threaded into the render payload (that is Slice B). Bind
+        // it away here so the CLI behavior + every golden stay
+        // byte-identical until the render wiring lands.
+        axes: _,
     } = widen_with_config_attributions(
         select_in_scope(&current, &scope_input),
         &current,
