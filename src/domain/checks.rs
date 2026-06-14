@@ -468,6 +468,27 @@ impl<Id: CheckId> Finding<Id> {
         self.degraded = degraded;
         self
     }
+
+    /// Whether this finding is a **surfaced uncovered gap** — a
+    /// [`Verdict::Uncovered`] finding the operator has **not** suppressed
+    /// (cute-dbt#406).
+    ///
+    /// This is the single source of truth for "does this gap still count?"
+    /// shared by every consumer that must agree on a suppressed finding:
+    /// the `--fail-on-uncovered` gate predicate
+    /// ([`has_total_uncovered`](crate::domain::findings_envelope::has_total_uncovered)),
+    /// the GitHub annotation emit (`build_annotations`), and the check-run
+    /// summary roll-up (`FindingsSummary::tally`). Suppression is an
+    /// operator acknowledgement (cute-dbt#171): a suppressed gap is
+    /// *display-acknowledged*, so it neither emits an annotation nor trips
+    /// the gate. Aligning every consumer on this one predicate keeps the
+    /// gate and the emit from ever re-drifting (the cute-dbt#406 fix: a run
+    /// whose only Total gap is suppressed must NOT trip the gate AND must
+    /// emit no `::error` — the two can never disagree).
+    #[must_use]
+    pub fn is_surfaced_uncovered(&self) -> bool {
+        matches!(self.verdict, Verdict::Uncovered) && self.suppressed.is_none()
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -3361,6 +3382,56 @@ mod tests {
                 Vec::new(),
             );
             assert!(finding.recommendation.is_none());
+        }
+    }
+
+    #[test]
+    fn is_surfaced_uncovered_is_the_shared_gate_and_emit_predicate() {
+        // cute-dbt#406: the single source of truth shared by the
+        // `--fail-on-uncovered` gate (`has_total_uncovered`) and the GitHub
+        // annotation emit (`build_annotations`). True iff Uncovered AND not
+        // suppressed; every other verdict (covered/unknown) is false, and a
+        // suppressed uncovered finding is false (the operator acknowledged
+        // it).
+        let unsuppressed = Finding::new(
+            HeuristicId::GrainUniqueKeyUnbacked,
+            node_id("model.shop.orders"),
+            UNIQUE_KEY_CONSTRUCT,
+            Verdict::Uncovered,
+            Vec::new(),
+        );
+        assert!(
+            unsuppressed.is_surfaced_uncovered(),
+            "an unsuppressed uncovered finding is a surfaced gap"
+        );
+
+        let mut suppressed = unsuppressed.clone();
+        suppressed.suppressed = Some(Suppression {
+            source: SuppressionSource::Config,
+            reason: Some("accepted".to_owned()),
+        });
+        assert!(
+            !suppressed.is_surfaced_uncovered(),
+            "a suppressed uncovered finding is NOT a surfaced gap"
+        );
+
+        for verdict in [
+            Verdict::Covered {
+                by: vec!["test.shop.unique_orders_order_id".to_owned()],
+            },
+            Verdict::Unknown,
+        ] {
+            let finding = Finding::new(
+                HeuristicId::GrainUniqueKeyUnbacked,
+                node_id("model.shop.orders"),
+                UNIQUE_KEY_CONSTRUCT,
+                verdict,
+                Vec::new(),
+            );
+            assert!(
+                !finding.is_surfaced_uncovered(),
+                "only an uncovered verdict can be a surfaced gap"
+            );
         }
     }
 

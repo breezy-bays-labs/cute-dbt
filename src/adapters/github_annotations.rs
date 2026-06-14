@@ -201,7 +201,10 @@ fn build_annotations<Id: CheckId>(
 ) -> Vec<Annotation> {
     let mut annotations: Vec<Annotation> = findings
         .iter()
-        .filter(|f| matches!(f.verdict, Verdict::Uncovered) && f.suppressed.is_none())
+        // Shared with the `--fail-on-uncovered` gate predicate
+        // (`has_total_uncovered`) so the emit and the gate can never
+        // disagree on a suppressed finding (cute-dbt#406).
+        .filter(|f| f.is_surfaced_uncovered())
         .filter_map(|f| {
             let recommendation = f.recommendation.clone()?;
             let anchor = anchor_for(f)?;
@@ -310,16 +313,20 @@ impl FindingsSummary {
             covered: 0,
         };
         for finding in findings {
-            match &finding.verdict {
-                Verdict::Covered { .. } => summary.covered += 1,
-                Verdict::Uncovered if finding.suppressed.is_none() => match finding.tier {
+            // A surfaced uncovered gap (uncovered + not suppressed — the
+            // SAME `is_surfaced_uncovered` predicate the gate and the
+            // annotation emit share, cute-dbt#406) counts toward its tier;
+            // a covered finding is always covered; everything else
+            // (suppressed-uncovered, unknown) is neither a gap nor a
+            // guarantee.
+            if finding.is_surfaced_uncovered() {
+                match finding.tier {
                     Tier::Total => summary.total_uncovered += 1,
                     Tier::High => summary.high_uncovered += 1,
                     Tier::Advisory => summary.advisory_uncovered += 1,
-                },
-                // Suppressed uncovered + Unknown verdicts: not a gap to
-                // count, not a covered guarantee either.
-                Verdict::Uncovered | Verdict::Unknown => {}
+                }
+            } else if matches!(finding.verdict, Verdict::Covered { .. }) {
+                summary.covered += 1;
             }
         }
         summary
@@ -646,6 +653,63 @@ mod tests {
         assert!(emit.lines.is_empty());
         let summary = FindingsSummary::tally(&findings);
         assert!(summary.is_clean());
+    }
+
+    #[test]
+    fn gate_and_emit_agree_on_a_suppressed_total_gap() {
+        // cute-dbt#406: the gate (`has_total_uncovered`) and the annotation
+        // emit (`build_annotations`) MUST agree on a suppressed Total gap —
+        // both must treat it as a non-event. A suppressed-only run trips
+        // neither (gate false ⇒ no ::error annotation), and the symmetric
+        // non-suppressed run trips both (gate true ⇒ an ::error annotation).
+        // This is the load-bearing "gate tripped ⇒ at least one error
+        // annotation" invariant, pinned at the seam where both predicates
+        // are reachable.
+        use crate::domain::findings_envelope::has_total_uncovered;
+
+        // Suppressed-only Total gap: gate does NOT trip, no ::error emitted.
+        let mut suppressed = uncovered(HeuristicId::GrainUniqueKeyUnbacked, "model.shop.a");
+        suppressed.suppressed = Some(crate::domain::checks::Suppression {
+            source: crate::domain::checks::SuppressionSource::Config,
+            reason: Some("accepted".to_owned()),
+        });
+        let suppressed_only = vec![suppressed];
+        assert!(
+            !has_total_uncovered(&suppressed_only),
+            "the gate does not trip on a suppressed-only Total gap"
+        );
+        let emit = emit_annotations(
+            &suppressed_only,
+            AnnotationLevels::advisory(), // gate is off (not tripping)
+            DEFAULT_ANNOTATION_CAP,
+            &always("models/a.sql", 1),
+        );
+        assert!(
+            !emit.lines.iter().any(|l| l.starts_with("::error ")),
+            "no ::error annotation when the gate did not trip: {:?}",
+            emit.lines
+        );
+
+        // Non-suppressed Total gap: gate trips AND an ::error is emitted.
+        let surfaced = vec![uncovered(
+            HeuristicId::GrainUniqueKeyUnbacked,
+            "model.shop.b",
+        )];
+        assert!(
+            has_total_uncovered(&surfaced),
+            "the gate trips on a non-suppressed Total gap"
+        );
+        let emit = emit_annotations(
+            &surfaced,
+            AnnotationLevels::enforcing(), // gate is tripping
+            DEFAULT_ANNOTATION_CAP,
+            &always("models/b.sql", 2),
+        );
+        assert!(
+            emit.lines.iter().any(|l| l.starts_with("::error ")),
+            "an ::error annotation rides when the gate trips: {:?}",
+            emit.lines
+        );
     }
 
     // Keep Evidence import used (some checks emit evidence rows).
