@@ -1089,6 +1089,89 @@ fn model_attributed_to_axes(world: &mut World, name: String, axes_csv: String) {
     }
 }
 
+// --- cute-dbt#414 (Slice C): the single-select 3-axis filter toggle ---
+
+/// Whether the active axis filter would admit a model: `all` admits every
+/// in-scope model; a specific axis admits a model only when its
+/// `axes.<axis>` bool fired. This mirrors `modelMatchesAxis` in
+/// interaction.js exactly — the payload is the source of truth the JS
+/// filter reads, so asserting it pins which segment narrows the dropdown to
+/// which models.
+fn model_admitted_by_axis(model: &Value, axis: &str) -> bool {
+    if axis == "all" {
+        return true;
+    }
+    model["axes"]
+        .get(axis)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Assert the model's payload would be ADMITTED by the named filter axis
+/// (`all`/`body`/`config`/`unit_test`) — the segment re-scopes the dropdown
+/// to exactly the admitted models.
+#[then(regex = r#"^the model "([^"]+)" is admitted by the filter axis "([^"]+)"$"#)]
+fn model_admitted_by_filter_axis(world: &mut World, name: String, axis: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let model = find_model(&p, &name)
+        .unwrap_or_else(|| panic!("model {name:?} not in payload; got {:?}", model_names(&p)));
+    assert!(
+        model_admitted_by_axis(model, &axis),
+        "model {name:?} must be admitted by the {axis:?} filter; axes were {:?}",
+        model.get("axes"),
+    );
+}
+
+/// Assert the model's payload would be REJECTED by the named filter axis —
+/// the dual of the admit assertion (a model the segment drops from the
+/// dropdown).
+#[then(regex = r#"^the model "([^"]+)" is rejected by the filter axis "([^"]+)"$"#)]
+fn model_rejected_by_filter_axis(world: &mut World, name: String, axis: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let model = find_model(&p, &name)
+        .unwrap_or_else(|| panic!("model {name:?} not in payload; got {:?}", model_names(&p)));
+    assert!(
+        !model_admitted_by_axis(model, &axis),
+        "model {name:?} must be rejected by the {axis:?} filter; axes were {:?}",
+        model.get("axes"),
+    );
+}
+
+/// Assert the rendered report carries the single-select 3-axis filter
+/// toggle: the static `data-testid="axis-filter"` radiogroup container plus
+/// the inlined segment definitions (one per named axis) the JS builds it
+/// from. The toggle is JS-built (the static container is empty in the
+/// served HTML), so the segment vocabulary lives in the inlined
+/// `FILTER_SEGMENTS` — asserting both the container markup AND every segment
+/// `data-axis` proves the four-segment control will materialize.
+#[then(regex = r#"^the rendered report carries the 3-axis filter toggle with segments "([^"]+)"$"#)]
+fn report_carries_axis_filter_toggle(world: &mut World, segments_csv: String) {
+    require_exit_0(world);
+    let html = world
+        .report_html
+        .as_ref()
+        .expect("report.html was written by the subprocess");
+    assert!(
+        html.contains(r#"data-testid="axis-filter""#),
+        "the rendered report must carry the axis-filter radiogroup container",
+    );
+    assert!(
+        html.contains(r#"role="radiogroup""#),
+        "the axis-filter container must be a radiogroup (single-select semantics)",
+    );
+    // Every named segment's `data-axis` must appear in the inlined
+    // FILTER_SEGMENTS the JS builds the toggle from.
+    for axis in segments_csv.split(',').map(str::trim) {
+        let needle = format!(r#"axis: "{axis}""#);
+        assert!(
+            html.contains(&needle),
+            "the inlined filter must define the {axis:?} segment (looked for {needle:?})",
+        );
+    }
+}
+
 /// Assert the model's `config_file` payload field names the given
 /// schema.yml — the optgroup grouping key + the non-interactive
 /// config-file chip source.

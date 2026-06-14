@@ -500,6 +500,17 @@
      the #91 scope toggle, and the always-open test details all live in the
      .test-section below the DAG. The zero-updated hint stays here, next to
      the model selection it explains. #}
+  {# cute-dbt#414 (Slice C) — the single-select 3-axis filter toggle
+     [All][Body][Config][Unit test]. Re-scopes the model <select> (and its
+     <optgroup>s) to the models whose selected change-axis fired; `All`
+     restores every in-scope model. JS-built (renderAxisFilter, from
+     m.axes — Rust computes, JS only renders) so the empty container stays
+     byte-identical across modes: in baseline mode no model carries `axes`,
+     so the segments are never built and the container stays hidden (the
+     #413 axis-chip gating, mirrored exactly — baseline goldens unchanged).
+     A radiogroup of buttons (single-select, aria-pressed per segment) —
+     the #91 test-mode-toggle recipe family, reused. -#}
+  <div class="axis-filter" role="radiogroup" aria-label="Filter models by change axis" data-testid="axis-filter" hidden></div>
   <div class="test-selector-row">
     <div class="selector-field">
       <label for="model-select">Model</label>

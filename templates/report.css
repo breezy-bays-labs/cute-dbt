@@ -82,6 +82,7 @@ html[data-style="terminal"] input,
 html[data-style="terminal"] .theme-chip,
 html[data-style="terminal"] .seg-radio,
 html[data-style="terminal"] .test-mode-toggle,
+html[data-style="terminal"] .axis-filter,
 html[data-style="terminal"] .settings-cog,
 html[data-style="terminal"] .settings-panel,
 html[data-style="terminal"] .cte-dag-cyto,
@@ -127,6 +128,7 @@ html[data-style="swiss"] select,
 html[data-style="swiss"] input,
 html[data-style="swiss"] .seg-radio,
 html[data-style="swiss"] .test-mode-toggle,
+html[data-style="swiss"] .axis-filter,
 html[data-style="swiss"] .theme-chip,
 html[data-style="swiss"] .settings-cog,
 html[data-style="swiss"] .settings-panel,
@@ -159,8 +161,10 @@ html[data-style="soft"] .expected-panel {
 }
 html[data-style="soft"] .expected-panel { border-width: 2px; border-color: var(--accent); }
 html[data-style="soft"] .test-mode-toggle,
+html[data-style="soft"] .axis-filter,
 html[data-style="soft"] .seg-radio { border-radius: 999px; overflow: hidden; }
 html[data-style="soft"] .test-mode-toggle button,
+html[data-style="soft"] .axis-filter button,
 html[data-style="soft"] .seg-radio button { padding-left: 14px; padding-right: 14px; }
 html[data-style="soft"] select,
 html[data-style="soft"] input,
@@ -561,6 +565,21 @@ g.dag-node:focus-visible { outline: 2px dashed var(--accent); outline-offset: 3p
 .test-mode-toggle button + button { border-left: var(--rule-w) solid var(--control-border); }
 .test-mode-toggle button:not(.is-active) { opacity: 0.85; color: var(--text-muted); }
 .test-mode-toggle button.is-active { background: var(--control-active-bg); color: var(--control-active-fg); }
+
+/* cute-dbt#414 (Slice C) — the single-select 3-axis filter toggle, reusing
+   the #91 test-mode-toggle segmented recipe (one bordered group, zero-gap
+   buttons, the active segment inverts). JS-built + hidden until any model
+   carries `axes` (--pr-diff mode only), so baseline goldens stay
+   byte-identical. */
+.axis-filter { display: inline-flex; gap: 0; border: var(--rule-w) solid var(--control-border); border-radius: var(--radius-sm); overflow: hidden; margin-bottom: 0.75rem; }
+.axis-filter button {
+  font-size: 0.85em; padding: 4px 12px; border: none; border-radius: 0;
+  background: var(--control-bg); color: var(--control-fg); cursor: pointer; opacity: 1;
+  font-family: var(--font-ui);
+}
+.axis-filter button + button { border-left: var(--rule-w) solid var(--control-border); }
+.axis-filter button:not(.is-active) { opacity: 0.85; color: var(--text-muted); }
+.axis-filter button.is-active { background: var(--control-active-bg); color: var(--control-active-fg); }
 
 .zero-updated-hint, .zero-updated-affirm { margin: 0.5rem 0 0; color: var(--text-muted); font-style: italic; font-size: 0.9em; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
