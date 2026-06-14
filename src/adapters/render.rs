@@ -1455,10 +1455,17 @@ pub struct PrDagPayload {
     /// per-node line counts) + induced model→model edges, both deterministic.
     pub graph: PrDagGraph,
     /// Count of genuinely modified models (new + modified, not connectors,
-    /// not deleted) — the emphasized tier in the descriptor.
+    /// not halo, not deleted) — the emphasized tier in the descriptor.
     pub modified_count: usize,
     /// Count of connector models (the quiet between-modified carriers).
     pub connector_count: usize,
+    /// Count of 1-hop context **halo** models (the dimmed neighbors of a
+    /// disconnected modified model, cute-dbt#428). Counted separately from
+    /// `modified_count` so the descriptor stays truthful ("1 modified · 2
+    /// context" rather than a misleading "3 modified"). Slice B (#429) owns
+    /// the full engine-aware render; this count keeps the existing descriptor
+    /// honest the moment the domain halo lands.
+    pub halo_count: usize,
     /// Count of deleted models (the ghosts).
     pub deleted_count: usize,
     /// `true` when the node count exceeded the size-bound cap
@@ -1477,10 +1484,15 @@ impl PrDagPayload {
     pub fn from_graph(graph: PrDagGraph, node_cap: usize) -> Self {
         let mut modified_count = 0;
         let mut connector_count = 0;
+        let mut halo_count = 0;
         let mut deleted_count = 0;
         for node in &graph.nodes {
             if node.is_connector {
                 connector_count += 1;
+            } else if node.is_halo {
+                // A 1-hop context halo neighbor (cute-dbt#428) — counted in the
+                // dimmed-context tier, never the emphasized "modified" tier.
+                halo_count += 1;
             } else if node.state == crate::domain::PrDagState::Deleted {
                 deleted_count += 1;
             } else {
@@ -1493,6 +1505,7 @@ impl PrDagPayload {
             graph,
             modified_count,
             connector_count,
+            halo_count,
             deleted_count,
             collapsed,
         }
@@ -10918,6 +10931,7 @@ mod tests {
             name: id.rsplit('.').next().unwrap_or(id).to_owned(),
             state,
             is_connector,
+            is_halo: false,
             lines_added,
             lines_removed,
         }
@@ -10954,10 +10968,14 @@ mod tests {
         // each go to their own.
         assert_eq!(payload.modified_count, 2, "New + Modified ⇒ modified tier");
         assert_eq!(payload.connector_count, 1, "is_connector wins over state");
+        assert_eq!(payload.halo_count, 0, "no halo node in this fixture");
         assert_eq!(payload.deleted_count, 1, "Deleted ⇒ deleted tier");
         // The descriptor tiers partition the node set exactly.
         assert_eq!(
-            payload.modified_count + payload.connector_count + payload.deleted_count,
+            payload.modified_count
+                + payload.connector_count
+                + payload.halo_count
+                + payload.deleted_count,
             graph.nodes.len(),
             "tiers partition the node set"
         );
@@ -10992,6 +11010,45 @@ mod tests {
         assert_eq!(payload.connector_count, 1);
         assert_eq!(payload.deleted_count, 0, "connector flag wins over Deleted");
         assert_eq!(payload.modified_count, 0);
+    }
+
+    #[test]
+    fn from_graph_counts_halo_nodes_in_their_own_dimmed_context_tier() {
+        use crate::domain::PrDagState;
+        // A disconnected modified model (cute-dbt#428) with two 1-hop halo
+        // neighbors: the halo nodes carry `state=Modified` + `is_halo` (their
+        // structural placeholder), but they must NOT inflate `modified_count`
+        // — they land in `halo_count`, the dimmed-context tier.
+        let halo = |id: &str| crate::domain::PrDagNode {
+            id: id.to_owned(),
+            name: id.rsplit('.').next().unwrap_or(id).to_owned(),
+            state: PrDagState::Modified,
+            is_connector: false,
+            is_halo: true,
+            lines_added: 0,
+            lines_removed: 0,
+        };
+        let graph = PrDagGraph {
+            nodes: vec![
+                pr_dag_node("model.shop.m", PrDagState::Modified, false, 4, 1),
+                halo("model.shop.up"),
+                halo("model.shop.down"),
+            ],
+            ..PrDagGraph::default()
+        };
+        let payload = PrDagPayload::from_graph(graph.clone(), 48);
+        assert_eq!(payload.modified_count, 1, "only the genuine modified model");
+        assert_eq!(payload.halo_count, 2, "the two 1-hop neighbors ⇒ halo tier");
+        assert_eq!(payload.connector_count, 0);
+        assert_eq!(payload.deleted_count, 0);
+        // The four tiers still partition the node set exactly.
+        assert_eq!(
+            payload.modified_count
+                + payload.connector_count
+                + payload.halo_count
+                + payload.deleted_count,
+            graph.nodes.len(),
+        );
     }
 
     #[test]
