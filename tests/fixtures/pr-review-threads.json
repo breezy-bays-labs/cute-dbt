@@ -1,0 +1,90 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "nodes": [
+            {
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "models/staging/stg_orders.sql",
+              "line": 14,
+              "originalLine": 14,
+              "diffSide": "RIGHT",
+              "comments": {
+                "nodes": [
+                  {
+                    "author": { "login": "synthetic-reviewer" },
+                    "body": "Consider naming this CTE `orders_with_totals` for clarity.",
+                    "originalLine": 14,
+                    "diffHunk": "@@ -10,4 +10,6 @@\n with base as (\n     select * from {{ ref('raw_orders') }}\n )\n+select id, total\n+from base",
+                    "commit": { "oid": "1111111111111111111111111111111111111111" }
+                  },
+                  {
+                    "author": { "login": "synthetic-author" },
+                    "body": "Done in the latest push.",
+                    "originalLine": 14,
+                    "diffHunk": "@@ -10,4 +10,6 @@\n with base as (\n     select * from {{ ref('raw_orders') }}\n )\n+select id, total\n+from base",
+                    "commit": { "oid": "1111111111111111111111111111111111111111" }
+                  }
+                ]
+              }
+            },
+            {
+              "isResolved": true,
+              "isOutdated": true,
+              "path": "models/marts/fct_orders.sql",
+              "line": null,
+              "originalLine": 8,
+              "diffSide": "LEFT",
+              "comments": {
+                "nodes": [
+                  {
+                    "author": { "login": "synthetic-reviewer" },
+                    "body": "This left-join can drop rows — did you intend an inner join?",
+                    "originalLine": 8,
+                    "diffHunk": "@@ -6,3 +6,3 @@\n from orders o\n-left join customers c on o.customer_id = c.id\n+inner join customers c on o.customer_id = c.id",
+                    "commit": { "oid": "2222222222222222222222222222222222222222" }
+                  }
+                ]
+              }
+            },
+            {
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "models/staging/stg_customers.sql",
+              "line": 3,
+              "originalLine": 3,
+              "diffSide": "RIGHT",
+              "comments": {
+                "nodes": [
+                  {
+                    "author": null,
+                    "body": "Comment from a deleted account — author should ingest as null.",
+                    "originalLine": 3,
+                    "diffHunk": "@@ -1,2 +1,3 @@\n select\n+    id,\n     name",
+                    "commit": { "oid": "3333333333333333333333333333333333333333" }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "comments": {
+          "nodes": [
+            {
+              "author": { "login": "synthetic-reviewer" },
+              "body": "Overall this PR looks solid — one nit on the staging CTE naming.",
+              "url": "https://github.com/synthetic-org/synthetic-repo/pull/1#issuecomment-1"
+            },
+            {
+              "author": null,
+              "body": "General comment from a ghost account.",
+              "url": "https://github.com/synthetic-org/synthetic-repo/pull/1#issuecomment-2"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
