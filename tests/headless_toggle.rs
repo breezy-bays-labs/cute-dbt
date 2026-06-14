@@ -14682,3 +14682,213 @@ fn pr_minidag_renders_and_node_click_selects_the_model() {
 
     let _ = tab.close(true);
 }
+
+// --- cute-dbt#402 (epic #360) — subject-lens tab shell -----------------
+
+/// Render a minimal report to a temp file, returning its `file://` URL.
+/// The subject-lens tab shell (cute-dbt#402) ships on every report, so a
+/// minimal one in-scope model is enough to exercise the tab toggle.
+fn render_lens_shell_to_file(filename: &str) -> String {
+    let m = manifest(vec![model_node("model.shop.dim_a")], Vec::new());
+    let models: ModelInScopeSet = [NodeId::new("model.shop.dim_a")].into_iter().collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &InScopeSet::new(),
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        &cute_dbt::domain::ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
+        None,
+        None,
+        &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        // cute-dbt#404 — no PR-scope mini-DAG in this lens-shell helper.
+        None,
+    )
+    .expect("render writes the report");
+    format!("file://{}", out.to_str().expect("UTF-8 path"))
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn lens_tabs_switch_the_active_panel_in_a_real_browser() {
+    // cute-dbt#402 — the subject-lens tab toggle proven in a real browser:
+    // the Models lens (today's whole report) is active at boot; clicking the
+    // Macros tab flips the active panel via an in-place class + `hidden`
+    // mutation (bindLensTabs, interaction.js — vanilla, no fetch, no
+    // re-render). file://, network-denied (the launch_browser host-resolver
+    // rule + the shared headless_zero_egress proof for committed examples).
+    let url = render_lens_shell_to_file("cute_dbt_lens_tabs.html");
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // At boot: the Models lens panel is visible; Macros + Project are hidden.
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-models\"]"),
+        1,
+        "the Models lens panel is visible at boot",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-macros\"]"),
+        0,
+        "the Macros lens panel is hidden at boot",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-models\"]').classList.contains('is-active')",
+        ),
+        "the Models tab is active at boot",
+    );
+
+    // Click the Macros tab: the active panel flips to Macros.
+    let _ = eval(
+        &tab,
+        "document.querySelector('[data-testid=\"lens-tab-macros\"]').click()",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-macros\"]"),
+        1,
+        "the Macros lens panel is visible after clicking the Macros tab",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-models\"]"),
+        0,
+        "the Models lens panel is hidden after switching to Macros",
+    );
+    // The class + aria mutation moved to the Macros tab (the toggle is a pure
+    // class/aria flip, never a re-render).
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-macros\"]').classList.contains('is-active')",
+        ),
+        "the Macros tab is active after the click",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-macros\"]').getAttribute('aria-selected') === 'true' \
+               && document.querySelector('[data-testid=\"lens-tab-models\"]').getAttribute('aria-selected') === 'false'",
+        ),
+        "aria-selected follows the active tab",
+    );
+
+    // Click Project: the active panel flips again (a third lens proves the
+    // toggle is general, not a two-state special case).
+    let _ = eval(
+        &tab,
+        "document.querySelector('[data-testid=\"lens-tab-project\"]').click()",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-project\"]"),
+        1,
+        "the Project lens panel is visible after clicking the Project tab",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-macros\"]"),
+        0,
+        "the Macros lens panel is hidden after switching to Project",
+    );
+
+    // ===== WAI-ARIA tablist keyboard navigation =====
+    // Roving tabindex contract: the single active tab is the Tab-order stop
+    // (`tabindex="0"`); the others are `-1`. Reset to Models, then drive REAL
+    // Chromium key events (tab.press_key → CDP Input, so the keydown handler's
+    // arrow-key navigation fires natively, not a synthetic event).
+    let _ = eval(
+        &tab,
+        "document.querySelector('[data-testid=\"lens-tab-models\"]').click()",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-models\"]').getAttribute('tabindex')",
+        ),
+        "0",
+        "the active (Models) tab is the roving Tab-order stop",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-macros\"]').getAttribute('tabindex')",
+        ),
+        "-1",
+        "an inactive tab is removed from the Tab order (tabindex=-1)",
+    );
+    // Focus the Models tab and press ArrowRight → focus + activation moves to
+    // the Macros tab (the next tab), wrapping at the ends.
+    let _ = eval(
+        &tab,
+        "document.querySelector('[data-testid=\"lens-tab-models\"]').focus()",
+    );
+    tab.press_key("ArrowRight")
+        .expect("ArrowRight on the focused Models tab");
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-macros\"]"),
+        1,
+        "ArrowRight moves the active lens to Macros",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-models\"]"),
+        0,
+        "the Models lens is hidden after ArrowRight",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.activeElement === document.querySelector('[data-testid=\"lens-tab-macros\"]')",
+        ),
+        "focus moved to the Macros tab (roving focus follows ArrowRight)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-macros\"]').getAttribute('tabindex')",
+        ),
+        "0",
+        "the roving Tab-order stop moved to the now-active Macros tab",
+    );
+    // ArrowLeft wraps backward past Models to End-of-list is not it — from
+    // Macros (index 1) ArrowLeft lands on Models (index 0).
+    tab.press_key("ArrowLeft")
+        .expect("ArrowLeft on the focused Macros tab");
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-models\"]"),
+        1,
+        "ArrowLeft moves the active lens back to Models",
+    );
+    // End jumps to the last tab (Project); Home jumps back to the first.
+    tab.press_key("End").expect("End on the focused Models tab");
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-project\"]"),
+        1,
+        "End jumps to the last (Project) lens",
+    );
+    tab.press_key("Home")
+        .expect("Home on the focused Project tab");
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-models\"]"),
+        1,
+        "Home jumps back to the first (Models) lens",
+    );
+    let _ = tab.close(true);
+}

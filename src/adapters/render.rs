@@ -8668,6 +8668,143 @@ mod tests {
         );
     }
 
+    // ===== subject-lens tab shell (cute-dbt#402, epic #360) =====
+
+    /// Render a one-model report, returning the HTML. Reuses the macro-lens
+    /// manifest helper for a minimal in-scope model so the Models lens panel
+    /// has real content to wrap. The tab shell is an UNGATED part of the
+    /// report (cute-dbt#402), so every report carries it.
+    fn render_html_for_lens_shell(filename: &str) -> String {
+        let node = macro_model(
+            "model.shop.orders",
+            "models/staging/orders.sql",
+            &["macro.shop.add_dq_flags"],
+        );
+        let manifest = macro_lens_manifest(vec![node]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.orders")]);
+        let tmp = std::env::temp_dir().join(filename);
+        let _ = std::fs::remove_file(&tmp);
+        render_report_with_externals(
+            &tmp,
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &InScopeSet::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "",
+            ScopeSource::PrDiff,
+            "t",
+            None,
+            &CheckPolicy::default(),
+            &ProjectFacts::default(),
+            &GovernanceFacts::default(),
+            None,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+            // cute-dbt#404 — no PR-scope mini-DAG in this lens-shell helper.
+            None,
+        )
+        .expect("report renders");
+        std::fs::read_to_string(&tmp).expect("read rendered report")
+    }
+
+    #[test]
+    fn lens_shell_renders_three_subject_tabs_with_models_active() {
+        let html = render_html_for_lens_shell("lensshell_tabs.html");
+        // The tab strip with all three subject lenses.
+        assert!(
+            html.contains(r#"data-testid="lens-tabs""#),
+            "the tab strip renders on every report",
+        );
+        assert!(
+            html.contains(r#"data-testid="lens-tab-models""#)
+                && html.contains(r#"data-testid="lens-tab-macros""#)
+                && html.contains(r#"data-testid="lens-tab-project""#),
+            "all three subject-lens tabs render",
+        );
+        // Models is the active tab by default.
+        assert!(
+            html.contains(
+                r#"<button type="button" class="lens-tab is-active" role="tab" id="lens-tab-models" aria-selected="true""#
+            ),
+            "the Models tab is active by default",
+        );
+        // WAI-ARIA roving tabindex: the active (Models) tab is the single
+        // Tab-order stop (`tabindex="0"`); the inactive tabs are `-1`,
+        // reachable only via the Arrow/Home/End keyboard pattern.
+        assert!(
+            html.contains(
+                r#"id="lens-tab-models" aria-selected="true" aria-controls="lens-panel-models" tabindex="0""#
+            ),
+            "the active Models tab carries the roving tabindex=0",
+        );
+        assert!(
+            html.contains(r#"id="lens-tab-macros" aria-selected="false" aria-controls="lens-panel-macros" tabindex="-1""#)
+                && html.contains(r#"id="lens-tab-project" aria-selected="false" aria-controls="lens-panel-project" tabindex="-1""#),
+            "the inactive tabs are removed from the Tab order (tabindex=-1)",
+        );
+        // The Models lens panel is the active panel; Macros/Project are hidden.
+        assert!(
+            html.contains(
+                r#"<div class="lens-panel is-active" role="tabpanel" id="lens-panel-models""#
+            ),
+            "the Models lens panel is active",
+        );
+        assert!(
+            html.contains(r#"id="lens-panel-macros" aria-labelledby="lens-tab-macros" data-lens="macros" data-testid="lens-panel-macros" hidden"#),
+            "the Macros lens panel is present and hidden by default",
+        );
+        assert!(
+            html.contains(r#"id="lens-panel-project" aria-labelledby="lens-tab-project" data-lens="project" data-testid="lens-panel-project" hidden"#),
+            "the Project lens panel is present and hidden by default",
+        );
+    }
+
+    #[test]
+    fn lens_shell_nests_the_existing_report_sections_inside_models() {
+        // The Models lens = today's whole report: the existing sections render
+        // UNCHANGED inside the Models panel. Assert the nesting order — the
+        // Models panel opens before the test-selection section, and the Macros
+        // panel opens after it (so the existing report sits between the two).
+        let html = render_html_for_lens_shell("lensshell_nesting.html");
+        let models_open = html
+            .find(r#"id="lens-panel-models""#)
+            .expect("Models panel present");
+        let test_selection = html
+            .find(r#"<section class="test-selection""#)
+            .expect("test-selection section present");
+        let macros_open = html
+            .find(r#"id="lens-panel-macros""#)
+            .expect("Macros panel present");
+        assert!(
+            models_open < test_selection && test_selection < macros_open,
+            "the existing report sections are nested inside the Models lens panel \
+             (models_open={models_open} test_selection={test_selection} macros_open={macros_open})",
+        );
+    }
+
+    #[test]
+    fn lens_shell_macros_and_project_are_honest_empty_states() {
+        // First pass: the Macros + Project lenses are scaffolded empty-states
+        // (a heading + a one-line "populated in the design phase" note), NOT
+        // invested lens content. Assert the empty-state hooks render.
+        let html = render_html_for_lens_shell("lensshell_empty.html");
+        assert!(
+            html.contains(r#"data-testid="lens-macros-empty""#),
+            "the Macros lens shows its honest empty-state",
+        );
+        assert!(
+            html.contains(r#"data-testid="lens-project-empty""#),
+            "the Project lens shows its honest empty-state",
+        );
+    }
+
     // ===== change-context banner PR link (cute-dbt#346) =====
 
     /// Render a one-model report carrying `pr_ref` on the given scope arm,

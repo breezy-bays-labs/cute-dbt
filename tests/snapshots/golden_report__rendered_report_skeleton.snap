@@ -1,5 +1,6 @@
 ---
 source: tests/golden_report.rs
+assertion_line: 115
 expression: skeleton
 ---
 <!DOCTYPE html>
@@ -113,7 +114,12 @@ expression: skeleton
       </div>
     </div>
   </div>
-</div>
+</div><nav class="lens-tabs" role="tablist" aria-label="Report lenses" data-testid="lens-tabs">
+  <button type="button" class="lens-tab is-active" role="tab" id="lens-tab-models" aria-selected="true" aria-controls="lens-panel-models" tabindex="0" data-lens="models" data-testid="lens-tab-models">Models</button>
+  <button type="button" class="lens-tab" role="tab" id="lens-tab-macros" aria-selected="false" aria-controls="lens-panel-macros" tabindex="-1" data-lens="macros" data-testid="lens-tab-macros">Macros</button>
+  <button type="button" class="lens-tab" role="tab" id="lens-tab-project" aria-selected="false" aria-controls="lens-panel-project" tabindex="-1" data-lens="project" data-testid="lens-tab-project">Project</button>
+</nav>
+<div class="lens-panel is-active" role="tabpanel" id="lens-panel-models" aria-labelledby="lens-tab-models" data-lens="models" data-testid="lens-panel-models">
 
 <section class="error-card" role="alert" aria-label="Manifest error">
   <h2>This manifest can't be visualized</h2>
@@ -242,6 +248,18 @@ expression: skeleton
     <div class="expected-body"></div>
   </section>
 
+</div></div>
+<div class="lens-panel" role="tabpanel" id="lens-panel-macros" aria-labelledby="lens-tab-macros" data-lens="macros" data-testid="lens-panel-macros" hidden>
+  <section class="lens-scaffold lens-scaffold-macros" aria-label="Macros lens" data-testid="lens-scaffold-macros">
+    <h2>Macros</h2>
+    <p class="lens-scaffold-empty" data-testid="lens-macros-empty">PR-scoped macro lens &mdash; blast radius, the macro&rsquo;s own diff, and the impacted models &amp; tests. Populated in the cute-dbt#360 design phase.</p>
+  </section>
+</div>
+<div class="lens-panel" role="tabpanel" id="lens-panel-project" aria-labelledby="lens-tab-project" data-lens="project" data-testid="lens-panel-project" hidden>
+  <section class="lens-scaffold lens-scaffold-project" aria-label="Project lens" data-testid="lens-scaffold-project">
+    <h2>Project</h2>
+    <p class="lens-scaffold-empty" data-testid="lens-project-empty">Project lens &mdash; <code>dbt_project.yml</code>, vars, and governance changes. Populated in the cute-dbt#360 design phase.</p>
+  </section>
 </div>
 
 <script type="application/json" id="cute-dbt-data"></script>
