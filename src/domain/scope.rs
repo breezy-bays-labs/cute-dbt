@@ -236,6 +236,28 @@ pub fn all_models(current: &Manifest) -> ModelInScopeSet {
         .collect()
 }
 
+/// Every `seed` node in the manifest — the `explore` verb's full-manifest
+/// seed seam (cute-dbt#398), the seed twin of [`all_models`].
+///
+/// The explorer is full-manifest with no scope source, so its seed-node
+/// detail cards must show data for **every** seed, not just the modified
+/// subset [`select_seeds_in_scope`] returns for the report's diff-scoped
+/// "Data tables" section. This projection feeds
+/// [`build_seed_cards`](crate::domain::build_seed_cards) → the CLI gather
+/// stage → the explorer's `seed_tables` side-map. Non-`seed` resource types
+/// are excluded (the seed mirror of the cute-dbt#167 model-only filter). The
+/// returned [`SeedInScopeSet`] iterates in deterministic node-id order
+/// (`BTreeSet`).
+#[must_use]
+pub fn all_seeds(current: &Manifest) -> SeedInScopeSet {
+    current
+        .nodes()
+        .iter()
+        .filter(|(_, node)| node.resource_type() == "seed")
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
 /// The models whose source files a PR diff changed — the `explore`
 /// verb's **change-context** seam (cute-dbt#106).
 ///

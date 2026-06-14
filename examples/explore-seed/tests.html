@@ -1,0 +1,1303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cute-dbt explore — unit tests</title>
+<link rel="icon" href="data:,">
+<style>
+/* Sakura.css v1.5.0
+ * ================
+ * Minimal css theme.
+ * Project: https://github.com/oxalorg/sakura/
+ */
+/* Body */
+html {
+  font-size: 62.5%;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+}
+
+body {
+  font-size: 1.8rem;
+  line-height: 1.618;
+  max-width: 38em;
+  margin: auto;
+  color: #4a4a4a;
+  background-color: #f9f9f9;
+  padding: 13px;
+}
+
+@media (max-width: 684px) {
+  body {
+    font-size: 1.53rem;
+  }
+}
+@media (max-width: 382px) {
+  body {
+    font-size: 1.35rem;
+  }
+}
+h1, h2, h3, h4, h5, h6 {
+  line-height: 1.1;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  font-weight: 700;
+  margin-top: 3rem;
+  margin-bottom: 1.5rem;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  -ms-word-break: break-all;
+  word-break: break-word;
+}
+
+h1 {
+  font-size: 2.35em;
+}
+
+h2 {
+  font-size: 2em;
+}
+
+h3 {
+  font-size: 1.75em;
+}
+
+h4 {
+  font-size: 1.5em;
+}
+
+h5 {
+  font-size: 1.25em;
+}
+
+h6 {
+  font-size: 1em;
+}
+
+p {
+  margin-top: 0px;
+  margin-bottom: 2.5rem;
+}
+
+small, sub, sup {
+  font-size: 75%;
+}
+
+hr {
+  border-color: #1d7484;
+}
+
+a {
+  text-decoration: none;
+  color: #1d7484;
+}
+a:visited {
+  color: #144f5a;
+}
+a:hover {
+  color: #982c61;
+  border-bottom: 2px solid #4a4a4a;
+}
+
+ul {
+  padding-left: 1.4em;
+  margin-top: 0px;
+  margin-bottom: 2.5rem;
+}
+
+li {
+  margin-bottom: 0.4em;
+}
+
+blockquote {
+  margin-left: 0px;
+  margin-right: 0px;
+  padding-left: 1em;
+  padding-top: 0.8em;
+  padding-bottom: 0.8em;
+  padding-right: 0.8em;
+  border-left: 5px solid #1d7484;
+  margin-bottom: 2.5rem;
+  background-color: #f1f1f1;
+}
+
+blockquote p {
+  margin-bottom: 0;
+}
+
+img, video {
+  height: auto;
+  max-width: 100%;
+  margin-top: 0px;
+  margin-bottom: 2.5rem;
+}
+
+/* Pre and Code */
+pre {
+  background-color: #f1f1f1;
+  display: block;
+  padding: 1em;
+  overflow-x: auto;
+  margin-top: 0px;
+  margin-bottom: 2.5rem;
+  font-size: 0.9em;
+}
+
+code, kbd, samp {
+  font-size: 0.9em;
+  padding: 0 0.5em;
+  background-color: #f1f1f1;
+  white-space: pre-wrap;
+}
+
+pre > code {
+  padding: 0;
+  background-color: transparent;
+  white-space: pre;
+  font-size: 1em;
+}
+
+/* Tables */
+table {
+  text-align: justify;
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 2rem;
+}
+
+td, th {
+  padding: 0.5em;
+  border-bottom: 1px solid #f1f1f1;
+}
+
+/* Buttons, forms and input */
+input, textarea {
+  border: 1px solid #4a4a4a;
+}
+input:focus, textarea:focus {
+  border: 1px solid #1d7484;
+}
+
+textarea {
+  width: 100%;
+}
+
+.button, button, input[type=submit], input[type=reset], input[type=button], input[type=file]::file-selector-button {
+  display: inline-block;
+  padding: 5px 10px;
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  background-color: #1d7484;
+  color: #f9f9f9;
+  border-radius: 1px;
+  border: 1px solid #1d7484;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+.button[disabled], button[disabled], input[type=submit][disabled], input[type=reset][disabled], input[type=button][disabled], input[type=file]::file-selector-button[disabled] {
+  cursor: default;
+  opacity: 0.5;
+}
+.button:hover, button:hover, input[type=submit]:hover, input[type=reset]:hover, input[type=button]:hover, input[type=file]::file-selector-button:hover {
+  background-color: #982c61;
+  color: #f9f9f9;
+  outline: 0;
+}
+.button:focus-visible, button:focus-visible, input[type=submit]:focus-visible, input[type=reset]:focus-visible, input[type=button]:focus-visible, input[type=file]::file-selector-button:focus-visible {
+  outline-style: solid;
+  outline-width: 2px;
+}
+
+textarea, select, input {
+  color: #4a4a4a;
+  padding: 6px 10px; /* The 6px vertically centers text on FF, ignored by Webkit */
+  margin-bottom: 10px;
+  background-color: #f1f1f1;
+  border: 1px solid #f1f1f1;
+  border-radius: 4px;
+  box-shadow: none;
+  box-sizing: border-box;
+}
+textarea:focus, select:focus, input:focus {
+  border: 1px solid #1d7484;
+  outline: 0;
+}
+
+input[type=checkbox]:focus {
+  outline: 1px dotted #1d7484;
+}
+
+label, legend, fieldset {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 600;
+}
+
+</style>
+<style>
+
+/* ============================================================================
+   cute-dbt design tokens v1 (cute-dbt#242)
+   ----------------------------------------------------------------------------
+   The design-system ROOT: the semantic token layer + ALL EIGHT [data-theme]
+   blocks, extracted VERBATIM from templates/report.css (the cute-dbt#177
+   chassis) at cute-dbt#242 — exact current values, zero value changes.
+   Shared by BOTH page families through an askama include (report.html and
+   explore-dag.html / explore-tests.html each inline this partial into their
+   own <style> block at compile time), so the report and the explore pages
+   consume ONE design system structurally. Single-file outputs hold: the
+   sharing happens at the template layer, never via a runtime asset.
+
+   FIRST-PARTY asset — authored for cute-dbt. Deliberately NOT listed in
+   `assets/MANIFEST.toml` (that index is third-party vendoring provenance);
+   its integrity gates are the banner-pin + comment-balance tests in
+   `src/adapters/asset_embed.rs`.
+
+   Design sessions: treat THIS file as the design-system root (see
+   DESIGN.md). Tokens are law — no new color literals; per-theme,
+   surface-scoped AA overrides live with their surfaces in the page
+   layers, never here.
+
+   PORTING-BUG GUARD (handoff §2.1): never write a `*` immediately followed
+   by `/` inside a comment body — it closes the comment early and silently
+   eats the next rule. A comment-balance test pins this.
+   ========================================================================== */
+
+/* ============================================================================
+   AA pins — do not re-brighten
+   ----------------------------------------------------------------------------
+   Every theme passes WCAG-AA (>= 4.5:1) on the load-bearing diff add/remove
+   pair (pass-2 handoff §2.3, re-pinned for 8 themes at cute-dbt#198). These
+   contrast ratios are verified and LOAD-BEARING; do not re-brighten any
+   theme's add/remove colors. Re-run the WCAG math on the diff add/remove
+   pair for every theme if any code-surface color changes.
+
+   | theme     | add-fg on surface | remove-fg on surface | white on add-chip | white on remove-chip |
+   |-----------|-------------------|----------------------|-------------------|----------------------|
+   | Light     | 5.02              | 4.83                 | 5.02              | 4.83                 |
+   | Solarized | 6.10              | 5.68                 | 4.81              | 5.41                 |
+   | Latte     | 5.42              | 5.63                 | 4.98              | 6.01                 |
+   | Rosé Pine | 5.37              | 6.24                 | 5.31              | 6.36                 |
+   | Dark      | 9.65              | 7.52                 | 5.02              | 4.58                 |
+   | Tokyo     | 8.81              | 6.08                 | 5.22              | 4.99                 |
+   | Gruvbox   | 6.74              | 4.85                 | 4.86              | 5.47                 |
+   | Dracula   | 9.83              | 4.95                 | 4.96              | 5.03                 |
+
+   cute-dbt#251 — the per-theme AA token repair (the #206 deepening
+   pattern, applied at TOKEN level — since #264 the tokens live in ONE
+   place, so deepening here repairs the report AND explore pages
+   simultaneously; the older surface-scoped overrides in report.css
+   predate this and stay). The #264 adversarial verification measured
+   the shared palette sub-AA on 5 of 8 themes; the values below were
+   adjusted minimally (lightness-only shifts, hue/saturation kept) so
+   EVERY combo clears 4.5:1 — pinned by the report + explore AA matrix
+   guards in tests/headless_toggle.rs (universal: all 8 themes,
+   effective composited backdrops). Do not re-brighten:
+     · --text-muted on the worst of bg/bg-alt/surface/surface-2/
+       code-header-bg/code-bg (solarized 4.58, latte 5.14,
+       rosepine 4.82, tokyo 4.58, gruvbox 4.59);
+     · --accent (and --accent-hover) on the worst of bg/bg-alt/surface
+       (accent: solarized 4.57, latte 4.77, rosepine 4.59; hover:
+       latte 4.55, rosepine 4.56);
+     · --code-add/rem-sigil on their composited add/rem rows (all
+       themes >= 4.55 at FULL opacity — `.diff-sigil` opacity dimming
+       was removed at #251 per the #227 composited-opacity rule);
+     · body --text on --code-add/rem-word composited over row + code-bg
+       (all themes >= 4.56; the dark themes' word-tint alphas were
+       lowered, the light themes' rem-word hexes lightened).
+   Latte/rosepine muted + latte accent adopt the themes' OWN deeper
+   steps already established by the #198/#227 scoped stand-ins
+   (Catppuccin subtext1 #5c5f77, latte blue #1a5cdd, rosepine #5d5780).
+   Light and Dark are untouched (they already passed everywhere).
+   ========================================================================== */
+
+/* ============================================================================
+   1. TOKEN LAYER  (engine/tokens.css)
+   ----------------------------------------------------------------------------
+   Semantic design tokens (the ~50 hardcoded report hexes collapsed to ~24
+   themeable tokens) + a density layer (set by the *direction* stylesheet, not
+   the theme) + eight [data-theme] blocks.
+
+   TWO ORTHOGONAL AXES
+     · THEME  (data-theme on <html>): colour identity. 8 of them.
+     · DIRECTION (a separate stylesheet): density + feel. 4 of them.
+
+   Theme families (kept in lockstep with the settings-panel theme grid):
+     · light : Light, Solarized, Catppuccin Latte, Rosé Pine Dawn
+     · dark  : Dark, Tokyo Night, Gruvbox, Dracula
+
+   FIXED-ACROSS-THEMES (intentionally NOT overridden per theme):
+     · the DAG role/edge palette (Okabe-Ito, colourblind-safe) — handoff §5.
+     · the diff "strong marker" chips (white-on-fill, AA everywhere).
+   Everything else themes.
+   ========================================================================== */
+
+:root {
+  /* ---- surfaces ------------------------------------------------------- */
+  --bg:            #ffffff;   /* page */
+  --bg-alt:        #f5f6f8;   /* code blocks, callouts, sunken wells */
+  --surface:       #ffffff;   /* cards / panels */
+  --surface-2:     #f1f2f4;   /* control chrome, switch tracks */
+
+  /* ---- text ----------------------------------------------------------- */
+  --text:          #33363d;   /* body */
+  --text-muted:    #6a6e78;   /* labels, hints, captions */
+  --text-faint:    #9aa0ab;   /* absent cells, disabled */
+
+  /* ---- lines ---------------------------------------------------------- */
+  --border:        #d9dce1;   /* dividers, inputs, panels */
+  --border-strong: #b9bdc6;   /* emphasised dividers */
+
+  /* ---- accent (themes + Tweakable) ------------------------------------ */
+  --accent:         #1d7484;  /* links, focus, active control, table rule */
+  --accent-hover:   #155c69;
+  --accent-tint:    #e3f0f2;  /* faint accent wash */
+  --accent-on:      #ffffff;  /* text on a solid accent fill */
+
+  /* ---- control chrome (segmented toggles, settings switches) ---------- */
+  --control-bg:        var(--surface-2);
+  --control-fg:        var(--text);
+  --control-border:    var(--border);
+  --control-active-bg: #2a2d34;
+  --control-active-fg: #ffffff;
+
+  /* ---- diff: text-on-surface (LOAD-BEARING, AA per theme) ------------- */
+  --diff-add-fg:    #15803d;  /* "new" scalar text */
+  --diff-remove-fg: #dc2626;  /* "old" scalar text */
+  --diff-arrow:     var(--text-muted);
+  --diff-add-row:    rgba(46, 160, 67, 0.07);   /* whole-row tint */
+  --diff-remove-row: rgba(244, 63, 94, 0.07);
+  --diff-add-edge:    rgba(46, 160, 67, 0.85);  /* inset left accent */
+  --diff-remove-edge: rgba(244, 63, 94, 0.85);
+
+  /* ---- diff: strong marker chip (CONSTANT — white-on-fill, AA) -------- */
+  --diff-add-chip:    #15803d;  /* green fill, white text ≈ 5.0:1   */
+  --diff-remove-chip: #dc2626;  /* red fill,   white text ≈ 4.8:1   */
+  --diff-chip-on:     #ffffff;
+  --col-add-chip:     #a6f0b8;  --col-add-on:    #04260f;
+  --col-remove-chip:  #ffabd6;  --col-remove-on: #26000a;
+
+  /* ---- badges / incremental ------------------------------------------ */
+  --badge-amber:    #b07400;  /* incremental affordances */
+  --badge-amber-bg: #fff8e1;
+  --badge-amber-edge: #E69F00;
+
+  /* ---- syntax (cool/neutral; never red/green) ------------------------ */
+  --syntax-keyword: #4338ca;
+  --syntax-string:  #0e7490;
+  --syntax-comment: #555a66;
+  --syntax-jinja:   #7c3aed;
+  --syntax-fold:    #4338ca;
+  --syntax-fold-bg: rgba(67, 56, 202, 0.07);
+
+  /* ---- code surface (GitHub-grade frame + unified diff) -------------- */
+  --code-bg:          #ffffff;   /* the code canvas */
+  --code-header-bg:   #f6f8fa;   /* toolbar strip + file header */
+  --code-gutter-bg:   #ffffff;   /* line-number rail (plain blocks) */
+  --code-gutter-fg:   #9aa0ab;   /* line numbers */
+  --code-line-hover:  rgba(27,31,36,0.035);
+  /* unified-diff rows (full-bleed tint) + their gutter rail + word-emphasis */
+  --code-add-bg:        #e6ffec;  --code-add-gutter: #ccffd6;  --code-add-word: #abf2bc;
+  --code-rem-bg:        #ffebe9;  --code-rem-gutter: #ffd7d5;  --code-rem-word: #ff9c98;
+  --code-hunk-bg:       #ddf4ff;  --code-hunk-fg:    #4b5563;  /* fold / "show N" rows */
+  --code-add-sigil:     #1a7f37;  --code-rem-sigil:  #cf222e;
+
+  /* ---- feedback ------------------------------------------------------- */
+  --warn:     #a06320;
+  --error:    #b3261e;
+  --error-bg: #fdecea;
+
+  /* ---- tooltip (dark bubble, constant) ------------------------------- */
+  --tooltip-bg: #1d1d22;
+  --tooltip-fg: #f5f5f7;
+
+  /* ====================================================================
+     FIXED DAG PALETTE — identical in every theme (handoff §5).
+     The DAG must read the same colourblind-safe way regardless of skin.
+     ==================================================================== */
+  --dag-import-fill:   #e8f1f8;  --dag-import-stroke:   #0072B2;
+  --dag-transform-fill:#f4f4f5;  --dag-transform-stroke:#8a8a90;
+  --dag-final-fill:    #fdf2dc;  --dag-final-stroke:    #E69F00;
+  --dag-node-text:     #1c1c1f;
+  --dag-selected:      #E91E63;  /* pink, reserved for selection only */
+  /* edge types (Okabe-Ito) */
+  --edge-from:  #1c1c1f;  --edge-inner:  #009E73;  --edge-left: #0072B2;
+  --edge-right: #56B4E9;  --edge-cross:  #CC79A7;  --edge-full: #982c61;
+  --edge-union-all: #E69F00;  --edge-union-distinct: #0072B2;
+
+  /* ---- DENSITY (defaults; the DIRECTION stylesheet overrides these) --- */
+  --fs-base:   13px;
+  --lh-base:   1.5;
+  --fs-label:  10.5px;
+  --pad-cell:  0.2rem 0.5rem;
+  --pad-panel: 1rem;
+  --gap-section: 1rem;
+  --radius-sm:  4px;
+  --radius-pan: 6px;
+  --rule-w:     1px;        /* hairline weight */
+  --font-ui:   system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --label-font: var(--font-ui);   /* directions can flip labels to mono */
+  --label-tracking: 0.06em;
+}
+
+/* ==========================================================================
+   THEME · DARK  — neutral, high-contrast
+   ========================================================================== */
+:root[data-theme="dark"] {
+  --bg:#15171c; --bg-alt:#1b1e25; --surface:#191c22; --surface-2:#23262e;
+  --text:#d7dae1; --text-muted:#9098a4; --text-faint:#646b77;
+  --border:#2e323b; --border-strong:#3c4150;
+  --accent:#5fb3c4; --accent-hover:#85cad9; --accent-tint:#16323a; --accent-on:#08191d;
+  --control-bg:#23262e; --control-active-bg:#5fb3c4; --control-active-fg:#08191d;
+  --diff-add-fg:#5fd99a; --diff-remove-fg:#ff8a8a;
+  --diff-add-row:rgba(95,217,154,0.10); --diff-remove-row:rgba(255,138,138,0.10);
+  --diff-add-edge:rgba(95,217,154,0.85); --diff-remove-edge:rgba(255,138,138,0.85);
+  --diff-add-chip:#15803d; --diff-remove-chip:#d83a3a;
+  --col-add-chip:#1f8a4c; --col-add-on:#eafff1; --col-remove-chip:#b3344e; --col-remove-on:#ffe9f1;
+  --badge-amber:#e0a93a; --badge-amber-bg:#2a2310; --badge-amber-edge:#e0a93a;
+  --syntax-keyword:#9aa6ff; --syntax-string:#56c8d8; --syntax-comment:#7e8595; --syntax-jinja:#c8a6ff;
+  --syntax-fold:#9aa6ff; --syntax-fold-bg:rgba(154,166,255,0.10);
+  --warn:#e0a93a; --error:#ff8a8a; --error-bg:#2a1414;
+  --tooltip-bg:#000000; --tooltip-fg:#f5f5f7;
+  --code-bg:#0d1117; --code-header-bg:#161b22; --code-gutter-bg:#0d1117; --code-gutter-fg:#6e7681;
+  --code-line-hover:rgba(255,255,255,0.04);
+  --code-add-bg:rgba(46,160,67,0.15); --code-add-gutter:rgba(46,160,67,0.30); --code-add-word:rgba(46,160,67,0.40);
+  --code-rem-bg:rgba(248,81,73,0.15); --code-rem-gutter:rgba(248,81,73,0.30); --code-rem-word:rgba(248,81,73,0.40);
+  --code-hunk-bg:rgba(56,139,253,0.15); --code-hunk-fg:#79c0ff;
+  --code-add-sigil:#3fb950; --code-rem-sigil:#f85149;
+}
+
+/* ==========================================================================
+   THEME · TOKYO NIGHT  — cool blue-purple
+   ========================================================================== */
+:root[data-theme="tokyo"] {
+  --bg:#1a1b26; --bg-alt:#1f2335; --surface:#1e2030; --surface-2:#292e42;
+  --text:#c0caf5; --text-muted:#8e95ba; --text-faint:#565f89;
+  --border:#2c3150; --border-strong:#3b4261;
+  --accent:#7aa2f7; --accent-hover:#9cb8fb; --accent-tint:#212d4f; --accent-on:#0d1020;
+  --control-bg:#292e42; --control-active-bg:#7aa2f7; --control-active-fg:#0d1020;
+  --diff-add-fg:#9ece6a; --diff-remove-fg:#f7768e;
+  --diff-add-row:rgba(158,206,106,0.10); --diff-remove-row:rgba(247,118,142,0.10);
+  --diff-add-edge:rgba(158,206,106,0.85); --diff-remove-edge:rgba(247,118,142,0.85);
+  --diff-add-chip:#3d7a2e; --diff-remove-chip:#c14358;
+  --col-add-chip:#3d7a2e; --col-add-on:#eafff1; --col-remove-chip:#a83b54; --col-remove-on:#ffe9f1;
+  --badge-amber:#e0af68; --badge-amber-bg:#2a2417; --badge-amber-edge:#e0af68;
+  --syntax-keyword:#bb9af7; --syntax-string:#7dcfff; --syntax-comment:#565f89; --syntax-jinja:#ff9e64;
+  --syntax-fold:#bb9af7; --syntax-fold-bg:rgba(187,154,247,0.10);
+  --warn:#e0af68; --error:#f7768e; --error-bg:#2d1620;
+  --tooltip-bg:#0d1020; --tooltip-fg:#c0caf5;
+  --code-bg:#1a1b26; --code-header-bg:#1f2335; --code-gutter-bg:#1a1b26; --code-gutter-fg:#565f89;
+  --code-line-hover:rgba(255,255,255,0.04);
+  --code-add-bg:rgba(158,206,106,0.15); --code-add-gutter:rgba(158,206,106,0.28); --code-add-word:rgba(158,206,106,0.24);
+  --code-rem-bg:rgba(247,118,142,0.15); --code-rem-gutter:rgba(247,118,142,0.28); --code-rem-word:rgba(247,118,142,0.35);
+  --code-hunk-bg:rgba(122,162,247,0.15); --code-hunk-fg:#7aa2f7;
+  --code-add-sigil:#9ece6a; --code-rem-sigil:#f7768e;
+}
+
+/* ==========================================================================
+   THEME · SOLARIZED  — warm cream (the "warm" slot)
+   ========================================================================== */
+:root[data-theme="solarized"] {
+  --bg:#fdf6e3; --bg-alt:#f3ecd6; --surface:#fdf6e3; --surface-2:#eee8d5;
+  --text:#4f5b62; --text-muted:#566b72; --text-faint:#9aa8ab;
+  --border:#ddd6c1; --border-strong:#c6bfa8;
+  --accent:#1d6fa8; --accent-hover:#155a8a; --accent-tint:#e3eedd; --accent-on:#ffffff;
+  --control-bg:#eee8d5; --control-active-bg:#586e75; --control-active-fg:#fdf6e3;
+  --diff-add-fg:#4a6600; --diff-remove-fg:#b82d18;
+  --diff-add-row:rgba(133,153,0,0.12); --diff-remove-row:rgba(220,50,47,0.10);
+  --diff-add-edge:rgba(110,130,0,0.85); --diff-remove-edge:rgba(220,50,47,0.85);
+  --diff-add-chip:#5a7d04; --diff-remove-chip:#c5341c;
+  --col-add-chip:#cfe08a; --col-add-on:#1f2b00; --col-remove-chip:#f4b8c4; --col-remove-on:#3a0008;
+  --badge-amber:#b58900; --badge-amber-bg:#f3e9c8; --badge-amber-edge:#b58900;
+  --syntax-keyword:#6c71c4; --syntax-string:#2aa198; --syntax-comment:#93a1a1; --syntax-jinja:#d33682;
+  --syntax-fold:#6c71c4; --syntax-fold-bg:rgba(108,113,196,0.10);
+  --warn:#b58900; --error:#dc322f; --error-bg:#f7e2dd;
+  --tooltip-bg:#073642; --tooltip-fg:#fdf6e3;
+  --code-bg:#fdf6e3; --code-header-bg:#f3ecd6; --code-gutter-bg:#fdf6e3; --code-gutter-fg:#93a1a1;
+  --code-line-hover:rgba(0,43,54,0.035);
+  --code-add-bg:#eef3d4; --code-add-gutter:#dde6b0; --code-add-word:#c8d98a;
+  --code-rem-bg:#fbe3da; --code-rem-gutter:#f5cdbf; --code-rem-word:#f4c8b8;
+  --code-hunk-bg:#e3ecdd; --code-hunk-fg:#586e75;
+  --code-add-sigil:#647300; --code-rem-sigil:#c82522;
+}
+
+/* ==========================================================================
+   THEME · GRUVBOX  — warm retro-dark (5th pick)
+   ========================================================================== */
+:root[data-theme="gruvbox"] {
+  --bg:#282828; --bg-alt:#32302f; --surface:#2e2c2a; --surface-2:#3c3836;
+  --text:#ebdbb2; --text-muted:#afa18d; --text-faint:#7c6f64;
+  --border:#3c3836; --border-strong:#504945;
+  --accent:#83a598; --accent-hover:#a3c4b7; --accent-tint:#2c3a36; --accent-on:#1d2021;
+  --control-bg:#3c3836; --control-active-bg:#83a598; --control-active-fg:#1d2021;
+  --diff-add-fg:#b8bb26; --diff-remove-fg:#fb6a5d;
+  --diff-add-row:rgba(184,187,38,0.10); --diff-remove-row:rgba(251,106,93,0.10);
+  --diff-add-edge:rgba(184,187,38,0.85); --diff-remove-edge:rgba(251,106,93,0.85);
+  --diff-add-chip:#79740e; --diff-remove-chip:#cc241d;
+  --col-add-chip:#79740e; --col-add-on:#f6f3d0; --col-remove-chip:#b3231c; --col-remove-on:#ffe9e2;
+  --badge-amber:#fabd2f; --badge-amber-bg:#332b10; --badge-amber-edge:#fabd2f;
+  --syntax-keyword:#d3869b; --syntax-string:#8ec07c; --syntax-comment:#928374; --syntax-jinja:#fe8019;
+  --syntax-fold:#d3869b; --syntax-fold-bg:rgba(211,134,155,0.10);
+  --warn:#fabd2f; --error:#fb4934; --error-bg:#3a1a16;
+  --tooltip-bg:#1d2021; --tooltip-fg:#ebdbb2;
+  --code-bg:#282828; --code-header-bg:#32302f; --code-gutter-bg:#282828; --code-gutter-fg:#7c6f64;
+  --code-line-hover:rgba(255,255,255,0.04);
+  --code-add-bg:rgba(184,187,38,0.15); --code-add-gutter:rgba(184,187,38,0.28); --code-add-word:rgba(184,187,38,0.30);
+  --code-rem-bg:rgba(251,73,52,0.15); --code-rem-gutter:rgba(251,73,52,0.28); --code-rem-word:rgba(251,73,52,0.40);
+  --code-hunk-bg:rgba(131,165,152,0.18); --code-hunk-fg:#83a598;
+  --code-add-sigil:#b8bb26; --code-rem-sigil:#fb7164;
+}
+
+/* ==========================================================================
+   THEME · DRACULA  — vivid purple-on-charcoal (dark family)
+   ========================================================================== */
+:root[data-theme="dracula"] {
+  --bg:#282a36; --bg-alt:#21222c; --surface:#2b2e3b; --surface-2:#343746;
+  --text:#f8f8f2; --text-muted:#a9adc4; --text-faint:#6272a4;
+  --border:#44475a; --border-strong:#565a73;
+  --accent:#bd93f9; --accent-hover:#d6bbfb; --accent-tint:#352b50; --accent-on:#21222c;
+  --control-bg:#343746; --control-active-bg:#bd93f9; --control-active-fg:#21222c;
+  --diff-add-fg:#50fa7b; --diff-remove-fg:#ff6e6e;
+  --diff-add-row:rgba(80,250,123,0.10); --diff-remove-row:rgba(255,85,85,0.12);
+  --diff-add-edge:rgba(80,250,123,0.85); --diff-remove-edge:rgba(255,110,110,0.85);
+  --diff-add-chip:#25803f; --diff-remove-chip:#c93b3b;
+  --col-add-chip:#25803f; --col-add-on:#eafff1; --col-remove-chip:#b3344e; --col-remove-on:#ffe9f1;
+  --badge-amber:#ffb86c; --badge-amber-bg:#2e2616; --badge-amber-edge:#ffb86c;
+  --syntax-keyword:#ff79c6; --syntax-string:#f1fa8c; --syntax-comment:#6272a4; --syntax-jinja:#ffb86c;
+  --syntax-fold:#ff79c6; --syntax-fold-bg:rgba(255,121,198,0.10);
+  --warn:#ffb86c; --error:#ff5555; --error-bg:#3a1a1f;
+  --tooltip-bg:#21222c; --tooltip-fg:#f8f8f2;
+  --code-bg:#282a36; --code-header-bg:#21222c; --code-gutter-bg:#282a36; --code-gutter-fg:#6272a4;
+  --code-line-hover:rgba(255,255,255,0.04);
+  --code-add-bg:rgba(80,250,123,0.12); --code-add-gutter:rgba(80,250,123,0.26); --code-add-word:rgba(80,250,123,0.32);
+  --code-rem-bg:rgba(255,85,85,0.13); --code-rem-gutter:rgba(255,85,85,0.28); --code-rem-word:rgba(255,85,85,0.40);
+  --code-hunk-bg:rgba(189,147,249,0.16); --code-hunk-fg:#bd93f9;
+  --code-add-sigil:#50fa7b; --code-rem-sigil:#ff7171;
+}
+
+/* ==========================================================================
+   THEME · CATPPUCCIN LATTE  — soft pastel cream (light family)
+   ========================================================================== */
+:root[data-theme="latte"] {
+  --bg:#eff1f5; --bg-alt:#e6e9ef; --surface:#eff1f5; --surface-2:#e6e9ef;
+  --text:#4c4f69; --text-muted:#5c5f77; --text-faint:#9ca0b0;
+  --border:#ccd0da; --border-strong:#acb0be;
+  --accent:#1a5cdd; --accent-hover:#3553fc; --accent-tint:#dce4fb; --accent-on:#ffffff;
+  --control-bg:#e6e9ef; --control-active-bg:#1e66f5; --control-active-fg:#ffffff;
+  --diff-add-fg:#2a7016; --diff-remove-fg:#bd1331;
+  --diff-add-row:#e3f0db; --diff-remove-row:#f6dde0;
+  --diff-add-edge:#40a02b; --diff-remove-edge:#d20f39;
+  --diff-add-chip:#2a8026; --diff-remove-chip:#c4123a;
+  --col-add-chip:#cfe6c0; --col-add-on:#234d12; --col-remove-chip:#f4c4cb; --col-remove-on:#6e0a1f;
+  --badge-amber:#a36608; --badge-amber-bg:#faefd6; --badge-amber-edge:#df8e1d;
+  --syntax-keyword:#8839ef; --syntax-string:#40a02b; --syntax-comment:#8c8fa1; --syntax-jinja:#ea76cb;
+  --syntax-fold:#8839ef; --syntax-fold-bg:rgba(136,57,239,0.08);
+  --warn:#a36608; --error:#d20f39; --error-bg:#f7d8de;
+  --tooltip-bg:#4c4f69; --tooltip-fg:#eff1f5;
+  --code-bg:#eff1f5; --code-header-bg:#e6e9ef; --code-gutter-bg:#eff1f5; --code-gutter-fg:#9ca0b0;
+  --code-line-hover:rgba(76,79,105,0.04);
+  --code-add-bg:#e3f0db; --code-add-gutter:#cfe6c0; --code-add-word:#bfe0a8;
+  --code-rem-bg:#f6dde0; --code-rem-gutter:#efc3c8; --code-rem-word:#ecb6bc;
+  --code-hunk-bg:#dce4fb; --code-hunk-fg:#5c5f77;
+  --code-add-sigil:#2a7016; --code-rem-sigil:#bd1331;
+}
+
+/* ==========================================================================
+   THEME · ROSÉ PINE DAWN  — muted rose / warm low-contrast (light family)
+   ========================================================================== */
+:root[data-theme="rosepine"] {
+  --bg:#e6d9c9; --bg-alt:#f7f1ea; --surface:#fbf6ef; --surface-2:#ece0d3;
+  --text:#544f74; --text-muted:#5d5780; --text-faint:#938ea1;
+  --border:#cdbfb1; --border-strong:#b3a596;
+  --accent:#276680; --accent-hover:#3c666e; --accent-tint:#dde7ea; --accent-on:#ffffff;
+  --control-bg:#f2e9e1; --control-active-bg:#286983; --control-active-fg:#ffffff;
+  --diff-add-fg:#45700f; --diff-remove-fg:#b01b43;
+  --diff-add-row:#e6ebdd; --diff-remove-row:#f6dde1;
+  --diff-add-edge:#56743a; --diff-remove-edge:#b4254a;
+  --diff-add-chip:#56743a; --diff-remove-chip:#b4254a;
+  --col-add-chip:#d3ddbd; --col-add-on:#2c4410; --col-remove-chip:#f1c6cf; --col-remove-on:#67132f;
+  --badge-amber:#996515; --badge-amber-bg:#f7ebd5; --badge-amber-edge:#ea9d34;
+  --syntax-keyword:#907aa9; --syntax-string:#286983; --syntax-comment:#9893a5; --syntax-jinja:#d7827e;
+  --syntax-fold:#907aa9; --syntax-fold-bg:rgba(144,122,169,0.10);
+  --warn:#996515; --error:#b4254a; --error-bg:#f3dde2;
+  --tooltip-bg:#232136; --tooltip-fg:#e0def4;
+  --code-bg:#faf4ed; --code-header-bg:#f2e9e1; --code-gutter-bg:#faf4ed; --code-gutter-fg:#9893a5;
+  --code-line-hover:rgba(87,82,121,0.04);
+  --code-add-bg:#e6ebdd; --code-add-gutter:#d3ddbd; --code-add-word:#c2d3a0;
+  --code-rem-bg:#f6dde1; --code-rem-gutter:#eec3cb; --code-rem-word:#eabdc5;
+  --code-hunk-bg:#dde7ea; --code-hunk-fg:#575279;
+  --code-add-sigil:#45700f; --code-rem-sigil:#b01b43;
+}
+
+/* end of cute-dbt design tokens v1 (cute-dbt#242) */
+/* ============================================================================
+   cute-dbt base chassis v1 (cute-dbt#242)
+   ----------------------------------------------------------------------------
+   The minimal CROSS-FAMILY page chassis: the token-consuming page-level
+   rules both page families (report + explore) share, moved here from
+   templates/report.css section 4 — rules only, exact current values.
+   Included via askama immediately after partials/tokens.css in every
+   page's <style> block; the report-specific remainder (style packs,
+   chrome, components, reconciliation, coverage panel) stays in
+   templates/report.css and cascades after this file exactly as before.
+
+   ORDER DISCIPLINE (the zero-visual-diff contract of the extraction):
+   only cascade-order-safe rules moved. The report's body GEOMETRY
+   (font-size / max-width / padding-top / font-family) deliberately stays
+   in report.css — it must keep winning the equal-specificity contest
+   against the report's 720px responsive body rule, which sits earlier in
+   that file. This file carries only the body's token skin.
+
+   FIRST-PARTY asset — authored for cute-dbt; integrity gates are the
+   banner-pin + comment-balance tests in `src/adapters/asset_embed.rs`.
+
+   PORTING-BUG GUARD (handoff §2.1): never write a `*` immediately followed
+   by `/` inside a comment body — it closes the comment early and silently
+   eats the next rule. A comment-balance test pins this.
+   ========================================================================== */
+
+/* cute-dbt#121 — make the `hidden` attribute authoritative: Sakura's
+   `pre { display: block }` (author origin) otherwise overrides the UA
+   `[hidden] { display: none }`, so a toggled-off element would still
+   render. Both page families toggle visibility by setting `hidden`;
+   this rule wins. */
+[hidden] { display: none !important; }
+
+html { background: var(--bg); }
+body {
+  background: var(--bg);
+  color: var(--text);
+  transition: background 120ms ease, color 120ms ease;
+}
+
+a { color: var(--accent); }
+a:hover { color: var(--accent-hover); }
+
+select, input, textarea {
+  background: var(--surface); color: var(--text);
+  border: var(--rule-w) solid var(--border); border-radius: var(--radius-sm);
+}
+select:hover, input:hover { border-color: var(--border-strong); }
+select:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* end of cute-dbt base chassis v1 (cute-dbt#242) */
+</style>
+<style>
+
+body { max-width: 72rem; }
+/* generic code/kbd surfaces re-skin with theme tokens (the report's
+   .td-defined-in idiom, cute-dbt#240): Sakura's constant #f1f1f1 fill is
+   illegible under the dark themes' near-white --text. */
+code, kbd { background: var(--bg-alt); color: var(--text); }
+.explore-header { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.explore-header h1 { margin-bottom: 0.25rem; }
+.explore-nav a { font-size: 0.95rem; }
+.explore-counts { color: var(--text-muted); font-size: 0.9rem; }
+.explore-model { border-top: 1px solid var(--border); padding-top: 0.75rem; margin-top: 0.75rem; }
+.explore-model h2 { margin-bottom: 0.2rem; }
+.model-path { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 0.4rem; }
+.not-compiled-badge { font-size: 0.7em; vertical-align: middle; padding: 0.1rem 0.45rem; border: 1.5px dashed #b07400; border-radius: 4px; background: var(--dag-transform-fill); color: var(--dag-node-text); }
+.explore-tests { margin-bottom: 0.5rem; }
+.explore-test .test-shape { color: var(--text-muted); font-size: 0.85rem; }
+.explore-test .test-description { color: var(--text-muted); font-size: 0.9rem; margin: 0.1rem 0 0; }
+.no-tests { color: var(--text-muted); font-style: italic; }
+.explore-empty { color: var(--text-muted); font-style: italic; }
+/* cute-dbt#102 — explore-local styling for the SHARED test-card partial
+   (report.html styles the same markup through its report-specific chassis
+   remainder, which this light page deliberately does not embed — only the
+   shared tokens + base partials above). */
+.explore-viewer { border-top: 1px solid var(--border); padding-top: 0.75rem; margin-top: 0.75rem; }
+.explore-viewer > h2 { margin-bottom: 0.4rem; }
+.test-card { border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem 1rem; background: var(--surface); }
+.test-card-head { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.test-select-field label { font-weight: 600; margin-right: 0.4rem; }
+/* Explore is full-manifest by design: there is no updated/context split,
+   so the partial's scope toggle is inert chrome here — hidden, not
+   forked out of the shared markup. */
+.test-mode-toggle { display: none; }
+.test-badges .tag-badge { display: inline-block; font-size: 0.75rem; color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.35rem; background: var(--surface-2); margin-right: 0.25rem; }
+.test-description { color: var(--text); margin: 0.5rem 0 0; }
+.test-defined-in { color: var(--text-muted); font-size: 0.85rem; margin: 0.3rem 0 0; }
+.panel-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.75rem; }
+.panel { flex: 1 1 22rem; min-width: 0; border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.8rem; background: var(--surface); }
+.panel-header { display: flex; align-items: baseline; gap: 0.6rem; }
+.panel-header h2 { font-size: 1.1rem; margin: 0 0 0.4rem; }
+.table-header { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+.table-title { margin: 0.4rem 0 0.2rem; font-size: 0.95rem; }
+.row-count-badge, .format-badge, .this-badge { font-size: 0.75rem; color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 0.35rem; background: var(--surface-2); }
+.fixture-provenance { font-size: 0.8rem; color: var(--text-muted); }
+table.given-table, table.expected-table { font-size: 0.85rem; margin: 0.3rem 0 0.6rem; }
+/* Sakura's constant #f1f1f1 hairline flares against the dark themes */
+table.given-table th, table.given-table td,
+table.expected-table th, table.expected-table td { border-color: var(--border); }
+.cell-null { color: var(--text-muted); font-style: italic; }
+.empty-hint, .given-empty { color: var(--text-muted); font-style: italic; }
+.sql-block { font-size: 0.85rem; background: var(--code-bg); color: var(--text); }
+.test-jump { background: none; border: none; padding: 0; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; }
+.test-jump:hover, .test-jump:focus { color: var(--accent-hover); }
+</style>
+</head>
+<body>
+
+<header class="explore-header">
+  <div>
+    <h1>Unit tests</h1>
+    <p class="explore-counts">full manifest — 1 model, 1 unit test</p>
+  </div>
+  <nav class="explore-nav" aria-label="Explore pages">
+    <a href="dag.html">&larr; Model lineage</a>
+  </nav>
+</header>
+
+
+
+<section class="explore-viewer" aria-label="Unit-test viewer">
+<h2>Unit-test viewer</h2>
+<section class="test-section" aria-label="Unit test">
+  <div class="test-card">
+    <div class="test-card-head">
+      <div class="selector-field test-select-field">
+        <label for="test-select">Unit test</label>
+        <select id="test-select"></select>
+      </div>
+      <div class="test-mode-toggle" role="group" aria-label="Test scope" data-testid="updated-toggle">
+        <button type="button" data-test-mode="updated" class="is-active" aria-pressed="true">Updated only</button>
+        <button type="button" data-test-mode="all" aria-pressed="false">All tests</button>
+      </div>
+      <div class="test-badges"></div>
+    </div>
+    <p class="test-description" hidden></p>
+    <div class="test-details-body"></div>
+  </div>
+</section>
+
+<div class="panel-row">
+
+  <section class="panel left-panel" aria-label="Given inputs">
+    
+    <div class="panel-header">
+      <h2>Given</h2>
+    </div>
+    <div class="left-panel-body" data-mode="inputs"></div>
+  </section>
+
+  <section class="panel expected-panel" aria-label="Expected output">
+    <div class="panel-header">
+      <h2>Expected</h2>
+      <span class="row-count-badge expected-rowcount">0 rows</span>
+    </div>
+    <div class="expected-body"></div>
+  </section>
+
+</div>
+</section>
+
+<section class="explore-model" data-model-id="model.analytics.stg_states" aria-label="Model stg_states">
+  <h2>stg_states</h2>
+  <p class="model-path"><code>models/staging/stg_states.sql</code></p>
+  <ul class="explore-tests">
+    <li class="explore-test" data-test-id="unit_test.analytics.stg_states.test_stg_states_passthrough">
+      
+      <button type="button" class="test-jump" data-test-id="unit_test.analytics.stg_states.test_stg_states_passthrough">test_stg_states_passthrough</button>
+      <span class="test-shape">&mdash; 1 given, expects 1 row</span>
+      
+    </li>
+    
+  </ul>
+  
+</section>
+
+
+
+<script type="application/json" id="cute-dbt-data">{"baseline":"","models":[{"name":"stg_states","path":"models/staging/stg_states.sql","dag":{"nodes":[{"id":"source","role":"import"},{"id":"(final select)","label":"stg_states.sql","role":"final"}],"edges":[{"from":"source","to":"(final select)","edge_type":"from"}]},"compiled_sql":{"(final select)":"select state_code, state_name, region from source\n","source":"source as (select * from raw_state_codes)"},"raw_sql":"with source as (\n    select * from {{ ref('raw_state_codes') }}\n)\nselect state_code, state_name, region\nfrom source\n","tests":[{"id":"unit_test.analytics.stg_states.test_stg_states_passthrough","name":"test_stg_states_passthrough","target_model":"stg_states","changed":false,"defined_in":"models/staging/unit_tests.yml","given":[{"input":"ref('raw_state_codes')","bound_to_node":"source","table":{"columns":["region","state_code","state_name"],"rows":[{"cells":[{"display":"Northeast","key":{"t":"str","v":"Northeast"}},{"display":"CT","key":{"t":"str","v":"CT"}},{"display":"Connecticut","key":{"t":"str","v":"Connecticut"}}]}]},"rows":[{"region":"Northeast","state_code":"CT","state_name":"Connecticut"}],"format":"dict"}],"expected":{"table":{"columns":["region","state_code","state_name"],"rows":[{"cells":[{"display":"Northeast","key":{"t":"str","v":"Northeast"}},{"display":"CT","key":{"t":"str","v":"CT"}},{"display":"Connecticut","key":{"t":"str","v":"Connecticut"}}]}]},"rows":[{"region":"Northeast","state_code":"CT","state_name":"Connecticut"}],"format":"dict"}}],"is_recursive":false}]}</script>
+<script>
+
+/* cute-dbt shared appearance engine v1 (cute-dbt#242)
+   ----------------------------------------------------------------------------
+   The cross-page-family half of the appearance system, re-layered out of
+   templates/theme.js at cute-dbt#242: reads the persisted appearance
+   (localStorage key cute-dbt.appearance.v1, graceful in-memory fallback),
+   resolves the prefers-color-scheme default, and applies the html-level
+   hooks the shared token partial (templates/partials/tokens.css) keys on:
+   [data-theme] + the html.dark family class (the DataTables dark sync),
+   [data-style], [data-density], [data-difflayout], [data-coverage],
+   [data-project] and the accent custom-property overrides. Embedded into BOTH page families —
+   report.html (where templates/theme.js layers the settings UI on top via
+   window.CuteAppearance) and explore-dag.html / explore-tests.html (which
+   apply the saved appearance read-only; the explore-side settings
+   affordance is cute-dbt#219's lane). Plain vanilla ES5, no framework,
+   zero egress.
+
+   Application happens at PARSE TIME (the script sits at the end of <body>;
+   documentElement already exists), so the attributes are in place before
+   any DOMContentLoaded boot — including the report's interaction engine
+   and theme.js's control sync.
+
+   Attributes without matching rules on a page are deliberately applied
+   anyway ([data-difflayout] / [data-coverage] / [data-project] are inert
+   on the explore pages today): ONE attribute contract across page
+   families, so pages
+   adopt new surfaces without touching this engine. The `engine` field
+   (the report's Mermaid <-> Cytoscape DAG pick) is persisted state only
+   here — applying it is report-specific (theme.js applyEngine).
+
+   First-party, NOT vendored: this file lives at templates/appearance.js,
+   embedded at compile time via asset_embed::APPEARANCE_JS (include_str!)
+   and interpolated inline by the askama renderers. Banner-pin +
+   end-of-file-sentinel tests in src/adapters/asset_embed.rs guard the
+   include. */
+(function () {
+  "use strict";
+
+  // The eight [data-theme] packs the token partial ships
+  // (templates/partials/tokens.css), light family first (design pass-2,
+  // cute-dbt#198) — kept in lockstep with the report's static theme grid.
+  // `dark` drives the html.dark class DataTables' vendored dark rules key on.
+  var THEMES = [
+    { id: "light",     dark: false },
+    { id: "solarized", dark: false },
+    { id: "latte",     dark: false },
+    { id: "rosepine",  dark: false },
+    { id: "dark",      dark: true  },
+    { id: "tokyo",     dark: true  },
+    { id: "gruvbox",   dark: true  },
+    { id: "dracula",   dark: true  }
+  ];
+
+  // Accent palettes: value / hover / tint triples applied as inline custom
+  // properties on <html>. "theme" = remove the override (the active theme's
+  // own accent shows through).
+  var ACCENTS = [
+    { id: "theme" },
+    { id: "teal",   v: "#1d7484", h: "#155c69", t: "#e3f0f2" },
+    { id: "blue",   v: "#2a6fdb", h: "#1f57b0", t: "#e6eefb" },
+    { id: "violet", v: "#7c3aed", h: "#6027c4", t: "#efe8fd" },
+    { id: "green",  v: "#1f8a5b", h: "#176d47", t: "#e2f3ec" },
+    { id: "amber",  v: "#b45c0c", h: "#8f4708", t: "#fbeede" }
+  ];
+
+  // The public localStorage key for the appearance state — a stable consumer
+  // contract (cute-dbt#178 AC3), not a credential. Cross-page since #242:
+  // every cute-dbt page family reads + applies this same key.
+  var KEY = "cute-dbt.appearance.v1"; // gitleaks:allow — a public storage key name, no secret
+  // `engine` (cute-dbt#180) is the DAG-engine picker: "mermaid" (the static
+  // default) or "cytoscape" (the opt-in interactive engine).
+  // `coverage` (cute-dbt#219) is the viewer-side coverage-intelligence
+  // display toggle: "off" (the default since cute-dbt#292 — the settings
+  // panel's Experimental group; the field may be absent) or the explicit
+  // opt-in "on". The CROSS-PAGE contract: any cute-dbt page that renders
+  // check-engine-derived content reads this same field — the report keys
+  // one CSS rule on html[data-coverage=off]; the explorer pages adopt it
+  // as #103/#104 land.
+  // `project` (cute-dbt#292) is the viewer-side project-state display
+  // toggle: "on" (default; the field may be absent) or "off". Emission is
+  // already opt-in at render time (the cute-dbt#291 experimental gate), so
+  // the viewer default SHOWS what the producer chose to emit; the report
+  // keys CSS rules on html[data-project=off].
+  var pref = { theme: null, style: "soft", accent: "theme", density: "auto", difflayout: "auto", engine: "mermaid", coverage: "off", project: "on" };
+
+  // Read the persisted appearance, string-typed keys only. Any storage error
+  // (file:// SecurityError, disabled storage) leaves the defaults intact.
+  function load() {
+    var raw;
+    try { raw = window.localStorage && window.localStorage.getItem(KEY); } catch (e) { raw = null; }
+    if (!raw) return;
+    try {
+      var p = JSON.parse(raw);
+      if (p && typeof p === "object") {
+        ["theme", "style", "accent", "density", "difflayout", "engine", "coverage", "project"].forEach(function (k) {
+          if (typeof p[k] === "string") pref[k] = p[k];
+        });
+      }
+    } catch (e) { /* ignore — defaults hold */ }
+    // Coerce the engine into its closed vocabulary — an unknown persisted
+    // value must fall back to the static default, never reach the dispatcher.
+    if (pref.engine !== "cytoscape") pref.engine = "mermaid";
+    // Same closed-vocabulary coercion for the coverage toggle (cute-dbt#219;
+    // default flipped OFF at cute-dbt#292): anything but the explicit "on"
+    // reads as the default OFF.
+    if (pref.coverage !== "on") pref.coverage = "off";
+    // And for the project-state display toggle (cute-dbt#292): anything but
+    // the explicit "off" reads as the default ON — emission is already
+    // opt-in at render time (cute-dbt#291).
+    if (pref.project !== "off") pref.project = "on";
+  }
+  // Persist the current appearance. Swallows any storage error (zero-egress
+  // in-memory fallback, mirrors interaction.js saveSettings).
+  function save() {
+    try { if (window.localStorage) window.localStorage.setItem(KEY, JSON.stringify(pref)); } catch (e) { /* in-memory only */ }
+  }
+
+  var root = document.documentElement;
+
+  function themeById(id) {
+    for (var i = 0; i < THEMES.length; i++) if (THEMES[i].id === id) return THEMES[i];
+    return THEMES[0];
+  }
+
+  function applyTheme(id) {
+    var t = themeById(id);
+    root.setAttribute("data-theme", t.id);
+    root.classList.toggle("dark", t.dark); // DataTables dark rules follow html.dark
+    pref.theme = t.id;
+  }
+  function applyAccent(id) {
+    var a = null;
+    for (var i = 0; i < ACCENTS.length; i++) if (ACCENTS[i].id === id) a = ACCENTS[i];
+    if (!a || a.id === "theme") {
+      root.style.removeProperty("--accent");
+      root.style.removeProperty("--accent-hover");
+      root.style.removeProperty("--accent-tint");
+      pref.accent = "theme";
+    } else {
+      root.style.setProperty("--accent", a.v);
+      root.style.setProperty("--accent-hover", a.h);
+      root.style.setProperty("--accent-tint", a.t);
+      pref.accent = a.id;
+    }
+  }
+  function applyDensity(d) {
+    if (d === "auto") root.removeAttribute("data-density");
+    else root.setAttribute("data-density", d);
+    pref.density = d;
+  }
+  function applyDiffLayout(v) {
+    root.setAttribute("data-difflayout", v);
+    pref.difflayout = v;
+  }
+  function applyStyle(s) {
+    root.setAttribute("data-style", s);
+    pref.style = s;
+  }
+  // cute-dbt#219 — the coverage-intelligence display toggle. PURE display:
+  // OFF sets html[data-coverage=off] (one CSS rule hides every
+  // check-engine-derived surface); ON removes the attribute and the
+  // already-rendered content shows again — no re-render, payload untouched.
+  // Default OFF since cute-dbt#292 (the Experimental settings group), so an
+  // unknown value reads as OFF.
+  function applyCoverage(v) {
+    var coverage = v === "on" ? "on" : "off";
+    if (coverage === "off") root.setAttribute("data-coverage", "off");
+    else root.removeAttribute("data-coverage");
+    pref.coverage = coverage;
+  }
+  // cute-dbt#292 — the project-state display toggle, the applyCoverage
+  // twin with the OPPOSITE default polarity (emission is already opt-in at
+  // render time, so an unknown value reads as ON): OFF sets
+  // html[data-project=off] — CSS hides the project-definition panel and the
+  // per-model provenance/var chips; ON removes the attribute. PURE display:
+  // no re-render, payload untouched.
+  function applyProject(v) {
+    var project = v === "off" ? "off" : "on";
+    if (project === "off") root.setAttribute("data-project", "off");
+    else root.removeAttribute("data-project");
+    pref.project = project;
+  }
+
+  // ---- boot: load, resolve the default theme, apply everything ----------
+  load();
+  // Default theme: saved -> prefers-color-scheme -> light.
+  if (!pref.theme) {
+    pref.theme = (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) ? "dark" : "light";
+  }
+  applyStyle(pref.style);
+  applyTheme(pref.theme);
+  applyAccent(pref.accent);
+  applyDensity(pref.density);
+  applyDiffLayout(pref.difflayout);
+  applyCoverage(pref.coverage);
+  applyProject(pref.project);
+
+  // The page-facing seam: templates/theme.js (the report's settings UI)
+  // drives the engine through this object — `pref` is the ONE live state
+  // (shared by reference; apply* mutate it, save() persists it).
+  window.CuteAppearance = {
+    key: KEY,
+    pref: pref,
+    save: save,
+    applyTheme: applyTheme,
+    applyStyle: applyStyle,
+    applyAccent: applyAccent,
+    applyDensity: applyDensity,
+    applyDiffLayout: applyDiffLayout,
+    applyCoverage: applyCoverage,
+    applyProject: applyProject
+  };
+})();
+/* end of cute-dbt shared appearance engine v1 (cute-dbt#242) */
+
+</script>
+<script>
+
+/* cute-dbt explore tests viewer v1 (cute-dbt#102)
+   ----------------------------------------------------------------------------
+   The unit-test viewer on explore's tests.html: renders the selected
+   test's description, badges, given fixtures and expected table into the
+   SHARED test-card partial (templates/partials/test-card.html — the same
+   markup report.html renders), reading the embedded `cute-dbt-data`
+   ReportPayload (the build_payload reuse seam).
+
+   Deliberately a LIGHT sibling of the report's interaction engine, not a
+   copy: no jQuery, no DataTables, no diff toggles (explore is
+   full-manifest — there is no changed-set and no PR diff to tint), no
+   Mermaid/Cytoscape. The Current-view fixture grids render the SAME
+   Rust-computed FixtureTable POD ({display, key} cells, cute-dbt#138)
+   the report renders, so the two surfaces cannot drift on cell
+   semantics.
+
+   Affordances:
+   - the test selector (the partial's #test-select) lists every unit
+     test, optgrouped by model;
+   - each index row's test-name button (data-test-id) selects that test
+     in the viewer;
+   - NULL / absent cells keep the report's vocabulary (.cell-null /
+     .cell-absent); sql-format fixtures render as a code block; external
+     fixture files surface the provenance note instead of a silently
+     empty grid (the cute-dbt#126 contract).
+
+   DOM discipline: every dynamic string lands via createElement +
+   textContent — never an HTML-string sink (the asset_embed banner test
+   pins this). First-party, NOT vendored: lives at templates/explore-tests.js,
+   embedded via asset_embed::EXPLORE_TESTS_JS (include_str!). Banner-pin
+   + end-of-file-sentinel tests guard the include. */
+(function () {
+  "use strict";
+
+  var carrier = document.getElementById("cute-dbt-data");
+  var viewer = document.querySelector(".explore-viewer");
+  var select = document.getElementById("test-select");
+  if (!carrier || !viewer || !select) return;
+  var data = JSON.parse(carrier.textContent);
+
+  // Flat id -> {model, test} index over the payload (prototype-less so a
+  // hostile test id can never collide with a built-in property).
+  var byId = Object.create(null);
+  var total = 0;
+  (data.models || []).forEach(function (m) {
+    (m.tests || []).forEach(function (t) {
+      byId[t.id] = { model: m, test: t };
+      total += 1;
+    });
+  });
+  if (!total) {
+    viewer.hidden = true;
+    return;
+  }
+
+  // ---- tiny DOM helpers (textContent only) --------------------------------
+  function el(tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function clear(node) {
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  function rowsText(n) {
+    return n + " row" + (n === 1 ? "" : "s");
+  }
+
+  // ---- fixture-shape predicates (the interaction.js vocabulary) -----------
+  function isSqlCodeBlock(obj) {
+    return Boolean(obj && obj.format === "sql" && typeof obj.rows === "string");
+  }
+
+  function isExternalFixture(obj) {
+    return Boolean(obj && obj.fixture && (obj.rows === null || obj.rows === undefined));
+  }
+
+  function isLoadedExternalFixture(obj) {
+    return Boolean(obj && obj.fixture && obj.rows !== null && obj.rows !== undefined);
+  }
+
+  function provenanceChip(name) {
+    var chip = el("span", "fixture-provenance", "from ");
+    chip.appendChild(el("code", "", String(name)));
+    return chip;
+  }
+
+  function externalNote(name) {
+    var box = el("div", "given-empty external-fixture-note",
+      "data in external fixture file: ");
+    box.appendChild(el("code", "", String(name)));
+    return box;
+  }
+
+  function sqlBlock(text) {
+    var pre = el("pre", "sql-block");
+    pre.appendChild(el("code", "", String(text)));
+    return pre;
+  }
+
+  // ---- the Current-view grid off the Rust FixtureTable POD ----------------
+  function cellTd(cell) {
+    var td = document.createElement("td");
+    var key = cell && cell.key;
+    if (!key || key.t === "null") {
+      td.className = "cell-null";
+      td.textContent = "NULL";
+      return td;
+    }
+    if (key.t === "absent") {
+      td.className = "cell-absent";
+      return td;
+    }
+    if (key.t === "number") td.className = "cell-num";
+    td.textContent = cell.display;
+    return td;
+  }
+
+  function buildTable(table, cls) {
+    var tbl = el("table", cls);
+    var thead = document.createElement("thead");
+    var hr = document.createElement("tr");
+    (table.columns || []).forEach(function (c) {
+      hr.appendChild(el("th", "", c));
+    });
+    thead.appendChild(hr);
+    tbl.appendChild(thead);
+    var tbody = document.createElement("tbody");
+    (table.rows || []).forEach(function (r) {
+      var tr = document.createElement("tr");
+      (r.cells || []).forEach(function (cell) {
+        tr.appendChild(cellTd(cell));
+      });
+      tbody.appendChild(tr);
+    });
+    tbl.appendChild(tbody);
+    return tbl;
+  }
+
+  // ---- per-test render -----------------------------------------------------
+  function renderGiven(g) {
+    var sec = el("section", "given-section");
+    var hdr = el("div", "table-header");
+    hdr.appendChild(el("h4", "table-title", "given · " + g.input));
+    if (g.is_this) hdr.appendChild(el("span", "this-badge", "prior model state"));
+    if (isLoadedExternalFixture(g)) hdr.appendChild(provenanceChip(g.fixture));
+    if (isSqlCodeBlock(g)) {
+      hdr.appendChild(el("span", "format-badge", "format: sql"));
+      sec.appendChild(hdr);
+      sec.appendChild(sqlBlock(g.rows));
+      return sec;
+    }
+    if (isExternalFixture(g)) {
+      if (g.format) hdr.appendChild(el("span", "format-badge", "format: " + g.format));
+      sec.appendChild(hdr);
+      sec.appendChild(externalNote(g.fixture));
+      return sec;
+    }
+    var table = g.table || { columns: [], rows: [] };
+    if (g.format && g.format !== "dict") {
+      hdr.appendChild(el("span", "format-badge", "format: " + g.format));
+    }
+    hdr.appendChild(el("span", "row-count-badge", rowsText(table.rows.length)));
+    sec.appendChild(hdr);
+    sec.appendChild(buildTable(table, "given-table"));
+    return sec;
+  }
+
+  function renderExpected(t) {
+    var body = document.querySelector(".expected-body");
+    var rowcount = document.querySelector(".expected-rowcount");
+    clear(body);
+    if (isLoadedExternalFixture(t.expected)) {
+      body.appendChild(provenanceChip(t.expected.fixture));
+    }
+    if (isSqlCodeBlock(t.expected)) {
+      rowcount.textContent = "format: sql";
+      body.appendChild(sqlBlock(t.expected.rows));
+      return;
+    }
+    if (isExternalFixture(t.expected)) {
+      rowcount.textContent = "external fixture";
+      body.appendChild(externalNote(t.expected.fixture));
+      return;
+    }
+    var table = (t.expected && t.expected.table) || { columns: [], rows: [] };
+    rowcount.textContent = rowsText(table.rows.length);
+    body.appendChild(buildTable(table, "expected-table"));
+  }
+
+  function renderTest(t) {
+    // Description (the partial's hidden-when-absent contract).
+    var desc = document.querySelector(".test-description");
+    if (t.description) {
+      desc.textContent = t.description;
+      desc.hidden = false;
+    } else {
+      desc.textContent = "";
+      desc.hidden = true;
+    }
+    // Badges: tag chips (kept light — explore has no diff badges).
+    var badges = document.querySelector(".test-badges");
+    clear(badges);
+    (t.tags || []).forEach(function (tag) {
+      badges.appendChild(el("span", "tag-badge", tag));
+    });
+    // Details body: where the test was authored.
+    var details = document.querySelector(".test-details-body");
+    clear(details);
+    if (t.defined_in) {
+      var p = el("p", "test-defined-in", "defined in ");
+      p.appendChild(el("code", "", t.defined_in));
+      details.appendChild(p);
+    }
+    // Given panel.
+    var givenWrap = document.querySelector(".left-panel-body");
+    clear(givenWrap);
+    if (!t.given || !t.given.length) {
+      givenWrap.appendChild(el("div", "empty-hint", "No fixtures defined for this test."));
+    } else {
+      t.given.forEach(function (g) { givenWrap.appendChild(renderGiven(g)); });
+    }
+    // Expected panel.
+    renderExpected(t);
+  }
+
+  function selectTest(id) {
+    var entry = byId[id];
+    if (!entry) return;
+    if (select.value !== id) select.value = id;
+    renderTest(entry.test);
+  }
+
+  // ---- selector population + wiring ----------------------------------------
+  (data.models || []).forEach(function (m) {
+    if (!m.tests || !m.tests.length) return;
+    var og = document.createElement("optgroup");
+    og.label = m.name;
+    m.tests.forEach(function (t) {
+      var opt = document.createElement("option");
+      opt.value = t.id;
+      opt.textContent = t.name;
+      og.appendChild(opt);
+    });
+    select.appendChild(og);
+  });
+
+  select.addEventListener("change", function () { selectTest(select.value); });
+
+  // Index rows: each test-name button jumps the viewer to its test.
+  Array.prototype.forEach.call(
+    document.querySelectorAll(".test-jump[data-test-id]"),
+    function (btn) {
+      btn.addEventListener("click", function () {
+        selectTest(btn.getAttribute("data-test-id"));
+        if (viewer.scrollIntoView) viewer.scrollIntoView({ block: "start" });
+      });
+    }
+  );
+
+  // Boot: the first test in payload order.
+  selectTest(select.value);
+})();
+/* end of cute-dbt explore tests viewer v1 (cute-dbt#102) */
+
+</script>
+</body>
+</html>

@@ -7,3 +7,9 @@ diff --git a/seeds/raw_state_codes.csv b/seeds/raw_state_codes.csv
 @@ -7 +7 @@
 -TX,Texas,South,true
 +TX,Texas,South,
+diff --git a/models/staging/stg_states.sql b/models/staging/stg_states.sql
+--- a/models/staging/stg_states.sql
++++ b/models/staging/stg_states.sql
+@@ -4 +4 @@
+-select state_code, state_name
++select state_code, state_name, region

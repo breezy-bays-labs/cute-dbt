@@ -263,6 +263,11 @@
     // cute-dbt#232 — viewport-edge tagging for the pure-CSS bubble family
     // (geometry annotation only; visibility stays CSS :hover/:focus).
     bindTipEdgeTagger();
+    // cute-dbt#402 (epic #360) — the subject-lens tab strip (Models /
+    // Macros / Project). A pure in-place class/hidden/aria toggle; the
+    // Models lens (today's whole report) is active by default. Distinct
+    // handler from the DAG-shelf toggle (territory partition with #398).
+    bindLensTabs();
   });
 
   // cute-dbt#91 — scope-toggle helpers --------------------------------
@@ -1562,6 +1567,64 @@
     });
   }
 
+  // cute-dbt#402 (epic #360) — the subject-lens tab strip. Implements the
+  // WAI-ARIA tablist keyboard pattern: clicking OR keyboard-navigating a tab
+  // flips which lens panel is visible via a pure in-place class + `hidden` +
+  // aria + roving-`tabindex` toggle — never a fetch or a re-render (the
+  // zero-egress posture, no `src`). Roving tabindex: exactly one tab is in
+  // the Tab order (`tabindex="0"`, the active one); the rest are `-1` and
+  // reached with the Arrow/Home/End keys. The Models lens (today's whole
+  // report) is the active panel by default. Kept deliberately separate from
+  // bindShelf (the DAG node-detail handler) — territory partition with
+  // cute-dbt#398's shelf work.
+  function bindLensTabs() {
+    var $tabs = $(".lens-tab");
+    if (!$tabs.length) return;
+    function activate(lens) {
+      $tabs.each(function () {
+        // Roving tabindex: the active tab is the single Tab-order stop; the
+        // others are programmatically focusable only (Arrow/Home/End).
+        var on = $(this).attr("data-lens") === lens;
+        $(this)
+          .toggleClass("is-active", on)
+          .attr("aria-selected", on ? "true" : "false")
+          .attr("tabindex", on ? "0" : "-1");
+      });
+      $(".lens-panel").each(function () {
+        var on = $(this).attr("data-lens") === lens;
+        $(this).toggleClass("is-active", on).prop("hidden", !on);
+      });
+    }
+    $(document).on("click", ".lens-tab", function () {
+      activate($(this).attr("data-lens"));
+    });
+    // WAI-ARIA tablist arrow-key navigation (wrapping) + Home/End. Moving to
+    // a tab focuses AND activates it (the automatic-activation tablist
+    // pattern, matching the single-panel-at-a-time toggle above).
+    $(document).on("keydown", ".lens-tab", function (e) {
+      var key = e.key;
+      var count = $tabs.length;
+      var current = $tabs.index(this);
+      if (current < 0) return;
+      var target = -1;
+      if (key === "ArrowRight" || key === "ArrowDown") {
+        target = (current + 1) % count;
+      } else if (key === "ArrowLeft" || key === "ArrowUp") {
+        target = (current - 1 + count) % count;
+      } else if (key === "Home") {
+        target = 0;
+      } else if (key === "End") {
+        target = count - 1;
+      } else {
+        return;
+      }
+      e.preventDefault();
+      var $next = $tabs.eq(target);
+      activate($next.attr("data-lens"));
+      $next.trigger("focus");
+    });
+  }
+
   // cute-dbt#201 — the left panel is the Given panel: always every given
   // input (the Inspect/All-inputs segmented toggle is retired; node detail
   // lives in the DAG shelf). The #131 ordinal binding rides the render
@@ -1599,6 +1662,19 @@
     var mfName = nodeManifestName(node, t, m);
     if (mfName) $detail.append(buildModelDetailCard(mfName));
 
+    // cute-dbt#398 — when the selected DAG node is an import CTE backed by a
+    // SEED, surface the seed's data table in the shelf (the same affordance
+    // the explore page gives seed nodes). The seed table is already inlined
+    // on DATA.seed_cards (cute-dbt#350/#387) — zero-egress, no view-time
+    // fetch. Reuses buildSeedCard (the #350 grid + the #126 "data
+    // unavailable" degrade) verbatim, then runs the shared DataTables init on
+    // the injected grid (renderNodeDetail rebuilds the shelf body, so the
+    // init that renderSeedDataTables runs at load does not cover it). A
+    // non-seed import node (a model/snapshot/source ref) resolves to no seed
+    // card and this is a no-op — non-seed nodes render unchanged.
+    var seedCard = seedCardForNode(node, t);
+    if (seedCard) $detail.append(buildSeedCard(seedCard));
+
     // role badge rides the Compiled SQL summary row (saves vertical space).
     var sql = (m.compiled_sql && m.compiled_sql[node.id]) || "-- compiled SQL not available";
     var $det = $("<details>").addClass("compiled-sql").attr("open", "open");
@@ -1615,6 +1691,30 @@
     $detail.append($det);
 
     $wrap.append($detail);
+    // Initialize the (lazy-init) DataTables on the seed grid only after it is
+    // in the document — initDataTablesIn is a no-op when no seed card was
+    // appended (the non-seed-node path).
+    if (seedCard) initDataTablesIn($wrap);
+  }
+
+  // cute-dbt#398 — the seed card (DATA.seed_cards entry) a DAG node maps to,
+  // or null. ONLY an import-CTE node bound to a seed input resolves: scan the
+  // current test's givens for the one whose `bound_to_node` is this node id,
+  // parse its `ref('<name>')` target, and match a seed card by that bare
+  // name. Seed names are globally unique handles and DATA.seed_cards holds
+  // ONLY seeds (the #350 in-scope projection), so a name hit is a seed hit —
+  // a model import shares no name with a seed (dbt ref() names are unique
+  // across resource types). Null for any non-seed node (final select, a model
+  // import, a transform CTE) and when the seed is not in scope (no card).
+  function seedCardForNode(node, t) {
+    if (!node || node.role !== "import") return null;
+    var cards = DATA.seed_cards;
+    if (!cards || !cards.length) return null;
+    var g = ((t && t.given) || []).filter(function (x) { return x.bound_to_node === node.id; })[0];
+    if (!g) return null;
+    var refName = refTargetName(g.input);
+    if (!refName) return null;
+    return cards.filter(function (c) { return c.name === refName; })[0] || null;
   }
 
   // cute-dbt#98 — the test's cell-level data diff for THIS given input, or

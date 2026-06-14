@@ -5193,6 +5193,259 @@ fn source_given_fixture_card_renders_in_the_given_panel_not_the_shelf() {
     let _ = tab.close(true);
 }
 
+// --- cute-dbt#398: seed-node DAG shelf shows the seed's data table -----
+
+/// A `SeedCard` carrying a small `table` (no diff). The bare `name` is the
+/// `ref()` target the report's seed-shelf resolution matches on.
+fn seed_card_with_table(id: &str, name: &str) -> SeedCard {
+    let mut card = SeedCard::new(
+        NodeId::new(id),
+        name,
+        Some(format!("seeds/{name}.csv")),
+        vec![],
+    );
+    card.table = Some(FixtureTable::new(
+        vec!["code".to_owned(), "label".to_owned()],
+        vec![
+            TableRow::new(vec![
+                Cell::new(CellValue::Str("CT".to_owned())),
+                Cell::new(CellValue::Str("Connecticut".to_owned())),
+            ]),
+            TableRow::new(vec![
+                Cell::new(CellValue::Str("TX".to_owned())),
+                Cell::new(CellValue::Str("Texas".to_owned())),
+            ]),
+        ],
+    ));
+    card
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn report_seed_import_node_shelf_shows_the_seed_data_table() {
+    // cute-dbt#398 — selecting a seed-backed import CTE in the report DAG
+    // opens the node-detail shelf with the seed's data table (the same
+    // affordance the explore page gives seed nodes). The table is inlined on
+    // DATA.seed_cards at gen-time (zero-egress: no view-time fetch); clicking
+    // the import node resolves it through the bound given's ref() target.
+    let model = model_node_with_compiled(
+        "model.shop.stg_states",
+        "with raw_state_codes as (select * from raw_state_codes) \
+         select code, label from raw_state_codes",
+    );
+    let ut = UnitTest::new(
+        "t".to_owned(),
+        NodeId::new("stg_states"),
+        vec![UnitTestGiven::new(
+            "ref('raw_state_codes')".to_owned(),
+            serde_json::json!([{"code": "CT", "label": "Connecticut"}]),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(serde_json::Value::Null, None, None),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+    let m = manifest(vec![model], vec![("unit_test.shop.stg_states.t", ut)]);
+    let in_scope: InScopeSet = std::iter::once("unit_test.shop.stg_states.t".to_owned()).collect();
+    let models: ModelInScopeSet = std::iter::once(NodeId::new("model.shop.stg_states")).collect();
+    let seed_cards = [seed_card_with_table(
+        "seed.shop.raw_state_codes",
+        "raw_state_codes",
+    )];
+    let out = tmp("headless_seed_shelf.html");
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "baseline.json",
+        ScopeSource::Baseline,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        &ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
+        None,
+        None,
+        &seed_cards,
+        DEFAULT_SEED_ROW_CAP,
+        None,
+    )
+    .expect("render writes the report");
+    let url = format!(
+        "file://{}",
+        out.to_str().expect("report path is valid UTF-8")
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate seed-shelf report");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-mermaid svg",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("Mermaid DAG SVG renders");
+
+    // Click the seed-backed import CTE (the `raw_state_codes` import node).
+    let clicked = eval_bool(
+        &tab,
+        "(function(){var g=document.querySelector('.cte-dag-mermaid svg g.node[data-node-id=\"raw_state_codes\"]');\
+          if(!g){return false;}g.dispatchEvent(new MouseEvent('click',{bubbles:true}));return true;})()",
+    );
+    assert!(
+        clicked,
+        "the seed-backed import CTE node is present + clickable"
+    );
+
+    // The shelf opens for that node and renders the seed data card.
+    assert_eq!(
+        eval_string(
+            &tab,
+            "(document.querySelector('.dag-shelf-body .node-detail')||{getAttribute:function(){return ''}})\
+             .getAttribute('data-node-id')||''",
+        ),
+        "raw_state_codes",
+        "clicking the seed import node opens the node-detail shelf for that node",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "(document.querySelector('.dag-shelf-body .seed-data-card')||{getAttribute:function(){return ''}})\
+             .getAttribute('data-seed')||''",
+        ),
+        "raw_state_codes",
+        "the shelf shows the seed's data card",
+    );
+    // The seed's rows actually render in the grid.
+    let card_text = eval_string(
+        &tab,
+        "(document.querySelector('.dag-shelf-body .seed-data-card')||{}).textContent||''",
+    );
+    assert!(
+        card_text.contains("Connecticut") && card_text.contains("Texas"),
+        "the seed's rows render in the shelf grid: {card_text}",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn report_non_seed_import_node_shelf_is_unchanged() {
+    // cute-dbt#398 — a NON-seed import CTE (a model ref(), no matching seed
+    // card) opens the shelf with compiled SQL only — no seed data card. The
+    // seed affordance is strictly additive; non-seed nodes render unchanged.
+    let model = model_node_with_compiled(
+        "model.shop.stg_states",
+        "with upstream_model as (select * from upstream_model) \
+         select code from upstream_model",
+    );
+    let ut = UnitTest::new(
+        "t".to_owned(),
+        NodeId::new("stg_states"),
+        vec![UnitTestGiven::new(
+            "ref('upstream_model')".to_owned(),
+            serde_json::json!([{"code": "CT"}]),
+            Some("dict".to_owned()),
+            None,
+        )],
+        UnitTestExpect::new(serde_json::Value::Null, None, None),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    );
+    let m = manifest(vec![model], vec![("unit_test.shop.stg_states.t", ut)]);
+    let in_scope: InScopeSet = std::iter::once("unit_test.shop.stg_states.t".to_owned()).collect();
+    let models: ModelInScopeSet = std::iter::once(NodeId::new("model.shop.stg_states")).collect();
+    // A seed card EXISTS but for a DIFFERENT seed — the import node's ref()
+    // target does not match it, so no seed card renders for this node.
+    let seed_cards = [seed_card_with_table("seed.shop.other_seed", "other_seed")];
+    let out = tmp("headless_seed_shelf_nonseed.html");
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "baseline.json",
+        ScopeSource::Baseline,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        &ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
+        None,
+        None,
+        &seed_cards,
+        DEFAULT_SEED_ROW_CAP,
+        None,
+    )
+    .expect("render writes the report");
+    let url = format!(
+        "file://{}",
+        out.to_str().expect("report path is valid UTF-8")
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url)
+        .expect("navigate non-seed shelf report");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-mermaid svg",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("Mermaid DAG SVG renders");
+
+    let clicked = eval_bool(
+        &tab,
+        "(function(){var g=document.querySelector('.cte-dag-mermaid svg g.node[data-node-id=\"upstream_model\"]');\
+          if(!g){return false;}g.dispatchEvent(new MouseEvent('click',{bubbles:true}));return true;})()",
+    );
+    assert!(
+        clicked,
+        "the non-seed import CTE node is present + clickable"
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.dag-shelf-body .node-detail .sql-block') !== null",
+        ),
+        "the shelf shows the node's compiled SQL",
+    );
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('.dag-shelf-body .seed-data-card') !== null",
+        ),
+        "a non-seed import node renders NO seed data card (the affordance is seed-only)",
+    );
+
+    let _ = tab.close(true);
+}
+
 // --- cute-dbt#201: the DAG node-detail shelf ---------------------------
 
 /// Poll until `expr` evaluates true (the Mermaid re-render after a node
@@ -7006,6 +7259,64 @@ fn explore_macro_dag_rendered_geometry_is_structurally_sound() {
         "window.CuteExploreLineage.cyInstance()",
         3,
         10,
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_seed_node_detail_card_shows_the_seed_data_table() {
+    // cute-dbt#398 — the explore side of the seed-shelf affordance: the
+    // committed seed-data explore golden (`explore-seed/dag.html`) carries a
+    // seed-typed DAG node + its inlined table on `data.seed_tables`. Clicking
+    // the seed node (via the live CuteExploreLineage cy) HIGHLIGHTS it and
+    // opens the model-detail card, which renders the seed's data grid — the
+    // same affordance the report's DAG shelf gives a seed-backed import node.
+    let browser = launch_browser();
+    let url = committed_example_url("explore-seed/dag.html");
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(
+        ".lineage-canvas canvas",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("the explore-seed Cytoscape canvas renders");
+    wait_for_cy_node_count(&tab, "window.CuteExploreLineage.cyInstance()", 2);
+
+    // Click the seed node — this HIGHLIGHTS it (the click-tap path) and opens
+    // the detail card (renderDetailCard).
+    let tapped = eval_bool(
+        &tab,
+        "(function(){var cy=window.CuteExploreLineage.cyInstance();\
+          var n=cy.getElementById('seed.analytics.raw_state_codes');\
+          if(!n||!n.length){return false;}n.emit('tap');return true;})()",
+    );
+    assert!(
+        tapped,
+        "the seed node is present + tappable in the explore DAG"
+    );
+
+    // The detail card is visible and carries the seed's data section + grid.
+    assert!(
+        !eval_bool(&tab, "document.querySelector('.model-detail-card').hidden"),
+        "clicking the seed node opens the detail card",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-detail-card .detail-seed-table') !== null",
+        ),
+        "the seed node's detail card renders the seed data table",
+    );
+    let card_text = eval_string(
+        &tab,
+        "(document.querySelector('.model-detail-card')||{}).textContent||''",
+    );
+    assert!(
+        card_text.contains("Connecticut") && card_text.contains("Texas"),
+        "the seed's rows render in the detail-card grid: {card_text}",
     );
 
     let _ = tab.close(true);
@@ -11706,7 +12017,7 @@ fn fold_toggle_hides_in_file_view_and_folds_only_the_visible_diff_universal() {
 
 use cute_dbt::adapters::explore::render_explore;
 use cute_dbt::adapters::render::build_payload;
-use cute_dbt::domain::all_models;
+use cute_dbt::domain::{DEFAULT_SEED_ROW_CAP, all_models};
 
 /// A compiled explore model with `raw_code` and a file path (so the
 /// tests page renders a `.model-path code` surface).
@@ -11752,7 +12063,17 @@ fn render_explore_theme_pages(stem: &str) -> PathBuf {
     );
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
     let _ = std::fs::remove_dir_all(&dir);
-    render_explore(&dir, &m, &models, None, &payload, None).expect("explore renders");
+    render_explore(
+        &dir,
+        &m,
+        &models,
+        None,
+        &payload,
+        None,
+        &[],
+        DEFAULT_SEED_ROW_CAP,
+    )
+    .expect("explore renders");
     dir
 }
 
@@ -14680,5 +15001,215 @@ fn pr_minidag_renders_and_node_click_selects_the_model() {
         "the viewer toggle hides the mini-DAG panel",
     );
 
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#402 (epic #360) — subject-lens tab shell -----------------
+
+/// Render a minimal report to a temp file, returning its `file://` URL.
+/// The subject-lens tab shell (cute-dbt#402) ships on every report, so a
+/// minimal one in-scope model is enough to exercise the tab toggle.
+fn render_lens_shell_to_file(filename: &str) -> String {
+    let m = manifest(vec![model_node("model.shop.dim_a")], Vec::new());
+    let models: ModelInScopeSet = [NodeId::new("model.shop.dim_a")].into_iter().collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &InScopeSet::new(),
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        &cute_dbt::domain::ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
+        None,
+        None,
+        &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        // cute-dbt#404 — no PR-scope mini-DAG in this lens-shell helper.
+        None,
+    )
+    .expect("render writes the report");
+    format!("file://{}", out.to_str().expect("UTF-8 path"))
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn lens_tabs_switch_the_active_panel_in_a_real_browser() {
+    // cute-dbt#402 — the subject-lens tab toggle proven in a real browser:
+    // the Models lens (today's whole report) is active at boot; clicking the
+    // Macros tab flips the active panel via an in-place class + `hidden`
+    // mutation (bindLensTabs, interaction.js — vanilla, no fetch, no
+    // re-render). file://, network-denied (the launch_browser host-resolver
+    // rule + the shared headless_zero_egress proof for committed examples).
+    let url = render_lens_shell_to_file("cute_dbt_lens_tabs.html");
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // At boot: the Models lens panel is visible; Macros + Project are hidden.
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-models\"]"),
+        1,
+        "the Models lens panel is visible at boot",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-macros\"]"),
+        0,
+        "the Macros lens panel is hidden at boot",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-models\"]').classList.contains('is-active')",
+        ),
+        "the Models tab is active at boot",
+    );
+
+    // Click the Macros tab: the active panel flips to Macros.
+    let _ = eval(
+        &tab,
+        "document.querySelector('[data-testid=\"lens-tab-macros\"]').click()",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-macros\"]"),
+        1,
+        "the Macros lens panel is visible after clicking the Macros tab",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-models\"]"),
+        0,
+        "the Models lens panel is hidden after switching to Macros",
+    );
+    // The class + aria mutation moved to the Macros tab (the toggle is a pure
+    // class/aria flip, never a re-render).
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-macros\"]').classList.contains('is-active')",
+        ),
+        "the Macros tab is active after the click",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-macros\"]').getAttribute('aria-selected') === 'true' \
+               && document.querySelector('[data-testid=\"lens-tab-models\"]').getAttribute('aria-selected') === 'false'",
+        ),
+        "aria-selected follows the active tab",
+    );
+
+    // Click Project: the active panel flips again (a third lens proves the
+    // toggle is general, not a two-state special case).
+    let _ = eval(
+        &tab,
+        "document.querySelector('[data-testid=\"lens-tab-project\"]').click()",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-project\"]"),
+        1,
+        "the Project lens panel is visible after clicking the Project tab",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-macros\"]"),
+        0,
+        "the Macros lens panel is hidden after switching to Project",
+    );
+
+    // ===== WAI-ARIA tablist keyboard navigation =====
+    // Roving tabindex contract: the single active tab is the Tab-order stop
+    // (`tabindex="0"`); the others are `-1`. Reset to Models, then drive REAL
+    // Chromium key events (tab.press_key → CDP Input, so the keydown handler's
+    // arrow-key navigation fires natively, not a synthetic event).
+    let _ = eval(
+        &tab,
+        "document.querySelector('[data-testid=\"lens-tab-models\"]').click()",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-models\"]').getAttribute('tabindex')",
+        ),
+        "0",
+        "the active (Models) tab is the roving Tab-order stop",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-macros\"]').getAttribute('tabindex')",
+        ),
+        "-1",
+        "an inactive tab is removed from the Tab order (tabindex=-1)",
+    );
+    // Focus the Models tab and press ArrowRight → focus + activation moves to
+    // the Macros tab (the next tab), wrapping at the ends.
+    let _ = eval(
+        &tab,
+        "document.querySelector('[data-testid=\"lens-tab-models\"]').focus()",
+    );
+    tab.press_key("ArrowRight")
+        .expect("ArrowRight on the focused Models tab");
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-macros\"]"),
+        1,
+        "ArrowRight moves the active lens to Macros",
+    );
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-models\"]"),
+        0,
+        "the Models lens is hidden after ArrowRight",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.activeElement === document.querySelector('[data-testid=\"lens-tab-macros\"]')",
+        ),
+        "focus moved to the Macros tab (roving focus follows ArrowRight)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"lens-tab-macros\"]').getAttribute('tabindex')",
+        ),
+        "0",
+        "the roving Tab-order stop moved to the now-active Macros tab",
+    );
+    // ArrowLeft wraps backward past Models to End-of-list is not it — from
+    // Macros (index 1) ArrowLeft lands on Models (index 0).
+    tab.press_key("ArrowLeft")
+        .expect("ArrowLeft on the focused Macros tab");
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-models\"]"),
+        1,
+        "ArrowLeft moves the active lens back to Models",
+    );
+    // End jumps to the last tab (Project); Home jumps back to the first.
+    tab.press_key("End").expect("End on the focused Models tab");
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-project\"]"),
+        1,
+        "End jumps to the last (Project) lens",
+    );
+    tab.press_key("Home")
+        .expect("Home on the focused Project tab");
+    assert_eq!(
+        visible_count(&tab, "[data-testid=\"lens-panel-models\"]"),
+        1,
+        "Home jumps back to the first (Models) lens",
+    );
     let _ = tab.close(true);
 }
