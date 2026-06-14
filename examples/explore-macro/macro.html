@@ -740,6 +740,25 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
 .model-detail-card .detail-type { display: inline-block; margin-right: 0.35rem; padding: 0 0.4rem; border: 1.5px solid var(--dag-import-stroke); border-radius: 4px; color: var(--dag-node-text); font-size: 0.8rem; }
 .model-detail-card .detail-changed { display: inline-block; margin-left: 0.35rem; padding: 0 0.4rem; border: 1.5px solid var(--dag-import-stroke); border-radius: 4px; background: var(--dag-import-fill); color: var(--dag-node-text); box-shadow: 0 0 0 2px rgba(230, 159, 0, 0.55); font-size: 0.8rem; }
 .model-detail-card .detail-section-title { margin: 0.5rem 0 0.15rem; font-size: 0.85rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+/* cute-dbt#345 (AC1 + AC3) — the filtered artifact directory: the
+   folder-grouped models + tests that call the macro, surfaced as TWO
+   separate partitions (the get_where_subquery non-merge rule). Native
+   <details>/<summary> collapse (zero JS, zero egress); themed via the
+   shared semantic tokens. */
+.macro-directory { margin-top: 1.25rem; }
+.macro-directory > h2 { margin-bottom: 0.25rem; }
+.macro-directory-hint { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 0.75rem; }
+.macro-partition { border: 1px solid var(--border); border-radius: 6px; background: var(--surface); padding: 0.5rem 0.85rem 0.75rem; margin-bottom: 0.75rem; }
+.macro-partition > h3 { font-size: 1rem; margin: 0.25rem 0 0.1rem; }
+.macro-partition-count { color: var(--text-muted); font-weight: 400; font-size: 0.85rem; }
+.macro-partition-empty { color: var(--text-faint); font-style: italic; font-size: 0.9rem; margin: 0.3rem 0 0; }
+.macro-folder { margin: 0.35rem 0 0; }
+.macro-folder > summary { cursor: pointer; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; color: var(--text-muted); padding: 0.1rem 0; }
+.macro-folder > summary:hover, .macro-folder > summary:focus { color: var(--text); }
+.macro-folder-files { list-style: none; margin: 0.2rem 0 0.3rem; padding-left: 1.2rem; }
+.macro-folder-files li { margin: 0.1rem 0; font-size: 0.9rem; overflow-wrap: anywhere; }
+.macro-entry-name { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-weight: 600; }
+.macro-entry-file { color: var(--text-muted); font-size: 0.85rem; }
 </style>
 </head>
 <body>
@@ -779,6 +798,38 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
   </div>
   </div>
   <aside class="model-detail-card" aria-label="Model detail" hidden></aside>
+</section>
+
+
+<section class="macro-directory" aria-label="Filtered artifact directory">
+  <h2>What calls this macro</h2>
+  <p class="macro-directory-hint">Only the models and tests whose <code>depends_on.macros</code> reaches the macro &mdash; grouped by project folder, the two kinds kept separate.</p>
+
+  <div class="macro-partition" aria-label="Models that call the macro">
+    <h3>Models <span class="macro-partition-count">(3)</span></h3>
+    <details class="macro-folder" open>
+      <summary>models/intermediate/healthcare</summary>
+      <ul class="macro-folder-files">
+        <li data-node-id="model.healthcare_analytics.int_encounters__enriched"><span class="macro-entry-name">int_encounters__enriched</span> <span class="macro-entry-file">int_encounters__enriched.sql</span></li>
+        
+      </ul>
+    </details>
+    <details class="macro-folder" open>
+      <summary>models/marts/core</summary>
+      <ul class="macro-folder-files">
+        <li data-node-id="model.healthcare_analytics.fct_clinical_events"><span class="macro-entry-name">fct_clinical_events</span> <span class="macro-entry-file">fct_clinical_events.sql</span></li>
+        <li data-node-id="model.healthcare_analytics.fct_encounters"><span class="macro-entry-name">fct_encounters</span> <span class="macro-entry-file">fct_encounters.sql</span></li>
+        
+      </ul>
+    </details>
+    
+  </div>
+
+  <div class="macro-partition" aria-label="Tests that call the macro">
+    <h3>Tests <span class="macro-partition-count">(0)</span></h3>
+    <p class="macro-partition-empty">No root-project tests call this macro.</p>
+    
+  </div>
 </section>
 
 

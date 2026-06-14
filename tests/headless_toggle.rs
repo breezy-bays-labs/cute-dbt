@@ -7543,6 +7543,67 @@ fn explore_macro_dag_rendered_geometry_is_structurally_sound() {
 
 #[test]
 #[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_macro_page_renders_the_filtered_artifact_directory() {
+    // cute-dbt#345 (AC1 + AC3) — the filtered artifact directory: the
+    // committed focused-macro golden (`explore-macro/macro.html`) lists the
+    // models that call the macro (`quarantine_filter`), grouped by project
+    // folder via native <details>/<summary>, with the tests partition kept
+    // SEPARATE (the get_where_subquery non-merge rule). This drives a real
+    // Chromium against the committed golden and asserts the live DOM the
+    // browser actually rendered (a structural assert beyond the byte-gate).
+    let browser = launch_browser();
+    let url = committed_example_url("explore-macro/macro.html");
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(
+        ".macro-directory",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("the filtered artifact directory renders");
+
+    // Two SEPARATE partitions exist (never merged).
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelectorAll('.macro-directory .macro-partition').length === 2",
+        ),
+        "the directory surfaces the models and tests partitions separately",
+    );
+
+    // The models partition lists the macro callers under their project
+    // folders (the playground golden has 3 callers across 2 folders).
+    let model_entries = eval_i64(
+        &tab,
+        "document.querySelectorAll('.macro-partition[aria-label=\"Models that call the macro\"] .macro-folder-files li').length",
+    );
+    assert!(
+        model_entries >= 3,
+        "the models partition lists every macro caller as a directory entry (got {model_entries})",
+    );
+
+    // The folders are collapsible <details> with a folder-path summary.
+    assert!(
+        eval_bool(
+            &tab,
+            "Array.from(document.querySelectorAll('.macro-partition[aria-label=\"Models that call the macro\"] details.macro-folder > summary')).some(function(s){return s.textContent.indexOf('models/') === 0;})",
+        ),
+        "the model folders carry a collapsible project-folder summary",
+    );
+
+    // Collapse a folder (native <details>) and confirm it closes — the
+    // collapsibility is real, not decorative.
+    let collapsed = eval_bool(
+        &tab,
+        "(function(){var d=document.querySelector('.macro-partition[aria-label=\"Models that call the macro\"] details.macro-folder');if(!d){return false;}d.open=false;return d.open===false;})()",
+    );
+    assert!(collapsed, "the directory folders are genuinely collapsible");
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
 fn explore_seed_node_detail_card_shows_the_seed_data_table() {
     // cute-dbt#398 — the explore side of the seed-shelf affordance: the
     // committed seed-data explore golden (`explore-seed/dag.html`) carries a

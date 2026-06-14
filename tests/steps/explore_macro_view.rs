@@ -179,14 +179,59 @@ fn macro_node_count(world: &mut World, expected: usize) {
     );
 }
 
+// --- Then: the filtered artifact directory (cute-dbt#345 AC1 + AC3) ----
+
+#[then("macro.html renders the filtered artifact directory")]
+fn macro_renders_directory(world: &mut World) {
+    let html = macro_html(world);
+    assert!(
+        html.contains(r#"class="macro-directory""#),
+        "macro.html must render the filtered artifact directory section",
+    );
+    // The two partitions are surfaced separately (the AC3 non-merge rule).
+    assert!(
+        html.contains(r#"aria-label="Models that call the macro""#)
+            && html.contains(r#"aria-label="Tests that call the macro""#),
+        "the directory must surface the models and tests partitions separately",
+    );
+}
+
+#[then(regex = r#"^the macro directory models partition lists "([^"]+)" under "([^"]+)"$"#)]
+fn macro_directory_lists_model(world: &mut World, model: String, folder: String) {
+    let html = macro_html(world);
+    let id = format!("model.jaffle_shop.{model}");
+    assert!(
+        html.contains(&format!("<summary>{folder}</summary>")),
+        "the models partition must group the caller under {folder:?}",
+    );
+    assert!(
+        html.contains(&format!(r#"data-node-id="{id}""#)),
+        "the models partition must list {model:?} (id {id}) as a directory entry",
+    );
+}
+
+#[then("the macro directory tests partition is empty")]
+fn macro_directory_tests_empty(world: &mut World) {
+    let html = macro_html(world);
+    assert!(
+        html.contains("No root-project tests call this macro."),
+        "the tests partition must render its honest empty state when no test calls the macro",
+    );
+}
+
+/// The captured `macro.html`, panicking with stderr context when absent.
+fn macro_html(world: &World) -> String {
+    world
+        .explore_macro_html
+        .clone()
+        .unwrap_or_else(|| panic!("macro.html was not written; stderr={}", world.last_stderr))
+}
+
 /// Parse the `explore-dag-data` JSON carrier embedded in `macro.html`
 /// (the focused [`LineagePayload`]). Self-contained on the `World`'s
 /// captured `macro.html` (the subprocess wrote it).
 fn macro_lineage_payload(world: &World) -> serde_json::Value {
-    let html = world
-        .explore_macro_html
-        .clone()
-        .unwrap_or_else(|| panic!("macro.html was not written; stderr={}", world.last_stderr));
+    let html = macro_html(world);
     let dom = tl::parse(&html, tl::ParserOptions::default()).expect("macro.html must parse");
     let parser = dom.parser();
     let node = dom
