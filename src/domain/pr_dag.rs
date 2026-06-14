@@ -40,19 +40,25 @@
 //! DAG) and deterministically ordered ([`BTreeSet`]/sorted output), the
 //! byte-identity-golden requirement the downstream render lane depends on.
 //!
-//! ## What is deliberately out of this slice
+//! ## Per-node line counts (cute-dbt#403 — Slice B)
 //!
-//! Per-node `lines ±` (added/removed counts) need the diff and are a
-//! later render-side concern — Slice A is graph topology + node states
-//! only. There is no I/O, no parser dependency, no `clap`, no `askama`
-//! here: pure domain (`std` + `serde` derive), the same purity contract
-//! the rest of `src/domain/` honors.
+//! Each [`PrDagNode`] carries unsigned [`lines_added`](PrDagNode::lines_added)
+//! / [`lines_removed`](PrDagNode::lines_removed) counts. [`compute_pr_dag`]
+//! (Slice A topology) emits `0/0`; the two arm-specific pure fns fill them:
+//! [`pr_dag_lines_from_diff`] (pr-diff arm — the `+`/`-` hunk line counts for
+//! the node's file) and [`pr_dag_lines_from_raw_code`] (baseline arm — the
+//! `raw_code` old→new [`diff_lines`] counts). Slice C (#404) wires the
+//! population into the run loop and renders the `±` chip; this slice is the
+//! pure computation only. There is no I/O, no parser dependency, no `clap`,
+//! no `askama` here: pure domain (`std` + `serde` derive), the same purity
+//! contract the rest of `src/domain/` honors.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
 
 use crate::domain::manifest::{Manifest, NodeId};
+use crate::domain::pr_diff::{DiffLineKind, NormalizedDiffIndex, diff_lines};
 use crate::domain::state::ModelInScopeSet;
 
 /// The lifecycle state of a node in the PR-scope mini-DAG.
@@ -111,6 +117,144 @@ pub struct PrDagNode {
     /// `state = modified` only as a structural placeholder the render lane
     /// renders in the quiet tier when `is_connector` is set.
     pub is_connector: bool,
+    /// Lines this node's declaring source *gained* in the PR (the diff's
+    /// `+` count for the node's file). `0` for a connector / unchanged
+    /// carrier, and for a node whose file is absent from the diff
+    /// (cute-dbt#403 — Slice B). [`compute_pr_dag`] emits `0` here; the
+    /// counts are filled by [`pr_dag_lines_from_diff`] (pr-diff arm) /
+    /// [`pr_dag_lines_from_raw_code`] (baseline arm) — Slice C wires the
+    /// population into the run loop and renders the `±` chip.
+    #[serde(default)]
+    pub lines_added: usize,
+    /// Lines this node's declaring source *lost* in the PR (the diff's `-`
+    /// count for the node's file). See [`Self::lines_added`] for the
+    /// zero-default / connector / absent-file contract (cute-dbt#403).
+    #[serde(default)]
+    pub lines_removed: usize,
+}
+
+/// An unsigned per-node line-count delta — how many lines a node's
+/// declaring source gained (`added`) and lost (`removed`) in the PR
+/// (cute-dbt#403 — Slice B).
+///
+/// A render-payload-adjacent POD the two arm-specific counters
+/// ([`pr_dag_lines_from_diff`] / [`pr_dag_lines_from_raw_code`]) return and
+/// Slice C folds onto a [`PrDagNode`]'s
+/// [`lines_added`](PrDagNode::lines_added) /
+/// [`lines_removed`](PrDagNode::lines_removed). `Copy` (two `usize`s);
+/// `std`-only (domain purity).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LineDelta {
+    /// Lines gained (the `+` count). `0` for an unchanged carrier.
+    pub added: usize,
+    /// Lines lost (the `-` count). `0` for an unchanged carrier.
+    pub removed: usize,
+}
+
+/// Per-node line counts from a parsed PR diff (the **pr-diff arm**,
+/// cute-dbt#403 — Slice B).
+///
+/// Sums the `+` and `-` line counts across every hunk touching the node's
+/// declaring file, looked up in the [`NormalizedDiffIndex`] by
+/// `original_file_path`. The definition is the **raw diff line count** — the
+/// same `added_lines` / `removed_lines` bodies the inline diff view renders
+/// from ([`crate::domain::pr_diff::Hunk`]), counted before the block-precise
+/// narrowing or the whitespace-only collapse. This is the honest "lines the
+/// PR touched in this file" the `±` chip reports, and it matches what a
+/// reviewer sees in `git diff --stat` for that path.
+///
+/// Returns `0/0` (the [`LineDelta::default`]) when the node has no
+/// `original_file_path` (a deleted ghost / synthetic node) **or** when its
+/// file is absent from the diff (a connector / unchanged carrier, or a node
+/// changed only via a sibling) — [`NormalizedDiffIndex::hunks_for`] returns
+/// an empty slice in both cases, so the fold over zero hunks is `0/0` and
+/// never panics. A deleted model carries no current `original_file_path`,
+/// so its diff-arm count is `0/0` here; the baseline arm
+/// ([`pr_dag_lines_from_raw_code`]) is where a deletion's removed-everything
+/// count is surfaced.
+#[must_use]
+pub fn pr_dag_lines_from_diff(
+    original_file_path: Option<&str>,
+    index: &NormalizedDiffIndex,
+) -> LineDelta {
+    let Some(ofp) = original_file_path else {
+        return LineDelta::default();
+    };
+    index
+        .hunks_for(ofp)
+        .iter()
+        .fold(LineDelta::default(), |acc, hunk| LineDelta {
+            added: acc.added + hunk.added_lines.len(),
+            removed: acc.removed + hunk.removed_lines.len(),
+        })
+}
+
+/// Per-node line counts from a model's `raw_code` old → new (the **baseline
+/// arm**, cute-dbt#403 — Slice B).
+///
+/// Diffs the baseline `raw_code` (`old`) against the current `raw_code`
+/// (`new`) with the domain's line differ ([`diff_lines`], an LCS line diff)
+/// and counts the resulting [`DiffLineKind::Added`] / [`DiffLineKind::Removed`]
+/// lines. The whitespace handling is deliberately *raw* — `diff_lines`
+/// compares lines verbatim, so the count is "lines that differ", matching
+/// the baseline-mode inline SQL diff the report renders.
+///
+/// The new-node / deleted-ghost ends are honest and documented:
+///
+/// - **new node** (`old == None` — absent from the baseline): every current
+///   line is an addition. `0/0` only if the node also has no current
+///   `raw_code`.
+/// - **deleted ghost** (`new == None` — absent from the current manifest):
+///   every baseline line is a removal — the "removed everything" count. A
+///   deletion is a real, countable change, so this surfaces it (rather than
+///   a silent `0/0`); the diff arm cannot see it (no current file), so the
+///   baseline arm owns the deletion count.
+/// - **both `None`** (no `raw_code` either side — a synthetic / non-SQL
+///   node): `0/0`.
+///
+/// Empty (`Some("")`) and absent (`None`) `raw_code` are treated alike — an
+/// empty body has zero lines, so a `Some("")` → `Some("x")` is one addition
+/// and a `None` → `Some("x")` is one addition, identically. Pure (`std`-only
+/// via [`diff_lines`]); never panics.
+#[must_use]
+pub fn pr_dag_lines_from_raw_code(old: Option<&str>, new: Option<&str>) -> LineDelta {
+    let old_lines = split_raw_lines(old);
+    let new_lines = split_raw_lines(new);
+    diff_lines(&old_lines, &new_lines)
+        .lines
+        .iter()
+        .fold(LineDelta::default(), |acc, line| match line.kind {
+            DiffLineKind::Added => LineDelta {
+                added: acc.added + 1,
+                ..acc
+            },
+            DiffLineKind::Removed => LineDelta {
+                removed: acc.removed + 1,
+                ..acc
+            },
+            DiffLineKind::Context => acc,
+        })
+}
+
+/// Split a `raw_code` body into the owned line vector [`diff_lines`]
+/// consumes, treating absent / empty bodies as zero lines.
+///
+/// Strips a single trailing `\n` (git's line frame — the same
+/// engine-divergence normalization
+/// [`crate::domain::pr_diff::reconstruct_model_sql_diffs`] applies: dbt-core
+/// strips the terminator, dbt-fusion retains it), so both engines yield the
+/// same line count. An empty or `None` body is zero lines (not one phantom
+/// `""`), so a new/deleted node's count is the true authored-line count.
+fn split_raw_lines(raw: Option<&str>) -> Vec<String> {
+    match raw {
+        None | Some("") => Vec::new(),
+        Some(body) => body
+            .strip_suffix('\n')
+            .unwrap_or(body)
+            .split('\n')
+            .map(str::to_owned)
+            .collect(),
+    }
 }
 
 /// One directed edge of the PR-scope mini-DAG (producer → consumer), both
@@ -374,6 +518,11 @@ fn pr_dag_node(
         name: bare_name_for(manifest, id),
         state,
         is_connector,
+        // Slice A topology emits 0/0; the counts are computed by the
+        // arm-specific fns (`pr_dag_lines_from_diff` /
+        // `pr_dag_lines_from_raw_code`) and folded on in Slice C (#403/#404).
+        lines_added: 0,
+        lines_removed: 0,
     }
 }
 
@@ -450,6 +599,7 @@ mod tests {
     use crate::domain::manifest::{
         Checksum, DependsOn, ManifestMetadata, Node, NodeConfig, NodeId,
     };
+    use crate::domain::pr_diff::{FileHunks, Hunk, PrDiff};
     use std::collections::HashMap;
 
     // ---- builders -------------------------------------------------------
@@ -1054,5 +1204,250 @@ mod tests {
         let manifest = chain_abcd();
         let graph = compute_pr_dag(&manifest, &modified_of(&[]), &new_of(&[]), NO_REMOVED);
         assert!(graph.nodes.is_empty() && graph.edges.is_empty());
+    }
+
+    // ---- per-node line counts (cute-dbt#403 — Slice B) ------------------
+
+    /// A `--unified=0`-shaped hunk over the given `+`/`-` bodies (the
+    /// `new_start` / `new_len` are nominal — `pr_dag_lines_from_diff` reads
+    /// only the body lengths, so the footprint is unconstrained here).
+    fn hunk(removed: &[&str], added: &[&str]) -> Hunk {
+        Hunk {
+            new_start: 1,
+            new_len: added.len(),
+            removed_lines: removed.iter().map(|s| (*s).to_owned()).collect(),
+            added_lines: added.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+
+    /// A [`NormalizedDiffIndex`] mapping each `(path, hunks)` (no project-root
+    /// strip, so manifest `original_file_path` keys resolve identically).
+    fn index_of(files: Vec<(&str, Vec<Hunk>)>) -> NormalizedDiffIndex {
+        let diff = PrDiff {
+            renames: Vec::new(),
+            files: files
+                .into_iter()
+                .map(|(path, hunks)| FileHunks {
+                    path: path.to_owned(),
+                    hunks,
+                })
+                .collect(),
+        };
+        NormalizedDiffIndex::new(&diff, None)
+    }
+
+    // -- pr-diff arm ------------------------------------------------------
+
+    #[test]
+    fn pr_diff_arm_counts_the_added_and_removed_hunk_lines_for_the_file() {
+        // A modified model: 3 added, 2 removed across two hunks on its file.
+        let index = index_of(vec![(
+            "models/stg_orders.sql",
+            vec![
+                hunk(&["old a", "old b"], &["new a", "new b", "new c"]),
+                Hunk {
+                    new_start: 20,
+                    new_len: 0,
+                    removed_lines: Vec::new(),
+                    added_lines: Vec::new(),
+                },
+            ],
+        )]);
+        let delta = pr_dag_lines_from_diff(Some("models/stg_orders.sql"), &index);
+        assert_eq!(
+            delta,
+            LineDelta {
+                added: 3,
+                removed: 2
+            },
+            "added/removed summed across every hunk on the file",
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_sums_added_and_removed_across_multiple_files_only_for_the_node() {
+        // The index holds two files; the node resolves to exactly one — the
+        // OTHER file's counts must NOT leak into this node's delta.
+        let index = index_of(vec![
+            ("models/a.sql", vec![hunk(&[], &["+1", "+2"])]),
+            ("models/b.sql", vec![hunk(&["-1", "-2", "-3"], &[])]),
+        ]);
+        assert_eq!(
+            pr_dag_lines_from_diff(Some("models/a.sql"), &index),
+            LineDelta {
+                added: 2,
+                removed: 0
+            },
+        );
+        assert_eq!(
+            pr_dag_lines_from_diff(Some("models/b.sql"), &index),
+            LineDelta {
+                added: 0,
+                removed: 3
+            },
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_is_zero_for_a_connector_whose_file_is_absent_from_the_diff() {
+        // A connector / unchanged carrier: the diff touches another file, so
+        // this node's file is absent ⇒ 0/0 (never a panic).
+        let index = index_of(vec![("models/other.sql", vec![hunk(&[], &["x"])])]);
+        let delta = pr_dag_lines_from_diff(Some("models/connector.sql"), &index);
+        assert_eq!(delta, LineDelta::default(), "absent file ⇒ 0/0");
+    }
+
+    #[test]
+    fn pr_diff_arm_is_zero_when_the_node_has_no_original_file_path() {
+        // A deleted ghost / synthetic node has no current `original_file_path`
+        // ⇒ the diff arm cannot key it ⇒ 0/0 (the baseline arm owns deletions).
+        let index = index_of(vec![("models/a.sql", vec![hunk(&["x"], &["y"])])]);
+        assert_eq!(
+            pr_dag_lines_from_diff(None, &index),
+            LineDelta::default(),
+            "no original_file_path ⇒ 0/0 on the diff arm",
+        );
+    }
+
+    #[test]
+    fn pr_diff_arm_over_an_empty_index_is_zero() {
+        let index = index_of(vec![]);
+        assert_eq!(
+            pr_dag_lines_from_diff(Some("models/a.sql"), &index),
+            LineDelta::default(),
+        );
+    }
+
+    // -- baseline arm -----------------------------------------------------
+
+    #[test]
+    fn baseline_arm_counts_added_and_removed_from_raw_code_old_to_new() {
+        // old: a, b, c   new: a, B2, c, d  ⇒ b→B2 is one remove + one add,
+        // d is one add ⇒ added=2, removed=1.
+        let old = "a\nb\nc";
+        let new = "a\nB2\nc\nd";
+        let delta = pr_dag_lines_from_raw_code(Some(old), Some(new));
+        assert_eq!(
+            delta,
+            LineDelta {
+                added: 2,
+                removed: 1
+            },
+            "raw_code old→new line diff counts",
+        );
+    }
+
+    #[test]
+    fn baseline_arm_unchanged_raw_code_is_zero() {
+        // A connector / unchanged carrier in baseline mode: identical
+        // raw_code ⇒ all-Context ⇒ 0/0.
+        let same = "select 1\nfrom t\nwhere x";
+        assert_eq!(
+            pr_dag_lines_from_raw_code(Some(same), Some(same)),
+            LineDelta::default(),
+            "identical raw_code ⇒ 0/0",
+        );
+    }
+
+    #[test]
+    fn baseline_arm_new_node_counts_every_current_line_as_added() {
+        // A new node: absent from the baseline (old = None) ⇒ every current
+        // line is an addition, nothing removed.
+        let new = "select 1\nfrom t\nwhere x";
+        assert_eq!(
+            pr_dag_lines_from_raw_code(None, Some(new)),
+            LineDelta {
+                added: 3,
+                removed: 0
+            },
+            "new node ⇒ all current lines added",
+        );
+    }
+
+    #[test]
+    fn baseline_arm_deleted_ghost_counts_every_baseline_line_as_removed() {
+        // A deleted ghost: absent from the current manifest (new = None) ⇒
+        // every baseline line is a removal — the removed-everything count.
+        let old = "select 1\nfrom t\nwhere x\ngroup by 1";
+        assert_eq!(
+            pr_dag_lines_from_raw_code(Some(old), None),
+            LineDelta {
+                added: 0,
+                removed: 4
+            },
+            "deleted ghost ⇒ all baseline lines removed",
+        );
+    }
+
+    #[test]
+    fn baseline_arm_both_absent_is_zero() {
+        // A synthetic / non-SQL node with no raw_code either side ⇒ 0/0.
+        assert_eq!(pr_dag_lines_from_raw_code(None, None), LineDelta::default(),);
+    }
+
+    #[test]
+    fn baseline_arm_empty_and_absent_raw_code_are_equivalent() {
+        // `Some("")` (an empty body — some node types ship `raw_code: ""`)
+        // is zero lines, identical to `None`: a one-line addition either way.
+        let new = "select 1";
+        assert_eq!(
+            pr_dag_lines_from_raw_code(Some(""), Some(new)),
+            pr_dag_lines_from_raw_code(None, Some(new)),
+            "Some(\"\") and None are both zero-line bodies",
+        );
+        assert_eq!(
+            pr_dag_lines_from_raw_code(Some(""), Some(new)),
+            LineDelta {
+                added: 1,
+                removed: 0
+            },
+        );
+    }
+
+    #[test]
+    fn baseline_arm_trailing_newline_does_not_inflate_the_count() {
+        // dbt-fusion retains the file's trailing `\n` on raw_code; dbt-core
+        // strips it. A single trailing terminator must NOT register as an
+        // extra phantom line on either side — fusion-vs-core parity.
+        let core = "select 1\nfrom t"; // dbt-core: no trailing newline
+        let fusion = "select 1\nfrom t\n"; // dbt-fusion: trailing newline
+        // Same body, different terminator framing ⇒ no change counted.
+        assert_eq!(
+            pr_dag_lines_from_raw_code(Some(core), Some(fusion)),
+            LineDelta::default(),
+            "a lone trailing-newline difference is not a line change",
+        );
+        // And a real EOF blank line survives (only ONE terminator stripped):
+        // "a\n\n" → lines [a, ""] vs "a" → [a] ⇒ one added blank line.
+        assert_eq!(
+            pr_dag_lines_from_raw_code(Some("a"), Some("a\n\n")),
+            LineDelta {
+                added: 1,
+                removed: 0
+            },
+            "a genuine EOF blank line is a real added line",
+        );
+    }
+
+    // -- field plumbing ---------------------------------------------------
+
+    #[test]
+    fn compute_pr_dag_emits_zero_line_counts_on_every_node() {
+        // Slice A topology is unchanged: every node carries 0/0 counts until
+        // Slice C folds the arm-specific deltas on. (Byte-neutral to goldens.)
+        let manifest = chain_abcd();
+        let graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.a", "model.s.d"]),
+            &new_of(&["model.s.a"]),
+            &[NodeId::new("model.s.gone")],
+        );
+        assert!(
+            graph
+                .nodes
+                .iter()
+                .all(|n| n.lines_added == 0 && n.lines_removed == 0),
+            "compute_pr_dag emits 0/0 line counts (Slice C populates them)",
+        );
     }
 }
