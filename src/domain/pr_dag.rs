@@ -376,7 +376,7 @@ pub fn compute_pr_dag(
     // anchor edges are unioned on. A halo node never contributes a generic
     // induced edge (e.g. a spurious halo↔halo link); it carries only the
     // explicit anchor edges, honoring "edges only to/from their anchor".
-    let mut edges = induced_edges(&adjacency, &nodes, &halo.nodes);
+    let mut edges = induced_edges(&adjacency, &nodes);
     merge_halo_edges(&mut edges, &halo.edges);
 
     PrDagGraph { nodes, edges }
@@ -829,19 +829,19 @@ fn is_version_suffix(segment: &str) -> bool {
 /// edges **only to/from its anchor** (cute-dbt#428) — those anchor edges are
 /// supplied explicitly by [`merge_halo_edges`], so letting the generic pass
 /// also emit (e.g.) a spurious halo↔halo link between two independent isolated
-/// anchors' neighbors would over-draw the context. For a halo-free PR the
-/// `halo` set is empty and this is exactly the original induced subgraph
+/// anchors' neighbors would over-draw the context. Halo membership is read
+/// from each node's `is_halo` flag (set before this runs), so for a halo-free
+/// PR no node is filtered and this is exactly the original induced subgraph
 /// (byte-stable).
-fn induced_edges(
-    adjacency: &ModelAdjacency<'_>,
-    nodes: &[PrDagNode],
-    halo: &BTreeSet<&NodeId>,
-) -> Vec<PrDagEdge> {
-    let halo_ids: BTreeSet<&str> = halo.iter().map(|id| id.as_str()).collect();
+fn induced_edges(adjacency: &ModelAdjacency<'_>, nodes: &[PrDagNode]) -> Vec<PrDagEdge> {
+    // The non-halo "in-set" is derived straight from the node flags: `nodes`
+    // is fully assembled (every `is_halo` set) before this runs, so a separate
+    // halo parameter is redundant (cute-dbt#428 — gemini review fold). The keys
+    // stay borrowed `&str` (no per-id `String` allocation) by construction.
     let in_set: BTreeSet<&str> = nodes
         .iter()
+        .filter(|n| !n.is_halo)
         .map(|n| n.id.as_str())
-        .filter(|id| !halo_ids.contains(id))
         .collect();
     // BTreeSet over (from, to) string pairs ⇒ sorted + deduplicated.
     let mut edges: BTreeSet<(&str, &str)> = BTreeSet::new();
