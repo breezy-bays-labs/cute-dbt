@@ -262,6 +262,61 @@ fn render_pr_diff_with_axes_to_file(
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
         &axes,
+        &std::collections::BTreeMap::new(),
+        &[],
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    format!("file://{p}")
+}
+
+/// PR-diff-mode render that threads a per-model `axes` map, a per-model
+/// `model_states` map (NEW/MODIFIED), and a `removed_models` path list
+/// (cute-dbt#416). Drives the Models-lens NEW state chip + the REMOVED
+/// summary in a real browser.
+#[allow(clippy::too_many_arguments)]
+fn render_pr_diff_with_states_to_file(
+    filename: &str,
+    nodes: Vec<Node>,
+    tests: Vec<(&str, UnitTest)>,
+    model_ids: &[&str],
+    axes: BTreeMap<NodeId, ChangeAxes>,
+    model_states: BTreeMap<NodeId, cute_dbt::domain::ModelState>,
+    removed_models: &[String],
+) -> String {
+    let all_ids: Vec<String> = tests.iter().map(|(id, _)| (*id).to_owned()).collect();
+    let m = manifest(nodes, tests);
+    let in_scope: InScopeSet = all_ids.into_iter().collect();
+    let models: ModelInScopeSet = model_ids.iter().map(|id| NodeId::new(*id)).collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        &ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
+        None,
+        None,
+        &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        None,
+        &axes,
+        &model_states,
+        removed_models,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -786,6 +841,44 @@ fn axes_row_hidden(tab: &Tab) -> bool {
     )
 }
 
+// --- cute-dbt#416: NEW/REMOVED state chips ----------------------------
+
+/// `data-state` of the NEW state chip in the model-axes row, or "" when
+/// absent (the selected model is not NEW).
+fn state_chip(tab: &Tab) -> String {
+    eval_string(
+        tab,
+        "(function(){var c=document.querySelector('[data-testid=\"model-axes\"] [data-testid=\"state-chip\"]');\
+          return c ? c.getAttribute('data-state') : '';})()",
+    )
+}
+
+/// The REMOVED-summary chip's `data-removed-count`, or "" when the summary
+/// is absent/hidden (no removed models).
+fn removed_summary_count(tab: &Tab) -> String {
+    eval_string(
+        tab,
+        "(function(){var c=document.querySelector('[data-testid=\"removed-summary-chip\"]');\
+          return c ? c.getAttribute('data-removed-count') : '';})()",
+    )
+}
+
+/// `|`-joined text of the REMOVED path chips (the short removed-model list).
+fn removed_path_chips(tab: &Tab) -> String {
+    eval_string(
+        tab,
+        "Array.from(document.querySelectorAll('[data-testid=\"removed-path-chip\"]'))\
+         .map(function(c){return c.textContent.trim();}).join('|')",
+    )
+}
+
+fn removed_row_hidden(tab: &Tab) -> bool {
+    eval_bool(
+        tab,
+        "document.querySelector('[data-testid=\"removed-models\"]').hidden",
+    )
+}
+
 // --- cute-dbt#414 (Slice C): single-select 3-axis filter toggle -------
 
 /// `|`-joined `option` VALUES (model names) of `#model-select`, in DOM
@@ -1018,6 +1111,110 @@ fn baseline_mode_renders_no_axis_chips() {
         "",
         "baseline mode builds zero filter segments",
     );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn pr_diff_models_lens_renders_new_state_chip_and_removed_summary() {
+    // cute-dbt#416 — the NEW state chip + the REMOVED summary in a real
+    // browser. The fixture seeds:
+    //   - fct_new: a NEW model (state="new") that also fired its body axis
+    //     (the added file carries hunks) → NEW chip alongside the Body chip;
+    //   - dim_mod: a MODIFIED model (state="modified") → NO state chip (the
+    //     axis chips already say MODIFIED), just its Body chip;
+    //   - two REMOVED model paths (node-less) → the Models-lens summary chip
+    //     ("2 models removed") + the two line-through path chips.
+    let nodes = vec![
+        model_node_with_raw_and_path("model.shop.fct_new", "select 1", "models/marts/fct_new.sql"),
+        model_node_with_raw_and_path("model.shop.dim_mod", "select 2", "models/marts/dim_mod.sql"),
+    ];
+    let axes = BTreeMap::from([
+        (
+            NodeId::new("model.shop.fct_new"),
+            ChangeAxes {
+                body: true,
+                config: false,
+                unit_test: false,
+            },
+        ),
+        (
+            NodeId::new("model.shop.dim_mod"),
+            ChangeAxes {
+                body: true,
+                config: false,
+                unit_test: false,
+            },
+        ),
+    ]);
+    let states = BTreeMap::from([
+        (
+            NodeId::new("model.shop.fct_new"),
+            cute_dbt::domain::ModelState::New,
+        ),
+        (
+            NodeId::new("model.shop.dim_mod"),
+            cute_dbt::domain::ModelState::Modified,
+        ),
+    ]);
+    let removed = vec![
+        "models/marts/dim_gone_a.sql".to_owned(),
+        "models/marts/dim_gone_b.sql".to_owned(),
+    ];
+    let url = render_pr_diff_with_states_to_file(
+        "headless_state_chips.html",
+        nodes,
+        vec![],
+        &["model.shop.fct_new", "model.shop.dim_mod"],
+        axes,
+        states,
+        &removed,
+    );
+
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate state chips");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // The REMOVED summary renders once at boot (report-level, model-agnostic).
+    assert!(
+        !removed_row_hidden(&tab),
+        "the removed-models summary shows when the PR deleted models",
+    );
+    assert_eq!(
+        removed_summary_count(&tab),
+        "2",
+        "the summary chip names the removed-model count",
+    );
+    assert_eq!(
+        removed_path_chips(&tab),
+        "models/marts/dim_gone_a.sql|models/marts/dim_gone_b.sql",
+        "the short path list names each removed model file",
+    );
+
+    // fct_new: NEW → the state chip renders alongside the Body axis chip.
+    select_model(&tab, "fct_new");
+    assert_eq!(
+        state_chip(&tab),
+        "new",
+        "the NEW model carries a NEW state chip",
+    );
+    assert_eq!(
+        axis_chips(&tab),
+        "body",
+        "the NEW model still renders its fired axis chips",
+    );
+
+    // dim_mod: MODIFIED → NO state chip (the axis chips already say MODIFIED).
+    select_model(&tab, "dim_mod");
+    assert_eq!(
+        state_chip(&tab),
+        "",
+        "a MODIFIED model renders no extra state chip",
+    );
+    assert_eq!(axis_chips(&tab), "body");
+
     let _ = tab.close(true);
 }
 
@@ -3183,6 +3380,7 @@ fn reconstruct_fusion_data_diffs(
     let diff = PrDiff {
         renames: Vec::new(),
         deleted: Vec::new(),
+        added: Vec::new(),
         files: vec![FileHunks {
             path: "models/marts/_unit_tests.yml".to_owned(),
             hunks: vec![hunk],
@@ -5310,6 +5508,8 @@ fn render_with_external_fixtures(
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -5802,6 +6002,8 @@ fn report_seed_import_node_shelf_shows_the_seed_data_table() {
         DEFAULT_SEED_ROW_CAP,
         None,
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
     )
     .expect("render writes the report");
     let url = format!(
@@ -5922,6 +6124,8 @@ fn report_non_seed_import_node_shelf_is_unchanged() {
         DEFAULT_SEED_ROW_CAP,
         None,
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
     )
     .expect("render writes the report");
     let url = format!(
@@ -8765,6 +8969,8 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -9341,6 +9547,8 @@ fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -13515,6 +13723,8 @@ fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -13560,6 +13770,8 @@ fn render_governance_to_file(
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -13723,6 +13935,7 @@ fn render_macro_lens_to_file(filename: &str) -> String {
     let diff = PrDiff {
         renames: Vec::new(),
         deleted: Vec::new(),
+        added: Vec::new(),
         files: vec![FileHunks {
             path: "macros/dq.sql".to_owned(),
             hunks: vec![Hunk {
@@ -13774,6 +13987,8 @@ fn render_macro_lens_to_file(filename: &str) -> String {
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -14013,6 +14228,7 @@ fn render_two_macro_lens_to_file(filename: &str) -> String {
     let diff = PrDiff {
         renames: Vec::new(),
         deleted: Vec::new(),
+        added: Vec::new(),
         files: vec![
             FileHunks {
                 path: "macros/dq.sql".to_owned(),
@@ -14072,6 +14288,8 @@ fn render_two_macro_lens_to_file(filename: &str) -> String {
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -14236,6 +14454,8 @@ fn render_capped_macro_lens_to_file(filename: &str, model_count: usize, body_cap
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         None,
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -14814,7 +15034,7 @@ fn project_panel_renders_categorized_on_the_committed_showcase() {
         "document.querySelector('[data-testid=\"project-def-affected\"]').textContent",
     );
     assert_eq!(
-        affected, "affects 20 models — widened into report scope, listed below",
+        affected, "affects 21 models — widened into report scope, listed below",
         "the count is explicit (TOTAL tier) and past the R1b cap the names collapse",
     );
     assert_eq!(
@@ -15631,6 +15851,8 @@ fn render_seed_report(filename: &str, seed_cards: &[SeedCard]) -> String {
         3,
         None,
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -15952,6 +16174,8 @@ fn render_minidag_report(filename: &str) -> String {
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
         Some(&pr_dag),
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -16106,6 +16330,8 @@ fn render_lens_shell_to_file(filename: &str) -> String {
         // cute-dbt#404 — no PR-scope mini-DAG in this lens-shell helper.
         None,
         &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))

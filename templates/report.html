@@ -511,6 +511,15 @@
      A radiogroup of buttons (single-select, aria-pressed per segment) —
      the #91 test-mode-toggle recipe family, reused. -#}
   <div class="axis-filter" role="radiogroup" aria-label="Filter models by change axis" data-testid="axis-filter" hidden></div>
+  {# cute-dbt#416 — the REMOVED models summary: a count chip + a short path
+     list for the models this PR deleted. Removed models are node-less (no
+     current node → no dropdown detail), so they surface ONCE here at the
+     Models-lens level, never as <select> options. JS-built
+     (renderRemovedModels, from DATA.removed_models — present only in
+     --pr-diff mode; baseline omits the key, so the container stays hidden
+     and baseline goldens stay byte-identical). The chip-only placement is a
+     #360 design-revisitable default. -#}
+  <p class="removed-models-row" aria-label="Models removed in this PR" data-testid="removed-models" hidden></p>
   <div class="test-selector-row">
     <div class="selector-field">
       <label for="model-select">Model</label>

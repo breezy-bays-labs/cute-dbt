@@ -61,3 +61,35 @@ diff --git a/dbt_project.yml b/dbt_project.yml
 @@ -27 +27 @@
 -    search_order: ["dbt_utils", "healthcare_analytics"]
 +    search_order: ["healthcare_analytics", "dbt_utils"]
+diff --git a/models/marts/analytics/fct_provider_scorecard.sql b/models/marts/analytics/fct_provider_scorecard.sql
+new file mode 100644
+--- /dev/null
++++ b/models/marts/analytics/fct_provider_scorecard.sql
+@@ -0,0 +1,14 @@
++{{
++    config(
++        materialized='table',
++        tags=['analytics', 'scorecard']
++    )
++}}
++
++-- A new provider scorecard model added in this PR (cute-dbt#416 NEW state).
++select
++    provider_id
++    , avg(quality_score) as avg_quality_score
++    , count(*) as encounter_count
++from {{ ref('fct_provider_metrics') }}
++group by provider_id
+diff --git a/models/marts/analytics/fct_legacy_provider_rollup.sql b/models/marts/analytics/fct_legacy_provider_rollup.sql
+deleted file mode 100644
+--- a/models/marts/analytics/fct_legacy_provider_rollup.sql
++++ /dev/null
+@@ -1,8 +0,0 @@
+-{{
+-    config(materialized='table', tags=['analytics', 'legacy'])
+-}}
+-
+--- Removed in this PR (cute-dbt#416 REMOVED state): superseded by the scorecard.
+-select provider_id, sum(encounter_count) as total_encounters
+-from {{ ref('fct_provider_metrics') }}
+-group by provider_id

@@ -1,5 +1,6 @@
 ---
 source: tests/golden_report.rs
+assertion_line: 115
 expression: skeleton
 ---
 <!DOCTYPE html>
@@ -130,6 +131,7 @@ expression: skeleton
 <section class="test-selection" aria-label="Test selection">
   
   <div class="axis-filter" role="radiogroup" aria-label="Filter models by change axis" data-testid="axis-filter" hidden></div>
+  <p class="removed-models-row" aria-label="Models removed in this PR" data-testid="removed-models" hidden></p>
   <div class="test-selector-row">
     <div class="selector-field">
       <label for="model-select">Model</label>

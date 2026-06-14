@@ -238,6 +238,9 @@
     });
     renderTestModeToggle();
     renderAxisFilter();
+    // cute-dbt#416 — the node-less REMOVED models summary renders once at
+    // boot (the set is fixed for the report; no per-model dependency).
+    renderRemovedModels();
     renderModelSelector();
     renderTestSelector();
     renderForSelectedModel();
@@ -591,11 +594,30 @@
     var $row = $('[data-testid="model-axes"]').empty();
     var axes = (m && m.axes) || null;
     var configFile = (m && m.config_file) || null;
+    // cute-dbt#416 — the top-level NEW state chip. The state is mutually
+    // exclusive (new | modified); only NEW renders an extra chip (the axis
+    // chips already say MODIFIED). Present only in --pr-diff mode (baseline
+    // omits `state`). REMOVED never reaches here — removed models are
+    // node-less and surfaced as the separate Models-lens summary.
+    var isNew = (m && m.state) === "new";
     var firedAxes = axes
       ? AXIS_ORDER.filter(function (k) { return axes[k]; })
       : [];
-    if (!firedAxes.length && !configFile) { $row.prop("hidden", true); return; }
-    // Axis chips first — the primary 3-axis attribution affordance.
+    if (!isNew && !firedAxes.length && !configFile) {
+      $row.prop("hidden", true);
+      return;
+    }
+    // The NEW state chip leads the row — the top-level lifecycle state sits
+    // ahead of the per-axis MODIFIED attribution.
+    if (isNew) {
+      $row.append(
+        $("<span>").addClass("axis-chip state-chip state-chip-new")
+          .attr("data-testid", "state-chip")
+          .attr("data-state", "new")
+          .text("New")
+      );
+    }
+    // Axis chips next — the primary 3-axis attribution affordance.
     firedAxes.forEach(function (k) {
       $row.append(
         $("<span>").addClass("axis-chip axis-chip-" + k)
@@ -614,6 +636,36 @@
           .text(configFile)
       );
     }
+    $row.prop("hidden", false);
+  }
+
+  // cute-dbt#416 — the REMOVED models summary. Removed models are node-less
+  // (no current node → no dropdown detail), so they surface ONCE at the
+  // Models lens level as a count + a short path list, never as dropdown
+  // options. Rendered once at boot (the set is fixed for the report). The
+  // final placement is a #360 design-revisitable default.
+  function renderRemovedModels() {
+    var $row = $('[data-testid="removed-models"]');
+    if (!$row.length) { return; }
+    $row.empty();
+    var removed = (DATA && DATA.removed_models) || [];
+    if (!removed.length) { $row.prop("hidden", true); return; }
+    var label = removed.length === 1
+      ? "1 model removed"
+      : removed.length + " models removed";
+    $row.append(
+      $("<span>").addClass("axis-chip state-chip state-chip-removed")
+        .attr("data-testid", "removed-summary-chip")
+        .attr("data-removed-count", String(removed.length))
+        .text(label)
+    );
+    removed.forEach(function (path) {
+      $row.append(
+        $("<span>").addClass("removed-path-chip")
+          .attr("data-testid", "removed-path-chip")
+          .text(path)
+      );
+    });
     $row.prop("hidden", false);
   }
 

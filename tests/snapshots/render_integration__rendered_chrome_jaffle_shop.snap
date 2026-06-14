@@ -1,5 +1,6 @@
 ---
 source: tests/render_integration.rs
+assertion_line: 227
 expression: chrome
 ---
 <!DOCTYPE html>
@@ -1978,6 +1979,28 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
   overflow-wrap: anywhere;
 }
 
+/* cute-dbt#416 — the top-level NEW/REMOVED state chips, reusing the
+   .axis-chip pill base so they compose coherently with the 3-axis MODIFIED
+   chips. NEW leads the model-axes row (accent left-border, the
+   "added" affordance); REMOVED leads the report-level removed-models
+   summary (muted left-border + line-through path list, the "gone"
+   affordance). Existing AA-gated semantic tokens only, so the chips theme
+   with the chassis. The visual polish is a #360 design pass. */
+.state-chip { font-weight: 700; }
+.state-chip-new { border-left: 3px solid var(--accent); }
+.state-chip-removed { border-left: 3px solid var(--text-muted); }
+.removed-models-row {
+  margin: 0.4rem 0 0; display: flex; flex-wrap: wrap; gap: 0.35rem;
+  align-items: center;
+}
+.removed-path-chip {
+  font-family: var(--font-mono); font-size: 0.78em;
+  background: var(--bg-alt); color: var(--text-muted);
+  border: var(--rule-w) solid var(--border);
+  border-radius: var(--radius-sm); padding: 0.1rem 0.45rem;
+  text-decoration: line-through; overflow-wrap: anywhere;
+}
+
 /* ============================================================================
    cute-dbt#402 (epic #360) — the subject-lens tab shell. Tabs are subject
    JOURNEYS (Models / Macros / Project), not change-state sections. First
@@ -2133,6 +2156,7 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
 <section class="test-selection" aria-label="Test selection">
   
   <div class="axis-filter" role="radiogroup" aria-label="Filter models by change axis" data-testid="axis-filter" hidden></div>
+  <p class="removed-models-row" aria-label="Models removed in this PR" data-testid="removed-models" hidden></p>
   <div class="test-selector-row">
     <div class="selector-field">
       <label for="model-select">Model</label>
@@ -2513,6 +2537,9 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     });
     renderTestModeToggle();
     renderAxisFilter();
+    // cute-dbt#416 — the node-less REMOVED models summary renders once at
+    // boot (the set is fixed for the report; no per-model dependency).
+    renderRemovedModels();
     renderModelSelector();
     renderTestSelector();
     renderForSelectedModel();
@@ -2866,11 +2893,30 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     var $row = $('[data-testid="model-axes"]').empty();
     var axes = (m && m.axes) || null;
     var configFile = (m && m.config_file) || null;
+    // cute-dbt#416 — the top-level NEW state chip. The state is mutually
+    // exclusive (new | modified); only NEW renders an extra chip (the axis
+    // chips already say MODIFIED). Present only in --pr-diff mode (baseline
+    // omits `state`). REMOVED never reaches here — removed models are
+    // node-less and surfaced as the separate Models-lens summary.
+    var isNew = (m && m.state) === "new";
     var firedAxes = axes
       ? AXIS_ORDER.filter(function (k) { return axes[k]; })
       : [];
-    if (!firedAxes.length && !configFile) { $row.prop("hidden", true); return; }
-    // Axis chips first — the primary 3-axis attribution affordance.
+    if (!isNew && !firedAxes.length && !configFile) {
+      $row.prop("hidden", true);
+      return;
+    }
+    // The NEW state chip leads the row — the top-level lifecycle state sits
+    // ahead of the per-axis MODIFIED attribution.
+    if (isNew) {
+      $row.append(
+        $("<span>").addClass("axis-chip state-chip state-chip-new")
+          .attr("data-testid", "state-chip")
+          .attr("data-state", "new")
+          .text("New")
+      );
+    }
+    // Axis chips next — the primary 3-axis attribution affordance.
     firedAxes.forEach(function (k) {
       $row.append(
         $("<span>").addClass("axis-chip axis-chip-" + k)
@@ -2889,6 +2935,36 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
           .text(configFile)
       );
     }
+    $row.prop("hidden", false);
+  }
+
+  // cute-dbt#416 — the REMOVED models summary. Removed models are node-less
+  // (no current node → no dropdown detail), so they surface ONCE at the
+  // Models lens level as a count + a short path list, never as dropdown
+  // options. Rendered once at boot (the set is fixed for the report). The
+  // final placement is a #360 design-revisitable default.
+  function renderRemovedModels() {
+    var $row = $('[data-testid="removed-models"]');
+    if (!$row.length) { return; }
+    $row.empty();
+    var removed = (DATA && DATA.removed_models) || [];
+    if (!removed.length) { $row.prop("hidden", true); return; }
+    var label = removed.length === 1
+      ? "1 model removed"
+      : removed.length + " models removed";
+    $row.append(
+      $("<span>").addClass("axis-chip state-chip state-chip-removed")
+        .attr("data-testid", "removed-summary-chip")
+        .attr("data-removed-count", String(removed.length))
+        .text(label)
+    );
+    removed.forEach(function (path) {
+      $row.append(
+        $("<span>").addClass("removed-path-chip")
+          .attr("data-testid", "removed-path-chip")
+          .text(path)
+      );
+    });
     $row.prop("hidden", false);
   }
 

@@ -415,6 +415,7 @@ fn payload_json_for(model_id: &str, policy: &CheckPolicy<HeuristicId>) -> serde_
         policy,
         &cute_dbt::domain::ProjectFacts::default(),
         &std::collections::BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
     );
     serde_json::to_value(&payload.models[0]).expect("model payload serializes")
 }

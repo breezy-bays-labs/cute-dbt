@@ -333,6 +333,25 @@ fn synthesize_pr_diff(
             ));
         }
     }
+    // cute-dbt#416: added-file blocks — `--- /dev/null` / `+++ b/<path>`
+    // (the NEW-detection signal). A minimal `+`-only hunk is enough; the
+    // scope path keys NEW off the `added` set, not the hunk body.
+    for added in &world.added_files {
+        patch.push_str(&format!(
+            "diff --git a/{added} b/{added}\nnew file mode 100644\n--- /dev/null\n+++ b/{added}\n"
+        ));
+        push_hunk(&mut patch, 0, 1, &[], &["new content".to_owned()]);
+    }
+    // cute-dbt#416: deleted-file blocks — `--- a/<path>` / `+++ /dev/null`
+    // (the REMOVED-detection signal). A minimal `-`-only hunk; the scope
+    // path keys REMOVED off the `deleted` set + node absence.
+    for deleted in &world.deleted_files {
+        patch.push_str(&format!(
+            "diff --git a/{deleted} b/{deleted}\ndeleted file mode 100644\n--- a/{deleted}\n+++ /dev/null\n"
+        ));
+        // A pure deletion: `@@ -1,N +0,0 @@` with N removed lines.
+        patch.push_str("@@ -1 +0,0 @@\n-old content\n");
+    }
     for changed in &world.changed_files {
         let is_yaml = changed.ends_with(".yml") || changed.ends_with(".yaml");
         let tests = tests_declared_in(manifest, changed, project_root);
@@ -390,6 +409,37 @@ fn pr_diff_changes_one(world: &mut World, path: String) {
 #[given(regex = r#"^a PR diff that changes (?:only )?"([^"]+)" and "([^"]+)"$"#)]
 fn pr_diff_changes_two(world: &mut World, a: String, b: String) {
     world.changed_files = vec![a, b];
+}
+
+// --- Given: added / deleted models (cute-dbt#416) --------------------
+
+/// A PR that ADDS a new model file: the diff carries a `--- /dev/null` /
+/// `+++ b/<ofp>` block (the NEW signal) AND the manifest carries the new
+/// model node (so it's a real in-scope NEW model with detail). The model's
+/// `original_file_path` is the added path, so scope attributes it NEW.
+#[given(regex = r#"^a PR diff that adds a new model at "([^"]+)"$"#)]
+fn pr_diff_adds_model(world: &mut World, ofp: String) {
+    let bare = bare_from_ofp(&ofp);
+    let manifest = take_current(world);
+    let manifest = with_node(
+        manifest,
+        model_node_with_original_file_path(&bare, "ck-new", Some(COMPILED_WITH_CTE), &ofp),
+    );
+    world.current_manifest = Some(manifest);
+    world.last_named_model = Some(bare);
+    world.added_files.push(ofp);
+}
+
+/// A PR that DELETES a model file: the diff carries a `--- a/<ofp>` /
+/// `+++ /dev/null` block (the REMOVED signal). NO node is added — a REMOVED
+/// model is node-less; the path under `models/` ending in `.sql`/`.py`
+/// resolving to no current node is the REMOVED inference.
+#[given(regex = r#"^a PR diff that deletes the model at "([^"]+)"$"#)]
+fn pr_diff_deletes_model(world: &mut World, ofp: String) {
+    // Ensure a (possibly empty) manifest exists for the When step.
+    let manifest = take_current(world);
+    world.current_manifest = Some(manifest);
+    world.deleted_files.push(ofp);
 }
 
 // --- Given: git renames (cute-dbt#80) --------------------------------
@@ -1087,6 +1137,63 @@ fn model_attributed_to_axes(world: &mut World, name: String, axes_csv: String) {
             "model {name:?} axis {axis:?}: expected {should_fire}, got {fired} (full axes {axes:?})",
         );
     }
+}
+
+// --- cute-dbt#416: NEW/MODIFIED/REMOVED state taxonomy --------------
+
+/// Assert a model's payload carries the expected top-level state
+/// (`new`/`modified`). The state is the wire form of `ModelState`,
+/// serialized only on the `--pr-diff` arm.
+#[then(regex = r#"^the model "([^"]+)" has the state "([^"]+)"$"#)]
+fn model_has_state(world: &mut World, name: String, expected: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let model = find_model(&p, &name)
+        .unwrap_or_else(|| panic!("model {name:?} not in payload; got {:?}", model_names(&p)));
+    let state = model["state"].as_str().unwrap_or_else(|| {
+        panic!("model {name:?} must carry a state in pr-diff mode; got {model:?}")
+    });
+    assert_eq!(
+        state, expected,
+        "model {name:?} state: expected {expected:?}, got {state:?}",
+    );
+}
+
+/// Assert the rendered report lists the given path among its REMOVED models
+/// (the node-less `removed_models` payload summary).
+#[then(regex = r#"^the rendered report lists "([^"]+)" as a removed model$"#)]
+fn report_lists_removed_model(world: &mut World, path: String) {
+    require_exit_0(world);
+    let p = payload(world);
+    let removed: Vec<String> = p["removed_models"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        removed.contains(&path),
+        "expected {path:?} among removed models; got {removed:?}",
+    );
+}
+
+/// Assert the rendered report surfaces NO removed-model summary (the
+/// `removed_models` key is omitted when empty).
+#[then("the rendered report lists no removed models")]
+fn report_lists_no_removed_models(world: &mut World) {
+    require_exit_0(world);
+    let p = payload(world);
+    let empty = p
+        .get("removed_models")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty);
+    assert!(
+        empty,
+        "expected no removed models; got {:?}",
+        p.get("removed_models")
+    );
 }
 
 // --- cute-dbt#414 (Slice C): the single-select 3-axis filter toggle ---

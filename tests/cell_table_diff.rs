@@ -109,6 +109,7 @@ fn index_for(hunks: Vec<Hunk>) -> NormalizedDiffIndex {
     let diff = PrDiff {
         renames: Vec::new(),
         deleted: Vec::new(),
+        added: Vec::new(),
         files: vec![FileHunks {
             path: OFP.to_owned(),
             hunks,

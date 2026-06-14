@@ -72,6 +72,7 @@ struct DiffScan {
     files: Vec<FileHunks>,
     renames: Vec<RenamePair>,
     deleted: Vec<String>,
+    added: Vec<String>,
     pending_rename_from: Option<String>,
     /// The old-side path staged by the most recent `--- a/<path>` header,
     /// awaiting its `+++` partner (cute-dbt#396). A `+++ /dev/null`
@@ -80,6 +81,13 @@ struct DiffScan {
     /// [`start_file_with_path`]; a `--- /dev/null` (addition) never stages
     /// anything.
     pending_old_path: Option<String>,
+    /// `true` when the most recent `--- ` header was `--- /dev/null` — the
+    /// addition signal (cute-dbt#416). The mirror of [`pending_old_path`]
+    /// (`Self::pending_old_path`): a `/dev/null` old side stages no path
+    /// but DOES flag the next `+++ b/<path>` as an addition, so its new
+    /// path lands in [`added`](Self::added). A real `--- a/<path>` clears
+    /// this flag (a modify / deletion / rename, never an addition).
+    pending_old_dev_null: bool,
     current: Option<FileHunks>,
     in_hunk: bool,
     saw_structure: bool,
@@ -116,6 +124,7 @@ impl DiffScan {
         self.in_hunk = false;
         self.pending_rename_from = None;
         self.pending_old_path = None;
+        self.pending_old_dev_null = false;
         flush(&mut self.current, &mut self.files);
         true
     }
@@ -160,7 +169,9 @@ impl DiffScan {
             &mut self.current,
             &mut self.files,
             &mut self.deleted,
+            &mut self.added,
             &mut self.pending_old_path,
+            &mut self.pending_old_dev_null,
         ) || consume_rename_header(line, &mut self.pending_rename_from, &mut self.renames)
         {
             self.saw_structure = true;
@@ -179,6 +190,7 @@ impl DiffScan {
             files: self.files,
             renames: self.renames,
             deleted: self.deleted,
+            added: self.added,
         })
     }
 }
@@ -233,24 +245,32 @@ fn open_hunk(
 ///
 /// A `--- ` (old-side path) **stages** its path in `pending_old_path` for
 /// the `+++` partner to resolve (cute-dbt#396): a `/dev/null` old side (an
-/// addition) clears the staging. A `+++ ` either:
+/// addition) stages no path but raises `pending_old_dev_null` so the next
+/// `+++ b/<path>` is recorded on `added` (cute-dbt#416). A `+++ ` either:
 /// - `+++ /dev/null` (a deletion) → records the staged old path on `deleted`;
 /// - `+++ b/<path>` (a real new side: add / modify / rename-with-edit) →
 ///   starts a new file via [`start_file_with_path`] (which also clears the
-///   staging).
+///   staging) and, when the old side was `/dev/null`, ALSO records the new
+///   path on `added`.
 ///
 /// Returns `true` when the line was a `--- `/`+++ ` header (the caller marks
 /// `saw_structure` and moves on); `false` for any other header line.
+#[allow(clippy::too_many_arguments)]
 fn consume_path_header(
     line: &str,
     current: &mut Option<FileHunks>,
     files: &mut Vec<FileHunks>,
     deleted: &mut Vec<String>,
+    added: &mut Vec<String>,
     pending_old_path: &mut Option<String>,
+    pending_old_dev_null: &mut bool,
 ) -> bool {
     if let Some(rest) = line.strip_prefix("--- ") {
-        // Stage the old-side path (None for `/dev/null` — an addition).
-        *pending_old_path = parse_minus_path(rest);
+        // Stage the old-side path; `None` (`/dev/null`) is an addition —
+        // stage no path but flag the `+++` partner as an addition.
+        let old = parse_minus_path(rest);
+        *pending_old_dev_null = old.is_none();
+        *pending_old_path = old;
         return true;
     }
     if let Some(rest) = line.strip_prefix("+++ ") {
@@ -264,9 +284,13 @@ fn consume_path_header(
             }
             // `+++ b/<path>` — a real new side; open the file. The staged
             // old path is now consumed (a modify / rename-with-edit, never a
-            // deletion).
+            // deletion). When the old side was `/dev/null` (cute-dbt#416),
+            // this is an addition — its new path also lands on `added`.
             Some(path) => {
                 *pending_old_path = None;
+                if std::mem::take(pending_old_dev_null) {
+                    added.push(path.clone());
+                }
                 start_file_with_path(path, current, files);
             }
         }
@@ -956,6 +980,192 @@ index 3333333..4444444 100644\n\
         assert!(
             diff.deleted.is_empty(),
             "no staged old path → no phantom deletion",
+        );
+    }
+
+    // ----- cute-dbt#416: addition detection (the NEW-arm signal) -----
+
+    #[test]
+    fn pure_addition_captures_the_new_side_path_on_added() {
+        // The minimal addition shape: `--- /dev/null` then `+++ b/<path>`.
+        // The OLD side is `/dev/null`, so the new path lands on `added` (the
+        // mirror of `deleted`). The new path is ALSO a normal `files` entry
+        // (its `+`-only hunks are real changed content).
+        let diff = parse_diff(
+            "diff --git a/models/new_model.sql b/models/new_model.sql\nnew file mode 100644\n--- /dev/null\n+++ b/models/new_model.sql\n@@ -0,0 +1,2 @@\n+select 1\n+select 2\n",
+        )
+        .expect("a pure-addition diff parses");
+        assert_eq!(
+            diff.added,
+            vec!["models/new_model.sql".to_owned()],
+            "the `b/`-stripped new-side path is the added path",
+        );
+        assert_eq!(
+            diff.files[0].path, "models/new_model.sql",
+            "the addition is also a normal changed-content file entry",
+        );
+        assert!(diff.renames.is_empty(), "an addition is not a rename");
+        assert!(diff.deleted.is_empty(), "an addition is not a deletion");
+    }
+
+    #[test]
+    fn modify_is_not_an_addition() {
+        // A plain modification carries `--- a/x` / `+++ b/x` (BOTH sides are
+        // the same real path). The real `--- a/` old side never flags an
+        // addition, so `added` stays empty.
+        let diff = parse_diff(
+            "diff --git a/m.sql b/m.sql\nindex 1111..2222 100644\n--- a/m.sql\n+++ b/m.sql\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .expect("a modify diff parses");
+        assert!(
+            diff.added.is_empty(),
+            "a modification (old side is a real path) is not an addition",
+        );
+        assert_eq!(diff.files[0].path, "m.sql");
+    }
+
+    #[test]
+    fn deletion_is_not_an_addition() {
+        // A pure deletion carries `--- a/<path>` / `+++ /dev/null`. The new
+        // side is `/dev/null`, so nothing lands in `added` — it is a
+        // deletion, not an addition.
+        let diff = parse_diff(
+            "diff --git a/models/old_model.sql b/models/old_model.sql\ndeleted file mode 100644\n--- a/models/old_model.sql\n+++ /dev/null\n@@ -1 +0,0 @@\n-select 1\n",
+        )
+        .expect("a pure-deletion diff parses");
+        assert!(
+            diff.added.is_empty(),
+            "a deletion (new side is /dev/null) is not an addition",
+        );
+        assert_eq!(diff.deleted, vec!["models/old_model.sql".to_owned()]);
+    }
+
+    #[test]
+    fn rename_is_not_an_addition() {
+        // A rename-with-edit carries `--- a/old` / `+++ b/new` (the OLD side
+        // is a REAL path, not `/dev/null`), so it is a rename, NOT an
+        // addition — `added` stays empty.
+        let diff = parse_diff(
+            "diff --git a/old_name.yml b/new_name.yml\nsimilarity index 80%\nrename from old_name.yml\nrename to new_name.yml\n--- a/old_name.yml\n+++ b/new_name.yml\n@@ -1 +1 @@\n-a\n+b\n",
+        )
+        .expect("a rename-with-change diff parses");
+        assert!(
+            diff.added.is_empty(),
+            "a rename (old side is a real path) is not an addition",
+        );
+        assert_eq!(diff.renames.len(), 1);
+    }
+
+    #[test]
+    fn added_path_strips_b_prefix_and_trailing_timestamp() {
+        // The new-side `+++ ` header carries a `b/` prefix and an optional
+        // trailing `\t<timestamp>` section, both stripped (parity with the
+        // deletion old-side `parse_minus_path`).
+        let diff = parse_diff(
+            "diff --git a/dir/sub/born.sql b/dir/sub/born.sql\nnew file mode 100644\n--- /dev/null\n+++ b/dir/sub/born.sql\t2026-01-01 00:00:00\n@@ -0,0 +1 @@\n+x\n",
+        )
+        .expect("an addition with a timestamped new-side header parses");
+        assert_eq!(
+            diff.added,
+            vec!["dir/sub/born.sql".to_owned()],
+            "the `b/` prefix and the trailing `\\t<timestamp>` are stripped",
+        );
+    }
+
+    #[test]
+    fn multiple_additions_are_all_collected() {
+        let diff = parse_diff(
+            "diff --git a/a.sql b/a.sql\nnew file mode 100644\n--- /dev/null\n+++ b/a.sql\n@@ -0,0 +1 @@\n+x\ndiff --git a/b.yml b/b.yml\nnew file mode 100644\n--- /dev/null\n+++ b/b.yml\n@@ -0,0 +1 @@\n+y\n",
+        )
+        .expect("a two-addition diff parses");
+        assert_eq!(
+            diff.added,
+            vec!["a.sql".to_owned(), "b.yml".to_owned()],
+            "every added file is captured in diff order",
+        );
+    }
+
+    #[test]
+    fn addition_marker_does_not_leak_across_files() {
+        // A `--- /dev/null` followed by its OWN `+++ b/added` flags only that
+        // addition; a LATER modify (`--- a/y` / `+++ b/y`) must NOT inherit
+        // the stale dev-null flag. The addition's real `+++ b/` consumes the
+        // flag (`std::mem::take`), so the modify's `+++ b/y` finds it cleared.
+        let diff = parse_diff(
+            "diff --git a/added.sql b/added.sql\nnew file mode 100644\n--- /dev/null\n+++ b/added.sql\n@@ -0,0 +1 @@\n+a\ndiff --git a/y.sql b/y.sql\nindex 1111..2222 100644\n--- a/y.sql\n+++ b/y.sql\n@@ -1 +1 @@\n-old\n+new\n",
+        )
+        .expect("parses");
+        assert_eq!(
+            diff.added,
+            vec!["added.sql".to_owned()],
+            "only added.sql is an addition, not the later modified y.sql",
+        );
+    }
+
+    #[test]
+    fn mixed_patch_classifies_added_distinctly() {
+        // The four-kind mixed patch (mirror of `mixed_patch_classifies_each_file_kind`)
+        // but asserting `added` carries ONLY the addition's new path — never
+        // the modify's or the rename's new path.
+        let diff = parse_diff(concat!(
+            // (1) deletion
+            "diff --git a/gone.sql b/gone.sql\n",
+            "deleted file mode 100644\n",
+            "--- a/gone.sql\n",
+            "+++ /dev/null\n",
+            "@@ -1 +0,0 @@\n",
+            "-bye\n",
+            // (2) addition
+            "diff --git a/added.sql b/added.sql\n",
+            "new file mode 100644\n",
+            "--- /dev/null\n",
+            "+++ b/added.sql\n",
+            "@@ -0,0 +1 @@\n",
+            "+hello\n",
+            // (3) modification
+            "diff --git a/kept.sql b/kept.sql\n",
+            "index 1111..2222 100644\n",
+            "--- a/kept.sql\n",
+            "+++ b/kept.sql\n",
+            "@@ -1 +1 @@\n",
+            "-old\n",
+            "+new\n",
+            // (4) rename-with-edit
+            "diff --git a/from.yml b/to.yml\n",
+            "similarity index 90%\n",
+            "rename from from.yml\n",
+            "rename to to.yml\n",
+            "--- a/from.yml\n",
+            "+++ b/to.yml\n",
+            "@@ -1 +1 @@\n",
+            "-p\n",
+            "+q\n",
+        ))
+        .expect("a mixed patch parses");
+        assert_eq!(
+            diff.added,
+            vec!["added.sql".to_owned()],
+            "only the addition's new path lands in `added`",
+        );
+        assert_eq!(
+            diff.deleted,
+            vec!["gone.sql".to_owned()],
+            "only the deletion lands in `deleted`",
+        );
+    }
+
+    #[test]
+    fn dev_null_minus_without_a_following_plus_records_no_addition() {
+        // Defensive: a `--- /dev/null` not followed by a `+++ b/<path>`
+        // (never real git output) records no addition. The dev-null flag is
+        // reset on the next `diff --git`.
+        let diff = parse_diff(
+            "diff --git a/z.sql b/z.sql\n--- /dev/null\ndiff --git a/w.sql b/w.sql\nindex 1111..2222 100644\n--- a/w.sql\n+++ b/w.sql\n@@ -1 +1 @@\n-a\n+b\n",
+        )
+        .expect("parses");
+        assert!(
+            diff.added.is_empty(),
+            "an orphan `--- /dev/null` records no phantom addition",
         );
     }
 

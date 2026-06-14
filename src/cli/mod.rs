@@ -97,12 +97,12 @@ use crate::domain::{
     BlockDiff, ChangeAxes, CheckPolicy, ConfigAttribution, DEFAULT_MACRO_BODY_CAP,
     DEFAULT_PR_DAG_NODE_CAP, DEFAULT_REPORT_TITLE, DEFAULT_SEED_ROW_CAP, DepDate,
     EnabledExperiments, EnvelopeScope, Experiment, Finding, FixtureTableDiff, GovernanceFacts,
-    HeuristicId, InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, Node,
-    NodeId, NormalizedDiffIndex, PrConfig, PrRef, PreflightError, ProjectChangePanel, ProjectFacts,
-    ProjectFallbackReason, ResolvedAnchor, ScopeInput, ScopeSelection, SeedCard, SeedInScopeSet,
-    StateComparator, SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff,
-    UnitTestYamlBlock, VarReference, all_models, all_seeds, attach_hook_facts,
-    attach_model_yaml_diffs, attach_var_facts, attribute_config_tree_changes,
+    HeuristicId, InScopeSet, Manifest, ModelInScopeSet, ModelState, ModelYamlOutcome,
+    NamedTableDiff, Node, NodeId, NormalizedDiffIndex, PrConfig, PrRef, PreflightError,
+    ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ResolvedAnchor, ScopeInput,
+    ScopeSelection, SeedCard, SeedInScopeSet, StateComparator, SuppressRule, SuppressionSource,
+    UnitTest, UnitTestDataDiff, UnitTestYamlBlock, VarReference, all_models, all_seeds,
+    attach_hook_facts, attach_model_yaml_diffs, attach_var_facts, attribute_config_tree_changes,
     attribute_var_changes, build_seed_cards, changed_macros_baseline, changed_macros_pr_diff,
     changed_models, check_by_id, compute_pr_dag, diff_project_definitions,
     effective_fixture_format, external_fixture_table, extract_model_block, extract_unit_test_block,
@@ -320,6 +320,13 @@ fn execute_report(args: &ReportArgs) -> Result<ReportOutcome, RunError> {
         // empty map (the documented Option-A gap), so baseline goldens stay
         // byte-identical.
         axes,
+        // cute-dbt#416 — the per-model NEW/MODIFIED state + the node-less
+        // REMOVED model paths, threaded into the render payload (the Models-
+        // lens state chips). The `--pr-diff` arm populates a state for every
+        // in-scope model and the deleted model paths; the baseline arm
+        // produces empty maps (the documented Option-A gap).
+        model_states,
+        removed_models,
     } = widen_with_config_attributions(
         select_in_scope(&current, &scope_input),
         &current,
@@ -544,6 +551,8 @@ fn execute_report(args: &ReportArgs) -> Result<ReportOutcome, RunError> {
         seed_row_cap,
         pr_dag.as_ref(),
         &axes,
+        &model_states,
+        &removed_models,
     )
     .map_err(|err| RunError::output(&args.out, err))?;
     // cute-dbt#386 — the machine-readable findings envelope. Purely
@@ -2209,6 +2218,8 @@ fn render(
     seed_row_cap: usize,
     pr_dag: Option<&PrDagPayload>,
     axes: &BTreeMap<NodeId, ChangeAxes>,
+    model_states: &BTreeMap<NodeId, ModelState>,
+    removed_models: &[String],
 ) -> Result<(), io::Error> {
     render_report_with_externals(
         out,
@@ -2235,6 +2246,8 @@ fn render(
         seed_row_cap,
         pr_dag,
         axes,
+        model_states,
+        removed_models,
     )
 }
 
@@ -3510,6 +3523,7 @@ mod tests {
         let diff = PrDiff {
             renames: Vec::new(),
             deleted: Vec::new(),
+            added: Vec::new(),
             files: vec![FileHunks {
                 path: path.to_owned(),
                 hunks: vec![Hunk {
@@ -3628,6 +3642,7 @@ mod tests {
         let diff = PrDiff {
             renames: Vec::new(),
             deleted: Vec::new(),
+            added: Vec::new(),
             files: vec![FileHunks {
                 path: "dbt_project.yml".to_owned(),
                 hunks,
@@ -3701,6 +3716,7 @@ mod tests {
         let diff = PrDiff {
             renames: Vec::new(),
             deleted: Vec::new(),
+            added: Vec::new(),
             files: vec![FileHunks {
                 path: "models/dim_users.sql".to_owned(),
                 hunks: vec![replacement_hunk(1, "a", "b")],
