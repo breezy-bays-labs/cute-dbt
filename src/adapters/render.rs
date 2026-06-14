@@ -2027,12 +2027,15 @@ pub struct MacroDagEdge {
 fn build_macro_dag(current: &Manifest, macro_id: &str) -> MacroDagPayload {
     let focus = crate::domain::macro_focus_set(current, macro_id);
     let lineage = crate::adapters::explore::build_macro_lineage_payload(current, &focus);
+    // `lineage` is an owned temporary, unused after this point, so consume it
+    // with `into_iter()` — moves each id/name/from/to string out instead of
+    // cloning it (cute-dbt#438 review).
     let nodes: Vec<MacroDagNode> = lineage
         .nodes
-        .iter()
+        .into_iter()
         .map(|n| MacroDagNode {
-            id: n.id.clone(),
-            name: n.name.clone(),
+            id: n.id,
+            name: n.name,
             role: match n.macro_role {
                 Some(crate::adapters::explore::MacroRole::User) => "user",
                 // Downstream is the default for any focus node that is not a
@@ -2045,10 +2048,10 @@ fn build_macro_dag(current: &Manifest, macro_id: &str) -> MacroDagPayload {
         .collect();
     let edges: Vec<MacroDagEdge> = lineage
         .edges
-        .iter()
+        .into_iter()
         .map(|e| MacroDagEdge {
-            from: e.from.clone(),
-            to: e.to.clone(),
+            from: e.from,
+            to: e.to,
         })
         .collect();
     MacroDagPayload { nodes, edges }
