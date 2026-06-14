@@ -704,10 +704,22 @@ const MODEL_FILE_EXTENSIONS: [&str; 2] = [".sql", ".py"];
 /// is project-relative, matching the manifest's `original_file_path`
 /// scheme. The result is sorted for deterministic golden output.
 fn removed_model_paths(current: &Manifest, index: &NormalizedDiffIndex) -> Vec<String> {
+    // Materialize the current model paths once (cute-dbt#437 review) so the
+    // node-membership test is an O(1) set lookup per deleted path instead of
+    // an O(model-nodes) re-traversal — O(D + N) overall, not O(D × N). A
+    // deleted path that still resolves to a current model node is a
+    // modify/rename, NOT a removal — only genuinely node-less deletions are
+    // REMOVED models, so those are excluded.
+    let current_model_paths: BTreeSet<&str> = current
+        .nodes()
+        .iter()
+        .filter(|(_, node)| node.resource_type() == "model")
+        .filter_map(|(_, node)| node.original_file_path())
+        .collect();
     let mut removed: Vec<String> = index
         .deleted_paths()
         .filter(|path| is_model_path(path))
-        .filter(|path| !path_names_a_current_node(current, path))
+        .filter(|path| !current_model_paths.contains(path))
         .map(str::to_owned)
         .collect();
     removed.sort_unstable();
@@ -722,18 +734,6 @@ fn removed_model_paths(current: &Manifest, index: &NormalizedDiffIndex) -> Vec<S
 fn is_model_path(path: &str) -> bool {
     path.starts_with(DEFAULT_MODEL_PATH_PREFIX)
         && MODEL_FILE_EXTENSIONS.iter().any(|ext| path.ends_with(ext))
-}
-
-/// Whether `path` is the `original_file_path` of some current model node
-/// (cute-dbt#416). A deleted path that still resolves to a node is a
-/// modify/rename, NOT a removal — only genuinely node-less deletions are
-/// REMOVED models.
-fn path_names_a_current_node(current: &Manifest, path: &str) -> bool {
-    current
-        .nodes()
-        .iter()
-        .filter(|(_, node)| node.resource_type() == "model")
-        .any(|(_, node)| node.original_file_path() == Some(path))
 }
 
 #[cfg(test)]

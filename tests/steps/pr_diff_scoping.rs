@@ -1185,10 +1185,14 @@ fn report_lists_removed_model(world: &mut World, path: String) {
 fn report_lists_no_removed_models(world: &mut World) {
     require_exit_0(world);
     let p = payload(world);
-    let empty = p
-        .get("removed_models")
-        .and_then(Value::as_array)
-        .is_none_or(Vec::is_empty);
+    // Absent key is the no-removed-models happy path (`skip_serializing_if`
+    // omits an empty `removed_models`); a *present* value must be an empty
+    // array — a non-array present value is a payload-shape regression and
+    // must fail, not silently pass (cute-dbt#437 review).
+    let empty = match p.get("removed_models") {
+        None => true,
+        Some(v) => v.as_array().is_some_and(Vec::is_empty),
+    };
     assert!(
         empty,
         "expected no removed models; got {:?}",
