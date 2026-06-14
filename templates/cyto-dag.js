@@ -319,11 +319,19 @@
 
   // Public seam: interaction.js's renderDag() dispatcher drives render/
   // destroy; the cyInstance getter is the headless-test seam (mirrors the
-  // window.__cute* seam precedent).
+  // window.__cute* seam precedent). `layoutPositions` + `styleSheetFor` are
+  // EXPOSED (cute-dbt#429/#431) so the report's tab-scoped DAGs (the Models-tab
+  // mini-DAG + the Macros-tab macro DAG) reuse the SAME first-party preset
+  // longest-path column layout — the report-page no-layout-plugin contract
+  // (NEVER cytoscape-dagre; dagre is the explore page's layout only,
+  // AGENTS.md). The tab DAGs build their own independent cy instances (the
+  // CTE-DAG `cy` above stays a separate singleton), so they pass their own
+  // host container; they share only the pure layout math + the palette hook.
   window.CuteCyto = {
     render: render,
     destroy: destroy,
-    cyInstance: function () { return cy; }
+    cyInstance: function () { return cy; },
+    layoutPositions: layoutPositions
   };
 })();
 /* end of cute-dbt cytoscape DAG engine v1 (cute-dbt#180) */

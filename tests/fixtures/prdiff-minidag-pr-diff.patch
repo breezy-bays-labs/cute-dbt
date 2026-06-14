@@ -10,3 +10,11 @@ diff --git a/models/marts/fct_orders.sql b/models/marts/fct_orders.sql
 @@ -4 +4 @@
 -  sum(amount) as revenue
 +  sum(amount) as gross_revenue
+diff --git a/models/marts/_fct_orders_tests.yml b/models/marts/_fct_orders_tests.yml
+--- a/models/marts/_fct_orders_tests.yml
++++ b/models/marts/_fct_orders_tests.yml
+@@ -0,0 +1,4 @@
++models:
++  - name: fct_orders
++    config:
++      materialized: incremental

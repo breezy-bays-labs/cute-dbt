@@ -388,7 +388,7 @@ fn execute_report(args: &ReportArgs) -> Result<ReportOutcome, RunError> {
     // deleted) and the diff/raw_code line counts; it never widens scope. `None`
     // (off, or empty scope) ⇒ omitted from JSON + zero DOM, keeping the
     // non-experimental goldens byte-identical (the `macro_lens` precedent).
-    let pr_dag = gather_pr_dag(&current, &scope_input, &experiments);
+    let pr_dag = gather_pr_dag(&current, &scope_input, &experiments, &axes);
 
     // Stage-2 fail-closed reads the TRUE in-scope set (cute-dbt#91): the
     // widened render set is only for what the report displays. Config-tree
@@ -2011,6 +2011,7 @@ fn gather_pr_dag(
     current: &Manifest,
     scope_input: &ScopeInput,
     experiments: &EnabledExperiments,
+    axes: &BTreeMap<NodeId, ChangeAxes>,
 ) -> Option<PrDagPayload> {
     if !experiments.is_enabled(Experiment::PrScopeMiniDag) {
         return None;
@@ -2022,7 +2023,80 @@ fn gather_pr_dag(
     }
     let mut graph = compute_pr_dag(current, &modified, &new, &removed);
     populate_pr_dag_line_counts(&mut graph, current, scope_input);
-    Some(PrDagPayload::from_graph(graph, DEFAULT_PR_DAG_NODE_CAP))
+    // cute-dbt#430 — the per-axis pre-computed subgraphs feeding the #414
+    // filter-reactive mini-DAG. For each change-axis (`body` / `config` /
+    // `unit_test`), recompute the mini-DAG over the SUBSET of modified models
+    // whose `axes.<axis>` fired (connectors + halo re-derived over that
+    // smaller seed set, IN RUST), so the JS only toggles between the
+    // pre-emitted sets. Empty `axes` (the baseline arm) yields an empty map ⇒
+    // the payload's `by_axis` serde-skips ⇒ baseline goldens stay
+    // byte-identical.
+    let by_axis = pr_dag_axis_subgraphs(current, scope_input, &modified, &new, &removed, axes);
+    Some(PrDagPayload::from_graph_with_axes(
+        graph,
+        by_axis,
+        DEFAULT_PR_DAG_NODE_CAP,
+    ))
+}
+
+/// Recompute one mini-DAG per change-axis over the axis-filtered modified
+/// subset (cute-dbt#430). Returns `axis-token → recomputed graph` for the
+/// three axes (`body` / `config` / `unit_test`), each populated with per-node
+/// line counts identically to the `all` graph. An axis whose subset is empty
+/// still gets an entry (the empty graph) so the JS always has a view to swap
+/// to (it renders the honest "0 models" empty state for that filter).
+///
+/// The `removed` ghosts are intentionally **not** carried into the per-axis
+/// subgraphs: a deletion has no current node to carry a `ChangeAxes`
+/// attribution, so it belongs only to the `all` view. (On the `--pr-diff`
+/// arm — the only arm with `axes` — `removed` is always empty anyway, so this
+/// is a no-op there; the documented choice is for forward-safety.)
+///
+/// Empty `axes` (the baseline arm) short-circuits to an empty map, keeping the
+/// payload byte-identical to the pre-#430 / baseline shape.
+fn pr_dag_axis_subgraphs(
+    current: &Manifest,
+    scope_input: &ScopeInput,
+    modified: &ModelInScopeSet,
+    new: &BTreeSet<NodeId>,
+    removed: &[NodeId],
+    axes: &BTreeMap<NodeId, ChangeAxes>,
+) -> BTreeMap<String, crate::domain::PrDagGraph> {
+    /// The `ChangeAxes`-bit predicate one filter axis reads (`a.body` etc.).
+    type AxisPredicate = fn(&ChangeAxes) -> bool;
+    if axes.is_empty() {
+        return BTreeMap::new();
+    }
+    // The three #414 filter axes, paired with the `ChangeAxes` bit each reads.
+    // (`removed` is dropped per the function contract above.)
+    let _ = removed;
+    let axis_predicates: [(&str, AxisPredicate); 3] = [
+        ("body", |a| a.body),
+        ("config", |a| a.config),
+        ("unit_test", |a| a.unit_test),
+    ];
+    let mut by_axis = BTreeMap::new();
+    for (token, fired) in axis_predicates {
+        // The modified subset whose this-axis bit fired. A modified model with
+        // no `axes` entry (e.g. a config-tree-widened context model) never
+        // fires a specific axis, matching the JS `modelMatchesAxis` semantics.
+        let subset: ModelInScopeSet = modified
+            .iter()
+            .filter(|id| axes.get(*id).is_some_and(fired))
+            .cloned()
+            .collect();
+        // The `new` subset restricted to this axis subset (so an added model
+        // stays New within its axis view).
+        let new_subset: BTreeSet<NodeId> = new
+            .iter()
+            .filter(|id| subset.contains(id))
+            .cloned()
+            .collect();
+        let mut graph = compute_pr_dag(current, &subset, &new_subset, &[]);
+        populate_pr_dag_line_counts(&mut graph, current, scope_input);
+        by_axis.insert(token.to_owned(), graph);
+    }
+    by_axis
 }
 
 /// Derive the `(modified, new, removed)` node sets `compute_pr_dag` consumes,
@@ -2347,6 +2421,136 @@ mod tests {
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, "title-only");
         assert!(subtitle.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // pr_dag_axis_subgraphs (cute-dbt#430) — the per-axis pre-computed
+    // mini-DAG subgraphs feeding the #414 filter-reactive render.
+    // -----------------------------------------------------------------
+
+    /// A `model` node with the given full id + `depends_on` producers.
+    fn axis_model(id: &str, producers: &[&str]) -> Node {
+        Node::new(
+            NodeId::new(id),
+            "model",
+            crate::domain::Checksum::new("sha256", "ck"),
+            Some("select 1".to_owned()),
+            Some("select 1".to_owned()),
+            DependsOn::new(
+                Vec::new(),
+                producers.iter().map(|p| NodeId::new(*p)).collect(),
+            ),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::new(),
+        )
+    }
+
+    fn axis_manifest(specs: &[(&str, &[&str])]) -> Manifest {
+        let nodes = specs
+            .iter()
+            .map(|(id, prods)| (NodeId::new(*id), axis_model(id, prods)))
+            .collect();
+        Manifest::new(
+            ManifestMetadata::new("v12"),
+            nodes,
+            HashMap::new(),
+            HashMap::new(),
+        )
+    }
+
+    fn axes_entry(body: bool, config: bool, unit_test: bool) -> ChangeAxes {
+        ChangeAxes {
+            body,
+            config,
+            unit_test,
+        }
+    }
+
+    /// An empty `--pr-diff` scope input (the arm the per-axis map populates
+    /// on) — the diff is empty so line counts are 0/0, but the topology
+    /// recomputation is what the test asserts.
+    fn empty_pr_diff_scope() -> ScopeInput {
+        let index = NormalizedDiffIndex::new(&crate::domain::PrDiff::default(), None);
+        ScopeInput::PrDiff { index }
+    }
+
+    #[test]
+    fn axis_subgraphs_recompute_connectors_per_axis_subset() {
+        // chain stg -> int -> fct. stg + fct modified (body axis fired for
+        // both); fct ALSO fired config. int is the unchanged connector.
+        let manifest = axis_manifest(&[
+            ("model.s.stg", &[]),
+            ("model.s.int", &["model.s.stg"]),
+            ("model.s.fct", &["model.s.int"]),
+        ]);
+        let modified: ModelInScopeSet = [NodeId::new("model.s.stg"), NodeId::new("model.s.fct")]
+            .into_iter()
+            .collect();
+        let new = BTreeSet::new();
+        let mut axes = BTreeMap::new();
+        axes.insert(NodeId::new("model.s.stg"), axes_entry(true, false, false));
+        axes.insert(NodeId::new("model.s.fct"), axes_entry(true, true, false));
+
+        let scope = empty_pr_diff_scope();
+        let by_axis = pr_dag_axis_subgraphs(&manifest, &scope, &modified, &new, &[], &axes);
+
+        // body: both stg + fct fired body ⇒ int is recomputed as the
+        // connector between them (3 nodes, the same as "all").
+        let body = by_axis.get("body").expect("body view");
+        let body_ids: BTreeSet<&str> = body.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert!(
+            body_ids.contains("model.s.int"),
+            "body subset keeps both modified ⇒ int reappears as connector"
+        );
+        assert!(
+            body.nodes
+                .iter()
+                .any(|n| n.id == "model.s.int" && n.is_connector),
+            "int is the recomputed connector in the body view"
+        );
+
+        // config: ONLY fct fired config ⇒ a single-seed subset, NO connector
+        // (one seed cannot have a between-connector). int must NOT appear as a
+        // connector; fct is disconnected and halos its one parent int instead.
+        let config = by_axis.get("config").expect("config view");
+        assert!(
+            !config.nodes.iter().any(|n| n.is_connector),
+            "single-seed config subset has no connector"
+        );
+        assert!(
+            config
+                .nodes
+                .iter()
+                .any(|n| n.id == "model.s.fct" && !n.is_connector),
+            "fct is the lone modified seed in the config view"
+        );
+
+        // unit_test: no model fired unit_test ⇒ empty subset ⇒ empty graph,
+        // but the entry still exists so the JS always has a view to swap to.
+        let ut = by_axis.get("unit_test").expect("unit_test view present");
+        assert!(
+            ut.nodes.is_empty(),
+            "no unit_test-axis model ⇒ empty subset"
+        );
+    }
+
+    #[test]
+    fn axis_subgraphs_empty_axes_yields_empty_map() {
+        // The baseline arm carries no `axes` ⇒ no per-axis views ⇒ byte-
+        // identical baseline goldens.
+        let manifest = axis_manifest(&[("model.s.a", &[])]);
+        let modified: ModelInScopeSet = [NodeId::new("model.s.a")].into_iter().collect();
+        let map = pr_dag_axis_subgraphs(
+            &manifest,
+            &empty_pr_diff_scope(),
+            &modified,
+            &BTreeSet::new(),
+            &[],
+            &BTreeMap::new(),
+        );
+        assert!(map.is_empty(), "no axes ⇒ no per-axis subgraphs");
     }
 
     // -----------------------------------------------------------------

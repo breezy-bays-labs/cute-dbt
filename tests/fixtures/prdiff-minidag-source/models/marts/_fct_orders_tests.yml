@@ -1,3 +1,7 @@
+models:
+  - name: fct_orders
+    config:
+      materialized: incremental
 unit_tests:
   - name: test_revenue_rollup
     model: fct_orders

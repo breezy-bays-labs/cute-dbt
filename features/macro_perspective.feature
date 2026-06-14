@@ -35,6 +35,22 @@ Feature: A changed macro is called out, never silently invisible
     And the macro-lens fidelity chip reads "heuristic"
     And the macro-lens section never names a "state:modified.macros" selector
 
+  # cute-dbt#431 (epic #427) — the Macros tab renders a macro-scoped lineage
+  # DAG (the impacted models role-stamped as User vertices + their downstream
+  # closure), engine-aware (Mermaid default + Cytoscape) and driven by the
+  # #424 macro picker. Reuses the explore build_macro_lineage_payload, projected
+  # to the slim report tab-DAG shape; the report-page Cytoscape uses the
+  # first-party preset layout, NEVER cytoscape-dagre.
+  Scenario: The macro lens renders the macro-scoped lineage DAG
+    Given a current manifest with a root-project macro called by two models
+    And the working tree carries that macro's source file
+    And the PR diff edits the macro's body
+    And the experimental switch enables macro-lens
+    When I run cute-dbt report in pr-diff mode against the macro patch
+    Then the exit code is 0
+    And the report carries the macro-lens section
+    And the macro-lens section carries the macro-scoped lineage DAG
+
   Scenario: No macro edit leaves the section absent and the report byte-stable
     Given a current manifest with a root-project macro called by two models
     And the working tree carries that macro's source file
