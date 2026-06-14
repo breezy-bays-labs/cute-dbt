@@ -2033,6 +2033,66 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
   color: var(--text-muted); overflow-wrap: anywhere; margin: 0.5rem 0;
 }
 
+/* PR review comments (cute-dbt#419 / #420 / #421 / #422, epic #353).
+   The whole surface is JS-rendered from DATA.pr_comments; these rules
+   dress the inline threads, the top count button, and the per-model count
+   chip. No `overflow:hidden` ancestor clips the focusable-bubble tooltip
+   (the .model-comment-count-chip reuses the shared .expect-tooltip family,
+   whose bubble is position:absolute over a position:relative trigger). */
+.pr-comments-count {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  margin: 0.6rem 0 0; padding: 0.35rem 0.7rem;
+  border: 1px solid var(--border, #ccc); border-radius: var(--radius-sm, 6px);
+  background: var(--surface-2, rgba(0,0,0,0.03)); color: var(--text, inherit);
+  font: inherit; font-size: 0.92em; cursor: pointer;
+}
+.pr-comments-count:hover { background: var(--surface-3, rgba(0,0,0,0.06)); }
+.pr-comments-count:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pr-comments-count-label { font-weight: 600; }
+.pr-comments-count[hidden] { display: none; }
+
+.model-comments-row { margin: 0.3rem 0; }
+.model-comments-row[hidden] { display: none; }
+.model-comment-count-chip {
+  border-bottom: none; padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border, #ccc); border-radius: 999px;
+  background: var(--surface-2, rgba(0,0,0,0.03)); cursor: help;
+}
+.model-comment-bubble { text-align: left; }
+.model-comment-bubble-row { display: block; white-space: nowrap; padding: 0.05rem 0; }
+
+/* Inline thread cards, injected after the anchored Model-SQL diff line. */
+.pr-comment-thread {
+  display: block; margin: 0.3rem 0 0.5rem; padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border, #ccc);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--surface-1, rgba(0,0,0,0.02));
+  font-size: 0.9em; white-space: normal;
+}
+.pr-comment-resolved { border-left-color: var(--ok, #2e7d32); opacity: 0.85; }
+.pr-comment-outdated { border-left-color: var(--warn, #b45c0c); }
+.pr-comment-thread-head {
+  display: flex; align-items: center; gap: 0.4rem;
+  margin-bottom: 0.35rem; color: var(--text-muted);
+}
+.pr-comment-anchor { font-weight: 600; }
+.pr-comment-badge {
+  font-size: 0.78em; padding: 0.05rem 0.4rem; border-radius: 999px;
+  border: 1px solid currentColor;
+}
+.pr-comment-badge-resolved { color: var(--ok, #2e7d32); }
+.pr-comment-badge-outdated { color: var(--warn, #b45c0c); }
+.pr-comment-collapse > summary { cursor: pointer; color: var(--text-muted); }
+.pr-comment { margin: 0.25rem 0; }
+.pr-comment-author { font-weight: 600; color: var(--accent); }
+.pr-comment-text { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 0.1rem; }
+.pr-comment-tail {
+  margin: 0.6rem 0; padding: 0.5rem 0.7rem;
+  border: 1px dashed var(--border, #ccc); border-radius: var(--radius-sm, 6px);
+}
+.pr-comment-tail-label { margin: 0 0 0.4rem; color: var(--text-muted); font-style: italic; }
+
 /* end of cute-dbt report chassis v1 (cute-dbt#177) */
 
 </style>
@@ -2048,6 +2108,9 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     <span class="diff-scope-text">Showing 1 unit test in scope</span> —
     vs baseline manifest <code class="diff-scope-baseline">jaffle-shop-baseline.json</code>.
   </p>
+
+  
+  <button type="button" class="pr-comments-count" data-testid="pr-comments-count" hidden></button>
 </section>
 
 
@@ -2164,6 +2227,8 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     </div>
   </div>
   <p class="model-axes-row" data-testid="model-axes" hidden></p>
+  
+  <p class="model-comments-row" data-testid="model-comments" hidden></p>
   <p class="model-attribution-row" data-testid="model-attribution" hidden></p>
   <p class="zero-updated-hint" data-testid="zero-updated-hint" hidden></p>
 </section>
@@ -2577,6 +2642,10 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     // cute-dbt#416 — the node-less REMOVED models summary renders once at
     // boot (the set is fixed for the report; no per-model dependency).
     renderRemovedModels();
+    // cute-dbt#420 — the top-of-report PR review-comment count button renders
+    // once at boot (the total is fixed for the report). No-op when
+    // DATA.pr_comments is absent (off-gate / no PR context / no comments).
+    renderPrCommentsCountButton();
     renderModelSelector();
     renderTestSelector();
     renderForSelectedModel();
@@ -3008,6 +3077,300 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     $row.prop("hidden", false);
   }
 
+  // ---- PR review comments (#419 / #420 / #421 / #422, epic #353) -------
+  //
+  // The whole comment surface is CLIENT-RENDERED from DATA.pr_comments (the
+  // pr_dag / seed_cards precedent) — the Rust side already ANCHORED each
+  // review thread onto a rendered diff line (the shipped #418 anchoring) and
+  // grouped the threads per model, so the JS only PLACES them: the top count
+  // button (#420), the per-model count tooltip (#421), and the inline thread
+  // at its Model-SQL diff line (#419). Absent the `pr-comments` experiment /
+  // no PR context / no comments, DATA.pr_comments is omitted and every
+  // function here no-ops — keeping every default golden byte-identical.
+
+  // The per-model comment bucket for model `m`, matched on the model's
+  // project-relative file path (`m.path` — the join key BOTH the model
+  // payload and the bucket carry; the model payload does NOT carry the node
+  // id). Null when the model carries no anchored comments.
+  function prCommentBucketFor(m) {
+    var pc = DATA && DATA.pr_comments;
+    if (!pc || !pc.by_model || !m || !m.path) { return null; }
+    for (var i = 0; i < pc.by_model.length; i++) {
+      if (pc.by_model[i].model_path === m.path) { return pc.by_model[i]; }
+    }
+    return null;
+  }
+
+  // Find the model NAME owning a comment bucket (so navigation can select it
+  // in the <select>, which keys on name). Matches on the bucket's
+  // model_path. Null when the bucket's model is not a current dropdown model.
+  function modelNameForBucket(bucket) {
+    for (var i = 0; i < DATA.models.length; i++) {
+      if (DATA.models[i].path === bucket.model_path) { return DATA.models[i].name; }
+    }
+    return null;
+  }
+
+  // #420 — the top-of-report total-count navigation button. Fills the
+  // always-present static .pr-comments-count container and unhides it;
+  // clicking navigates to the FIRST anchored thread (selects its model +
+  // scrolls to the anchored Model-SQL diff line). Rendered ONCE at boot (the
+  // total is fixed for the report). Absent comments ⇒ the container stays
+  // hidden (byte-identity-safe: it is identical empty markup in every report).
+  function renderPrCommentsCountButton() {
+    var $btn = $('[data-testid="pr-comments-count"]');
+    if (!$btn.length) { return; }
+    var pc = DATA && DATA.pr_comments;
+    var total = (pc && typeof pc.total === "number") ? pc.total : 0;
+    if (!pc || total < 1) { $btn.prop("hidden", true).empty(); return; }
+    var label = total === 1 ? "1 PR review comment" : total + " PR review comments";
+    $btn.empty()
+      .append($("<span>").addClass("pr-comments-count-icon").attr("aria-hidden", "true").text("💬"))
+      .append($("<span>").addClass("pr-comments-count-label").text(label))
+      .attr("aria-label", label + " — jump to the first comment")
+      .attr("data-total", String(total))
+      .prop("hidden", false);
+    // The first navigable target: the first thread of the first model bucket
+    // that maps to a current model (skip buckets whose model is not in the
+    // dropdown). Falls back to no-op navigation if none is anchorable.
+    $btn.off("click.cuteComments").on("click.cuteComments", function () {
+      navigateToFirstComment();
+    });
+  }
+
+  // A thread is a LIVE anchor candidate when it pins to a real new/old diff
+  // line (not outdated, has a line) — the navigation target the #420 button
+  // promises (an anchored diff line, never an outdated/unplaced tail entry).
+  // Visibility (folded-away) is resolved at injection time against the live
+  // DOM; here we pick by the payload's anchor facts.
+  function firstLiveThread(bucket) {
+    var threads = (bucket && bucket.threads) || [];
+    for (var j = 0; j < threads.length; j++) {
+      if (!threads[j].outdated && threads[j].line != null) { return threads[j]; }
+    }
+    return null;
+  }
+
+  // Navigate to the first anchored review thread: select its model in the
+  // dropdown (selectModelByName → renderForSelectedModel re-renders the
+  // Model-SQL diff and re-injects the threads), then scroll to that thread's
+  // anchored diff line. Scans for the FIRST bucket that BOTH maps to a
+  // selectable dropdown model AND has a live-anchored thread (CodeRabbit #439:
+  // a bucket whose model isn't selectable, or whose threads are all
+  // outdated/unplaced, must not stop the search). Falls back to the bucket's
+  // first thread only when the loop finds a selectable model with no live
+  // anchor (so the count button is never a dead click). In-page only (no
+  // fetch — the zero-egress contract).
+  function navigateToFirstComment() {
+    var pc = DATA && DATA.pr_comments;
+    if (!pc || !pc.by_model) { return; }
+    var fallback = null;
+    for (var i = 0; i < pc.by_model.length; i++) {
+      var bucket = pc.by_model[i];
+      var name = modelNameForBucket(bucket);
+      if (!name) { continue; }
+      var thread = firstLiveThread(bucket);
+      if (thread) {
+        selectModelByName(name);
+        scrollToThread(thread);
+        return;
+      }
+      // Remember the first selectable-but-anchorless bucket; only used if no
+      // bucket anywhere carries a live thread.
+      if (!fallback && bucket.threads && bucket.threads.length) {
+        fallback = { name: name, thread: bucket.threads[0] };
+      }
+    }
+    if (fallback) {
+      selectModelByName(fallback.name);
+      scrollToThread(fallback.thread);
+    }
+  }
+
+  // Scroll the injected comment thread (or its anchored diff line) into view.
+  // Defers a tick so the renderForSelectedModel re-render + injection settle.
+  // The thread is located by a NON-selector attribute scan (CodeRabbit #439):
+  // `thread.__key` is derived from the model path, which may contain `"`, `\`,
+  // or `]` — interpolating it into a CSS selector would break the query, so we
+  // compare `getAttribute("data-thread-key")` directly instead.
+  function scrollToThread(thread) {
+    setTimeout(function () {
+      var target = null;
+      if (thread && thread.__key) {
+        target = Array.prototype.find.call(
+          document.querySelectorAll(".pr-comment-thread[data-thread-key]"),
+          function (el) { return el.getAttribute("data-thread-key") === thread.__key; }
+        ) || null;
+      }
+      if (!target) {
+        target = document.querySelector(".model-sql .pr-comment-thread");
+      }
+      // Record the resolved navigation target's key so the headless test can
+      // assert the count button lands on the LIVE anchored thread (not an
+      // outdated/unplaced tail entry) — observability only, no behavior.
+      window.__cuteLastCommentNavKey = target
+        ? target.getAttribute("data-thread-key")
+        : null;
+      if (target && target.scrollIntoView) {
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }, 60);
+  }
+
+  // #421 — the per-model comment count, shown via the FOCUSABLE-BUBBLE
+  // tooltip (.expect-tooltip + .expect-tooltip-bubble): a focusable <button>
+  // whose CSS bubble paints on :hover AND :focus — NEVER a native `title`
+  // (hover-delayed, keyboard-unreachable, touch-invisible). aria-label
+  // carries the count for AT; the bubble is aria-hidden (never announced
+  // twice). Hidden when the selected model has no anchored comments.
+  function renderModelCommentCount(m) {
+    var $row = $('[data-testid="model-comments"]');
+    if (!$row.length) { return; }
+    $row.empty();
+    var bucket = prCommentBucketFor(m);
+    if (!bucket || !bucket.count) { $row.prop("hidden", true); return; }
+    var n = bucket.count;
+    var word = n === 1 ? "comment" : "comments";
+    var aria = n + " review " + word + " on this model";
+    var $btn = $("<button>").attr("type", "button")
+      .addClass("expect-tooltip model-comment-count-chip")
+      .attr("data-testid", "model-comment-count")
+      .attr("data-count", String(n))
+      .attr("aria-label", aria)
+      .text("💬 " + n + " " + word);
+    // The bubble: a per-thread summary (author of the first comment + a
+    // resolved/outdated marker), revealed on hover/focus.
+    var $bubble = $("<span>").addClass("expect-tooltip-bubble model-comment-bubble")
+      .attr("data-testid", "model-comment-bubble").attr("aria-hidden", "true");
+    bucket.threads.forEach(function (t) {
+      var who = (t.comments && t.comments[0] && t.comments[0].author) || "ghost";
+      var where = t.outdated ? "outdated"
+        : (t.line != null ? "line " + t.line : "—");
+      var stateMark = t.resolved ? " · resolved" : "";
+      $bubble.append(
+        $("<span>").addClass("model-comment-bubble-row")
+          .text("@" + who + " · " + where + stateMark)
+      );
+    });
+    $btn.append($bubble);
+    $row.append($btn).prop("hidden", false);
+  }
+
+  // Find the VISIBLE rendered diff line a thread anchors to (Right →
+  // data-newline, Left → data-oldline), or null when there is no live anchor
+  // (outdated, no line, no diff, or the only matching line is folded away /
+  // hidden). A `[hidden]` match is treated as NO anchor (CodeRabbit #439):
+  // injecting after an invisible line detaches the comment from its visible
+  // context, so such a thread is routed to the "not shown" tail instead.
+  function liveDiffAnchorFor(t, $diff) {
+    if (t.outdated || t.line == null || !$diff.length) { return null; }
+    var attr = (t.side === "Left") ? "data-oldline" : "data-newline";
+    // `:not([hidden])` excludes folded-away context lines, so a thread on a
+    // collapsed line falls through to `unplaced` (the tail) rather than being
+    // inserted after an invisible anchor.
+    var $line = $diff.find('.diff-line[' + attr + '="' + t.line + '"]:not([hidden])').first();
+    return ($line && $line.length) ? { $line: $line, key: attr + ":" + t.line } : null;
+  }
+
+  // #419 — inject each anchored review thread inline at its Model-SQL diff
+  // line. Runs AFTER renderModelSql has rebuilt the .model-sql diff for the
+  // selected model. A thread RESOLVED to a live, VISIBLE line (Right →
+  // data-newline, Left → data-oldline) is inserted right after that diff
+  // line; an OUTDATED thread (no live line), a thread whose line is folded
+  // away (hidden), and any thread whose anchored line is not in the rendered
+  // diff are appended to a per-model "outdated / unplaced comments" tail so
+  // reviewer context is never lost (the never-drop posture).
+  function anchorModelCommentThreads(m) {
+    var $section = $(".model-sql");
+    // Always clear a prior model's injected threads first (the
+    // renderModelSql rebuild contract — never leak across a model switch).
+    $section.find(".pr-comment-thread, .pr-comment-tail").remove();
+    var bucket = prCommentBucketFor(m);
+    if (!bucket || !bucket.threads.length) { return; }
+    var $diff = $section.find(".sql-diff-view");
+    var unplaced = [];
+    // Track the last thread injected at each anchor so multiple threads on the
+    // SAME diff line keep `bucket.threads` order (CodeRabbit #439: repeated
+    // `$line.after(...)` reverses them — insert after the previously injected
+    // thread, not the raw anchor, each time).
+    var lastInsertedByAnchor = Object.create(null);
+    bucket.threads.forEach(function (t, idx) {
+      // Give each thread a stable per-model key so the navigation scroll can
+      // target it (and the headless test can assert it).
+      t.__key = (m.path || m.name || "model") + "#" + idx;
+      var anchor = liveDiffAnchorFor(t, $diff);
+      if (anchor) {
+        var $thread = buildCommentThread(t);
+        var $insertAfter = lastInsertedByAnchor[anchor.key] || anchor.$line;
+        $insertAfter.after($thread);
+        lastInsertedByAnchor[anchor.key] = $thread;
+      } else {
+        unplaced.push(t);
+      }
+    });
+    if (unplaced.length) {
+      var $tail = $("<div>").addClass("pr-comment-tail").attr("data-testid", "pr-comment-tail");
+      $tail.append(
+        $("<p>").addClass("pr-comment-tail-label")
+          .text(unplaced.length === 1
+            ? "1 comment refers to a line that changed or is not shown:"
+            : unplaced.length + " comments refer to lines that changed or are not shown:")
+      );
+      unplaced.forEach(function (t) { $tail.append(buildCommentThread(t)); });
+      // Place the tail after the diff (or the section wrap) so it is visible.
+      var $wrap = $section.find(".model-sql-wrap");
+      ($wrap.length ? $wrap : $section).append($tail);
+    }
+  }
+
+  // Build one review thread's DOM — GitHub-style: a header (anchor/line +
+  // resolved/outdated badges) over the comment rows (author + body). All
+  // strings are set via .text()/textContent (NEVER innerHTML) so a
+  // manifest/PR-derived body is drawn as text, never parsed as HTML.
+  function buildCommentThread(t) {
+    var $thread = $("<div>").addClass("pr-comment-thread")
+      .attr("data-testid", "pr-comment-thread")
+      .attr("data-thread-key", t.__key || "");
+    if (t.resolved) { $thread.addClass("pr-comment-resolved"); }
+    if (t.outdated) { $thread.addClass("pr-comment-outdated"); }
+    var $head = $("<div>").addClass("pr-comment-thread-head");
+    var anchorText = t.outdated
+      ? (t.original_line != null ? "outdated · was line " + t.original_line : "outdated")
+      : (t.line != null ? "line " + t.line : "comment");
+    $head.append($("<span>").addClass("pr-comment-anchor").text(anchorText));
+    if (t.resolved) {
+      $head.append($("<span>").addClass("pr-comment-badge pr-comment-badge-resolved").text("resolved"));
+    }
+    if (t.outdated) {
+      $head.append($("<span>").addClass("pr-comment-badge pr-comment-badge-outdated").text("outdated"));
+    }
+    $thread.append($head);
+    // Resolved threads collapse: the body lives in a <details>, closed by
+    // default, so a resolved conversation is quiet but still inspectable.
+    var $body;
+    if (t.resolved) {
+      var $det = $("<details>").addClass("pr-comment-collapse");
+      $det.append($("<summary>").text(
+        (t.comments ? t.comments.length : 0) === 1
+          ? "1 comment (resolved)"
+          : (t.comments ? t.comments.length : 0) + " comments (resolved)"
+      ));
+      $body = $("<div>").addClass("pr-comment-body");
+      $det.append($body);
+      $thread.append($det);
+    } else {
+      $body = $("<div>").addClass("pr-comment-body");
+      $thread.append($body);
+    }
+    (t.comments || []).forEach(function (c) {
+      var $c = $("<div>").addClass("pr-comment");
+      $c.append($("<span>").addClass("pr-comment-author").text("@" + (c.author || "ghost")));
+      $c.append($("<div>").addClass("pr-comment-text").text(c.body || ""));
+      $body.append($c);
+    });
+    return $thread;
+  }
+
   function renderModelAttribution(m) {
     var $row = $('[data-testid="model-attribution"]').empty();
     var list = (m && m.config_attributions) || [];
@@ -3056,8 +3419,15 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     closeNodeShelf();
     renderModelAxes(m);
     renderModelAttribution(m);
+    // cute-dbt#421 — the per-model PR review-comment count tooltip (focusable
+    // bubble). No-op when the selected model carries no anchored comments.
+    renderModelCommentCount(m);
     renderTestDetails(t);
     renderModelSql(m);
+    // cute-dbt#419 — inject the anchored review threads inline at their
+    // Model-SQL diff lines (and an outdated/unplaced tail). MUST run AFTER
+    // renderModelSql rebuilds the diff for this model. No-op without comments.
+    anchorModelCommentThreads(m);
     // cute-dbt#247 — the Model YAML section (peer of Model SQL): the
     // model's authored schema-file `models:` entry, or its truthful
     // degrade placeholder.
@@ -5810,7 +6180,15 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
             : ln.kind === "removed" ? "diff-removed"
             : "diff-context";
     var sigil = ln.kind === "added" ? "+" : ln.kind === "removed" ? "-" : " ";
+    // cute-dbt#419 — carry the old/new line numbers as data attributes so
+    // the PR-comment injector (anchorModelCommentThreads) can find the exact
+    // rendered diff line a review thread anchors to (Right side → new line,
+    // Left side → old line). Decorative positional metadata only (the
+    // .diff-gutter precedent); absent the pr-comments surface they are inert.
+    var oAttr = (num && num.o != null) ? ' data-oldline="' + num.o + '"' : "";
+    var nAttr = (num && num.n != null) ? ' data-newline="' + num.n + '"' : "";
     return '<span class="diff-line ' + cls + (extraClass ? " " + extraClass : "") + '"'
+         + oAttr + nAttr
          + (hidden ? " hidden" : "") + '>'
          + diffGutter(num ? num.o : null, num ? num.n : null)
          + '<span class="diff-sigil">' + sigil + '</span>'

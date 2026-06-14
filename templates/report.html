@@ -47,6 +47,19 @@
      with that file's diff — the per-diff fold toggle in each code header
      (buildFoldToggleBtn, interaction.js). #}
   {%- endif %}
+
+  {# cute-dbt#420 (epic #353) — the top-of-report PR review-comment count
+     button. ALWAYS-present static container (identical bytes in every
+     report — like .removed-models-row / .zero-updated-affirm), hidden until
+     renderPrComments (interaction.js) fills it from DATA.pr_comments and
+     unhides it. Absent the `pr-comments` experiment / no PR context / no
+     comments, DATA.pr_comments is omitted, the JS never fills it, and it
+     stays hidden — so every default golden stays byte-identical. Clicking
+     it navigates to the first anchored comment (selects that model via
+     __cuteSelectNode + scrolls to the anchored Model-SQL diff line). A
+     focusable <button> (keyboard-reachable navigation); the JS sets its
+     aria-label with the live count. #}
+  <button type="button" class="pr-comments-count" data-testid="pr-comments-count" hidden></button>
 </section>
 
 {# cute-dbt#139 / cute-dbt#178 — report settings menu. A cog button (top-right,
@@ -423,6 +436,17 @@
      PR-review affordance) stay visible regardless of the project-state
      display toggle (html[data-project=off]). -#}
   <p class="model-axes-row" data-testid="model-axes" hidden></p>
+  {# cute-dbt#421 (epic #353) — the per-model PR review-comment count, shown
+     via the focusable-bubble tooltip (.expect-tooltip / .expect-tooltip-bubble
+     — the load-bearing-affordance pattern: a focusable <button> + a CSS
+     bubble that paints on :hover AND :focus, NEVER a native `title` which is
+     hover-delayed / keyboard-unreachable / touch-invisible). JS-rendered per
+     model selection (renderModelCommentCount, from DATA.pr_comments's
+     per-model bucket); hidden whenever the selected model carries no
+     comments. Present only when the `pr-comments` experiment is on and the
+     model has anchored threads — so default goldens stay byte-identical
+     (the .model-axes-row precedent: an always-present, JS-filled container). #}
+  <p class="model-comments-row" data-testid="model-comments" hidden></p>
   {# cute-dbt#267 — config-tree provenance chips for the selected model:
      why a config-widened model is in this report. JS-rendered per model
      selection (renderModelAttribution, from m.config_attributions);

@@ -47,11 +47,12 @@ use cute_dbt::adapters::render::{
     render_report, render_report_with_externals,
 };
 use cute_dbt::domain::{
-    BlockDiff, Cell, CellValue, ChangeAxes, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine,
-    DiffLineKind, FileHunks, FixtureTable, HookChangeFacts, HookManifestPresence, Hunk, InScopeSet,
-    MacroIdentity, Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId,
-    NormalizedDiffIndex, PrDiff, ProjectChange, ProjectChangeCategory, ProjectChangePanel,
-    ProjectFacts, ProjectFallbackReason, SeedCard, SourceNode, TableRow, TestMetadata, UnitTest,
+    BlockDiff, Cell, CellValue, ChangeAxes, Checksum, CommentsView, DEFAULT_REPORT_TITLE,
+    DependsOn, DiffLine, DiffLineKind, DiffSide, FileHunks, FixtureTable, HookChangeFacts,
+    HookManifestPresence, Hunk, InScopeSet, MacroIdentity, Manifest, ManifestMetadata,
+    ModelCommentBucket, ModelInScopeSet, Node, NodeConfig, NodeId, NormalizedDiffIndex, PrDiff,
+    ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectFacts, ProjectFallbackReason,
+    RenderedComment, RenderedThread, SeedCard, SourceNode, TableRow, TestMetadata, UnitTest,
     UnitTestDataDiff, UnitTestExpect, UnitTestGiven, UnitTestYamlBlock, compute_pr_dag,
     external_fixture_table, populate_line_counts, pr_dag_lines_from_raw_code, raw_hunk_lines,
     reconstruct_table_diffs,
@@ -264,6 +265,8 @@ fn render_pr_diff_with_axes_to_file(
         &axes,
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -317,6 +320,8 @@ fn render_pr_diff_with_states_to_file(
         &axes,
         &model_states,
         removed_models,
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -1870,7 +1875,10 @@ fn block_diff_folds_long_context_runs_and_reveals_on_activate() {
     );
     assert!(
         folded_html.contains("diff-folded fold-0")
-            && folded_html.contains("diff-folded fold-0\" hidden>"),
+            // cute-dbt#419 — the per-line `data-oldline`/`data-newline`
+            // anchor attributes now sit between the class and the `hidden`
+            // attribute, so the folded line ends `… data-newline="N" hidden>`.
+            && folded_html.contains("hidden><span class=\"diff-gutter\""),
         "the folded middle lines carry `diff-folded fold-0` and the hidden attribute: {folded_html}",
     );
 
@@ -5510,6 +5518,8 @@ fn render_with_external_fixtures(
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -6004,6 +6014,8 @@ fn report_seed_import_node_shelf_shows_the_seed_data_table() {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let url = format!(
@@ -6126,6 +6138,8 @@ fn report_non_seed_import_node_shelf_is_unchanged() {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let url = format!(
@@ -8971,6 +8985,8 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -9549,6 +9565,8 @@ fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -13725,6 +13743,8 @@ fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -13772,6 +13792,8 @@ fn render_governance_to_file(
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -13989,6 +14011,8 @@ fn render_macro_lens_to_file(filename: &str) -> String {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -14290,6 +14314,8 @@ fn render_two_macro_lens_to_file(filename: &str) -> String {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -14456,6 +14482,8 @@ fn render_capped_macro_lens_to_file(filename: &str, model_count: usize, body_cap
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -15853,6 +15881,8 @@ fn render_seed_report(filename: &str, seed_cards: &[SeedCard]) -> String {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -16216,6 +16246,8 @@ fn render_minidag_report(filename: &str) -> String {
         &axes,
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -16621,6 +16653,8 @@ fn render_lens_shell_to_file(filename: &str) -> String {
         &BTreeMap::new(),
         &std::collections::BTreeMap::new(),
         &[],
+        // cute-dbt#419 — no PR review-comments through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -16793,5 +16827,384 @@ fn lens_tabs_switch_the_active_panel_in_a_real_browser() {
         1,
         "Home jumps back to the first (Models) lens",
     );
+    let _ = tab.close(true);
+}
+
+// ===== cute-dbt#419 / #420 / #421 / #422 — PR review comments =========
+//
+// Drives the committed comments-showcase golden in a real headless
+// Chromium. The golden renders the prdiff-minidag manifest in --pr-diff
+// mode with the `pr-comments` experiment on and a synthetic
+// --pr-comments review-threads payload, so the JS surface is live:
+//   * #419 — an anchored review thread renders INLINE at its Model-SQL
+//     diff line (the resolved thread on fct_orders new-side line 4), and
+//     an OUTDATED thread lands in the per-model "unplaced" tail;
+//   * #420 — the top-of-report count button shows the total and NAVIGATES
+//     (selects the comment's model + scrolls to the inline thread);
+//   * #421 — the per-model count tooltip reveals on FOCUS (the
+//     load-bearing a11y guard — a focusable bubble, never a native title).
+
+/// Wait until renderForSelectedModel has injected (or cleared) the comment
+/// threads for the current model — `renderModelSql` + `anchorModelCommentThreads`
+/// run synchronously on a model switch, so a short readyState settle suffices.
+fn settle_comments(tab: &Tab) {
+    wait_for_document_ready(tab);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn pr_comments_render_inline_count_and_navigate() {
+    let browser = launch_browser();
+    let url = committed_example_url("comments-showcase-report.html");
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // ---- #420 — the top count button is present, shows the total (3),
+    // and is a focusable navigation button (not a native title). ----
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"pr-comments-count\"]').hidden"
+        ),
+        "the top-of-report comment-count button is visible when comments exist",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"pr-comments-count\"]').getAttribute('data-total')"
+        ),
+        "3",
+        "the count button reports the report-wide total (3 review comments)",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"pr-comments-count\"]').tagName"
+        ),
+        "BUTTON",
+        "the count affordance is a focusable <button>, never a native title",
+    );
+
+    // ---- #419 — the default model (fct_orders) carries the RESOLVED inline
+    // thread at new-side line 4 and the OUTDATED thread in the tail. ----
+    select_model(&tab, "fct_orders");
+    settle_comments(&tab);
+    assert!(
+        eval_i64(
+            &tab,
+            "document.querySelectorAll('.model-sql .pr-comment-thread').length"
+        ) >= 1,
+        "at least one review thread renders inline within the Model SQL section",
+    );
+    // The resolved thread is anchored right after the new-side line-4 diff line.
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){var l=document.querySelector('.model-sql .sql-diff-view .diff-line[data-newline=\"4\"]');\
+             return !!(l && l.nextElementSibling && l.nextElementSibling.classList.contains('pr-comment-thread'));})()"
+        ),
+        "the resolved thread is injected immediately after its anchored diff line (new line 4)",
+    );
+    // The outdated thread (no live line) is surfaced in the per-model tail,
+    // never dropped and never mis-anchored.
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.model-sql [data-testid=\"pr-comment-tail\"] .pr-comment-outdated') !== null"
+        ),
+        "the outdated thread is surfaced honestly in the per-model tail",
+    );
+
+    // ---- #421 — the per-model count tooltip reveals on FOCUS (a11y). ----
+    // fct_orders carries 2 comments → the focusable count chip is present.
+    assert!(
+        !eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"model-comments\"]').hidden"
+        ),
+        "the per-model comment-count row is shown for a model with comments",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"model-comment-count\"]').getAttribute('data-count')"
+        ),
+        "2",
+        "fct_orders shows its 2-comment count",
+    );
+    // The bubble is hidden until the chip is FOCUSED (keyboard reach), then
+    // becomes visible — the load-bearing a11y guard (never a native title).
+    let bubble_visible = "(function(){var b=document.querySelector('[data-testid=\"model-comment-bubble\"]');\
+        if(!b)return false;var s=getComputedStyle(b);return s.visibility==='visible'&&parseFloat(s.opacity)>0.5;})()";
+    assert!(
+        !eval_bool(&tab, bubble_visible),
+        "the per-model count bubble is hidden before focus",
+    );
+    eval(
+        &tab,
+        "document.querySelector('[data-testid=\"model-comment-count\"]').focus()",
+    );
+    assert!(
+        eval_bool(&tab, bubble_visible),
+        "focusing the count chip REVEALS the bubble (keyboard-reachable, not a native title)",
+    );
+
+    // ---- #420 — clicking the top count button NAVIGATES to a LIVE anchor. ----
+    // The first bucket (fct_orders) has its OUTDATED thread FIRST (sorted
+    // line=None ahead of line=4), so the OLD `bucket.threads[0]` code would
+    // scroll to the outdated tail entry (`…#0`). The fix picks the first
+    // LIVE-anchored thread, so navigation lands on the inline line-4 thread
+    // (`…#1`) — this assertion is the TDD discriminator (red before the fix).
+    eval(&tab, "window.__cuteLastCommentNavKey = undefined");
+    eval(
+        &tab,
+        "document.querySelector('[data-testid=\"pr-comments-count\"]').click()",
+    );
+    settle_comments(&tab);
+    // scrollToThread defers a tick; wait for the nav target to be recorded.
+    wait_until_true(
+        &tab,
+        "window.__cuteLastCommentNavKey != null",
+        "the count button resolved a navigation target",
+    );
+    assert_eq!(
+        eval_string(&tab, "String(window.__cuteLastCommentNavKey)"),
+        "models/marts/fct_orders.sql#1",
+        "the count button navigates to the first LIVE anchor (the inline line-4 \
+         thread), NOT the outdated tail thread that sorts first in the bucket",
+    );
+    // And that target is an INLINE thread injected after the visible line-4
+    // diff line (not a tail entry).
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){var l=document.querySelector('.model-sql .sql-diff-view .diff-line[data-newline=\"4\"]');\
+             return !!(l && l.nextElementSibling && l.nextElementSibling.classList.contains('pr-comment-thread')\
+             && l.nextElementSibling.getAttribute('data-thread-key')==='models/marts/fct_orders.sql#1');})()"
+        ),
+        "the navigated-to live thread is the one injected inline after diff line 4",
+    );
+
+    // ---- the OPEN thread on stg_orders renders with both its comments. ----
+    select_model(&tab, "stg_orders");
+    settle_comments(&tab);
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){var l=document.querySelector('.model-sql .sql-diff-view .diff-line[data-newline=\"2\"]');\
+             return !!(l && l.nextElementSibling && l.nextElementSibling.classList.contains('pr-comment-thread'));})()"
+        ),
+        "the open thread on stg_orders is injected after its anchored diff line (new line 2)",
+    );
+    assert_eq!(
+        eval_i64(
+            &tab,
+            "(function(){var t=document.querySelector('.model-sql .pr-comment-thread');\
+             return t?t.querySelectorAll('.pr-comment').length:0;})()"
+        ),
+        2,
+        "the open stg_orders thread renders both of its comments",
+    );
+
+    let _ = tab.close(true);
+}
+
+// cute-dbt#419 (CodeRabbit #439 regression guard) — a review thread anchored
+// to a FOLDED-AWAY (hidden) diff line must NOT be injected inline after the
+// invisible anchor; it belongs in the per-model "not shown" tail (the same
+// treatment as a missing line). This drives a synthetic single-model report
+// whose Model-SQL diff has a long context run that folds, with a comment
+// anchored to a line inside the folded (hidden) region.
+
+/// A `model` node with a multi-line `raw_code` body + an `original_file_path`,
+/// so the Model-SQL section renders AND the comment grouping (which joins on
+/// `original_file_path`) finds it.
+fn folding_model() -> Node {
+    // 14 lines so the diff can carry a long mid context run.
+    let raw = (1..=14)
+        .map(|n| format!("line{n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    model_node_with_raw_and_path("model.shop.fld", &raw, "models/marts/fld.sql")
+}
+
+/// A `BlockDiff` with a change at the top (new line 1), a LONG context run
+/// (new lines 2..=13, twelve lines — the middle folds with pad 3), and a
+/// change at the bottom — so new-side line 7 lands inside the folded region.
+fn folding_sql_diff() -> BlockDiff {
+    let mut lines = vec![
+        DiffLine {
+            kind: DiffLineKind::Removed,
+            text: "old1".to_owned(),
+            emphasis: None,
+        },
+        DiffLine {
+            kind: DiffLineKind::Added,
+            text: "line1".to_owned(),
+            emphasis: None,
+        },
+    ];
+    // Context lines new-side 2..=13 (12 lines): with pad 3 the middle ~6 lines
+    // fold (hidden), and new-side line 7 is among them.
+    for n in 2..=13 {
+        lines.push(DiffLine {
+            kind: DiffLineKind::Context,
+            text: format!("line{n}"),
+            emphasis: None,
+        });
+    }
+    lines.push(DiffLine {
+        kind: DiffLineKind::Removed,
+        text: "old14".to_owned(),
+        emphasis: None,
+    });
+    lines.push(DiffLine {
+        kind: DiffLineKind::Added,
+        text: "line14".to_owned(),
+        emphasis: None,
+    });
+    BlockDiff { lines }
+}
+
+/// Render a synthetic single-model `--pr-diff` report whose Model-SQL diff
+/// folds, carrying a `CommentsView` with two threads on the folding model:
+/// one on a FOLDED line (new line 7 — must go to the tail) and one on a
+/// VISIBLE line (new line 1 — must inline). Returns the `file://` URL.
+fn render_folding_comments_to_file(filename: &str) -> String {
+    let node = folding_model();
+    let m = manifest(vec![node], vec![]);
+    let models: ModelInScopeSet = [NodeId::new("model.shop.fld")].into_iter().collect();
+    let in_scope = InScopeSet::new();
+    let changed = InScopeSet::new();
+    let mut sql_diffs: HashMap<String, BlockDiff> = HashMap::new();
+    sql_diffs.insert("model.shop.fld".to_owned(), folding_sql_diff());
+
+    let comment = |body: &str| RenderedComment {
+        author: Some("octocat".to_owned()),
+        body: body.to_owned(),
+    };
+    let view = CommentsView {
+        by_model: vec![ModelCommentBucket {
+            model: "model.shop.fld".to_owned(),
+            model_path: "models/marts/fld.sql".to_owned(),
+            count: 2,
+            threads: vec![
+                // On the FOLDED line 7 → must be UNPLACED (tail).
+                RenderedThread {
+                    model: Some("model.shop.fld".to_owned()),
+                    path: "models/marts/fld.sql".to_owned(),
+                    line: Some(7),
+                    original_line: Some(7),
+                    side: DiffSide::Right,
+                    within_hunk: false,
+                    resolved: false,
+                    outdated: false,
+                    comments: vec![comment("on a folded line")],
+                },
+                // On the VISIBLE line 1 → must inline.
+                RenderedThread {
+                    model: Some("model.shop.fld".to_owned()),
+                    path: "models/marts/fld.sql".to_owned(),
+                    line: Some(1),
+                    original_line: Some(1),
+                    side: DiffSide::Right,
+                    within_hunk: true,
+                    resolved: false,
+                    outdated: false,
+                    comments: vec![comment("on a visible line")],
+                },
+            ],
+        }],
+        unanchored: vec![],
+        total: 2,
+    };
+
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &changed,
+        &HashMap::new(),
+        &HashMap::new(),
+        &sql_diffs,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        &ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
+        None,
+        None,
+        &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        None,
+        &BTreeMap::new(),
+        &std::collections::BTreeMap::new(),
+        &[],
+        Some(&view),
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    format!("file://{p}")
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn pr_comment_on_a_folded_line_goes_to_the_tail_not_inline() {
+    let browser = launch_browser();
+    let url = render_folding_comments_to_file("pr_comments_folded.html");
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+    select_model(&tab, "fld");
+    settle_comments(&tab);
+
+    // The long context run folds: new-side line 7 is HIDDEN (folded away).
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){var l=document.querySelector('.model-sql .sql-diff-view .diff-line[data-newline=\"7\"]');\
+             return !!(l && l.hasAttribute('hidden'));})()"
+        ),
+        "precondition: the diff folds and new-side line 7 is hidden",
+    );
+    // The thread on the folded line is NOT injected inline after the hidden
+    // anchor — it lands in the per-model tail (CodeRabbit #439 fix).
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){var l=document.querySelector('.model-sql .sql-diff-view .diff-line[data-newline=\"7\"]');\
+             return !(l && l.nextElementSibling && l.nextElementSibling.classList.contains('pr-comment-thread'));})()"
+        ),
+        "a thread on a FOLDED line must NOT be injected after the invisible anchor",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){var tail=document.querySelector('.model-sql [data-testid=\"pr-comment-tail\"]');\
+             return !!(tail && /on a folded line/.test(tail.textContent));})()"
+        ),
+        "the folded-line thread is surfaced in the per-model tail instead",
+    );
+    // The thread on the VISIBLE line 1 still injects inline (control).
+    assert!(
+        eval_bool(
+            &tab,
+            "(function(){var l=document.querySelector('.model-sql .sql-diff-view .diff-line[data-newline=\"1\"]');\
+             return !!(l && l.nextElementSibling && l.nextElementSibling.classList.contains('pr-comment-thread'));})()"
+        ),
+        "a thread on a VISIBLE line is still injected inline (control)",
+    );
+
     let _ = tab.close(true);
 }

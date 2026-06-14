@@ -113,9 +113,10 @@ pre-push:
       # cute-dbt#84 (pr_diff_scoping), cute-dbt#71 (consumer_report_contract),
       # cute-dbt#69 (unit_test_yaml).
       # Mirrors the `feature-count` CI job; the README is not a feature.
+      # cute-dbt#419 (pr_comments) joined the contract → 31.
       run: |
         set -euo pipefail
-        expected=30
+        expected=31
         count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
         if [ "$count" != "$expected" ]; then
           echo "feature-count: expected ${expected} .feature files, found ${count}"

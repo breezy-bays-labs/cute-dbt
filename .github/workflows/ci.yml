@@ -343,6 +343,7 @@ jobs:
     #   - 28 after agent_skill (cute-dbt#304)
     #   - 29 after macro_perspective (cute-dbt#265)
     #   - 30 after explore_macro_view (cute-dbt#345)
+    #   - 31 after pr_comments (cute-dbt#419)
     # The README is not a feature. The job name deliberately carries no
     # number (cute-dbt#68 — the old `==6` display label went stale across
     # several bumps): the enforced count lives ONLY in the `expected=`
@@ -360,7 +361,7 @@ jobs:
       - name: features/*.feature count matches expected
         run: |
           set -euo pipefail
-          expected=30
+          expected=31
           count=$(find features -maxdepth 1 -name '*.feature' | wc -l | tr -d ' ')
           echo "feature-count: expected ${expected}, found ${count}"
           if [ "$count" != "$expected" ]; then
@@ -710,6 +711,24 @@ jobs:
             output: examples/prdiff-minidag-report.html
             project_root: tests/fixtures/prdiff-minidag-source
             experimental: "1"
+          # cute-dbt#419–#422 (epic #353) — the GOLDEN PR review-comments
+          # showcase. REUSES the prdiff-minidag manifest + patch + source (so
+          # no manifest regen — the threads anchor onto its real diff lines)
+          # and adds a SYNTHETIC `gh api graphql` review-threads payload via
+          # --pr-comments. The `pr-comments` experiment is on, so the committed
+          # golden exercises the gated surface: an inline OPEN thread on
+          # stg_orders line 2, a RESOLVED thread + an OUTDATED tail on
+          # fct_orders, the per-model count tooltip, and the top-of-report
+          # count button (3 comments total). No baseline — --pr-diff only.
+          - name: comments-showcase
+            mode: report
+            current: tests/fixtures/prdiff-minidag-current.json
+            baseline: ""
+            pr_diff: tests/fixtures/prdiff-minidag-pr-diff.patch
+            output: examples/comments-showcase-report.html
+            project_root: tests/fixtures/prdiff-minidag-source
+            experimental: "1"
+            pr_comments: tests/fixtures/comments-showcase-pr-comments.json
           # cute-dbt#100 — the GOLDEN explore pages: the full synthetic
           # playground manifest rendered to the two-file --out-dir shape
           # (examples/explore/dag.html + tests.html), each independently
@@ -790,6 +809,9 @@ jobs:
           # pins a far-future date so the golden is wall-clock-independent.
           FINDINGS_OUT: ${{ matrix.findings_out }}
           GENERATED_AT: ${{ matrix.generated_at }}
+          # cute-dbt#419: optional synthetic PR review-comments payload (the
+          # comments-showcase row); empty = no --pr-comments arg.
+          PR_COMMENTS: ${{ matrix.pr_comments }}
         run: |
           set -euo pipefail
           mkdir -p target/example-check
@@ -889,16 +911,25 @@ jobs:
             findings_args=(--findings-out "$rendered_findings" --generated-at "$GENERATED_AT")
             findings_hint=" --findings-out $FINDINGS_OUT --generated-at $GENERATED_AT"
           fi
+          # cute-dbt#419: the optional --pr-comments arg (the comments-showcase
+          # row's synthetic review-threads payload). Built only when set.
+          pr_comments_args=()
+          pr_comments_hint=""
+          if [ -n "$PR_COMMENTS" ]; then
+            pr_comments_args=(--pr-comments "@$PR_COMMENTS")
+            pr_comments_hint=" --pr-comments @$PR_COMMENTS"
+          fi
           cargo run --quiet --locked --bin cute-dbt -- report \
             --manifest "$CURRENT_MANIFEST" \
             "${scope_args[@]}" \
             "${project_root_args[@]}" \
             "${config_args[@]}" \
             "${findings_args[@]}" \
+            "${pr_comments_args[@]}" \
             --out "$rendered"
           if ! diff -q "$rendered" "$OUTPUT_PATH" >/dev/null; then
             echo "::error::example-report-up-to-date: $OUTPUT_PATH does not match the renderer output ($EXAMPLE_NAME). Regenerate with:"
-            echo "  ${regen_env}cargo run --bin cute-dbt -- report --manifest $CURRENT_MANIFEST$scope_hint$regen_hint$config_hint$findings_hint --out $OUTPUT_PATH"
+            echo "  ${regen_env}cargo run --bin cute-dbt -- report --manifest $CURRENT_MANIFEST$scope_hint$regen_hint$config_hint$findings_hint$pr_comments_hint --out $OUTPUT_PATH"
             echo "Sizes:"
             ls -l "$rendered" "$OUTPUT_PATH"
             exit 1
@@ -910,7 +941,7 @@ jobs:
           if [ -n "$FINDINGS_OUT" ]; then
             if ! diff -q "$rendered_findings" "$FINDINGS_OUT" >/dev/null; then
               echo "::error::example-report-up-to-date: $FINDINGS_OUT does not match the renderer output ($EXAMPLE_NAME findings envelope). Regenerate with:"
-              echo "  ${regen_env}cargo run --bin cute-dbt -- report --manifest $CURRENT_MANIFEST$scope_hint$regen_hint$config_hint$findings_hint --out $OUTPUT_PATH"
+              echo "  ${regen_env}cargo run --bin cute-dbt -- report --manifest $CURRENT_MANIFEST$scope_hint$regen_hint$config_hint$findings_hint$pr_comments_hint --out $OUTPUT_PATH"
               echo "Sizes:"
               ls -l "$rendered_findings" "$FINDINGS_OUT"
               exit 1

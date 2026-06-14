@@ -266,6 +266,33 @@ pub struct ReportArgs {
     #[arg(long, value_name = "N")]
     pub pr_number: Option<u64>,
 
+    /// Inline the PR's GitHub review comments into the report
+    /// (cute-dbt#419–#422, epic #353) from a `gh api graphql`
+    /// `reviewThreads` JSON payload at this `@<path>` (or, without the `@`,
+    /// the literal JSON itself — the unit-test form).
+    ///
+    /// This is the **deterministic injection seam** the comments-showcase
+    /// golden + the BDD/headless suites use: a synthetic
+    /// [`PrComments`](crate::domain::PrComments)-shaped JSON fixture stands in
+    /// for the live `gh` fetch, so the committed golden is reproducible
+    /// without network/auth. The same payload shape the gen-time
+    /// [`fetch_pr_comments`](crate::adapters::pr_comments::fetch_pr_comments)
+    /// adapter returns from `gh` — the live path resolves the PR from
+    /// `--pr-url` / `--pr-number` when this flag is absent (a later wiring;
+    /// the file seam is the canonical golden path today).
+    ///
+    /// Each ingested review thread is anchored onto the report's rendered
+    /// diff (the shipped comment→diff-line anchoring, cute-dbt#418) and the
+    /// threads are grouped per model. Gated behind the `pr-comments`
+    /// experiment and the `--pr-diff` arm (a comment anchors to a *rendered
+    /// diff*; the baseline arm has none). A malformed payload degrades to "no
+    /// comments" (fail-soft — PR comments are context, never a dependency),
+    /// never a run failure. The comments are inlined at gen-time and the
+    /// report stays view-time zero-egress (any navigate is in-page JS, never
+    /// a fetch).
+    #[arg(long, value_name = "@FILE", value_parser = crate::cli::pr_comments::parse_pr_comments_arg)]
+    pub pr_comments: Option<crate::domain::PrComments>,
+
     /// Emit the machine-readable **findings envelope** JSON to this path,
     /// alongside the HTML `--out` report in the same run (cute-dbt#386).
     ///

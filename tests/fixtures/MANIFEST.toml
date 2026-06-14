@@ -1146,6 +1146,32 @@ with a login, one with a null author). All logins, bodies, paths, and commit \
 oids are invented — no real repository, account, or PR data.\
 """
 
+[[fixture]]
+path = "comments-showcase-pr-comments.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/419"
+sha256 = "a82b9b9de1710f19cb8e06fc3c0cb54abe6d536fa96c8e1659f0ca3bb727fb0d"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The synthetic `gh api graphql` review-threads payload that drives the \
+comments-showcase GOLDEN (cute-dbt#419–#422, epic #353 — the report's inline \
+PR review-comments surface). Fed to `report --pr-comments @<file>` (the \
+deterministic injection seam standing in for the live `gh` fetch) over the \
+SHARED prdiff-minidag manifest + patch + source, so the threads anchor onto \
+real rendered diff lines without regenerating any manifest. Three review \
+threads exercising every render state: an OPEN two-comment thread on \
+`models/staging/stg_orders.sql` new-side line 2 (the added `status` column), a \
+RESOLVED one-comment thread on `models/marts/fct_orders.sql` new-side line 4 \
+(the `gross_revenue` rename), and an OUTDATED thread on the same file (null \
+`line`, `originalLine` 9, a null/ghost author) — so the golden shows inline \
+threads, the resolved-collapse, the outdated-tail, a ghost author, and the \
+per-model count (2 on fct_orders, 1 on stg_orders; 3 total). Plus one general \
+PR comment. Every login, body, path, commit oid, and url is invented \
+(example.invalid) — no real repository, account, or PR data.\
+"""
+
 # ---------------------------------------------------------------------------
 # dbt-project/ data carriers (cute-dbt#114 / #115)
 #

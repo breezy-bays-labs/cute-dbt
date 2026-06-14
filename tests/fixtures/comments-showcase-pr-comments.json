@@ -1,0 +1,85 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "nodes": [
+            {
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "models/staging/stg_orders.sql",
+              "line": 2,
+              "originalLine": 2,
+              "diffSide": "RIGHT",
+              "comments": {
+                "nodes": [
+                  {
+                    "author": { "login": "octocat" },
+                    "body": "Adding `status` here is great — can we confirm it is non-null in the source?",
+                    "originalLine": 2,
+                    "diffHunk": "@@ -2 +2 @@",
+                    "commit": { "oid": "feedface" }
+                  },
+                  {
+                    "author": { "login": "data-reviewer" },
+                    "body": "Good call. The source guarantees it, so no coalesce needed.",
+                    "originalLine": 2,
+                    "diffHunk": "@@ -2 +2 @@",
+                    "commit": { "oid": "feedface" }
+                  }
+                ]
+              }
+            },
+            {
+              "isResolved": true,
+              "isOutdated": false,
+              "path": "models/marts/fct_orders.sql",
+              "line": 4,
+              "originalLine": 4,
+              "diffSide": "RIGHT",
+              "comments": {
+                "nodes": [
+                  {
+                    "author": { "login": "octocat" },
+                    "body": "nit: `gross_revenue` reads clearer than `revenue` — thanks for the rename.",
+                    "originalLine": 4,
+                    "diffHunk": "@@ -4 +4 @@",
+                    "commit": { "oid": "feedface" }
+                  }
+                ]
+              }
+            },
+            {
+              "isResolved": false,
+              "isOutdated": true,
+              "path": "models/marts/fct_orders.sql",
+              "line": null,
+              "originalLine": 9,
+              "diffSide": "RIGHT",
+              "comments": {
+                "nodes": [
+                  {
+                    "author": null,
+                    "body": "This grouping changed since I commented — please re-check the rollup grain.",
+                    "originalLine": 9,
+                    "diffHunk": "@@ -9 +9 @@",
+                    "commit": { "oid": "deadbeef" }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "comments": {
+          "nodes": [
+            {
+              "author": { "login": "octocat" },
+              "body": "Overall looks good — one open question on the staging change.",
+              "url": "https://example.invalid/shop/demo/pull/42#issuecomment-1"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

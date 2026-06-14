@@ -35,6 +35,7 @@ pub mod fail_closed;
 pub mod incremental_models;
 pub mod macro_perspective;
 pub mod one_command_review;
+pub mod pr_comments;
 pub mod pr_diff_scoping;
 pub mod project_definition;
 pub mod report_generation;

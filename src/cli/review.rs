@@ -1562,6 +1562,13 @@ impl ComposeInputs {
             pr_url: self.pr.as_ref().map(|p| p.url.clone()),
             pr_title: self.pr.as_ref().map(|p| p.title.clone()),
             pr_number: self.pr.as_ref().map(|p| p.number),
+            // cute-dbt#419–#422 — `review` carries no `--pr-comments @file`
+            // fixture (that is the golden/test injection seam); it relies on
+            // the LIVE `gh api graphql` fetch in `gather_pr_comments`, which
+            // resolves the PR from the `--pr-*` fields above. So `None` here
+            // means "fetch from gh when the `pr-comments` experiment is on
+            // and a PR resolves" — the natural review-from-a-PR path.
+            pr_comments: None,
             // cute-dbt#386 — the findings-envelope sidecar + coverage gate
             // are `report`-verb surfaces; `review` does not emit the
             // envelope or apply the gate in this slice (both off). A future

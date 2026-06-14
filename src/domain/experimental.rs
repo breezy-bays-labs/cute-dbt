@@ -83,6 +83,21 @@ pub enum Experiment {
     /// every default golden stays byte-identical (the `macro_lens` /
     /// governance / seeds precedent).
     PrScopeMiniDag,
+    /// The PR review-comments surface (cute-dbt#419–#422, epic #353): the
+    /// ingested GitHub review threads, anchored onto the rendered diff and
+    /// grouped per model — inline diff-line comment threads (author · body ·
+    /// replies · resolved/outdated state), a top-of-report total-count
+    /// navigation button, and a per-model comment-count tooltip. Built from
+    /// the already-anchored
+    /// [`ThreadAnchor`](crate::domain::ThreadAnchor)s via
+    /// [`group_comment_threads`](crate::domain::group_comment_threads); gated
+    /// empty so the cli passes `None` when off (or no PR context / no
+    /// comments), the `{%- if pr_comments %}` template section emits zero
+    /// bytes, and every default golden stays byte-identical (the `macro_lens`
+    /// / governance / seeds / pr-scope-mini-dag precedent). The comments are
+    /// inlined at gen-time and view-time zero-egress — any navigate-to-comment
+    /// is in-page JS, never a fetch.
+    PrComments,
 }
 
 impl Experiment {
@@ -94,6 +109,7 @@ impl Experiment {
         Experiment::MacroLens,
         Experiment::Seeds,
         Experiment::PrScopeMiniDag,
+        Experiment::PrComments,
     ];
 
     /// The kebab-case wire id this experiment is named by in the
@@ -107,6 +123,7 @@ impl Experiment {
             Self::MacroLens => "macro-lens",
             Self::Seeds => "seeds",
             Self::PrScopeMiniDag => "pr-scope-mini-dag",
+            Self::PrComments => "pr-comments",
         }
     }
 
@@ -390,6 +407,20 @@ mod tests {
             Some(Experiment::PrScopeMiniDag)
         );
         assert!(Experiment::ALL.contains(&Experiment::PrScopeMiniDag));
+    }
+
+    #[test]
+    fn pr_comments_is_a_registered_experiment_with_its_wire_id() {
+        // cute-dbt#419–#422 (epic #353) — the gating seam for the PR
+        // review-comments surface (inline threads + counts + navigation).
+        // The id round-trips and the variant is in the closed vocabulary
+        // (so `1`/`all` enables it on the comments-showcase golden row).
+        assert_eq!(Experiment::PrComments.id(), "pr-comments");
+        assert_eq!(
+            Experiment::from_id("pr-comments"),
+            Some(Experiment::PrComments)
+        );
+        assert!(Experiment::ALL.contains(&Experiment::PrComments));
     }
 
     // ----- [experimental] TOML resolution -----
