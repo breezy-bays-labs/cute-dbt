@@ -104,7 +104,7 @@ pub use governance::{
 pub use grain::{GrainKind, GrainSignal, model_grain_signals, test_is_enabled};
 pub use macro_lens::{
     MacroFocusSet, changed_macros_baseline, changed_macros_pr_diff, macro_blast_radius,
-    macro_focus_set,
+    macro_focus_set, macro_test_consumers,
 };
 pub use manifest::{
     Checksum, ColumnFacts, Constraint, ConstraintKind, DependsOn, DisabledEntry, Exposure, Group,
