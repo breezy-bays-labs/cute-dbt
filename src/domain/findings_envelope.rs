@@ -45,7 +45,7 @@
 
 use serde::Serialize;
 
-use crate::domain::checks::{Finding, HeuristicId, Tier, Verdict};
+use crate::domain::checks::{Finding, HeuristicId, Tier};
 use crate::domain::finding_anchor::{AnchorSide, ResolvedAnchor};
 
 /// The envelope schema version — an **integer**, the only stability anchor
@@ -281,22 +281,26 @@ impl FindingsEnvelope {
 
 /// The `--fail-on-uncovered` gate predicate (decision D3).
 ///
-/// `true` iff **any** finding is both [`Tier::Total`] and
-/// [`Verdict::Uncovered`] — a deterministic coverage gap on a zero-false-
-/// positive check. Not configurable: `Total`-only is the design tenet, so
-/// the gate never trips on a `High`/`Advisory` heuristic guess and never
-/// on a `Covered`/`Unknown` verdict.
+/// `true` iff **any** finding is a [`Tier::Total`] **surfaced** uncovered
+/// gap — a deterministic coverage gap on a zero-false-positive check that
+/// the operator has **not** suppressed. Not configurable: `Total`-only is
+/// the design tenet, so the gate never trips on a `High`/`Advisory`
+/// heuristic guess and never on a `Covered`/`Unknown` verdict.
 ///
-/// A `suppressed` Total-tier uncovered finding still counts: suppression is
-/// a *display* acknowledgement, not a coverage fact — the gap is real, the
-/// operator merely chose not to surface it in the HTML. (If a future slice
-/// wants suppression to exempt the gate, that is a deliberate decision, not
-/// a silent default; this predicate keeps the honest "the gap exists" read.)
+/// A **suppressed** Total-tier uncovered finding does **NOT** trip the gate
+/// (cute-dbt#406): if the operator suppressed it (`[[checks.suppress]]` /
+/// `-- cute-dbt: ignore(...)`), they have acknowledged the gap and do not
+/// want it to fail the build. This predicate shares the exact
+/// [`Finding::is_surfaced_uncovered`](crate::domain::checks::Finding::is_surfaced_uncovered)
+/// suppression check the GitHub annotation emit (`build_annotations`) uses,
+/// so the gate and the emit can never disagree: a suppressed-only Total gap
+/// trips no gate AND emits no `::error` annotation, preserving the "gate
+/// tripped ⇒ at least one error annotation" intuition.
 #[must_use]
 pub fn has_total_uncovered(findings: &[Finding<HeuristicId>]) -> bool {
     findings
         .iter()
-        .any(|f| f.tier == Tier::Total && f.verdict == Verdict::Uncovered)
+        .any(|f| f.tier == Tier::Total && f.is_surfaced_uncovered())
 }
 
 #[cfg(test)]
@@ -469,6 +473,46 @@ mod tests {
                 by: vec!["test.shop.t".to_owned()],
             }),
             finding(Verdict::Unknown),
+            finding(Verdict::Uncovered),
+        ];
+        assert!(has_total_uncovered(&findings));
+    }
+
+    // ---- suppression-aware gate (cute-dbt#406) ----------------------
+
+    // Mark a finding as operator-suppressed (the cute-dbt#171 display-layer
+    // acknowledgement `apply_check_policy` attaches).
+    fn suppressed(mut finding: Finding<HeuristicId>) -> Finding<HeuristicId> {
+        finding.suppressed = Some(crate::domain::checks::Suppression {
+            source: crate::domain::checks::SuppressionSource::Config,
+            reason: Some("accepted during backfill".to_owned()),
+        });
+        finding
+    }
+
+    #[test]
+    fn gate_does_not_trip_on_a_suppressed_total_uncovered_finding() {
+        // cute-dbt#406: a Total-tier uncovered finding the operator
+        // suppressed does NOT trip `--fail-on-uncovered`. If you suppressed
+        // it, you do not want it to fail the build — and this is the exact
+        // suppression check `build_annotations` uses to filter the
+        // annotation emit, so the gate and the emit can never disagree.
+        let only_gap = suppressed(finding(Verdict::Uncovered));
+        assert_eq!(only_gap.tier, Tier::Total);
+        assert!(only_gap.suppressed.is_some());
+        assert!(
+            !has_total_uncovered(&[only_gap]),
+            "a suppressed-only Total gap must not trip the gate"
+        );
+    }
+
+    #[test]
+    fn gate_trips_when_an_unsuppressed_total_gap_rides_beside_a_suppressed_one() {
+        // A suppressed Total gap is exempt, but a sibling non-suppressed
+        // Total gap still trips the gate — suppression exempts only the
+        // finding it marks, never the whole run.
+        let findings = vec![
+            suppressed(finding(Verdict::Uncovered)),
             finding(Verdict::Uncovered),
         ];
         assert!(has_total_uncovered(&findings));
