@@ -326,6 +326,50 @@ impl NodeConfig {
     pub fn store_failures(&self) -> Option<bool> {
         self.config.get("store_failures").and_then(Value::as_bool)
     }
+
+    /// `config.delimiter` — a **seed**'s CSV field separator (cute-dbt#397).
+    ///
+    /// Wire shape verified against dbt-fusion `SeedConfig.delimiter:
+    /// Option<Spanned<String>>` (`dbt-schemas`
+    /// `project/configs/seed_config.rs`; the `Spanned` wrapper serializes as
+    /// a bare string) and the committed `seed-showcase-current.json` fixture.
+    /// `None` when the key is absent or not a string (the
+    /// [`Self::materialized`] tolerant-read precedent). The dbt **default**
+    /// is `","` — distinguishing default-vs-authored is the consumer's job
+    /// (the seed config-display chip suppresses the default), not this
+    /// accessor's, which reports the raw wire value verbatim.
+    #[must_use]
+    pub fn delimiter(&self) -> Option<&str> {
+        self.config.get("delimiter").and_then(Value::as_str)
+    }
+
+    /// `config.quote_columns` — whether a **seed**'s column identifiers are
+    /// quoted in the generated DDL (cute-dbt#397).
+    ///
+    /// Wire shape: dbt-fusion `SeedConfig.quote_columns: Option<bool>`. The
+    /// dbt **default** is `false`. `None` when the key is absent or not a
+    /// bool (the [`Self::enabled`] tolerant-read precedent).
+    #[must_use]
+    pub fn quote_columns(&self) -> Option<bool> {
+        self.config.get("quote_columns").and_then(Value::as_bool)
+    }
+
+    /// `config.column_types` — a **seed**'s explicit column→type overrides
+    /// (cute-dbt#397), as the raw `column_name → data_type` object.
+    ///
+    /// Wire shape: dbt-fusion `SeedConfig.column_types:
+    /// Option<BTreeMap<Spanned<String>, String>>`; on the wire that is a JSON
+    /// object of string values. The dbt **default** is an empty map. `None`
+    /// when the key is absent or not an object; an empty map deserializes to
+    /// `Some(empty)` — the consumer (the config-display chip) treats an empty
+    /// map as "no override authored" and suppresses the chip, mirroring the
+    /// `delimiter`/`quote_columns` default suppression. Values are the raw
+    /// passthrough [`Map`](serde_json::Map) — the display string is composed
+    /// by the consumer, not interpreted here.
+    #[must_use]
+    pub fn column_types(&self) -> Option<&serde_json::Map<String, Value>> {
+        self.config.get("column_types").and_then(Value::as_object)
+    }
 }
 
 /// A data-test's typed failure severity (cute-dbt#258).
@@ -3683,6 +3727,75 @@ mod tests {
             config_with("store_failures", Value::Null).store_failures(),
             None,
             "both committed fixtures null-fill store_failures when unset",
+        );
+    }
+
+    // ----- cute-dbt#397: seed-config typed dict reads -----------------
+
+    #[test]
+    fn seed_config_reads_delimiter_quote_columns_column_types() {
+        // delimiter: a string passes through verbatim (raw wire value; the
+        // chip suppresses the "," default, not this accessor).
+        assert_eq!(
+            config_with("delimiter", Value::String("|".to_owned())).delimiter(),
+            Some("|"),
+        );
+        assert_eq!(
+            config_with("delimiter", Value::String(",".to_owned())).delimiter(),
+            Some(","),
+            "the default delimiter still reads through — default-suppression is the consumer's job",
+        );
+        assert_eq!(config_with("delimiter", Value::Null).delimiter(), None);
+        assert_eq!(NodeConfig::default().delimiter(), None);
+        assert_eq!(
+            config_with("delimiter", Value::from(42)).delimiter(),
+            None,
+            "a non-string delimiter degrades to None (ADR-5), never panics",
+        );
+
+        // quote_columns: a bool passes through.
+        assert_eq!(
+            config_with("quote_columns", Value::Bool(true)).quote_columns(),
+            Some(true),
+        );
+        assert_eq!(
+            config_with("quote_columns", Value::Bool(false)).quote_columns(),
+            Some(false),
+        );
+        assert_eq!(
+            config_with("quote_columns", Value::Null).quote_columns(),
+            None,
+        );
+        assert_eq!(NodeConfig::default().quote_columns(), None);
+        assert_eq!(
+            config_with("quote_columns", Value::String("true".to_owned())).quote_columns(),
+            None,
+            "a non-bool quote_columns degrades to None (ADR-5)",
+        );
+
+        // column_types: a JSON object passes through as the raw map; an
+        // empty map is Some(empty) (the chip treats that as "no override").
+        let mut types = serde_json::Map::new();
+        types.insert(
+            "state_code".to_owned(),
+            Value::String("varchar(2)".to_owned()),
+        );
+        let c = config_with("column_types", Value::Object(types.clone()));
+        assert_eq!(c.column_types(), Some(&types));
+        assert_eq!(
+            config_with("column_types", Value::Object(serde_json::Map::new())).column_types(),
+            Some(&serde_json::Map::new()),
+            "an empty column_types map reads through as Some(empty) (default-fill)",
+        );
+        assert_eq!(
+            config_with("column_types", Value::Null).column_types(),
+            None
+        );
+        assert_eq!(NodeConfig::default().column_types(), None);
+        assert_eq!(
+            config_with("column_types", Value::from(42)).column_types(),
+            None,
+            "a non-object column_types degrades to None (ADR-5)",
         );
     }
 
