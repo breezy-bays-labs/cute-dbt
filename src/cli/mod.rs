@@ -79,7 +79,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::adapters::explore::render_explore;
+use crate::adapters::explore::{MacroFocus, render_explore};
 use crate::adapters::findings_emit::{
     collect_in_scope_findings, envelope_from_findings_anchored, write_sidecar,
 };
@@ -106,12 +106,12 @@ use crate::domain::{
     changed_macros_baseline, changed_macros_pr_diff, changed_models, check_by_id, compute_pr_dag,
     diff_project_definitions, effective_fixture_format, external_fixture_table,
     extract_model_block, extract_unit_test_block, gather_governance, has_total_uncovered,
-    hook_operations, macro_focus_set, populate_line_counts, pr_dag_lines_from_diff,
-    pr_dag_lines_from_raw_code, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
-    reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
-    refine_changed_by_hunks, resolve_check_policy, resolve_experimental_config,
-    resolve_finding_anchor, reverse_apply, scan_pragmas, select_in_scope, select_seeds_in_scope,
-    widen_with_config_attributions,
+    hook_operations, macro_focus_set, macro_test_consumers, populate_line_counts,
+    pr_dag_lines_from_diff, pr_dag_lines_from_raw_code, preflight_compiled, raw_hunk_lines,
+    reconstruct_block_diffs, reconstruct_external_fixture_diff, reconstruct_model_sql_diffs,
+    reconstruct_table_diffs, refine_changed_by_hunks, resolve_check_policy,
+    resolve_experimental_config, resolve_finding_anchor, reverse_apply, scan_pragmas,
+    select_in_scope, select_seeds_in_scope, widen_with_config_attributions,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
@@ -726,17 +726,23 @@ fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
         "",
     );
     // cute-dbt#345 — the macro view emits its third sub-page only when the
-    // `--pr-diff` changed a root-project macro. The FOCUS SET is RESOLVED
-    // here (the scope-resolution lane, including the domain walk) and
-    // handed to the renderer, which stays a pure renderer (it never calls
-    // a domain walker). When several macros changed, the focused DAG is
-    // built for the lowest-id one (the deterministic `BTreeSet` first) —
-    // the multi-macro picker is a later slice (founder Open Q 6).
-    let macro_focus = context
-        .changed_macros
-        .iter()
-        .next()
-        .map(|macro_id| macro_focus_set(&current, macro_id));
+    // `--pr-diff` changed a root-project macro. The FOCUS SET and the TEST
+    // CONSUMERS are RESOLVED here (the scope-resolution lane, including the
+    // domain walks) and handed to the renderer, which stays a pure renderer
+    // (it never calls a domain walker). When several macros changed, the
+    // focused view is built for the lowest-id one (the deterministic
+    // `BTreeSet` first) — the multi-macro picker is a later slice (founder
+    // Open Q 6).
+    let changed_macro = context.changed_macros.iter().next();
+    let macro_focus = changed_macro.map(|macro_id| macro_focus_set(&current, macro_id));
+    // The filtered artifact directory's tests partition (cute-dbt#345 AC3):
+    // the `test`/`unit_test` consumers of the macro, resolved by the SAME
+    // pure-domain authority the model partition uses (`macro_test_consumers`
+    // twins `macro_blast_radius`). Empty default when no macro changed; the
+    // renderer only consumes it on the `Some(macro_focus)` arm.
+    let macro_tests = changed_macro
+        .map(|macro_id| macro_test_consumers(&current, macro_id))
+        .unwrap_or_default();
     // cute-dbt#398 — the seed-node detail card's data: every seed's
     // working-tree CSV (read via `--project-root`, present only on the
     // `--pr-diff` arm), capped to DEFAULT_SEED_ROW_CAP (explore has no
@@ -750,7 +756,10 @@ fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
         &models,
         context.changed_models.as_ref(),
         &payload,
-        macro_focus.as_ref(),
+        macro_focus.as_ref().map(|focus| MacroFocus {
+            focus,
+            tests: &macro_tests,
+        }),
         &seed_cards,
         DEFAULT_SEED_ROW_CAP,
     )
