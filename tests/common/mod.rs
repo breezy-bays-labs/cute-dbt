@@ -52,6 +52,12 @@ pub const COMMITTED_EXPLORE_PAGES: &[&str] = &[
     "explore/dag.html",
     "explore/tests.html",
     "explore-macro/macro.html",
+    // cute-dbt#398 — the seed-data explore golden (seed-showcase manifest,
+    // --pr-diff + --project-root so the seed CSV is read and inlined). The
+    // seed-typed DAG node's detail card shows the seed data table; both pages
+    // hold the zero-egress invariant (the table is inlined at gen-time).
+    "explore-seed/dag.html",
+    "explore-seed/tests.html",
 ];
 
 /// Absolute path to a committed example HTML under `examples/`.

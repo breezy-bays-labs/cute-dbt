@@ -3782,6 +3782,19 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     var mfName = nodeManifestName(node, t, m);
     if (mfName) $detail.append(buildModelDetailCard(mfName));
 
+    // cute-dbt#398 — when the selected DAG node is an import CTE backed by a
+    // SEED, surface the seed's data table in the shelf (the same affordance
+    // the explore page gives seed nodes). The seed table is already inlined
+    // on DATA.seed_cards (cute-dbt#350/#387) — zero-egress, no view-time
+    // fetch. Reuses buildSeedCard (the #350 grid + the #126 "data
+    // unavailable" degrade) verbatim, then runs the shared DataTables init on
+    // the injected grid (renderNodeDetail rebuilds the shelf body, so the
+    // init that renderSeedDataTables runs at load does not cover it). A
+    // non-seed import node (a model/snapshot/source ref) resolves to no seed
+    // card and this is a no-op — non-seed nodes render unchanged.
+    var seedCard = seedCardForNode(node, t);
+    if (seedCard) $detail.append(buildSeedCard(seedCard));
+
     // role badge rides the Compiled SQL summary row (saves vertical space).
     var sql = (m.compiled_sql && m.compiled_sql[node.id]) || "-- compiled SQL not available";
     var $det = $("<details>").addClass("compiled-sql").attr("open", "open");
@@ -3798,6 +3811,30 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
     $detail.append($det);
 
     $wrap.append($detail);
+    // Initialize the (lazy-init) DataTables on the seed grid only after it is
+    // in the document — initDataTablesIn is a no-op when no seed card was
+    // appended (the non-seed-node path).
+    if (seedCard) initDataTablesIn($wrap);
+  }
+
+  // cute-dbt#398 — the seed card (DATA.seed_cards entry) a DAG node maps to,
+  // or null. ONLY an import-CTE node bound to a seed input resolves: scan the
+  // current test's givens for the one whose `bound_to_node` is this node id,
+  // parse its `ref('<name>')` target, and match a seed card by that bare
+  // name. Seed names are globally unique handles and DATA.seed_cards holds
+  // ONLY seeds (the #350 in-scope projection), so a name hit is a seed hit —
+  // a model import shares no name with a seed (dbt ref() names are unique
+  // across resource types). Null for any non-seed node (final select, a model
+  // import, a transform CTE) and when the seed is not in scope (no card).
+  function seedCardForNode(node, t) {
+    if (!node || node.role !== "import") return null;
+    var cards = DATA.seed_cards;
+    if (!cards || !cards.length) return null;
+    var g = ((t && t.given) || []).filter(function (x) { return x.bound_to_node === node.id; })[0];
+    if (!g) return null;
+    var refName = refTargetName(g.input);
+    if (!refName) return null;
+    return cards.filter(function (c) { return c.name === refName; })[0] || null;
   }
 
   // cute-dbt#98 — the test's cell-level data diff for THIS given input, or

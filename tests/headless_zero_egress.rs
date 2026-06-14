@@ -62,8 +62,8 @@ use headless_chrome::protocol::cdp::{Network, Runtime};
 use cute_dbt::adapters::explore::render_explore;
 use cute_dbt::adapters::render::build_payload;
 use cute_dbt::domain::{
-    Checksum, DependsOn, Exposure, InScopeSet, Manifest, ManifestMetadata, ModelInScopeSet, Node,
-    NodeConfig, NodeId, SourceNode, TestMetadata, all_models,
+    Checksum, DEFAULT_SEED_ROW_CAP, DependsOn, Exposure, InScopeSet, Manifest, ManifestMetadata,
+    ModelInScopeSet, Node, NodeConfig, NodeId, SourceNode, TestMetadata, all_models,
 };
 
 fn report_file_url(filename: &str) -> String {
@@ -573,7 +573,17 @@ fn render_explore_pages(
     );
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
     let _ = std::fs::remove_dir_all(&dir);
-    render_explore(&dir, &manifest, &models, changed, &payload, None).expect("explore renders");
+    render_explore(
+        &dir,
+        &manifest,
+        &models,
+        changed,
+        &payload,
+        None,
+        &[],
+        DEFAULT_SEED_ROW_CAP,
+    )
+    .expect("explore renders");
     dir
 }
 
@@ -604,7 +614,17 @@ fn render_explore_dag_manifest(stem: &str, manifest: &Manifest) -> String {
     );
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
     let _ = std::fs::remove_dir_all(&dir);
-    render_explore(&dir, manifest, &models, None, &payload, None).expect("explore renders");
+    render_explore(
+        &dir,
+        manifest,
+        &models,
+        None,
+        &payload,
+        None,
+        &[],
+        DEFAULT_SEED_ROW_CAP,
+    )
+    .expect("explore renders");
     let p = dir.join("dag.html");
     format!("file://{}", p.to_str().expect("page path is valid UTF-8"))
 }
@@ -1811,8 +1831,17 @@ fn render_explore_macro_page(
     };
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(stem);
     let _ = std::fs::remove_dir_all(&dir);
-    render_explore(&dir, &manifest, &models, None, &payload, Some(&focus))
-        .expect("explore renders");
+    render_explore(
+        &dir,
+        &manifest,
+        &models,
+        None,
+        &payload,
+        Some(&focus),
+        &[],
+        DEFAULT_SEED_ROW_CAP,
+    )
+    .expect("explore renders");
     let p = dir.join("macro.html");
     format!("file://{}", p.to_str().expect("page path is valid UTF-8"))
 }

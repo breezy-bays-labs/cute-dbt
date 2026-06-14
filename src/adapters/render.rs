@@ -1506,9 +1506,20 @@ fn build_seed_section(cards: &[SeedCard], cap: usize) -> Vec<SeedSectionCard> {
         .collect()
 }
 
-/// Transform one raw [`SeedCard`] into its capped render view.
-fn seed_section_card(card: &SeedCard, cap: usize) -> SeedSectionCard {
-    let (table, total_rows, shown_rows, capped) = match &card.table {
+/// Cap a seed's current table to `cap` rows, returning the (possibly
+/// truncated) table plus the honest `(total, shown, capped)` row-count
+/// metadata.
+///
+/// Shared by the report's [`seed_section_card`] (cute-dbt#350) and the
+/// explorer's seed-table side-map ([`crate::adapters::explore::seed_tables_by_id`],
+/// cute-dbt#398) so the two surfaces apply the row cap identically. A `None`
+/// input table (data could not be read) yields `(None, 0, 0, false)` — the
+/// labeled "data unavailable" degrade (the cute-dbt#126 lesson).
+pub(crate) fn cap_seed_table(
+    table: Option<&FixtureTable>,
+    cap: usize,
+) -> (Option<FixtureTable>, usize, usize, bool) {
+    match table {
         Some(t) => {
             let total = t.rows.len();
             let shown = total.min(cap);
@@ -1523,7 +1534,12 @@ fn seed_section_card(card: &SeedCard, cap: usize) -> SeedSectionCard {
             (Some(capped_table), total, shown, shown < total)
         }
         None => (None, 0, 0, false),
-    };
+    }
+}
+
+/// Transform one raw [`SeedCard`] into its capped render view.
+fn seed_section_card(card: &SeedCard, cap: usize) -> SeedSectionCard {
+    let (table, total_rows, shown_rows, capped) = cap_seed_table(card.table.as_ref(), cap);
     SeedSectionCard {
         id: card.id.as_str().to_owned(),
         name: card.name.clone(),

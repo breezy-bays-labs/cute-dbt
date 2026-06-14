@@ -100,7 +100,7 @@ use crate::domain::{
     ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex, PrConfig, PrRef, PreflightError,
     ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ResolvedAnchor, ScopeInput,
     ScopeSelection, SeedCard, SeedInScopeSet, SuppressRule, SuppressionSource, UnitTest,
-    UnitTestDataDiff, UnitTestYamlBlock, VarReference, all_models, attach_hook_facts,
+    UnitTestDataDiff, UnitTestYamlBlock, VarReference, all_models, all_seeds, attach_hook_facts,
     attach_model_yaml_diffs, attach_var_facts, attribute_config_tree_changes,
     attribute_var_changes, build_seed_cards, changed_macros_baseline, changed_macros_pr_diff,
     changed_models, check_by_id, diff_project_definitions, effective_fixture_format,
@@ -720,6 +720,13 @@ fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
         .iter()
         .next()
         .map(|macro_id| macro_focus_set(&current, macro_id));
+    // cute-dbt#398 — the seed-node detail card's data: every seed's
+    // working-tree CSV (read via `--project-root`, present only on the
+    // `--pr-diff` arm), capped to DEFAULT_SEED_ROW_CAP (explore has no
+    // `--config`, so it uses the default cap directly). Empty when there
+    // are no seeds or no `--project-root` ⇒ the side-map serde-skips ⇒ the
+    // seed-free `dag.html` golden stays byte-identical.
+    let seed_cards = gather_explore_seeds(args, &current);
     render_explore(
         &args.out_dir,
         &current,
@@ -727,6 +734,8 @@ fn execute_explore(args: &ExploreArgs) -> Result<(), RunError> {
         context.changed_models.as_ref(),
         &payload,
         macro_focus.as_ref(),
+        &seed_cards,
+        DEFAULT_SEED_ROW_CAP,
     )
     .map_err(|err| RunError::output(&args.out_dir, err))?;
     Ok(())
@@ -1081,6 +1090,33 @@ fn gather_seeds(
     };
     let reader = FsProjectFileReader::new(project_root);
     gather_seeds_with_reader(&reader, cards, index)
+}
+
+/// The explorer's `gather_seeds` (cute-dbt#398) — build a [`SeedCard`] for
+/// **every** seed in the manifest ([`all_seeds`], the full-manifest seam, not
+/// the report's modified-only [`select_seeds_in_scope`]) and fill each card's
+/// [`table`](crate::domain::SeedCard::table) from its working-tree CSV through
+/// the same [`ProjectFileReader`] port the report's [`gather_seeds`] uses.
+///
+/// The explorer's `--project-root` is only present alongside `--pr-diff`
+/// (clap `requires`), and is the diff-side strip — but it equally names the
+/// working tree the seed CSVs live in, so it is the project root passed to
+/// [`FsProjectFileReader`]. Without it (no `--pr-diff` run), every card keeps
+/// `table: None` — the labeled "data unavailable" degrade (the cute-dbt#126
+/// lesson), exactly the report's no-root behavior. No diff index is threaded:
+/// the explorer takes no baseline, so its seed detail cards show the current
+/// table only (no seed cell-diff) — `gather_seeds_with_reader` is called with
+/// `None`, leaving every card's `diff` empty.
+fn gather_explore_seeds(args: &ExploreArgs, current: &Manifest) -> Vec<SeedCard> {
+    let cards = build_seed_cards(current, &all_seeds(current));
+    let Some(project_root) = args.project_root.as_deref() else {
+        // No-root degrade: identity-and-lineage skeletons unchanged (every
+        // card keeps `table: None`), so the seed detail card can say
+        // truthfully "data unavailable".
+        return cards;
+    };
+    let reader = FsProjectFileReader::new(project_root.to_path_buf());
+    gather_seeds_with_reader(&reader, cards, None)
 }
 
 /// Pure composition step over the [`ProjectFileReader`] port — testable

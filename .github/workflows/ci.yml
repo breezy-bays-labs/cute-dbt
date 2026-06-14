@@ -722,6 +722,22 @@ jobs:
             pr_diff: tests/fixtures/playground-macro-pr-diff.patch
             output: examples/explore-macro
             project_root: tests/fixtures/playground-source
+          # cute-dbt#398 — the GOLDEN seed-data explore page. The dedicated
+          # seed-showcase manifest (one seed + one consuming model) rendered
+          # to the explore --out-dir shape with --pr-diff + --project-root so
+          # the working-tree seed CSV is read and inlined: the seed-typed DAG
+          # node's detail card shows the seed data table (zero-egress: inlined
+          # at gen-time, no view-time fetch). The --pr-diff also marks the
+          # changed model/seed; only dag.html + tests.html emit (no macro
+          # changed). The explore arm needs --project-root, which clap gates
+          # behind --pr-diff — hence the pr-diff arm here.
+          - name: explore-seed
+            mode: explore
+            current: tests/fixtures/seed-showcase-current.json
+            baseline: ""
+            pr_diff: tests/fixtures/seed-showcase-pr-diff.patch
+            output: examples/explore-seed
+            project_root: tests/fixtures/seed-showcase-source
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
