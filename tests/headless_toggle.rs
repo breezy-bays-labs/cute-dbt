@@ -6722,6 +6722,345 @@ fn cytoscape_hover_card_appears_and_tap_highlights_lineage_in_place() {
     let _ = tab.close(true);
 }
 
+// ===== cute-dbt#371 — rendered DAG geometry asserts ===================
+//
+// Every other DAG headless test introspects the live cy *model*
+// (elements, classes, the in-place class-mutation contract). None of
+// them looks at the rendered *geometry*, so a model-correct-but-
+// visually-broken dagre layout — collapsed columns, node overlap,
+// off-canvas drift, zero-size (undrawn / clipped-label) nodes — would
+// sail through CI. These tests close that gap by reading
+// `node.renderedBoundingBox()` off the SAME `window.CuteCyto` /
+// `window.CuteExploreLineage` hooks and asserting four STRUCTURAL
+// invariants (never exact coordinates — font/AA shift a few px):
+//
+//   1. no node has zero/near-zero width or height (it drew + its label
+//      fits inside the box);
+//   2. the dagre layout produced >= N distinct x-columns (the
+//      left-to-right layering is real, not collapsed into one stack) —
+//      N is chosen per-golden, comfortably below the committed shape;
+//   3. every node sits on-canvas (within the cy rendered viewport, no
+//      off-screen drift);
+//   4. no two nodes' boxes overlap beyond a small px tolerance.
+//
+// Thresholds are anchored to the committed goldens' MEASURED geometry
+// (a live probe of each page) with margin, so they encode today's
+// correct layout, not a guess. Pixel/screenshot-diff baselines are out
+// of scope here (deferred to the #360 Claude Design hi-fi pass).
+
+/// Returns a self-contained JS IIFE that measures the rendered geometry
+/// of the Cytoscape instance reached via `cy_expr` and serialises a
+/// structured report back to Rust. `overlap_tol` is the per-pair
+/// overlap tolerance in CSS px (font/AA jitter), `edge_margin` the
+/// on-canvas slack at the viewport edge.
+///
+/// Shape of the returned object:
+/// ```json
+/// {
+///   "ok": true,                  // false iff the cy hook is unreachable
+///   "nodeCount": 5,
+///   "distinctCols": 4,           // x-centres clustered at `col_bucket` px
+///   "minW": 85, "minH": 49,      // smallest rendered node box
+///   "viewport": { "w": 1200, "h": 220 },
+///   "offCanvas": ["id", ...],    // nodes drifting past the viewport edge
+///   "overlaps": [["a","b",dx,dy], ...]  // box pairs overlapping > tol
+/// }
+/// ```
+fn dag_geometry_js(cy_expr: &str, col_bucket: i64, overlap_tol: i64, edge_margin: i64) -> String {
+    format!(
+        r#"(function () {{
+  var cy = {cy_expr};
+  if (!cy || typeof cy.nodes !== 'function') {{ return {{ ok: false }}; }}
+  var nodes = cy.nodes();
+  var boxes = nodes.map(function (n) {{
+    var b = n.renderedBoundingBox();
+    return {{ id: n.id(), x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2, w: b.w, h: b.h, cx: (b.x1 + b.x2) / 2 }};
+  }});
+  var minW = Infinity, minH = Infinity;
+  boxes.forEach(function (b) {{ if (b.w < minW) minW = b.w; if (b.h < minH) minH = b.h; }});
+  var bucket = {col_bucket};
+  var cols = {{}};
+  boxes.forEach(function (b) {{ cols[Math.round(b.cx / bucket)] = true; }});
+  // cy.width()/cy.height() are the authoritative rendered viewport
+  // extent (renderedBoundingBox is in that same 0-based space).
+  var vw = cy.width(), vh = cy.height();
+  var margin = {edge_margin};
+  var offCanvas = boxes.filter(function (b) {{
+    return b.x1 < -margin || b.y1 < -margin || b.x2 > vw + margin || b.y2 > vh + margin;
+  }}).map(function (b) {{ return b.id; }});
+  var tol = {overlap_tol};
+  var overlaps = [];
+  for (var i = 0; i < boxes.length; i++) {{
+    for (var j = i + 1; j < boxes.length; j++) {{
+      var a = boxes[i], c = boxes[j];
+      var ox = Math.min(a.x2, c.x2) - Math.max(a.x1, c.x1);
+      var oy = Math.min(a.y2, c.y2) - Math.max(a.y1, c.y1);
+      if (ox > tol && oy > tol) {{ overlaps.push([a.id, c.id, Math.round(ox), Math.round(oy)]); }}
+    }}
+  }}
+  return {{
+    ok: true,
+    nodeCount: nodes.length,
+    distinctCols: Object.keys(cols).length,
+    minW: Math.round(minW), minH: Math.round(minH),
+    viewport: {{ w: Math.round(vw), h: Math.round(vh) }},
+    offCanvas: offCanvas,
+    overlaps: overlaps
+  }};
+}})()"#
+    )
+}
+
+/// Assert the four structural geometry invariants over the cy instance
+/// reached via `cy_expr`. `surface` labels the failing surface in
+/// panics; `min_cols` / `min_dim` are the per-golden thresholds (chosen
+/// from the measured committed shape, with margin).
+fn assert_dag_geometry(tab: &Tab, surface: &str, cy_expr: &str, min_cols: i64, min_dim: i64) {
+    // col_bucket=20px clusters dagre columns (real columns sit >80px
+    // apart on every golden); overlap_tol=4px and edge_margin=2px absorb
+    // font/AA jitter without masking a real collapse/overlap/drift.
+    let report = eval(tab, &dag_geometry_js(cy_expr, 20, 4, 2));
+
+    assert_eq!(
+        report.get("ok").and_then(serde_json::Value::as_bool),
+        Some(true),
+        "{surface}: the cy instance was not reachable via `{cy_expr}` — \
+         a renamed/missing hook must fail loudly, never read as empty geometry",
+    );
+
+    let node_count = report["nodeCount"].as_i64().expect("nodeCount is a number");
+    assert!(
+        node_count > 0,
+        "{surface}: the DAG rendered ZERO nodes — the layout never drew",
+    );
+
+    // (1) no zero/near-zero node — every node drew and its label fits.
+    let min_w = report["minW"].as_i64().expect("minW is a number");
+    let min_h = report["minH"].as_i64().expect("minH is a number");
+    assert!(
+        min_w >= min_dim && min_h >= min_dim,
+        "{surface}: a node rendered at or near zero size (minW={min_w}, minH={min_h}, \
+         floor={min_dim}px) — a collapsed/undrawn node or a clipped label, not a \
+         healthy box",
+    );
+
+    // (2) >= N distinct x-columns — the dagre layering is real, not a
+    // single collapsed stack.
+    let cols = report["distinctCols"]
+        .as_i64()
+        .expect("distinctCols is a number");
+    assert!(
+        cols >= min_cols,
+        "{surface}: the dagre layout collapsed to {cols} distinct x-column(s) \
+         (expected >= {min_cols}) — left-to-right layering is broken",
+    );
+
+    // (3) all nodes on-canvas — none drifted past the cy viewport edge.
+    let off_canvas = report["offCanvas"]
+        .as_array()
+        .expect("offCanvas is an array");
+    assert!(
+        off_canvas.is_empty(),
+        "{surface}: {n} node(s) rendered off-canvas (outside the cy viewport \
+         {vp}): {ids:?}",
+        n = off_canvas.len(),
+        vp = report["viewport"],
+        ids = off_canvas,
+    );
+
+    // (4) no two boxes overlap beyond the tolerance.
+    let overlaps = report["overlaps"].as_array().expect("overlaps is an array");
+    assert!(
+        overlaps.is_empty(),
+        "{surface}: {n} node-box pair(s) overlap beyond the 4px tolerance \
+         (each entry is [a, b, dx, dy]): {pairs:?}",
+        n = overlaps.len(),
+        pairs = overlaps,
+    );
+}
+
+/// Absolute `file://` URL of a committed example under `examples/`
+/// (mirrors `headless_zero_egress.rs`'s `report_file_url`). The geometry
+/// goldens are the SAME committed artifacts the zero-egress gate opens.
+fn committed_example_url(rel: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join(rel);
+    assert!(
+        path.exists(),
+        "examples/{rel} missing — regenerate the committed golden (the geometry \
+         asserts read it byte-for-byte; they never mutate it)",
+    );
+    let p = path.to_str().expect("example path is valid UTF-8");
+    format!("file://{p}")
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn report_dag_rendered_geometry_is_structurally_sound() {
+    // The committed report golden (`playground-report.html`) renders a
+    // per-model CTE DAG; flipping the settings-panel engine picker to
+    // Cytoscape makes `window.CuteCyto.cyInstance()` live. The default-
+    // selected model is a thin 2-node graph, so we switch to `dim_payers`
+    // — a measured 5-node / 4-column CTE DAG — to exercise real layering.
+    let browser = launch_browser();
+    let url = committed_example_url("playground-report.html");
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+
+    // Boot the default Mermaid render, then flip to the Cytoscape engine.
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-mermaid svg",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("Mermaid renders the DAG by default");
+    click_engine(&tab, "cytoscape");
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-cyto canvas",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("the Cytoscape engine renders a live canvas after the flip");
+
+    // Switch to the richer model and let cytoscape-dagre re-lay-out.
+    select_model(&tab, "dim_payers");
+    wait_for_cy_node_count(&tab, "window.CuteCyto.cyInstance()", 5);
+
+    // Measured committed shape: 5 nodes, 4 columns (x-centres ~176/176/
+    // 457/738/1019), minW=85, minH=49, no overlap, all on-canvas.
+    // Thresholds sit comfortably below the real numbers.
+    assert_dag_geometry(
+        &tab,
+        "report DAG (playground / dim_payers, Cytoscape)",
+        "window.CuteCyto.cyInstance()",
+        3,
+        10,
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_lineage_dag_rendered_geometry_is_structurally_sound() {
+    // The committed explore lineage golden (`explore/dag.html`) renders
+    // the full-manifest lineage through cytoscape-dagre; the live cy is
+    // reached via `window.CuteExploreLineage.cyInstance()`. Its nodes are
+    // canvas-text labels (small boxes), so the zero-size floor is lower
+    // than the report's CTE boxes.
+    let browser = launch_browser();
+    let url = committed_example_url("explore/dag.html");
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(
+        ".lineage-canvas canvas",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("the explore lineage Cytoscape canvas renders");
+
+    // Measured committed shape: 52 nodes, 8 columns (centres ~109/194/
+    // 277/359/443/528/612), minW=32, minH=12 (label boxes), no overlap,
+    // all on-canvas. Floors: >= 5 columns, >= 6px per side.
+    assert_dag_geometry(
+        &tab,
+        "explore lineage DAG (explore/dag.html)",
+        "window.CuteExploreLineage.cyInstance()",
+        5,
+        6,
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn explore_macro_dag_rendered_geometry_is_structurally_sound() {
+    // The committed focused-macro golden (`explore-macro/macro.html`,
+    // cute-dbt#345/#369) is the SAME cytoscape-dagre page rendered with
+    // `--pr-diff`; the live cy is the same `CuteExploreLineage` hook. Its
+    // nodes are full boxes (wider than lineage labels), so the floor is
+    // higher.
+    let browser = launch_browser();
+    let url = committed_example_url("explore-macro/macro.html");
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(
+        ".lineage-canvas canvas",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("the explore macro Cytoscape canvas renders");
+
+    // Measured committed shape: 11 nodes, 3 columns (centres ~152/358/
+    // 566), minW=148, minH=30, no overlap, all on-canvas. Floors: >= 3
+    // columns, >= 10px per side.
+    assert_dag_geometry(
+        &tab,
+        "explore macro DAG (explore-macro/macro.html)",
+        "window.CuteExploreLineage.cyInstance()",
+        3,
+        10,
+    );
+
+    let _ = tab.close(true);
+}
+
+/// Poll until the cy instance reached via `cy_expr` reports `expected`
+/// nodes (a model switch / re-layout is async). Mirrors the
+/// readiness-poll discipline of `wait_for_document_ready` — a 10s cap is
+/// a wedged-tab guardrail, not the wait mechanism.
+fn wait_for_cy_node_count(tab: &Tab, cy_expr: &str, expected: i64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let probe = format!(
+        "(function () {{ var cy = {cy_expr}; \
+         return cy && typeof cy.nodes === 'function' ? cy.nodes().length : -1; }})()"
+    );
+    loop {
+        // Raw Runtime::Evaluate, deliberately NOT the fail-loud `eval`
+        // helper: while the model switch / re-layout is in flight the cy
+        // hook may not yet be safely callable, so `cy_expr` can throw
+        // transiently. Readiness polling must treat a protocol error or a
+        // thrown eval as "not ready yet — keep polling", never as a failure
+        // (cute-dbt#109 / #208); `eval` (correctly) panics on a throw, which
+        // would defeat this loop's wait-until-ready intent. The probe's own
+        // `cy && typeof cy.nodes` guard covers the null/undefined-cy case
+        // (→ -1); this covers the case where `cy_expr` itself throws.
+        let count = tab
+            .call_method(Runtime::Evaluate {
+                expression: probe.clone(),
+                object_group: None,
+                include_command_line_api: None,
+                silent: Some(true),
+                context_id: None,
+                return_by_value: Some(true),
+                generate_preview: None,
+                user_gesture: Some(true),
+                await_promise: Some(false),
+                throw_on_side_effect: None,
+                timeout: None,
+                disable_breaks: None,
+                repl_mode: None,
+                allow_unsafe_eval_blocked_by_csp: None,
+                unique_context_id: None,
+                serialization_options: None,
+            })
+            .ok()
+            .filter(|r| r.exception_details.is_none())
+            .and_then(|r| r.result.value)
+            .and_then(|v| v.as_i64());
+        if count == Some(expected) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the cy instance never reached {expected} nodes within 10s \
+             (the model switch / re-layout did not settle)",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 // ===== cute-dbt#170 — the per-model coverage-checks panel ==============
 //
 // The findings surface is client-side JS over the payload's
