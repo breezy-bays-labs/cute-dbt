@@ -36,7 +36,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-bc6a72ef.js";
+            window.path_to_searchindex_js = "searchindex-dccc8a70.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-aa34fb98.js"></script>
@@ -1815,6 +1815,32 @@ than mislabel a test.</p>
 dir (hence <code>mkdir -p _site</code> + <code>--out _site/report.html</code>) keeps the Pages
 publish in § 4 from pushing your <strong>whole checkout</strong> to the <code>gh-pages</code>
 branch — <code>publish_dir</code> points at <code>_site/</code>, not <code>.</code>.</p>
+<h3 id="inline-annotations-on-the-files-changed-tab"><a class="header" href="#inline-annotations-on-the-files-changed-tab">Inline annotations on the Files-changed tab</a></h3>
+<p>Add <code>--annotations</code> to the same invocation and cute-dbt prints <strong>GitHub
+workflow-command annotations</strong> to stdout for each in-scope uncovered
+finding it can pin to a changed line:</p>
+<pre><code class="language-bash">cute-dbt report \
+  --manifest dbt_project/target/manifest.json \
+  --pr-diff @diff.patch \
+  --project-root dbt_project \
+  --annotations \
+  --out _site/report.html
+</code></pre>
+<p>GitHub Actions renders those lines <strong>inline on the PR’s Files-changed
+tab</strong> — no token, no API call, no permission scope; just printing them is
+enough, and it works identically on public and private repos (unlike
+SARIF, which is gated on private). Each line is
+<code>::warning file=&lt;path&gt;,line=&lt;n&gt;,title=cute-dbt: &lt;check-id&gt;::&lt;recommendation&gt;</code>,
+anchored at the model file’s first changed line. The level follows the
+finding’s tier: advisory → <code>notice</code>, high → <code>warning</code>, and a deterministic
+<code>Total</code>-tier gap → <code>error</code> <strong>only when</strong> you also pass
+<code>--fail-on-uncovered</code> (otherwise it rides as a <code>warning</code>, so <code>--annotations</code>
+alone never changes your exit code). A finding whose model file is not in
+the diff stays summary-only (there is no honest line to pin it to), and the
+emit is capped at GitHub’s ~10-per-step limit with a <code>+N more</code> overflow
+notice pointing back at the full report. The annotations are a generation-
+time stdout emit — they are <strong>never</strong> written into <code>report.html</code>, so the
+report’s zero-egress guarantee is untouched.</p>
 <h2 id="4-pages-preview-public-repos"><a class="header" href="#4-pages-preview-public-repos">4. Pages preview (public repos)</a></h2>
 <p>Copy this into <code>.github/workflows/cute-dbt-pr-review.yml</code>. Edit
 <code>dbt_project</code>, the dbt adapter, and <code>CUTE_DBT_REV</code> (see § 6 install note).</p>
