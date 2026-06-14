@@ -41,6 +41,7 @@ pub mod checks;
 pub mod config;
 pub mod cte;
 pub mod experimental;
+pub mod findings_envelope;
 pub mod governance;
 pub mod grain;
 pub mod macro_lens;
@@ -82,6 +83,10 @@ pub use cte::{
 pub use experimental::{
     DEFAULT_MACRO_BODY_CAP, EnabledExperiments, Experiment, ExperimentalConfig, ExperimentalError,
     parse_experimental_env, resolve_experimental_config,
+};
+pub use findings_envelope::{
+    EnvelopeMetadata, EnvelopeScope, FindingsEnvelope, ID_STABILITY, SCHEMA_VERSION,
+    has_total_uncovered,
 };
 pub use governance::{
     BlastRadius, BreakingReason, ColumnMetaTags, ConstraintSupport, ContractChange, ContractClass,

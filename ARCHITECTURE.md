@@ -89,7 +89,7 @@ machinery that guards no invariant here.
 | 2 | Per-crate independent versioning | Single artifact version | Moot — one crate, one version. The release cadence is whole-product, not per-component. | Absence (no second crate to version independently). |
 | 3 | `public-api-shim` re-export pattern (`pub use crate::…::…` from `lib.rs` curating a stable surface for library consumers) | None | The binary is the product; there are no library consumers to shield from internal renames. An API shim with no consumer would add indirection that guards nothing. | **CI:** `non-mirror-guard` job rejects `pub use crate::…::…` in `src/lib.rs`. |
 | 4 | AST-purity `cargo-deny` bans + `ast-purity` CI grep (keep adapter AST libraries out of a shared core) | None | The AST-purity invariant exists to protect a *shared* core crate from adapter parser dependencies when several adapter crates each pull in different AST libraries. cute-dbt has exactly one parser (`sqlparser-rs`) and one consumer of it; there is no shared core and no rival AST surface — no invariant to enforce. (Bonus: `bans.deny.wrappers` is fragile under proc-macro dependency chains; this project never needs to depend on that mechanism.) | **CI:** `non-mirror-guard` job rejects `bans.deny.wrappers` in `deny.toml`. |
-| 5 | `nested-json-envelope` ADR for wire output | None | Output is HTML-primary, single self-contained file. There is no JSON wire envelope to version. `--format json` is explicitly deferred to v0.2+; if it lands it will be a new ADR, not a retroactive shim. | Absence (no JSON output in v0.1). |
+| 5 | `nested-json-envelope` ADR for wire output | **Reversed — now present** (the findings-envelope **sidecar**, cute-dbt#386 / epic #261) | Originally absent: output was HTML-primary, single self-contained file, with no JSON wire envelope to version. The conscious simplification has been **deliberately reversed** under the founder's ADR-4 amendment (2026-06-11) + the #261 locked decisions — see the note below the table. The reversal stays minimal: the envelope is an **additive `--findings-out <path.json>` sidecar** (mirroring dbt's manifest/run_results sidecars), **never a `--format json` swap**, so the HTML output and its byte-identity goldens are untouched. | New-output-path ADR (#261), not a retroactive shim. The envelope is byte-identity-gated like the HTML goldens (`examples/diff-showcase-findings.json` in `example-report-check`). |
 | 6 | `proc-macro2 span-locations` toolchain gate | None | No direct `proc-macro2` dependency. The `sqlparser` tokenizer carries its own spans, and the tokenizer pass itself (for `-- @desc` per-CTE breakdowns) is v0.2-deferred. There is no proc-macro span-precision invariant in scope to gate. | Absence (no `proc-macro2` direct dep). |
 
 **Enforcement layering.** Three of the six rows have a literal CI grep
@@ -97,13 +97,71 @@ backing them — rows 1, 3, and 4 are guarded by the
 [`non-mirror-guard`](.github/workflows/ci.yml) job, which rejects the
 specific tripwires (`[workspace]`, `pub use crate::…::…`,
 `bans.deny.wrappers`) that would silently reintroduce the apparatus. Rows
-2, 5, and 6 are enforced by **absence** — there is no second crate to
-version, no JSON output path, and no `proc-macro2` direct dependency, so
-the apparatus cannot be added incidentally; adding any of them would
-require a discrete code change visible at review.
+2 and 6 are enforced by **absence** — there is no second crate to
+version and no `proc-macro2` direct dependency, so the apparatus cannot be
+added incidentally; adding either would require a discrete code change
+visible at review. Row 5 was absence-enforced until cute-dbt#386 reversed
+it; the envelope's own shape is now pinned by a **byte-identity golden**
+(`examples/diff-showcase-findings.json`), the same gate class as the HTML
+examples.
 
 This is deliberate. The strongest tripwires get CI; the absence-enforced
 ones get this section.
+
+### Row-5 reversal — the findings-envelope sidecar (cute-dbt#386, epic #261)
+
+Row 5's "no JSON wire envelope" simplification was **consciously
+reversed** — a sanctioned reversal, not a "pattern completion." The
+authority is the founder's **ADR-4 amendment (2026-06-11)** plus the four
+**decisions locked** in the [#261 Wave-1 shaping
+session](https://github.com/breezy-bays-labs/cute-dbt/issues/261). The
+canonical decision record is the ops-repo ADR
+(`decisions/cute-dbt/`); this section is the public-repo narrative.
+
+The reframe that made the reversal cheap: the `Finding` POD already derives
+`Serialize` and already emits the full vocabulary (`check` / `tier` /
+`verdict` / `evidence` / `recommendation` / `degraded` / `suppressed`), so
+this is not "design a findings schema" — it is "wrap the already-serializing
+PODs in a versioned header, emit them as a sidecar, and make four policy
+commitments." The four locked decisions:
+
+1. **Delivery = sidecar.** A new `--findings-out <path.json>` flag emits the
+   envelope **alongside** the HTML report in one run — additive, **not** a
+   `--format json` swap. The HTML output is byte-for-byte unchanged (the
+   HTML goldens stay green); CI gets the human report *and* the machine
+   envelope from one invocation.
+2. **check-id stability: v0.x churns, freeze at v1.0.** Individual
+   check-ids are **unstable** in v0.x and only freeze at v1.0. The envelope
+   carries this loudly and machine-readably: `metadata.id_stability:
+   "unstable-v0.x"`. **Consumers pin `metadata.schema_version` (an integer,
+   starting at `1`) — the only stability anchor pre-v1.0 — never an
+   individual check-id, and never a gate config hard-keyed to specific ids,
+   until v1.0.**
+3. **Gate = Total-tier `Uncovered` only, not configurable.**
+   `--fail-on-uncovered` exits a dedicated non-zero code (distinct from the
+   usage-error and fail-closed codes) iff ≥1 `Tier::Total` +
+   `Verdict::Uncovered` finding is in the in-scope set. `Total` checks are
+   zero-false-positive by construction, so the gate never trips on a
+   heuristic guess. No tier knob — Total-only is the design tenet.
+4. **OpenLineage: design-compatible, deferred.** The envelope fields are
+   shaped so a future OpenLineage-facet projection is a clean mapping, but
+   **no** OpenLineage output is emitted in this slice.
+
+Severity is the existing `Tier` enum (no new field). SARIF is a later,
+lossy projection — never canonical, not here. Owner fields (soft-dep #256)
+reserve their slot and are populated later, additively.
+
+The envelope POD + the gate predicate live in `src/domain/findings_envelope.rs`
+(pure: `std` + serde derive only); the findings-collection + emit-to-file
+live in the `src/adapters/findings_emit.rs` adapter (it parses each in-scope
+model's CTE graph and runs the **same** `model_findings → apply_check_policy`
+pipeline the renderer runs, so the envelope's findings match the report's
+exactly). `generated_at` is computed at the CLI I/O boundary and threaded in
+as a parameter (the golden-determinism rule — std-only, no `chrono`/`time`),
+so the committed envelope golden is byte-stable. The envelope is emitted as
+an **RFC3339 date** (`YYYY-MM-DD`): a finer-grained timestamp would need a
+date-time formatting crate cute-dbt's std-only posture forbids, and the date
+is the deterministic granularity the golden gate needs.
 
 ## 3. Two-stage fail-closed contract
 

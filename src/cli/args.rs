@@ -265,6 +265,47 @@ pub struct ReportArgs {
     /// Overrides `[pr].number` in `--config`.
     #[arg(long, value_name = "N")]
     pub pr_number: Option<u64>,
+
+    /// Emit the machine-readable **findings envelope** JSON to this path,
+    /// alongside the HTML `--out` report in the same run (cute-dbt#386).
+    ///
+    /// Additive sidecar — NOT a format swap: the HTML report is written
+    /// exactly as before, and this writes a second `{ metadata, findings }`
+    /// JSON file beside it. The envelope wraps the same in-scope findings
+    /// the report surfaces in a versioned header
+    /// (`metadata.schema_version` — the integer stability anchor; check-ids
+    /// themselves are unstable until v1.0, so pin `schema_version`, not
+    /// individual ids). The file's parent directory must already exist (the
+    /// same contract as `--out`).
+    #[arg(long, value_name = "PATH")]
+    pub findings_out: Option<PathBuf>,
+
+    /// Exit non-zero when the in-scope set carries any **Total-tier
+    /// `Uncovered`** finding (cute-dbt#386) — the deterministic
+    /// coverage-gap gate for CI.
+    ///
+    /// `Total` checks are zero-false-positive by construction, so this gate
+    /// never trips on a heuristic guess. The exit code is dedicated
+    /// (distinct from the usage-error and fail-closed codes); the HTML
+    /// report and the `--findings-out` sidecar (if requested) are still
+    /// written first. Not configurable — `Total`-only is the design tenet
+    /// (no tier knob in v0.1).
+    #[arg(long)]
+    pub fail_on_uncovered: bool,
+
+    /// Override the findings envelope's `metadata.generated_at` with a
+    /// fixed `YYYY-MM-DD` date (cute-dbt#386).
+    ///
+    /// The envelope timestamp is normally "today" computed at the I/O
+    /// boundary. This flag pins it to a fixed value so the committed
+    /// envelope golden stays byte-identical across CI runs regardless of
+    /// the wall-clock date (the golden-determinism rule: the domain is a
+    /// pure function of `(facts, generated_at)`; this is the I/O-boundary
+    /// injection point). Hidden — it exists only for golden regeneration /
+    /// reproducible builds, never a normal user surface. Inert unless
+    /// `--findings-out` is also set.
+    #[arg(long, value_name = "YYYY-MM-DD", hide = true)]
+    pub generated_at: Option<String>,
 }
 
 /// Arguments for `cute-dbt explore` (cute-dbt#100) — full-manifest,
