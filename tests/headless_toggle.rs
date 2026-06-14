@@ -2663,6 +2663,7 @@ fn reconstruct_fusion_data_diffs(
     };
     let diff = PrDiff {
         renames: Vec::new(),
+        deleted: Vec::new(),
         files: vec![FileHunks {
             path: "models/marts/_unit_tests.yml".to_owned(),
             hunks: vec![hunk],
@@ -12666,6 +12667,7 @@ fn render_macro_lens_to_file(filename: &str) -> String {
     // reconstructs (the `+` matches the working-tree body).
     let diff = PrDiff {
         renames: Vec::new(),
+        deleted: Vec::new(),
         files: vec![FileHunks {
             path: "macros/dq.sql".to_owned(),
             hunks: vec![Hunk {
