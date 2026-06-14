@@ -127,6 +127,14 @@ code, kbd { background: var(--bg-alt); color: var(--text); }
    change-context twin of .detail-notcompiled; both can show at once). */
 .model-detail-card .detail-changed { display: inline-block; margin-left: 0.35rem; padding: 0 0.4rem; border: 1.5px solid var(--dag-import-stroke); border-radius: 4px; background: var(--dag-import-fill); color: var(--dag-node-text); box-shadow: 0 0 0 2px rgba(230, 159, 0, 0.55); font-size: 0.8rem; }
 .model-detail-card .detail-section-title { margin: 0.5rem 0 0.15rem; font-size: 0.85rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+/* cute-dbt#398 — the seed-node detail card's data table (the seed CSV the
+   engine loads, inlined at gen-time). Reuses the detail-columns look so the
+   seed grid reads as one with the rest of the card. */
+.model-detail-card .detail-seed-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin: 0.25rem 0 0; }
+.model-detail-card .detail-seed-table th, .model-detail-card .detail-seed-table td { text-align: left; padding: 0.15rem 0.6rem 0.15rem 0; border-bottom: 1px solid var(--border); vertical-align: top; overflow-wrap: anywhere; }
+.model-detail-card .detail-seed-table th { color: var(--text-muted); font-weight: 600; }
+.model-detail-card .detail-seed-rowcap { margin: 0.15rem 0; font-size: 0.8rem; color: var(--text-muted); }
+.model-detail-card .detail-seed-unavailable { margin: 0.15rem 0; }
 </style>
 </head>
 {# cute-dbt#105 — the external-drive contract version, server-rendered

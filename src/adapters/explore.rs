@@ -52,8 +52,8 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::render::{DagPayload, ReportPayload};
 use crate::domain::{
-    GrainKind, MacroFocusSet, Manifest, ModelInScopeSet, Node, NodeId, SourceNode,
-    model_grain_signals, resolve_tested_model,
+    FixtureTable, GrainKind, MacroFocusSet, Manifest, ModelInScopeSet, Node, NodeId, SeedCard,
+    SourceNode, model_grain_signals, resolve_tested_model,
 };
 
 /// The explorer's external-drive contract version (cute-dbt#105).
@@ -759,6 +759,87 @@ pub struct LineagePayload {
     /// "no CTE DAG" sparse state for a compiled CTE-less model and the
     /// labeled fail-open degraded view for a `not_compiled` one.
     pub cte_dags: BTreeMap<String, DagPayload>,
+    /// Per-seed data tables (cute-dbt#398) — the seed-node detail-card's
+    /// data, keyed by full seed node id (`seed.<pkg>.<name>`). Each entry
+    /// is the seed's working-tree CSV, read at gen-time and capped to the
+    /// resolved row cap (zero-egress: the table is inlined here, never
+    /// fetched at view time). A side-map (the `cte_dags` precedent), NOT a
+    /// per-node field — only seed nodes ever carry one, so an `Option` on
+    /// every [`LineageNodePayload`] would be a type that lies about its
+    /// shape. An empty map (no seeds, or no `--project-root`) serializes to
+    /// `{}` and is already the default shape, so a seed-free `dag.html`
+    /// golden stays byte-identical. A seed whose CSV could not be read
+    /// carries an entry with `table: None` — the labeled "data unavailable"
+    /// degrade (the cute-dbt#126 lesson), never a silently absent key
+    /// (which the client could not distinguish from a non-seed node).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub seed_tables: BTreeMap<String, SeedTablePayload>,
+}
+
+/// One seed's data-table payload for the explorer's seed-node detail card
+/// (cute-dbt#398) — the lean explore-side twin of the report's
+/// [`SeedSectionCard`](crate::adapters::render::SeedSectionCard).
+///
+/// Carries only what the detail card renders: the CAPPED current table plus
+/// the honest "showing N of M rows" metadata. It deliberately does NOT carry
+/// `SeedSectionCard`'s `feeds_models` / config chips / cell-diff — the
+/// explore detail card surfaces lineage and identity from its own
+/// `detail`/`paths` node payload, and the explorer takes no baseline so a
+/// seed diff is out of scope. Sharing the *whole* report struct would couple
+/// two unrelated render surfaces; sharing the cap-and-truncate *logic*
+/// (the render layer's `cap_seed_table` helper) is the right reuse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SeedTablePayload {
+    /// The seed's CURRENT data table, **capped** to the resolved row cap.
+    /// `None` ⇒ the data could not be read (no `--project-root` / unreadable
+    /// file) ⇒ the labeled "data unavailable" state (the cute-dbt#126
+    /// lesson). When `Some`, holds at most [`shown_rows`](Self::shown_rows)
+    /// rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<FixtureTable>,
+    /// The TRUE number of rows BEFORE the cap — the `M` in "showing N of M
+    /// rows". `0` when [`table`](Self::table) is `None`.
+    pub total_rows: usize,
+    /// The number of rows actually carried after the cap — the `N`. Equals
+    /// [`total_rows`](Self::total_rows) when under the cap; `0` when `table`
+    /// is `None`.
+    pub shown_rows: usize,
+    /// `true` when the cap truncated rows (so the client shows the honest
+    /// "showing N of M rows" note). Precomputed in Rust — the JS only
+    /// renders.
+    pub capped: bool,
+}
+
+/// Build the per-seed data-table side-map for the lineage payload
+/// (cute-dbt#398), keyed by full seed node id (`seed.<pkg>.<name>`).
+///
+/// Each gathered [`SeedCard`] (identity + the working-tree CSV the CLI
+/// gather stage read) becomes a lean [`SeedTablePayload`]: the current table
+/// capped to `cap` rows via the shared render-layer `cap_seed_table` helper
+/// (the same row cap the report's "Data tables" section applies), plus the
+/// honest row-count metadata. A card whose `table` is `None` (no `--project-root` /
+/// unreadable CSV) still gets an entry (`table: None`) so the detail card can
+/// render the labeled "data unavailable" degrade rather than silently
+/// omitting the key. Pure transform over owned data — no I/O (the CSV read
+/// happened upstream in the cli gather, the `cte_dags` precedent).
+#[must_use]
+pub fn seed_tables_by_id(cards: &[SeedCard], cap: usize) -> BTreeMap<String, SeedTablePayload> {
+    cards
+        .iter()
+        .map(|card| {
+            let (table, total_rows, shown_rows, capped) =
+                crate::adapters::render::cap_seed_table(card.table.as_ref(), cap);
+            (
+                card.id.as_str().to_owned(),
+                SeedTablePayload {
+                    table,
+                    total_rows,
+                    shown_rows,
+                    capped,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Build the serializable lineage payload for `dag.html` (cute-dbt#101).
@@ -861,6 +942,7 @@ fn lineage_payload_from(
         nodes,
         edges,
         cte_dags: BTreeMap::new(),
+        seed_tables: BTreeMap::new(),
     }
 }
 
@@ -1319,6 +1401,8 @@ pub fn render_explore(
     changed: Option<&ModelInScopeSet>,
     payload: &ReportPayload,
     macro_focus: Option<&MacroFocusSet>,
+    seed_cards: &[SeedCard],
+    seed_row_cap: usize,
 ) -> io::Result<()> {
     fs::create_dir_all(out_dir)?;
 
@@ -1331,6 +1415,15 @@ pub fn render_explore(
     // cute-dbt#102 — the CTE ⇄ model toggle's per-model CTE DAGs ride
     // the same carrier (the payload's graphs, parsed once upstream).
     lineage.cte_dags = cte_dags_by_model(models, payload);
+    // cute-dbt#398 — per-seed data tables ride the SAME carrier (the
+    // `cte_dags` side-map precedent): the gathered working-tree CSVs,
+    // capped to the resolved row cap. The seed-node detail card reads
+    // `data.seed_tables[id]` and renders the grid (or the labeled
+    // "data unavailable" degrade when the CSV could not be read). An empty
+    // `seed_cards` (no seeds, or no `--project-root`) leaves the map empty
+    // ⇒ omitted from JSON ⇒ the seed-free `dag.html` golden stays
+    // byte-identical (the serde-skip on `seed_tables`).
+    lineage.seed_tables = seed_tables_by_id(seed_cards, seed_row_cap);
     let not_compiled_count = lineage.nodes.iter().filter(|n| n.not_compiled).count();
     // The marked-node count (what actually renders), not `changed.len()`
     // — a defensive id outside the model set must not inflate the banner.
@@ -1444,7 +1537,8 @@ mod tests {
 
     use crate::adapters::render::build_payload;
     use crate::domain::{
-        Checksum, DependsOn, InScopeSet, ManifestMetadata, Node, NodeConfig, all_models,
+        Checksum, DEFAULT_SEED_ROW_CAP, DependsOn, InScopeSet, ManifestMetadata, Node, NodeConfig,
+        all_models,
     };
 
     fn model(id: &str, compiled: Option<&str>, deps: &[&str]) -> Node {
@@ -2092,7 +2186,17 @@ mod tests {
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("both-pages");
 
-        render_explore(&dir, &current, &models, None, &payload, None).expect("explore renders");
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            None,
+            &payload,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("explore renders");
 
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html written");
         let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html written");
@@ -2145,8 +2249,28 @@ mod tests {
         let payload = payload_for(&current, &models);
         let dir_a = tmp_dir("det-a");
         let dir_b = tmp_dir("det-b");
-        render_explore(&dir_a, &current, &models, None, &payload, None).expect("first render");
-        render_explore(&dir_b, &current, &models, None, &payload, None).expect("second render");
+        render_explore(
+            &dir_a,
+            &current,
+            &models,
+            None,
+            &payload,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("first render");
+        render_explore(
+            &dir_b,
+            &current,
+            &models,
+            None,
+            &payload,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("second render");
         for page in ["dag.html", "tests.html"] {
             let a = fs::read(dir_a.join(page)).expect("page a");
             let b = fs::read(dir_b.join(page)).expect("page b");
@@ -2162,7 +2286,17 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("nested").join("deeper");
-        render_explore(&dir, &current, &models, None, &payload, None).expect("creates out-dir");
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            None,
+            &payload,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("creates out-dir");
         assert!(dir.join("dag.html").exists());
         assert!(dir.join("tests.html").exists());
         let _ = fs::remove_dir_all(dir.parent().expect("parent"));
@@ -2174,8 +2308,17 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("empty");
-        render_explore(&dir, &current, &models, None, &payload, None)
-            .expect("empty manifest renders");
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            None,
+            &payload,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("empty manifest renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
             dag.contains("\"nodes\":[]"),
@@ -2251,7 +2394,17 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("cte-toggle");
-        render_explore(&dir, &current, &models, None, &payload, None).expect("explore renders");
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            None,
+            &payload,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         // The carrier embeds the per-model CTE DAG map.
         assert!(dag.contains("\"cte_dags\":{"), "cte_dags carrier present");
@@ -2306,7 +2459,17 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("tests-viewer");
-        render_explore(&dir, &current, &models, None, &payload, None).expect("explore renders");
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            None,
+            &payload,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("explore renders");
         let tests = fs::read_to_string(dir.join("tests.html")).expect("tests.html");
         // The shared askama partial (report.html's test card) renders.
         assert!(
@@ -2877,7 +3040,17 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("contract-version");
-        render_explore(&dir, &current, &models, None, &payload, None).expect("explore renders");
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            None,
+            &payload,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
             dag.contains(&format!(
@@ -2982,8 +3155,17 @@ mod tests {
         let payload = payload_for(&current, &models);
         let changed = changed_set(&["model.shop.dim_orders"]);
         let dir = tmp_dir("change-context");
-        render_explore(&dir, &current, &models, Some(&changed), &payload, None)
-            .expect("explore renders");
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            Some(&changed),
+            &payload,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
             dag.contains("1 changed in this diff"),
@@ -3016,8 +3198,17 @@ mod tests {
         let payload = payload_for(&current, &models);
         let empty = ModelInScopeSet::new();
         let dir = tmp_dir("change-context-zero");
-        render_explore(&dir, &current, &models, Some(&empty), &payload, None)
-            .expect("explore renders");
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            Some(&empty),
+            &payload,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(dag.contains("0 changed in this diff"), "honest zero");
         assert!(
@@ -3185,8 +3376,17 @@ mod tests {
             &["model.shop.dim_orders", "model.shop.mart_orders"],
         );
         let dir = tmp_dir("macro-focus");
-        render_explore(&dir, &current, &models, None, &payload, Some(&focus))
-            .expect("explore renders");
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            None,
+            &payload,
+            Some(&focus),
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("explore renders");
         let macro_html = fs::read_to_string(dir.join("macro.html")).expect("macro.html written");
         // The focused carrier rides macro.html and carries the role keys.
         assert!(
@@ -3219,7 +3419,17 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("no-macro-focus");
-        render_explore(&dir, &current, &models, None, &payload, None).expect("explore renders");
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            None,
+            &payload,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("explore renders");
         assert!(
             !dir.join("macro.html").exists(),
             "the no-focus path must not emit macro.html",
@@ -3268,8 +3478,17 @@ mod tests {
         assert_eq!(focus.downstream.len(), 2, "closure includes the test node");
 
         let dir = tmp_dir("macro-count-vertex");
-        render_explore(&dir, &current, &models, None, &payload, Some(&focus))
-            .expect("explore renders");
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            None,
+            &payload,
+            Some(&focus),
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("explore renders");
         let macro_html = fs::read_to_string(dir.join("macro.html")).expect("macro.html");
 
         // The rendered focused DAG carries exactly 2 vertices (stg + dim);
@@ -3319,7 +3538,17 @@ mod tests {
         let models = all_models(&current);
         let payload = payload_for(&current, &models);
         let dir = tmp_dir("no-change-context");
-        render_explore(&dir, &current, &models, None, &payload, None).expect("explore renders");
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            None,
+            &payload,
+            None,
+            &[],
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("explore renders");
         let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
         assert!(
             !dag.contains("<span class=\"legend-chip changed\">"),
@@ -3332,6 +3561,110 @@ mod tests {
         assert!(
             !dag.contains("\"changed\":"),
             "no changed keys in the no-context carrier",
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ----- cute-dbt#398 — seed-table side-map ---------------------------
+
+    /// A `FixtureTable` of `n` single-column (`id`) rows.
+    fn seed_table_of(n: usize) -> crate::domain::FixtureTable {
+        use crate::domain::{Cell, CellValue, FixtureTable, TableRow};
+        let rows = (0..n)
+            .map(|i| TableRow::new(vec![Cell::new(CellValue::Number(i.to_string()))]))
+            .collect();
+        FixtureTable::new(vec!["id".to_owned()], rows)
+    }
+
+    /// A raw `SeedCard` with a `table` of `n` rows (no diff).
+    fn seed_card_with_rows(id: &str, n: usize) -> SeedCard {
+        let mut card = SeedCard::new(NodeId::new(id), "raw_codes", None, Vec::new());
+        card.table = Some(seed_table_of(n));
+        card
+    }
+
+    #[test]
+    fn seed_tables_by_id_keys_each_card_by_full_node_id_under_cap() {
+        let map = seed_tables_by_id(&[seed_card_with_rows("seed.shop.raw_codes", 3)], 500);
+        let entry = map
+            .get("seed.shop.raw_codes")
+            .expect("keyed by full seed node id");
+        assert_eq!(entry.total_rows, 3);
+        assert_eq!(entry.shown_rows, 3);
+        assert!(!entry.capped);
+        assert_eq!(entry.table.as_ref().expect("table present").rows.len(), 3);
+    }
+
+    #[test]
+    fn seed_tables_by_id_caps_the_table_and_records_the_true_total() {
+        // Over-cap: the table truncates to `cap`, but `total_rows` keeps the
+        // TRUE pre-cap count so the client labels "showing N of M" honestly.
+        let map = seed_tables_by_id(&[seed_card_with_rows("seed.shop.raw_codes", 10)], 4);
+        let entry = &map["seed.shop.raw_codes"];
+        assert_eq!(entry.total_rows, 10);
+        assert_eq!(entry.shown_rows, 4);
+        assert!(entry.capped);
+        assert_eq!(entry.table.as_ref().expect("table present").rows.len(), 4);
+    }
+
+    #[test]
+    fn seed_tables_by_id_carries_a_none_table_entry_for_an_unreadable_seed() {
+        // The cute-dbt#126 degrade: a card whose CSV could not be read still
+        // gets an entry (table: None) so the detail card renders the labeled
+        // "data unavailable" state — never a silently absent key (which the
+        // client could not tell from a non-seed node).
+        let card = SeedCard::new(NodeId::new("seed.shop.lonely"), "lonely", None, Vec::new());
+        let map = seed_tables_by_id(&[card], 500);
+        let entry = map.get("seed.shop.lonely").expect("a None-table entry");
+        assert!(entry.table.is_none());
+        assert_eq!(entry.total_rows, 0);
+        assert_eq!(entry.shown_rows, 0);
+        assert!(!entry.capped);
+    }
+
+    #[test]
+    fn empty_seed_tables_are_omitted_from_the_dag_json() {
+        // The byte-identity guard: an empty `seed_tables` (no seeds, or no
+        // --project-root) must serde-skip so a seed-free dag.html golden is
+        // byte-identical to the pre-#398 shape.
+        let current = three_model_manifest();
+        let mut lineage = build_lineage_payload(&current, &all_models(&current), None);
+        lineage.seed_tables = seed_tables_by_id(&[], DEFAULT_SEED_ROW_CAP);
+        let json = json_for_html_script(&lineage).expect("serialize");
+        assert!(
+            !json.contains("seed_tables"),
+            "an empty seed_tables map must not appear in the JSON: {json}",
+        );
+    }
+
+    #[test]
+    fn render_explore_inlines_the_seed_table_in_the_dag_carrier() {
+        // The seed table is inlined at gen-time on dag.html (zero-egress: no
+        // view-time fetch), keyed by the seed node id the detail card looks up.
+        let current = typed_manifest();
+        let models = all_models(&current);
+        let payload = payload_for(&current, &models);
+        let dir = tmp_dir("seed-table-inlined");
+        let cards = [seed_card_with_rows("seed.shop.raw_codes", 2)];
+        render_explore(
+            &dir,
+            &current,
+            &models,
+            None,
+            &payload,
+            None,
+            &cards,
+            DEFAULT_SEED_ROW_CAP,
+        )
+        .expect("explore renders");
+        let dag = fs::read_to_string(dir.join("dag.html")).expect("dag.html");
+        assert!(
+            dag.contains("\"seed_tables\""),
+            "the seed-table side-map rides the dag carrier",
+        );
+        assert!(
+            dag.contains("seed.shop.raw_codes"),
+            "the seed table is keyed by the seed node id",
         );
         let _ = fs::remove_dir_all(&dir);
     }

@@ -99,6 +99,11 @@
   var nodeById = {};
   data.nodes.forEach(function (n) { nodeById[n.id] = n; });
 
+  // cute-dbt#398 — the per-seed data tables, keyed by full seed node id.
+  // A SIDE-MAP on the payload (the cute-dbt#102 cte_dags precedent), absent
+  // entirely on a seed-free manifest (the serde-skip), so default to {}.
+  var seedTables = data.seed_tables || {};
+
   // ---- external-drive contract surface (cute-dbt#105) ----------------------
   // The version is server-rendered as <body data-cute-dbt-contract>
   // (readable by attribute-only observers without executing JS); this
@@ -538,7 +543,66 @@
       card.appendChild(el("p", "detail-empty", "no declared columns"));
     }
 
+    // cute-dbt#398 — a SEED node also surfaces its data table (the seed
+    // CSV the engine loads), read at gen-time and inlined here (zero-egress:
+    // no view-time fetch). Reuses the same node-id key the payload carries;
+    // a seed whose CSV could not be read renders the labeled "data
+    // unavailable" degrade (the cute-dbt#126 lesson), never a silent blank.
+    // Non-seed nodes never enter this branch (the section is seed-only).
+    if (type === "seed") renderSeedData(card, id);
+
     card.hidden = false;
+  }
+
+  // cute-dbt#398 — render one seed's data table into its detail card. All
+  // values land through textContent (the createElement discipline this file
+  // already follows): a hostile CSV cell draws as a glyph, never markup.
+  // The seed-table side-map is keyed by full seed node id; an absent entry
+  // OR a `table: null` entry both render the labeled "data unavailable"
+  // degrade — never a silent empty grid.
+  function renderSeedData(card, id) {
+    card.appendChild(el("p", "detail-section-title", "data"));
+    var seed = seedTables[id];
+    if (!seed || !seed.table) {
+      card.appendChild(el(
+        "p", "detail-seed-unavailable detail-empty",
+        "data unavailable — run with --project-root so the seed CSV can be read"
+      ));
+      return;
+    }
+    // The honest "showing N of M rows" note — only when the cap truncated.
+    if (seed.capped) {
+      card.appendChild(el(
+        "p", "detail-seed-rowcap",
+        "showing " + seed.shown_rows + " of " + seed.total_rows + " rows"
+      ));
+    }
+    var t = seed.table;
+    var table = el("table", "detail-seed-table", null);
+    var head = document.createElement("tr");
+    t.columns.forEach(function (col) { head.appendChild(el("th", null, col)); });
+    table.appendChild(head);
+    t.rows.forEach(function (r) {
+      var tr = document.createElement("tr");
+      var cells = (r && r.cells) || [];
+      t.columns.forEach(function (_, i) {
+        tr.appendChild(el("td", null, seedCellText(cells[i])));
+      });
+      table.appendChild(tr);
+    });
+    card.appendChild(table);
+  }
+
+  // The display token for one seed-table cell: the authored display string,
+  // or "" for an absent/null cell (the dbt empty-equals-null convention —
+  // rendered as an empty cell, never the literal "null"). Mirrors the
+  // report's `cellRaw`/Current-view rendering without importing it (explore
+  // carries no report JS).
+  function seedCellText(cell) {
+    if (!cell) return "";
+    if (cell.display != null) return String(cell.display);
+    var k = cell.key || {};
+    return k.v != null ? String(k.v) : "";
   }
 
   function hideDetailCard() {
