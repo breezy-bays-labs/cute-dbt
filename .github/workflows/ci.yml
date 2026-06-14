@@ -674,6 +674,24 @@ jobs:
             output: examples/macro-heavy-report.html
             project_root: tests/fixtures/macro-heavy-source
             experimental: "1"
+          # cute-dbt#350 — the GOLDEN seed-data showcase. A dedicated
+          # minimal manifest (one seed + one consuming model, NOT the shared
+          # playground manifest, so the playground/explore goldens stay
+          # untouched — the explorer seed node-type is a later epic #350
+          # slice) rendered in --pr-diff mode against a synthetic seed-CSV
+          # edit (a region casing fix + a NULL introduction). The `seeds`
+          # experiment is on, so the committed golden exercises the gated
+          # "Data tables" section: the seed's current table (capped at the
+          # default 500 — under cap here) + its NULL-aware old→new cell-diff.
+          # No baseline — the showcase is --pr-diff only.
+          - name: seed-showcase
+            mode: report
+            current: tests/fixtures/seed-showcase-current.json
+            baseline: ""
+            pr_diff: tests/fixtures/seed-showcase-pr-diff.patch
+            output: examples/seed-showcase-report.html
+            project_root: tests/fixtures/seed-showcase-source
+            experimental: "1"
           # cute-dbt#100 — the GOLDEN explore pages: the full synthetic
           # playground manifest rendered to the two-file --out-dir shape
           # (examples/explore/dag.html + tests.html), each independently

@@ -1,0 +1,7 @@
+state_code,state_name,region,is_active
+CT,Connecticut,Northeast,true
+VT,Vermont,Northeast,true
+MA,Massachusetts,Northeast,true
+NY,New York,Northeast,true
+CA,California,West,true
+TX,Texas,South,

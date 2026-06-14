@@ -47,12 +47,13 @@ use cute_dbt::adapters::render::{
     render_report, render_report_with_externals,
 };
 use cute_dbt::domain::{
-    BlockDiff, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, FileHunks,
-    HookChangeFacts, HookManifestPresence, Hunk, InScopeSet, MacroIdentity, Manifest,
-    ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId, NormalizedDiffIndex, PrDiff,
-    ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectFacts, ProjectFallbackReason,
-    SourceNode, TestMetadata, UnitTest, UnitTestDataDiff, UnitTestExpect, UnitTestGiven,
-    UnitTestYamlBlock, external_fixture_table, raw_hunk_lines, reconstruct_table_diffs,
+    BlockDiff, Cell, CellValue, Checksum, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind,
+    FileHunks, FixtureTable, HookChangeFacts, HookManifestPresence, Hunk, InScopeSet,
+    MacroIdentity, Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId,
+    NormalizedDiffIndex, PrDiff, ProjectChange, ProjectChangeCategory, ProjectChangePanel,
+    ProjectFacts, ProjectFallbackReason, SeedCard, SourceNode, TableRow, TestMetadata, UnitTest,
+    UnitTestDataDiff, UnitTestExpect, UnitTestGiven, UnitTestYamlBlock, external_fixture_table,
+    raw_hunk_lines, reconstruct_table_diffs,
 };
 use cute_dbt::ports::ManifestSource;
 
@@ -4786,6 +4787,7 @@ fn render_with_external_fixtures(
         None,
         None,
         &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -7742,6 +7744,7 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
         None,
         None,
         &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -8315,6 +8318,7 @@ fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
         None,
         None,
         &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -12456,6 +12460,7 @@ fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
         None,
         None,
         &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -12498,6 +12503,7 @@ fn render_governance_to_file(
         None,
         None,
         &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -12708,6 +12714,7 @@ fn render_macro_lens_to_file(filename: &str) -> String {
         Some(&lens),
         None,
         &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -12927,6 +12934,7 @@ fn render_capped_macro_lens_to_file(filename: &str, model_count: usize, body_cap
         Some(&lens),
         None,
         &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -14168,6 +14176,178 @@ fn project_state_display_toggle_hides_surfaces_and_renders_only_when_emitted() {
         ),
         "the Experimental group itself still renders (the coverage toggle \
          is unconditional)",
+    );
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#350 "Data tables" seed section ------------------------
+
+/// A `SeedCard` with a current `table` of `n` integer rows, optionally a
+/// cell-diff. Mirrors what the cli `gather_seeds` stage produces.
+fn seed_card_with_rows(name: &str, n: usize) -> SeedCard {
+    let mut card = SeedCard::new(
+        NodeId::new(format!("seed.shop.{name}")),
+        name,
+        Some(format!("seeds/{name}.csv")),
+        vec!["stg_a".to_owned()],
+    );
+    let rows = (0..n)
+        .map(|i| TableRow::new(vec![Cell::new(CellValue::Number(i.to_string()))]))
+        .collect();
+    card.table = Some(FixtureTable::new(vec!["id".to_owned()], rows));
+    card
+}
+
+/// Render a one-model report carrying `seed_cards`, returning its `file://`
+/// URL. The seed cards cross to the render payload exactly as the cli's
+/// gather→render seam threads them (post-experiment-gate).
+fn render_seed_report(filename: &str, seed_cards: &[SeedCard]) -> String {
+    let nodes = vec![model_node("model.shop.m")];
+    let tests = vec![("unit_test.shop.m.t", unit_test("t", "m"))];
+    let m = manifest(nodes, tests);
+    let in_scope: InScopeSet = ["unit_test.shop.m.t".to_owned()].into_iter().collect();
+    let models: ModelInScopeSet = [NodeId::new("model.shop.m")].into_iter().collect();
+    let changed: InScopeSet = ["unit_test.shop.m.t".to_owned()].into_iter().collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &changed,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        &cute_dbt::domain::ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
+        None,
+        None,
+        seed_cards,
+        // A small cap so a >cap card exercises the "showing N of M" note.
+        3,
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    format!("file://{p}")
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn seed_data_tables_section_renders_when_seed_cards_present() {
+    // A capped seed (5 rows, cap 3) renders the section, the grid, and the
+    // honest "showing 3 of 5 rows" note — built by the report JS from the
+    // gated DATA.seed_cards payload.
+    let url = render_seed_report(
+        "headless_seed_present.html",
+        &[seed_card_with_rows("raw_a", 5)],
+    );
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate seed report");
+    tab.wait_until_navigated().expect("await navigation");
+
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"data-tables-section\"]') !== null",
+        ),
+        "the Data tables section renders when a seed card is present",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"seed-data-card\"]') !== null",
+        ),
+        "the per-seed card renders",
+    );
+    // The grid renders (a real table the vendored DataTables can drive).
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelectorAll('.seed-data-card table.given-table').length === 1",
+        ),
+        "the seed current-table grid renders",
+    );
+    // The honest "showing 3 of 5 rows" note (the cap bit).
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"seed-data-rowcap\"]').getAttribute('data-total')"
+        ),
+        "5",
+        "the rowcap note carries the TRUE pre-cap total",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"seed-data-rowcap\"]').getAttribute('data-shown')"
+        ),
+        "3",
+        "the rowcap note carries the capped shown count",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn seed_data_tables_section_absent_when_no_seed_cards() {
+    // The gate's render-side proof: with no seed cards (the experiment-off
+    // path passes an empty vec), the section never renders — keeping every
+    // seed-free golden byte-identical.
+    let url = render_seed_report("headless_seed_absent.html", &[]);
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate seed-free report");
+    tab.wait_until_navigated().expect("await navigation");
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"data-tables-section\"]') === null",
+        ),
+        "the Data tables section is absent when no seed card is present",
+    );
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn seed_data_unavailable_renders_a_labeled_degrade() {
+    // The #126 lesson: a seed whose table could not be read renders a LABELED
+    // "data unavailable" state, never a silent empty grid.
+    let mut card = SeedCard::new(
+        NodeId::new("seed.shop.lonely"),
+        "lonely",
+        Some("seeds/lonely.csv".to_owned()),
+        Vec::new(),
+    );
+    card.table = None;
+    let url = render_seed_report("headless_seed_degrade.html", &[card]);
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate degrade report");
+    tab.wait_until_navigated().expect("await navigation");
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"seed-data-unavailable\"]') !== null",
+        ),
+        "an unreadable seed renders the labeled data-unavailable state",
+    );
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.seed-data-card table') === null",
+        ),
+        "no grid is fabricated for an unreadable seed",
     );
     let _ = tab.close(true);
 }

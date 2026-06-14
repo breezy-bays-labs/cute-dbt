@@ -721,6 +721,64 @@ Pure synthetic data — fictitious patient ids, no real records.\
 """
 
 [[fixture]]
+path = "seed-showcase-current.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/350"
+sha256 = "6965733d8e5635ae5e8e735767356d62bf1bc23fd9d2cfb15686715714301d6b"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The dedicated dogfood manifest for cute-dbt#350's "Data tables" seed section \
+(the seed-showcase GOLDEN example row). A minimal hand-authored v12 manifest: \
+one `seed` node (seed.analytics.raw_state_codes, original_file_path \
+seeds/raw_state_codes.csv, config.delimiter "," + quote_columns false) and \
+one `model` node (stg_states) that `ref()`s it, so the seed reports \
+"feeds 1 model". A SEPARATE fixture (not the shared playground manifest) so \
+the playground / explore goldens stay untouched — the explorer seed node-type \
+is a later epic #350 slice. Rendered in --pr-diff mode against \
+seed-showcase-pr-diff.patch under the `seeds` experiment so the golden shows \
+the gated seed section. Pure synthetic data — generic state codes, no real \
+records.\
+"""
+
+[[fixture]]
+path = "seed-showcase-pr-diff.patch"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/350"
+sha256 = "e9c1c74981bea847005c463692837238a2c31a6014baeb7f2bc1a95e689c2689"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The hand-crafted PR diff for the seed-showcase GOLDEN (cute-dbt#350). Touches \
+`seeds/raw_state_codes.csv` so the seed lands in --pr-diff scope, with two \
+edit hunks that dogfood the diff machinery: a region casing fix on the CT row \
+(NorthEast → Northeast) and a NULL introduction on the TX row (is_active \
+true → empty), so the golden renders the NULL-aware old→new cell-diff. No \
+baseline — the showcase is --pr-diff only. Synthetic, no real records.\
+"""
+
+[[fixture]]
+path = "seed-showcase-source/seeds/raw_state_codes.csv"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/350"
+sha256 = "1f664ac4d52ce584cc7a30a3423856755bc0a8f1b7c6a5c6971a3643ce85d5d6"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The working-tree SEED CSV for the seed-showcase GOLDEN (cute-dbt#350). A \
+synthetic US-state lookup table (state_code, state_name, region, is_active) \
+the seed-showcase manifest's `seed.analytics.raw_state_codes` node points at \
+via `original_file_path: seeds/raw_state_codes.csv`. The current (working-tree) \
+side of the cell-diff; the paired seed-showcase-pr-diff.patch reverse-applies \
+to reconstruct the OLD side. Resolved by the ProjectFileReader under \
+`--project-root tests/fixtures/seed-showcase-source`. Pure synthetic data — \
+generic state codes, no real records.\
+"""
+
+[[fixture]]
 path = "playground-source/macros/data_quality/quarantine_filter.sql"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/265"

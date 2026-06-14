@@ -36,6 +36,20 @@ use crate::domain::experimental::ExperimentalConfig;
 /// renders byte-for-byte unchanged.
 pub const DEFAULT_REPORT_TITLE: &str = "cute-dbt report";
 
+/// Default cap on how many seed rows the "Data tables" section's
+/// current-table view renders before showing the honest
+/// "showing N of M rows" note (cute-dbt#350, the seed-data experiment).
+///
+/// A seed can carry tens of thousands of rows; inlining every one into the
+/// (frozen, single-file, zero-egress) report would bloat it. The cap bounds
+/// the CURRENT-table view only — the cell-DIFF view always renders every
+/// changed/added/removed row in full (a diff is intrinsically bounded by the
+/// edit size, and truncating it would hide the very change under review).
+/// `None` (the key omitted from `[seeds] row_cap`) ⇒ this default, resolved
+/// at the cli I/O boundary, the same posture as the report-title fallback
+/// and the macro-lens `macro_body_cap`.
+pub const DEFAULT_SEED_ROW_CAP: usize = 500;
+
 /// Operator-supplied configuration, deserialized from the
 /// `--config <PATH>` TOML file.
 ///
@@ -78,6 +92,35 @@ pub struct AnalysisConfig {
     /// to the pre-#346 output.
     #[serde(default)]
     pub pr: PrConfig,
+    /// `[seeds]` section (cute-dbt#350) — the seed-data "Data tables"
+    /// render knobs. Currently one optional key, `row_cap`, bounding the
+    /// current-table view (the cell-diff is never capped). Absent / empty ⇒
+    /// [`DEFAULT_SEED_ROW_CAP`] at the cli boundary. Only meaningful with
+    /// the `seeds` experiment on; inert otherwise.
+    #[serde(default)]
+    pub seeds: SeedsConfig,
+}
+
+/// `[seeds]` table (cute-dbt#350) — the seed-data render knobs.
+///
+/// Keys:
+/// - `row_cap`, an optional positive integer bounding how many seed rows
+///   the "Data tables" current-table view renders before the honest
+///   "showing N of M rows" note. Absent ⇒ [`DEFAULT_SEED_ROW_CAP`]
+///   (resolved at the cli I/O boundary). A `usize` so a negative or
+///   non-integer value is a clap usage error at `--config` parse time
+///   (exit 2) — the fail-closed-config posture, never a
+///   [`crate::domain::PreflightError`]. The cap bounds only the CURRENT
+///   table; the cell-diff always renders every changed row in full.
+#[derive(Debug, Default, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SeedsConfig {
+    /// The seed current-table row cap. `None` (the key omitted) ⇒
+    /// [`DEFAULT_SEED_ROW_CAP`] at the cli boundary. `0` is a legal cap
+    /// (render no data rows — the header + the "showing 0 of M rows" note
+    /// only), the macro-lens `macro_body_cap` precedent.
+    #[serde(default)]
+    pub row_cap: Option<usize>,
 }
 
 /// `[pr]` table (cute-dbt#346) — the source-PR context for the
@@ -204,6 +247,56 @@ mod tests {
     fn empty_toml_string_deserializes_to_default() {
         let cfg: AnalysisConfig = toml::from_str("").expect("empty TOML parses");
         assert_eq!(cfg, AnalysisConfig::default());
+    }
+
+    #[test]
+    fn default_has_no_seed_row_cap_override() {
+        // cute-dbt#350 — an absent `[seeds] row_cap` means the cli boundary
+        // applies DEFAULT_SEED_ROW_CAP; the POD carries None, not the literal
+        // default (the default lives at the I/O boundary, the report-title /
+        // macro_body_cap posture).
+        assert!(AnalysisConfig::default().seeds.row_cap.is_none());
+    }
+
+    #[test]
+    fn seeds_section_with_row_cap_populates_it() {
+        let cfg: AnalysisConfig = toml::from_str(
+            r"
+[seeds]
+row_cap = 50
+",
+        )
+        .expect("row_cap TOML parses");
+        assert_eq!(cfg.seeds.row_cap, Some(50));
+    }
+
+    #[test]
+    fn seed_row_cap_zero_is_a_valid_override() {
+        // 0 is a legal cap (render no data rows — header + note only). A
+        // `usize` accepts it; the render side treats 0 as "no rows shown".
+        let cfg: AnalysisConfig =
+            toml::from_str("[seeds]\nrow_cap = 0\n").expect("row_cap = 0 parses");
+        assert_eq!(cfg.seeds.row_cap, Some(0));
+    }
+
+    #[test]
+    fn missing_seeds_section_yields_default_seeds() {
+        let cfg: AnalysisConfig =
+            toml::from_str("[report]\ntitle = \"x\"\n").expect("seeds-less TOML parses");
+        assert!(cfg.seeds.row_cap.is_none());
+    }
+
+    #[test]
+    fn unknown_seeds_field_is_rejected() {
+        // deny_unknown_fields on SeedsConfig: a typo'd key fails the
+        // value-parser loudly (clap usage error) rather than silent ignore.
+        let err = toml::from_str::<AnalysisConfig>("[seeds]\nrowcap = 10\n")
+            .expect_err("[seeds] rowcap typo");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("rowcap") || msg.contains("unknown field"),
+            "names the unknown field: {msg}",
+        );
     }
 
     #[test]
