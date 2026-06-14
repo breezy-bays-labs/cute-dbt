@@ -650,6 +650,14 @@ jobs:
             # clause (fictional acme/shop url; never a real PR — the
             # synthetic-only fixture invariant).
             config: tests/fixtures/config-pr-showcase.toml
+            # cute-dbt#386 — the showcase also emits the machine-readable
+            # findings envelope sidecar and byte-identity-gates it. The
+            # `--generated-at` override pins a far-future date so the golden
+            # is wall-clock-independent (golden-determinism rule). The
+            # envelope wraps the SAME in-scope findings the HTML report
+            # surfaces, so this row proves the sidecar shape stays stable.
+            findings_out: examples/diff-showcase-findings.json
+            generated_at: "2099-01-01"
           # cute-dbt#265 Slice D — the GOLDEN macro-lens cap showcase. A
           # synthetic heavy macro (`mask_pii`) reaches 14 root-project
           # models (> the default inline-body cap of 10), so the committed
@@ -738,6 +746,11 @@ jobs:
           # cute-dbt#346: optional --config (the diff-showcase row's
           # synthetic [pr] section); empty = no --config arg.
           CONFIG: ${{ matrix.config }}
+          # cute-dbt#386: optional findings-envelope sidecar golden (the
+          # diff-showcase row); empty = no --findings-out arg. GENERATED_AT
+          # pins a far-future date so the golden is wall-clock-independent.
+          FINDINGS_OUT: ${{ matrix.findings_out }}
+          GENERATED_AT: ${{ matrix.generated_at }}
         run: |
           set -euo pipefail
           mkdir -p target/example-check
@@ -824,18 +837,45 @@ jobs:
             config_args=(--config "$CONFIG")
             config_hint=" --config $CONFIG"
           fi
+          # cute-dbt#386: the optional findings-envelope sidecar (the
+          # diff-showcase row). Rendered into a scratch path and
+          # byte-diffed against the committed golden, the same gate shape
+          # as the HTML. --generated-at pins the envelope timestamp so the
+          # golden is wall-clock-independent.
+          findings_args=()
+          findings_hint=""
+          rendered_findings=""
+          if [ -n "$FINDINGS_OUT" ]; then
+            rendered_findings="target/example-check/$(basename "$FINDINGS_OUT")"
+            findings_args=(--findings-out "$rendered_findings" --generated-at "$GENERATED_AT")
+            findings_hint=" --findings-out $FINDINGS_OUT --generated-at $GENERATED_AT"
+          fi
           cargo run --quiet --locked --bin cute-dbt -- report \
             --manifest "$CURRENT_MANIFEST" \
             "${scope_args[@]}" \
             "${project_root_args[@]}" \
             "${config_args[@]}" \
+            "${findings_args[@]}" \
             --out "$rendered"
           if ! diff -q "$rendered" "$OUTPUT_PATH" >/dev/null; then
             echo "::error::example-report-up-to-date: $OUTPUT_PATH does not match the renderer output ($EXAMPLE_NAME). Regenerate with:"
-            echo "  ${regen_env}cargo run --bin cute-dbt -- report --manifest $CURRENT_MANIFEST$scope_hint$regen_hint$config_hint --out $OUTPUT_PATH"
+            echo "  ${regen_env}cargo run --bin cute-dbt -- report --manifest $CURRENT_MANIFEST$scope_hint$regen_hint$config_hint$findings_hint --out $OUTPUT_PATH"
             echo "Sizes:"
             ls -l "$rendered" "$OUTPUT_PATH"
             exit 1
+          fi
+          # cute-dbt#386: byte-identity-gate the findings-envelope golden
+          # exactly like the HTML (same row, additive). The envelope is
+          # deterministic over (fixtures, pinned --generated-at), so
+          # byte-equality is the correct gate.
+          if [ -n "$FINDINGS_OUT" ]; then
+            if ! diff -q "$rendered_findings" "$FINDINGS_OUT" >/dev/null; then
+              echo "::error::example-report-up-to-date: $FINDINGS_OUT does not match the renderer output ($EXAMPLE_NAME findings envelope). Regenerate with:"
+              echo "  ${regen_env}cargo run --bin cute-dbt -- report --manifest $CURRENT_MANIFEST$scope_hint$regen_hint$config_hint$findings_hint --out $OUTPUT_PATH"
+              echo "Sizes:"
+              ls -l "$rendered_findings" "$FINDINGS_OUT"
+              exit 1
+            fi
           fi
 
   example-report-up-to-date:

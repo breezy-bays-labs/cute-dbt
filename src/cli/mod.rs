@@ -34,11 +34,16 @@
 //! model renders as a "not compiled" node. `PreflightError` keeps its
 //! four variants; explore raises no fifth.
 //!
-//! Three exit codes: `0` success, `1` a run-time failure (a fail-closed
+//! Four exit codes: `0` success, `1` a run-time failure (a fail-closed
 //! manifest or an unwritable output path — no partial report is ever
 //! written), `2` an operator usage error (clap rejected the arguments,
 //! including a bare `cute-dbt` with no subcommand, or supplying neither
-//! or both `report` scope sources — `--baseline-manifest` / `--pr-diff`).
+//! or both `report` scope sources — `--baseline-manifest` / `--pr-diff`),
+//! and `3` the `report` verb's `--fail-on-uncovered` coverage gate
+//! (cute-dbt#386): the report (and any `--findings-out` sidecar) IS
+//! written, then the run exits non-zero because the in-scope set carries a
+//! Total-tier `Uncovered` finding — distinct from `1` so CI tells a real
+//! coverage gap apart from unusable input.
 
 mod args;
 mod exit;
@@ -75,6 +80,9 @@ use std::process::ExitCode;
 use clap::Parser;
 
 use crate::adapters::explore::render_explore;
+use crate::adapters::findings_emit::{
+    collect_in_scope_findings, envelope_from_findings, write_sidecar,
+};
 use crate::adapters::manifest::{FileManifestSource, load_baseline};
 use crate::adapters::project_def::parse as parse_project_definition;
 use crate::adapters::project_file::FsProjectFileReader;
@@ -84,7 +92,7 @@ use crate::adapters::render::{
 };
 use crate::domain::{
     BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_MACRO_BODY_CAP, DEFAULT_REPORT_TITLE,
-    DEFAULT_SEED_ROW_CAP, DepDate, EnabledExperiments, Experiment, FixtureTableDiff,
+    DEFAULT_SEED_ROW_CAP, DepDate, EnabledExperiments, EnvelopeScope, Experiment, FixtureTableDiff,
     GovernanceFacts, HeuristicId, InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome,
     NamedTableDiff, NormalizedDiffIndex, PrConfig, PrRef, PreflightError, ProjectChangePanel,
     ProjectFacts, ProjectFallbackReason, ScopeInput, ScopeSelection, SeedCard, SeedInScopeSet,
@@ -93,15 +101,15 @@ use crate::domain::{
     attribute_config_tree_changes, attribute_var_changes, build_seed_cards,
     changed_macros_baseline, changed_macros_pr_diff, changed_models, check_by_id,
     diff_project_definitions, effective_fixture_format, external_fixture_table,
-    extract_model_block, extract_unit_test_block, gather_governance, hook_operations,
-    macro_focus_set, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
+    extract_model_block, extract_unit_test_block, gather_governance, has_total_uncovered,
+    hook_operations, macro_focus_set, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
     reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
     refine_changed_by_hunks, resolve_check_policy, resolve_experimental_config, reverse_apply,
     scan_pragmas, select_in_scope, select_seeds_in_scope, widen_with_config_attributions,
 };
 use crate::ports::{ManifestSource, ProjectFileReader};
 
-use args::{Cli, Command, ExploreArgs, ReportArgs};
+use args::{Cli, Command, ExploreArgs, ReportArgs, validate_argument_conflicts};
 
 /// Exit code for a run-time failure: a fail-closed manifest (Stage-1 or
 /// Stage-2) or an unwritable `--out` path.
@@ -109,6 +117,14 @@ const EXIT_FAILURE: u8 = 1;
 
 /// Exit code for an operator usage error (clap rejected the arguments).
 const EXIT_USAGE: u8 = 2;
+
+/// Exit code for the `--fail-on-uncovered` coverage gate (cute-dbt#386):
+/// the run produced its report (and the `--findings-out` sidecar, if
+/// requested) successfully, but the in-scope set carries ≥1 Total-tier
+/// `Uncovered` finding. Distinct from `EXIT_FAILURE` (a fail-closed manifest
+/// — no report written) so CI can tell "a real coverage gap" apart from "the
+/// input was unusable".
+const EXIT_GATE: u8 = 3;
 
 /// Binary entry point: parse arguments, dispatch the selected verb's
 /// composition, and map the outcome to a process exit code.
@@ -118,27 +134,57 @@ pub fn run() -> ExitCode {
         Ok(cli) => cli,
         Err(err) => return report_arg_error(&err),
     };
+    // Post-parse usage validation clap's derive cannot express
+    // (cute-dbt#386): `report --findings-out` must differ from `--out`,
+    // or the sidecar JSON would clobber the HTML report. Routed through
+    // the same exit-2 usage-error path as a parse failure.
+    if let Err(err) = validate_argument_conflicts(&cli) {
+        return report_arg_error(&err);
+    }
     // Per-verb dispatch; every run-time failure is mapped to one
     // stderr message + exit 1 here. `review` wraps its own cli-layer
     // `ReviewError` (cute-dbt#300) alongside the composed report's
-    // `RunError`, so its arm converts to the message eagerly.
-    let outcome: Result<(), String> = match &cli.command {
-        Command::Review(review_args) => {
-            review::execute_review(review_args).map_err(|failure| failure.message())
-        }
+    // `RunError`, so its arm converts to the message eagerly. The
+    // `report` verb additionally carries the `--fail-on-uncovered` gate
+    // outcome (cute-dbt#386): a successful run can still exit
+    // `EXIT_GATE` when an in-scope Total-tier coverage gap is present.
+    let outcome: Result<ReportOutcome, String> = match &cli.command {
+        Command::Review(review_args) => review::execute_review(review_args)
+            .map(|()| ReportOutcome::Success)
+            .map_err(|failure| failure.message()),
         Command::Report(report) => execute_report(report).map_err(|failure| failure.message()),
-        Command::Explore(explore) => execute_explore(explore).map_err(|failure| failure.message()),
-        Command::Skill(skill_args) => {
-            skill::execute_skill(skill_args).map_err(|failure| failure.message())
-        }
+        Command::Explore(explore) => execute_explore(explore)
+            .map(|()| ReportOutcome::Success)
+            .map_err(|failure| failure.message()),
+        Command::Skill(skill_args) => skill::execute_skill(skill_args)
+            .map(|()| ReportOutcome::Success)
+            .map_err(|failure| failure.message()),
     };
     match outcome {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(ReportOutcome::Success) => ExitCode::SUCCESS,
+        Ok(ReportOutcome::UncoveredGate) => ExitCode::from(EXIT_GATE),
         Err(message) => {
             eprintln!("{message}");
             ExitCode::from(EXIT_FAILURE)
         }
     }
+}
+
+/// The success-side outcome of a verb run.
+///
+/// Almost every run is [`ReportOutcome::Success`]; the `report` verb's
+/// `--fail-on-uncovered` gate (cute-dbt#386) is the one path that produces
+/// its output *and* signals a distinct non-zero exit
+/// ([`ReportOutcome::UncoveredGate`]) — a deterministic Total-tier coverage
+/// gap, not a fail-closed input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportOutcome {
+    /// The run completed; exit `0`.
+    Success,
+    /// The run wrote its report (and any `--findings-out` sidecar) but the
+    /// in-scope set carries a Total-tier `Uncovered` finding and
+    /// `--fail-on-uncovered` was set; exit [`EXIT_GATE`].
+    UncoveredGate,
 }
 
 /// Print a clap parse error and pick its exit code.
@@ -218,7 +264,7 @@ impl RunError {
 // Splitting the loop into sub-loops would add indirection that buys nothing
 // at this single composition site (the `render_report` rationale, cli edition).
 #[allow(clippy::too_many_lines)]
-fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
+fn execute_report(args: &ReportArgs) -> Result<ReportOutcome, RunError> {
     let current = load_current(args)?;
     let scope_input = resolve_scope_input(args)?;
     // Experimental switch (cute-dbt#289, epic #288): the resolved
@@ -476,7 +522,104 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
         seed_row_cap,
     )
     .map_err(|err| RunError::output(&args.out, err))?;
-    Ok(())
+    // cute-dbt#386 — the machine-readable findings envelope. Purely
+    // additive to the HTML report above (the render path is untouched):
+    // the SAME in-scope `model_findings → apply_check_policy` pipeline the
+    // renderer ran is re-derived in the emit adapter so the envelope's
+    // findings match the report's exactly. Two consumers, both gated on
+    // their flags and both no-ops by default:
+    //   - `--findings-out <path>` writes the `{ metadata, findings }`
+    //     sidecar JSON beside the HTML report;
+    //   - `--fail-on-uncovered` exits `EXIT_GATE` iff the in-scope set
+    //     carries a Total-tier `Uncovered` finding (deterministic gap).
+    // Both share one collection pass — skipped entirely when neither flag
+    // is set (zero added work on the default path).
+    finalize_findings(
+        args,
+        &current,
+        &models_in_scope,
+        &check_policy,
+        &scope_input,
+    )
+}
+
+/// The `--findings-out` / `--fail-on-uncovered` tail of the `report` run
+/// loop (cute-dbt#386) — runs strictly AFTER the HTML report is written.
+///
+/// Collects the in-scope findings once (via the emit adapter's mirror of
+/// the renderer's `model_findings → apply_check_policy` pipeline) and feeds
+/// both consumers from that single pass. Returns
+/// [`ReportOutcome::UncoveredGate`] iff `--fail-on-uncovered` is set and a
+/// Total-tier `Uncovered` finding is in scope; otherwise
+/// [`ReportOutcome::Success`]. Both flags off ⇒ no collection, immediate
+/// `Success` (the default path adds zero work).
+///
+/// `generated_at` is the RFC3339 **date** ([`today_rfc3339_date`]) computed
+/// here at the I/O boundary and threaded into the pure envelope builder, so
+/// the committed envelope golden stays byte-stable (the golden-determinism
+/// rule; the fixture pins a far-past/far-future date) and `cute-dbt` carries
+/// no `chrono`/`time` dependency.
+fn finalize_findings(
+    args: &ReportArgs,
+    current: &Manifest,
+    models_in_scope: &ModelInScopeSet,
+    check_policy: &CheckPolicy<HeuristicId>,
+    scope_input: &ScopeInput,
+) -> Result<ReportOutcome, RunError> {
+    if args.findings_out.is_none() && !args.fail_on_uncovered {
+        return Ok(ReportOutcome::Success);
+    }
+    // Collect the in-scope findings once. The gate reads the raw `Finding`s
+    // (`has_total_uncovered` operates on `&[Finding]`); the envelope wraps
+    // the SAME vec into anchor-bearing entries (cute-dbt#386). One pass.
+    let findings = collect_in_scope_findings(current, models_in_scope, check_policy);
+    // `generated_at` is the I/O-boundary date — the `--generated-at`
+    // override (golden regeneration / reproducible builds) over today's
+    // computed civil date. Threaded into the pure envelope builder so the
+    // committed golden is byte-stable.
+    let generated_at = args.generated_at.clone().unwrap_or_else(today_rfc3339_date);
+    // The gate decision is read off the raw findings BEFORE the sidecar is
+    // written, but a sidecar write failure still wins (returns below via `?`
+    // before the gate outcome is returned) — the write-failure-over-gate
+    // precedence the run_loop tests pin.
+    let gate_tripped = args.fail_on_uncovered && has_total_uncovered(&findings);
+    if let Some(path) = &args.findings_out {
+        let envelope = envelope_from_findings(
+            findings,
+            env!("CARGO_PKG_VERSION"),
+            generated_at,
+            envelope_scope(args, scope_input),
+        );
+        write_sidecar(&envelope, path).map_err(|err| RunError::output(path, err))?;
+    }
+    Ok(if gate_tripped {
+        ReportOutcome::UncoveredGate
+    } else {
+        ReportOutcome::Success
+    })
+}
+
+/// Build the envelope's [`EnvelopeScope`] from the run's scope source —
+/// the machine-readable twin of [`scope_banner`] (cute-dbt#386).
+///
+/// `Baseline` carries the `--baseline-manifest` path verbatim (empty when
+/// somehow absent — omitted from JSON). `PrDiff` deliberately carries NO
+/// source label (`source: None`, omitted): the parsed [`PrDiff`](crate::domain::pr_diff::PrDiff) retains
+/// only the changed-file facts, not the `@file` argument, and embedding the
+/// raw `@file` path could bake a CI-runner-absolute path into the committed
+/// artifact (the same `root_path`-leak class the manifest gitignore guards).
+/// The slot is reserved (forward-compatible) but unpopulated — the `mode:
+/// "pr-diff"` tag is the arm discriminator a consumer keys on.
+fn envelope_scope(args: &ReportArgs, scope_input: &ScopeInput) -> EnvelopeScope {
+    match scope_input {
+        ScopeInput::Baseline { .. } => EnvelopeScope::Baseline {
+            baseline: args
+                .baseline_manifest
+                .as_ref()
+                .map_or_else(String::new, |p| p.display().to_string()),
+        },
+        ScopeInput::PrDiff { .. } => EnvelopeScope::PrDiff { source: None },
+    }
 }
 
 /// The named `explore` run loop (cute-dbt#100) — `load_current` →
@@ -1484,6 +1627,24 @@ fn today_dep_date() -> DepDate {
     DepDate { year, month, day }
 }
 
+/// The findings envelope's `generated_at`, computed at the I/O boundary
+/// (cute-dbt#386).
+///
+/// An **RFC3339 date** (`YYYY-MM-DD`) — a deliberate precision choice: a
+/// full RFC3339 *date-time* would need timezone + time-of-field formatting
+/// that std cannot produce without a `chrono`/`time` dependency, and
+/// cute-dbt is std-only by posture (cargo-deny + the no-extra-date-crate
+/// line). The date is the deterministic, golden-stable granularity the
+/// envelope needs (the committed golden pins a fixed fixture date); a
+/// finer-grained timestamp would defeat byte-identity gating. Reuses the
+/// same `today_dep_date` → `civil_from_days` machinery as the governance
+/// deprecation chips, so "today" is computed once, the same way, at the one
+/// I/O boundary. `YYYY-MM-DD` is a valid RFC3339 `full-date`.
+fn today_rfc3339_date() -> String {
+    let DepDate { year, month, day } = today_dep_date();
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
 /// Days-since-Unix-epoch → `(year, month, day)` (proleptic Gregorian) —
 /// Howard Hinnant's `civil_from_days` algorithm, std-only (the domain
 /// forbids `chrono`). Pure + total. `m`/`d` are in `[1, 12]` / `[1, 31]`
@@ -1780,6 +1941,9 @@ mod tests {
             pr_url: None,
             pr_title: None,
             pr_number: None,
+            findings_out: None,
+            fail_on_uncovered: false,
+            generated_at: None,
         }
     }
 
