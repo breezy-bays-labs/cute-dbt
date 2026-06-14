@@ -1,0 +1,32 @@
+# Aikido code-scanning configuration — repo-root, non-admin, version-controlled.
+# Docs: https://help.aikido.dev/code-scanning/scanning-practices/ignore-via-code-with-aikido-files
+#
+# Why this file exists (cute-dbt#372):
+# Aikido's SAST scanner flags every askama `{{ ... | safe }}` interpolation in
+# templates/ as "Rendering unescaped input -> XSS (high)". For cute-dbt these
+# are false positives BY CONSTRUCTION — see ARCHITECTURE.md §5 (Asset embedding /
+# zero-egress gate). `|safe` renders only:
+#   (a) compile-time, SHA-256-pinned, `include_str!`-embedded vendored assets
+#       (Sakura/jQuery/DataTables/Mermaid/Cytoscape/dagre + first-party JS),
+#       provenance-indexed in assets/MANIFEST.toml; and
+#   (b) the report / DAG payload JSON, which is pre-escaped by
+#       `payload_json_for_html_script` (src/adapters/render.rs) and
+#       `json_for_html_script` (src/adapters/explore.rs) — both turn every
+#       tag-opening `<` into the JSON escape `<`, asserted by the
+#       `json_escapes_tag_opening_lt` unit test. `JSON.parse` round-trips the
+#       original characters; the browser's HTML script-data state machine never
+#       sees a `</script>`/`<!--`/`<tag` opener.
+# None is unescaped user input. The emitted report additionally makes ZERO
+# outbound requests over file:// (the headless zero-egress gate), so an embedded
+# payload cannot exfiltrate even if it were hostile.
+#
+# Path matching here is simple string-inclusion (no globs/regex): any file whose
+# full path contains `templates/` is excluded from Aikido scanning. The templates
+# directory is pure askama render markup over the above two `|safe` sources — it
+# carries no secrets, no lockfiles, and no real SAST sink — so excluding it
+# removes the recurring `|safe` false-positive noise without masking a real
+# surface. Aikido remains advisory (never a required status check).
+
+exclude:
+  paths:
+    - templates/

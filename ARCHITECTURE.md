@@ -346,6 +346,51 @@ file.
   request resolves in-document and never leaves it. Reinforces the
   "literally zero requests" story.
 
+### The `|safe` filter is the audited embedding pattern (not an XSS vector)
+
+Every inline asset and the report/DAG payload reach the HTML through
+askama's `|safe` filter (`{{ … | safe }}`) — askama escapes interpolated
+values by default, and `|safe` opts a value out of that escaping so the
+embedded CSS/JS/JSON lands verbatim inside its `<style>` / `<script>`
+block. A generic SAST scanner reads `|safe` as "rendering unescaped input
+→ XSS"; for cute-dbt that is a **false positive by construction**, because
+`|safe` only ever renders two kinds of value, neither of them unescaped
+user input:
+
+1. **Compile-time, SHA-256-pinned vendored assets** — Sakura CSS, jQuery,
+   DataTables, the Mermaid/Cytoscape/dagre UMD bundles, and the first-party
+   JS — all `include_str!`-embedded from `assets/` at build time and
+   provenance-indexed in `assets/MANIFEST.toml`. These bytes are fixed in
+   the binary's `.rodata`; no runtime path lets untrusted input reach a
+   `|safe` asset slot.
+2. **The report / DAG payload JSON** — emitted into a
+   `<script type="application/json">` block after passing through
+   `payload_json_for_html_script` (`src/adapters/render.rs`) /
+   `json_for_html_script` (`src/adapters/explore.rs`). Both escapers turn
+   every *tag-opening* `<` (a `<` followed by `/`, `!`, `?`, `=`, or an
+   ASCII letter) into the JSON escape `<`, so the browser's HTML
+   script-data state machine never encounters a `</script>`, `<!--`, or
+   `<tag` opener that could break out of the script block, while
+   `JSON.parse` round-trips the original characters unchanged. The unit
+   test `json_escapes_tag_opening_lt` pins this for `</script>` / `<!--` /
+   `<b>`. Manifest-derived strings that *do* render as DOM text go through
+   askama's default escaping or are drawn as Cytoscape canvas-text glyphs
+   (never HTML labels) — never through a `|safe` slot.
+
+On top of both, the emitted report makes **zero outbound requests** over
+`file://` (the headless zero-egress gate above), so even a hypothetically
+hostile embedded payload has no exfiltration channel. `|safe` is therefore
+the *intended, audited* mechanism for the zero-egress single-file design,
+not an injection surface.
+
+To stop the advisory **Aikido** SAST scanner re-raising this false
+positive on every render-touching PR (cute-dbt#372), the repo-root
+[`.aikido`](.aikido) config excludes `templates/` from Aikido scanning
+(simple string-inclusion match; the templates directory is pure render
+markup over the two `|safe` sources above and carries no secrets/lockfiles
+/real SAST sink). Aikido stays **advisory** — never a required status
+check — so it can never block a render PR on the embedding pattern.
+
 ### Vendored-asset provenance
 
 `assets/MANIFEST.toml` records every vendored asset with:
