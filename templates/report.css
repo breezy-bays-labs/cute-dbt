@@ -1464,6 +1464,38 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
   overflow-wrap: anywhere;
 }
 
+/* cute-dbt#413 — the per-model change-axis chips (Body / Config / Unit
+   test) + the non-interactive config-file chip. A SEPARATE row from the
+   project-state attribution row above, so the axis chips (a core PR-review
+   affordance) are NEVER hidden by the html[data-project=off] display
+   toggle. The axis chips are LABELED, pill-shaped solid chips (the
+   coverage/findings tier-chip family) — one per fired axis; the
+   config-file chip reuses the config-attribution mono recipe with a solid
+   left edge marking it as the grouping key (contextual, never a button —
+   the filter toggle is the separate #414). All tokens are existing
+   AA-gated semantic tokens, so the chips theme with the chassis. */
+.model-axes-row {
+  margin: 0.4rem 0 0; display: flex; flex-wrap: wrap; gap: 0.35rem;
+  align-items: center;
+}
+.axis-chip {
+  font: inherit; font-size: 0.78em; font-weight: 600; line-height: 1.4;
+  background: var(--bg-alt); color: var(--text);
+  border: var(--rule-w) solid var(--border);
+  border-radius: 999px; padding: 0.05rem 0.55rem;
+  white-space: nowrap;
+}
+.axis-chip-body { border-left: 3px solid var(--accent); }
+.axis-chip-config { border-left: 3px solid var(--text-muted); }
+.axis-chip-unit_test { border-left: 3px dashed var(--accent); }
+.config-file-chip {
+  font-family: var(--font-mono); font-size: 0.78em;
+  background: var(--bg-alt); color: var(--text-muted);
+  border: var(--rule-w) solid var(--border); border-left: 3px solid var(--border);
+  border-radius: var(--radius-sm); padding: 0.1rem 0.45rem;
+  overflow-wrap: anywhere;
+}
+
 /* ============================================================================
    cute-dbt#402 (epic #360) — the subject-lens tab shell. Tabs are subject
    JOURNEYS (Models / Macros / Project), not change-state sections. First
