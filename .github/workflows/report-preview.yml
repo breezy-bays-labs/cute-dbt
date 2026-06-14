@@ -113,6 +113,17 @@ jobs:
             pr_diff: tests/fixtures/seed-showcase-pr-diff.patch
             project_root: tests/fixtures/seed-showcase-source
             experimental: "1"
+          # cute-dbt#404 — the PR-scope lineage mini-DAG showcase, mirrored
+          # from ci.yml's example-report-check prdiff-minidag row. A dedicated
+          # connector-path manifest rendered in --pr-diff mode with the
+          # `pr-scope-mini-dag` experiment on, so the preview card offers the
+          # gated top-of-report mini-DAG (modified emphasized, connector quiet).
+          - name: prdiff-minidag
+            current: tests/fixtures/prdiff-minidag-current.json
+            baseline: ""
+            pr_diff: tests/fixtures/prdiff-minidag-pr-diff.patch
+            project_root: tests/fixtures/prdiff-minidag-source
+            experimental: "1"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:

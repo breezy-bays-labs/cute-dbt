@@ -43,7 +43,7 @@ use headless_chrome::{Browser, LaunchOptionsBuilder, Tab};
 
 use cute_dbt::adapters::manifest::FileManifestSource;
 use cute_dbt::adapters::render::{
-    ExternalFixtures, LoadedFixture, MacroLensPayload, ScopeSource, build_macro_lens,
+    ExternalFixtures, LoadedFixture, MacroLensPayload, PrDagPayload, ScopeSource, build_macro_lens,
     render_report, render_report_with_externals,
 };
 use cute_dbt::domain::{
@@ -52,8 +52,9 @@ use cute_dbt::domain::{
     MacroIdentity, Manifest, ManifestMetadata, ModelInScopeSet, Node, NodeConfig, NodeId,
     NormalizedDiffIndex, PrDiff, ProjectChange, ProjectChangeCategory, ProjectChangePanel,
     ProjectFacts, ProjectFallbackReason, SeedCard, SourceNode, TableRow, TestMetadata, UnitTest,
-    UnitTestDataDiff, UnitTestExpect, UnitTestGiven, UnitTestYamlBlock, external_fixture_table,
-    raw_hunk_lines, reconstruct_table_diffs,
+    UnitTestDataDiff, UnitTestExpect, UnitTestGiven, UnitTestYamlBlock, compute_pr_dag,
+    external_fixture_table, populate_line_counts, pr_dag_lines_from_raw_code, raw_hunk_lines,
+    reconstruct_table_diffs,
 };
 use cute_dbt::ports::ManifestSource;
 
@@ -4789,6 +4790,7 @@ fn render_with_external_fixtures(
         None,
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -7746,6 +7748,7 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
         None,
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        None,
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -8320,6 +8323,7 @@ fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
         None,
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        None,
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -12462,6 +12466,7 @@ fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
         None,
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -12505,6 +12510,7 @@ fn render_governance_to_file(
         None,
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -12717,6 +12723,7 @@ fn render_macro_lens_to_file(filename: &str) -> String {
         None,
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -12937,6 +12944,7 @@ fn render_capped_macro_lens_to_file(filename: &str, model_count: usize, body_cap
         None,
         &[],
         cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -14236,6 +14244,7 @@ fn render_seed_report(filename: &str, seed_cards: &[SeedCard]) -> String {
         seed_cards,
         // A small cap so a >cap card exercises the "showing N of M" note.
         3,
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -14438,5 +14447,238 @@ fn seed_data_unavailable_renders_a_labeled_degrade() {
         ),
         "no grid is fabricated for an unreadable seed",
     );
+    let _ = tab.close(true);
+}
+
+// --- cute-dbt#404 PR-scope lineage mini-DAG -------------------------
+
+/// A `model` node carrying `raw_code`, `original_file_path`, and `depends_on`
+/// producers — the connector-path mini-DAG fixture (cute-dbt#404).
+fn model_node_with_deps(full_id: &str, raw_code: &str, path: &str, producers: &[&str]) -> Node {
+    Node::new(
+        NodeId::new(full_id),
+        "model",
+        Checksum::new("sha256", "ck"),
+        Some("select 1".to_owned()),
+        Some(raw_code.to_owned()),
+        DependsOn::new(
+            Vec::new(),
+            producers.iter().map(|p| NodeId::new(*p)).collect(),
+        ),
+        Some(path.to_owned()),
+        NodeConfig::default(),
+        None,
+        BTreeMap::new(),
+    )
+}
+
+/// Render a report carrying the PR-scope mini-DAG for a connector-path
+/// manifest (stg → int → fct, with stg + fct modified and int the connector),
+/// returning its `file://` URL. The mini-DAG payload crosses to render exactly
+/// as the cli's `gather_pr_dag` → render seam threads it (post-experiment-gate).
+fn render_minidag_report(filename: &str) -> String {
+    // A connector path: stg_orders -> int_order_items -> fct_orders. stg + fct
+    // are modified (their raw_code changed old->new); int is the unchanged
+    // connector between them.
+    let stg = model_node_with_deps(
+        "model.shop.stg_orders",
+        "select order_id, customer_id, status, amount\nfrom raw_orders",
+        "models/staging/stg_orders.sql",
+        &[],
+    );
+    let int = model_node_with_deps(
+        "model.shop.int_order_items",
+        "select order_id, customer_id, amount\nfrom stg_orders",
+        "models/intermediate/int_order_items.sql",
+        &["model.shop.stg_orders"],
+    );
+    let fct = model_node_with_deps(
+        "model.shop.fct_orders",
+        "select customer_id, sum(amount) as gross_revenue\nfrom int_order_items\ngroup by 1",
+        "models/marts/fct_orders.sql",
+        &["model.shop.int_order_items"],
+    );
+    let nodes = vec![stg, int, fct];
+    let tests = vec![
+        ("unit_test.shop.stg_orders.t", unit_test("t", "stg_orders")),
+        ("unit_test.shop.fct_orders.t", unit_test("t", "fct_orders")),
+    ];
+    let m = manifest(nodes, tests);
+    let in_scope: InScopeSet = [
+        "unit_test.shop.stg_orders.t".to_owned(),
+        "unit_test.shop.fct_orders.t".to_owned(),
+    ]
+    .into_iter()
+    .collect();
+    // The two modified models render cards; the connector is DAG-only.
+    let models: ModelInScopeSet = [
+        NodeId::new("model.shop.stg_orders"),
+        NodeId::new("model.shop.fct_orders"),
+    ]
+    .into_iter()
+    .collect();
+    let changed = in_scope.clone();
+
+    // Compute the mini-DAG exactly as the cli does (modified = stg + fct;
+    // connector = int between them), then fold per-node baseline line counts.
+    let modified: ModelInScopeSet = [
+        NodeId::new("model.shop.stg_orders"),
+        NodeId::new("model.shop.fct_orders"),
+    ]
+    .into_iter()
+    .collect();
+    let mut graph = compute_pr_dag(&m, &modified, &std::collections::BTreeSet::new(), &[]);
+    // Give the modified nodes a nonzero line delta (old -> new) so the ± chip
+    // renders; the connector keeps 0/0.
+    populate_line_counts(&mut graph, |node| match node.id.as_str() {
+        "model.shop.stg_orders" => {
+            pr_dag_lines_from_raw_code(Some("select order_id\nfrom raw_orders"), Some("a\nb\nc"))
+        }
+        "model.shop.fct_orders" => pr_dag_lines_from_raw_code(Some("select x"), Some("a\nb")),
+        _ => pr_dag_lines_from_raw_code(Some("same"), Some("same")),
+    });
+    let pr_dag = PrDagPayload::from_graph(graph, 48);
+
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report_with_externals(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &changed,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "",
+        ScopeSource::PrDiff,
+        DEFAULT_REPORT_TITLE,
+        None,
+        &cute_dbt::domain::CheckPolicy::default(),
+        &cute_dbt::domain::ProjectFacts::default(),
+        &cute_dbt::domain::GovernanceFacts::default(),
+        None,
+        None,
+        &[],
+        cute_dbt::domain::DEFAULT_SEED_ROW_CAP,
+        Some(&pr_dag),
+    )
+    .expect("render writes the report");
+    let p = out.to_str().expect("report path is valid UTF-8");
+    format!("file://{p}")
+}
+
+/// Poll for the mini-DAG Mermaid SVG to appear (the render is async — it runs
+/// on DOMContentLoaded and resolves a `mermaid.render` promise). Returns the
+/// node count once nonzero, or 0 after the timeout.
+fn wait_for_minidag_nodes(tab: &Tab) -> i64 {
+    for _ in 0..40 {
+        let n = eval(
+            tab,
+            "document.querySelectorAll('.pr-minidag-canvas g.node').length",
+        )
+        .as_i64()
+        .unwrap_or(0);
+        if n > 0 {
+            return n;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    0
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn pr_minidag_renders_and_node_click_selects_the_model() {
+    // The gated mini-DAG renders the cross-model subgraph at the report top
+    // (modified emphasized, connector quiet), and clicking a node updates the
+    // report's existing model <select> via the #91 change.cuteDbt contract.
+    let url = render_minidag_report("headless_minidag.html");
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate minidag report");
+    tab.wait_until_navigated().expect("await navigation");
+    wait_for_document_ready(&tab);
+
+    // The panel + descriptor render server-side.
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('[data-testid=\"pr-minidag-panel\"]') !== null",
+        ),
+        "the PR-scope mini-DAG panel renders when the experiment is on",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"pr-minidag-descriptor\"]').getAttribute('data-modified')",
+        ),
+        "2",
+        "the descriptor reports the 2 modified models",
+    );
+    assert_eq!(
+        eval_string(
+            &tab,
+            "document.querySelector('[data-testid=\"pr-minidag-descriptor\"]').getAttribute('data-connectors')",
+        ),
+        "1",
+        "the descriptor reports the 1 connector model",
+    );
+
+    // The Mermaid SVG paints client-side (async). Wait for its nodes.
+    let node_count = wait_for_minidag_nodes(&tab);
+    assert!(
+        node_count >= 3,
+        "the mini-DAG Mermaid SVG renders its 3 nodes (got {node_count})",
+    );
+
+    // The click→select contract: select a DIFFERENT model than the default,
+    // then click its mini-DAG node and assert the report's #model-select moved.
+    // Default model is the first updated one (stg_orders); click fct_orders.
+    let before = eval_string(&tab, "document.getElementById('model-select').value");
+    let clicked = eval_bool(
+        &tab,
+        "(function () { \
+           var g = document.querySelector('.pr-minidag-canvas g.node[data-model=\"fct_orders\"]'); \
+           if (!g) return false; \
+           g.dispatchEvent(new MouseEvent('click', { bubbles: true })); \
+           return true; \
+         })()",
+    );
+    assert!(
+        clicked,
+        "the fct_orders mini-DAG node is present and clickable"
+    );
+    // Give the change handler a tick.
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let after = eval_string(&tab, "document.getElementById('model-select').value");
+    assert_eq!(
+        after, "fct_orders",
+        "clicking the fct_orders node selects it in the report model selector \
+         (before={before})",
+    );
+
+    // The viewer toggle hides the whole panel.
+    let _ = eval(
+        &tab,
+        "(function () { \
+           var t = document.getElementById('settings-prdag-input'); \
+           t.checked = false; \
+           t.dispatchEvent(new Event('change')); \
+           return true; \
+         })()",
+    );
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.pr-minidag-panel').hidden === true",
+        ),
+        "the viewer toggle hides the mini-DAG panel",
+    );
+
     let _ = tab.close(true);
 }
