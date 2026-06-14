@@ -54,6 +54,18 @@ enum ContainerShape {
     None,
 }
 
+/// JSON fixtures that are deliberately **not** dbt manifests, so the
+/// manifest-shape assertions below do not apply to them. The non-`.json`
+/// skip (config TOML, pr-diff patches) is by suffix; these are JSON by
+/// extension but a different wire entirely, so they are named explicitly
+/// (and greppably) here. Each has its own dedicated assertions.
+///
+/// - `pr-review-threads.json` — the synthetic `gh api graphql`
+///   `reviewThreads` response for the PR review-thread ingestion adapter
+///   (cute-dbt#395); pinned by `tests/pr_comments_ingestion.rs` and the
+///   `adapters::pr_comments` unit suite.
+const NON_MANIFEST_JSON_FIXTURES: &[&str] = &["pr-review-threads.json"];
+
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
@@ -113,6 +125,16 @@ fn every_listed_fixture_parses_and_reports_shape() {
         if !entry.path.ends_with(".json") {
             println!(
                 "fixture_parse: {} is non-JSON (manifest-shape assertions do not apply)",
+                entry.path
+            );
+            continue;
+        }
+        // JSON, but a deliberately non-manifest wire (e.g. the #395 gh
+        // GraphQL response) — skip the manifest-shape assertions; the
+        // fixture has its own dedicated parse coverage.
+        if NON_MANIFEST_JSON_FIXTURES.contains(&entry.path.as_str()) {
+            println!(
+                "fixture_parse: {} is non-manifest JSON (manifest-shape assertions do not apply)",
                 entry.path
             );
             continue;
