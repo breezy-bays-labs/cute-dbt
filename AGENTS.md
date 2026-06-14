@@ -72,7 +72,12 @@ Enforced by module convention + clippy + review (a single crate cannot fail
 to compile on an inward `use`). The full layering invariant, the two-stage
 fail-closed contract, the StateComparator strategy, and the conscious
 design simplifications (no workspace, no per-crate versioning, no API shim,
-no AST-purity grep, no JSON envelope) are recorded in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+no AST-purity grep) are recorded in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+The sixth original simplification — **no JSON wire envelope** — was
+**consciously reversed** at cute-dbt#386 / epic #261 (founder ADR-4
+amendment, 2026-06-11): a machine-readable findings-envelope **sidecar**
+now lands via `--findings-out` (additive — the HTML output is unchanged).
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) §2 (row 5 + the row-5-reversal note).
 
 ```
 domain  -> (no outward imports; std + serde derive only)
@@ -86,10 +91,13 @@ cli/    -> clap derive, ExitCode mapping, run loop composition
 main.rs -> thin entry
 ```
 
-**Never import inward.** The five "conscious design simplifications" (no
-workspace, no per-crate versioning, no API shim, no AST-purity grep, no
-JSON envelope) are documented absences, not omissions. Adding any of them
-is a regression, not a "pattern completion."
+**Never import inward.** The "conscious design simplifications" (no
+workspace, no per-crate versioning, no API shim, no AST-purity grep) are
+documented absences, not omissions. Adding any of them is a regression, not
+a "pattern completion." The one-time exception — the **JSON wire envelope**
+— was sanctioned-reversed at cute-dbt#386 (findings-envelope sidecar); that
+reversal is authorized by the founder's ADR-4 amendment + the #261 locked
+decisions, not a contributor "completing the pattern."
 The `non-mirror-guard` CI job rejects:
 - a `[workspace]` table in `Cargo.toml`
 - `bans.deny.wrappers` in `deny.toml`

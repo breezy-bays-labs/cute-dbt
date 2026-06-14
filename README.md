@@ -258,8 +258,10 @@ reach `compiled_code`.
 Single-crate Rust CLI, hexagonal **inward-dependency discipline**.
 `src/{domain, ports, adapters, cli}` + `main.rs`. The full architecture
 invariants, the two-stage fail-closed contract, and the conscious design
-simplifications (no workspace, no public-API shim, no JSON envelope) are in
-[`ARCHITECTURE.md`](ARCHITECTURE.md).
+simplifications (no workspace, no public-API shim) are in
+[`ARCHITECTURE.md`](ARCHITECTURE.md) — including the one that was
+consciously reversed at cute-dbt#386 (the machine-readable findings-envelope
+sidecar, the former "no JSON envelope" line).
 
 ## Documentation
 
