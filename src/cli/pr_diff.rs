@@ -82,11 +82,11 @@ struct DiffScan {
     /// anything.
     pending_old_path: Option<String>,
     /// `true` when the most recent `--- ` header was `--- /dev/null` — the
-    /// addition signal (cute-dbt#416). The mirror of [`pending_old_path`]
-    /// (`Self::pending_old_path`): a `/dev/null` old side stages no path
-    /// but DOES flag the next `+++ b/<path>` as an addition, so its new
-    /// path lands in [`added`](Self::added). A real `--- a/<path>` clears
-    /// this flag (a modify / deletion / rename, never an addition).
+    /// addition signal (cute-dbt#416). The mirror of
+    /// [`pending_old_path`](Self::pending_old_path): a `/dev/null` old side
+    /// stages no path but DOES flag the next `+++ b/<path>` as an addition,
+    /// so its new path lands in [`added`](Self::added). A real `--- a/<path>`
+    /// clears this flag (a modify / deletion / rename, never an addition).
     pending_old_dev_null: bool,
     current: Option<FileHunks>,
     in_hunk: bool,
