@@ -1,0 +1,7 @@
+diff --git a/n.yml b/n.yml
+new file mode 100644
+--- /dev/null
++++ b/n.yml
+@@ -0,0 +1,2 @@
++line 1
++line 2

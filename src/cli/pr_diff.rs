@@ -183,7 +183,11 @@ impl DiffScan {
 /// verbatim (git emits them un-prefixed and unquoted-for-spaces;
 /// C-quoted non-ASCII paths are not dequoted — parity with the
 /// `+++ b/<path>` parser).
-fn parse_unified_diff(s: &str) -> Result<PrDiff, String> {
+///
+/// `pub(crate)` so the fuzz seam ([`crate::cli::fuzz_parse_unified_diff`],
+/// cute-dbt#383) can drive this **pure** entry point with adversarial
+/// bytes without going through `parse_diff`'s `@file` I/O arm.
+pub(crate) fn parse_unified_diff(s: &str) -> Result<PrDiff, String> {
     let mut scan = DiffScan::default();
     for line in s.lines() {
         scan.feed(line)?;
