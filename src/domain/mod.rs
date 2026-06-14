@@ -41,6 +41,7 @@ pub mod checks;
 pub mod config;
 pub mod cte;
 pub mod experimental;
+pub mod finding_anchor;
 pub mod governance;
 pub mod grain;
 pub mod macro_lens;
@@ -83,6 +84,7 @@ pub use experimental::{
     DEFAULT_MACRO_BODY_CAP, EnabledExperiments, Experiment, ExperimentalConfig, ExperimentalError,
     parse_experimental_env, resolve_experimental_config,
 };
+pub use finding_anchor::{AnchorSide, ResolvedAnchor, resolve_finding_anchor};
 pub use governance::{
     BlastRadius, BreakingReason, ColumnMetaTags, ConstraintSupport, ContractChange, ContractClass,
     ContractColumnDiff, DepDate, GovChip, GovernanceFacts, GroupChip, MetaPair, ModelMetaTags,

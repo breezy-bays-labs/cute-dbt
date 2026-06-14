@@ -44,6 +44,7 @@ pub mod asset_embed;
 pub mod config_reader;
 pub mod cte_engine;
 pub mod explore;
+pub mod github_annotations;
 pub mod manifest;
 pub mod project_def;
 pub mod project_file;
