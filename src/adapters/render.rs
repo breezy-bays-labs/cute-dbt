@@ -67,16 +67,16 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, ConfigAttribution, CteGraph, DiffLine,
-    DiffLineKind, EdgeType, Finding, FixtureTable, GovernanceFacts, HeuristicId, HookChangeFacts,
-    HookManifestPresence, InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet,
-    ModelYamlOutcome, Node, NodeId, NormalizedDiffIndex, PrRef, ProjectChange,
-    ProjectChangeCategory, ProjectChangePanel, ProjectDefinition, ProjectFacts,
-    ProjectFallbackReason, SeedCard, SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff,
-    UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock, VarAttribution, VarChangeFacts,
-    VarReference, VarScanFootprint, apply_check_policy, macro_blast_radius, model_findings,
-    reconstruct_macro_sql_diff, resolve_target_model, resolve_tested_model,
-    table_from_manifest_rows,
+    BANNER_EMPTY_SCOPE, BlockDiff, CheckId, CheckPolicy, ConfigAttribution, CteGraph,
+    DEFAULT_SEED_ROW_CAP, DiffLine, DiffLineKind, EdgeType, Finding, FixtureTable,
+    FixtureTableDiff, GovernanceFacts, HeuristicId, HookChangeFacts, HookManifestPresence,
+    InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet, ModelYamlOutcome, Node,
+    NodeId, NormalizedDiffIndex, PrRef, ProjectChange, ProjectChangeCategory, ProjectChangePanel,
+    ProjectDefinition, ProjectFacts, ProjectFallbackReason, SeedCard, SourceNode, TestMetadata,
+    Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock,
+    VarAttribution, VarChangeFacts, VarReference, VarScanFootprint, apply_check_policy,
+    macro_blast_radius, model_findings, reconstruct_macro_sql_diff, resolve_target_model,
+    resolve_tested_model, table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -1406,22 +1406,138 @@ pub struct ReportPayload {
     /// keeping the no-PR-context goldens byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_ref: Option<PrRefPayload>,
-    /// The in-scope seed cards (cute-dbt#350) — one per seed the diff
-    /// modified (baseline arm: changed `checksum`; pr-diff arm: the
-    /// `seeds/<name>.csv` appears in the diff). Each carries the seed's
-    /// identity, project-relative path, direct downstream-model lineage,
-    /// and — once the CLI gather stage reads the working-tree CSV — the
-    /// parsed [`FixtureTable`]; a seed whose
-    /// file could not be read keeps `table: None` (a labeled empty-data
-    /// state at render, the truthful degrade — never a silent blank grid,
-    /// the cute-dbt#126 lesson). This slice plumbs the payload but does
-    /// **not** render it (the "Data tables" report section lands in a later
-    /// slice); the field is serialized for downstream consumers + the
-    /// gather-stage assertions. Omitted from JSON when empty (no seed in
-    /// scope), so seed-free payloads — every committed golden — stay
-    /// byte-identical.
+    /// The in-scope seed cards' RENDER VIEW (cute-dbt#350) — one
+    /// [`SeedSectionCard`] per seed the diff modified, built from the raw
+    /// [`SeedCard`]s the CLI gathered (`build_seed_section`) plus the
+    /// resolved row cap. Each carries the seed's identity, project-relative
+    /// path, direct downstream-model lineage, config-display strings, the
+    /// CAPPED current table (with its true pre-cap row total for the honest
+    /// "showing N of M rows" label), and — on the pr-diff arm — the FULL
+    /// (never capped) old→new cell-diff. A seed whose data could not be read
+    /// carries `table: None` (the labeled "data unavailable" state, the
+    /// cute-dbt#126 lesson — never a silent blank grid). Gated behind the
+    /// `seeds` experiment: the cli passes an EMPTY raw vec when the
+    /// experiment is off, so this view is empty ⇒ omitted from JSON
+    /// (`#[serde(skip_serializing_if)]`) ⇒ the "Data tables" section renders
+    /// zero DOM (`DATA.seed_cards` absent) and every seed-free golden stays
+    /// byte-identical (the `macro_lens` / governance precedent).
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub seed_cards: Vec<SeedCard>,
+    pub seed_cards: Vec<SeedSectionCard>,
+}
+
+/// One seed's render view for the "Data tables" section (cute-dbt#350) — the
+/// wire shape the report JS consumes (`DATA.seed_cards`).
+///
+/// Built by `build_seed_section` from a raw [`SeedCard`] plus the resolved
+/// row cap. It differs from the gathered [`SeedCard`] in two render-time
+/// ways: the current `table` is **truncated to the cap** (with the true
+/// pre-cap total carried in [`total_rows`](Self::total_rows) so the JS can
+/// label "showing N of M rows" honestly), while the cell-`diff` is carried
+/// **in full** — a diff is intrinsically bounded by the edit size and
+/// capping it would hide the very change under review. A seed whose data
+/// could not be read carries `table: None` AND `diff: None` — the JS renders
+/// the labeled "data unavailable" state, never a silent empty grid (the
+/// cute-dbt#126 lesson).
+#[derive(Debug, Clone, Serialize)]
+pub struct SeedSectionCard {
+    /// The seed's full manifest node id (`seed.<pkg>.<name>`).
+    pub id: String,
+    /// The seed's authored bare name — the handle a reviewer recognizes.
+    pub name: String,
+    /// The seed source file, project-relative (`seeds/<name>.csv`). `None`
+    /// for a synthetic node that omits the path. Safe to inline (no
+    /// home-path leak — unlike the node's absolute `root_path`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_file_path: Option<String>,
+    /// The bare names of the DIRECT downstream models that `ref()` this
+    /// seed (the immediate blast radius — direct consumers, not the
+    /// transitive closure). Sorted; empty for an unreferenced seed.
+    pub feeds_models: Vec<String>,
+    /// The seed's `delimiter` config display string, when authored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delimiter: Option<String>,
+    /// The seed's `quote_columns` config display string, when authored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote_columns: Option<String>,
+    /// The seed's `column_types` config display string, when authored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_types: Option<String>,
+    /// The seed's CURRENT data table, **capped** to the resolved row cap.
+    /// `None` ⇒ the data could not be read (no `--project-root` / unreadable
+    /// file) ⇒ the labeled "data unavailable" state. When `Some`, holds at
+    /// most [`shown_rows`](Self::shown_rows) rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<FixtureTable>,
+    /// The TRUE number of rows in the seed's current table BEFORE the cap —
+    /// the `M` in "showing N of M rows". `0` when [`table`](Self::table) is
+    /// `None` (no data read).
+    pub total_rows: usize,
+    /// The number of rows actually carried in [`table`](Self::table) after
+    /// the cap — the `N` in "showing N of M rows". Equals
+    /// [`total_rows`](Self::total_rows) when under the cap. `0` when
+    /// `table` is `None`.
+    pub shown_rows: usize,
+    /// `true` when [`total_rows`](Self::total_rows) exceeds
+    /// [`shown_rows`](Self::shown_rows) — the cap actually truncated rows,
+    /// so the JS shows the "showing N of M rows" note. Precomputed in Rust
+    /// so the (untrusted-name-free) JS only renders.
+    pub capped: bool,
+    /// The old→new cell-diff, carried in FULL (never capped). `Some` only on
+    /// the pr-diff arm when the seed CSV's hunks reconstructed a diff; `None`
+    /// on the baseline arm and when the data could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<FixtureTableDiff>,
+}
+
+/// Build the "Data tables" seed render views (cute-dbt#350) from the raw
+/// gathered [`SeedCard`]s plus the resolved row `cap`.
+///
+/// Pure transform: per card, truncate the current table to `cap` rows
+/// (recording the true pre-cap total for the honest "showing N of M" label),
+/// pass the cell-diff through untouched (a diff is never capped — truncating
+/// it would hide the change under review), and carry the degrade state
+/// (`table: None`) verbatim. The cap is applied here, render-side, from the
+/// `--config`-resolved value the cli threads in (default
+/// [`DEFAULT_SEED_ROW_CAP`]).
+fn build_seed_section(cards: &[SeedCard], cap: usize) -> Vec<SeedSectionCard> {
+    cards
+        .iter()
+        .map(|card| seed_section_card(card, cap))
+        .collect()
+}
+
+/// Transform one raw [`SeedCard`] into its capped render view.
+fn seed_section_card(card: &SeedCard, cap: usize) -> SeedSectionCard {
+    let (table, total_rows, shown_rows, capped) = match &card.table {
+        Some(t) => {
+            let total = t.rows.len();
+            let shown = total.min(cap);
+            // Only clone-and-truncate when the cap actually bites; the common
+            // under-cap path clones the table whole (cheap relative to the
+            // render) so the wire shape is identical to the raw table.
+            let capped_table = if shown < total {
+                FixtureTable::new(t.columns.clone(), t.rows[..shown].to_vec())
+            } else {
+                t.clone()
+            };
+            (Some(capped_table), total, shown, shown < total)
+        }
+        None => (None, 0, 0, false),
+    };
+    SeedSectionCard {
+        id: card.id.as_str().to_owned(),
+        name: card.name.clone(),
+        original_file_path: card.original_file_path.clone(),
+        feeds_models: card.feeds_models.clone(),
+        delimiter: card.delimiter.clone(),
+        quote_columns: card.quote_columns.clone(),
+        column_types: card.column_types.clone(),
+        table,
+        total_rows,
+        shown_rows,
+        capped,
+        diff: card.diff.clone(),
+    }
 }
 
 /// The serialized source-PR reference (cute-dbt#346) — the JSON twin of
@@ -3022,6 +3138,9 @@ pub fn render_report(
         None,
         None,
         &[],
+        // No seed cards flow through this convenience wrapper, so the cap is
+        // inert — pass the default (cute-dbt#350).
+        DEFAULT_SEED_ROW_CAP,
     )
 }
 
@@ -3057,6 +3176,7 @@ pub fn render_report_with_externals(
     macro_lens: Option<&MacroLensPayload>,
     pr_ref: Option<&PrRef>,
     seed_cards: &[SeedCard],
+    seed_row_cap: usize,
 ) -> io::Result<()> {
     let mut payload = build_payload_with_externals(
         current,
@@ -3090,15 +3210,16 @@ pub fn render_report_with_externals(
     // is inert rather than rendering a dangling link with no diff context.
     let pr_ref = pr_ref.filter(|_| scope_source == ScopeSource::PrDiff);
     payload.pr_ref = pr_ref.map(PrRefPayload::from);
-    // cute-dbt#350 — the seed cards the CLI gathered (identity + lineage
-    // from the projection, enriched with the working-tree CSV table). Both
-    // scope arms populate this (data only this slice; the pr-diff cell-diff
-    // lands later). Empty (no seed in scope) ⇒ omitted from JSON, so every
-    // seed-free golden stays byte-identical. The payload is plumbed but
-    // UNRENDERED in this slice — the report "Data tables" section is a
-    // later slice — so a populated `seed_cards` changes zero emitted bytes
-    // until that section ships.
-    payload.seed_cards = seed_cards.to_vec();
+    // cute-dbt#350 — the "Data tables" seed render views, built from the raw
+    // cards the CLI gathered (identity + lineage + working-tree CSV table +
+    // pr-diff cell-diff) plus the `--config`-resolved row cap. The cap bounds
+    // the current table render-side here (the cell-diff is never capped); the
+    // honest "showing N of M rows" label is precomputed per card. Gated
+    // behind the `seeds` experiment: the cli passes an EMPTY raw vec when off,
+    // so this view is empty ⇒ omitted from JSON ⇒ the section renders zero DOM
+    // and every seed-free golden stays byte-identical (the macro_lens / governance
+    // precedent).
+    payload.seed_cards = build_seed_section(seed_cards, seed_row_cap);
     // The empty-scope banner contract reads the TRUE in-scope set, not the
     // widened render set or the changed subset (cute-dbt#91).
     let banner_text = compose_banner_text(in_scope);
@@ -6925,9 +7046,13 @@ mod tests {
         );
     }
 
-    // ===== seed cards payload (cute-dbt#350) =====
+    // ===== seed cards payload + "Data tables" render view (cute-dbt#350) =====
+    // `Cell` / `CellValue` / the diff types are imported by the cute-dbt#98
+    // block below (same `tests` module); only `TableRow` is new here.
 
-    fn payload_with_seed_cards(seed_cards: Vec<SeedCard>) -> ReportPayload {
+    use crate::domain::TableRow;
+
+    fn payload_with_seed_section(seed_cards: Vec<SeedSectionCard>) -> ReportPayload {
         ReportPayload {
             baseline: "baseline.json".to_owned(),
             models: vec![],
@@ -6942,46 +7067,164 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_seed_cards_are_omitted_from_the_json_payload() {
-        // The byte-identity guard: no seed in scope ⇒ the `seed_cards` key
-        // is absent from JSON, so every seed-free golden stays identical.
-        let serialized =
-            payload_json_for_html_script(&payload_with_seed_cards(Vec::new())).expect("serialize");
-        assert!(
-            !serialized.contains("seed_cards"),
-            "an empty seed_cards vec must not appear in the JSON: {serialized}",
-        );
+    /// A `FixtureTable` with one `id` column and `n` integer rows (0..n).
+    fn seed_table(n: usize) -> FixtureTable {
+        let rows = (0..n)
+            .map(|i| TableRow::new(vec![Cell::new(CellValue::Number(i.to_string()))]))
+            .collect();
+        FixtureTable::new(vec!["id".to_owned()], rows)
     }
 
-    #[test]
-    fn populated_seed_cards_serialize_into_the_json_payload() {
-        // The plumbing proof: a populated card crosses to the payload JSON
-        // (the renderer does not yet render it — that is a later slice — but
-        // the wire shape is carried for downstream consumers + assertions).
-        let card = SeedCard::new(
+    /// A raw `SeedCard` carrying `table` with `n` rows (no diff).
+    fn raw_seed_card_with_rows(n: usize) -> SeedCard {
+        let mut card = SeedCard::new(
             NodeId::new("seed.shop.raw_customers"),
             "raw_customers",
             Some("seeds/raw_customers.csv".to_owned()),
             vec!["stg_customers".to_owned()],
         );
+        card.table = Some(seed_table(n));
+        card
+    }
+
+    #[test]
+    fn empty_seed_section_is_omitted_from_the_json_payload() {
+        // The byte-identity guard: no seed in scope (or the experiment off) ⇒
+        // the `seed_cards` key is absent from JSON, so every seed-free golden
+        // stays identical. `build_seed_section(&[], _)` yields an empty vec.
+        let view = build_seed_section(&[], DEFAULT_SEED_ROW_CAP);
         let serialized =
-            payload_json_for_html_script(&payload_with_seed_cards(vec![card])).expect("serialize");
-        let parsed: serde_json::Value = serde_json::from_str(&serialized).expect("valid JSON");
-        let cards = parsed["seed_cards"]
-            .as_array()
-            .expect("seed_cards is a JSON array");
-        assert_eq!(cards.len(), 1);
-        assert_eq!(
-            cards[0]["name"],
-            serde_json::Value::String("raw_customers".to_owned())
+            payload_json_for_html_script(&payload_with_seed_section(view)).expect("serialize");
+        assert!(
+            !serialized.contains("seed_cards"),
+            "an empty seed section must not appear in the JSON: {serialized}",
         );
+    }
+
+    #[test]
+    fn build_seed_section_carries_identity_lineage_and_under_cap_table() {
+        // Under-cap: the whole table crosses; total == shown; not capped.
+        let view = build_seed_section(&[raw_seed_card_with_rows(3)], 500);
+        assert_eq!(view.len(), 1);
+        let c = &view[0];
+        assert_eq!(c.id, "seed.shop.raw_customers");
+        assert_eq!(c.name, "raw_customers");
+        assert_eq!(c.feeds_models, vec!["stg_customers".to_owned()]);
+        assert_eq!(c.total_rows, 3);
+        assert_eq!(c.shown_rows, 3);
+        assert!(!c.capped);
+        assert_eq!(c.table.as_ref().expect("table present").rows.len(), 3);
+    }
+
+    #[test]
+    fn build_seed_section_caps_the_current_table_and_records_the_true_total() {
+        // Over-cap: the table truncates to `cap` rows, but `total_rows` keeps
+        // the TRUE pre-cap count so the JS can label "showing N of M rows"
+        // honestly. `capped` flags the truncation.
+        let view = build_seed_section(&[raw_seed_card_with_rows(10)], 4);
+        let c = &view[0];
+        assert_eq!(c.total_rows, 10);
+        assert_eq!(c.shown_rows, 4);
+        assert!(c.capped);
+        assert_eq!(c.table.as_ref().expect("table present").rows.len(), 4);
+        // The truncation keeps the FIRST `cap` rows in source order.
+        let first = &c.table.as_ref().unwrap().rows[0].cells[0];
+        assert_eq!(first.display, "0");
+    }
+
+    #[test]
+    fn build_seed_section_cap_zero_renders_no_data_rows_but_keeps_the_header() {
+        // cap = 0 is legal (header + "showing 0 of M rows" note only).
+        let view = build_seed_section(&[raw_seed_card_with_rows(5)], 0);
+        let c = &view[0];
+        assert_eq!(c.total_rows, 5);
+        assert_eq!(c.shown_rows, 0);
+        assert!(c.capped);
+        let table = c
+            .table
+            .as_ref()
+            .expect("an empty-rows table still renders the header");
+        assert!(table.rows.is_empty());
+        assert_eq!(table.columns, vec!["id".to_owned()]);
+    }
+
+    #[test]
+    fn build_seed_section_degrades_truthfully_when_table_is_none() {
+        // The #126 lesson: a seed whose data could not be read keeps
+        // `table: None` AND zero counts — the JS renders the labeled
+        // "data unavailable" state, never a silent empty grid.
+        let card = SeedCard::new(
+            NodeId::new("seed.shop.lonely"),
+            "lonely",
+            Some("seeds/lonely.csv".to_owned()),
+            Vec::new(),
+        );
+        let view = build_seed_section(&[card], 500);
+        let c = &view[0];
+        assert!(c.table.is_none());
+        assert_eq!(c.total_rows, 0);
+        assert_eq!(c.shown_rows, 0);
+        assert!(!c.capped);
+    }
+
+    #[test]
+    fn build_seed_section_never_caps_the_cell_diff() {
+        // The diff is intrinsically bounded by the edit size; capping it would
+        // hide the change under review. A card with a 6-row diff and a low cap
+        // keeps every diff row even as its current table truncates.
+        let mut card = raw_seed_card_with_rows(6);
+        let diff_rows: Vec<RowChange> = (0..6)
+            .map(|i| RowChange {
+                kind: RowChangeKind::Added,
+                cells: vec![CellChange {
+                    old: Cell::new(CellValue::Absent),
+                    new: Cell::new(CellValue::Number(i.to_string())),
+                    changed: true,
+                }],
+            })
+            .collect();
+        card.diff = Some(FixtureTableDiff {
+            columns: vec![DiffColumn {
+                name: "id".to_owned(),
+                status: ColumnStatus::Present,
+            }],
+            rows: diff_rows,
+        });
+        let view = build_seed_section(&[card], 2);
+        let c = &view[0];
+        // Current table capped to 2…
+        assert_eq!(c.shown_rows, 2);
+        assert!(c.capped);
+        // …but the diff carries all 6 rows.
+        assert_eq!(c.diff.as_ref().expect("diff present").rows.len(), 6);
+    }
+
+    #[test]
+    fn populated_seed_section_serializes_with_the_render_view_shape() {
+        // The wire-shape proof: the JS reads name/feeds_models/total_rows/
+        // shown_rows/capped + the capped table. Pins the keys the report JS
+        // branches on.
+        let view = build_seed_section(&[raw_seed_card_with_rows(10)], 4);
+        let serialized =
+            payload_json_for_html_script(&payload_with_seed_section(view)).expect("serialize");
+        let parsed: serde_json::Value = serde_json::from_str(&serialized).expect("valid JSON");
+        let cards = parsed["seed_cards"].as_array().expect("array");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0]["name"], serde_json::json!("raw_customers"));
         assert_eq!(
             cards[0]["feeds_models"],
-            serde_json::json!(["stg_customers"]),
+            serde_json::json!(["stg_customers"])
         );
-        // The data-bearing field is null until the gather stage fills it.
-        assert!(cards[0]["table"].is_null());
+        assert_eq!(cards[0]["total_rows"], serde_json::json!(10));
+        assert_eq!(cards[0]["shown_rows"], serde_json::json!(4));
+        assert_eq!(cards[0]["capped"], serde_json::json!(true));
+        assert_eq!(
+            cards[0]["table"]["rows"]
+                .as_array()
+                .expect("rows array")
+                .len(),
+            4
+        );
     }
 
     // ===== governance surfaces (cute-dbt#260, Slice 0) =====
@@ -7029,6 +7272,7 @@ mod tests {
             None,
             None,
             &[],
+            DEFAULT_SEED_ROW_CAP,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -7971,6 +8215,7 @@ mod tests {
             macro_lens,
             None,
             &[],
+            DEFAULT_SEED_ROW_CAP,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8349,6 +8594,7 @@ mod tests {
             None,
             pr_ref,
             &[],
+            DEFAULT_SEED_ROW_CAP,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -8481,6 +8727,7 @@ mod tests {
             None,
             None,
             &[],
+            DEFAULT_SEED_ROW_CAP,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")

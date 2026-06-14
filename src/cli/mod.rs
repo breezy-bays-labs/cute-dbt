@@ -84,16 +84,17 @@ use crate::adapters::render::{
 };
 use crate::domain::{
     BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_MACRO_BODY_CAP, DEFAULT_REPORT_TITLE,
-    DepDate, EnabledExperiments, Experiment, FixtureTableDiff, GovernanceFacts, HeuristicId,
-    InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex,
-    PrConfig, PrRef, PreflightError, ProjectChangePanel, ProjectFacts, ProjectFallbackReason,
-    ScopeInput, ScopeSelection, SeedCard, SeedInScopeSet, SuppressRule, SuppressionSource,
-    UnitTest, UnitTestDataDiff, UnitTestYamlBlock, VarReference, all_models, attach_hook_facts,
-    attach_model_yaml_diffs, attach_var_facts, attribute_config_tree_changes,
-    attribute_var_changes, build_seed_cards, changed_macros_baseline, changed_macros_pr_diff,
-    changed_models, check_by_id, diff_project_definitions, effective_fixture_format,
-    external_fixture_table, extract_model_block, extract_unit_test_block, gather_governance,
-    hook_operations, macro_focus_set, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
+    DEFAULT_SEED_ROW_CAP, DepDate, EnabledExperiments, Experiment, FixtureTableDiff,
+    GovernanceFacts, HeuristicId, InScopeSet, Manifest, ModelInScopeSet, ModelYamlOutcome,
+    NamedTableDiff, NormalizedDiffIndex, PrConfig, PrRef, PreflightError, ProjectChangePanel,
+    ProjectFacts, ProjectFallbackReason, ScopeInput, ScopeSelection, SeedCard, SeedInScopeSet,
+    SuppressRule, SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock, VarReference,
+    all_models, attach_hook_facts, attach_model_yaml_diffs, attach_var_facts,
+    attribute_config_tree_changes, attribute_var_changes, build_seed_cards,
+    changed_macros_baseline, changed_macros_pr_diff, changed_models, check_by_id,
+    diff_project_definitions, effective_fixture_format, external_fixture_table,
+    extract_model_block, extract_unit_test_block, gather_governance, hook_operations,
+    macro_focus_set, preflight_compiled, raw_hunk_lines, reconstruct_block_diffs,
     reconstruct_external_fixture_diff, reconstruct_model_sql_diffs, reconstruct_table_diffs,
     refine_changed_by_hunks, resolve_check_policy, resolve_experimental_config, reverse_apply,
     scan_pragmas, select_in_scope, select_seeds_in_scope, widen_with_config_attributions,
@@ -376,17 +377,35 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
     if let ScopeInput::PrDiff { index } = &scope_input {
         attach_model_yaml_diffs(&mut model_yaml, index);
     }
-    // Seed cards (cute-dbt#350): the seed dual of the model scope. Select
+    // Seed cards (cute-dbt#350): the seed dual of the model scope, gated
+    // behind the `seeds` experiment (epic #350 / epic #288 default-OFF
+    // posture — the project-state / governance / macro-lens precedent). This
+    // is the SINGLE gating source: when the experiment is off the cards never
+    // cross to the render payload, so the "Data tables" section emits zero
+    // DOM and every seed-free golden stays byte-identical. Enabled: select
     // the in-scope seeds on EITHER arm (`select_seeds_in_scope` — baseline:
     // changed `checksum`; pr-diff: the `seeds/<name>.csv` is in the diff),
-    // then read each seed's working-tree CSV into its card (truthful degrade
-    // per seed — a card the reader cannot fill keeps `table: None`). Data
-    // only this slice; the pr-diff cell-diff lands later. The payload is
-    // plumbed but UNRENDERED here (the "Data tables" section is a later
-    // slice), so a populated `seed_cards` changes zero emitted bytes — every
-    // committed golden stays byte-identical.
-    let seeds_in_scope = select_seeds_in_scope(&current, &scope_input);
-    let seed_cards = gather_seeds(args, &current, &seeds_in_scope);
+    // read each seed's working-tree CSV into its card (truthful degrade per
+    // seed — a card the reader cannot fill keeps `table: None`), and on the
+    // pr-diff arm reconstruct the seed CSV's old→new cell-diff from its own
+    // hunks (`reconstruct_external_fixture_diff`, the #126 external-fixture
+    // machinery — the seed file IS an external tabular file). The render
+    // layer (`build_seed_section`) applies the row cap + the honest label.
+    let seed_cards = if experiments.is_enabled(Experiment::Seeds) {
+        let seeds_in_scope = select_seeds_in_scope(&current, &scope_input);
+        let seed_index = match &scope_input {
+            ScopeInput::PrDiff { index } => Some(index),
+            ScopeInput::Baseline { .. } => None,
+        };
+        gather_seeds(args, &current, &seeds_in_scope, seed_index)
+    } else {
+        Vec::new()
+    };
+    // The seed current-table row cap (cute-dbt#350) — resolved at the I/O
+    // boundary from `[seeds] row_cap` over DEFAULT_SEED_ROW_CAP, the
+    // macro_body_cap precedent. Inert when no seed is in scope / the
+    // experiment is off (an empty `seed_cards` renders nothing to cap).
+    let seed_row_cap = resolve_seed_row_cap(args);
     // Cell-level unit-test data-table diffs (cute-dbt#98): the structured
     // sibling of `yaml_diffs`. For each in-scope changed test whose own YAML
     // block the diff touched, reconstruct an aligned given/expect cell diff
@@ -454,6 +473,7 @@ fn execute_report(args: &ReportArgs) -> Result<(), RunError> {
         macro_lens.as_ref(),
         pr_ref.as_ref(),
         &seed_cards,
+        seed_row_cap,
     )
     .map_err(|err| RunError::output(&args.out, err))?;
     Ok(())
@@ -863,6 +883,7 @@ fn gather_seeds(
     args: &ReportArgs,
     current: &Manifest,
     seeds_in_scope: &SeedInScopeSet,
+    index: Option<&NormalizedDiffIndex>,
 ) -> Vec<SeedCard> {
     let cards = build_seed_cards(current, seeds_in_scope);
     let (resolved, _derived) =
@@ -875,7 +896,7 @@ fn gather_seeds(
         return cards;
     };
     let reader = FsProjectFileReader::new(project_root);
-    gather_seeds_with_reader(&reader, cards)
+    gather_seeds_with_reader(&reader, cards, index)
 }
 
 /// Pure composition step over the [`ProjectFileReader`] port — testable
@@ -892,6 +913,7 @@ fn gather_seeds(
 fn gather_seeds_with_reader(
     reader: &dyn ProjectFileReader,
     mut cards: Vec<SeedCard>,
+    index: Option<&NormalizedDiffIndex>,
 ) -> Vec<SeedCard> {
     for card in &mut cards {
         let Some(path) = card.original_file_path.as_deref() else {
@@ -919,6 +941,19 @@ fn gather_seeds_with_reader(
         // non-tabulatable body leaves `table: None` (truthful empty).
         let format = effective_fixture_format(None, path);
         card.table = external_fixture_table(&text, format.as_deref());
+        // cute-dbt#350 — on the pr-diff arm, reconstruct the seed CSV's
+        // old→new cell-diff from its OWN hunks (the working-tree text is NEW;
+        // reverse-applying the hunks rebuilds OLD). The seed file is an
+        // external tabular file, so this reuses the #126 reconstruction
+        // wholesale. A seed the diff did not touch (no hunks) yields `None`
+        // (`reconstruct_external_fixture_diff` returns `None`), so its card
+        // renders the plain current table. Baseline arm: `index` is `None`,
+        // so `diff` stays `None` (no hunks exist in either manifest — seeds
+        // carry zero row data in the manifest).
+        if let Some(index) = index {
+            card.diff =
+                reconstruct_external_fixture_diff(&text, format.as_deref(), index.hunks_for(path));
+        }
     }
     cards
 }
@@ -1604,6 +1639,19 @@ fn resolve_macro_body_cap(args: &ReportArgs) -> usize {
         .unwrap_or(DEFAULT_MACRO_BODY_CAP)
 }
 
+/// The seed current-table row cap (cute-dbt#350), resolved at the I/O
+/// boundary: `[seeds] row_cap` from `--config` over
+/// [`DEFAULT_SEED_ROW_CAP`]. Config-only (no CLI flag — the cap is a
+/// gen-time knob authored once in the config, the report-title precedent
+/// rather than the macro-lens dual flag/config knob). Keeps the render side
+/// a pure fn of the cap value.
+fn resolve_seed_row_cap(args: &ReportArgs) -> usize {
+    args.config
+        .as_ref()
+        .and_then(|c| c.seeds.row_cap)
+        .unwrap_or(DEFAULT_SEED_ROW_CAP)
+}
+
 /// The diff-scope banner inputs for the selected scope source.
 ///
 /// Returns `(baseline_label, scope_source)`. The baseline arm carries the
@@ -1686,6 +1734,7 @@ fn render(
     macro_lens: Option<&MacroLensPayload>,
     pr_ref: Option<&PrRef>,
     seed_cards: &[SeedCard],
+    seed_row_cap: usize,
 ) -> Result<(), io::Error> {
     render_report_with_externals(
         out,
@@ -1709,6 +1758,7 @@ fn render(
         macro_lens,
         pr_ref,
         seed_cards,
+        seed_row_cap,
     )
 }
 
@@ -1763,6 +1813,7 @@ mod tests {
             checks: crate::domain::ChecksConfig::default(),
             experimental: crate::domain::ExperimentalConfig::default(),
             pr: crate::domain::PrConfig::default(),
+            seeds: crate::domain::SeedsConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, DEFAULT_REPORT_TITLE);
@@ -1780,6 +1831,7 @@ mod tests {
             checks: crate::domain::ChecksConfig::default(),
             experimental: crate::domain::ExperimentalConfig::default(),
             pr: crate::domain::PrConfig::default(),
+            seeds: crate::domain::SeedsConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, "Q3 review");
@@ -1797,6 +1849,7 @@ mod tests {
             checks: crate::domain::ChecksConfig::default(),
             experimental: crate::domain::ExperimentalConfig::default(),
             pr: crate::domain::PrConfig::default(),
+            seeds: crate::domain::SeedsConfig::default(),
         });
         let (title, subtitle) = resolve_report_strings(&cli);
         assert_eq!(title, "title-only");
@@ -1843,6 +1896,7 @@ mod tests {
                 title: Some("from config".to_owned()),
                 number: None,
             },
+            seeds: crate::domain::SeedsConfig::default(),
         });
         let pr = resolve_pr_ref(&cli).expect("config resolves a ref");
         assert_eq!(pr.number, 9);
@@ -1861,6 +1915,7 @@ mod tests {
                 title: Some("config title".to_owned()),
                 number: Some(9),
             },
+            seeds: crate::domain::SeedsConfig::default(),
         });
         // The flag overrides the matching config key (CLI-over-TOML).
         cli.pr_title = Some("flag title".to_owned());
@@ -1889,6 +1944,7 @@ mod tests {
                 macro_body_cap: cap,
             },
             pr: crate::domain::PrConfig::default(),
+            seeds: crate::domain::SeedsConfig::default(),
         });
         cli
     }
@@ -1924,6 +1980,44 @@ mod tests {
     fn resolve_macro_body_cap_accepts_zero() {
         let cli = cli_with_experimental_config(Some(0));
         assert_eq!(resolve_macro_body_cap(&cli), 0);
+    }
+
+    // resolve_seed_row_cap (cute-dbt#350) — config-only (no CLI flag);
+    // `[seeds] row_cap` over DEFAULT_SEED_ROW_CAP.
+
+    fn cli_with_seed_row_cap(cap: Option<usize>) -> ReportArgs {
+        let mut cli = cli("report.html");
+        cli.config = Some(crate::domain::AnalysisConfig {
+            seeds: crate::domain::SeedsConfig { row_cap: cap },
+            ..crate::domain::AnalysisConfig::default()
+        });
+        cli
+    }
+
+    #[test]
+    fn resolve_seed_row_cap_defaults_without_config() {
+        assert_eq!(
+            resolve_seed_row_cap(&cli("report.html")),
+            DEFAULT_SEED_ROW_CAP
+        );
+    }
+
+    #[test]
+    fn resolve_seed_row_cap_defaults_when_config_omits_the_key() {
+        assert_eq!(
+            resolve_seed_row_cap(&cli_with_seed_row_cap(None)),
+            DEFAULT_SEED_ROW_CAP
+        );
+    }
+
+    #[test]
+    fn resolve_seed_row_cap_reads_the_config_key() {
+        assert_eq!(resolve_seed_row_cap(&cli_with_seed_row_cap(Some(42))), 42);
+    }
+
+    #[test]
+    fn resolve_seed_row_cap_accepts_zero() {
+        assert_eq!(resolve_seed_row_cap(&cli_with_seed_row_cap(Some(0))), 0);
     }
 
     // -----------------------------------------------------------------
@@ -1966,6 +2060,7 @@ mod tests {
             checks,
             experimental: crate::domain::ExperimentalConfig::default(),
             pr: crate::domain::PrConfig::default(),
+            seeds: crate::domain::SeedsConfig::default(),
         });
         cli
     }
@@ -2138,6 +2233,7 @@ mod tests {
                 macro_body_cap: None,
             },
             pr: crate::domain::PrConfig::default(),
+            seeds: crate::domain::SeedsConfig::default(),
         });
         cli
     }
@@ -3511,7 +3607,7 @@ mod tests {
         let reader = StubReader { entries };
 
         let cards = build_seed_cards(&manifest, &seeds_in_scope_of(&[seed_id]));
-        let cards = gather_seeds_with_reader(&reader, cards);
+        let cards = gather_seeds_with_reader(&reader, cards, None);
 
         assert_eq!(cards.len(), 1);
         let card = &cards[0];
@@ -3530,6 +3626,61 @@ mod tests {
     }
 
     #[test]
+    fn gather_seeds_reconstructs_the_cell_diff_on_the_pr_diff_arm() {
+        // cute-dbt#350 — when an `index` is passed (the pr-diff arm), the seed
+        // CSV's own hunks reconstruct the old→new cell-diff: working-tree text
+        // is NEW, reverse-applying the hunk rebuilds OLD. The seed file is an
+        // external tabular file, so this reuses the #126 reconstruction.
+        use crate::domain::RowChangeKind;
+        let seed_id = "seed.shop.raw_customers";
+        let manifest = seed_manifest(vec![seed_node(seed_id, Some("seeds/raw_customers.csv"))]);
+        let mut entries = StdHashMap::new();
+        // NEW working-tree body (row 2 amount = 99).
+        entries.insert(
+            "seeds/raw_customers.csv".to_owned(),
+            StubResult::Ok("id,amount\n1,10\n2,99\n".to_owned()),
+        );
+        let reader = StubReader { entries };
+        // The hunk on the seed file: row 2 changed 20 -> 99 (line 3).
+        let index = index_for("seeds/raw_customers.csv", "2,20", "2,99", 3);
+
+        let cards = build_seed_cards(&manifest, &seeds_in_scope_of(&[seed_id]));
+        let cards = gather_seeds_with_reader(&reader, cards, Some(&index));
+
+        let card = &cards[0];
+        assert!(card.table.is_some(), "the current table still fills");
+        let diff = card
+            .diff
+            .as_ref()
+            .expect("pr-diff arm reconstructs the cell diff");
+        assert!(
+            diff.rows.iter().any(|r| r.kind == RowChangeKind::Modified),
+            "the touched seed cell is a Modified row",
+        );
+    }
+
+    #[test]
+    fn gather_seeds_leaves_diff_none_on_the_baseline_arm() {
+        // The baseline arm passes `index: None` ⇒ no hunks to reconstruct from
+        // (seeds carry zero row data in either manifest), so `diff` stays
+        // `None` — the card renders the plain current table.
+        let seed_id = "seed.shop.raw_customers";
+        let manifest = seed_manifest(vec![seed_node(seed_id, Some("seeds/raw_customers.csv"))]);
+        let mut entries = StdHashMap::new();
+        entries.insert(
+            "seeds/raw_customers.csv".to_owned(),
+            StubResult::Ok("id,amount\n1,10\n".to_owned()),
+        );
+        let reader = StubReader { entries };
+
+        let cards = build_seed_cards(&manifest, &seeds_in_scope_of(&[seed_id]));
+        let cards = gather_seeds_with_reader(&reader, cards, None);
+
+        assert!(cards[0].table.is_some());
+        assert!(cards[0].diff.is_none(), "baseline arm carries no cell diff");
+    }
+
+    #[test]
     fn gather_seeds_degrades_truthfully_when_the_file_is_missing() {
         // A missing CSV ⇒ the card is STILL emitted (identity + lineage),
         // just with `table: None` — never dropped, never a silent skip.
@@ -3541,7 +3692,7 @@ mod tests {
         };
 
         let cards = build_seed_cards(&manifest, &seeds_in_scope_of(&[seed_id]));
-        let cards = gather_seeds_with_reader(&reader, cards);
+        let cards = gather_seeds_with_reader(&reader, cards, None);
 
         assert_eq!(cards.len(), 1, "a missing file degrades, never drops");
         assert_eq!(cards[0].id, NodeId::new(seed_id));
@@ -3570,7 +3721,7 @@ mod tests {
         // already carry `manifest: "current.json"`, `project_root: None`.
         let args = cli("out.html");
 
-        let cards = gather_seeds(&args, &manifest, &seeds_in_scope_of(&[seed_id]));
+        let cards = gather_seeds(&args, &manifest, &seeds_in_scope_of(&[seed_id]), None);
 
         assert_eq!(cards.len(), 1, "no-root degrade emits every card");
         assert_eq!(cards[0].id, NodeId::new(seed_id));
@@ -3601,7 +3752,7 @@ mod tests {
         let reader = StubReader { entries };
 
         let cards = build_seed_cards(&manifest, &seeds_in_scope_of(&[]));
-        let cards = gather_seeds_with_reader(&reader, cards);
+        let cards = gather_seeds_with_reader(&reader, cards, None);
 
         assert!(cards.is_empty(), "no seed in scope ⇒ empty vec");
     }

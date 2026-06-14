@@ -1,0 +1,9 @@
+diff --git a/seeds/raw_state_codes.csv b/seeds/raw_state_codes.csv
+--- a/seeds/raw_state_codes.csv
++++ b/seeds/raw_state_codes.csv
+@@ -2 +2 @@
+-CT,Connecticut,NorthEast,true
++CT,Connecticut,Northeast,true
+@@ -7 +7 @@
+-TX,Texas,South,true
++TX,Texas,South,
