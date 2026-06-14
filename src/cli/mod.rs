@@ -1160,9 +1160,10 @@ fn gather_explore_seeds(args: &ExploreArgs, current: &Manifest) -> Vec<SeedCard>
 }
 
 /// Gather the explore-side standing project facts (cute-dbt#270): the
-/// parsed working-tree `dbt_project.yml`, the SAME [`ProjectDefinition`]
-/// the report reads (R4), driving the explore project pane / vars
-/// inventory / config provenance.
+/// parsed working-tree `dbt_project.yml`, the SAME
+/// [`ProjectDefinition`](crate::domain::ProjectDefinition) the report
+/// reads (R4), driving the explore project pane / vars inventory / config
+/// provenance.
 ///
 /// Project-root resolution mirrors the report's standing-metadata path
 /// ([`gather_project_facts`]): the explicit `--project-root` (present
