@@ -67,7 +67,7 @@
     <h2>PR scope lineage <span class="pr-minidag-experimental" data-testid="pr-minidag-experimental">experimental</span></h2>
     <button type="button" class="expect-tooltip pr-minidag-hint" aria-label="Click a node to select that model below.">ⓘ<span class="expect-tooltip-bubble" aria-hidden="true">Click a node to select that model below.</span></button>
   </div>
-  <p class="pr-minidag-descriptor" data-testid="pr-minidag-descriptor" data-modified="{{ pr_dag.modified_count }}" data-connectors="{{ pr_dag.connector_count }}" data-deleted="{{ pr_dag.deleted_count }}">{{ pr_dag.modified_count }} modified {% if pr_dag.modified_count == 1 %}model{% else %}models{% endif %}{% if pr_dag.connector_count > 0 %} · {{ pr_dag.connector_count }} connector {% if pr_dag.connector_count == 1 %}model{% else %}models{% endif %}{% endif %}{% if pr_dag.deleted_count > 0 %} · {{ pr_dag.deleted_count }} deleted{% endif %} — modified emphasized, connectors quiet, deleted as ghosts. Click a node to select it below.</p>
+  <p class="pr-minidag-descriptor" data-testid="pr-minidag-descriptor" data-modified="{{ pr_dag.modified_count }}" data-connectors="{{ pr_dag.connector_count }}" data-halo="{{ pr_dag.halo_count }}" data-deleted="{{ pr_dag.deleted_count }}">{{ pr_dag.modified_count }} modified {% if pr_dag.modified_count == 1 %}model{% else %}models{% endif %}{% if pr_dag.connector_count > 0 %} · {{ pr_dag.connector_count }} connector {% if pr_dag.connector_count == 1 %}model{% else %}models{% endif %}{% endif %}{% if pr_dag.halo_count > 0 %} · {{ pr_dag.halo_count }} context {% if pr_dag.halo_count == 1 %}model{% else %}models{% endif %}{% endif %}{% if pr_dag.deleted_count > 0 %} · {{ pr_dag.deleted_count }} deleted{% endif %} — modified emphasized, connectors quiet, context dimmed, deleted as ghosts. Click a node to select it below.</p>
 {%- if pr_dag.collapsed %}
   <p class="pr-minidag-collapsed" data-testid="pr-minidag-collapsed" data-nodes="{{ pr_dag.graph.nodes.len() }}">PR scope spans {{ pr_dag.graph.nodes.len() }} models — too large to render inline. Use the model selector below to navigate.</p>
 {%- else %}
@@ -111,6 +111,7 @@
         if (a !== 0 || r !== 0) label += " (+" + a + "/-" + r + ")";
         var cls, shape;
         if (n.is_connector) { cls = "prdag_connector"; shape = '["' + label + '"]'; }
+        else if (n.is_halo) { cls = "prdag_halo"; shape = '["' + label + '"]'; }
         else if (n.state === "deleted") { cls = "prdag_deleted"; shape = '["' + label + '"]'; }
         else { cls = "prdag_modified"; shape = '(["' + label + '"])'; }
         lines.push("    " + safeIds[n.id] + shape + ":::" + cls);
@@ -121,6 +122,7 @@
       });
       lines.push("    classDef prdag_modified fill:#fdf2dc,stroke:#b07400,stroke-width:2.5px,color:#1c1c1f;");
       lines.push("    classDef prdag_connector fill:#f4f4f5,stroke:#8a8a90,stroke-width:1.2px,color:#5a5a5f;");
+      lines.push("    classDef prdag_halo fill:#fafafb,stroke:#b8b8be,stroke-width:1px,stroke-dasharray:3 2,color:#6a6a70;");
       lines.push("    classDef prdag_deleted fill:#f7f7f8,stroke:#b0392c,stroke-width:1.5px,stroke-dasharray:5 3,color:#7a3a33;");
       var src = lines.join("\n");
       var id = "prdag-" + Math.random().toString(36).slice(2, 9);

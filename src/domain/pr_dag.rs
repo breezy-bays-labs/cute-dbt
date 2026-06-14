@@ -16,7 +16,7 @@
 //!
 //! ## Node set
 //!
-//! `nodes = modified ∪ connectors ∪ removed`, where
+//! `nodes = modified ∪ connectors ∪ halo ∪ removed`, where
 //!
 //! - **modified** (M) is the caller-supplied [`ModelInScopeSet`] — the
 //!   genuine PR-modified models (`changed_models` in the `PrDiff` arm, the
@@ -25,9 +25,19 @@
 //!   distinct* members of M — formally `(DESC(M) ∩ ANC(M)) \ M`, keeping
 //!   only nodes reached forward from one seed *and* backward from a
 //!   different seed. A node merely downstream of a single modified model
-//!   is 1-hop context, **not** a connector. An isolated modified model
-//!   (no lineage path to/from another modified model) contributes no
-//!   connector and renders alone.
+//!   is 1-hop context, **not** a connector.
+//! - **halo** is the 1-hop context for a **disconnected** modified model
+//!   (cute-dbt#428 — epic #427 slice A): a modified model with no directed
+//!   lineage path to or from any *other* modified model is *disconnected*,
+//!   and its immediate `depends_on` parents + direct children join the set as
+//!   quiet, [`is_halo`](PrDagNode::is_halo)-flagged context — so an isolated
+//!   change is shown with its neighbors rather than alone. A disconnected
+//!   model with **no** neighbors still renders alone (no halo is possible). A
+//!   modified model that IS connected to another (via connectors or a direct
+//!   edge) gets **no** halo. A halo node that is itself a seed or a connector
+//!   keeps that **stronger role** (the dedup contract); halo is a distinct
+//!   role from connector — between-two vs context-for-one — kept separable
+//!   for the render lane (#429) and the descriptor counts.
 //! - **removed** are DELETED models (present in the baseline, absent from
 //!   the current manifest) the caller derived as the baseline−current
 //!   set-diff. They have no current `depends_on`, so they join the node
@@ -35,9 +45,13 @@
 //!
 //! ## Edges
 //!
-//! The induced subgraph: every model→model `depends_on` edge whose **both**
-//! endpoints are in the node set. The graph is acyclic (dbt lineage is a
-//! DAG) and deterministically ordered ([`BTreeSet`]/sorted output), the
+//! The induced subgraph over **seeds ∪ connectors ∪ removed**: every
+//! model→model `depends_on` edge whose **both** endpoints are in that node
+//! set. A **halo** node contributes edges **only to/from its anchor** (the
+//! disconnected model it is a neighbor of) — never a generic induced edge
+//! (e.g. a spurious halo↔halo link between two independent isolated anchors'
+//! neighbors). The graph is acyclic (dbt lineage is a DAG) and
+//! deterministically ordered ([`BTreeSet`]/sorted output), the
 //! byte-identity-golden requirement the downstream render lane depends on.
 //!
 //! ## Per-node line counts (cute-dbt#403 — Slice B)
@@ -133,6 +147,24 @@ pub struct PrDagNode {
     /// `state = modified` only as a structural placeholder the render lane
     /// renders in the quiet tier when `is_connector` is set.
     pub is_connector: bool,
+    /// `true` when this node is a *1-hop context halo* node — an immediate
+    /// `depends_on` parent or direct child of a **disconnected** modified
+    /// model (a modified model with no connector path to any *other* modified
+    /// model), pulled in so an isolated change is not shown with zero
+    /// neighbors (cute-dbt#428 — epic #427 slice A). Like a connector, a halo
+    /// node is an unchanged carrier in the quiet/dimmed tier — but it is a
+    /// **distinct role**: a connector lies *between two* modified models,
+    /// whereas a halo node is context for a *single isolated* one, so the two
+    /// stay separable for the render lane (#429) and the descriptor counts.
+    ///
+    /// Mutually exclusive with [`is_connector`](Self::is_connector) and with a
+    /// genuine modified/new/deleted state: a node that is *also* a seed or a
+    /// connector keeps that stronger role and is never flagged a halo (the
+    /// dedup contract). `#[serde(skip_serializing_if)]` so a PR with no
+    /// disconnected modified model emits **no** `is_halo` key — the goldens
+    /// for the connected/empty cases stay byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_halo: bool,
     /// Lines this node's declaring source *gained* in the PR (the diff's
     /// `+` count for the node's file). `0` for a connector / unchanged
     /// carrier, and for a node whose file is absent from the diff
@@ -331,8 +363,21 @@ pub fn compute_pr_dag(
 
     let connectors = connectors_between(&adjacency, &seeds);
 
-    let nodes = assemble_nodes(manifest, &seeds, &connectors, new, removed);
-    let edges = induced_edges(&adjacency, &nodes);
+    // The 1-hop context halo (cute-dbt#428): for every DISCONNECTED modified
+    // model (no connector path to any OTHER modified model), its immediate
+    // parents + direct children, minus any node that is itself a seed or a
+    // connector (those keep their stronger role — the dedup contract). The
+    // anchor↔halo edges are the ONLY edges a halo node induces.
+    let halo = halo_for_disconnected(&adjacency, &seeds, &connectors);
+
+    let nodes = assemble_nodes(manifest, &seeds, &connectors, &halo.nodes, new, removed);
+    // The induced subgraph over the ORIGINAL node set (seeds ∪ connectors ∪
+    // removed) is unchanged — byte-stable for a halo-free PR — and the halo's
+    // anchor edges are unioned on. A halo node never contributes a generic
+    // induced edge (e.g. a spurious halo↔halo link); it carries only the
+    // explicit anchor edges, honoring "edges only to/from their anchor".
+    let mut edges = induced_edges(&adjacency, &nodes);
+    merge_halo_edges(&mut edges, &halo.edges);
 
     PrDagGraph { nodes, edges }
 }
@@ -479,18 +524,204 @@ fn has_distinct_pair(
     true
 }
 
+/// The 1-hop context halo and its anchor edges (cute-dbt#428).
+///
+/// `nodes` are the halo node ids (immediate parents + direct children of the
+/// disconnected modified models, minus seeds and connectors); `edges` are the
+/// anchor↔halo `depends_on` edges (the ONLY edges a halo node induces).
+struct Halo<'m> {
+    nodes: BTreeSet<&'m NodeId>,
+    edges: BTreeSet<(&'m NodeId, &'m NodeId)>,
+}
+
+/// Compute the 1-hop context halo: for every DISCONNECTED modified model (a
+/// seed with no directed lineage path to or from any *other* seed), its
+/// immediate `depends_on` parents + direct children become halo context
+/// nodes, and the producer→consumer edge between the seed and each neighbor
+/// becomes an anchor edge.
+///
+/// Dedup (the issue's "keeps its stronger role" clause): a neighbor that is
+/// itself a seed or a connector is **excluded** from the halo node set — it
+/// already renders in its own (stronger) tier. The anchor *edge* to such a
+/// neighbor is likewise dropped: were the neighbor a seed, the two seeds would
+/// not be disconnected (they share a direct edge), so this only ever drops a
+/// would-be edge to an already-present node, never a real lineage edge the
+/// generic [`induced_edges`] pass already emits.
+///
+/// "Disconnected" is decided over the model→model lineage: a seed is
+/// CONNECTED when some *other* seed is reachable from it forward (a
+/// descendant) or backward (an ancestor) — exactly the condition under which
+/// a connecting path (and thus a connector, for paths of length ≥ 2) exists.
+/// A seed with no other seed reachable either way is disconnected and earns a
+/// halo. A seed with no neighbors at all yields an empty halo (it still
+/// renders alone — no halo is possible).
+fn halo_for_disconnected<'m>(
+    adjacency: &ModelAdjacency<'m>,
+    seeds: &BTreeSet<&'m NodeId>,
+    connectors: &BTreeSet<&'m NodeId>,
+) -> Halo<'m> {
+    let mut halo = Halo {
+        nodes: BTreeSet::new(),
+        edges: BTreeSet::new(),
+    };
+    for &seed in seeds {
+        if is_connected_to_another_seed(adjacency, seed, seeds) {
+            continue; // linked to another modified model ⇒ no halo
+        }
+        // The 1-hop ring: direct children (the anchor edge is seed → child)
+        // and immediate parents (parent → seed). `Direction` carries which
+        // adjacency map to read and how to orient the anchor edge; the
+        // dedup (a neighbor that is itself a seed or connector keeps its
+        // stronger role) lives in the shared collector.
+        collect_halo_neighbors(
+            &mut halo,
+            adjacency,
+            seed,
+            seeds,
+            connectors,
+            Direction::Child,
+        );
+        collect_halo_neighbors(
+            &mut halo,
+            adjacency,
+            seed,
+            seeds,
+            connectors,
+            Direction::Parent,
+        );
+    }
+    halo
+}
+
+/// Which 1-hop direction [`collect_halo_neighbors`] walks from an anchor seed.
+#[derive(Clone, Copy)]
+enum Direction {
+    /// Direct children (read `forward`; the anchor edge is `seed → neighbor`).
+    Child,
+    /// Immediate parents (read `backward`; the anchor edge is `neighbor → seed`).
+    Parent,
+}
+
+/// Collect the 1-hop neighbors of `seed` in one direction into `halo`, adding
+/// each as a halo node + its anchor edge, and skipping any neighbor that is
+/// itself a seed or a connector (the dedup: a stronger role wins).
+fn collect_halo_neighbors<'m>(
+    halo: &mut Halo<'m>,
+    adjacency: &ModelAdjacency<'m>,
+    seed: &'m NodeId,
+    seeds: &BTreeSet<&'m NodeId>,
+    connectors: &BTreeSet<&'m NodeId>,
+    direction: Direction,
+) {
+    let map = match direction {
+        Direction::Child => &adjacency.forward,
+        Direction::Parent => &adjacency.backward,
+    };
+    for &neighbor in map.get(seed).into_iter().flatten() {
+        if seeds.contains(neighbor) || connectors.contains(neighbor) {
+            continue; // a neighbor with a stronger role keeps it
+        }
+        halo.nodes.insert(neighbor);
+        let edge = match direction {
+            Direction::Child => (seed, neighbor),
+            Direction::Parent => (neighbor, seed),
+        };
+        halo.edges.insert(edge);
+    }
+}
+
+/// `true` when some seed OTHER than `seed` is reachable from `seed` over the
+/// model→model lineage in either direction (a descendant via `forward` or an
+/// ancestor via `backward`) — i.e. `seed` lies on a directed lineage path
+/// to/from another modified model and is therefore NOT disconnected.
+///
+/// A bounded BFS in each direction; the first foreign seed reached short-
+/// circuits. Cycle-guarded by the `visited` set (a malformed cyclic manifest
+/// cannot loop). The `seed` itself is never counted (it is the start, not a
+/// "different" modified model).
+fn is_connected_to_another_seed<'m>(
+    adjacency: &ModelAdjacency<'m>,
+    seed: &'m NodeId,
+    seeds: &BTreeSet<&'m NodeId>,
+) -> bool {
+    [&adjacency.forward, &adjacency.backward]
+        .into_iter()
+        .any(|dir| reaches_a_foreign_seed(dir, seed, seeds))
+}
+
+/// Single-direction BFS from `seed` over `dir`, returning `true` as soon as a
+/// seed other than `seed` is reached. Visited-guarded (deterministic, cycle-
+/// safe); the start node is enqueued but never itself counts as a foreign
+/// seed.
+fn reaches_a_foreign_seed<'m>(
+    dir: &BTreeMap<&'m NodeId, Vec<&'m NodeId>>,
+    seed: &'m NodeId,
+    seeds: &BTreeSet<&'m NodeId>,
+) -> bool {
+    let mut visited: BTreeSet<&NodeId> = BTreeSet::new();
+    let mut queue: VecDeque<&NodeId> = VecDeque::new();
+    queue.push_back(seed);
+    visited.insert(seed);
+    while let Some(current) = queue.pop_front() {
+        if current != seed && seeds.contains(current) {
+            return true; // a different modified model is reachable
+        }
+        for &next in dir.get(current).into_iter().flatten() {
+            if visited.insert(next) {
+                queue.push_back(next);
+            }
+        }
+    }
+    false
+}
+
+/// Union the halo's anchor edges onto the already-induced edge set, holding
+/// the `(from, to)` lexicographic order (cute-dbt#428).
+///
+/// Building a fresh [`BTreeSet`] keyed by the owned `(from, to)` strings keeps
+/// the merge deterministic and idempotent — a halo edge that an induced edge
+/// already covers (it cannot, by the disconnected invariant, but the set
+/// dedups regardless) collapses to one.
+fn merge_halo_edges(edges: &mut Vec<PrDagEdge>, halo_edges: &BTreeSet<(&NodeId, &NodeId)>) {
+    if halo_edges.is_empty() {
+        return; // byte-stable for a halo-free PR (no re-sort, no realloc)
+    }
+    let mut all: BTreeSet<(&str, &str)> = edges
+        .iter()
+        .map(|e| (e.from.as_str(), e.to.as_str()))
+        .collect();
+    for (from, to) in halo_edges {
+        all.insert((from.as_str(), to.as_str()));
+    }
+    *edges = all
+        .into_iter()
+        .map(|(from, to)| PrDagEdge {
+            from: from.to_owned(),
+            to: to.to_owned(),
+        })
+        .collect();
+}
+
 /// Assemble the node list: modified seeds (New / Modified) ∪ connectors
-/// (quiet, `is_connector`) ∪ removed (Deleted). Node-id-ordered via the
-/// [`BTreeMap`] keying, so the output is deterministic.
+/// (quiet, `is_connector`) ∪ halo (quiet, `is_halo`) ∪ removed (Deleted).
+/// Node-id-ordered via the [`BTreeMap`] keying, so the output is
+/// deterministic.
+///
+/// The insertion order encodes the dedup precedence (`insert` overwrites,
+/// `or_insert_with` defers): seeds win over everything, connectors over halo,
+/// halo over a removed ghost. By construction `halo` already excludes seeds
+/// and connectors ([`halo_for_disconnected`]), so the `or_insert_with` guard
+/// is the belt-and-suspenders that pins the contract.
 fn assemble_nodes(
     manifest: &Manifest,
     seeds: &BTreeSet<&NodeId>,
     connectors: &BTreeSet<&NodeId>,
+    halo: &BTreeSet<&NodeId>,
     new: &BTreeSet<NodeId>,
     removed: &[NodeId],
 ) -> Vec<PrDagNode> {
     // Keyed by node id for deterministic order + idempotent membership
-    // (a node is at most one of seed / connector / removed by
+    // (a node is at most one of seed / connector / halo / removed by
     // construction, but the map collapses any accidental overlap to a
     // single deterministic node).
     let mut by_id: BTreeMap<&NodeId, PrDagNode> = BTreeMap::new();
@@ -501,39 +732,49 @@ fn assemble_nodes(
         } else {
             PrDagState::Modified
         };
-        by_id.insert(id, pr_dag_node(manifest, id, state, false));
+        by_id.insert(id, pr_dag_node(manifest, id, state, false, false));
     }
     for &id in connectors {
         // Connectors are unchanged carriers; render-quiet. State is the
         // structural placeholder `Modified` flagged `is_connector`.
         by_id
             .entry(id)
-            .or_insert_with(|| pr_dag_node(manifest, id, PrDagState::Modified, true));
+            .or_insert_with(|| pr_dag_node(manifest, id, PrDagState::Modified, true, false));
+    }
+    for &id in halo {
+        // Halo nodes are unchanged context for a disconnected modified model;
+        // render-quiet. State is the structural placeholder `Modified` flagged
+        // `is_halo` (never `is_connector` — a distinct role).
+        by_id
+            .entry(id)
+            .or_insert_with(|| pr_dag_node(manifest, id, PrDagState::Modified, false, true));
     }
     for id in removed {
         // A removed node is absent from the current manifest, so its bare
         // name falls back to the id's leaf-free form (see `bare_name_for`).
         by_id
             .entry(id)
-            .or_insert_with(|| pr_dag_node(manifest, id, PrDagState::Deleted, false));
+            .or_insert_with(|| pr_dag_node(manifest, id, PrDagState::Deleted, false, false));
     }
 
     by_id.into_values().collect()
 }
 
-/// Build a single [`PrDagNode`] for `id` with the given state/connector
-/// flag, resolving the bare name from the current manifest when present.
+/// Build a single [`PrDagNode`] for `id` with the given state / connector /
+/// halo role, resolving the bare name from the current manifest when present.
 fn pr_dag_node(
     manifest: &Manifest,
     id: &NodeId,
     state: PrDagState,
     is_connector: bool,
+    is_halo: bool,
 ) -> PrDagNode {
     PrDagNode {
         id: id.as_str().to_owned(),
         name: bare_name_for(manifest, id),
         state,
         is_connector,
+        is_halo,
         // Slice A topology emits 0/0; the counts are computed by the
         // arm-specific fns (`pr_dag_lines_from_diff` /
         // `pr_dag_lines_from_raw_code`) and folded on in Slice C (#403/#404).
@@ -580,10 +821,28 @@ fn is_version_suffix(segment: &str) -> bool {
 }
 
 /// The induced edge set: every model→model `depends_on` edge whose both
-/// endpoints are in the node set. Sourced from the precomputed forward
-/// adjacency, lexicographically ordered by `(from, to)`, deduplicated.
+/// endpoints are in the node set AND **neither endpoint is a halo node**.
+/// Sourced from the precomputed forward adjacency, lexicographically ordered
+/// by `(from, to)`, deduplicated.
+///
+/// Halo nodes are excluded from this generic pass because a halo node induces
+/// edges **only to/from its anchor** (cute-dbt#428) — those anchor edges are
+/// supplied explicitly by [`merge_halo_edges`], so letting the generic pass
+/// also emit (e.g.) a spurious halo↔halo link between two independent isolated
+/// anchors' neighbors would over-draw the context. Halo membership is read
+/// from each node's `is_halo` flag (set before this runs), so for a halo-free
+/// PR no node is filtered and this is exactly the original induced subgraph
+/// (byte-stable).
 fn induced_edges(adjacency: &ModelAdjacency<'_>, nodes: &[PrDagNode]) -> Vec<PrDagEdge> {
-    let in_set: BTreeSet<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
+    // The non-halo "in-set" is derived straight from the node flags: `nodes`
+    // is fully assembled (every `is_halo` set) before this runs, so a separate
+    // halo parameter is redundant (cute-dbt#428 — gemini review fold). The keys
+    // stay borrowed `&str` (no per-id `String` allocation) by construction.
+    let in_set: BTreeSet<&str> = nodes
+        .iter()
+        .filter(|n| !n.is_halo)
+        .map(|n| n.id.as_str())
+        .collect();
     // BTreeSet over (from, to) string pairs ⇒ sorted + deduplicated.
     let mut edges: BTreeSet<(&str, &str)> = BTreeSet::new();
     for (&producer, consumers) in &adjacency.forward {
@@ -796,9 +1055,12 @@ mod tests {
     // ---- property: a node OFF all modified-paths is excluded ------------
 
     #[test]
-    fn a_node_downstream_of_only_one_modified_model_is_not_a_connector() {
-        // A (modified) -> B (unmodified leaf). B is 1-hop context, NOT a
-        // connector (there is no SECOND modified model on the other side).
+    fn a_node_downstream_of_only_one_modified_model_is_a_halo_not_a_connector() {
+        // A (modified) -> B (unmodified leaf), A the only modified model. B is
+        // 1-hop context, NOT a connector (there is no SECOND modified model on
+        // the other side). Since cute-dbt#428, A is disconnected (no other
+        // modified model), so B joins as its HALO node — present, but flagged
+        // `is_halo`, never `is_connector`.
         let manifest = manifest_of(&[
             ("model.s.a", "model", &[]),
             ("model.s.b", "model", &["model.s.a"]),
@@ -811,20 +1073,23 @@ mod tests {
         );
         let ids = ids_of(&graph);
         assert!(ids.contains("model.s.a"));
+        let b = node_of(&graph, "model.s.b");
+        assert!(b.is_halo, "downstream-of-one is now a halo node");
         assert!(
-            !ids.contains("model.s.b"),
-            "downstream-of-one is not between"
+            !b.is_connector,
+            "downstream-of-one is not a between-connector"
         );
     }
 
     #[test]
-    fn a_convergence_sink_below_two_modified_models_is_not_a_connector() {
+    fn a_convergence_sink_below_two_modified_models_is_a_halo_not_a_connector() {
         // A -> C, B -> C, with A and B modified. C is a COMMON DESCENDANT
         // (a sink) of both — it is downstream of two modified models but
         // BETWEEN neither: C ∈ DESC(M) but C ∉ ANC(M). Under the strict
-        // (DESC ∩ ANC) \ M definition, a convergence sink is NOT a
-        // connector. (A node downstream of modified models is 1-hop
-        // context, surfaced later, not a between-connector.)
+        // (DESC ∩ ANC) \ M definition, a convergence sink is NOT a connector.
+        // Since cute-dbt#428: A and B are roots with NO directed path between
+        // them ⇒ both are disconnected, so C is their SHARED 1-hop halo child
+        // (present once, flagged `is_halo`, never `is_connector`).
         let manifest = manifest_of(&[
             ("model.s.a", "model", &[]),
             ("model.s.b", "model", &[]),
@@ -836,12 +1101,22 @@ mod tests {
             &new_of(&[]),
             NO_REMOVED,
         );
-        let ids = ids_of(&graph);
+        let c = node_of(&graph, "model.s.c");
+        assert!(c.is_halo, "the convergence sink is a shared halo child");
         assert!(
-            !ids.contains("model.s.c"),
-            "a convergence sink is downstream-of-both, between-neither",
+            !c.is_connector,
+            "a sink is downstream-of-both, between-neither"
         );
-        assert_eq!(ids, BTreeSet::from(["model.s.a", "model.s.b"]));
+        assert_eq!(
+            ids_of(&graph),
+            BTreeSet::from(["model.s.a", "model.s.b", "model.s.c"]),
+        );
+        // C is the shared halo of two disconnected anchors ⇒ an anchor edge to
+        // EACH.
+        assert_eq!(
+            edges_of(&graph),
+            BTreeSet::from([("model.s.a", "model.s.c"), ("model.s.b", "model.s.c"),]),
+        );
     }
 
     #[test]
@@ -887,7 +1162,10 @@ mod tests {
     }
 
     #[test]
-    fn a_single_modified_model_is_shown_alone_with_no_connectors() {
+    fn a_single_modified_model_has_no_connectors_and_halos_its_one_parent() {
+        // A -> B, only B modified. B has no second modified model anywhere ⇒
+        // disconnected ⇒ no connector, but its one parent A becomes a halo
+        // node (cute-dbt#428). The anchor edge A->B is induced.
         let manifest = manifest_of(&[
             ("model.s.a", "model", &[]),
             ("model.s.b", "model", &["model.s.a"]),
@@ -898,9 +1176,16 @@ mod tests {
             &new_of(&[]),
             NO_REMOVED,
         );
-        let ids = ids_of(&graph);
-        assert_eq!(ids, BTreeSet::from(["model.s.b"]));
-        assert!(graph.edges.is_empty());
+        assert_eq!(ids_of(&graph), BTreeSet::from(["model.s.a", "model.s.b"]));
+        assert!(graph.nodes.iter().all(|n| !n.is_connector), "no connectors");
+        assert!(
+            node_of(&graph, "model.s.a").is_halo,
+            "the one parent is halo"
+        );
+        assert_eq!(
+            edges_of(&graph),
+            BTreeSet::from([("model.s.a", "model.s.b")])
+        );
     }
 
     // ---- property: induced edge set is EXACTLY the model edges in-set ---
@@ -928,11 +1213,14 @@ mod tests {
 
     #[test]
     fn an_edge_to_a_node_outside_the_set_is_not_induced() {
-        // A (modified) -> B (unmodified, excluded). The A->B edge must NOT
-        // appear (B is not in the node set).
+        // A (modified) -> B (halo child) -> C (2-hop, EXCLUDED). A is the only
+        // modified model ⇒ disconnected ⇒ B is its halo child (so A->B IS
+        // induced as an anchor edge), but C is 2 hops away — outside the node
+        // set — so the B->C edge must NOT appear.
         let manifest = manifest_of(&[
             ("model.s.a", "model", &[]),
             ("model.s.b", "model", &["model.s.a"]),
+            ("model.s.c", "model", &["model.s.b"]),
         ]);
         let graph = compute_pr_dag(
             &manifest,
@@ -940,7 +1228,15 @@ mod tests {
             &new_of(&[]),
             NO_REMOVED,
         );
-        assert!(graph.edges.is_empty(), "B excluded ⇒ A->B not induced");
+        assert!(
+            !ids_of(&graph).contains("model.s.c"),
+            "a 2-hop node is outside the halo node set",
+        );
+        assert_eq!(
+            edges_of(&graph),
+            BTreeSet::from([("model.s.a", "model.s.b")]),
+            "only the anchor edge A->B; the B->C edge to an excluded node is not induced",
+        );
     }
 
     #[test]
@@ -1520,5 +1816,437 @@ mod tests {
         // The connectors keep the zero default.
         let b = node_of(&graph, "model.s.b");
         assert_eq!((b.lines_added, b.lines_removed), (0, 0));
+    }
+
+    // ---- 1-hop context halo for disconnected modified models (#428) -----
+
+    /// The `is_halo`-flagged node ids of a computed graph.
+    fn halo_ids_of(graph: &PrDagGraph) -> BTreeSet<&str> {
+        graph
+            .nodes
+            .iter()
+            .filter(|n| n.is_halo)
+            .map(|n| n.id.as_str())
+            .collect()
+    }
+
+    /// The `is_connector`-flagged node ids of a computed graph.
+    fn connector_ids_of(graph: &PrDagGraph) -> BTreeSet<&str> {
+        graph
+            .nodes
+            .iter()
+            .filter(|n| n.is_connector)
+            .map(|n| n.id.as_str())
+            .collect()
+    }
+
+    // -- case: a CONNECTED cluster gets NO halo ---------------------------
+
+    #[test]
+    fn a_connected_cluster_of_modified_models_gets_no_halo() {
+        // A -> B -> C, A and C modified, B the connector. There IS a path
+        // between two modified models ⇒ neither A nor C is disconnected ⇒ no
+        // halo. (The unchanged D below A and the unchanged E above C must NOT
+        // be pulled in — they would only appear were A/C disconnected.)
+        let manifest = manifest_of(&[
+            ("model.s.up", "model", &[]),
+            ("model.s.a", "model", &["model.s.up"]),
+            ("model.s.b", "model", &["model.s.a"]),
+            ("model.s.c", "model", &["model.s.b"]),
+            ("model.s.down", "model", &["model.s.c"]),
+        ]);
+        let graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.a", "model.s.c"]),
+            &new_of(&[]),
+            NO_REMOVED,
+        );
+        assert!(
+            halo_ids_of(&graph).is_empty(),
+            "a connected cluster pulls in no halo context",
+        );
+        // The node set is exactly the connected cluster (seeds + connector).
+        assert_eq!(
+            ids_of(&graph),
+            BTreeSet::from(["model.s.a", "model.s.b", "model.s.c"]),
+        );
+    }
+
+    #[test]
+    fn two_directly_adjacent_modified_models_get_no_halo() {
+        // A -> B, both modified (a connecting EDGE, zero connectors). They are
+        // linked directly ⇒ connected ⇒ no halo, even though there is no
+        // intermediate connector node.
+        let manifest = manifest_of(&[
+            ("model.s.a", "model", &[]),
+            ("model.s.b", "model", &["model.s.a"]),
+            ("model.s.leaf", "model", &["model.s.b"]),
+        ]);
+        let graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.a", "model.s.b"]),
+            &new_of(&[]),
+            NO_REMOVED,
+        );
+        assert!(
+            halo_ids_of(&graph).is_empty(),
+            "directly-adjacent modified models are connected ⇒ no halo",
+        );
+        assert_eq!(ids_of(&graph), BTreeSet::from(["model.s.a", "model.s.b"]));
+    }
+
+    // -- case: a SINGLE isolated model WITH neighbors gains a halo ---------
+
+    #[test]
+    fn a_single_isolated_modified_model_with_neighbors_gains_its_one_hop_halo() {
+        // up -> M -> down, only M modified. M has no other modified model on
+        // any path ⇒ disconnected ⇒ its immediate parent `up` and direct child
+        // `down` become halo context nodes.
+        let manifest = manifest_of(&[
+            ("model.s.up", "model", &[]),
+            ("model.s.m", "model", &["model.s.up"]),
+            ("model.s.down", "model", &["model.s.m"]),
+        ]);
+        let graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.m"]),
+            &new_of(&[]),
+            NO_REMOVED,
+        );
+        assert_eq!(
+            halo_ids_of(&graph),
+            BTreeSet::from(["model.s.up", "model.s.down"]),
+            "the disconnected model's 1-hop parents + children are the halo",
+        );
+        // The anchor M is a genuine modified node, never flagged halo/connector.
+        let m = node_of(&graph, "model.s.m");
+        assert_eq!(m.state, PrDagState::Modified);
+        assert!(!m.is_halo && !m.is_connector);
+        // Halo nodes are quiet placeholders: state=Modified, is_halo, never a
+        // connector.
+        for hid in ["model.s.up", "model.s.down"] {
+            let h = node_of(&graph, hid);
+            assert!(h.is_halo, "{hid} flagged halo");
+            assert!(!h.is_connector, "{hid} is NOT a connector (distinct role)");
+            assert_eq!(h.state, PrDagState::Modified, "halo quiet-tier state");
+        }
+        // Edges run ONLY between the anchor and its halo neighbors.
+        assert_eq!(
+            edges_of(&graph),
+            BTreeSet::from([("model.s.up", "model.s.m"), ("model.s.m", "model.s.down"),]),
+            "halo induces edges only to/from the anchor",
+        );
+    }
+
+    #[test]
+    fn a_halo_includes_all_parents_and_all_children_of_the_isolated_anchor() {
+        // p1, p2 -> M -> c1, c2, only M modified. ALL four direct neighbors
+        // join the halo (the immediate parents + the direct children, the full
+        // 1-hop ring), and nothing further (gp -> p1, the grandparent, stays
+        // out — 2 hops).
+        let manifest = manifest_of(&[
+            ("model.s.gp", "model", &[]),
+            ("model.s.p1", "model", &["model.s.gp"]),
+            ("model.s.p2", "model", &[]),
+            ("model.s.m", "model", &["model.s.p1", "model.s.p2"]),
+            ("model.s.c1", "model", &["model.s.m"]),
+            ("model.s.c2", "model", &["model.s.m"]),
+        ]);
+        let graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.m"]),
+            &new_of(&[]),
+            NO_REMOVED,
+        );
+        assert_eq!(
+            halo_ids_of(&graph),
+            BTreeSet::from(["model.s.p1", "model.s.p2", "model.s.c1", "model.s.c2",]),
+            "the full 1-hop ring (all parents + all children), grandparent excluded",
+        );
+        assert!(
+            !ids_of(&graph).contains("model.s.gp"),
+            "a 2-hop grandparent is not halo context",
+        );
+    }
+
+    // -- case: an isolated model with NO neighbors renders ALONE ----------
+
+    #[test]
+    fn a_single_isolated_modified_model_with_no_neighbors_renders_alone() {
+        // M modified, no depends_on and nothing consumes it ⇒ disconnected
+        // AND zero neighbors ⇒ no halo is possible; it still renders alone.
+        let manifest = manifest_of(&[
+            ("model.s.m", "model", &[]),
+            ("model.s.unrelated", "model", &[]),
+        ]);
+        let graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.m"]),
+            &new_of(&[]),
+            NO_REMOVED,
+        );
+        assert_eq!(ids_of(&graph), BTreeSet::from(["model.s.m"]));
+        assert!(halo_ids_of(&graph).is_empty(), "no neighbors ⇒ no halo");
+        assert!(graph.edges.is_empty());
+    }
+
+    // -- case: TWO independent isolated models ⇒ TWO independent halos ----
+
+    #[test]
+    fn two_disconnected_modified_models_get_two_independent_halos() {
+        // Cluster 1:  p1 -> M1 -> c1.   Cluster 2:  p2 -> M2 -> c2.
+        // M1 and M2 are in separate components (no path between them) ⇒ both
+        // disconnected ⇒ each gets its own 1-hop halo, independent of the
+        // other.
+        let manifest = manifest_of(&[
+            ("model.s.p1", "model", &[]),
+            ("model.s.m1", "model", &["model.s.p1"]),
+            ("model.s.c1", "model", &["model.s.m1"]),
+            ("model.s.p2", "model", &[]),
+            ("model.s.m2", "model", &["model.s.p2"]),
+            ("model.s.c2", "model", &["model.s.m2"]),
+        ]);
+        let graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.m1", "model.s.m2"]),
+            &new_of(&[]),
+            NO_REMOVED,
+        );
+        assert_eq!(
+            halo_ids_of(&graph),
+            BTreeSet::from(["model.s.p1", "model.s.c1", "model.s.p2", "model.s.c2",]),
+            "each isolated anchor contributes its own 1-hop halo",
+        );
+        // Edges: each anchor wired only to its own halo (no cross-cluster edge).
+        assert_eq!(
+            edges_of(&graph),
+            BTreeSet::from([
+                ("model.s.m1", "model.s.c1"),
+                ("model.s.m2", "model.s.c2"),
+                ("model.s.p1", "model.s.m1"),
+                ("model.s.p2", "model.s.m2"),
+            ]),
+        );
+    }
+
+    // -- case: a halo node that is itself modified DEDUPS to modified -----
+
+    #[test]
+    fn a_halo_node_that_is_also_modified_keeps_its_modified_role() {
+        // up -> M -> N, with BOTH M and N modified. M and N are directly
+        // adjacent (connected) ⇒ NO halo for either; even though `up` is M's
+        // parent, M is connected to N, so M earns no halo and `up` stays out.
+        // This pins the strongest dedup: a connected pair never spawns a halo,
+        // so a neighbor can never be wrongly flagged.
+        let manifest = manifest_of(&[
+            ("model.s.up", "model", &[]),
+            ("model.s.m", "model", &["model.s.up"]),
+            ("model.s.n", "model", &["model.s.m"]),
+        ]);
+        let graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.m", "model.s.n"]),
+            &new_of(&[]),
+            NO_REMOVED,
+        );
+        assert!(halo_ids_of(&graph).is_empty());
+        assert_eq!(ids_of(&graph), BTreeSet::from(["model.s.m", "model.s.n"]));
+    }
+
+    #[test]
+    fn a_neighbor_that_is_itself_a_modified_seed_keeps_modified_not_halo() {
+        // Two DISCONNECTED-from-each-other-looking anchors that actually share
+        // a neighbor edge: M1 (isolated from M2 via no directed path) has child
+        // X; M2 has child X too. X is a plain unmodified neighbor. Construct so
+        // X is ALSO modified to exercise the dedup: M1 -> X, with X modified.
+        // Then M1 and X are directly adjacent (connected) — so M1 is NOT
+        // disconnected and spawns no halo; X, modified, is its own seed.
+        let manifest = manifest_of(&[
+            ("model.s.m1", "model", &[]),
+            ("model.s.x", "model", &["model.s.m1"]),
+            ("model.s.solo", "model", &[]),
+            ("model.s.solo_child", "model", &["model.s.solo"]),
+        ]);
+        let graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.m1", "model.s.x", "model.s.solo"]),
+            &new_of(&[]),
+            NO_REMOVED,
+        );
+        // X is a seed — never a halo node.
+        assert!(!node_of(&graph, "model.s.x").is_halo);
+        assert_eq!(node_of(&graph, "model.s.x").state, PrDagState::Modified);
+        // M1—X are connected (direct edge) ⇒ no halo for that cluster.
+        // `solo` is disconnected ⇒ its child `solo_child` is a halo node.
+        assert_eq!(
+            halo_ids_of(&graph),
+            BTreeSet::from(["model.s.solo_child"]),
+            "only the disconnected `solo` anchor's child is halo; X stays a seed",
+        );
+    }
+
+    #[test]
+    fn a_halo_node_shared_between_two_isolated_anchors_appears_once() {
+        // p1 -> shared <- via: M1 -> shared, M2 -> shared, with M1 and M2 each
+        // isolated (no directed path between them). `shared` is a direct child
+        // of BOTH ⇒ it is a halo node for both anchors but appears EXACTLY once
+        // (BTreeSet dedup), carrying edges to BOTH anchors.
+        let manifest = manifest_of(&[
+            ("model.s.m1", "model", &[]),
+            ("model.s.m2", "model", &[]),
+            ("model.s.shared", "model", &["model.s.m1", "model.s.m2"]),
+        ]);
+        let graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.m1", "model.s.m2"]),
+            &new_of(&[]),
+            NO_REMOVED,
+        );
+        // `shared` is a common DESCENDANT of two modified models (a convergence
+        // sink) — NOT a connector under (DESC ∩ ANC)\M; here it is the shared
+        // 1-hop halo of two disconnected anchors.
+        assert!(
+            connector_ids_of(&graph).is_empty(),
+            "a sink is not a connector"
+        );
+        assert_eq!(
+            halo_ids_of(&graph),
+            BTreeSet::from(["model.s.shared"]),
+            "the shared neighbor appears exactly once",
+        );
+        // Exactly one `shared` node in the list (dedup, not duplicated).
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .filter(|n| n.id == "model.s.shared")
+                .count(),
+            1,
+        );
+        // It carries an anchor edge to EACH isolated anchor.
+        assert_eq!(
+            edges_of(&graph),
+            BTreeSet::from([
+                ("model.s.m1", "model.s.shared"),
+                ("model.s.m2", "model.s.shared"),
+            ]),
+        );
+    }
+
+    // -- case: a halo node that is a CONNECTOR keeps the connector role ---
+
+    #[test]
+    fn a_neighbor_that_is_a_connector_for_another_pair_keeps_connector_role() {
+        // A -> K -> C with A,C modified ⇒ K is a connector. Separately, an
+        // isolated modified model M with K as a direct child: K must keep its
+        // CONNECTOR role (stronger), never be re-flagged halo.
+        //   A -> K -> C   (A,C modified ⇒ K connector)
+        //   M -> K        (M isolated, K is M's child)
+        let manifest = manifest_of(&[
+            ("model.s.a", "model", &[]),
+            ("model.s.k", "model", &["model.s.a", "model.s.m"]),
+            ("model.s.c", "model", &["model.s.k"]),
+            ("model.s.m", "model", &[]),
+        ]);
+        let graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.a", "model.s.c", "model.s.m"]),
+            &new_of(&[]),
+            NO_REMOVED,
+        );
+        // K is the A->C connector; M is connected to A/C THROUGH K? No — M's
+        // only link is M->K->C, a directed path M ... C, so M IS connected to C.
+        // Thus M is NOT disconnected and spawns no halo. K stays a connector.
+        let k = node_of(&graph, "model.s.k");
+        assert!(k.is_connector, "K keeps its connector role");
+        assert!(!k.is_halo, "K is never re-flagged as halo");
+        assert!(
+            halo_ids_of(&graph).is_empty(),
+            "M reaches C through K ⇒ M is connected ⇒ no halo",
+        );
+    }
+
+    // -- determinism + acyclicity carry over to the halo node set ---------
+
+    #[test]
+    fn the_halo_graph_is_acyclic_and_order_independent() {
+        let forward = manifest_of(&[
+            ("model.s.up", "model", &[]),
+            ("model.s.m", "model", &["model.s.up"]),
+            ("model.s.down", "model", &["model.s.m"]),
+        ]);
+        let reversed = manifest_of(&[
+            ("model.s.down", "model", &["model.s.m"]),
+            ("model.s.m", "model", &["model.s.up"]),
+            ("model.s.up", "model", &[]),
+        ]);
+        let m = modified_of(&["model.s.m"]);
+        let g1 = compute_pr_dag(&forward, &m, &new_of(&[]), NO_REMOVED);
+        let g2 = compute_pr_dag(&reversed, &m, &new_of(&[]), NO_REMOVED);
+        assert_eq!(g1, g2, "the halo graph is a pure function of the facts");
+        assert!(is_acyclic(&g1), "the halo-augmented mini-DAG stays acyclic");
+    }
+
+    #[test]
+    fn a_disconnected_seed_alongside_a_connected_cluster_only_halos_the_isolated_one() {
+        // Cluster: A -> B -> C (A,C modified, B connector). Isolated: M with a
+        // child leaf. The connected cluster gets NO halo; only M's leaf does.
+        let manifest = manifest_of(&[
+            ("model.s.a", "model", &[]),
+            ("model.s.b", "model", &["model.s.a"]),
+            ("model.s.c", "model", &["model.s.b"]),
+            ("model.s.m", "model", &[]),
+            ("model.s.leaf", "model", &["model.s.m"]),
+        ]);
+        let graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.a", "model.s.c", "model.s.m"]),
+            &new_of(&[]),
+            NO_REMOVED,
+        );
+        assert_eq!(connector_ids_of(&graph), BTreeSet::from(["model.s.b"]));
+        assert_eq!(
+            halo_ids_of(&graph),
+            BTreeSet::from(["model.s.leaf"]),
+            "only the isolated M's neighbor is halo; the A-C cluster has none",
+        );
+    }
+
+    // -- a halo node never bleeds non-anchor induced edges ----------------
+
+    #[test]
+    fn halo_nodes_of_independent_anchors_do_not_link_to_each_other() {
+        // M1 -> X, M2 -> X is the shared-sink case; here force a DIFFERENT
+        // shape where M1's child could spuriously edge M2's child: arrange
+        // M1 -> h1 -> h2 <- M2 with M1, M2 isolated. h1 is M1's child, h2 is
+        // M2's child; h1 -> h2 is a real depends_on edge. Because h1, h2 are
+        // halo nodes, that h1->h2 edge must NOT be induced — only the anchor
+        // edges M1->h1 and M2->h2 appear.
+        let manifest = manifest_of(&[
+            ("model.s.m1", "model", &[]),
+            ("model.s.h1", "model", &["model.s.m1"]),
+            ("model.s.h2", "model", &["model.s.h1", "model.s.m2"]),
+            ("model.s.m2", "model", &[]),
+        ]);
+        let graph = compute_pr_dag(
+            &manifest,
+            &modified_of(&["model.s.m1", "model.s.m2"]),
+            &new_of(&[]),
+            NO_REMOVED,
+        );
+        // M1 reaches M2? M1 -> h1 -> h2 <- M2: there is NO directed path from
+        // M1 to M2 (h2 <- M2 is M2 -> h2, the wrong direction), nor M2 to M1.
+        // So both are disconnected. h1 ∈ halo(M1), h2 ∈ halo(M2).
+        assert_eq!(
+            halo_ids_of(&graph),
+            BTreeSet::from(["model.s.h1", "model.s.h2"]),
+        );
+        // The h1->h2 edge is BETWEEN two halo nodes ⇒ excluded; only the two
+        // anchor edges survive.
+        assert_eq!(
+            edges_of(&graph),
+            BTreeSet::from([("model.s.m1", "model.s.h1"), ("model.s.m2", "model.s.h2"),]),
+            "halo↔halo edges are not induced; only anchor edges appear",
+        );
     }
 }
