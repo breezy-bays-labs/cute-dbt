@@ -387,6 +387,25 @@
     {%- endif %}
   </div>
 </div>
+{#- cute-dbt#402 (epic #360) — the subject-lens tab shell. The PR-review
+   report is a tabbed artifact whose tabs are *subject journeys*: Models (the
+   default tab — the whole existing report), Macros, and Project. This is a
+   confident, ungated feature direction (NOT experimental) — the report's
+   structure changes by design here. The tab strip + the Models lens panel
+   open below; the existing report sections render unchanged INSIDE the
+   Models panel; the panel + the scaffolded Macros/Project panels close just
+   before the JSON payload carrier. Tab switching is a vanilla-JS class
+   toggle (bindLensTabs in interaction.js — distinct from any DAG-shelf
+   handler), no framework, no new external asset (zero-egress holds). First
+   pass: the Macros/Project panels are HONEST empty-states pointing at the
+   #360 design phase; the state-change taxonomy (NEW/MODIFIED/REMOVED chips +
+   badges) is deliberately deferred pending a product decision. -#}
+<nav class="lens-tabs" role="tablist" aria-label="Report lenses" data-testid="lens-tabs">
+  <button type="button" class="lens-tab is-active" role="tab" id="lens-tab-models" aria-selected="true" aria-controls="lens-panel-models" data-lens="models" data-testid="lens-tab-models">Models</button>
+  <button type="button" class="lens-tab" role="tab" id="lens-tab-macros" aria-selected="false" aria-controls="lens-panel-macros" data-lens="macros" data-testid="lens-tab-macros">Macros</button>
+  <button type="button" class="lens-tab" role="tab" id="lens-tab-project" aria-selected="false" aria-controls="lens-panel-project" data-lens="project" data-testid="lens-tab-project">Project</button>
+</nav>
+<div class="lens-panel is-active" role="tabpanel" id="lens-panel-models" aria-labelledby="lens-tab-models" data-lens="models" data-testid="lens-panel-models">
 
 {# cute-dbt#266 — the "Project definition changed" panel. Server-rendered
    (no JS dependency) whenever dbt_project.yml is in the PR diff: the
@@ -864,6 +883,26 @@
    that separated the panel row from the payload carrier) — this
    report's bytes are unchanged, gated by the byte-identity golden. #}
 {% include "partials/test-card.html" %}
+{#- cute-dbt#402 (epic #360) — close the Models lens panel opened above and
+   emit the scaffolded Macros + Project lens panels. First pass: both are
+   HONEST empty-states (a heading + a one-line note) pointing at the #360
+   design phase — no lens content is invested here. The PR-scoped macro lens
+   (blast radius + macro diff + impacted models/tests) and the project /
+   governance lens are design-phase work. The lens-tab toggle script is
+   inlined just below the panels (plain DOM, zero-egress). -#}
+</div>
+<div class="lens-panel" role="tabpanel" id="lens-panel-macros" aria-labelledby="lens-tab-macros" data-lens="macros" data-testid="lens-panel-macros" hidden>
+  <section class="lens-scaffold lens-scaffold-macros" aria-label="Macros lens" data-testid="lens-scaffold-macros">
+    <h2>Macros</h2>
+    <p class="lens-scaffold-empty" data-testid="lens-macros-empty">PR-scoped macro lens &mdash; blast radius, the macro&rsquo;s own diff, and the impacted models &amp; tests. Populated in the cute-dbt#360 design phase.</p>
+  </section>
+</div>
+<div class="lens-panel" role="tabpanel" id="lens-panel-project" aria-labelledby="lens-tab-project" data-lens="project" data-testid="lens-panel-project" hidden>
+  <section class="lens-scaffold lens-scaffold-project" aria-label="Project lens" data-testid="lens-scaffold-project">
+    <h2>Project</h2>
+    <p class="lens-scaffold-empty" data-testid="lens-project-empty">Project lens &mdash; <code>dbt_project.yml</code>, vars, and governance changes. Populated in the cute-dbt#360 design phase.</p>
+  </section>
+</div>
 
 <script type="application/json" id="cute-dbt-data">{{ payload_json|safe }}</script>
 

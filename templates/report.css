@@ -1464,4 +1464,37 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
   overflow-wrap: anywhere;
 }
 
+/* ============================================================================
+   cute-dbt#402 (epic #360) — the subject-lens tab shell. Tabs are subject
+   JOURNEYS (Models / Macros / Project), not change-state sections. First
+   pass: minimal chassis only — the tab strip, the active-tab affordance, and
+   panel show/hide. Uses the design-system semantic tokens so it themes with
+   the rest of the chassis. Claude Design owns the visual polish.
+   ============================================================================ */
+.lens-tabs {
+  display: flex; gap: 0.25rem; flex-wrap: wrap;
+  margin: 1rem 0 0.75rem; padding: 0;
+  border-bottom: var(--rule-w) solid var(--border);
+}
+.lens-tab {
+  appearance: none; cursor: pointer;
+  background: transparent; color: var(--text-muted);
+  border: var(--rule-w) solid transparent; border-bottom: none;
+  border-top-left-radius: var(--radius-sm); border-top-right-radius: var(--radius-sm);
+  padding: 0.4rem 0.85rem; margin-bottom: calc(-1 * var(--rule-w));
+  font: inherit; font-weight: 600; line-height: 1.2;
+}
+.lens-tab:hover { color: var(--text); background: var(--bg-alt); }
+.lens-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.lens-tab.is-active {
+  color: var(--text); background: var(--bg);
+  border-color: var(--border);
+  border-bottom: var(--rule-w) solid var(--bg);
+}
+.lens-panel[hidden] { display: none; }
+.lens-scaffold { padding: 0.5rem 0; }
+.lens-scaffold-empty {
+  color: var(--text-muted); overflow-wrap: anywhere; margin: 0.5rem 0;
+}
+
 /* end of cute-dbt report chassis v1 (cute-dbt#177) */

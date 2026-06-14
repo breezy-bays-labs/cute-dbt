@@ -263,6 +263,11 @@
     // cute-dbt#232 — viewport-edge tagging for the pure-CSS bubble family
     // (geometry annotation only; visibility stays CSS :hover/:focus).
     bindTipEdgeTagger();
+    // cute-dbt#402 (epic #360) — the subject-lens tab strip (Models /
+    // Macros / Project). A pure in-place class/hidden/aria toggle; the
+    // Models lens (today's whole report) is active by default. Distinct
+    // handler from the DAG-shelf toggle (territory partition with #398).
+    bindLensTabs();
   });
 
   // cute-dbt#91 — scope-toggle helpers --------------------------------
@@ -1559,6 +1564,31 @@
       var open = $btn.attr("aria-expanded") === "true";
       $btn.attr("aria-expanded", open ? "false" : "true");
       $btn.closest("li").find(".mdc-col-tests").prop("hidden", open);
+    });
+  }
+
+  // cute-dbt#402 (epic #360) — the subject-lens tab strip. Clicking a tab
+  // (or activating it via keyboard) flips which lens panel is visible: a
+  // pure in-place class + `hidden` + aria toggle, never a fetch or a
+  // re-render (the zero-egress posture, no `src`). The Models lens (today's
+  // whole report) is the active panel by default. Kept deliberately separate
+  // from bindShelf (the DAG node-detail handler) — territory partition with
+  // cute-dbt#398's shelf work.
+  function bindLensTabs() {
+    var $tabs = $(".lens-tab");
+    if (!$tabs.length) return;
+    function activate(lens) {
+      $tabs.each(function () {
+        var on = $(this).attr("data-lens") === lens;
+        $(this).toggleClass("is-active", on).attr("aria-selected", on ? "true" : "false");
+      });
+      $(".lens-panel").each(function () {
+        var on = $(this).attr("data-lens") === lens;
+        $(this).toggleClass("is-active", on).prop("hidden", !on);
+      });
+    }
+    $(document).on("click", ".lens-tab", function () {
+      activate($(this).attr("data-lens"));
     });
   }
 
