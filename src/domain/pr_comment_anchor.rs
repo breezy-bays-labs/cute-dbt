@@ -55,6 +55,8 @@
 //! Pure domain (std + serde only): the resolver borrows the already-parsed
 //! [`NormalizedDiffIndex`]; it does no I/O and never re-reads the diff.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 use crate::domain::pr_comment::{DiffSide, PrCommentThread};
@@ -72,8 +74,10 @@ use crate::domain::pr_diff::{Hunk, NormalizedDiffIndex};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedThread {
     /// The file the thread anchors to, normalized the same way the diff
-    /// index keys its files (repo-relative, project-root strip already
-    /// applied at index-build time).
+    /// index keys its files: the GitHub thread path run through
+    /// [`normalize_path`](crate::domain::path::normalize_path) with the
+    /// report's project-root strip applied, so it matches the
+    /// project-relative keys [`NormalizedDiffIndex`] holds.
     pub path: String,
     /// 1-based line on the thread's [`side`](Self::side).
     pub line: u32,
@@ -124,7 +128,7 @@ fn line_in_new_side_hunk(line: u32, hunks: &[Hunk]) -> bool {
     let line = line as usize;
     hunks
         .iter()
-        .any(|h| h.new_len > 0 && line >= h.new_start && line < h.new_start + h.new_len)
+        .any(|h| h.new_len > 0 && line >= h.new_start && line - h.new_start < h.new_len)
 }
 
 /// Whether `line` (1-based, old side) falls inside any of `hunks`'
@@ -148,7 +152,7 @@ fn line_in_old_side_hunk(line: u32, hunks: &[Hunk]) -> bool {
             return false;
         }
         let old_start = h.new_start.max(1);
-        line >= old_start && line < old_start + removed_len
+        line >= old_start && line - old_start < removed_len
     })
 }
 
@@ -157,10 +161,29 @@ fn line_in_old_side_hunk(line: u32, hunks: &[Hunk]) -> bool {
 ///
 /// `report_basis` is the commit SHA the report's diff was built against,
 /// when the caller knows it (`None` to skip the basis check and rely on
-/// GitHub's `isOutdated` flag plus the within-hunk test alone). The path
-/// is normalized through the same [`NormalizedDiffIndex`] the report
-/// renders, so a sub-directory dbt project's project-root strip is honored
-/// automatically.
+/// GitHub's `isOutdated` flag plus the within-hunk test alone).
+///
+/// `project_to_repo_strip` is the dbt project root relative to the repo
+/// root — **the same strip the caller passed to
+/// [`NormalizedDiffIndex::new`]**. `thread.path` arrives repo-relative
+/// (GitHub anchors review threads to repo paths), whereas the diff index
+/// keys its files project-relative (the strip was applied at index-build
+/// time). This function normalizes `thread.path` through that same strip
+/// (via [`normalize_path`](crate::domain::path::normalize_path)) so a
+/// sub-directory dbt project's repo-relative thread path resolves onto the
+/// project-relative diff keyset instead of silently dropping to
+/// [`ThreadAnchor::PathNotInDiff`]. Pass `None` for a project living at the
+/// repo root (identity strip).
+///
+/// # Arguments
+///
+/// - `thread` — the ingested GitHub review thread to anchor.
+/// - `index` — the report's rendered diff, keyed project-relative.
+/// - `report_basis` — the report's diff commit SHA, or `None` to skip the
+///   basis check.
+/// - `project_to_repo_strip` — the dbt project root relative to the repo
+///   root (the same strip [`NormalizedDiffIndex`] was built with), or
+///   `None` for a repo-root project.
 ///
 /// Resolution order (each step is fail-honest — never a fabricated line):
 ///
@@ -181,7 +204,15 @@ pub fn anchor_comment_thread(
     thread: &PrCommentThread,
     index: &NormalizedDiffIndex,
     report_basis: Option<&str>,
+    project_to_repo_strip: Option<&Path>,
 ) -> ThreadAnchor {
+    // Reconcile the repo-relative GitHub thread path onto the
+    // project-relative diff keyset by applying the same project-root strip
+    // the report's `NormalizedDiffIndex` was built with. Done once, up
+    // front, so every lookup and every returned `path` is keyspace-consistent
+    // with the index.
+    let normalized_path = crate::domain::path::normalize_path(&thread.path, project_to_repo_strip);
+
     let basis_differs = match (thread.commit_oid.as_deref(), report_basis) {
         (Some(thread_oid), Some(basis)) => thread_oid != basis,
         // No basis to compare against (or the thread carries no commit) →
@@ -197,20 +228,20 @@ pub fn anchor_comment_thread(
         .filter(|_| !thread.is_outdated && !basis_differs)
     else {
         return ThreadAnchor::Outdated {
-            path: thread.path.clone(),
+            path: normalized_path,
             original_line: thread.original_line,
         };
     };
 
     // Step 2: path not in the rendered diff at all.
-    if !index.contains_changed(&thread.path) {
+    if !index.contains_changed(&normalized_path) {
         return ThreadAnchor::PathNotInDiff {
-            path: thread.path.clone(),
+            path: normalized_path,
         };
     }
 
     // Step 3: resolve against the file's hunks, recording within-hunk.
-    let hunks = index.hunks_for(&thread.path);
+    let hunks = index.hunks_for(&normalized_path);
     let within_hunk = match thread.diff_side {
         DiffSide::Right => line_in_new_side_hunk(line, hunks),
         DiffSide::Left => line_in_old_side_hunk(line, hunks),
@@ -220,7 +251,7 @@ pub fn anchor_comment_thread(
     };
 
     ThreadAnchor::Resolved(ResolvedThread {
-        path: thread.path.clone(),
+        path: normalized_path,
         line,
         side: thread.diff_side.clone(),
         within_hunk,
@@ -297,7 +328,7 @@ mod tests {
         );
         let t = thread("models/orders.sql", Some(5), DiffSide::Right);
         assert_eq!(
-            anchor_comment_thread(&t, &index, Some(&"a".repeat(40))),
+            anchor_comment_thread(&t, &index, Some(&"a".repeat(40)), None),
             ThreadAnchor::Resolved(ResolvedThread {
                 path: "models/orders.sql".to_owned(),
                 line: 5,
@@ -314,7 +345,7 @@ mod tests {
             vec![hunk(5, 2, &["old"], &["n1", "n2"])],
         );
         let t = thread("models/orders.sql", Some(6), DiffSide::Right);
-        let anchor = anchor_comment_thread(&t, &index, None);
+        let anchor = anchor_comment_thread(&t, &index, None, None);
         match anchor {
             ThreadAnchor::Resolved(r) => assert!(r.within_hunk),
             other => panic!("expected Resolved, got {other:?}"),
@@ -333,7 +364,7 @@ mod tests {
         );
         let t = thread("models/orders.sql", Some(40), DiffSide::Right);
         assert_eq!(
-            anchor_comment_thread(&t, &index, None),
+            anchor_comment_thread(&t, &index, None, None),
             ThreadAnchor::Resolved(ResolvedThread {
                 path: "models/orders.sql".to_owned(),
                 line: 40,
@@ -355,7 +386,7 @@ mod tests {
         t.is_outdated = true;
         t.original_line = Some(12);
         assert_eq!(
-            anchor_comment_thread(&t, &index, None),
+            anchor_comment_thread(&t, &index, None, None),
             ThreadAnchor::Outdated {
                 path: "models/orders.sql".to_owned(),
                 original_line: Some(12),
@@ -374,7 +405,7 @@ mod tests {
         let mut t = thread("models/orders.sql", Some(5), DiffSide::Right);
         t.is_outdated = true;
         assert!(matches!(
-            anchor_comment_thread(&t, &index, None),
+            anchor_comment_thread(&t, &index, None, None),
             ThreadAnchor::Outdated { .. }
         ));
     }
@@ -390,7 +421,7 @@ mod tests {
         let t = thread("models/orders.sql", Some(5), DiffSide::Right); // oid = "aaaa…"
         // The report was built against a DIFFERENT commit.
         assert_eq!(
-            anchor_comment_thread(&t, &index, Some(&"b".repeat(40))),
+            anchor_comment_thread(&t, &index, Some(&"b".repeat(40)), None),
             ThreadAnchor::Outdated {
                 path: "models/orders.sql".to_owned(),
                 original_line: Some(5),
@@ -406,7 +437,7 @@ mod tests {
         );
         let t = thread("models/orders.sql", Some(5), DiffSide::Right);
         assert!(matches!(
-            anchor_comment_thread(&t, &index, Some(&"a".repeat(40))),
+            anchor_comment_thread(&t, &index, Some(&"a".repeat(40)), None),
             ThreadAnchor::Resolved(_)
         ));
     }
@@ -420,7 +451,7 @@ mod tests {
         );
         let t = thread("models/orders.sql", Some(5), DiffSide::Right);
         assert!(matches!(
-            anchor_comment_thread(&t, &index, None),
+            anchor_comment_thread(&t, &index, None, None),
             ThreadAnchor::Resolved(_)
         ));
     }
@@ -436,7 +467,7 @@ mod tests {
         // Even with a report basis present, a thread with no commit can't
         // mismatch → resolves on its live line.
         assert!(matches!(
-            anchor_comment_thread(&t, &index, Some(&"b".repeat(40))),
+            anchor_comment_thread(&t, &index, Some(&"b".repeat(40)), None),
             ThreadAnchor::Resolved(_)
         ));
     }
@@ -452,7 +483,7 @@ mod tests {
         let mut t = thread("models/orders.sql", None, DiffSide::Right);
         t.original_line = Some(9);
         assert_eq!(
-            anchor_comment_thread(&t, &index, None),
+            anchor_comment_thread(&t, &index, None, None),
             ThreadAnchor::Outdated {
                 path: "models/orders.sql".to_owned(),
                 original_line: Some(9),
@@ -468,7 +499,7 @@ mod tests {
         let index = index_for("models/customers.sql", vec![hunk(1, 1, &[], &["x"])]);
         let t = thread("models/orders.sql", Some(5), DiffSide::Right);
         assert_eq!(
-            anchor_comment_thread(&t, &index, None),
+            anchor_comment_thread(&t, &index, None, None),
             ThreadAnchor::PathNotInDiff {
                 path: "models/orders.sql".to_owned(),
             }
@@ -484,9 +515,51 @@ mod tests {
         let mut t = thread("models/orders.sql", Some(5), DiffSide::Right);
         t.is_outdated = true;
         assert!(matches!(
-            anchor_comment_thread(&t, &index, None),
+            anchor_comment_thread(&t, &index, None, None),
             ThreadAnchor::Outdated { .. }
         ));
+    }
+
+    // ----- Case: sub-directory dbt project (project-root strip) -----
+
+    #[test]
+    fn right_side_line_inside_a_hunk_resolves_with_subdirectory_strip() {
+        use std::path::Path;
+        // Index keys are project-relative (built with the strip); the thread
+        // path is repo-relative (GitHub). The strip must reconcile them.
+        let index = index_for(
+            "models/orders.sql",
+            vec![hunk(5, 2, &["old"], &["n1", "n2"])],
+        );
+        let t = thread("my_sub_dir/models/orders.sql", Some(5), DiffSide::Right);
+        assert_eq!(
+            anchor_comment_thread(&t, &index, None, Some(Path::new("my_sub_dir"))),
+            ThreadAnchor::Resolved(ResolvedThread {
+                path: "models/orders.sql".to_owned(),
+                line: 5,
+                side: DiffSide::Right,
+                within_hunk: true,
+            })
+        );
+    }
+
+    #[test]
+    fn sub_directory_thread_without_the_strip_drops_to_path_not_in_diff() {
+        // The bug-is-fixed contrast: without the project-root strip, the
+        // repo-relative thread path never matches the project-relative diff
+        // key, so the thread silently drops to PathNotInDiff (the pre-fix
+        // behavior). Pinning it makes the strip's load-bearing role explicit.
+        let index = index_for(
+            "models/orders.sql",
+            vec![hunk(5, 2, &["old"], &["n1", "n2"])],
+        );
+        let t = thread("my_sub_dir/models/orders.sql", Some(5), DiffSide::Right);
+        assert_eq!(
+            anchor_comment_thread(&t, &index, None, None),
+            ThreadAnchor::PathNotInDiff {
+                path: "my_sub_dir/models/orders.sql".to_owned(),
+            }
+        );
     }
 
     // ----- Case: Left-side (deletion) anchoring ---------------------
@@ -501,7 +574,7 @@ mod tests {
             vec![hunk(5, 1, &["o1", "o2"], &["n1"])],
         );
         let t = thread("models/orders.sql", Some(5), DiffSide::Left);
-        let anchor = anchor_comment_thread(&t, &index, None);
+        let anchor = anchor_comment_thread(&t, &index, None, None);
         match anchor {
             ThreadAnchor::Resolved(r) => {
                 assert!(r.within_hunk);
@@ -517,7 +590,7 @@ mod tests {
         // old-side footprint 8..=8.
         let index = index_for("models/orders.sql", vec![hunk(8, 0, &["dropped"], &[])]);
         let t = thread("models/orders.sql", Some(8), DiffSide::Left);
-        let anchor = anchor_comment_thread(&t, &index, None);
+        let anchor = anchor_comment_thread(&t, &index, None, None);
         match anchor {
             ThreadAnchor::Resolved(r) => assert!(r.within_hunk),
             other => panic!("expected Resolved, got {other:?}"),
@@ -531,7 +604,7 @@ mod tests {
             vec![hunk(5, 1, &["o1", "o2"], &["n1"])],
         );
         let t = thread("models/orders.sql", Some(99), DiffSide::Left);
-        let anchor = anchor_comment_thread(&t, &index, None);
+        let anchor = anchor_comment_thread(&t, &index, None, None);
         match anchor {
             ThreadAnchor::Resolved(r) => assert!(!r.within_hunk),
             other => panic!("expected Resolved, got {other:?}"),
@@ -544,7 +617,7 @@ mod tests {
         // within the hunk (there is no old-side content there).
         let index = index_for("models/orders.sql", vec![hunk(5, 1, &[], &["added"])]);
         let t = thread("models/orders.sql", Some(5), DiffSide::Left);
-        let anchor = anchor_comment_thread(&t, &index, None);
+        let anchor = anchor_comment_thread(&t, &index, None, None);
         match anchor {
             ThreadAnchor::Resolved(r) => assert!(!r.within_hunk),
             other => panic!("expected Resolved, got {other:?}"),
@@ -564,7 +637,7 @@ mod tests {
             Some(5),
             DiffSide::Unknown("BOTH".to_owned()),
         );
-        let anchor = anchor_comment_thread(&t, &index, None);
+        let anchor = anchor_comment_thread(&t, &index, None, None);
         match anchor {
             ThreadAnchor::Resolved(r) => {
                 assert!(!r.within_hunk);
