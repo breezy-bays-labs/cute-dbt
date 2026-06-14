@@ -1,0 +1,10 @@
+unit_tests:
+  - name: test_status_kept
+    model: stg_orders
+    given:
+      - input: source('raw', 'orders')
+        rows:
+          - { order_id: 1, customer_id: 7, status: placed, amount: 12 }
+    expect:
+      rows:
+        - { order_id: 1, customer_id: 7, status: placed, amount: 12 }

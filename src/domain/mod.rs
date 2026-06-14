@@ -113,7 +113,10 @@ pub use manifest::{
 pub use model_yaml::ModelYamlOutcome;
 pub use path::{match_changed_path, normalize_path};
 pub use pr_comment::{DiffSide, PrComment, PrCommentThread, PrComments};
-pub use pr_dag::{PrDagEdge, PrDagGraph, PrDagNode, PrDagState, compute_pr_dag};
+pub use pr_dag::{
+    DEFAULT_PR_DAG_NODE_CAP, LineDelta, PrDagEdge, PrDagGraph, PrDagNode, PrDagState,
+    compute_pr_dag, populate_line_counts, pr_dag_lines_from_diff, pr_dag_lines_from_raw_code,
+};
 pub use pr_diff::{
     BlockDiff, DiffLine, DiffLineKind, FileHunks, Hunk, NormalizedDiffIndex, PrDiff,
     ReverseApplyError, attach_model_yaml_diffs, diff_lines, raw_hunk_lines,

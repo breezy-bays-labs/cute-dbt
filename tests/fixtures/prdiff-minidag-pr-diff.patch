@@ -1,0 +1,12 @@
+diff --git a/models/staging/stg_orders.sql b/models/staging/stg_orders.sql
+--- a/models/staging/stg_orders.sql
++++ b/models/staging/stg_orders.sql
+@@ -2 +2 @@
+-  select order_id, customer_id, amount
++  select order_id, customer_id, status, amount
+diff --git a/models/marts/fct_orders.sql b/models/marts/fct_orders.sql
+--- a/models/marts/fct_orders.sql
++++ b/models/marts/fct_orders.sql
+@@ -4 +4 @@
+-  sum(amount) as revenue
++  sum(amount) as gross_revenue

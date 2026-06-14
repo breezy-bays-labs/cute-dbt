@@ -33,7 +33,13 @@ pub fn fixture(name: &str) -> PathBuf {
 /// Report pages only: the headless gate applies the report's
 /// Mermaid + DataTables liveness oracle to every entry. The explore
 /// pages live in [`COMMITTED_EXPLORE_PAGES`] with page-aware oracles.
-pub const COMMITTED_EXAMPLES: &[&str] = &["jaffle-shop-report.html", "playground-report.html"];
+pub const COMMITTED_EXAMPLES: &[&str] = &[
+    "jaffle-shop-report.html",
+    "playground-report.html",
+    // cute-dbt#404 — the PR-scope lineage mini-DAG golden (experiment-on,
+    // --pr-diff). The zero-egress + resource-ref gates scan it like any other.
+    "prdiff-minidag-report.html",
+];
 
 /// The committed `cute-dbt explore` example pages under `examples/`
 /// (cute-dbt#100), rendered from the synthetic playground fixture by

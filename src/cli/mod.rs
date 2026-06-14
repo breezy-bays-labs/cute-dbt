@@ -90,22 +90,23 @@ use crate::adapters::manifest::{FileManifestSource, load_baseline};
 use crate::adapters::project_def::parse as parse_project_definition;
 use crate::adapters::project_file::FsProjectFileReader;
 use crate::adapters::render::{
-    ExternalFixtures, LoadedFixture, MacroLensPayload, ScopeSource, build_macro_lens,
+    ExternalFixtures, LoadedFixture, MacroLensPayload, PrDagPayload, ScopeSource, build_macro_lens,
     build_payload, index_tests_for_models, render_report_with_externals,
 };
 use crate::domain::{
-    BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_MACRO_BODY_CAP, DEFAULT_REPORT_TITLE,
-    DEFAULT_SEED_ROW_CAP, DepDate, EnabledExperiments, EnvelopeScope, Experiment, Finding,
-    FixtureTableDiff, GovernanceFacts, HeuristicId, InScopeSet, Manifest, ModelInScopeSet,
-    ModelYamlOutcome, NamedTableDiff, NormalizedDiffIndex, PrConfig, PrRef, PreflightError,
-    ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ResolvedAnchor, ScopeInput,
-    ScopeSelection, SeedCard, SeedInScopeSet, SuppressRule, SuppressionSource, UnitTest,
-    UnitTestDataDiff, UnitTestYamlBlock, VarReference, all_models, attach_hook_facts,
-    attach_model_yaml_diffs, attach_var_facts, attribute_config_tree_changes,
+    BlockDiff, CheckPolicy, ConfigAttribution, DEFAULT_MACRO_BODY_CAP, DEFAULT_PR_DAG_NODE_CAP,
+    DEFAULT_REPORT_TITLE, DEFAULT_SEED_ROW_CAP, DepDate, EnabledExperiments, EnvelopeScope,
+    Experiment, Finding, FixtureTableDiff, GovernanceFacts, HeuristicId, InScopeSet, Manifest,
+    ModelInScopeSet, ModelYamlOutcome, NamedTableDiff, Node, NodeId, NormalizedDiffIndex, PrConfig,
+    PrRef, PreflightError, ProjectChangePanel, ProjectFacts, ProjectFallbackReason, ResolvedAnchor,
+    ScopeInput, ScopeSelection, SeedCard, SeedInScopeSet, StateComparator, SuppressRule,
+    SuppressionSource, UnitTest, UnitTestDataDiff, UnitTestYamlBlock, VarReference, all_models,
+    attach_hook_facts, attach_model_yaml_diffs, attach_var_facts, attribute_config_tree_changes,
     attribute_var_changes, build_seed_cards, changed_macros_baseline, changed_macros_pr_diff,
-    changed_models, check_by_id, diff_project_definitions, effective_fixture_format,
-    external_fixture_table, extract_model_block, extract_unit_test_block, gather_governance,
-    has_total_uncovered, hook_operations, macro_focus_set, preflight_compiled, raw_hunk_lines,
+    changed_models, check_by_id, compute_pr_dag, diff_project_definitions,
+    effective_fixture_format, external_fixture_table, extract_model_block, extract_unit_test_block,
+    gather_governance, has_total_uncovered, hook_operations, macro_focus_set, populate_line_counts,
+    pr_dag_lines_from_diff, pr_dag_lines_from_raw_code, preflight_compiled, raw_hunk_lines,
     reconstruct_block_diffs, reconstruct_external_fixture_diff, reconstruct_model_sql_diffs,
     reconstruct_table_diffs, refine_changed_by_hunks, resolve_check_policy,
     resolve_experimental_config, resolve_finding_anchor, reverse_apply, scan_pragmas,
@@ -364,6 +365,14 @@ fn execute_report(args: &ReportArgs) -> Result<ReportOutcome, RunError> {
     // over the default), keeping the render side a pure fn of the cap.
     let macro_body_cap = resolve_macro_body_cap(args);
     let macro_lens = gather_macro_lens(&current, &scope_input, &experiments, macro_body_cap);
+    // PR-scope lineage mini-DAG (cute-dbt#404, epic #352) — the focused
+    // cross-model subgraph the report puts at the top, gated behind the
+    // `pr-scope-mini-dag` experiment (the single gating source lives inside
+    // `gather_pr_dag`). It CONSUMES the scope sets (modified ∪ connectors ∪
+    // deleted) and the diff/raw_code line counts; it never widens scope. `None`
+    // (off, or empty scope) ⇒ omitted from JSON + zero DOM, keeping the
+    // non-experimental goldens byte-identical (the `macro_lens` precedent).
+    let pr_dag = gather_pr_dag(&current, &scope_input, &experiments);
 
     // Stage-2 fail-closed reads the TRUE in-scope set (cute-dbt#91): the
     // widened render set is only for what the report displays. Config-tree
@@ -524,6 +533,7 @@ fn execute_report(args: &ReportArgs) -> Result<ReportOutcome, RunError> {
         pr_ref.as_ref(),
         &seed_cards,
         seed_row_cap,
+        pr_dag.as_ref(),
     )
     .map_err(|err| RunError::output(&args.out, err))?;
     // cute-dbt#386 — the machine-readable findings envelope. Purely
@@ -1819,6 +1829,126 @@ fn gather_macro_lens(
     build_macro_lens(current, &changed_macros, source, index, body_cap)
 }
 
+/// Gather the PR-scope lineage mini-DAG (cute-dbt#404, epic #352), gated
+/// behind the `pr-scope-mini-dag` experiment (the epic #288 default-OFF
+/// posture). **This is the single gating source** — the function returns
+/// `None` before computing anything when the experiment is off, so nothing
+/// crosses to the render payload, the `{% match pr_dag %}` section emits zero
+/// DOM, and every default golden stays byte-identical (the `gather_macro_lens`
+/// precedent).
+///
+/// Enabled, per scope arm:
+/// - **pr-diff** — the modified set is [`changed_models`] (models whose
+///   `original_file_path` is in the diff); the deleted set is the diff's
+///   `deleted` paths resolved against the BASELINE manifest if one were
+///   present (none on this arm), so it is empty here; per-node line counts
+///   come from [`pr_dag_lines_from_diff`] (the `+`/`-` hunk counts for the
+///   node's file). The `new` (added) subset is left empty: the pr-diff arm has
+///   no baseline to diff membership against, so an added model is reported as
+///   `Modified` (the safe default the topology documents).
+/// - **baseline** — the modified set is the [`StateComparator`] modified
+///   models (changed `checksum`); the `new` subset is the current models
+///   absent from the baseline; the deleted set is the baseline models absent
+///   from the current manifest (the baseline−current set-diff); per-node line
+///   counts come from [`pr_dag_lines_from_raw_code`] (the `raw_code` old→new
+///   line diff), which also surfaces a deleted ghost's removed-everything count.
+///
+/// A pure pass over the already-parsed manifest(s) + the diff index (no file
+/// read, zero-egress). The mini-DAG is a render-only contextualizer — it never
+/// widens scope (it *consumes* the scope sets, the `pr_dag` module contract).
+/// `None` whenever the scope set is empty (nothing to draw), so an empty-scope
+/// report carries no mini-DAG bytes.
+fn gather_pr_dag(
+    current: &Manifest,
+    scope_input: &ScopeInput,
+    experiments: &EnabledExperiments,
+) -> Option<PrDagPayload> {
+    if !experiments.is_enabled(Experiment::PrScopeMiniDag) {
+        return None;
+    }
+    let (modified, new, removed) = pr_dag_scope_sets(current, scope_input);
+    if modified.is_empty() && removed.is_empty() {
+        // Nothing modified and nothing deleted ⇒ no graph to draw.
+        return None;
+    }
+    let mut graph = compute_pr_dag(current, &modified, &new, &removed);
+    populate_pr_dag_line_counts(&mut graph, current, scope_input);
+    Some(PrDagPayload::from_graph(graph, DEFAULT_PR_DAG_NODE_CAP))
+}
+
+/// Derive the `(modified, new, removed)` node sets `compute_pr_dag` consumes,
+/// per scope arm (cute-dbt#404). See [`gather_pr_dag`] for the per-arm
+/// semantics; this is the set-derivation half, factored out so the gather
+/// stays a thin compose.
+fn pr_dag_scope_sets(
+    current: &Manifest,
+    scope_input: &ScopeInput,
+) -> (ModelInScopeSet, BTreeSet<NodeId>, Vec<NodeId>) {
+    match scope_input {
+        ScopeInput::PrDiff { index } => {
+            let modified = changed_models(current, index);
+            // The pr-diff arm has no baseline manifest to diff membership
+            // against — an added model is reported as `Modified` (the safe
+            // default), and deletions are not surfaced as ghosts here (a
+            // deleted model has no current node to anchor a reliable id;
+            // the baseline arm owns the deletion ghosts).
+            (modified, BTreeSet::new(), Vec::new())
+        }
+        ScopeInput::Baseline { manifest, .. } => {
+            let baseline = manifest.as_ref();
+            let cmp = StateComparator::body_only();
+            let modified = cmp.models_in_scope(current, baseline);
+            // `new`: current models absent from the baseline (the added set).
+            let new: BTreeSet<NodeId> = current
+                .nodes()
+                .iter()
+                .filter(|(_, node)| node.resource_type() == "model")
+                .filter(|(id, _)| baseline.node(id).is_none())
+                .map(|(id, _)| id.clone())
+                .collect();
+            // `removed`: baseline models absent from the current manifest (the
+            // deleted ghosts — the baseline−current set-diff).
+            let removed: Vec<NodeId> = baseline
+                .nodes()
+                .iter()
+                .filter(|(_, node)| node.resource_type() == "model")
+                .filter(|(id, _)| current.node(id).is_none())
+                .map(|(id, _)| id.clone())
+                .collect();
+            (modified, new, removed)
+        }
+    }
+}
+
+/// Fold the per-node line counts onto `graph` (cute-dbt#404 Slice C
+/// population), keyed by scope arm — the pr-diff arm sums the diff hunks for
+/// each node's file ([`pr_dag_lines_from_diff`]); the baseline arm diffs each
+/// node's `raw_code` old→new ([`pr_dag_lines_from_raw_code`]).
+fn populate_pr_dag_line_counts(
+    graph: &mut crate::domain::PrDagGraph,
+    current: &Manifest,
+    scope_input: &ScopeInput,
+) {
+    match scope_input {
+        ScopeInput::PrDiff { index } => {
+            populate_line_counts(graph, |node| {
+                let id = NodeId::new(&node.id);
+                let ofp = current.node(&id).and_then(Node::original_file_path);
+                pr_dag_lines_from_diff(ofp, index)
+            });
+        }
+        ScopeInput::Baseline { manifest, .. } => {
+            let baseline = manifest.as_ref();
+            populate_line_counts(graph, |node| {
+                let id = NodeId::new(&node.id);
+                let old = baseline.node(&id).and_then(Node::raw_code);
+                let new = current.node(&id).and_then(Node::raw_code);
+                pr_dag_lines_from_raw_code(old, new)
+            });
+        }
+    }
+}
+
 /// Resolve the macro-lens inline-body cap (cute-dbt#265 Slice D, founder
 /// D5) — the gen-time knob bounding how many impacted-model SQL bodies the
 /// experimental section server-renders inline.
@@ -1937,6 +2067,7 @@ fn render(
     pr_ref: Option<&PrRef>,
     seed_cards: &[SeedCard],
     seed_row_cap: usize,
+    pr_dag: Option<&PrDagPayload>,
 ) -> Result<(), io::Error> {
     render_report_with_externals(
         out,
@@ -1961,6 +2092,7 @@ fn render(
         pr_ref,
         seed_cards,
         seed_row_cap,
+        pr_dag,
     )
 }
 
