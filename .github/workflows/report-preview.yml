@@ -380,6 +380,14 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          # cute-dbt#393 — `--annotations` prints GitHub workflow-command
+          # annotations (`::warning file=,line=,title=cute-dbt: <id>::<rec>`)
+          # to stdout for the in-scope uncovered findings, which GitHub
+          # renders INLINE on this PR's Files-changed tab (zero auth, zero
+          # API call). The live self-dogfood of the #393 review-UX
+          # projection. CI-safe: without `--fail-on-uncovered` a Total-tier
+          # gap rides as `::warning` (never `::error`), so the exit code is
+          # unchanged — annotations only add inline context, never a gate.
           cargo run --quiet --locked --bin cute-dbt -- report \
             --manifest dbt-project/target/manifest.json \
             --pr-diff @target/report-preview/prdiff.patch \
@@ -387,6 +395,7 @@ jobs:
             --pr-url "$PR_URL" \
             --pr-title "$PR_TITLE" \
             --pr-number "$PR_NUMBER" \
+            --annotations \
             --out target/report-preview/dbt-project-report.html
           ls -l target/report-preview/dbt-project-report.html
 

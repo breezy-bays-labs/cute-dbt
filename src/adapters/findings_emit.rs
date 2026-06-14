@@ -24,8 +24,9 @@ use std::path::Path;
 
 use crate::adapters::cte_engine::parse_cte_graph;
 use crate::domain::{
-    CheckPolicy, EnvelopeMetadata, EnvelopeScope, Finding, FindingsEnvelope, HeuristicId, Manifest,
-    ModelInScopeSet, apply_check_policy, model_findings,
+    CheckPolicy, EnvelopeFinding, EnvelopeMetadata, EnvelopeScope, Finding, FindingAnchor,
+    FindingsEnvelope, HeuristicId, Manifest, ModelInScopeSet, ResolvedAnchor, apply_check_policy,
+    model_findings,
 };
 
 /// Collect the flat in-scope finding set the envelope reports over.
@@ -98,6 +99,46 @@ pub fn envelope_from_findings(
 ) -> FindingsEnvelope {
     let metadata = EnvelopeMetadata::new(cute_dbt_version, generated_at, scope);
     FindingsEnvelope::new(metadata, findings)
+}
+
+/// Assemble a [`FindingsEnvelope`] from an already-collected finding set,
+/// **populating each finding's reserved anchor slot** via `anchor_for`
+/// (cute-dbt#393 — completing the #261 one-resolver-two-projections arc).
+///
+/// The anchor-less twin of this is [`envelope_from_findings`]; this is the
+/// same builder except each [`EnvelopeFinding`]'s `anchor` is filled from
+/// the resolver output (the SAME
+/// [`resolve_finding_anchor`](crate::domain::resolve_finding_anchor) the
+/// `--annotations` emit consumes). A finding whose anchor does not resolve
+/// (its model file is not in the diff, or the run is the baseline arm with
+/// no diff index) keeps `anchor: None` — and an unpopulated anchor
+/// serializes to **zero** added bytes (the `skip_serializing_if` on every
+/// `FindingAnchor` field), so the committed envelope golden only grows the
+/// `anchor` objects that actually resolved.
+///
+/// `anchor_for` is the resolver bound to the run's manifest + diff index
+/// (the CLI passes a closure); a [`ResolvedAnchor`] maps into the wire
+/// [`FindingAnchor`] via its `From` impl.
+#[must_use]
+pub fn envelope_from_findings_anchored(
+    findings: Vec<Finding<HeuristicId>>,
+    cute_dbt_version: impl Into<String>,
+    generated_at: impl Into<String>,
+    scope: EnvelopeScope,
+    anchor_for: &impl Fn(&Finding<HeuristicId>) -> Option<ResolvedAnchor>,
+) -> FindingsEnvelope {
+    let metadata = EnvelopeMetadata::new(cute_dbt_version, generated_at, scope);
+    let entries = findings
+        .into_iter()
+        .map(|finding| {
+            let anchor = anchor_for(&finding).map(FindingAnchor::from);
+            EnvelopeFinding { finding, anchor }
+        })
+        .collect();
+    FindingsEnvelope {
+        metadata,
+        findings: entries,
+    }
 }
 
 /// Serialize the envelope to pretty (2-space) JSON with a trailing newline.
@@ -280,5 +321,74 @@ mod tests {
         let on_disk = fs::read_to_string(&path).expect("reads back");
         assert_eq!(on_disk, envelope_to_json(&envelope).expect("serializes"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- envelope anchor population (cute-dbt#393) -------------------
+
+    #[test]
+    fn anchored_builder_populates_each_finding_anchor_from_the_resolver() {
+        use crate::domain::{AnchorSide, ResolvedAnchor};
+
+        let manifest = manifest_with(vec![unbacked_unique_key_model()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.orders_rollup")]);
+        let findings = collect_in_scope_findings(&manifest, &models, &CheckPolicy::default());
+        // A resolver that always resolves to a fixed line.
+        let resolver = |_: &Finding<HeuristicId>| {
+            Some(ResolvedAnchor {
+                path: "models/orders_rollup.sql".to_owned(),
+                line: 9,
+                diff_context: AnchorSide::Modified,
+            })
+        };
+        let envelope = envelope_from_findings_anchored(
+            findings,
+            "0.1.0",
+            "2026-01-15",
+            EnvelopeScope::PrDiff { source: None },
+            &resolver,
+        );
+        assert_eq!(envelope.findings.len(), 1);
+        let anchor = envelope.findings[0]
+            .anchor
+            .as_ref()
+            .expect("anchor populated");
+        assert_eq!(anchor.path.as_deref(), Some("models/orders_rollup.sql"));
+        assert_eq!(anchor.line, Some(9));
+        // The wire shape nests the resolved anchor under `anchor`.
+        let value = serde_json::to_value(&envelope).expect("serializes");
+        assert_eq!(value["findings"][0]["anchor"]["line"], 9);
+        assert_eq!(value["findings"][0]["anchor"]["diff_context"], "modified");
+    }
+
+    #[test]
+    fn anchored_builder_leaves_unresolved_findings_anchor_less_and_byte_minimal() {
+        let manifest = manifest_with(vec![unbacked_unique_key_model()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.orders_rollup")]);
+        let findings = collect_in_scope_findings(&manifest, &models, &CheckPolicy::default());
+        // A resolver that resolves nothing (baseline arm / model not in diff).
+        let none_resolver = |_: &Finding<HeuristicId>| None;
+        let anchored = envelope_from_findings_anchored(
+            findings.clone(),
+            "0.1.0",
+            "2026-01-15",
+            EnvelopeScope::PrDiff { source: None },
+            &none_resolver,
+        );
+        // With no anchor resolved, the anchored builder produces the SAME
+        // bytes as the anchor-less builder — the `anchor` key is omitted
+        // entirely, so the committed golden only grows the anchors that
+        // actually resolved.
+        let plain = envelope_from_findings(
+            findings,
+            "0.1.0",
+            "2026-01-15",
+            EnvelopeScope::PrDiff { source: None },
+        );
+        assert!(anchored.findings.iter().all(|f| f.anchor.is_none()));
+        assert_eq!(
+            envelope_to_json(&anchored).expect("serializes"),
+            envelope_to_json(&plain).expect("serializes"),
+            "an all-None-anchor envelope is byte-identical to the anchor-less one"
+        );
     }
 }

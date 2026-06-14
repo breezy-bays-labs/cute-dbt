@@ -631,7 +631,12 @@
             "limit: 100 — failing-row reporting caps at 100 rows; the test still trips on the first failure, but the failure surface is truncated"
           ]
         }
-      ]
+      ],
+      "anchor": {
+        "path": "models/marts/analytics/fct_provider_metrics.sql",
+        "line": 50,
+        "diff_context": "modified"
+      }
     },
     {
       "check": "grain.unique-key-unbacked",

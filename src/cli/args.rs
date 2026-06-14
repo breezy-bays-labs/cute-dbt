@@ -293,6 +293,28 @@ pub struct ReportArgs {
     #[arg(long)]
     pub fail_on_uncovered: bool,
 
+    /// Print GitHub workflow-command annotations for the in-scope
+    /// uncovered findings to **stdout** at generation time (cute-dbt#393).
+    ///
+    /// Each annotatable finding emits a
+    /// `::warning file=<path>,line=<n>,title=cute-dbt: <check-id>::<recommendation>`
+    /// line that GitHub Actions renders **inline on the PR Files-changed
+    /// tab** — zero auth, zero API call, zero token, identical on public
+    /// and private repos. Tier → level: `Advisory` → `notice`, `High` →
+    /// `warning`, and a `Total`-tier gap → `error` when
+    /// `--fail-on-uncovered` is also set (else `warning`). Only findings
+    /// whose model file is in the `--pr-diff` (so a concrete `(path,
+    /// line)` resolves) are emitted inline; the rest stay summary-only.
+    /// GitHub renders at most ~10 annotations per step, so the emit is
+    /// capped with an honest `+N more` overflow notice.
+    ///
+    /// A gen-time `stdout` emit, never written into `report.html` — the
+    /// view-time zero-egress gate is untouched. Inert on the
+    /// `--baseline-manifest` arm (no diff hunks ⇒ no resolvable line ⇒ no
+    /// inline annotation).
+    #[arg(long)]
+    pub annotations: bool,
+
     /// Override the findings envelope's `metadata.generated_at` with a
     /// fixed `YYYY-MM-DD` date (cute-dbt#386).
     ///

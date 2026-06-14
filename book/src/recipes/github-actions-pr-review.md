@@ -128,6 +128,37 @@ dir (hence `mkdir -p _site` + `--out _site/report.html`) keeps the Pages
 publish in § 4 from pushing your **whole checkout** to the `gh-pages`
 branch — `publish_dir` points at `_site/`, not `.`.
 
+### Inline annotations on the Files-changed tab
+
+Add `--annotations` to the same invocation and cute-dbt prints **GitHub
+workflow-command annotations** to stdout for each in-scope uncovered
+finding it can pin to a changed line:
+
+```bash
+cute-dbt report \
+  --manifest dbt_project/target/manifest.json \
+  --pr-diff @diff.patch \
+  --project-root dbt_project \
+  --annotations \
+  --out _site/report.html
+```
+
+GitHub Actions renders those lines **inline on the PR's Files-changed
+tab** — no token, no API call, no permission scope; just printing them is
+enough, and it works identically on public and private repos (unlike
+SARIF, which is gated on private). Each line is
+`::warning file=<path>,line=<n>,title=cute-dbt: <check-id>::<recommendation>`,
+anchored at the model file's first changed line. The level follows the
+finding's tier: advisory → `notice`, high → `warning`, and a deterministic
+`Total`-tier gap → `error` **only when** you also pass
+`--fail-on-uncovered` (otherwise it rides as a `warning`, so `--annotations`
+alone never changes your exit code). A finding whose model file is not in
+the diff stays summary-only (there is no honest line to pin it to), and the
+emit is capped at GitHub's ~10-per-step limit with a `+N more` overflow
+notice pointing back at the full report. The annotations are a generation-
+time stdout emit — they are **never** written into `report.html`, so the
+report's zero-egress guarantee is untouched.
+
 ## 4. Pages preview (public repos)
 
 Copy this into `.github/workflows/cute-dbt-pr-review.yml`. Edit
