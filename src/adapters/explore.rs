@@ -1200,15 +1200,15 @@ fn macro_dir_partition(
             continue;
         };
         let path = node.original_file_path();
-        let folder = path
-            .and_then(|p| p.rsplit_once('/').map(|(dir, _)| dir.to_owned()))
-            .unwrap_or_else(|| match path {
+        let (folder, file) = match path {
+            Some(p) => p.rsplit_once('/').map_or_else(
                 // A path with no slash is a project-root file: group it
                 // under "." so it still mirrors the tree honestly.
-                Some(_) => ".".to_owned(),
-                None => MACRO_DIR_NO_PATH.to_owned(),
-            });
-        let file = path.and_then(|p| p.rsplit('/').next()).map(str::to_owned);
+                || (".".to_owned(), Some(p.to_owned())),
+                |(dir, file_name)| (dir.to_owned(), Some(file_name.to_owned())),
+            ),
+            None => (MACRO_DIR_NO_PATH.to_owned(), None),
+        };
         by_folder.entry(folder).or_default().push(MacroDirEntry {
             id: id.as_str().to_owned(),
             name: leaf_segment(id.as_str()).to_owned(),
