@@ -2041,25 +2041,27 @@ var is=function(){function e(e){return-e.tension*e.x-e.friction*e.v}function t(t
   // with the static macro-role dim, in place — never a re-render, never a
   // commit. `clearHighlight` clears it (the same .dim/.trace/.sel classes).
   function filterByModels(ids, label) {
-    var present = (ids || []).filter(function (id) {
+    // Resolve each id to its Cytoscape node ONCE (cute-dbt#433) — the prior
+    // form called cy.getElementById up to 3× per id (filter, union, select).
+    var present = [];
+    (ids || []).forEach(function (id) {
       var n = cy.getElementById(id);
-      return n && n.length;
+      if (n && n.length) { present.push({ id: id, node: n }); }
     });
     cy.batch(function () {
       cy.elements().removeClass("dim sel trace");
       if (!present.length) { return; }
       var set = cy.collection();
-      present.forEach(function (id) {
-        var n = cy.getElementById(id);
-        set = set.union(n).union(n.predecessors()).union(n.successors());
+      present.forEach(function (p) {
+        set = set.union(p.node).union(p.node.predecessors()).union(p.node.successors());
       });
       cy.elements().addClass("dim");
       set.removeClass("dim").addClass("trace");
-      present.forEach(function (id) { cy.getElementById(id).removeClass("dim").addClass("sel"); });
+      present.forEach(function (p) { p.node.removeClass("dim").addClass("sel"); });
     });
     highlighted = null;
     hideDetailCard();
-    activeFilter = { label: label, matched: present.slice() };
+    activeFilter = { label: label, matched: present.map(function (p) { return p.id; }) };
     notifyHighlight(null);
   }
 

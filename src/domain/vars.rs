@@ -1059,11 +1059,27 @@ pub fn project_var_inventory(current: &Manifest, def: &ProjectDefinition) -> Var
     }
     let (scans, footprint) = scan_models(current);
     let root = current.metadata().project_name();
+    // Resolve each scanned model's package ONCE (cute-dbt#433): the package
+    // depends only on the model, not the var, so the former per-var
+    // re-resolution inside `inventory_entry` was an O(V×M) manifest lookup +
+    // `NodeId` clone. Precompute the model → package map here in O(M) and
+    // hand it down; the inner loop becomes an O(1) borrow.
+    let model_pkgs: BTreeMap<&str, Option<&str>> = scans
+        .keys()
+        .map(|id| {
+            let pkg = current
+                .nodes()
+                .get(&crate::domain::manifest::NodeId::new(id.clone()))
+                .and_then(|n| n.package_name())
+                .or(root);
+            (id.as_str(), pkg)
+        })
+        .collect();
     let mut var_models: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut entries: Vec<VarInventoryEntry> = triples
         .into_iter()
         .map(|(name, scope, value)| {
-            inventory_entry(current, &scans, root, name, scope, value, &mut var_models)
+            inventory_entry(&scans, &model_pkgs, name, scope, value, &mut var_models)
         })
         .collect();
     entries.sort_by(|a, b| {
@@ -1084,9 +1100,8 @@ pub fn project_var_inventory(current: &Manifest, def: &ProjectDefinition) -> Var
 /// counts and append every literal-referencing model into the shared
 /// `var_models` filter index.
 fn inventory_entry(
-    current: &Manifest,
     scans: &BTreeMap<String, ModelScan>,
-    root: Option<&str>,
+    model_pkgs: &BTreeMap<&str, Option<&str>>,
     name: String,
     scope: VarScope,
     value: Value,
@@ -1099,11 +1114,9 @@ fn inventory_entry(
         ..VarInventoryEntry::default()
     };
     for (id, scan) in scans {
-        let model_pkg = current
-            .nodes()
-            .get(&crate::domain::manifest::NodeId::new(id.clone()))
-            .and_then(|n| n.package_name())
-            .or(root);
+        // O(1) borrow of the package resolved once in `project_var_inventory`
+        // (cute-dbt#433). Every scan id is present in `model_pkgs`.
+        let model_pkg = model_pkgs.get(id.as_str()).copied().flatten();
         if !scope_reaches(&entry.scope, model_pkg) {
             continue;
         }
