@@ -51,6 +51,38 @@ models:
       - name: status
         description: Order status.
 
+  # cute-dbt live-dogfood (PR #440) — the incremental-CTE-zone showcase.
+  # merge-strategy incremental keyed on event_id; the {% if is_incremental() %}
+  # block wraps a high-water + delta CTE pair (a real sub-structure, not a bare
+  # WHERE). unique+not_null back the merge key — a COVERED grain, the contrast
+  # to customer_order_days' deliberately uncovered composite grain above.
+  - name: order_events_enriched_incremental
+    description: >
+      Per-order event stream with a status weight. Incremental MERGE on
+      event_id; on incremental runs a high-water-mark CTE and a delta CTE
+      (inside the is_incremental block) restrict to events newer than the
+      loaded mark. The full build emits every event.
+    config:
+      tags: ['marts', 'incremental', 'events']
+      meta:
+        owner: analytics-eng
+        maturity: production
+        incremental_strategy: merge
+    columns:
+      - name: event_id
+        description: Order identifier; the incremental merge key.
+        tests:
+          - unique
+          - not_null
+      - name: customer_id
+        description: Customer who placed the order.
+      - name: event_at
+        description: Order date; the incremental high-water-mark column.
+      - name: status
+        description: Order status.
+      - name: status_weight
+        description: Numeric weight derived from status via a Jinja loop.
+
 unit_tests:
   # cute-dbt#164 dogfood — the pair below covers BOTH is_incremental()
   # branches (one test with the true override, one with none), the
@@ -131,3 +163,78 @@ unit_tests:
           customer_id: 2
           order_date: '2024-01-02'
           status: 'placed'
+
+  # cute-dbt live-dogfood (PR #440) — the enriched model's branch pair,
+  # mirroring the order_events_incremental pair above: one test drives the
+  # incremental CTE zone (overrides.macros.is_incremental: true), one the full
+  # build. The incremental test's `this` mock is the high-water-mark source.
+  - name: test_order_events_enriched_incremental_only_new_events
+    description: |
+      is_incremental() true: high_water reads max(event_at) from the mocked
+      `this` (2024-01-01); new_events keeps only strictly-newer events. EXPECT
+      is the single 2024-01-02 'placed' event the merge writes, with its
+      status_weight (placed -> 1).
+    model: order_events_enriched_incremental
+    overrides:
+      macros:
+        is_incremental: true
+    given:
+      - input: this
+        format: dict
+        rows:
+          - event_id: 1
+            customer_id: 1
+            event_at: '2024-01-01'
+            status: 'completed'
+            status_weight: 3
+      - input: ref('stg_orders')
+        format: dict
+        rows:
+          - order_id: 1
+            customer_id: 1
+            order_date: '2024-01-01'
+            status: 'completed'
+          - order_id: 2
+            customer_id: 2
+            order_date: '2024-01-02'
+            status: 'placed'
+    expect:
+      format: dict
+      rows:
+        - event_id: 2
+          customer_id: 2
+          event_at: '2024-01-02'
+          status: 'placed'
+          status_weight: 1
+
+  - name: test_order_events_enriched_incremental_full_build
+    description: |
+      The full-build branch: no overrides, so is_incremental() is false, the
+      high_water + new_events CTEs drop out, and the model emits every event
+      with its status_weight (completed -> 3, placed -> 1).
+    model: order_events_enriched_incremental
+    given:
+      - input: ref('stg_orders')
+        format: dict
+        rows:
+          - order_id: 1
+            customer_id: 1
+            order_date: '2024-01-01'
+            status: 'completed'
+          - order_id: 2
+            customer_id: 2
+            order_date: '2024-01-02'
+            status: 'placed'
+    expect:
+      format: dict
+      rows:
+        - event_id: 1
+          customer_id: 1
+          event_at: '2024-01-01'
+          status: 'completed'
+          status_weight: 3
+        - event_id: 2
+          customer_id: 2
+          event_at: '2024-01-02'
+          status: 'placed'
+          status_weight: 1

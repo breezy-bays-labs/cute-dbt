@@ -25,7 +25,9 @@ select
 from orders
 {% if is_incremental() %}
 -- delete+insert reprocesses whole key partitions: take every order day at
--- or after the loaded high-water mark. coalesce guards the empty target.
-where order_date >= (select coalesce(max(order_date), '1900-01-01') from {{ this }})
+-- or after the loaded high-water mark. The mark is the shared
+-- incremental_high_water_mark() macro (cute-dbt live-dogfood PR #440 — macro
+-- adoption, body change); its coalesce guards the empty target.
+where order_date >= {{ incremental_high_water_mark('order_date') }}
 {% endif %}
 group by customer_id, order_date
