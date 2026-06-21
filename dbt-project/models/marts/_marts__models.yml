@@ -242,6 +242,10 @@ unit_tests:
             , 1 as customer_id
             , cast('2024-01-01' as date) as order_date
             , 'completed' as status
+      # cute-dbt live-dogfood (PR #440): unit-test CHANGE — bump the mocked
+      # credit_card amount 10 -> 25 (sql-format given) paired with
+      # customer_lifetime_value 10 -> 25 (dict expect) below, so the report
+      # renders a sql-given + dict-expect cell diff on an EXISTING (on-main) test.
       - input: ref('stg_payments')
         format: sql
         rows: |
@@ -249,7 +253,7 @@ unit_tests:
             1 as payment_id
             , 1 as order_id
             , 'credit_card' as payment_method
-            , 10 as amount
+            , 25 as amount
     expect:
       format: dict
       rows:
@@ -257,7 +261,9 @@ unit_tests:
           first_name: 'Ada'
           last_name: 'Lovelace'
           number_of_orders: 1
-          customer_lifetime_value: 10
+          # cute-dbt live-dogfood (PR #440): expect cell 10 -> 25 (paired with
+          # the given amount change above).
+          customer_lifetime_value: 25
 
   # NOTE: test_orders_never_refunded_excludes_refunded_orders was REMOVED in
   # this PR alongside its model orders_never_refunded.sql (the REMOVED-model
@@ -295,3 +301,38 @@ unit_tests:
       rows: |
         order_id,customer_id,order_date,status,credit_card_amount,coupon_amount,bank_transfer_amount,gift_card_amount,amount
         1,1,2024-01-01,completed,20,0,0,0,20
+
+  # cute-dbt live-dogfood (PR #440) — a NEW unit test (added in this PR) on
+  # payment_audit, which previously had none, so the report shows a unit test
+  # being ADDED to a model. payment_audit groups stg_payments by method into a
+  # count + total; dict expect compares listed columns, rows match unordered.
+  - name: test_payment_audit_rolls_up_by_method
+    description: |
+      Two credit_card payments (20 + 30) roll up to count 2 / total 50; one
+      coupon payment (50) to count 1 / total 50.
+    model: payment_audit
+    given:
+      - input: ref('stg_payments')
+        format: dict
+        rows:
+          - payment_id: 1
+            order_id: 1
+            payment_method: 'credit_card'
+            amount: 20
+          - payment_id: 2
+            order_id: 2
+            payment_method: 'credit_card'
+            amount: 30
+          - payment_id: 3
+            order_id: 3
+            payment_method: 'coupon'
+            amount: 50
+    expect:
+      format: dict
+      rows:
+        - payment_method: 'credit_card'
+          payment_count: 2
+          total_amount: 50
+        - payment_method: 'coupon'
+          payment_count: 1
+          total_amount: 50

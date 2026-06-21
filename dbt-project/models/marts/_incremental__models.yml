@@ -139,6 +139,9 @@ unit_tests:
       high-water-mark filter drops out of the compiled SQL. EXPECT is every
       input row. Pairs with test_order_events_incremental_only_new_rows to
       exercise BOTH is_incremental() branches.
+      cute-dbt live-dogfood (PR #440): unit-test CHANGE — a third order row
+      (2024-01-03 'shipped') added to GIVEN and EXPECT, so the report renders
+      an added-row diff on both grids of an existing test.
     model: order_events_incremental
     given:
       - input: ref('stg_orders')
@@ -152,6 +155,10 @@ unit_tests:
             customer_id: 2
             order_date: '2024-01-02'
             status: 'placed'
+          - order_id: 3
+            customer_id: 3
+            order_date: '2024-01-03'
+            status: 'shipped'
     expect:
       format: dict
       rows:
@@ -163,6 +170,10 @@ unit_tests:
           customer_id: 2
           order_date: '2024-01-02'
           status: 'placed'
+        - order_id: 3
+          customer_id: 3
+          order_date: '2024-01-03'
+          status: 'shipped'
 
   # cute-dbt live-dogfood (PR #440) — the enriched model's branch pair,
   # mirroring the order_events_incremental pair above: one test drives the
