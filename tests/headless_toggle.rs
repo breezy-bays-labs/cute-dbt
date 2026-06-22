@@ -17208,3 +17208,183 @@ fn pr_comment_on_a_folded_line_goes_to_the_tail_not_inline() {
 
     let _ = tab.close(true);
 }
+
+// ===== cute-dbt#446 (S3) — bidirectional compiled-CTE↔code sync =====
+
+/// Render a single multi-CTE model report whose terminal node carries a
+/// real source map (`code_map.node_spans`), then return its `file://` URL.
+/// The model has two CTEs so the node spans occupy distinct line ranges in
+/// `code_map.compiled` — the line-flash + line-click both have something to
+/// target. Baseline mode (no diff) keeps the fixture minimal.
+fn render_code_map_report(filename: &str) -> String {
+    // A clean, multi-line compiled body: two import/transform CTEs feeding a
+    // final select. Newlines make the per-node spans land on distinct lines.
+    let compiled = "with src as (\n  select id, amount from raw_orders\n),\n\
+                    enriched as (\n  select id, amount * 2 as doubled from src\n)\n\
+                    select id, doubled from enriched";
+    let model = model_node_with_compiled("model.shop.orders", compiled);
+    let ut = simple_unit_test_for("orders");
+    let m = manifest(vec![model], vec![("unit_test.shop.orders.t", ut)]);
+    let in_scope: InScopeSet = std::iter::once("unit_test.shop.orders.t".to_owned()).collect();
+    let models: ModelInScopeSet = std::iter::once(NodeId::new("model.shop.orders")).collect();
+    let out = tmp(filename);
+    let _ = std::fs::remove_file(&out);
+    render_report(
+        &out,
+        &m,
+        &in_scope,
+        &models,
+        &InScopeSet::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "baseline.json",
+        ScopeSource::Baseline,
+        DEFAULT_REPORT_TITLE,
+        None,
+    )
+    .expect("render writes the report");
+    format!(
+        "file://{}",
+        out.to_str().expect("report path is valid UTF-8")
+    )
+}
+
+/// A minimal in-scope unit test targeting `model_bare` so the model renders.
+fn simple_unit_test_for(model_bare: &str) -> UnitTest {
+    UnitTest::new(
+        "t".to_owned(),
+        NodeId::new(model_bare),
+        vec![UnitTestGiven::new(
+            format!("ref('{model_bare}_src')"),
+            serde_json::json!([]),
+            None,
+            None,
+        )],
+        UnitTestExpect::new(serde_json::json!([]), None, None),
+        None,
+        DependsOn::default(),
+        None,
+        None,
+        None,
+    )
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn code_map_dag_to_code_flashes_the_selected_nodes_line_range() {
+    // cute-dbt#446 (S3, DAG→code): selecting a node through the #180 seam
+    // renders the source-map pane and flashes EXACTLY the lines the node's
+    // compiled span owns (`code_map.node_spans[id]`), scrolling them in.
+    let url = render_code_map_report("headless_code_map_dag_to_code.html");
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate code-map report");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-mermaid svg",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("Mermaid DAG SVG renders");
+
+    // The terminal node's span is known up front (the seam reads the live
+    // currentModel). Select it through __cuteSelectNode (the #180 seam the
+    // DAG click + finding pin both route through).
+    let _ = eval(&tab, "void window.__cuteSelectNode('(final select)')");
+
+    // The source-map pane renders the full compiled text as numbered lines.
+    assert!(
+        eval_bool(
+            &tab,
+            "document.querySelector('.dag-shelf-body .code-map-pre') !== null"
+        ),
+        "selecting a node renders the source-map pane",
+    );
+    let line_count = eval_i64(
+        &tab,
+        "document.querySelectorAll('.code-map-pre .code-line').length",
+    );
+    assert!(
+        line_count >= 7,
+        "the full compiled text renders one .code-line per source line: {line_count}"
+    );
+
+    // The terminal node's owned line range, read from the live payload.
+    let start = eval_i64(&tab, "window.__cuteNodeSpanLines('(final select)').start");
+    let end = eval_i64(&tab, "window.__cuteNodeSpanLines('(final select)').end");
+    assert!(
+        start >= 1 && end >= start,
+        "terminal span resolves to a real line range: {start}..{end}"
+    );
+
+    // EXACTLY the owned lines carry the flash class; no others do.
+    let flashed = eval(
+        &tab,
+        "Array.from(document.querySelectorAll('.code-map-pre .code-line.code-flash'))\
+         .map(function(l){return parseInt(l.getAttribute('data-line'),10);})",
+    );
+    let flashed: Vec<i64> = serde_json::from_value(flashed).expect("flashed lines is an array");
+    let expected: Vec<i64> = (start..=end).collect();
+    assert_eq!(
+        flashed, expected,
+        "exactly the terminal node's owned line range flashes (no more, no less)",
+    );
+
+    let _ = tab.close(true);
+}
+
+#[test]
+#[ignore = "requires Chrome; runs explicitly in the headless-zero-egress CI job via `-- --ignored`"]
+fn code_map_code_to_dag_selects_the_node_owning_the_clicked_line() {
+    // cute-dbt#446 (S3, code→DAG): clicking a source-map line selects the DAG
+    // node whose compiled span OWNS that line — routed through the #180
+    // in-place selection seam (opens the node-detail shelf for that node).
+    let url = render_code_map_report("headless_code_map_code_to_dag.html");
+    let browser = launch_browser();
+    let tab = browser.new_tab().expect("new tab");
+    tab.navigate_to(&url).expect("navigate code-map report");
+    tab.wait_until_navigated().expect("await navigation");
+    tab.wait_for_element_with_custom_timeout(
+        ".cte-dag-mermaid svg",
+        std::time::Duration::from_secs(15),
+    )
+    .expect("Mermaid DAG SVG renders");
+
+    // Open the pane (select any node first so the shelf is up).
+    let _ = eval(&tab, "void window.__cuteSelectNode('(final select)')");
+    assert!(
+        eval_bool(&tab, "document.querySelector('.code-map-pre') !== null"),
+        "the source-map pane is present",
+    );
+
+    // Pick a line OWNED by a non-terminal node so the click changes selection.
+    // The first CTE `src` owns lines 1-3 in the compiled text; line 2 is the
+    // SELECT inside it. Resolve the owning node id straight from the payload,
+    // then click that line and assert the shelf re-targets to it.
+    let owner_line2 = eval_string(&tab, "String(window.__cuteNodeOwningLine(2)||'')");
+    assert!(
+        !owner_line2.is_empty() && owner_line2 != "(final select)",
+        "line 2 is owned by a non-terminal CTE node: {owner_line2}",
+    );
+
+    let clicked = eval_bool(
+        &tab,
+        "(function(){var l=document.querySelector('.code-map-pre .code-line[data-line=\"2\"]');\
+          if(!l){return false;}l.dispatchEvent(new MouseEvent('click',{bubbles:true}));return true;})()",
+    );
+    assert!(clicked, "the line-2 row is present + clickable");
+
+    assert_eq!(
+        eval_string(
+            &tab,
+            "(document.querySelector('.dag-shelf-body .node-detail')||{getAttribute:function(){return ''}})\
+             .getAttribute('data-node-id')||''",
+        ),
+        owner_line2,
+        "clicking a line selects the DAG node whose compiled span owns it",
+    );
+
+    let _ = tab.close(true);
+}

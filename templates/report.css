@@ -1369,6 +1369,20 @@ html[data-style="swiss"] .degraded-chip { border-radius: 0; }
 }
 .cte-dag.pin-flash { animation: cute-pin-flash 1.4s ease-out; border-radius: var(--radius-sm); }
 
+/* source-map pane: bidirectional compiled-CTE↔code sync (cute-dbt#446, S3) */
+.code-map { margin-top: var(--space-3); }
+.code-map > summary { cursor: pointer; display: flex; align-items: baseline; gap: var(--space-2); }
+.code-map-hint { color: var(--text-muted); font-size: 0.85em; font-style: italic; }
+.code-map-pre .code-line { cursor: pointer; border-radius: var(--radius-sm); }
+/* the line currently owned by the selected node (static highlight) */
+.code-map-pre .code-line.code-line-owned { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+/* the flash run on (re)selection — fades the accent wash out */
+@keyframes cute-code-flash {
+  0%   { background: color-mix(in srgb, var(--accent) 38%, transparent); }
+  100% { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+}
+.code-map-pre .code-line.code-flash { animation: cute-code-flash 1.4s ease-out; }
+
 /* ============================================================================
    §9 PROJECT-DEFINITION PANEL (cute-dbt#266)
    The server-rendered "Project definition changed" callout: categorized
