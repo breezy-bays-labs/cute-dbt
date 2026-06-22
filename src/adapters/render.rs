@@ -3467,6 +3467,60 @@ enum TagRole {
     Other,
 }
 
+/// Fuzz seam (cute-dbt#464, Z3): drive the hand-rolled raw-zone scanner
+/// ([`locate_raw_zones`]) with adversarial `raw_code` text.
+///
+/// `raw_code` is cute-dbt's SECOND untrusted-input parser (after the
+/// `--pr-diff` patch parser fuzzed in cute-dbt#383): a malicious manifest can
+/// carry arbitrary bytes in a node's `raw_code`, fed straight into this
+/// hand-rolled `{%…%}`/`{{…}}`/`{#…#}` tag-boundary scanner. The scanner owns
+/// the whitespace-control / string-literal-aware / comment-swallowing edge
+/// cases minijinja's lexer would have handled for free (the cost of hand-roll,
+/// the design's §9 fuzz obligation), so it is exactly the org's named Q4 blind
+/// spot.
+///
+/// This `#[doc(hidden)]` re-export lets the `tests/fuzz_zone_scanner` bolero
+/// target (stable Rust, no nightly) feed it random bytes and assert the
+/// FAIL-CLOSED contract: the scan never panics / hangs, and a
+/// malformed/unbalanced tag stream degrades to an EMPTY result — never a
+/// fabricated zone. It returns a flattened, fully-`Eq` POD per located zone
+/// (`(kind_tag, raw_start_byte, raw_end_byte, block_id)`) so the fuzz target
+/// can assert DETERMINISM (the same bytes scan identically) and the structural
+/// invariant (every emitted span is non-empty + in-bounds) without reaching
+/// the private adapter `ZoneFact`/`SourceSpan` types. Not part of the v0.x
+/// public API surface — it exists solely so a test target outside the crate can
+/// reach the private scanner, the same internal-reach motivation
+/// [`crate::cli::fuzz_parse_unified_diff`] has.
+///
+/// See `.claude/rules/testing.md` (the **Fuzz** rung) for the Q4
+/// bring-into-shape context.
+#[doc(hidden)]
+#[must_use]
+pub fn fuzz_locate_raw_zones(raw_code: &str) -> Vec<(u8, u32, u32, u32)> {
+    locate_raw_zones(raw_code)
+        .into_iter()
+        .map(|z| {
+            // A stable tag per emitted ZoneKind: the wire never sees this; it
+            // only has to be deterministic so the fuzz target can compare two
+            // scans of the same input for equality.
+            // `ZoneKind` is `#[non_exhaustive]` but defined in THIS crate, so an
+            // exhaustive match here is intra-crate-complete; a future emitted
+            // variant deliberately breaks this site so determinism stays
+            // well-defined (the maintainer assigns its sentinel).
+            let kind_tag = match z.kind {
+                ZoneKind::IncrementalGuard => 0u8,
+                ZoneKind::ForLoop => 1u8,
+            };
+            (
+                kind_tag,
+                z.raw_span.start.byte,
+                z.raw_span.end.byte,
+                z.block_id,
+            )
+        })
+        .collect()
+}
+
 /// Hand-rolled tag-boundary scanner over `raw_code` (cute-dbt#448, Z1). Emits a
 /// [`ZoneFact`] per matched `{% if … %}…{% endif %}` / `{% for … %}…{% endfor %}`
 /// construct, pairing start↔end with a DEPTH-STACK (NOT first-`endif`-wins) so

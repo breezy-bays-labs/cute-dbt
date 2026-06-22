@@ -676,3 +676,102 @@ fn jaffle_shop_lineage_renders_seeds_as_typed_roots() {
         );
     }
 }
+
+// ── cute-dbt#464 (Z3): the dogfood RAW-ZONE VISIBILITY contract ──
+//
+// Z2 (#448) landed the scanner + projection with synthetic UNIT tests. Z3's
+// dogfood-alongside-every-feature obligation is that the zone map is VISIBLE in
+// a COMMITTED artifact: the playground manifest's `fct_encounters_incremental`
+// carries BOTH a Shape-A `{% for %}` loop INSIDE one CTE body AND a
+// `{% if is_incremental() %}` guard, so the regenerated playground golden
+// surfaces a real `code_map.raw_zones[]` with both zone kinds. This test pins
+// that the renderer projects them through the SAME public `ReportPayload` the
+// golden inlines — a mechanically-present-but-invisible feature would pass the
+// #448 unit tests yet fail HERE (L9: the claim is scoped to Shape A + the
+// incremental guard; Shape-B N-CTE is out of scope).
+#[test]
+fn playground_dogfood_model_surfaces_both_raw_zone_kinds() {
+    use cute_dbt::adapters::render::RawZonePayload;
+    use cute_dbt::domain::ZoneKind;
+
+    let current = load("playground-current.json");
+    let baseline = load("playground-baseline.json");
+    let comparator = StateComparator::body_only();
+    let in_scope = comparator.in_scope_unit_tests(&current, &baseline);
+    let models_in_scope = comparator.models_in_scope(&current, &baseline);
+    let payload = build_payload(
+        &current,
+        &in_scope,
+        &models_in_scope,
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        &HashMap::new(),
+        "playground-baseline.json",
+    );
+
+    // The dogfood model is a NEW (baseline-absent) incremental model, so it is
+    // in scope and renders its `code_map`.
+    let model = payload
+        .models
+        .iter()
+        .find(|m| m.name == "fct_encounters_incremental")
+        .expect("the dogfood incremental model renders in the playground report");
+    let code_map = model
+        .code_map
+        .as_ref()
+        .expect("a compiled model carries a code_map");
+    let zones: &[RawZonePayload] = &code_map.raw_zones;
+    assert_eq!(
+        zones.len(),
+        2,
+        "the dogfood model surfaces exactly two zones (Shape-A for-loop + \
+         incremental guard) — got {:?}",
+        zones
+            .iter()
+            .map(|z| (z.kind, z.presence))
+            .collect::<Vec<_>>(),
+    );
+
+    // The Shape-A `{% for %}` loop expands columns INSIDE the `source` CTE: its
+    // compiled tokens land STRICTLY nested in one CteBody span → Structural,
+    // bound to the containing node (never compiled_out, never a fabricated
+    // 1→1 edge to a sibling CTE).
+    let for_loop = zones
+        .iter()
+        .find(|z| z.kind == ZoneKind::ForLoop)
+        .expect("the Shape-A for-loop zone is visible in the golden");
+    assert_eq!(
+        for_loop.presence, "structural",
+        "a loop inside one CTE body is Structural (L9 Shape A)",
+    );
+    assert_eq!(
+        for_loop.node_id.as_deref(),
+        Some("source"),
+        "the Structural for-loop binds to its containing CTE node",
+    );
+    assert!(
+        code_map.node_spans.contains_key("source"),
+        "the bound node has a real CteBody span (the Structural contains_range \
+         anchor)",
+    );
+
+    // The `{% if is_incremental() %}` guard is the second visible zone: in this
+    // manifest its tokens compiled IN as a terminal WHERE, so it is located and
+    // bound (never a false claim either direction).
+    let guard = zones
+        .iter()
+        .find(|z| z.kind == ZoneKind::IncrementalGuard)
+        .expect("the incremental-guard zone is visible in the golden");
+    assert!(
+        guard.presence == "structural" || guard.presence == "compiled_in",
+        "the located guard is bound to a node, never a false compiled_out \
+         (got {})",
+        guard.presence,
+    );
+    assert!(
+        guard.node_id.is_some(),
+        "a located guard carries its owning node (compiled: Some ⇒ an edge)",
+    );
+}
