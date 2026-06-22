@@ -15,6 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::manifest::NodeId;
 use crate::domain::span::SourceSpan;
 
 /// SQL edge kind classified by the CTE engine.
@@ -460,6 +461,177 @@ impl CteEdge {
     }
 }
 
+// ---------------------------------------------------------------------
+// Intra-model column lineage (cute-dbt#447, CLL-2).
+//
+// Domain POD facts — std + serde only, written BACK by the CTE engine
+// (the cute-dbt#40 pattern; `sqlparser` is forbidden in `src/domain/` by
+// `tests/domain_clean_arch.rs`). The projection-provenance AST walk lives
+// in `cte_engine.rs` and rides the EXISTING single parse; it emits these
+// PODs the renderer/context layer then projects. Mirrors Fusion's open
+// `CllEdge { from_node, from_col, to_node, to_col, op }` flat directed-edge
+// shape, but with cute-dbt's honest `confidence` axis the warehouse-backed
+// Fusion engine does not need.
+// ---------------------------------------------------------------------
+
+/// Where a column lives. A [`ColumnRef`] is keyed by a TYPED node identity,
+/// never a bare `String` (v2 keys every span by a typed node id — a
+/// `SourceMapEntry`'s `node_id` is a `dag.nodes[].id`/[`NodeId`], not an
+/// untyped string). The two cases are distinct variants so the field can
+/// never silently mean two things:
+///   - `Intra` — a CTE/terminal node *within* one model's DAG (a
+///     `dag.nodes[].id`, i.e. a CTE alias or `TERMINAL_NODE_NAME`).
+///   - `Cross` — an upstream MODEL, for the Tier-3 cross-model edge
+///     (a manifest [`NodeId`]). Reserved; CLL-2 emits only `Intra` (the
+///     intra-model variant — cross-model is CLL-4).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColumnScope {
+    /// A CTE/terminal node within one model's DAG (a `dag.nodes[].id`).
+    Intra {
+        /// The stable engine node id (a CTE alias or `TERMINAL_NODE_NAME`).
+        node_id: String,
+    },
+    /// An upstream MODEL (cross-model, Tier 3 / CLL-4). Reserved.
+    Cross {
+        /// The upstream manifest model id.
+        model: NodeId,
+    },
+}
+
+/// A column within a [`ColumnScope`]. `scope` is the TYPED node identity —
+/// the v2 `SpanRole::Column { node_id, column }` reserved slot rendered as
+/// an edge endpoint, never an overloaded `String`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ColumnRef {
+    /// The node the column belongs to.
+    pub scope: ColumnScope,
+    /// The column name (lowercased to match the engine's case-folding).
+    pub column: String,
+}
+
+impl ColumnRef {
+    /// Construct an `Intra`-scoped column reference within one model's DAG.
+    #[must_use]
+    pub fn intra(node_id: impl Into<String>, column: impl Into<String>) -> Self {
+        Self {
+            scope: ColumnScope::Intra {
+                node_id: node_id.into(),
+            },
+            column: column.into(),
+        }
+    }
+}
+
+/// Recce's dbt-proven 5-way transformation vocabulary (NOT Fusion's three
+/// inconsistent layers). ONE canonical enum, stable for byte-identity
+/// goldens. `#[non_exhaustive]` — every future kind is an additive variant.
+///
+/// CLL-2 (the deterministic MVP) emits `PassThrough` and `Renamed` only;
+/// `Derived` is the deferred expression-walker extension (CLL-3 / #449),
+/// and `Source`/`JoinKey` are the cross-model / predicate kinds (CLL-4).
+/// They are defined now so the vocabulary is stable for goldens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ColumnEdgeKind {
+    /// `c.email AS email` — a direct copy, output name == input name.
+    PassThrough,
+    /// `c.email AS contact_email` — a copy under a new name.
+    Renamed,
+    /// `coalesce(a.x, b.y) AS z` — many-to-one through an expression
+    /// (DEFERRED to CLL-3; not produced by CLL-2).
+    Derived,
+    /// Terminates at a leaf table ref / `ref()` boundary (CLL-4).
+    Source,
+    /// Used in a join/filter predicate, not projected (CLL-4).
+    JoinKey,
+}
+
+/// The honest no-catalog confidence (never-a-false-claim) — tracks SQL
+/// EXPLICITNESS, not catalog presence. `#[non_exhaustive]` — additive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ColumnEdgeConfidence {
+    /// Qualified, single-source (via `sole_relation_leaf`), or disambiguated
+    /// via documented `columns[]` — the SQL states the input unambiguously.
+    Resolved,
+    /// Unqualified column under a multi-relation FROM → fanned out to all
+    /// candidate sources (the `SQLLineage` two-edge trick). Render dotted.
+    Ambiguous,
+    /// `SELECT *` / `q.*` over an UNKNOWN external relation (undocumented
+    /// `source()`), lateral / UNNEST / `json_extract` — the column list is not
+    /// statically enumerable. Render badged with the WHY. NEVER dropped.
+    Opaque,
+}
+
+/// ONE directed column-provenance edge: an output column `to_col` derives
+/// from an input column `from_col`, classified by `kind` + `confidence`.
+/// The bidirectional edge set serves all three affordances (context,
+/// downstream impact, upstream trace) from one structure — downstream
+/// impact is a reverse index over the set; upstream trace is a forward
+/// walk. Written by the engine onto [`CteGraph::with_column_edges`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnEdge {
+    /// Upstream (input) column.
+    pub from_col: ColumnRef,
+    /// Downstream (output) column.
+    pub to_col: ColumnRef,
+    /// The transformation kind.
+    pub kind: ColumnEdgeKind,
+    /// The honest confidence in this edge.
+    pub confidence: ColumnEdgeConfidence,
+}
+
+impl ColumnEdge {
+    /// Canonical constructor.
+    #[must_use]
+    pub fn new(
+        from_col: ColumnRef,
+        to_col: ColumnRef,
+        kind: ColumnEdgeKind,
+        confidence: ColumnEdgeConfidence,
+    ) -> Self {
+        Self {
+            from_col,
+            to_col,
+            kind,
+            confidence,
+        }
+    }
+}
+
+/// A column-defining span: the compiled byte range of one output column's
+/// projection item within the owning CTE/terminal body. The domain fact
+/// behind the v2 `SpanRole::Column { node_id, column }` `SourceMapEntry`
+/// (a sub-range of the owning `CteBody` entry). Written by the engine onto
+/// [`CteGraph::with_column_spans`] in the SAME retain-don't-recompute AST
+/// pass that retains the node spans (never a second parse); the domain
+/// `SourceMap` folds these into `SpanRole::Column` entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnSpan {
+    /// The owning node id (a CTE alias or `TERMINAL_NODE_NAME`).
+    pub node_id: String,
+    /// The output column name (lowercased).
+    pub column: String,
+    /// The compiled byte/line/col span of the projection item — a sub-range
+    /// of the owning `CteBody` entry's span.
+    pub span: SourceSpan,
+}
+
+impl ColumnSpan {
+    /// Canonical constructor.
+    #[must_use]
+    pub fn new(node_id: impl Into<String>, column: impl Into<String>, span: SourceSpan) -> Self {
+        Self {
+            node_id: node_id.into(),
+            column: column.into(),
+            span,
+        }
+    }
+}
+
 /// Directed acyclic graph of CTE nodes + edges produced by the CTE
 /// engine (PR 7) and consumed by the renderer (PR 8b).
 ///
@@ -503,6 +675,22 @@ pub struct CteGraph {
     /// `#[serde(skip)]` keeps the embedded report payload byte-stable.
     #[serde(skip)]
     subquery_facts: Vec<SubqueryFact>,
+    /// Intra-model column-provenance edges (cute-dbt#447, CLL-2) — one
+    /// per `(output column ← input column)` derivation across every CTE/
+    /// terminal body, classified by [`ColumnEdgeKind`] + confidence.
+    /// Engine-computed from the SAME single parse (the cute-dbt#40
+    /// retain-don't-recompute pattern); the renderer projects them into
+    /// the per-model `column_lineage.edges` section. Additive +
+    /// `skip_serializing_if = Vec::is_empty` so models with no resolvable
+    /// column edges stay byte-stable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    column_edges: Vec<ColumnEdge>,
+    /// Per-output-column compiled spans (cute-dbt#447, CLL-2) — the domain
+    /// facts the per-model `SourceMap` folds into `SpanRole::Column`
+    /// entries (sub-ranges of the owning `CteBody` entry). Engine-computed
+    /// in the same projection walk. Additive + `skip_serializing_if`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    column_spans: Vec<ColumnSpan>,
 }
 
 impl CteGraph {
@@ -518,6 +706,8 @@ impl CteGraph {
             is_recursive: false,
             left_join_facts: Vec::new(),
             subquery_facts: Vec::new(),
+            column_edges: Vec::new(),
+            column_spans: Vec::new(),
         }
     }
 
@@ -570,6 +760,47 @@ impl CteGraph {
     #[must_use]
     pub fn subquery_facts(&self) -> &[SubqueryFact] {
         &self.subquery_facts
+    }
+
+    /// Attach engine-computed intra-model column-provenance edges
+    /// (cute-dbt#447, CLL-2).
+    ///
+    /// Returns `self` with `column_edges` set. Called by the CTE engine
+    /// from the same parsed AST that feeds the cute-dbt#40 shape facts —
+    /// never a second parse.
+    #[must_use]
+    pub fn with_column_edges(mut self, column_edges: Vec<ColumnEdge>) -> Self {
+        self.column_edges = column_edges;
+        self
+    }
+
+    /// Intra-model column-provenance edges across every body in the query
+    /// (cute-dbt#447). Empty for graphs constructed without engine-computed
+    /// column lineage, and for models whose projections resolve to nothing
+    /// statically recoverable.
+    #[must_use]
+    pub fn column_edges(&self) -> &[ColumnEdge] {
+        &self.column_edges
+    }
+
+    /// Attach engine-computed per-output-column compiled spans
+    /// (cute-dbt#447, CLL-2) — the domain facts the per-model `SourceMap`
+    /// folds into `SpanRole::Column` entries.
+    ///
+    /// Returns `self` with `column_spans` set. Same single-parse pass as
+    /// [`Self::with_column_edges`].
+    #[must_use]
+    pub fn with_column_spans(mut self, column_spans: Vec<ColumnSpan>) -> Self {
+        self.column_spans = column_spans;
+        self
+    }
+
+    /// Per-output-column compiled spans across every body in the query
+    /// (cute-dbt#447). Each span is a sub-range of the owning `CteBody`
+    /// node's span.
+    #[must_use]
+    pub fn column_spans(&self) -> &[ColumnSpan] {
+        &self.column_spans
     }
 
     /// CTE nodes in declaration order.
@@ -922,5 +1153,76 @@ mod tests {
             !g.is_recursive(),
             "missing is_recursive field defaults to false"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // CLL-2 (cute-dbt#447) — column-lineage PODs.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn column_edge_serde_roundtrip_intra() {
+        let edge = ColumnEdge::new(
+            ColumnRef::intra("customers", "email"),
+            ColumnRef::intra("(final select)", "contact_email"),
+            ColumnEdgeKind::Renamed,
+            ColumnEdgeConfidence::Resolved,
+        );
+        let json = serde_json::to_string(&edge).unwrap();
+        let back: ColumnEdge = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, edge);
+    }
+
+    #[test]
+    fn column_scope_serializes_as_tagged_snake_case() {
+        let intra = ColumnScope::Intra {
+            node_id: "stg".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&intra).unwrap(),
+            r#"{"intra":{"node_id":"stg"}}"#
+        );
+        let cross = ColumnScope::Cross {
+            model: NodeId::new("model.proj.stg_orders"),
+        };
+        assert_eq!(
+            serde_json::to_string(&cross).unwrap(),
+            r#"{"cross":{"model":"model.proj.stg_orders"}}"#
+        );
+    }
+
+    #[test]
+    fn column_edges_omitted_when_empty() {
+        // Additive + skip_serializing_if = Vec::is_empty ⇒ a graph with no
+        // column edges has no `column_edges` key (byte-stability for goldens).
+        let g = CteGraph::new(Vec::new(), Vec::new());
+        let json = serde_json::to_string(&g).unwrap();
+        assert!(
+            !json.contains("column_edges"),
+            "empty column_edges must be omitted: {json}"
+        );
+        assert!(
+            !json.contains("column_spans"),
+            "empty column_spans must be omitted: {json}"
+        );
+    }
+
+    #[test]
+    fn graph_with_column_edges_and_spans_roundtrip() {
+        let edges = vec![ColumnEdge::new(
+            ColumnRef::intra("a", "x"),
+            ColumnRef::intra("(final select)", "x"),
+            ColumnEdgeKind::PassThrough,
+            ColumnEdgeConfidence::Resolved,
+        )];
+        let spans = vec![ColumnSpan::new("a", "x", src_span(8, 9))];
+        let g = CteGraph::new(Vec::new(), Vec::new())
+            .with_column_edges(edges.clone())
+            .with_column_spans(spans.clone());
+        assert_eq!(g.column_edges(), edges.as_slice());
+        assert_eq!(g.column_spans(), spans.as_slice());
+        let json = serde_json::to_string(&g).unwrap();
+        let back: CteGraph = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.column_edges(), edges.as_slice());
+        assert_eq!(back.column_spans(), spans.as_slice());
     }
 }

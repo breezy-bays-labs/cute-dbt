@@ -59,8 +59,9 @@ use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Location, Span};
 
 use crate::domain::{
-    CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, SourcePos, SourceSpan,
-    SubqueryFact, SubqueryKind,
+    ColumnEdge, ColumnEdgeConfidence, ColumnEdgeKind, ColumnRef, ColumnSpan, CteEdge, CteGraph,
+    CteNode, EdgeType, JoinKeyPair, LeftJoinFact, SourcePos, SourceSpan, SubqueryFact,
+    SubqueryKind,
 };
 
 /// Display name of the synthetic terminal node — the final `SELECT` that
@@ -121,6 +122,12 @@ fn parse_query(compiled_sql: &str) -> Result<Query, CteError> {
 /// DAG-safe regardless.
 fn build_graph(compiled_sql: &str, query: &Query) -> CteGraph {
     let ctes = cte_tables(query);
+    // CLL-2 (cute-dbt#447): the projection-provenance pass rides this SAME
+    // single parse — never a second one. It walks every body's projection,
+    // emits intra-model column edges (pass-through / rename) + per-column
+    // compiled spans, and the domain `SourceMap` folds the spans into
+    // `SpanRole::Column` entries. Both arms (WITH-bearing + WITH-less) run it.
+    let lineage = collect_column_lineage(compiled_sql, ctes, query);
     if ctes.is_empty() {
         // No CTE structure to visualise — but the body's LEFT JOIN
         // facts still surface (cute-dbt#173): the catalog C4 canonical
@@ -130,7 +137,9 @@ fn build_graph(compiled_sql: &str, query: &Query) -> CteGraph {
         let facts = compute_shape_facts(TERMINAL_NODE_NAME, &query.body);
         return CteGraph::default()
             .with_left_join_facts(facts.left_joins)
-            .with_subquery_facts(facts.subqueries);
+            .with_subquery_facts(facts.subqueries)
+            .with_column_edges(lineage.edges)
+            .with_column_spans(lineage.spans);
     }
     let recursive = query.with.as_ref().is_some_and(|with| with.recursive);
     let (nodes, left_joins, subqueries) = build_nodes(compiled_sql, ctes, query);
@@ -138,7 +147,9 @@ fn build_graph(compiled_sql: &str, query: &Query) -> CteGraph {
     let edges = build_edges(ctes, query, &index);
     let graph = CteGraph::new(nodes, edges)
         .with_left_join_facts(left_joins)
-        .with_subquery_facts(subqueries);
+        .with_subquery_facts(subqueries)
+        .with_column_edges(lineage.edges)
+        .with_column_spans(lineage.spans);
     if recursive {
         graph.with_recursive()
     } else {
@@ -206,6 +217,439 @@ fn build_nodes(
             .with_shape_facts(terminal_facts.is_simple, terminal_facts.leaf_refs),
     );
     (nodes, left_joins, subqueries)
+}
+
+// ---------------------------------------------------------------------
+// Intra-model column lineage — the projection-provenance pass
+// (cute-dbt#447, CLL-2).
+//
+// Tier-1 MVP = PASS-THROUGH (`c.email AS email`) + RENAME
+// (`c.email AS contact_email`) ONLY — the cases the existing projection
+// walker reaches (`Identifier` / aliased `CompoundIdentifier`). Expression
+// provenance (`coalesce(a.x, b.y) AS z`) is CLL-3: those items emit NO
+// `Derived` edge here (honest absence — never a fabricated edge).
+//
+// Confidence tracks SQL EXPLICITNESS (never-a-false-claim):
+//   - Resolved  — qualified ref, or single-source unqualified (sole_relation_leaf).
+//   - Ambiguous — unqualified column under a multi-relation FROM → FAN OUT
+//                 to every candidate source (never dropped).
+//   - Opaque    — `SELECT *` / `q.*` over an UNKNOWN external relation → a
+//                 virtual `*→*` edge, badged. A star over a known intra-model
+//                 CTE is NOT auto-Opaque: the design (column-lineage-feasibility
+//                 §3 Tier-1) scopes intra-model star-EXPANSION into CLL-2 — the
+//                 upstream CTE's output columns were resolved when the pass
+//                 walked that CTE's own projection, so a downstream
+//                 `select * from <known_cte>` EXPANDS into one Resolved
+//                 PassThrough edge per upstream output column. Opaque is
+//                 reserved STRICTLY for a star over an UNKNOWN external relation
+//                 (an undocumented `source()` / a leaf the resolver cannot
+//                 expand). Cross-model star expansion (over a `ref()` boundary)
+//                 stays CLL-4.
+// ---------------------------------------------------------------------
+
+/// The output of the projection-provenance pass: the intra-model column
+/// edges and the per-output-column compiled spans, both written back onto
+/// the [`CteGraph`].
+struct ColumnLineage {
+    edges: Vec<ColumnEdge>,
+    spans: Vec<ColumnSpan>,
+}
+
+/// A CTE's resolved output-column list (lowercased, in projection order) when
+/// the body is FULLY enumerable, else `None`. A `None` body — one whose
+/// projection carries an Opaque star or a positionally-anonymous expression —
+/// cannot have its star expanded downstream (we would have to fabricate the
+/// missing names), so a `select * from <that-cte>` honestly stays Opaque.
+type KnownCteColumns = HashMap<String, Option<Vec<String>>>;
+
+/// Walk every body's `select.projection` (each CTE + the terminal select),
+/// emitting pass-through / rename [`ColumnEdge`]s and per-column
+/// [`ColumnSpan`]s. Rides the single parse — never re-parses.
+///
+/// CTEs are walked in DECLARATION order so that by the time a body does
+/// `select * from <upstream_cte>` the upstream CTE's resolved output columns
+/// are already recorded in `known_cte_columns` — the design's intra-model
+/// star-EXPANSION (CLL-2), keyed off the columns the pass already resolved.
+fn collect_column_lineage(compiled_sql: &str, ctes: &[Cte], query: &Query) -> ColumnLineage {
+    let index = ByteIndex::new(compiled_sql);
+    let mut edges: Vec<ColumnEdge> = Vec::new();
+    let mut spans: Vec<ColumnSpan> = Vec::new();
+    let mut known_cte_columns: KnownCteColumns = HashMap::new();
+    for cte in ctes {
+        let name = cte_name(cte);
+        let outputs = collect_body_column_lineage(
+            name,
+            &cte.query.body,
+            compiled_sql,
+            &index,
+            &known_cte_columns,
+            &mut edges,
+            &mut spans,
+        );
+        known_cte_columns.insert(name.to_ascii_lowercase(), outputs);
+    }
+    collect_body_column_lineage(
+        TERMINAL_NODE_NAME,
+        &query.body,
+        compiled_sql,
+        &index,
+        &known_cte_columns,
+        &mut edges,
+        &mut spans,
+    );
+    ColumnLineage { edges, spans }
+}
+
+/// Column lineage for ONE body. Only a top-level `SetExpr::Select` is
+/// analysed — a `UNION`/`EXCEPT`/parenthesised query is not a single
+/// projection list (UNION-by-position is a deferred refinement), so it
+/// emits no edges (honest absence, never a fabricated claim).
+///
+/// Returns the body's resolved output-column descriptor (see
+/// [`KnownCteColumns`]) so the caller can register it for downstream star
+/// expansion. A non-`Select` body is non-enumerable (`None`).
+fn collect_body_column_lineage(
+    node_id: &str,
+    body: &SetExpr,
+    sql: &str,
+    index: &ByteIndex,
+    known_cte_columns: &KnownCteColumns,
+    edges: &mut Vec<ColumnEdge>,
+    spans: &mut Vec<ColumnSpan>,
+) -> Option<Vec<String>> {
+    let SetExpr::Select(select) = body else {
+        return None;
+    };
+    let aliases = select_alias_map(select);
+    let sole_leaf = sole_relation_leaf(select);
+    // Accumulate the body's output columns; `enumerable` flips to false the
+    // moment one item has no statically-knowable output name (an Opaque star
+    // or an anonymous expression) — then the whole body is non-enumerable.
+    let mut outputs: Vec<String> = Vec::new();
+    let mut enumerable = true;
+    for item in &select.projection {
+        let item_outputs = resolve_projection_item(
+            node_id,
+            item,
+            &aliases,
+            sole_leaf.as_deref(),
+            known_cte_columns,
+            sql,
+            index,
+            edges,
+            spans,
+        );
+        match item_outputs {
+            Some(cols) => outputs.extend(cols),
+            None => enumerable = false,
+        }
+    }
+    enumerable.then_some(outputs)
+}
+
+/// Resolve ONE `SelectItem` into its output column(s) + provenance edge(s) +
+/// span. Tier-1: pass-through / rename direct refs; a star over a KNOWN
+/// intra-model CTE EXPANDS into one Resolved edge per upstream output column;
+/// a star over an UNKNOWN external relation degrades honestly to `Opaque`;
+/// expressions (functions/CASE/…) emit a span but NO edge (CLL-3).
+///
+/// Returns this item's contribution to the body's output-column list:
+/// `Some(cols)` = the statically-knowable output name(s); `None` = the item
+/// has no enumerable output name (an Opaque star or an anonymous expression),
+/// which makes the owning body non-enumerable for downstream star expansion.
+#[allow(clippy::too_many_arguments)]
+fn resolve_projection_item(
+    node_id: &str,
+    item: &SelectItem,
+    aliases: &HashMap<String, String>,
+    sole_leaf: Option<&str>,
+    known_cte_columns: &KnownCteColumns,
+    sql: &str,
+    index: &ByteIndex,
+    edges: &mut Vec<ColumnEdge>,
+    spans: &mut Vec<ColumnSpan>,
+) -> Option<Vec<String>> {
+    match item {
+        // `expr AS alias` — the output name is the alias; the input is the
+        // column inside `expr`. Pass-through when name==col, else rename.
+        SelectItem::ExprWithAlias { expr, alias } => {
+            let output = alias.value.to_ascii_lowercase();
+            if let Some(input) = direct_column_ref(expr, aliases, sole_leaf) {
+                let kind = if input.column == output {
+                    ColumnEdgeKind::PassThrough
+                } else {
+                    ColumnEdgeKind::Renamed
+                };
+                push_edges(node_id, &output, input, kind, edges);
+                push_span(node_id, &output, item, sql, index, spans);
+            } else {
+                // An expression (coalesce/CASE/func) — honest absence: NO
+                // edge here (that is CLL-3). Still record the column span so
+                // the column→code sync can flash it.
+                push_span(node_id, &output, item, sql, index, spans);
+            }
+            // The output NAME is known regardless of whether an edge was
+            // emitted — the alias is explicit in the SQL.
+            Some(vec![output])
+        }
+        // A bare `col` or `q.col` projection — the output name is the column
+        // itself; always a pass-through.
+        SelectItem::UnnamedExpr(expr) => {
+            if let Some(input) = direct_column_ref(expr, aliases, sole_leaf) {
+                let output = input.column.clone();
+                push_edges(node_id, &output, input, ColumnEdgeKind::PassThrough, edges);
+                push_span(node_id, &output, item, sql, index, spans);
+                Some(vec![output])
+            } else {
+                // A bare non-column expression with no alias has no stable
+                // output name — no edge, no span, nothing to anchor — and it
+                // makes the body non-enumerable (we cannot name this column).
+                None
+            }
+        }
+        // `SELECT *` — over a KNOWN intra-model CTE this EXPANDS into one
+        // Resolved PassThrough edge per upstream output column (the design's
+        // CLL-2 intra-model star expansion). Over an UNKNOWN external relation
+        // (or a CTE whose own output is non-enumerable) it degrades honestly to
+        // a single virtual `*→*` Opaque edge — never a fabricated column list.
+        SelectItem::Wildcard(_) => resolve_star(
+            node_id,
+            sole_leaf,
+            known_cte_columns,
+            item,
+            sql,
+            index,
+            edges,
+            spans,
+        ),
+        // `q.*` — a qualified star over relation `q`. Same expansion/degrade
+        // rule, sourced from `q`'s resolved leaf.
+        SelectItem::QualifiedWildcard(kind, _) => {
+            let leaf = qualified_wildcard_leaf(kind, aliases);
+            resolve_star(
+                node_id,
+                leaf.as_deref(),
+                known_cte_columns,
+                item,
+                sql,
+                index,
+                edges,
+                spans,
+            )
+        }
+        // Spark's `expr AS (a, b, …)` multi-alias form — not a direct column
+        // reference; no Tier-1 edge (honest absence). No single stable output
+        // name ⇒ the body is non-enumerable.
+        SelectItem::ExprWithAliases { .. } => None,
+    }
+}
+
+/// Resolve a star (`*` or `q.*`) sourced from `source_leaf`. When the leaf
+/// names a KNOWN intra-model CTE with a fully-enumerable output-column list,
+/// EXPAND: emit one `PassThrough`/`Resolved` edge per upstream column
+/// (`<leaf>.<col> → <node_id>.<col>`) and return those columns. Otherwise
+/// (unknown external relation, or a CTE whose own projection was
+/// non-enumerable) degrade to a single virtual `*→*` Opaque edge and return
+/// `None` — the never-a-false-claim honest gap. The `*` column span is
+/// recorded either way so the column→code sync can flash the projection.
+#[allow(clippy::too_many_arguments)]
+fn resolve_star(
+    node_id: &str,
+    source_leaf: Option<&str>,
+    known_cte_columns: &KnownCteColumns,
+    item: &SelectItem,
+    sql: &str,
+    index: &ByteIndex,
+    edges: &mut Vec<ColumnEdge>,
+    spans: &mut Vec<ColumnSpan>,
+) -> Option<Vec<String>> {
+    push_span(node_id, "*", item, sql, index, spans);
+    if let Some(columns) = known_cte_output_columns(source_leaf, known_cte_columns) {
+        let leaf = source_leaf.expect("a known CTE was found, so the leaf is Some");
+        for column in &columns {
+            edges.push(ColumnEdge::new(
+                ColumnRef::intra(leaf, column.clone()),
+                ColumnRef::intra(node_id, column.clone()),
+                ColumnEdgeKind::PassThrough,
+                ColumnEdgeConfidence::Resolved,
+            ));
+        }
+        Some(columns)
+    } else {
+        push_star_edge(node_id, source_leaf, edges);
+        None
+    }
+}
+
+/// The fully-enumerable output columns of the CTE named `source_leaf`, when
+/// that leaf names a KNOWN intra-model CTE whose own projection was
+/// enumerable. `None` for an unknown external relation, an unqualified star
+/// (`source_leaf` is `None`), or a known CTE whose output was non-enumerable
+/// (it carried its own Opaque star / anonymous expression).
+fn known_cte_output_columns(
+    source_leaf: Option<&str>,
+    known_cte_columns: &KnownCteColumns,
+) -> Option<Vec<String>> {
+    let leaf = source_leaf?;
+    known_cte_columns.get(leaf).cloned().flatten()
+}
+
+/// A resolved input column reference for the Tier-1 cases — the qualifier
+/// (when present) maps through `aliases`; an unqualified column resolves
+/// against the sole relation, or fans out (handled by the caller via
+/// [`InputCol::candidates`]).
+struct InputCol {
+    /// Candidate source node ids the column could come from. One ⇒ Resolved;
+    /// many ⇒ Ambiguous (fan out). The qualified case has exactly one.
+    candidates: Vec<String>,
+    column: String,
+    confidence: ColumnEdgeConfidence,
+}
+
+/// Extract the direct input column of a projection expression for the
+/// Tier-1 cases ONLY: a bare `Identifier` or an aliased/qualified
+/// `CompoundIdentifier`. Returns `None` for any expression
+/// (function/CASE/binary-op/…) — those are CLL-3's honest absence.
+fn direct_column_ref(
+    expr: &Expr,
+    aliases: &HashMap<String, String>,
+    sole_leaf: Option<&str>,
+) -> Option<InputCol> {
+    match expr {
+        // `col` — unqualified. Single-source ⇒ Resolved against the sole
+        // leaf; multi-source ⇒ Ambiguous fan-out to every candidate.
+        Expr::Identifier(ident) => {
+            let column = ident.value.to_ascii_lowercase();
+            if let Some(leaf) = sole_leaf {
+                return Some(InputCol {
+                    candidates: vec![leaf.to_owned()],
+                    column,
+                    confidence: ColumnEdgeConfidence::Resolved,
+                });
+            }
+            // Multi-source (or zero-source) ⇒ fan out to every candidate
+            // relation, all Ambiguous. De-duplicated + ordered (BTreeSet) so
+            // the emitted edge order is deterministic for goldens.
+            let candidates: Vec<String> = aliases
+                .values()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if candidates.is_empty() {
+                None
+            } else {
+                Some(InputCol {
+                    candidates,
+                    column,
+                    confidence: ColumnEdgeConfidence::Ambiguous,
+                })
+            }
+        }
+        // `q.col` — qualified. The qualifier resolves through `aliases` to a
+        // source leaf ⇒ Resolved. An unresolvable qualifier still yields the
+        // edge against the bare qualifier (Resolved — the SQL was explicit).
+        Expr::CompoundIdentifier(_) => {
+            let (qualifier, column) = qualified_column(expr)?;
+            let source = aliases.get(&qualifier).cloned().unwrap_or(qualifier);
+            Some(InputCol {
+                candidates: vec![source],
+                column,
+                confidence: ColumnEdgeConfidence::Resolved,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Push one edge per candidate source (fan-out for the Ambiguous case;
+/// exactly one for the Resolved case). Each edge is intra-model.
+fn push_edges(
+    node_id: &str,
+    output: &str,
+    input: InputCol,
+    kind: ColumnEdgeKind,
+    edges: &mut Vec<ColumnEdge>,
+) {
+    for source in input.candidates {
+        edges.push(ColumnEdge::new(
+            ColumnRef::intra(source, input.column.clone()),
+            ColumnRef::intra(node_id, output),
+            kind,
+            input.confidence,
+        ));
+    }
+}
+
+/// Push the virtual `*→*` Opaque edge for a `SELECT *` / `q.*` over an
+/// UNKNOWN external relation (the only case that reaches here — a star over a
+/// known intra-model CTE is expanded by [`resolve_star`] instead). The source
+/// node is the relation's leaf when known, else a synthetic `*` source.
+fn push_star_edge(node_id: &str, source_leaf: Option<&str>, edges: &mut Vec<ColumnEdge>) {
+    let source = source_leaf.unwrap_or("*");
+    edges.push(ColumnEdge::new(
+        ColumnRef::intra(source, "*"),
+        ColumnRef::intra(node_id, "*"),
+        ColumnEdgeKind::Source,
+        ColumnEdgeConfidence::Opaque,
+    ));
+}
+
+/// The leaf relation of a `q.*` qualified wildcard, resolved through the
+/// alias map. `None` for an expression-qualified wildcard.
+fn qualified_wildcard_leaf(
+    kind: &SelectItemQualifiedWildcardKind,
+    aliases: &HashMap<String, String>,
+) -> Option<String> {
+    let SelectItemQualifiedWildcardKind::ObjectName(name) = kind else {
+        return None;
+    };
+    let qualifier = name.0.last()?.as_ident()?.value.to_ascii_lowercase();
+    Some(aliases.get(&qualifier).cloned().unwrap_or(qualifier))
+}
+
+/// Record the compiled span of one projection item as a [`ColumnSpan`] for
+/// `column` under `node_id` — a sub-range of the owning body. Degraded
+/// spans (empty / out-of-bounds) are dropped (degrade, not lie), so the
+/// `SpanRole::Column` entry is simply absent.
+fn push_span(
+    node_id: &str,
+    column: &str,
+    item: &SelectItem,
+    sql: &str,
+    index: &ByteIndex,
+    spans: &mut Vec<ColumnSpan>,
+) {
+    let Some(source_span) = span_to_source_span(item.span(), sql, index) else {
+        return;
+    };
+    spans.push(ColumnSpan::new(
+        node_id,
+        column.to_ascii_lowercase(),
+        source_span,
+    ));
+}
+
+/// Convert a sqlparser [`Span`] into a domain [`SourceSpan`], or `None` when
+/// the span is degraded — a line-0 sentinel (`start.line == 0 ||
+/// end.line == 0`, sqlparser's "no span") or an invalid byte range
+/// (`start > end || end > sql.len()`). The degrade-not-lie boundary: a
+/// fabricated span would point the column→code sync at the wrong bytes, so an
+/// absent span is the honest answer. Split out of [`push_span`] so the guard
+/// is unit-testable with synthetic spans (no parser round-trip needed).
+fn span_to_source_span(span: Span, sql: &str, index: &ByteIndex) -> Option<SourceSpan> {
+    if span.start.line == 0 || span.end.line == 0 {
+        return None;
+    }
+    let start = index.byte_of(sql, span.start);
+    let end = index.byte_of(sql, span.end);
+    if start > end || end > sql.len() {
+        return None;
+    }
+    Some(SourceSpan {
+        start: loc_to_pos(span.start, start),
+        end: loc_to_pos(span.end, end),
+    })
 }
 
 /// Engine-computed structural facts about a query body
@@ -2489,6 +2933,417 @@ mod tests {
             Some("unrefunded"),
             "the sole outer relation may itself be a CTE — the detector \
              binds it through the simple-FROM closure"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // CLL-2 (cute-dbt#447) — intra-model column edges (pass-through /
+    // rename) + the `SpanRole::Column` sub-range spans.
+    // -----------------------------------------------------------------
+
+    /// Find every edge whose `to_col` is `(node_id, column)` in declaration
+    /// order — the resolver's output for one projected column.
+    fn edges_to<'a>(g: &'a CteGraph, node_id: &str, column: &str) -> Vec<&'a ColumnEdge> {
+        g.column_edges()
+            .iter()
+            .filter(|e| e.to_col == ColumnRef::intra(node_id, column))
+            .collect()
+    }
+
+    #[test]
+    fn column_lineage_pass_through_resolved() {
+        // `c.email AS email` — output name == input column ⇒ PassThrough,
+        // qualified ⇒ Resolved; the qualifier resolves through select_alias_map.
+        let g = graph(
+            "WITH customers AS (SELECT 1 AS email) \
+             SELECT c.email AS email FROM customers c",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "email");
+        assert_eq!(edges.len(), 1, "exactly one resolved input");
+        let e = edges[0];
+        assert_eq!(e.from_col, ColumnRef::intra("customers", "email"));
+        assert_eq!(e.kind, ColumnEdgeKind::PassThrough);
+        assert_eq!(e.confidence, ColumnEdgeConfidence::Resolved);
+    }
+
+    #[test]
+    fn column_lineage_rename_resolved() {
+        // `c.email AS contact_email` — output != input ⇒ Renamed/Resolved.
+        let g = graph(
+            "WITH customers AS (SELECT 1 AS email) \
+             SELECT c.email AS contact_email FROM customers c",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "contact_email");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].from_col, ColumnRef::intra("customers", "email"));
+        assert_eq!(edges[0].kind, ColumnEdgeKind::Renamed);
+        assert_eq!(edges[0].confidence, ColumnEdgeConfidence::Resolved);
+    }
+
+    #[test]
+    fn column_lineage_single_source_unqualified_resolved() {
+        // Unqualified `email` over a SOLE relation ⇒ Resolved (sole_relation_leaf).
+        let g = graph(
+            "WITH customers AS (SELECT 1 AS email) \
+             SELECT email FROM customers",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "email");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].from_col, ColumnRef::intra("customers", "email"));
+        assert_eq!(edges[0].kind, ColumnEdgeKind::PassThrough);
+        assert_eq!(edges[0].confidence, ColumnEdgeConfidence::Resolved);
+    }
+
+    #[test]
+    fn column_lineage_ambiguous_fan_out_never_dropped() {
+        // Unqualified `status` under a multi-relation FROM ⇒ fan out to EVERY
+        // candidate source, all Ambiguous, never dropped.
+        let g = graph(
+            "WITH orders AS (SELECT 1 AS status), refunds AS (SELECT 2 AS status) \
+             SELECT status AS status FROM orders, refunds",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "status");
+        assert_eq!(edges.len(), 2, "fanned out to both candidate sources");
+        let froms: std::collections::BTreeSet<_> =
+            edges.iter().map(|e| e.from_col.column.clone()).collect();
+        assert_eq!(froms, ["status".to_owned()].into_iter().collect());
+        let sources: std::collections::BTreeSet<_> = edges
+            .iter()
+            .map(|e| match &e.from_col.scope {
+                crate::domain::ColumnScope::Intra { node_id } => node_id.clone(),
+                crate::domain::ColumnScope::Cross { .. } => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            sources,
+            ["orders".to_owned(), "refunds".to_owned()]
+                .into_iter()
+                .collect()
+        );
+        assert!(
+            edges
+                .iter()
+                .all(|e| e.confidence == ColumnEdgeConfidence::Ambiguous),
+            "every fan-out edge is Ambiguous"
+        );
+    }
+
+    #[test]
+    fn column_lineage_opaque_star_over_unknown_external() {
+        // `SELECT *` over an undocumented external source ⇒ a virtual `*→*`
+        // edge, Opaque, never a fabricated column list.
+        let g = graph("SELECT * FROM raw_external_thing");
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "*");
+        assert_eq!(edges.len(), 1, "one virtual star edge");
+        let e = edges[0];
+        assert_eq!(e.from_col.column, "*");
+        assert_eq!(e.to_col.column, "*");
+        assert_eq!(e.confidence, ColumnEdgeConfidence::Opaque);
+        assert_eq!(e.kind, ColumnEdgeKind::Source);
+        assert_eq!(
+            e.from_col,
+            ColumnRef::intra("raw_external_thing", "*"),
+            "the star sources from the (unknown) external relation leaf"
+        );
+    }
+
+    #[test]
+    fn column_lineage_star_over_known_cte_expands_not_opaque() {
+        // never-a-false-claim: `select * from <known_cte>` is NOT Opaque — the
+        // upstream CTE's output columns were resolved when the pass walked it,
+        // so the star EXPANDS into one Resolved PassThrough edge per column.
+        // This mirrors jaffle-shop's compiled `stg_customers`
+        // (`… renamed as (select id as customer_id, …) select * from renamed`).
+        let g = graph(
+            "WITH renamed AS ( \
+                SELECT id AS customer_id, \
+                       trim(first_name) AS first_name, \
+                       trim(last_name) AS last_name \
+                FROM source \
+             ) \
+             SELECT * FROM renamed",
+        );
+        // The false `renamed.* → (final select).*` Opaque edge is GONE.
+        let star_edges = edges_to(&g, TERMINAL_NODE_NAME, "*");
+        assert!(
+            star_edges.is_empty(),
+            "no virtual `*→*` edge for a star over a known CTE — it expands"
+        );
+        assert!(
+            g.column_edges()
+                .iter()
+                .all(|e| e.confidence != ColumnEdgeConfidence::Opaque
+                    || e.from_col.column != "*"
+                    || !matches!(
+                        &e.from_col.scope,
+                        crate::domain::ColumnScope::Intra { node_id } if node_id == "renamed"
+                    )),
+            "the renamed.* Opaque edge must not exist (never-a-false-claim)"
+        );
+        // One Resolved PassThrough edge per upstream output column.
+        for column in ["customer_id", "first_name", "last_name"] {
+            let edges = edges_to(&g, TERMINAL_NODE_NAME, column);
+            assert_eq!(
+                edges.len(),
+                1,
+                "expanded `{column}` has exactly one upstream edge"
+            );
+            let e = edges[0];
+            assert_eq!(
+                e.from_col,
+                ColumnRef::intra("renamed", column),
+                "`{column}` traces back to the renamed CTE's same-named column"
+            );
+            assert_eq!(e.kind, ColumnEdgeKind::PassThrough);
+            assert_eq!(
+                e.confidence,
+                ColumnEdgeConfidence::Resolved,
+                "a star over a KNOWN CTE is Resolved, never Opaque"
+            );
+        }
+    }
+
+    #[test]
+    fn column_lineage_qualified_star_over_known_cte_expands() {
+        // `q.*` over a known CTE expands the same way (sourced through the
+        // alias map), Resolved per-column — never Opaque.
+        let g = graph(
+            "WITH renamed AS (SELECT 1 AS a, 2 AS b) \
+             SELECT r.* FROM renamed r",
+        );
+        assert!(
+            edges_to(&g, TERMINAL_NODE_NAME, "*").is_empty(),
+            "no virtual `*→*` edge for a qualified star over a known CTE"
+        );
+        for column in ["a", "b"] {
+            let edges = edges_to(&g, TERMINAL_NODE_NAME, column);
+            assert_eq!(edges.len(), 1, "expanded `{column}`");
+            assert_eq!(edges[0].from_col, ColumnRef::intra("renamed", column));
+            assert_eq!(edges[0].kind, ColumnEdgeKind::PassThrough);
+            assert_eq!(edges[0].confidence, ColumnEdgeConfidence::Resolved);
+        }
+    }
+
+    #[test]
+    fn column_lineage_star_over_cte_with_opaque_star_stays_opaque() {
+        // The honest gap: a star over a CTE whose OWN projection is a star over
+        // an unknown external relation is non-enumerable — we cannot list its
+        // columns, so the downstream star degrades to Opaque (never fabricated).
+        // This mirrors jaffle-shop's `source as (select * from raw_customers)`.
+        let g = graph(
+            "WITH source AS (SELECT * FROM raw_external_thing) \
+             SELECT * FROM source",
+        );
+        // source's own star over the unknown external stays Opaque.
+        let source_star = edges_to(&g, "source", "*");
+        assert_eq!(source_star.len(), 1);
+        assert_eq!(source_star[0].confidence, ColumnEdgeConfidence::Opaque);
+        assert_eq!(
+            source_star[0].from_col,
+            ColumnRef::intra("raw_external_thing", "*")
+        );
+        // The terminal star over `source` cannot expand (source is
+        // non-enumerable) ⇒ it ALSO stays an honest Opaque `*→*` edge.
+        let term_star = edges_to(&g, TERMINAL_NODE_NAME, "*");
+        assert_eq!(term_star.len(), 1, "one honest Opaque star edge");
+        assert_eq!(term_star[0].confidence, ColumnEdgeConfidence::Opaque);
+        assert_eq!(term_star[0].from_col, ColumnRef::intra("source", "*"));
+    }
+
+    #[test]
+    fn column_lineage_derived_not_produced_honest_absence() {
+        // `coalesce(a.x, b.y) AS z` is an Expr::Function — CLL-2 emits NO
+        // Derived edge (that is CLL-3); honest absence, never a fabricated edge.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x), b AS (SELECT 2 AS y) \
+             SELECT coalesce(a.x, b.y) AS z FROM a, b",
+        );
+        assert!(
+            edges_to(&g, TERMINAL_NODE_NAME, "z").is_empty(),
+            "no Derived edge for an expression in CLL-2"
+        );
+        assert!(
+            g.column_edges()
+                .iter()
+                .all(|e| e.kind != ColumnEdgeKind::Derived),
+            "no Derived edge is ever produced by CLL-2"
+        );
+        // But the column span IS recorded so column→code sync can flash it.
+        assert!(
+            g.column_spans()
+                .iter()
+                .any(|cs| cs.node_id == TERMINAL_NODE_NAME && cs.column == "z"),
+            "the derived column still carries a span for the sync layer"
+        );
+    }
+
+    #[test]
+    fn column_lineage_downstream_reverse_index() {
+        // B (downstream impact): a reverse index over the SAME edge set — no
+        // new parse. Changing `customers.email` reaches `contact_email`.
+        let g = graph(
+            "WITH customers AS (SELECT 1 AS email) \
+             SELECT c.email AS contact_email FROM customers c",
+        );
+        let downstream: Vec<_> = g
+            .column_edges()
+            .iter()
+            .filter(|e| e.from_col == ColumnRef::intra("customers", "email"))
+            .map(|e| e.to_col.clone())
+            .collect();
+        assert_eq!(
+            downstream,
+            vec![ColumnRef::intra(TERMINAL_NODE_NAME, "contact_email")]
+        );
+    }
+
+    #[test]
+    fn column_lineage_upstream_trace_dead_ends_at_ref_boundary() {
+        // C (intra-model upstream trace): walk an output column backward over
+        // the edge set; it dead-ends at the first leaf-table boundary (the
+        // `ref()` leaf has no intra-model upstream edge).
+        let g = graph(
+            "WITH stg AS (SELECT id FROM raw_source) \
+             SELECT s.id AS id FROM stg s",
+        );
+        // terminal.id <- stg.id
+        let up1: Vec<_> = g
+            .column_edges()
+            .iter()
+            .filter(|e| e.to_col == ColumnRef::intra(TERMINAL_NODE_NAME, "id"))
+            .map(|e| e.from_col.clone())
+            .collect();
+        assert_eq!(up1, vec![ColumnRef::intra("stg", "id")]);
+        // stg.id <- raw_source.id (the leaf boundary). No edge whose source is
+        // raw_source.id (it is outside the model — dead end).
+        let beyond_leaf: Vec<_> = g
+            .column_edges()
+            .iter()
+            .filter(|e| e.to_col == ColumnRef::intra("raw_source", "id"))
+            .collect();
+        assert!(
+            beyond_leaf.is_empty(),
+            "upstream trace dead-ends at the ref boundary"
+        );
+    }
+
+    #[test]
+    fn column_spans_are_subranges_of_owning_cte_body() {
+        // The `SpanRole::Column` span MUST be contained within the owning
+        // CteBody node's span (contains_range), so the column anchor resolves
+        // under the node anchor.
+        let sql = "WITH customers AS (SELECT 1 AS email) \
+                   SELECT c.email AS contact_email FROM customers c";
+        let g = graph(sql);
+        let term_span = g
+            .nodes()
+            .iter()
+            .find(|n| n.name() == TERMINAL_NODE_NAME)
+            .and_then(|n| n.source_span())
+            .copied()
+            .expect("terminal node has a span");
+        let col = g
+            .column_spans()
+            .iter()
+            .find(|cs| cs.node_id == TERMINAL_NODE_NAME && cs.column == "contact_email")
+            .expect("contact_email has a column span");
+        assert!(
+            term_span.contains_range(&col.span),
+            "column span {:?} must be a sub-range of the owning CteBody {:?}",
+            col.span,
+            term_span
+        );
+        // And the span byte-slices to the projection-item text.
+        let slice = &sql[col.span.start.byte as usize..col.span.end.byte as usize];
+        assert_eq!(slice, "c.email AS contact_email");
+    }
+
+    #[test]
+    fn degraded_spans_are_dropped_not_fabricated() {
+        // The degrade-not-lie boundary guard in `span_to_source_span` (the
+        // column-span path, distinct from `slice_or_fallback`'s node-span
+        // path): an empty (line-0 sentinel) or inverted byte range yields NO
+        // span — never a fabricated one that would mis-anchor the column→code
+        // sync. Kills the boundary-guard mutant on this strict-CRAP module by
+        // driving each REACHABLE degrade path plus a valid control. (The
+        // `end > sql.len()` clause is a belt-and-braces guard: `byte_of` itself
+        // already clamps every offset to `sql.len()`, so it is unreachable
+        // through this caller — exercised here only via the valid control's
+        // upper-bound equality.)
+        let sql = "select a from t"; // 15 bytes, single line
+        let index = ByteIndex::new(sql);
+        let loc = |line, col| Location::new(line, col);
+
+        // Line-0 sentinel on either endpoint ⇒ dropped.
+        assert!(
+            span_to_source_span(Span::new(loc(0, 1), loc(1, 4)), sql, &index).is_none(),
+            "a line-0 start (sqlparser's no-span) is dropped"
+        );
+        assert!(
+            span_to_source_span(Span::new(loc(1, 1), loc(0, 1)), sql, &index).is_none(),
+            "a line-0 end is dropped"
+        );
+
+        // Inverted byte range (start > end) ⇒ dropped. col 10 > col 2 on the
+        // same line, so byte(start) > byte(end).
+        assert!(
+            span_to_source_span(Span::new(loc(1, 10), loc(1, 2)), sql, &index).is_none(),
+            "an inverted byte range is dropped"
+        );
+
+        // Control: a valid in-bounds, ordered span IS retained and byte-slices
+        // back to the source — proving the guard rejects only the degrades, and
+        // that a span ending exactly at sql.len() is NOT dropped (the
+        // `end > sql.len()` clause is `>`, not `>=`).
+        let ok = span_to_source_span(Span::new(loc(1, 1), loc(1, 16)), sql, &index)
+            .expect("a valid span is retained");
+        let slice = &sql[ok.start.byte as usize..ok.end.byte as usize];
+        assert_eq!(
+            slice, "select a from t",
+            "the retained span (ending at sql.len()) slices to the whole source"
+        );
+        assert_eq!(
+            ok.end.byte as usize,
+            sql.len(),
+            "an end exactly at sql.len() is retained (guard is `>`, not `>=`)"
+        );
+    }
+
+    #[test]
+    fn column_lineage_canonical_vocab_is_stable_snake_case() {
+        // The Recce 5-way vocabulary serializes to its stable wire strings —
+        // goldens depend on these never drifting.
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeKind::PassThrough).unwrap(),
+            "\"pass_through\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeKind::Renamed).unwrap(),
+            "\"renamed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeKind::Derived).unwrap(),
+            "\"derived\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeKind::Source).unwrap(),
+            "\"source\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeKind::JoinKey).unwrap(),
+            "\"join_key\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeConfidence::Resolved).unwrap(),
+            "\"resolved\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeConfidence::Ambiguous).unwrap(),
+            "\"ambiguous\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeConfidence::Opaque).unwrap(),
+            "\"opaque\""
         );
     }
 }

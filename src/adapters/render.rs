@@ -67,17 +67,18 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, BlockDiff, ChangeAxes, CheckId, CheckPolicy, ColumnContext, CommentsView,
-    ConfigAttribution, CteGraph, DEFAULT_SEED_ROW_CAP, DiffLine, DiffLineKind, EdgeType, Finding,
-    FixtureTable, FixtureTableDiff, GovernanceFacts, HeuristicId, HookChangeFacts,
-    HookManifestPresence, InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet,
-    ModelState, ModelYamlOutcome, Node, NodeId, NormalizedDiffIndex, PrDagGraph, PrRef,
-    ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition, ProjectFacts,
-    ProjectFallbackReason, SeedCard, SourceMap, SourceNode, SourceSpan, SpanRole, TestMetadata,
-    Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock,
-    VarAttribution, VarChangeFacts, VarReference, VarScanFootprint, ZoneKind, apply_check_policy,
-    column_contexts, macro_blast_radius, model_findings, reconstruct_macro_sql_diff,
-    resolve_target_model, resolve_tested_model, table_from_manifest_rows,
+    BANNER_EMPTY_SCOPE, BlockDiff, ChangeAxes, CheckId, CheckPolicy, ColumnContext, ColumnEdge,
+    CommentsView, ConfigAttribution, CteGraph, DEFAULT_SEED_ROW_CAP, DiffLine, DiffLineKind,
+    EdgeType, Finding, FixtureTable, FixtureTableDiff, GovernanceFacts, HeuristicId,
+    HookChangeFacts, HookManifestPresence, InScopeSet, Instrument, MacroIdentity, Manifest,
+    ModelInScopeSet, ModelState, ModelYamlOutcome, Node, NodeId, NormalizedDiffIndex, PrDagGraph,
+    PrRef, ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition,
+    ProjectFacts, ProjectFallbackReason, SeedCard, SourceMap, SourceNode, SourceSpan, SpanRole,
+    TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides,
+    UnitTestYamlBlock, VarAttribution, VarChangeFacts, VarReference, VarScanFootprint, ZoneKind,
+    apply_check_policy, column_contexts, macro_blast_radius, model_findings,
+    reconstruct_macro_sql_diff, resolve_target_model, resolve_tested_model,
+    table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -330,6 +331,14 @@ pub struct CodeMapPayload {
     /// fills it).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub raw_zones: Vec<RawZonePayload>,
+    /// Derived: the `SpanRole::Column` entries (cute-dbt#447, CLL-2) — each
+    /// output column's compiled span, keyed `"node_id\u{1f}column"` (unit
+    /// separator), a sub-range of the owning node span. The JS finds a column
+    /// anchor as a `partition_point` over these nested under the `CteBody`
+    /// entry. Empty (omitted) until CLL-2 resolves a column edge, so older
+    /// goldens stay byte-stable.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub column_spans: BTreeMap<String, SourceSpan>,
 }
 
 impl CodeMapPayload {
@@ -351,10 +360,20 @@ impl CodeMapPayload {
                 _ => None,
             })
             .collect();
+        // cute-dbt#447 (CLL-2) — flatten the `SpanRole::Column` entries into a
+        // string-keyed map for the JS column-anchor lookup. The unit-separator
+        // join keeps the (node_id, column) pair addressable in JS without a
+        // nested object, and BTreeMap ordering keeps the wire deterministic.
+        let column_spans = sm
+            .column_spans()
+            .into_iter()
+            .map(|((node_id, column), span)| (format!("{node_id}\u{1f}{column}"), span))
+            .collect();
         Self {
             compiled: sm.compiled.clone(),
             node_spans,
             raw_zones,
+            column_spans,
         }
     }
 }
@@ -375,8 +394,12 @@ pub struct ColumnLineagePayload {
     /// goldens stay byte-identical.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub context: BTreeMap<String, ColumnContext>,
-    // `edges: Vec<ColumnEdge>` — CLL-2 (#447) fills this; CLL-1 ships
-    // context-only, so the field does not exist on the wire yet.
+    /// Tier-1 intra-model column-provenance edges (cute-dbt#447, CLL-2) —
+    /// pass-through / rename derivations, each with an honest `confidence`.
+    /// Omitted when empty (a model with no statically-resolvable column
+    /// edges) so pre-#447 goldens stay byte-stable.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<ColumnEdge>,
 }
 
 /// Per-model entry in the JSON payload — mirrors the design's
@@ -3945,12 +3968,18 @@ fn build_model_payload(
     // manifest fold (per-column definition + tested-by). `context`-only
     // (no edges yet); omitted from the wire when the model has no documented
     // or tested columns, so pre-#446 goldens stay byte-stable.
+    // cute-dbt#446 (CLL-1) context + cute-dbt#447 (CLL-2) edges. The edges are
+    // the engine's intra-model column-provenance facts (pass-through / rename),
+    // read off the already-parsed graph — never a second parse. The whole
+    // section is omitted when BOTH halves are empty so pre-#446 goldens stay
+    // byte-stable.
     let column_lineage = {
         let context = column_contexts(current, model);
-        if context.is_empty() {
+        let edges = graph.column_edges().to_vec();
+        if context.is_empty() && edges.is_empty() {
             None
         } else {
-            Some(ColumnLineagePayload { context })
+            Some(ColumnLineagePayload { context, edges })
         }
     };
     let raw_sql = model

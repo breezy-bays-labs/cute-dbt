@@ -39,13 +39,26 @@ pub enum SpanRole {
         #[serde(rename = "zone_kind")]
         kind: ZoneKind,
     },
+    /// A column-defining region — the compiled span of one output column's
+    /// projection item, a SUB-RANGE of the owning `CteBody` entry
+    /// (cute-dbt#447, CLL-2). `node_id` is the owning `dag.nodes[].id`;
+    /// `column` is the output column name. The additive variant the v2 plan
+    /// reserved for column-level lineage (`CllEdge` shape) — no payload
+    /// reshape, just a new `SpanRole`. The JS finds a column anchor as a
+    /// `partition_point` over the `Column` entries nested under the owning
+    /// `CteBody` entry (the S3 sync layer generalized to N spans).
+    Column {
+        /// The owning node id (a CTE alias or the terminal node name).
+        node_id: String,
+        /// The output column name (lowercased to match the engine).
+        column: String,
+    },
     // ── reserved, additive; NO payload reshape when they land ──
     // ExternalRef    { node_id: String },     // explorer cross-model: a ref() call site
     //                                          //   (fusion's nodes_with_ref_location pattern)
     // Source         { node_id: String },     // a source() call site
     // MacroExpansion { macro_id: String },    // {{ my_macro() }} → its compiled output
     //                                          //   (fusion's MacroSpan, raw=body compiled=site)
-    // Column         { node_id: String, column: String }, // column-level lineage (CllEdge shape)
 }
 
 /// CONTROL-FLOW zone kinds ONLY. Macro expansion / lineage are [`SpanRole`]
@@ -185,6 +198,20 @@ impl SourceMap {
                 compiled: Some(whole_text_span(compiled)),
             });
         }
+        // CLL-2 (cute-dbt#447): fold the engine's per-output-column spans into
+        // `SpanRole::Column` entries — each a SUB-RANGE of an owning `CteBody`
+        // entry. The engine already constrains them to lie within their owning
+        // node's span (the projection items are inside the body it parsed), so
+        // this is a pure POD fold, never a second parse. Honest absence: a model
+        // with no resolvable column spans emits none.
+        entries.extend(graph.column_spans().iter().map(|cs| SourceMapEntry {
+            role: SpanRole::Column {
+                node_id: cs.node_id.clone(),
+                column: cs.column.clone(),
+            },
+            raw: None,
+            compiled: Some(cs.span),
+        }));
         Some(Self {
             compiled: compiled.to_owned(),
             entries,
@@ -227,6 +254,25 @@ impl SourceMap {
             .iter()
             .filter_map(|e| match (&e.role, e.compiled) {
                 (SpanRole::CteBody { node_id }, Some(c)) => Some((node_id.clone(), c)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The `Column` span table (cute-dbt#447, CLL-2) — every entry whose role
+    /// is `Column` and whose `compiled` span is present, keyed by
+    /// `(node_id, column)`. Each span is a sub-range of the owning `CteBody`
+    /// entry's span. The render projection (`CodeMapPayload.column_spans`) is
+    /// this map; the JS finds a column anchor as a `partition_point` over the
+    /// `Column` entries nested under the owning `CteBody` entry.
+    #[must_use]
+    pub fn column_spans(&self) -> std::collections::BTreeMap<(String, String), SourceSpan> {
+        self.entries
+            .iter()
+            .filter_map(|e| match (&e.role, e.compiled) {
+                (SpanRole::Column { node_id, column }, Some(c)) => {
+                    Some(((node_id.clone(), column.clone()), c))
+                }
                 _ => None,
             })
             .collect()
@@ -616,5 +662,63 @@ mod tests {
         );
         let sm = SourceMap::from_cte_graph(&graph, compiled, TERMINAL).unwrap();
         assert_eq!(sm.entries.len(), 2);
+    }
+
+    // ── CLL-2 (cute-dbt#447): SpanRole::Column entries are sub-ranges ──
+    #[test]
+    fn column_spans_fold_into_column_entries_as_subranges() {
+        use crate::domain::cte::ColumnSpan;
+
+        // Terminal CteBody [21,36); a column span [28,36) nested inside it.
+        let compiled = "with a as (select 1) select x from a";
+        let node_a = cte("a", span(5, 20), "a as (select 1)");
+        let node_t = cte(TERMINAL, span(21, 36), "select x from a");
+        let graph = CteGraph::new(vec![node_a, node_t], Vec::new())
+            .with_column_spans(vec![ColumnSpan::new(TERMINAL, "x", span(28, 36))]);
+        let sm = SourceMap::from_cte_graph(&graph, compiled, TERMINAL).unwrap();
+
+        // One Column entry landed, with the right (node_id, column) key.
+        let col_spans = sm.column_spans();
+        let key = (TERMINAL.to_owned(), "x".to_owned());
+        let col = col_spans.get(&key).expect("column span present");
+
+        // It is a sub-range of the owning terminal CteBody span (contains_range).
+        let body = sm
+            .node_spans()
+            .get(TERMINAL)
+            .copied()
+            .expect("terminal body span");
+        assert!(
+            body.contains_range(col),
+            "column span {col:?} must be contained in body {body:?}"
+        );
+
+        // The Column entry serializes with the kind tag + node_id + column.
+        let entry = sm
+            .entries
+            .iter()
+            .find(|e| matches!(&e.role, SpanRole::Column { column, .. } if column == "x"))
+            .expect("Column entry");
+        let json = serde_json::to_string(&entry.role).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"column","node_id":"(final select)","column":"x"}"#
+        );
+    }
+
+    #[test]
+    fn column_entries_absent_when_no_column_spans() {
+        // Honest absence: a graph with no column spans emits no Column entries,
+        // so the wire stays byte-stable for pre-CLL-2 models.
+        let compiled = "select 1 as x";
+        let graph = CteGraph::new(Vec::new(), Vec::new());
+        let sm = SourceMap::from_cte_graph(&graph, compiled, TERMINAL).unwrap();
+        assert!(sm.column_spans().is_empty());
+        assert!(
+            !sm.entries
+                .iter()
+                .any(|e| matches!(e.role, SpanRole::Column { .. })),
+            "no Column entries without column spans"
+        );
     }
 }
