@@ -170,7 +170,13 @@ impl SourceMap {
         // terminal CteBody entry over the whole faithful text. The span carries
         // honest line/col endpoints (1-based start; the line count is the
         // last-line number) so the JS gutter sync resolves it like any node.
-        if entries.is_empty() {
+        //
+        // Gate on GRAPH emptiness, NOT on `entries.is_empty()` (cute-dbt#445
+        // CodeRabbit): `entries` is also empty when the graph HAS nodes but
+        // every `source_span()` is `None` (the degrade-not-lie drop above). In
+        // that case synthesizing a whole-text terminal span would FABRICATE a
+        // claim the engine never made — preserve honest absence instead.
+        if graph.nodes().is_empty() {
             entries.push(SourceMapEntry {
                 role: SpanRole::CteBody {
                     node_id: terminal_node_name.to_owned(),
@@ -434,6 +440,29 @@ mod tests {
             keys,
             vec![TERMINAL.to_owned()],
             "the span-less node is dropped"
+        );
+    }
+
+    #[test]
+    fn with_graph_all_missing_spans_does_not_synthesize_terminal() {
+        // A graph with nodes whose source_span() are all None must NOT fabricate
+        // a whole-text terminal span (cute-dbt#445 CodeRabbit): the terminal
+        // synthesis is gated on GRAPH emptiness, not `entries.is_empty()`. The
+        // graph is non-empty here, so even though every node is span-less and
+        // dropped (degrade-not-lie), no terminal entry is fabricated — honest
+        // absence is preserved.
+        let compiled = "with a as (select 1) select * from a";
+        let node_a = CteNode::new("a", None, Some("a as (select 1)".to_owned()), None);
+        let node_t = CteNode::new(TERMINAL, None, Some("select * from a".to_owned()), None);
+        let graph = CteGraph::new(vec![node_a, node_t], vec![]);
+        let sm = SourceMap::from_cte_graph(&graph, compiled, TERMINAL).unwrap();
+        assert!(
+            sm.entries.is_empty(),
+            "no entry is fabricated when the graph has nodes but every span is None"
+        );
+        assert!(
+            sm.compiled_slices().is_empty(),
+            "no whole-text terminal slice is fabricated"
         );
     }
 

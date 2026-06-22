@@ -296,6 +296,7 @@ jobs:
 
           violations = []
           node_checks = 0
+          models_with_code_map = 0
           for fn in files:
               with open(fn, encoding="utf-8") as f:
                   html = f.read()
@@ -313,6 +314,7 @@ jobs:
                   code_map = model.get("code_map")
                   if code_map is None:
                       continue  # no compiled code -> invariant holds vacuously
+                  models_with_code_map += 1
                   span_keys = set(code_map.get("node_spans", {}).keys())
                   for node in model.get("dag", {}).get("nodes", []):
                       nid = node.get("id")
@@ -326,6 +328,14 @@ jobs:
           if not files:
               print("::error::source-map-completeness: no example reports matched — "
                     "the glob drifted; gate would silently pass over nothing")
+              sys.exit(1)
+          # FAIL CLOSED: the committed examples are KNOWN to carry
+          # code_map-bearing models, so executing zero checks means a
+          # regression dropped code_map from every compiled model (or the DAG
+          # went empty) — the gate would otherwise report a silent false pass.
+          if models_with_code_map == 0 or node_checks == 0:
+              print("::error::source-map-completeness: executed zero code_map DAG "
+                    "checks; gate is not asserting the intended invariant")
               sys.exit(1)
           if violations:
               for v in violations:

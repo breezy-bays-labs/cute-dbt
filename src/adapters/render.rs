@@ -3911,7 +3911,7 @@ fn build_model_payload(
     // lone terminal entry for a WITH-less model), so the derived keys agree
     // with the DAG by construction.
     let source_map = SourceMap::from_cte_graph(&graph, compiled_code, TERMINAL_NODE_NAME);
-    let compiled_sql = build_compiled_sql(source_map.as_ref(), &bare_name, compiled_code);
+    let compiled_sql = build_compiled_sql(source_map.as_ref());
     let code_map = source_map.as_ref().map(CodeMapPayload::from_source_map);
     let raw_sql = model
         .raw_code()
@@ -4053,24 +4053,14 @@ fn endpoint_id(graph: &CteGraph, index: usize) -> String {
 /// byte-equal to the legacy per-node `raw_sql` slice by the S1 contract. The
 /// WITH-less model is ONE terminal `CteBody` entry over the whole text, so it
 /// keys by [`TERMINAL_NODE_NAME`] (NOT the model's bare name as v1's
-/// empty-graph branch did — the cute-dbt#445 key fix); `model_name` and
-/// `full_compiled_code` survive only as the no-source-map fallback (a model
-/// with no compiled code at all).
-fn build_compiled_sql(
-    source_map: Option<&SourceMap>,
-    model_name: &str,
-    full_compiled_code: &str,
-) -> BTreeMap<String, String> {
+/// empty-graph branch did — the cute-dbt#445 key fix).
+///
+/// `source_map` is `None` ONLY when the model has no compiled code at all
+/// (a seed/source — [`SourceMap::from_cte_graph`] returns `None` solely on an
+/// empty compiled string), so there is no slice to surface: the map is empty.
+fn build_compiled_sql(source_map: Option<&SourceMap>) -> BTreeMap<String, String> {
     match source_map {
         Some(sm) => sm.compiled_slices(),
-        // No compiled code → no source map. Preserve the legacy "surface
-        // SOMETHING" fallback keyed by the model name, but only on this
-        // genuinely-empty path (an uncompiled node still renders its card).
-        None if !full_compiled_code.is_empty() => {
-            let mut map = BTreeMap::new();
-            map.insert(model_name.to_owned(), full_compiled_code.to_owned());
-            map
-        }
         None => BTreeMap::new(),
     }
 }
