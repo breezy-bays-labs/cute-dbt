@@ -39,6 +39,15 @@ pattern ="src/adapters/cte_engine.rs"
 threshold = 15
 
 [[overrides]]
+# THE position/span vocabulary — the half-open byte primitives
+# (contains/contains_byte/contains_range/overlaps) + the empty-span guard
+# (cute-dbt#444). Off-by-one / underflow bugs here silently mis-bind a zone
+# to the wrong node or mis-slice compiled SQL, never crash — correctness-
+# load-bearing, strict.
+pattern ="src/domain/span.rs"
+threshold = 15
+
+[[overrides]]
 # Asset-inlining infra (PR 8a). The embedding logic is where bytes-vs-
 # templates accidents creep in.
 pattern ="src/adapters/asset_embed.rs"

@@ -15,6 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::span::SourceSpan;
+
 /// SQL edge kind classified by the CTE engine.
 ///
 /// Covers all structural relationships that can appear between CTEs:
@@ -41,35 +43,6 @@ pub enum EdgeType {
     UnionAll,
     /// `UNION` / `UNION DISTINCT` arm reference.
     UnionDistinct,
-}
-
-/// 1-based `(line, column)` span anchor; future use by the renderer to
-/// surface raw SQL spans in tooltips. Stored as a struct (not a tuple)
-/// so additive fields stay mechanical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Span {
-    line: u32,
-    column: u32,
-}
-
-impl Span {
-    /// Canonical constructor.
-    #[must_use]
-    pub fn new(line: u32, column: u32) -> Self {
-        Self { line, column }
-    }
-
-    /// 1-based line number.
-    #[must_use]
-    pub fn line(&self) -> u32 {
-        self.line
-    }
-
-    /// 1-based column number.
-    #[must_use]
-    pub fn column(&self) -> u32 {
-        self.column
-    }
 }
 
 /// One equi-join key pair recovered from a LEFT JOIN's `ON` clause —
@@ -331,8 +304,16 @@ impl SubqueryFact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CteNode {
     name: String,
-    #[serde(default)]
-    span: Option<Span>,
+    /// The retained byte/line range of this node's slice within the
+    /// model's compiled SQL — the `name AS ( … )` extent for a CTE body,
+    /// or the post-trim terminal-`SELECT` extent for the terminal node
+    /// (cute-dbt#444). `None` when the engine could not soundly locate the
+    /// span (empty / out-of-bounds → the same fallback path `raw_sql`
+    /// degrades through). A FACT computed by the CTE engine during the
+    /// single AST-parse pass, written back to this POD (the cute-dbt#40
+    /// pattern); the domain never pulls in `sqlparser`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_span: Option<SourceSpan>,
     #[serde(default)]
     raw_sql: Option<String>,
     #[serde(default)]
@@ -352,19 +333,21 @@ pub struct CteNode {
 impl CteNode {
     /// Canonical constructor.
     ///
-    /// `is_simple_from_shape` defaults to `false` and `body_leaf_table_refs`
-    /// to empty. Use [`Self::with_shape_facts`] to attach engine-computed
-    /// structural facts.
+    /// `source_span` is the retained compiled-SQL byte/line range of this
+    /// node's slice (cute-dbt#444), or `None` when the engine could not
+    /// soundly locate it. `is_simple_from_shape` defaults to `false` and
+    /// `body_leaf_table_refs` to empty. Use [`Self::with_shape_facts`] to
+    /// attach engine-computed structural facts.
     #[must_use]
     pub fn new(
         name: impl Into<String>,
-        span: Option<Span>,
+        source_span: Option<SourceSpan>,
         raw_sql: Option<String>,
         desc: Option<String>,
     ) -> Self {
         Self {
             name: name.into(),
-            span,
+            source_span,
             raw_sql,
             desc,
             is_simple_from_shape: false,
@@ -394,10 +377,15 @@ impl CteNode {
         &self.name
     }
 
-    /// Source-location anchor (for renderer tooltips); `None` in v0.1.
+    /// The retained compiled-SQL byte/line range of this node's slice —
+    /// the `name AS ( … )` extent for a CTE body, the post-trim terminal-
+    /// `SELECT` extent for the terminal node (cute-dbt#444). `None` when
+    /// the engine could not soundly locate the span (the same fallback the
+    /// raw-SQL slice degrades through). The `compiled[span.byte_range()]`
+    /// slice byte-equals [`Self::raw_sql`] by construction.
     #[must_use]
-    pub fn span(&self) -> Option<&Span> {
-        self.span.as_ref()
+    pub fn source_span(&self) -> Option<&SourceSpan> {
+        self.source_span.as_ref()
     }
 
     /// Raw SQL body of the CTE.
@@ -673,23 +661,33 @@ mod tests {
         assert_eq!(set.len(), 3);
     }
 
-    #[test]
-    fn span_constructor_and_getters() {
-        let s = Span::new(7, 12);
-        assert_eq!(s.line(), 7);
-        assert_eq!(s.column(), 12);
+    /// A `SourceSpan` over a single line, byte-offset endpoints — the
+    /// retained-fact shape the CTE engine writes onto a `CteNode`.
+    fn src_span(start_byte: u32, end_byte: u32) -> SourceSpan {
+        SourceSpan {
+            start: crate::domain::span::SourcePos {
+                line: 3,
+                col: 1,
+                byte: start_byte,
+            },
+            end: crate::domain::span::SourcePos {
+                line: 3,
+                col: end_byte - start_byte + 1,
+                byte: end_byte,
+            },
+        }
     }
 
     #[test]
     fn cte_node_constructor_and_getters() {
         let n = CteNode::new(
             "src_orders",
-            Some(Span::new(3, 1)),
+            Some(src_span(40, 64)),
             Some("select * from raw.orders".to_owned()),
             None,
         );
         assert_eq!(n.name(), "src_orders");
-        assert_eq!(n.span(), Some(&Span::new(3, 1)));
+        assert_eq!(n.source_span(), Some(&src_span(40, 64)));
         assert_eq!(n.raw_sql(), Some("select * from raw.orders"));
         assert!(n.desc().is_none(), "v0.1 always emits desc: None");
         assert!(
@@ -718,7 +716,7 @@ mod tests {
         let json = r#"{ "name": "x" }"#;
         let n: CteNode = serde_json::from_str(json).unwrap();
         assert_eq!(n.name(), "x");
-        assert!(n.span().is_none());
+        assert!(n.source_span().is_none());
         assert!(n.raw_sql().is_none());
         assert!(n.desc().is_none());
         assert!(!n.is_simple_from_shape());

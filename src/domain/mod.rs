@@ -58,6 +58,7 @@ pub mod preflight;
 pub mod project_def;
 pub mod scope;
 pub mod seed_card;
+pub mod span;
 pub mod state;
 pub mod unit_test;
 pub mod unit_test_table;
@@ -84,8 +85,7 @@ pub use config::{
     SeedsConfig,
 };
 pub use cte::{
-    CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, Span, SubqueryFact,
-    SubqueryKind,
+    CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, SubqueryFact, SubqueryKind,
 };
 pub use experimental::{
     DEFAULT_MACRO_BODY_CAP, EnabledExperiments, Experiment, ExperimentalConfig, ExperimentalError,
@@ -145,6 +145,7 @@ pub use scope::{
     select_in_scope, select_seeds_in_scope, widen_with_config_attributions,
 };
 pub use seed_card::SeedCard;
+pub use span::{SourcePos, SourceSpan};
 pub use state::{
     BANNER_EMPTY_SCOPE, BodyChecksumModifier, ConfigsModifier, ContractModifier, InScopeSet,
     MacrosModifier, ModelInScopeSet, ModifiedSet, ModifierKind, RelationModifier, SeedInScopeSet,

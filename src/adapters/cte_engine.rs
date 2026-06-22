@@ -59,7 +59,8 @@ use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Location, Span};
 
 use crate::domain::{
-    CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, SubqueryFact, SubqueryKind,
+    CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, SourcePos, SourceSpan,
+    SubqueryFact, SubqueryKind,
 };
 
 /// Display name of the synthetic terminal node — the final `SELECT` that
@@ -182,23 +183,26 @@ fn build_nodes(
     let mut nodes: Vec<CteNode> = ctes
         .iter()
         .map(|cte| {
-            let raw = slice_or_fallback(compiled_sql, &byte_index, cte.span(), || {
-                cte.query.to_string()
-            });
+            let (raw, source_span) =
+                slice_or_fallback(compiled_sql, &byte_index, cte.span(), || {
+                    cte.query.to_string()
+                });
             let facts = compute_shape_facts(cte_name(cte), &cte.query.body);
             left_joins.extend(facts.left_joins);
             subqueries.extend(facts.subqueries);
-            CteNode::new(cte_name(cte), None, Some(raw), None)
+            CteNode::new(cte_name(cte), source_span, Some(raw), None)
                 .with_shape_facts(facts.is_simple, facts.leaf_refs)
         })
         .collect();
-    let terminal_raw =
-        slice_terminal(compiled_sql, &byte_index, ctes).unwrap_or_else(|| query.body.to_string());
+    let (terminal_raw, terminal_span) = match slice_terminal(compiled_sql, &byte_index, ctes) {
+        Some((raw, span)) => (raw, Some(span)),
+        None => (query.body.to_string(), None),
+    };
     let terminal_facts = compute_shape_facts(TERMINAL_NODE_NAME, &query.body);
     left_joins.extend(terminal_facts.left_joins);
     subqueries.extend(terminal_facts.subqueries);
     nodes.push(
-        CteNode::new(TERMINAL_NODE_NAME, None, Some(terminal_raw), None)
+        CteNode::new(TERMINAL_NODE_NAME, terminal_span, Some(terminal_raw), None)
             .with_shape_facts(terminal_facts.is_simple, terminal_facts.leaf_refs),
     );
     (nodes, left_joins, subqueries)
@@ -825,24 +829,37 @@ fn push_leaf(factor: &TableFactor, refs: &mut Vec<String>) {
 /// 0.62 token spans — `closing_paren_token` reports
 /// `(Location(L, C), Location(L, C+1))` for the single-character `)`).
 ///
-/// Returns the fallback when the span is empty or yields an out-of-bounds
-/// range (defensive — sqlparser populates spans for every CTE we've
-/// observed, but the engine must never panic on a fixture).
+/// Returns `(text, Some(source_span))` on success, where `source_span`
+/// carries the 1-based line/col endpoints (from the sqlparser `Span`) plus
+/// the 0-based UTF-8 byte offsets (from [`ByteIndex`]) — the retained fact
+/// `build_nodes` attaches to the `CteNode` (cute-dbt#444). `sql[span.byte_range()]`
+/// byte-equals the returned text by construction.
+///
+/// Returns `(fallback(), None)` when the span is empty or yields an
+/// out-of-bounds range (defensive — sqlparser populates spans for every CTE
+/// we've observed, but the engine must never panic on a fixture, and a
+/// degraded span is `None` rather than a lie).
 fn slice_or_fallback<F: FnOnce() -> String>(
     sql: &str,
     index: &ByteIndex,
     span: Span,
     fallback: F,
-) -> String {
+) -> (String, Option<SourceSpan>) {
     if span.start.line == 0 || span.end.line == 0 {
-        return fallback();
+        return (fallback(), None);
     }
     let start = index.byte_of(sql, span.start);
     let end = index.byte_of(sql, span.end);
     if start > end || end > sql.len() {
-        return fallback();
+        return (fallback(), None);
     }
-    sql[start..end].to_owned()
+    // The non-terminal `CteBody` span is the untrimmed `name AS ( … )`
+    // range; its line/col endpoints come straight from the sqlparser `Span`.
+    let source_span = SourceSpan {
+        start: loc_to_pos(span.start, start),
+        end: loc_to_pos(span.end, end),
+    };
+    (sql[start..end].to_owned(), Some(source_span))
 }
 
 /// Slice the terminal `SELECT` — everything after the last CTE's
@@ -850,24 +867,59 @@ fn slice_or_fallback<F: FnOnce() -> String>(
 ///
 /// Starts at the byte position immediately past `)` so any comments or
 /// whitespace between the `WITH` clause and the final `SELECT` survive.
-/// Returns `None` when no CTEs are present (the caller falls back to the
-/// AST roundtrip, though `build_nodes` only fires this branch when at
-/// least one CTE exists).
-fn slice_terminal(sql: &str, index: &ByteIndex, ctes: &[Cte]) -> Option<String> {
+/// Returns `Some((text, source_span))` where `source_span.start.byte` is
+/// advanced PAST the same leading-trim prefix the text strips
+/// (`[',', '\n', '\r', ' ', '\t']`, cute-dbt#444 Blocker-1) so
+/// `sql[source_span.byte_range()]` byte-equals the trimmed text — NOT the
+/// raw closing-paren-end offset. The end endpoint is end-of-`sql`. Returns
+/// `None` when no CTEs are present (the caller falls back to the AST
+/// roundtrip, though `build_nodes` only fires this branch when at least one
+/// CTE exists).
+fn slice_terminal(sql: &str, index: &ByteIndex, ctes: &[Cte]) -> Option<(String, SourceSpan)> {
     let last = ctes.last()?;
     let close_end = last.closing_paren_token.0.span.end;
     if close_end.line == 0 {
         return None;
     }
-    let start = index.byte_of(sql, close_end);
-    if start > sql.len() {
+    let raw_start = index.byte_of(sql, close_end);
+    if raw_start > sql.len() {
         return None;
     }
-    Some(
-        sql[start..]
-            .trim_start_matches([',', '\n', '\r', ' ', '\t'])
-            .to_owned(),
-    )
+    let tail = &sql[raw_start..];
+    let trimmed = tail.trim_start_matches([',', '\n', '\r', ' ', '\t']);
+    // The post-trim start byte: raw_start advanced by the stripped prefix
+    // length (Blocker-1). `trimmed` is a suffix of `tail`, so the prefix
+    // length is `tail.len() - trimmed.len()`.
+    let start_byte = raw_start + (tail.len() - trimmed.len());
+    let source_span = SourceSpan {
+        start: index.pos_at(sql, start_byte),
+        end: index.pos_at(sql, sql.len()),
+    };
+    Some((trimmed.to_owned(), source_span))
+}
+
+/// The guarded `usize → u32` narrowing at the ONE ingestion boundary where
+/// a span byte offset becomes a [`SourcePos`] field (cute-dbt#444, Part I §5
+/// FIX 6) — fusion widened minijinja `u16 → u32` for exactly this
+/// silent-truncation class, so cute-dbt asserts the cast rather than
+/// trusting it. `u32::MAX` is the fail-closed fallback in release (a 4 GB
+/// model is not real); `debug_assert!` trips in tests.
+fn byte_u32(byte: usize) -> u32 {
+    u32::try_from(byte).unwrap_or_else(|_| {
+        debug_assert!(false, "span byte offset exceeds u32::MAX");
+        u32::MAX
+    })
+}
+
+/// Build a [`SourcePos`] from a sqlparser [`Location`] (1-based line/col)
+/// and an already-computed 0-based byte offset. Used for endpoints whose
+/// line/col the parser already reports.
+fn loc_to_pos(loc: Location, byte: usize) -> SourcePos {
+    SourcePos {
+        line: u32::try_from(loc.line).unwrap_or(u32::MAX),
+        col: u32::try_from(loc.column).unwrap_or(u32::MAX),
+        byte: byte_u32(byte),
+    }
 }
 
 /// Maps `(line, column)` to byte offsets in a SQL source string.
@@ -919,6 +971,30 @@ impl ByteIndex {
             }
         }
         line_start + line_text.len()
+    }
+
+    /// Inverse of [`Self::byte_of`]: the 1-based `(line, col)` and 0-based
+    /// `byte` [`SourcePos`] for a byte offset. Used for span endpoints the
+    /// parser does NOT report a `Location` for — the terminal node's
+    /// post-trim start (Blocker-1) and its end-of-`sql` endpoint
+    /// (cute-dbt#444). `col` is a 1-based unicode-char column, matching the
+    /// sqlparser `Location` convention `byte_of` consumes. A `byte` past
+    /// end-of-`sql` (only the saturating fallbacks reach here) clamps to the
+    /// last line; `byte` is recorded verbatim (guarded `usize → u32`).
+    fn pos_at(&self, sql: &str, byte: usize) -> SourcePos {
+        // `line_starts` is sorted ascending; the owning line is the last
+        // start `<= byte`. `partition_point` gives the count of starts
+        // `<= byte`; that count is the 1-based line number.
+        let clamped = byte.min(sql.len());
+        let line_no = self.line_starts.partition_point(|&s| s <= clamped).max(1);
+        let line_start = self.line_starts[line_no - 1];
+        // 1-based char column within the line.
+        let col = sql[line_start..clamped].chars().count() + 1;
+        SourcePos {
+            line: u32::try_from(line_no).unwrap_or(u32::MAX),
+            col: u32::try_from(col).unwrap_or(u32::MAX),
+            byte: byte_u32(byte),
+        }
     }
 }
 
@@ -1575,6 +1651,155 @@ mod tests {
             terminal.contains("-- final pass"),
             "comment between WITH-clause and final SELECT preserved, got:\n{terminal}"
         );
+    }
+
+    // ── cute-dbt#444: per-CTE SourceSpan retention ──────────────────────
+
+    /// TDD 1 — slice fidelity: `compiled[node.source_span().byte_range()]`
+    /// byte-equals the node's `raw_sql()` for EVERY node, pinned against the
+    /// comment-preserving fixture (`cte_slice_preserves_sql_comments`).
+    #[test]
+    fn retained_span_slices_byte_equal_raw_sql() {
+        let sql = "with stg AS (\n    -- pulling from raw.users\n    /* note: id only */\n    select id from raw.users\n)\n-- final pass\nselect * from stg";
+        let g = parse_cte_graph(sql).unwrap();
+        for node in g.nodes() {
+            let span = node
+                .source_span()
+                .unwrap_or_else(|| panic!("node `{}` retains a span", node.name()));
+            let raw = node.raw_sql().expect("node carries raw_sql");
+            assert_eq!(
+                &sql[span.byte_range()],
+                raw,
+                "compiled[span] byte-equals raw_sql for node `{}`",
+                node.name()
+            );
+        }
+    }
+
+    /// TDD 1 (multi-CTE) — the slice-fidelity invariant holds across CTE
+    /// bodies AND the terminal, with non-ASCII text in comments (the
+    /// char-vs-byte column path).
+    #[test]
+    fn retained_span_slices_byte_equal_with_unicode() {
+        let sql = "with a AS (\n  -- café ☕\n  select 1 AS id\n), b AS (select 2 AS id)\nselect * from a join b on a.id = b.id";
+        let g = parse_cte_graph(sql).unwrap();
+        assert_eq!(g.nodes().len(), 3, "two CTEs + terminal");
+        for node in g.nodes() {
+            let span = node.source_span().expect("span retained");
+            assert_eq!(
+                &sql[span.byte_range()],
+                node.raw_sql().unwrap(),
+                "node `{}` slice byte-equals raw_sql",
+                node.name()
+            );
+        }
+    }
+
+    /// TDD 2 (Blocker-1) — the TERMINAL node's `start.byte` is the POST-trim
+    /// offset: `compiled[span]` byte-equals the trimmed terminal text, NOT
+    /// the raw closing-paren-end (which would include the `\n-- final pass\n`
+    /// leading glue). The slice must START at the trimmed text's first byte.
+    #[test]
+    fn terminal_span_start_is_post_trim() {
+        let sql =
+            "with stg AS (\n    select id from raw.users\n)\n-- final pass\nselect * from stg";
+        let g = parse_cte_graph(sql).unwrap();
+        let terminal = &g.nodes()[1];
+        let span = terminal.source_span().expect("terminal span retained");
+        let raw = terminal.raw_sql().unwrap();
+        // The retained text equals the trimmed terminal (begins at the
+        // first non-trim char — here the `-- final pass` comment).
+        assert_eq!(&sql[span.byte_range()], raw);
+        assert!(
+            raw.starts_with("-- final pass"),
+            "terminal begins at the post-trim first byte, got:\n{raw}"
+        );
+        // The raw closing-paren-end byte (before trimming) points AT a
+        // newline; the post-trim start must be strictly greater.
+        let close_end = sql.find(")\n").unwrap() + 1; // byte just past `)`
+        assert!(
+            (span.start.byte as usize) > close_end,
+            "post-trim start ({}) advanced past the raw close-end ({close_end})",
+            span.start.byte
+        );
+        assert_eq!(
+            sql.as_bytes()[close_end],
+            b'\n',
+            "the raw close-end sits on the leading-trim newline"
+        );
+    }
+
+    /// TDD 3 — the terminal node's `end` endpoint reaches end-of-`sql`; its
+    /// `end.line` is the last line, derived by `ByteIndex::pos_at`.
+    #[test]
+    fn terminal_span_end_reaches_eof() {
+        let sql = "with stg AS (\n  select 1 AS id\n)\nselect * from stg\n";
+        let g = parse_cte_graph(sql).unwrap();
+        let span = g.nodes()[1].source_span().expect("terminal span");
+        assert_eq!(
+            span.end.byte as usize,
+            sql.len(),
+            "terminal end is end-of-sql"
+        );
+        let last_line = u32::try_from(sql.matches('\n').count() + 1).unwrap();
+        assert_eq!(
+            span.end.line, last_line,
+            "terminal end_line is the last line"
+        );
+    }
+
+    /// TDD 1/3 — line/col endpoints agree with the byte endpoints: slicing
+    /// from `pos_at(start.byte)` reproduces the same text and the recorded
+    /// line/col round-trip through `byte_of`-style reconstruction.
+    #[test]
+    fn span_line_col_agree_with_bytes() {
+        let sql = "with a AS (\n  select 1 AS id\n)\nselect * from a";
+        let g = parse_cte_graph(sql).unwrap();
+        let cte = &g.nodes()[0];
+        let span = cte.source_span().unwrap();
+        // start.line is 1 (the `with a AS (` is on line 1).
+        assert_eq!(span.start.line, 1, "CTE body span starts on line 1");
+        assert_eq!(span.start.col, 6, "CTE body span starts at the alias `a`");
+        assert!(span.start.byte < span.end.byte, "half-open, non-empty");
+    }
+
+    /// TDD 4 — fallback degrade: a node whose span the engine cannot soundly
+    /// locate carries `None`, never a fabricated/wrong span. A no-`WITH`
+    /// query produces no CTE nodes, so we exercise the empty-graph path and
+    /// the `slice_or_fallback` empty-span branch directly.
+    #[test]
+    fn empty_or_oob_span_degrades_to_none() {
+        // Empty span (line 0) ⇒ fallback text + None.
+        let sql = "select 1";
+        let idx = ByteIndex::new(sql);
+        let empty = Span {
+            start: Location { line: 0, column: 0 },
+            end: Location { line: 0, column: 0 },
+        };
+        let (text, span) = slice_or_fallback(sql, &idx, empty, || "FALLBACK".to_owned());
+        assert_eq!(text, "FALLBACK", "empty span yields the fallback text");
+        assert!(span.is_none(), "degraded span is None, never a lie");
+
+        // Inverted span (start strictly after end) ⇒ the `start > end`
+        // guard fires the fallback + None.
+        let inverted = Span {
+            start: Location { line: 1, column: 8 },
+            end: Location { line: 1, column: 2 },
+        };
+        let (text, span) = slice_or_fallback(sql, &idx, inverted, || "FB2".to_owned());
+        assert_eq!(text, "FB2", "inverted span yields the fallback text");
+        assert!(span.is_none(), "inverted span degrades to None");
+    }
+
+    /// TDD 7 — the `usize → u32` guard caps at `u32::MAX` (the tested
+    /// behavior). In a debug build `byte_u32` would `debug_assert!`, so this
+    /// exercises the in-range pass-through; the cap path is verified by
+    /// construction (the `unwrap_or_else` returns `u32::MAX`).
+    #[test]
+    fn byte_u32_guard_passes_in_range() {
+        assert_eq!(byte_u32(0), 0);
+        assert_eq!(byte_u32(123_456), 123_456);
+        assert_eq!(byte_u32(u32::MAX as usize), u32::MAX);
     }
 
     #[test]
