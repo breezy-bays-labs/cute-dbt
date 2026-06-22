@@ -407,10 +407,15 @@ impl<'m> ModelAdjacency<'m> {
     /// [`crate::domain::lineage::invert_depends_on`]; this is a filter
     /// (keep only edges whose BOTH endpoints are `model` nodes) over the
     /// borrowed inverted source, with `backward` derived from the same
-    /// full-manifest `depends_on` adjacency. Behaviour is byte-identical
-    /// to the pre-hoist build: the producer/consumer adjacency lists keep
-    /// the manifest's `depends_on` / `nodes()` iteration order, so every
-    /// BFS visited order and de-dup downstream is unchanged.
+    /// full-manifest `depends_on` adjacency. Behaviour is identical to the
+    /// pre-hoist build. Per-adjacency-list order is NOT relied upon:
+    /// `forward` iterates the inverted source (whose lists carry
+    /// `manifest.nodes()` `&HashMap` order), and `backward` now iterates
+    /// the sorted `BTreeMap` `inverted` (a different list order than the
+    /// pre-hoist pass). Output is unchanged because every downstream walk
+    /// collects into a `BTreeSet`/`BTreeMap` (BFS visited sets, de-dup),
+    /// where list order is unobservable — not because list order is
+    /// preserved.
     fn build(manifest: &'m Manifest) -> Self {
         // The model-id membership set, borrowed from the manifest's own
         // node map so every stored reference shares the `'m` lifetime.

@@ -11,12 +11,18 @@
 //! re-implement the inversion loop.
 //!
 //! This test makes that falsifiable: it scans the three consumer source
-//! files for the inversion SHAPE (an adjacency built by iterating
-//! `depends_on().nodes()` and pushing the *consumer* id under the
-//! *producer* key) and fails if any of them still contains it. The ONE
-//! inversion site (`src/domain/lineage.rs`) is asserted to contain it.
-//! If a consumer re-grows its own inversion, the seam isn't real and this
-//! gate goes red — never a prose note someone has to remember.
+//! files for the node-graph inversion SHAPE — an adjacency built by
+//! pushing the node-id binding of a `for (id, …) in ….nodes()` walk under
+//! the producer key of a `for <p> in …depends_on().nodes()` pass — and
+//! fails if any of them still contains it. The ONE inversion site
+//! (`src/domain/lineage.rs`) is asserted to contain it. If a consumer
+//! re-grows its own inversion, the seam isn't real and this gate goes red
+//! — never a prose note someone has to remember.
+//!
+//! The fingerprint is name-independent (it reads the loop bindings, never
+//! a hard-coded identifier), so a behaviour-preserving rename of the
+//! pushed variable cannot evade it; see [`contains_inversion_loop`] for
+//! the exact shape it does and does NOT cover.
 
 use std::fs;
 use std::path::Path;
@@ -27,19 +33,87 @@ fn read_src(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {} failed: {e}", path.display()))
 }
 
-/// `true` when `src` contains a `depends_on` producer→consumer inversion
-/// loop: a line reading `node.depends_on().nodes()` (or `.depends_on()`'s
-/// `.nodes()`) co-located in the same file with the
-/// `.entry(producer…).or_default().push(consumer…)` adjacency-build
-/// idiom. We look for the structural fingerprint rather than exact text so
-/// a behaviour-preserving rename can't silently re-introduce the
-/// inversion under a new variable name.
+/// `true` when `src` contains a node-graph `depends_on` producer→consumer
+/// inversion loop — the full-manifest self-inversion this hoist owns
+/// exactly once.
+///
+/// What this fingerprint covers (and what it does NOT): it matches the
+/// **structural shape** of a node self-inversion, not any one variable
+/// name. The shape is an `.entry(<P>).or_default().push(<C>)` adjacency
+/// build where the entry key `<P>` is the loop variable of a
+/// `for <P> in …depends_on().nodes()` pass, and the pushed value `<C>` is
+/// the node-id binding of the enclosing `for (<C>, …) in ….nodes()` walk
+/// over the manifest's node map. Because BOTH the key and the pushed value
+/// are read out of the surrounding loop bindings (not compared against any
+/// hard-coded identifier), a behaviour-preserving rename of the pushed
+/// variable — `consumer` → `child_id`, say — keeps tripping the check: a
+/// rename moves the binding and the `.push(<that binding>)` together, so
+/// the derived shape still matches. (The earlier fingerprint matched a
+/// `.push(consumer` literal and so claimed a rename-robustness it did not
+/// have — this is the honest replacement.)
+///
+/// It is deliberately NARROW to the node-graph self-inversion: a
+/// producer-keyed `.entry().or_default().push()` build fed by a DIFFERENT
+/// source (e.g. governance's `exposure.depends_on().nodes()` over
+/// `manifest.exposures()`, or the explorer's macro/folder grouping) does
+/// NOT match, because its pushed value is not the node-id binding of a
+/// `….nodes()` node-graph walk. That is the point: only the one true
+/// `manifest.nodes()` → invert `depends_on` site should light up.
 fn contains_inversion_loop(src: &str) -> bool {
-    // The producer→consumer push under an `or_default()` adjacency entry,
-    // fed by `depends_on().nodes()`, is the inversion fingerprint.
-    let reads_depends_on_nodes = src.contains("depends_on().nodes()");
-    let builds_reverse_adjacency = src.contains(".or_default()") && src.contains(".push(consumer");
-    reads_depends_on_nodes && builds_reverse_adjacency
+    // (1) The producer loop variable: `for <P> in …depends_on().nodes()`.
+    let Some(producer) = depends_on_nodes_loop_var(src) else {
+        return false;
+    };
+    // (2) The node-graph outer binding: `for (<C>, …) in ….nodes()` — the
+    //     consumer node id pushed under the producer key. (Excludes the
+    //     exposure-sink inversion, fed by `exposures().values()`.)
+    let Some(consumer) = node_graph_tuple_binding(src) else {
+        return false;
+    };
+    // (3) The adjacency build itself: `.entry(<P>)` … `.or_default()` …
+    //     `.push(<C>)`, with the key the producer and the value the
+    //     consumer node-id binding — name-independent (both derived from
+    //     the loop bindings above, never a hard-coded identifier).
+    src.contains(&format!(".entry({producer}"))
+        && src.contains(".or_default()")
+        && src.contains(&format!(".push({consumer}"))
+}
+
+/// The loop variable of a `for <V> in …depends_on().nodes()` pass, if any.
+/// `<V>` is the producer id under which consumers are bucketed.
+fn depends_on_nodes_loop_var(src: &str) -> Option<&str> {
+    for line in src.lines() {
+        let line = line.trim_start();
+        if let Some(var) = line.strip_prefix("for ")
+            && let Some((var, rest)) = var.split_once(" in ")
+            && rest.contains("depends_on().nodes()")
+        {
+            return Some(var.trim());
+        }
+    }
+    None
+}
+
+/// The node-id binding of a `for (<C>, …) in ….nodes()` walk over the
+/// manifest's node map, if any. `<C>` is the consumer id pushed under each
+/// producer. The destructured tuple shape (`(<C>, node)`) is what
+/// distinguishes the node-graph self-inversion from the
+/// `exposures().values()` / single-binding loops.
+fn node_graph_tuple_binding(src: &str) -> Option<&str> {
+    for line in src.lines() {
+        let line = line.trim_start();
+        if let Some(var) = line.strip_prefix("for (")
+            && let Some((tuple, rest)) = var.split_once(" in ")
+            && rest.contains(".nodes()")
+        {
+            // First element of the `(c, node)` destructure.
+            let first = tuple.split(',').next().unwrap_or("").trim();
+            if !first.is_empty() {
+                return Some(first);
+            }
+        }
+    }
+    None
 }
 
 /// The ONE inversion site DOES carry the loop (the test's own oracle —

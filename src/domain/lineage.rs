@@ -44,14 +44,24 @@ use std::collections::BTreeMap;
 ///
 /// Owned + serde-round-trippable (the spine-fact commitment, ruling C6 —
 /// `--context-out` round-trips). The values are node-id-ordered
-/// ([`BTreeMap`]); each adjacency list preserves the manifest's
-/// `depends_on` order (de-dup is the consumers' job, exactly as before
-/// this hoist).
+/// ([`BTreeMap`]). Per-adjacency-list order is **not** relied upon:
+/// `forward` lists are pushed in `manifest.nodes()` (a `&HashMap`)
+/// iteration order, which is not run-to-run stable. Determinism of every
+/// downstream artifact comes from each consumer collecting these lists
+/// into a `BTreeSet`/`BTreeMap` (where list order is unobservable), NOT
+/// from list-order preservation here (de-dup is the consumers' job,
+/// exactly as before this hoist).
+///
+/// First production consumer lands in S2 (cute-dbt#445): `DagFacts.lineage`
+/// reads this owned fact. Until then only [`invert_depends_on`] (the
+/// borrowed twin) has callers — the owned fact's permanent home is landed
+/// now per the S0 Build brief; keep it (it is not dead code).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ModelLineage {
-    /// Producer id → the node ids that consume it (the INVERTED edges —
-    /// the reverse of every `depends_on.nodes` edge). The governance
-    /// blast-radius reverse read; the PR mini-DAG's `forward` view.
+    /// Producer id → the node ids that consume it (the INVERTED
+    /// producer→consumer edges — the reverse of every `depends_on.nodes`
+    /// edge). The governance blast-radius reverse read; the PR mini-DAG's
+    /// `forward` view.
     forward: BTreeMap<NodeId, Vec<NodeId>>,
     /// Consumer id → the node ids it depends on (the forward
     /// `depends_on` adjacency, indexed). The PR mini-DAG's `backward`
@@ -66,14 +76,26 @@ impl ModelLineage {
     /// borrowed twin [`invert_depends_on`]) rather than re-inverting.
     #[must_use]
     pub fn from_manifest(manifest: &Manifest) -> Self {
-        let mut forward: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+        // `forward` is the LITERAL materialization of the ONE inversion
+        // site [`invert_depends_on`] — owned, by cloning the borrowed
+        // node ids out of its view. There is no second producer→consumer
+        // loop in this module; `from_manifest_forward_equals_invert_view`
+        // holds by construction.
+        let forward: BTreeMap<NodeId, Vec<NodeId>> = invert_depends_on(manifest)
+            .into_iter()
+            .map(|(producer, consumers)| {
+                (
+                    producer.clone(),
+                    consumers.into_iter().cloned().collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        // `backward` is the forward `depends_on` adjacency, indexed
+        // (consumer → its producers) — a separate, non-inverting pass over
+        // the node map (it does NOT bucket consumers under producers).
         let mut backward: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
         for (consumer_id, node) in manifest.nodes() {
             for producer_id in node.depends_on().nodes() {
-                forward
-                    .entry(producer_id.clone())
-                    .or_default()
-                    .push(consumer_id.clone());
                 backward
                     .entry(consumer_id.clone())
                     .or_default()
@@ -111,10 +133,14 @@ impl ModelLineage {
 /// is the falsifiable seam (`tests/lineage_seam.rs`): the inversion
 /// happens exactly once.
 ///
-/// Determinism: keyed by a [`BTreeMap`] (producer-id order); each
-/// adjacency list preserves the manifest's `depends_on` iteration order
-/// — identical to the pre-hoist `reverse_node_adjacency`, so every
-/// downstream walk (BFS visited order, de-dup) is byte-stable.
+/// Determinism: keyed by a [`BTreeMap`] (producer-id order). The
+/// per-producer consumer lists are pushed in `manifest.nodes()` (a
+/// `&HashMap`) iteration order, which is NOT run-to-run stable — this
+/// function does not rely on, or promise, adjacency-list order. It is
+/// behaviour-identical to the pre-hoist `reverse_node_adjacency` (the same
+/// loop). Downstream determinism comes from every consumer collecting
+/// these lists into a `BTreeSet`/`BTreeMap` (BFS visited sets, de-dup),
+/// where list order is unobservable — not from list-order stability here.
 #[must_use]
 pub fn invert_depends_on(manifest: &Manifest) -> BTreeMap<&NodeId, Vec<&NodeId>> {
     let mut consumers_of: BTreeMap<&NodeId, Vec<&NodeId>> = BTreeMap::new();
