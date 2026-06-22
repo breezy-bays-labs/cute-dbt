@@ -78,8 +78,13 @@ fn main() {
         // matching the domain `SourcePos`).
         let len = u32::try_from(text.len()).unwrap_or(u32::MAX);
         for (_kind, start, end, _block_id) in &zones {
+            // `start`/`end` are `&u32` (iterating `&zones`); compare the VALUES,
+            // not the reference addresses. A half-open raw span is non-empty iff
+            // `*start < *end` — `*start == *end` is the empty span the
+            // SourceSpan contract forbids, and an unguarded `start < end` would
+            // be a pointer-address comparison rather than a value one.
             assert!(
-                start < end,
+                *start < *end,
                 "an emitted zone span must be non-empty (start {start} < end {end})",
             );
             assert!(

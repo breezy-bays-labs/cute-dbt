@@ -9,10 +9,13 @@ with orders as (
         customer_id,
         order_date,
         status
-        -- cute-dbt#464 (Z3): a Shape-A {% for %} loop INSIDE one CTE body — the
+        -- cute-dbt#464 (Z3): a Shape-A for-loop INSIDE one CTE body — the
         -- loop expands a derived column per name, all nested in the `orders`
         -- CTE projection, so cute-dbt's raw-zone scanner marks it a STRUCTURAL
         -- zone bound to this node (NOT a sibling-CTE-producing Shape-B loop).
+        -- NOTE: keep literal Jinja tag delimiters out of these `--` comments —
+        -- minijinja scans the raw text for tags before SQL comments are stripped,
+        -- so a bare for-tag in prose is parsed as a real (malformed) loop.
         {% for derived in ['order_date'] %}
         , date_trunc('month', {{ derived }}) as {{ derived }}_month
         {% endfor %}
