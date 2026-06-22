@@ -3655,52 +3655,77 @@ fn find_expr_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
 fn mentions_is_incremental_call(cond: &str) -> bool {
     const TOKEN: &str = "is_incremental";
     let bytes = cond.as_bytes();
-    let n = bytes.len();
-    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    // Iterate every literal occurrence of the token; return on the first that
+    // is a real, unquoted, parenthesized call. Each predicate is a small
+    // single-purpose helper so the boundary/quote/call logic stays low-CC.
+    cond.match_indices(TOKEN).any(|(at, _)| {
+        token_left_boundary_ok(bytes, at)
+            && token_right_boundary_ok(bytes, at + TOKEN.len())
+            && call_paren_follows(bytes, at + TOKEN.len())
+            && !offset_in_string_literal(bytes, at)
+    })
+}
+
+/// Whether `b` is an identifier (word) char `[A-Za-z0-9_]`.
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// LEFT identifier boundary at token start `at`: the preceding byte (if any)
+/// must NOT be a word char, so `some_is_incremental_flag` does not match.
+fn token_left_boundary_ok(bytes: &[u8], at: usize) -> bool {
+    at == 0 || !is_word_byte(bytes[at - 1])
+}
+
+/// RIGHT identifier boundary just past the token (`after`): the next byte (if
+/// any) must NOT be a word char, so `is_incremental_flag` does not match.
+fn token_right_boundary_ok(bytes: &[u8], after: usize) -> bool {
+    after >= bytes.len() || !is_word_byte(bytes[after])
+}
+
+/// Whether an actual call `(` follows the token (skipping optional whitespace
+/// past `after`) — distinguishing a call `is_incremental()` from a bare ident.
+fn call_paren_follows(bytes: &[u8], after: usize) -> bool {
+    let mut j = after;
+    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    bytes.get(j) == Some(&b'(')
+}
+
+/// Whether byte offset `at` lies INSIDE a single/double-quoted string literal,
+/// scanning from the start and honoring `\`-escapes — so a quoted
+/// `'is_incremental'` is treated as data, not a call.
+fn offset_in_string_literal(bytes: &[u8], at: usize) -> bool {
     let mut quote: Option<u8> = None;
     let mut i = 0usize;
-    while i < n {
-        let b = bytes[i];
-        if let Some(q) = quote {
-            // Inside a string literal: only a backslash escape or the matching
-            // closing quote is meaningful; the token never matches here.
-            if b == b'\\' && i + 1 < n {
-                // A backslash escape: skip the escaped byte (so an embedded
-                // `\'` does not prematurely close the string literal).
-                i += 2;
-                continue;
+    while i < at {
+        i = step_string_scan(bytes, i, &mut quote);
+    }
+    quote.is_some()
+}
+
+/// Advance the quote-aware string scan one logical step from `i`, updating the
+/// open-quote state, and return the next index. A `\`-escape inside a quote
+/// consumes the escaped byte too.
+fn step_string_scan(bytes: &[u8], i: usize, quote: &mut Option<u8>) -> usize {
+    let b = bytes[i];
+    match *quote {
+        Some(q) => {
+            if b == b'\\' && i + 1 < bytes.len() {
+                return i + 2;
             }
             if b == q {
-                quote = None;
+                *quote = None;
             }
-            i += 1;
-        } else {
+        }
+        None => {
             if b == b'\'' || b == b'"' {
-                quote = Some(b);
-                i += 1;
-                continue;
+                *quote = Some(b);
             }
-            // Try to match the token starting at `i` with a left identifier
-            // boundary (the char before `i` must not be a word char).
-            let left_ok = i == 0 || !is_word(bytes[i - 1]);
-            // Right identifier boundary + an actual call `(` (optional ws).
-            if left_ok && cond[i..].starts_with(TOKEN) {
-                let after = i + TOKEN.len();
-                let right_ok = after >= n || !is_word(bytes[after]);
-                if right_ok {
-                    let mut j = after;
-                    while j < n && bytes[j].is_ascii_whitespace() {
-                        j += 1;
-                    }
-                    if j < n && bytes[j] == b'(' {
-                        return true;
-                    }
-                }
-            }
-            i += 1;
         }
     }
-    false
+    i + 1
 }
 
 /// Classify a full `{%…%}` tag slice by its leading keyword (after the `{%`
@@ -8157,6 +8182,92 @@ mod tests {
         let zones = locate_raw_zones("{% if is_incremental () %}a{% endif %}");
         assert_eq!(zones.len(), 1, "whitespace before `(` is still a call");
         assert_eq!(zones[0].kind, ZoneKind::IncrementalGuard);
+    }
+
+    // ── cute-dbt#448: per-helper unit coverage for the decomposed
+    // `mentions_is_incremental_call` predicates (the char-scanning broken into
+    // small single-purpose fns so each stays well under the strict CC gate). ──
+
+    #[test]
+    fn is_word_byte_classifies_identifier_chars() {
+        for b in [b'a', b'Z', b'0', b'9', b'_'] {
+            assert!(is_word_byte(b), "{} is a word char", b as char);
+        }
+        for b in [b' ', b'(', b'\'', b'-', b'.'] {
+            assert!(!is_word_byte(b), "{} is not a word char", b as char);
+        }
+    }
+
+    #[test]
+    fn token_boundary_helpers_honor_identifier_edges() {
+        // `xis_incremental` — left byte is a word char ⇒ left boundary fails.
+        let b = b"xis_incremental";
+        assert!(!token_left_boundary_ok(b, 1));
+        // Token at the very start ⇒ left boundary ok.
+        assert!(token_left_boundary_ok(b"is_incremental", 0));
+        // Right boundary: next byte `_` is a word char ⇒ fails.
+        assert!(!token_right_boundary_ok(b"is_incremental_x", 14));
+        // Right boundary at end-of-string ⇒ ok.
+        assert!(token_right_boundary_ok(b"is_incremental", 14));
+        // Right boundary: next byte `(` is not a word char ⇒ ok.
+        assert!(token_right_boundary_ok(b"is_incremental(", 14));
+    }
+
+    #[test]
+    fn call_paren_follows_skips_whitespace_then_requires_open_paren() {
+        assert!(call_paren_follows(b"(", 0));
+        assert!(call_paren_follows(b"   (", 0), "leading ws then `(`");
+        assert!(!call_paren_follows(b"   ", 0), "ws only, no `(`");
+        assert!(!call_paren_follows(b"x", 0), "non-`(` byte");
+        assert!(!call_paren_follows(b"", 0), "empty ⇒ no `(`");
+    }
+
+    #[test]
+    fn offset_in_string_literal_detects_quote_state() {
+        // Inside a single-quoted literal.
+        let s = b"x == 'is_incremental'";
+        assert!(
+            offset_in_string_literal(s, 6),
+            "offset 6 is inside the quote"
+        );
+        // The same buffer, AFTER the closing quote ⇒ not inside.
+        assert!(!offset_in_string_literal(s, 21));
+        // Outside any quote.
+        assert!(!offset_in_string_literal(b"is_incremental()", 0));
+        // Inside a DOUBLE-quoted literal (the other quote arm).
+        assert!(offset_in_string_literal(b"x == \"abc\"", 6));
+        // A `\`-escape inside a quote does not prematurely close it: the
+        // escaped `'` is consumed, so the offset past it is still inside.
+        assert!(
+            offset_in_string_literal(b"'a\\'b'c", 4),
+            "escaped quote keeps the literal open"
+        );
+        // A trailing lone backslash at end-of-buffer is handled (no overrun).
+        assert!(offset_in_string_literal(b"'a\\", 3), "unterminated escape");
+    }
+
+    #[test]
+    fn step_string_scan_advances_and_tracks_quotes() {
+        // Opening a quote from the neutral state.
+        let mut q: Option<u8> = None;
+        let next = step_string_scan(b"'a'", 0, &mut q);
+        assert_eq!((next, q), (1, Some(b'\'')));
+        // Closing the matching quote.
+        let mut q = Some(b'\'');
+        let next = step_string_scan(b"'a'", 2, &mut q);
+        assert_eq!((next, q), (3, None));
+        // An escape inside a quote skips two bytes and keeps the quote open.
+        let mut q = Some(b'\'');
+        let next = step_string_scan(b"\\'", 0, &mut q);
+        assert_eq!((next, q), (2, Some(b'\'')));
+        // A double-quote opener (the other neutral-state arm).
+        let mut q: Option<u8> = None;
+        let next = step_string_scan(b"\"x", 0, &mut q);
+        assert_eq!((next, q), (1, Some(b'"')));
+        // A neutral, non-quote byte just advances by one.
+        let mut q: Option<u8> = None;
+        let next = step_string_scan(b"ab", 0, &mut q);
+        assert_eq!((next, q), (1, None));
     }
 
     /// cute-dbt#445 TDD #4 (the inlined-data assertion, without a browser): the
