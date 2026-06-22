@@ -38,6 +38,7 @@
 pub mod cell_diff;
 pub mod check_config;
 pub mod checks;
+pub mod column_context;
 pub mod config;
 pub mod cte;
 pub mod experimental;
@@ -82,6 +83,7 @@ pub use checks::{
     checks_index_markdown, evaluate_all, filter_for_display, model_findings, registry_toml,
     resolve_supersedes, supersedes_is_acyclic,
 };
+pub use column_context::{ColumnContext, SINGULAR_KIND, TestFact, column_contexts};
 pub use config::{
     AnalysisConfig, DEFAULT_REPORT_TITLE, DEFAULT_SEED_ROW_CAP, PrConfig, PrRef, ReportConfig,
     SeedsConfig,

@@ -67,7 +67,7 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, BlockDiff, ChangeAxes, CheckId, CheckPolicy, CommentsView,
+    BANNER_EMPTY_SCOPE, BlockDiff, ChangeAxes, CheckId, CheckPolicy, ColumnContext, CommentsView,
     ConfigAttribution, CteGraph, DEFAULT_SEED_ROW_CAP, DiffLine, DiffLineKind, EdgeType, Finding,
     FixtureTable, FixtureTableDiff, GovernanceFacts, HeuristicId, HookChangeFacts,
     HookManifestPresence, InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet,
@@ -76,8 +76,8 @@ use crate::domain::{
     ProjectFallbackReason, SeedCard, SourceMap, SourceNode, SourceSpan, SpanRole, TestMetadata,
     Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock,
     VarAttribution, VarChangeFacts, VarReference, VarScanFootprint, ZoneKind, apply_check_policy,
-    macro_blast_radius, model_findings, reconstruct_macro_sql_diff, resolve_target_model,
-    resolve_tested_model, table_from_manifest_rows,
+    column_contexts, macro_blast_radius, model_findings, reconstruct_macro_sql_diff,
+    resolve_target_model, resolve_tested_model, table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -359,6 +359,26 @@ impl CodeMapPayload {
     }
 }
 
+/// The per-model column-lineage render projection (cute-dbt#446, CLL-1) —
+/// Serialize-only. In CLL-1 it carries ONLY the Tier-2 `context` half (the
+/// pure manifest fold: per-column definition + tested-by); the Tier-1 `edges`
+/// array is filled by CLL-2 (`SpanRole::Column` provenance) and is omitted
+/// from the wire entirely until then. The `context`-only shape lets the
+/// column-selection UX ship before any edge math, and keeps every pre-#446
+/// golden byte-stable (the whole key is omitted when a model has no documented
+/// or tested columns).
+#[derive(Debug, Clone, Serialize)]
+pub struct ColumnLineagePayload {
+    /// Per-column context keyed by column name — definition (`data_type` +
+    /// `description`) + tested-by (`TestFact`s) + the `documented` honesty
+    /// flag. Omitted when empty (an undocumented, untested model) so older
+    /// goldens stay byte-identical.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub context: BTreeMap<String, ColumnContext>,
+    // `edges: Vec<ColumnEdge>` — CLL-2 (#447) fills this; CLL-1 ships
+    // context-only, so the field does not exist on the wire yet.
+}
+
 /// Per-model entry in the JSON payload — mirrors the design's
 /// `window.CUTE_DBT_SAMPLE.models[i]` shape so the inlined interaction
 /// script consumes it without remapping.
@@ -401,6 +421,14 @@ pub struct ModelPayload {
     /// key is omitted then so older fixtures stay byte-stable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code_map: Option<CodeMapPayload>,
+    /// Column-lineage context (cute-dbt#446, CLL-1) — the Tier-2 pure
+    /// manifest fold: per-column definition (`data_type` + `description`) +
+    /// tested-by + the `documented` honesty flag. `None` (key omitted) when
+    /// the model has no documented or tested columns, so every pre-#446
+    /// golden stays byte-stable. The Tier-1 column edges (#447, CLL-2) land
+    /// as an additive `edges` array inside this section later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_lineage: Option<ColumnLineagePayload>,
     /// Raw Jinja source of the model file (`models/**/*.sql`).
     /// Surfaced verbatim in the per-model "Model SQL" expandable
     /// section (cute-dbt#47). `None` only when the manifest lacks
@@ -3913,6 +3941,18 @@ fn build_model_payload(
     let source_map = SourceMap::from_cte_graph(&graph, compiled_code, TERMINAL_NODE_NAME);
     let compiled_sql = build_compiled_sql(source_map.as_ref());
     let code_map = source_map.as_ref().map(CodeMapPayload::from_source_map);
+    // cute-dbt#446 (CLL-1) — the Tier-2 column-lineage context: a pure
+    // manifest fold (per-column definition + tested-by). `context`-only
+    // (no edges yet); omitted from the wire when the model has no documented
+    // or tested columns, so pre-#446 goldens stay byte-stable.
+    let column_lineage = {
+        let context = column_contexts(current, model);
+        if context.is_empty() {
+            None
+        } else {
+            Some(ColumnLineagePayload { context })
+        }
+    };
     let raw_sql = model
         .raw_code()
         .filter(|s| !s.is_empty())
@@ -3959,6 +3999,10 @@ fn build_model_payload(
         // cute-dbt#445 — the source-map projection (None for a model with no
         // compiled code; the key is omitted so older fixtures stay byte-stable).
         code_map,
+        // cute-dbt#446 — the Tier-2 column-lineage context (None when the
+        // model has no documented or tested columns; key omitted so pre-#446
+        // goldens stay byte-stable).
+        column_lineage,
         raw_sql,
         sql_diff,
         model_yaml,
@@ -5978,6 +6022,100 @@ mod tests {
         assert!(
             json.contains(r#""path":"models/staging/stg_orders.sql""#),
             "the full path is on the wire for the code-card header",
+        );
+    }
+
+    #[test]
+    fn model_payload_emits_column_lineage_context_for_documented_and_tested_columns() {
+        // cute-dbt#446 (CLL-1) — a documented + tested column rides the wire
+        // as `column_lineage.context.<col>` with data_type, description,
+        // documented:true, and its tested-by facts. The Tier-1 `edges` array
+        // does NOT exist yet (context-only).
+        let model = Node::new(
+            NodeId::new("model.shop.customers"),
+            "model",
+            checksum("body"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::from([("customer_id".to_owned(), Some("integer".to_owned()))]),
+        )
+        .with_column_descriptions(BTreeMap::from([(
+            "customer_id".to_owned(),
+            "PK of the customer".to_owned(),
+        )]));
+        let not_null = column_test_node(
+            "test.shop.not_null_customers_customer_id",
+            "model.shop.customers",
+            "customer_id",
+            TestMetadata::new("not_null", None, Value::Null),
+        );
+        let ut = simple_unit_test("customers", "test_one");
+        let manifest = manifest_for(vec![model, not_null], vec![("unit_test.shop.test_one", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.customers")]);
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        let cl = payload.models[0]
+            .column_lineage
+            .as_ref()
+            .expect("documented+tested model carries column_lineage");
+        let col = cl.context.get("customer_id").expect("column present");
+        assert!(col.documented);
+        assert_eq!(col.data_type.as_deref(), Some("integer"));
+        assert_eq!(col.description.as_deref(), Some("PK of the customer"));
+        assert_eq!(col.tests.len(), 1);
+        assert_eq!(col.tests[0].kind, "not_null");
+
+        let json = serde_json::to_value(&payload).expect("payload serializes");
+        let ctx = &json["models"][0]["column_lineage"]["context"]["customer_id"];
+        assert_eq!(ctx["data_type"], "integer");
+        assert_eq!(ctx["documented"], true);
+        assert_eq!(ctx["tests"][0]["kind"], "not_null");
+        // CLL-1 ships context-only — no `edges` key anywhere on the wire.
+        assert!(
+            json["models"][0]["column_lineage"].get("edges").is_none(),
+            "CLL-1 is context-only; edges land with CLL-2 (#447)",
+        );
+    }
+
+    #[test]
+    fn model_payload_omits_column_lineage_when_no_documented_or_tested_columns() {
+        // cute-dbt#446 — an undocumented, untested model omits the whole
+        // `column_lineage` key so every pre-#446 golden stays byte-stable.
+        let node = model_node("model.shop.stg_orders", "body", Some("select 1"));
+        let ut = simple_unit_test("stg_orders", "test_one");
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.stg_orders")]);
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        assert!(payload.models[0].column_lineage.is_none());
+        let json = serde_json::to_string(&payload).expect("payload serializes");
+        assert!(
+            !json.contains(r#""column_lineage""#),
+            "no documented/tested columns ⇒ no column_lineage key (older goldens stay stable)",
         );
     }
 
