@@ -326,6 +326,16 @@ fn build_typed_node_map<'a>(
 /// Build the deduplicated, sorted `(from_idx, to_idx)` edge list from each
 /// node's `depends_on.nodes`, keeping only edges between union members and
 /// dropping defensive self-edges. Sources contribute no outgoing deps.
+///
+/// This reads the FORWARD `depends_on` direction (each node → the nodes it
+/// depends on) to emit upstream→downstream edges — it does NOT invert
+/// `depends_on`. The cross-model lineage inversion (producer→consumer) is
+/// owned exactly once by [`crate::domain::lineage::invert_depends_on`]
+/// (cute-dbt#443); the governance reverse read and the PR mini-DAG model
+/// view are its only inverting consumers. `build_lineage` stays a scoped
+/// forward-edge view (the `typed` union already carries the scoped
+/// `models` set), so it is a read over the same lineage facts, never a
+/// second inversion.
 fn lineage_edges(
     current: &Manifest,
     typed: &BTreeMap<&NodeId, LineageNodeType>,
