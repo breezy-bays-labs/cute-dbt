@@ -338,7 +338,7 @@ retrieval.\
 path = "playground-current.json"
 origin = "dbt-playground"
 origin_url = "https://github.com/cmbays/dbt-playground/commit/c8270a4"
-sha256 = "8d1988e49a887fd6c77fbca6d40a8f518156f0f61fc892ffba0b720aedf57c29"
+sha256 = "3d7fc638b766eace6703048d5dd0235721920b2c1dca05232351e951c95e499b"
 synthetic_only = true
 license = "MIT"
 description = """
