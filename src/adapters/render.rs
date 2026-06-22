@@ -6988,9 +6988,9 @@ mod tests {
     }
 
     /// cute-dbt#445: `CodeMapPayload::from_source_map` projects `Zone` entries
-    /// into `raw_zones`. Core S2 never PRODUCES a Zone entry (the assembler
-    /// emits CteBody only), so this pins the deferred projection arm directly
-    /// from a hand-built SourceMap — keeping the wire surface stable + the
+    /// into `raw_zones`. Core S2 never PRODUCES a `Zone` entry (the assembler
+    /// emits `CteBody` only), so this pins the deferred projection arm directly
+    /// from a hand-built `SourceMap` — keeping the wire surface stable + the
     /// match arm killed before the S4/S5 raw-zone path lands.
     #[test]
     fn from_source_map_projects_zone_entries_into_raw_zones() {
