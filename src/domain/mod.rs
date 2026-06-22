@@ -132,9 +132,10 @@ pub use pr_diff::{
     refine_changed_by_hunks, reverse_apply, ws_equal,
 };
 pub use preflight::{PreflightError, preflight_compiled};
-// `project_def::Span` is deliberately NOT re-exported here — `cte::Span`
-// already owns the bare name at the domain root; consumers address the
-// YAML source span as `project_def::Span`.
+// `project_def::Span` is deliberately NOT re-exported here — the canonical
+// `SourceSpan` (re-exported below) now owns the position/span vocabulary at
+// the domain root, so the bare `Span` name stays reserved for it; consumers
+// address the YAML source span as `project_def::Span`.
 pub use project_def::{
     ConfigAttribution, ConfigLeafPath, ConfigProvenance, ConfigTree, HookChangeFacts,
     HookManifestPresence, HookOperation, HookOperations, ProjectChange, ProjectChangeCategory,

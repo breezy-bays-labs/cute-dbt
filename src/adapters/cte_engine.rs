@@ -898,15 +898,18 @@ fn slice_terminal(sql: &str, index: &ByteIndex, ctes: &[Cte]) -> Option<(String,
     Some((trimmed.to_owned(), source_span))
 }
 
-/// The guarded `usize → u32` narrowing at the ONE ingestion boundary where
-/// a span byte offset becomes a [`SourcePos`] field (cute-dbt#444, Part I §5
+/// The guarded `→ u32` narrowing at the ONE ingestion boundary where a span
+/// byte/line/col value becomes a [`SourcePos`] field (cute-dbt#444, Part I §5
 /// FIX 6) — fusion widened minijinja `u16 → u32` for exactly this
 /// silent-truncation class, so cute-dbt asserts the cast rather than
 /// trusting it. `u32::MAX` is the fail-closed fallback in release (a 4 GB
-/// model is not real); `debug_assert!` trips in tests.
-fn byte_u32(byte: usize) -> u32 {
-    u32::try_from(byte).unwrap_or_else(|_| {
-        debug_assert!(false, "span byte offset exceeds u32::MAX");
+/// model — or a 4-billion-line one — is not real); `debug_assert!` trips in
+/// tests. ALL THREE axes (byte, line, col) route through this one helper so
+/// the narrowing is uniform + debug-asserted (no bare saturating
+/// `unwrap_or(u32::MAX)` left on the line/col axes).
+fn clamp_u32<T: TryInto<u32>>(value: T, axis: &'static str) -> u32 {
+    value.try_into().unwrap_or_else(|_| {
+        debug_assert!(false, "span {axis} exceeds u32::MAX");
         u32::MAX
     })
 }
@@ -916,9 +919,9 @@ fn byte_u32(byte: usize) -> u32 {
 /// line/col the parser already reports.
 fn loc_to_pos(loc: Location, byte: usize) -> SourcePos {
     SourcePos {
-        line: u32::try_from(loc.line).unwrap_or(u32::MAX),
-        col: u32::try_from(loc.column).unwrap_or(u32::MAX),
-        byte: byte_u32(byte),
+        line: clamp_u32(loc.line, "line"),
+        col: clamp_u32(loc.column, "col"),
+        byte: clamp_u32(byte, "byte offset"),
     }
 }
 
@@ -991,9 +994,9 @@ impl ByteIndex {
         // 1-based char column within the line.
         let col = sql[line_start..clamped].chars().count() + 1;
         SourcePos {
-            line: u32::try_from(line_no).unwrap_or(u32::MAX),
-            col: u32::try_from(col).unwrap_or(u32::MAX),
-            byte: byte_u32(byte),
+            line: clamp_u32(line_no, "line"),
+            col: clamp_u32(col, "col"),
+            byte: clamp_u32(byte, "byte offset"),
         }
     }
 }
@@ -1727,6 +1730,19 @@ mod tests {
             b'\n',
             "the raw close-end sits on the leading-trim newline"
         );
+        // Pin a `pos_at`-derived `col` to its EXACT 1-based char column so the
+        // `let col = …chars().count() + 1` step is mutation-covered (a
+        // `+1 → *1` off-by-one — 1-based → 0-based — survives otherwise; no
+        // other test fixes a `pos_at` col ≥ 2). The terminal `end` reaches
+        // end-of-`sql`, which here is the last byte of `select * from stg`
+        // (17 chars, no trailing newline) on line 5 — so `end.col` is the
+        // post-the-last-char column 18 (`17 + 1`), which `17 * 1 = 17` cannot
+        // reproduce.
+        assert_eq!(span.end.line, 5, "terminal end is on the last line (5)");
+        assert_eq!(
+            span.end.col, 18,
+            "terminal end.col is the 1-based char column past `select * from stg` (17 chars + 1)"
+        );
     }
 
     /// TDD 3 — the terminal node's `end` endpoint reaches end-of-`sql`; its
@@ -1761,6 +1777,25 @@ mod tests {
         assert_eq!(span.start.line, 1, "CTE body span starts on line 1");
         assert_eq!(span.start.col, 6, "CTE body span starts at the alias `a`");
         assert!(span.start.byte < span.end.byte, "half-open, non-empty");
+
+        // Cross-check `start.col` against the BYTES under the §3.1 invariant
+        // ("line/col endpoints agree with byte endpoints"). This endpoint's
+        // col comes from the sqlparser-`Location` path (`loc_to_pos`); the
+        // terminal-span test pins the `pos_at` path. Computing the col from
+        // bytes independently of either source pins BOTH against the one
+        // invariant. The line-1 byte offset of the line start is 0.
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(sql.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        let start_line_start = line_starts[(span.start.line - 1) as usize];
+        let col_from_bytes = sql[start_line_start..span.start.byte as usize]
+            .chars()
+            .count()
+            + 1;
+        assert_eq!(
+            span.start.col as usize, col_from_bytes,
+            "start.col agrees with the byte-derived char column"
+        );
     }
 
     /// TDD 4 — fallback degrade: a node whose span the engine cannot soundly
@@ -1791,15 +1826,20 @@ mod tests {
         assert!(span.is_none(), "inverted span degrades to None");
     }
 
-    /// TDD 7 — the `usize → u32` guard caps at `u32::MAX` (the tested
-    /// behavior). In a debug build `byte_u32` would `debug_assert!`, so this
-    /// exercises the in-range pass-through; the cap path is verified by
-    /// construction (the `unwrap_or_else` returns `u32::MAX`).
+    /// TDD 7 — the `→ u32` guard caps at `u32::MAX` (the tested behavior). In
+    /// a debug build `clamp_u32` would `debug_assert!`, so this exercises the
+    /// in-range pass-through; the cap path is verified by construction (the
+    /// `unwrap_or_else` returns `u32::MAX`). All three axes share the helper,
+    /// so the byte axis exercises it for line/col too.
     #[test]
-    fn byte_u32_guard_passes_in_range() {
-        assert_eq!(byte_u32(0), 0);
-        assert_eq!(byte_u32(123_456), 123_456);
-        assert_eq!(byte_u32(u32::MAX as usize), u32::MAX);
+    fn clamp_u32_guard_passes_in_range() {
+        assert_eq!(clamp_u32(0_usize, "byte offset"), 0);
+        assert_eq!(clamp_u32(123_456_usize, "byte offset"), 123_456);
+        assert_eq!(clamp_u32(u32::MAX as usize, "byte offset"), u32::MAX);
+        // The line/col axes route through the same helper (u64 inputs from
+        // the sqlparser `Location`).
+        assert_eq!(clamp_u32(7_u64, "line"), 7);
+        assert_eq!(clamp_u32(u64::from(u32::MAX), "col"), u32::MAX);
     }
 
     #[test]

@@ -72,9 +72,15 @@ impl SourceSpan {
     }
     /// Half-open overlap test — `self` and `other` share at least one byte
     /// of their `[start, end)` ranges. Empty spans (`start == end`) never
-    /// overlap anything (no underflow on the `end.byte == 0` fallback span).
+    /// overlap anything (no underflow on the `end.byte == 0` fallback span):
+    /// the half-open interval `[k, k)` contains zero bytes, so it cannot
+    /// share a byte with anything — including a span that arithmetically
+    /// straddles `k` (e.g. `(5,5)` strictly inside `(0,10)` does NOT overlap).
     #[must_use]
     pub fn overlaps(&self, other: &SourceSpan) -> bool {
+        if self.start.byte >= self.end.byte || other.start.byte >= other.end.byte {
+            return false;
+        }
         self.start.byte < other.end.byte && other.start.byte < self.end.byte
     }
 }
@@ -188,10 +194,18 @@ mod tests {
                             "contains_range([{o0},{o1}) in [{s0},{s1}))"
                         );
 
-                        // overlaps: s0 < o1 && o0 < s1
+                        // overlaps: half-open `[s0,s1)` and `[o0,o1)` share a
+                        // byte iff `s0 < o1 && o0 < s1` AND BOTH are non-empty.
+                        // An empty interval (`start == end`) contains zero
+                        // bytes, so it overlaps nothing — even when it sits
+                        // arithmetically inside the other (e.g. `[5,5)` inside
+                        // `[0,10)`). The empty-span conjuncts are what make
+                        // this oracle non-vacuous for the degenerate case.
+                        let s_nonempty = s0 < s1;
+                        let o_nonempty = o0 < o1;
                         assert_eq!(
                             s.overlaps(&o),
-                            s0 < o1 && o0 < s1,
+                            s_nonempty && o_nonempty && s0 < o1 && o0 < s1,
                             "overlaps([{s0},{s1}) , [{o0},{o1}))"
                         );
 
@@ -227,6 +241,29 @@ mod tests {
             !zero.overlaps(&span(0, 3)),
             "empty [0,0) does not overlap [0,3)"
         );
+
+        // An empty span never overlaps ANY span, in EITHER argument
+        // position, regardless of where its byte sits relative to the other
+        // span: strictly inside, exactly on a boundary, or fully outside.
+        // This is the never-a-false-claim case the old `s0 < o1 && o0 < s1`
+        // oracle silently let through — an empty `[k,k)` contains zero
+        // bytes, so it cannot share a byte with anything.
+        let host = span(0, 10);
+        for k in [0_u32, 1, 5, 9, 10, 11] {
+            // k = 0  : empty at host.start (boundary)
+            // k = 5,9: empty strictly inside host  ← the reported lie
+            // k = 10 : empty at host.end (boundary)
+            // k = 1  : interior; k = 11: fully outside host
+            let empty = span(k, k);
+            assert!(
+                !empty.overlaps(&host),
+                "empty [{k},{k}) (left arg) overlaps nothing, even inside [0,10)"
+            );
+            assert!(
+                !host.overlaps(&empty),
+                "[0,10) does not overlap empty [{k},{k}) (right arg)"
+            );
+        }
 
         // An empty `other` (start == end) is CONTAINED iff its start is
         // inside `self`'s [start, end] (inclusive on the end because
