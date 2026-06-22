@@ -260,6 +260,82 @@ jobs:
             fi
           done
 
+  source-map-completeness:
+    # cute-dbt#445 (AC item 6) — the SourceMap-spine fitness function, in the
+    # EdgeType-completeness-guard shape. Guards that the data spine inlined in
+    # every committed example report is self-consistent: for every model that
+    # carries compiled code (a `code_map` block), every change-DAG node id
+    # (`dag.nodes[].id`) has a matching entry in `code_map.node_spans`
+    # (`dag.nodes[].id` keys ⊆ `code_map.node_spans` keys). A model with no
+    # compiled code (`code_map` absent) satisfies the invariant vacuously.
+    # This is the always-on CI twin of the unit-level structural check
+    # `every_dag_node_has_a_code_map_entry` (src/adapters/render.rs); a node
+    # the renderer fails to emit a span for would surface here as a missing
+    # node_spans key over the real committed payloads.
+    name: Source-map completeness guard (dag nodes ⊆ code_map spans)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - name: Every dag node id is present in code_map.node_spans
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re, json, glob, sys
+
+          # The data spine is inlined in every report (examples/*-report.html)
+          # and every explore page (examples/explore*/tests.html) as a single
+          # <script type="application/json" id="cute-dbt-data"> blob.
+          files = sorted(glob.glob("examples/*-report.html")) \
+              + sorted(glob.glob("examples/explore*/tests.html"))
+          blob_re = re.compile(
+              r'<script[^>]*id="cute-dbt-data"[^>]*>(.*?)</script>', re.DOTALL
+          )
+
+          violations = []
+          node_checks = 0
+          for fn in files:
+              with open(fn, encoding="utf-8") as f:
+                  html = f.read()
+              m = blob_re.search(html)
+              if not m:
+                  violations.append(f"{fn}: missing <script id=cute-dbt-data> JSON blob")
+                  continue
+              try:
+                  data = json.loads(m.group(1))
+              except json.JSONDecodeError as e:
+                  violations.append(f"{fn}: data blob is not valid JSON ({e})")
+                  continue
+              for model in data.get("models", []):
+                  name = model.get("name", "<unnamed>")
+                  code_map = model.get("code_map")
+                  if code_map is None:
+                      continue  # no compiled code -> invariant holds vacuously
+                  span_keys = set(code_map.get("node_spans", {}).keys())
+                  for node in model.get("dag", {}).get("nodes", []):
+                      nid = node.get("id")
+                      node_checks += 1
+                      if nid not in span_keys:
+                          violations.append(
+                              f"{fn} :: model {name!r} :: dag node id {nid!r} "
+                              f"not in code_map.node_spans"
+                          )
+
+          if not files:
+              print("::error::source-map-completeness: no example reports matched — "
+                    "the glob drifted; gate would silently pass over nothing")
+              sys.exit(1)
+          if violations:
+              for v in violations:
+                  print(f"::error::source-map-completeness: {v}")
+              sys.exit(1)
+          print(f"source-map-completeness: OK — {node_checks} dag-node checks over "
+                f"{len(files)} example payloads; every dag node id is present in "
+                f"code_map.node_spans (or the model has no compiled code)")
+          PY
+
   baseline-required-grep:
     # The locked policy decision: --baseline-manifest is a required CLI
     # argument on the `report` verb; omitting it is a clap usage error

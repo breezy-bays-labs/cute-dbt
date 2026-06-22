@@ -6954,8 +6954,9 @@ mod tests {
     /// cute-dbt#445 TDD #6 (the fitness function, here as a unit-level
     /// structural check): every `dag.nodes[].id` has a `CteBody` entry in the
     /// model's `code_map.node_spans`, or the model has no compiled code. The
-    /// always-on CI gate (`source-map-completeness`) enforces this over the
-    /// committed example payloads; this pins the invariant on the renderer.
+    /// always-on `source-map-completeness` CI gate (`.github/workflows/ci.yml`)
+    /// enforces the same invariant over the committed example payloads; this
+    /// pins it on the renderer at unit level.
     #[test]
     fn every_dag_node_has_a_code_map_entry() {
         let compiled = "with a as (select 1), b as (select * from a) select * from b";

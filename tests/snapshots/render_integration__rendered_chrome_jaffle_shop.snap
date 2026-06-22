@@ -1,6 +1,5 @@
 ---
 source: tests/render_integration.rs
-assertion_line: 227
 expression: chrome
 ---
 <!DOCTYPE html>
