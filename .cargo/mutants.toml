@@ -40,6 +40,12 @@ examine_globs = [
   "src/domain/state.rs",
   "src/domain/preflight.rs",
   "src/domain/pr_diff.rs",
+  # The ONE cross-model `depends_on` self-inversion site (cute-dbt#443).
+  # `invert_depends_on` + `ModelLineage::from_manifest` are correctness-
+  # load-bearing: the three consumers read this one inversion, so a silent
+  # adjacency bug mis-shapes every downstream lineage view. Mirrors the
+  # crap4rs strict-keyed entry.
+  "src/domain/lineage.rs",
   # path.rs joined at cute-dbt#183 — it was extracted from scope.rs at
   # cute-dbt#96 with its dedicated kill suite (tests/path_matching.rs)
   # but never re-added to the focused scope after the split.

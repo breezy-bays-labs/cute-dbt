@@ -31,6 +31,7 @@ use serde::Serialize;
 
 use crate::domain::checks::uniqueness_test_columns;
 use crate::domain::grain::test_is_enabled;
+use crate::domain::lineage::invert_depends_on;
 use crate::domain::manifest::{
     ColumnFacts, Constraint, ConstraintKind, Exposure, Group, Manifest, Node, NodeId, Owner,
 };
@@ -764,17 +765,17 @@ fn exposures_reachable_from_helper<'m>(
 /// `pub(crate)` so the sibling [`crate::domain::macro_lens`] downstream
 /// closure (cute-dbt#345) reuses this one reverse-edge primitive instead
 /// of inventing a second walker. Both files are domain (inward-only).
+///
+/// Since cute-dbt#443 the inversion is NOT re-implemented here — it reads
+/// the ONE full-manifest inversion site
+/// ([`crate::domain::lineage::invert_depends_on`]), so the governance
+/// blast-radius reverse read, the PR mini-DAG model view, and the
+/// explorer lineage all share a single `depends_on` self-inversion (the
+/// source-map-spine S0 seam). Behaviour is byte-identical: the borrowed
+/// view, the producer-id-ordered keys, and the `depends_on`-ordered
+/// adjacency lists are unchanged.
 pub(crate) fn reverse_node_adjacency(manifest: &Manifest) -> BTreeMap<&NodeId, Vec<&NodeId>> {
-    let mut consumers_of: BTreeMap<&NodeId, Vec<&NodeId>> = BTreeMap::new();
-    for (consumer_id, node) in manifest.nodes() {
-        for producer_id in node.depends_on().nodes() {
-            consumers_of
-                .entry(producer_id)
-                .or_default()
-                .push(consumer_id);
-        }
-    }
-    consumers_of
+    invert_depends_on(manifest)
 }
 
 /// Every node id reachable **downstream** from any id in `seed`, over the

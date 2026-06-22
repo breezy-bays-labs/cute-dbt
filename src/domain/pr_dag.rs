@@ -71,6 +71,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::Serialize;
 
+use crate::domain::lineage::invert_depends_on;
 use crate::domain::manifest::{Manifest, NodeId};
 use crate::domain::pr_diff::{DiffLineKind, NormalizedDiffIndex, diff_lines};
 use crate::domain::state::ModelInScopeSet;
@@ -400,8 +401,21 @@ struct ModelAdjacency<'m> {
 }
 
 impl<'m> ModelAdjacency<'m> {
-    /// Build both adjacency maps from the manifest's `depends_on` edges,
-    /// restricted to edges where **both** endpoints are `model` nodes.
+    /// Build both adjacency maps as a **model→model VIEW** of the ONE
+    /// full-manifest lineage fact (cute-dbt#443). The `depends_on`
+    /// self-inversion is NOT re-implemented here — it happened once in
+    /// [`crate::domain::lineage::invert_depends_on`]; this is a filter
+    /// (keep only edges whose BOTH endpoints are `model` nodes) over the
+    /// borrowed inverted source, with `backward` derived from the same
+    /// full-manifest `depends_on` adjacency. Behaviour is identical to the
+    /// pre-hoist build. Per-adjacency-list order is NOT relied upon:
+    /// `forward` iterates the inverted source (whose lists carry
+    /// `manifest.nodes()` `&HashMap` order), and `backward` now iterates
+    /// the sorted `BTreeMap` `inverted` (a different list order than the
+    /// pre-hoist pass). Output is unchanged because every downstream walk
+    /// collects into a `BTreeSet`/`BTreeMap` (BFS visited sets, de-dup),
+    /// where list order is unobservable — not because list order is
+    /// preserved.
     fn build(manifest: &'m Manifest) -> Self {
         // The model-id membership set, borrowed from the manifest's own
         // node map so every stored reference shares the `'m` lifetime.
@@ -411,22 +425,26 @@ impl<'m> ModelAdjacency<'m> {
             .filter(|(_, node)| node.resource_type() == "model")
             .map(|(id, _)| id)
             .collect();
+
+        // The ONE inversion (producer → consumers), full-manifest. Filter
+        // to the model→model subgraph: keep only producers that are model
+        // nodes, and only their model consumers. The stored references
+        // are re-resolved to the manifest's own (`'m`-lived) ids via the
+        // `models` set so a consumer's local `depends_on` copy is never
+        // stored.
+        let inverted = invert_depends_on(manifest);
         let mut forward: BTreeMap<&NodeId, Vec<&NodeId>> = BTreeMap::new();
         let mut backward: BTreeMap<&NodeId, Vec<&NodeId>> = BTreeMap::new();
-        for (consumer_id, node) in manifest.nodes() {
-            if node.resource_type() != "model" {
-                continue;
-            }
-            for producer_id in node.depends_on().nodes() {
-                // Resolve the producer from the `models` set so the edge
-                // is kept only when BOTH endpoints are model nodes and the
-                // stored reference is `'m`-lived (the manifest's id, not
-                // the consumer's local `depends_on` copy).
-                let Some(&producer) = models.get(producer_id) else {
-                    continue;
+        for (&producer_id, consumers) in &inverted {
+            let Some(&producer) = models.get(producer_id) else {
+                continue; // producer is not a model node
+            };
+            for &consumer_id in consumers {
+                let Some(&consumer) = models.get(consumer_id) else {
+                    continue; // consumer is not a model node
                 };
-                forward.entry(producer).or_default().push(consumer_id);
-                backward.entry(consumer_id).or_default().push(producer);
+                forward.entry(producer).or_default().push(consumer);
+                backward.entry(consumer).or_default().push(producer);
             }
         }
         Self { forward, backward }
