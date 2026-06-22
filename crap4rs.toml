@@ -48,6 +48,17 @@ pattern ="src/domain/span.rs"
 threshold = 15
 
 [[overrides]]
+# THE per-model source-map primitive — the SourceMap assembler
+# (`from_cte_graph`) + the derived `compiled_slices`/`node_spans`
+# projections + the whole-text terminal-span synthesis (cute-dbt#445,
+# source-map-spine S2). The single source of truth `compiled_sql` derives
+# from; a silent span-arithmetic or key-derivation bug yields a
+# mis-sliced compiled SQL or a DAG node with no code anchor, never a
+# crash — correctness-load-bearing, strict.
+pattern ="src/domain/source_map.rs"
+threshold = 15
+
+[[overrides]]
 # Asset-inlining infra (PR 8a). The embedding logic is where bytes-vs-
 # templates accidents creep in.
 pattern ="src/adapters/asset_embed.rs"

@@ -52,6 +52,13 @@ examine_globs = [
   "src/domain/path.rs",
   "src/domain/scope.rs",
   "src/domain/cell_diff.rs",
+  # THE per-model source-map primitive (cute-dbt#445). The span-arithmetic
+  # `compiled_slices`/`node_spans` projections + the `from_cte_graph`
+  # terminal-span synthesis are correctness-load-bearing: a silent
+  # byte-range or key bug mis-slices compiled SQL or strands a DAG node
+  # with no code anchor, never crashes. Mirrors the crap4rs strict-keyed
+  # entry.
+  "src/domain/source_map.rs",
   "src/domain/unit_test_table.rs",
   "src/domain/unit_test_yaml.rs",
   "src/adapters/manifest.rs",
