@@ -38,6 +38,7 @@
 pub mod cell_diff;
 pub mod check_config;
 pub mod checks;
+pub mod column_context;
 pub mod config;
 pub mod cte;
 pub mod experimental;
@@ -45,6 +46,7 @@ pub mod finding_anchor;
 pub mod findings_envelope;
 pub mod governance;
 pub mod grain;
+pub mod lineage;
 pub mod macro_lens;
 pub mod manifest;
 pub mod model_yaml;
@@ -58,6 +60,8 @@ pub mod preflight;
 pub mod project_def;
 pub mod scope;
 pub mod seed_card;
+pub mod source_map;
+pub mod span;
 pub mod state;
 pub mod unit_test;
 pub mod unit_test_table;
@@ -79,13 +83,14 @@ pub use checks::{
     checks_index_markdown, evaluate_all, filter_for_display, model_findings, registry_toml,
     resolve_supersedes, supersedes_is_acyclic,
 };
+pub use column_context::{ColumnContext, SINGULAR_KIND, TestFact, column_contexts};
 pub use config::{
     AnalysisConfig, DEFAULT_REPORT_TITLE, DEFAULT_SEED_ROW_CAP, PrConfig, PrRef, ReportConfig,
     SeedsConfig,
 };
 pub use cte::{
-    CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, Span, SubqueryFact,
-    SubqueryKind,
+    ColumnEdge, ColumnEdgeConfidence, ColumnEdgeKind, ColumnRef, ColumnScope, ColumnSpan, CteEdge,
+    CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, SubqueryFact, SubqueryKind,
 };
 pub use experimental::{
     DEFAULT_MACRO_BODY_CAP, EnabledExperiments, Experiment, ExperimentalConfig, ExperimentalError,
@@ -103,6 +108,7 @@ pub use governance::{
     exposures_reachable_from, gather_governance,
 };
 pub use grain::{GrainKind, GrainSignal, model_grain_signals, test_is_enabled};
+pub use lineage::{ModelLineage, invert_depends_on};
 pub use macro_lens::{
     MacroFocusSet, changed_macros_baseline, changed_macros_pr_diff, macro_blast_radius,
     macro_focus_set, macro_test_consumers,
@@ -130,9 +136,10 @@ pub use pr_diff::{
     refine_changed_by_hunks, reverse_apply, ws_equal,
 };
 pub use preflight::{PreflightError, preflight_compiled};
-// `project_def::Span` is deliberately NOT re-exported here — `cte::Span`
-// already owns the bare name at the domain root; consumers address the
-// YAML source span as `project_def::Span`.
+// `project_def::Span` is deliberately NOT re-exported here — the canonical
+// `SourceSpan` (re-exported below) now owns the position/span vocabulary at
+// the domain root, so the bare `Span` name stays reserved for it; consumers
+// address the YAML source span as `project_def::Span`.
 pub use project_def::{
     ConfigAttribution, ConfigLeafPath, ConfigProvenance, ConfigTree, HookChangeFacts,
     HookManifestPresence, HookOperation, HookOperations, ProjectChange, ProjectChangeCategory,
@@ -145,6 +152,8 @@ pub use scope::{
     select_in_scope, select_seeds_in_scope, widen_with_config_attributions,
 };
 pub use seed_card::SeedCard;
+pub use source_map::{Presence, SourceMap, SourceMapEntry, SpanRole, ZoneKind};
+pub use span::{SourcePos, SourceSpan};
 pub use state::{
     BANNER_EMPTY_SCOPE, BodyChecksumModifier, ConfigsModifier, ContractModifier, InScopeSet,
     MacrosModifier, ModelInScopeSet, ModifiedSet, ModifierKind, RelationModifier, SeedInScopeSet,

@@ -54413,7 +54413,7 @@
       "alias": "fct_encounters_incremental",
       "checksum": {
         "name": "sha256",
-        "checksum": "431384a672cf4cc26cd3d811f070a23fceb44cfa2c94ffeff4378eee599186ad"
+        "checksum": "64c541c0eac517f5e15a40d10ee51a4363aced99ca2e525a621de81e56f111a9"
       },
       "config": {
         "enabled": true,
@@ -54548,7 +54548,7 @@
       },
       "created_at": 1779857897.083735,
       "relation_name": "\"memory\".\"main_marts\".\"fct_encounters_incremental\"",
-      "raw_code": "{{\n    config(\n        materialized='incremental',\n        unique_key='encounter_id',\n        incremental_strategy='merge',\n        on_schema_change='append_new_columns'\n    )\n}}\n\nwith source as (\n    select * from {{ ref('stg_synthea__encounters') }}\n)\n\nselect\n    encounter_id\n    , patient_id\n    , encounter_type\n    , start_time\n    , total_cost\nfrom source\n{% if is_incremental() %}\nwhere start_time > (select max(start_time) from {{ this }})\n{% endif %}",
+      "raw_code": "{{\n    config(\n        materialized='incremental',\n        unique_key='encounter_id',\n        incremental_strategy='merge',\n        on_schema_change='append_new_columns'\n    )\n}}\n\nwith source as (\n    select\n        encounter_id\n        , patient_id\n        , encounter_type\n        , start_time\n        {% for cost_col in rounded_cost_columns %}\n        , round({{ cost_col }}, 2) as {{ cost_col }}_rounded\n        {% endfor %}\n    from {{ ref('stg_synthea__encounters') }}\n)\n\nselect\n    encounter_id\n    , patient_id\n    , encounter_type\n    , start_time\n    , total_cost_rounded\nfrom source\n{% if is_incremental() %}\nwhere start_time > (select max(start_time) from {{ this }})\n{% endif %}\n",
       "doc_blocks": [],
       "language": "sql",
       "refs": [
@@ -54569,7 +54569,7 @@
       },
       "compiled_path": "target/compiled/healthcare_analytics/models/marts/core/fct_encounters.sql",
       "compiled": true,
-      "compiled_code": "\n\nwith source as (\n    select * from \"memory\".\"main_staging\".\"stg_synthea__encounters\"\n)\n\nselect\n    encounter_id\n    , patient_id\n    , encounter_type\n    , start_time\n    , total_cost\nfrom source\n\nwhere start_time > (select max(start_time) from \"memory\".\"main_marts\".\"fct_encounters_incremental\")\n",
+      "compiled_code": "\n\nwith source as (\n    select\n        encounter_id\n        , patient_id\n        , encounter_type\n        , start_time\n        , round(total_cost, 2) as total_cost_rounded\n    from \"memory\".\"main_staging\".\"stg_synthea__encounters\"\n)\n\nselect\n    encounter_id\n    , patient_id\n    , encounter_type\n    , start_time\n    , total_cost_rounded\nfrom source\n\nwhere start_time > (select max(start_time) from \"memory\".\"main_marts\".\"fct_encounters_incremental\")\n",
       "extra_ctes_injected": true,
       "extra_ctes": [],
       "contract": {

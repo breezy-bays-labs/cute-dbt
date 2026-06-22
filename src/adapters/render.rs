@@ -67,16 +67,17 @@ use crate::adapters::asset_embed::{
 };
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
-    BANNER_EMPTY_SCOPE, BlockDiff, ChangeAxes, CheckId, CheckPolicy, CommentsView,
-    ConfigAttribution, CteGraph, DEFAULT_SEED_ROW_CAP, DiffLine, DiffLineKind, EdgeType, Finding,
-    FixtureTable, FixtureTableDiff, GovernanceFacts, HeuristicId, HookChangeFacts,
-    HookManifestPresence, InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet,
-    ModelState, ModelYamlOutcome, Node, NodeId, NormalizedDiffIndex, PrDagGraph, PrRef,
-    ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition, ProjectFacts,
-    ProjectFallbackReason, SeedCard, SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff,
-    UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock, VarAttribution, VarChangeFacts,
-    VarReference, VarScanFootprint, apply_check_policy, macro_blast_radius, model_findings,
-    reconstruct_macro_sql_diff, resolve_target_model, resolve_tested_model,
+    BANNER_EMPTY_SCOPE, BlockDiff, ChangeAxes, CheckId, CheckPolicy, ColumnContext, ColumnEdge,
+    CommentsView, ConfigAttribution, CteGraph, DEFAULT_SEED_ROW_CAP, DiffLine, DiffLineKind,
+    EdgeType, Finding, FixtureTable, FixtureTableDiff, GovernanceFacts, HeuristicId,
+    HookChangeFacts, HookManifestPresence, InScopeSet, Instrument, MacroIdentity, Manifest,
+    ModelInScopeSet, ModelState, ModelYamlOutcome, Node, NodeId, NormalizedDiffIndex, PrDagGraph,
+    PrRef, ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition,
+    ProjectFacts, ProjectFallbackReason, SeedCard, SourceMap, SourceMapEntry, SourceNode,
+    SourcePos, SourceSpan, SpanRole, TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven,
+    UnitTestOverrides, UnitTestYamlBlock, VarAttribution, VarChangeFacts, VarReference,
+    VarScanFootprint, ZoneKind, apply_check_policy, column_contexts, macro_blast_radius,
+    model_findings, reconstruct_macro_sql_diff, resolve_target_model, resolve_tested_model,
     table_from_manifest_rows,
 };
 
@@ -298,6 +299,292 @@ impl From<ChangeAxes> for AxesPayload {
     }
 }
 
+/// One raw-Jinja zone projection (cute-dbt#448, Z2 — CORE). Projected once from
+/// a `SpanRole::Zone` [`SourceMapEntry`] by `gather_raw_zones`: the zone's raw
+/// `start`/`end` source positions, the 3-state `presence` verdict DERIVED ONCE
+/// in Rust and emitted as a string the prototype renders verbatim (L6), and the
+/// owning `node_id` back-ref DERIVED via `contains_range` — `null` (omitted)
+/// when the zone compiled OUT (type-incapable of an edge, never-a-false-claim,
+/// honesty principle 1). In a zone-free model `CodeMapPayload.raw_zones` is
+/// empty and never serializes (`skip_serializing_if`), so pre-#448 goldens stay
+/// byte-stable (L7).
+#[derive(Debug, Clone, Serialize)]
+pub struct RawZonePayload {
+    /// Which control-flow construct this zone is (`incremental_guard` /
+    /// `for_loop` on the wire).
+    pub kind: ZoneKind,
+    /// The zone's raw-source start position (`raw.start` — a zone always has a
+    /// raw span).
+    pub start: SourcePos,
+    /// The zone's raw-source end position (`raw.end`).
+    pub end: SourcePos,
+    /// The 3-state presence verdict, DERIVED ONCE in Rust via
+    /// [`SourceMapEntry::presence`] at this projection boundary and serialized
+    /// as the `snake_case` string the prototype renders verbatim (`compiled_in` /
+    /// `compiled_out` / `structural`). NEVER recomputed in JS (L6).
+    pub presence: &'static str,
+    /// The owning node, DERIVED via `contains_range`; `null` (omitted) when the
+    /// zone compiled OUT — type-incapable of an edge (honesty principle 1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+}
+
+/// The per-model source-map render projection (cute-dbt#445) — Serialize-only,
+/// PROJECTS the domain [`SourceMap`] spine fact. The faithful full `compiled`
+/// text plus the derived `CteBody` node-span table; `raw_zones` is the deferred
+/// `Zone` projection (empty in core S2).
+#[derive(Debug, Clone, Serialize)]
+pub struct CodeMapPayload {
+    /// `SourceMap.compiled` — the one faithful text every span indexes into.
+    pub compiled: String,
+    /// Derived: the `CteBody` entries' compiled spans, keyed by node id.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_spans: BTreeMap<String, SourceSpan>,
+    /// Derived: the `Zone` entries (empty in core S2; the S4/S5 raw-zone path
+    /// fills it).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub raw_zones: Vec<RawZonePayload>,
+    /// Derived: the `SpanRole::Column` entries (cute-dbt#447, CLL-2) — each
+    /// output column's compiled span, keyed `"node_id\u{1f}column"` (unit
+    /// separator), a sub-range of the owning node span. The JS finds a column
+    /// anchor as a `partition_point` over these nested under the `CteBody`
+    /// entry. Empty (omitted) until CLL-2 resolves a column edge, so older
+    /// goldens stay byte-stable.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub column_spans: BTreeMap<String, SourceSpan>,
+}
+
+impl CodeMapPayload {
+    /// Project a domain [`SourceMap`] into the render payload — the faithful
+    /// text, the derived `CteBody` node-span table, and the (deferred) raw
+    /// zones. Pure projection: every field is read off the spine fact, never
+    /// recomputed.
+    fn from_source_map(sm: &SourceMap) -> Self {
+        let node_spans = sm.node_spans();
+        let raw_zones = gather_raw_zones(sm, &node_spans);
+        // cute-dbt#447 (CLL-2) — flatten the `SpanRole::Column` entries into a
+        // string-keyed map for the JS column-anchor lookup. The unit-separator
+        // join keeps the (node_id, column) pair addressable in JS without a
+        // nested object, and BTreeMap ordering keeps the wire deterministic.
+        let column_spans = sm
+            .column_spans()
+            .into_iter()
+            .map(|((node_id, column), span)| (format!("{node_id}\u{1f}{column}"), span))
+            .collect();
+        Self {
+            compiled: sm.compiled.clone(),
+            node_spans,
+            raw_zones,
+            column_spans,
+        }
+    }
+}
+
+/// Project the `SpanRole::Zone` entries of a [`SourceMap`] into
+/// [`RawZonePayload`]s (cute-dbt#448, Z2) — the single localized `gather_<feat>`
+/// fn. For each zone entry: read `kind` + the raw `start`/`end`; DERIVE the
+/// 3-state `presence` verdict ONCE via [`SourceMapEntry::presence`] over the
+/// model's `CteBody` compiled spans, and serialize it as a string (L6); DERIVE
+/// the owning `node_id` back-ref via `contains_range` against those same spans.
+///
+/// Never-a-false-claim (honesty principle 1): a `compiled: None` zone is
+/// `compiled_out` with `node_id: None` — type-incapable of an edge. A zone with
+/// no raw span is skipped (a zone ALWAYS has a raw origin; a raw-less Zone entry
+/// is not a thing the scanner produces, but the projection degrades to absence
+/// rather than fabricating a `(0,0)` span).
+fn gather_raw_zones(
+    sm: &SourceMap,
+    node_spans: &BTreeMap<String, SourceSpan>,
+) -> Vec<RawZonePayload> {
+    // The CteBody compiled spans of THIS model — the presence/back-ref basis.
+    let cte_spans: Vec<SourceSpan> = node_spans.values().copied().collect();
+    sm.entries
+        .iter()
+        .filter_map(|e| {
+            let SpanRole::Zone { kind } = &e.role else {
+                return None;
+            };
+            let raw = e.raw?;
+            let presence = e.presence(&cte_spans);
+            // The owning node, DERIVED via contains_range — only when the zone
+            // compiled IN. `compiled_out` ⇒ no edge (None), by construction.
+            let node_id = e.compiled.and_then(|c| owning_node_id(node_spans, &c));
+            Some(RawZonePayload {
+                kind: *kind,
+                start: raw.start,
+                end: raw.end,
+                presence: presence.to_wire(),
+                node_id,
+            })
+        })
+        .collect()
+}
+
+/// The smallest `CteBody` node whose compiled span CONTAINS `compiled` — the
+/// zone's owning node back-ref (cute-dbt#448). "Smallest" so a Structural zone
+/// nested inside several enclosing bodies binds to the TIGHTEST one (the
+/// containing CTE, not the whole terminal select). Returns `None` if no node
+/// span contains the zone's compiled span (an honest no-edge, never fabricated).
+fn owning_node_id(
+    node_spans: &BTreeMap<String, SourceSpan>,
+    compiled: &SourceSpan,
+) -> Option<String> {
+    node_spans
+        .iter()
+        .filter(|(_, span)| span.contains_range(compiled))
+        .min_by_key(|(_, span)| span.end.byte.saturating_sub(span.start.byte))
+        .map(|(node_id, _)| node_id.clone())
+}
+
+/// Scan `raw` for control zones ([`locate_raw_zones`]) and append one
+/// `SpanRole::Zone` [`SourceMapEntry`] per located zone to `sm.entries`
+/// (cute-dbt#448, Z2). Each entry's `compiled` span is resolved by HONEST
+/// token-location in `compiled`: the zone's longest literal SQL fragment, found
+/// in the compiled text ⇒ `Some(span)`; absent (e.g. an `is_incremental()`
+/// guard pruned this build) ⇒ `None` — the honest "pruned this build" verdict,
+/// NEVER fabricated. The cute-dbt#40 adapter-parses-domain-holds pattern.
+fn append_zone_entries(sm: &mut SourceMap, raw: &str, compiled: &str) {
+    for zone in locate_raw_zones(raw) {
+        let compiled_span = resolve_zone_compiled(raw, &zone.raw_span, compiled);
+        sm.entries.push(SourceMapEntry {
+            role: SpanRole::Zone { kind: zone.kind },
+            raw: Some(zone.raw_span),
+            compiled: compiled_span,
+        });
+    }
+}
+
+/// Resolve a zone's compiled span by honest token-location (cute-dbt#448, §6).
+/// Extract the zone body's literal SQL fragments (Jinja `{%…%}`/`{{…}}`/`{#…#}`
+/// stripped, longest first), then locate the BEST UNAMBIGUOUS fragment in
+/// `compiled`. A fragment is usable only when it occurs EXACTLY ONCE in
+/// `compiled`: a fragment that appears MULTIPLY (e.g. a pruned guard whose
+/// literal also lives outside the zone region) could bind the FIRST occurrence
+/// — a region OUTSIDE the actual zone — and fabricate a false
+/// `Some`/`CompiledIn`. The honest verdict there is absence: try the next-best
+/// fragment, and if NONE is unambiguous, return `None` (`CompiledOut`). Degrade,
+/// never guess (never-a-false-claim). Raw-text matching is the LAST-RESORT
+/// mechanism the shaping permits; this fix makes it ambiguity-safe so it cannot
+/// lie about presence.
+fn resolve_zone_compiled(raw: &str, raw_span: &SourceSpan, compiled: &str) -> Option<SourceSpan> {
+    let body = raw.get(raw_span.byte_range())?;
+    // Candidates longest-first; bind the first that resolves UNAMBIGUOUSLY.
+    for anchor in literal_fragments(body) {
+        // The anchor must be a meaningful token run, not a stray symbol — a
+        // single char/whitespace match would over-bind. Require ≥3
+        // non-whitespace bytes.
+        if anchor.chars().filter(|c| !c.is_whitespace()).count() < 3 {
+            continue;
+        }
+        // UNAMBIGUOUS ONLY: bind iff the anchor occurs exactly once. A multiply
+        // occurring anchor cannot tell the zone's region from a coincidental
+        // twin elsewhere in `compiled`, so binding it would risk a false claim.
+        let mut occurrences = compiled.match_indices(anchor);
+        let first = occurrences.next();
+        let unique = occurrences.next().is_none();
+        if let Some((at, _)) = first.filter(|_| unique) {
+            // Exactly one occurrence — an honest, unambiguous bind.
+            return byte_span(compiled, at, at + anchor.len());
+        }
+        // 0 occurrences (absent) or ≥2 (ambiguous): try the next-best candidate.
+    }
+    // No unambiguous literal anchor present ⇒ honest absence (CompiledOut).
+    None
+}
+
+/// Every contiguous literal (non-Jinja) text fragment in a zone body, ORDERED
+/// LONGEST-FIRST (cute-dbt#448) — the token-location anchor candidates. Strips
+/// `{%…%}` / `{{…}}` / `{#…#}` constructs (each is a boundary) and trims each
+/// remaining run. Empty when the body is all-Jinja / whitespace. The
+/// ambiguity-safe [`resolve_zone_compiled`] walks these in order, binding the
+/// first that occurs EXACTLY ONCE in the compiled text.
+fn literal_fragments(body: &str) -> Vec<&str> {
+    let bytes = body.as_bytes();
+    let n = bytes.len();
+    let mut frags: Vec<(usize, usize)> = Vec::new();
+    let mut seg_start = 0usize;
+    let mut i = 0usize;
+    let push_seg = |start: usize, end: usize, frags: &mut Vec<(usize, usize)>| {
+        let frag = body[start..end].trim();
+        if !frag.is_empty() {
+            // Map the trimmed fragment back to byte offsets within `body`.
+            let lead = body[start..end].len() - body[start..end].trim_start().len();
+            let fs = start + lead;
+            let fe = fs + frag.len();
+            frags.push((fs, fe));
+        }
+    };
+    while i < n {
+        if bytes[i] == b'{' && i + 1 < n && matches!(bytes[i + 1], b'%' | b'{' | b'#') {
+            // Close the current literal segment, then skip the Jinja construct.
+            push_seg(seg_start, i, &mut frags);
+            let close_delim = match bytes[i + 1] {
+                b'%' => b'%',
+                b'{' => b'}',
+                _ => b'#',
+            };
+            // Find the construct's closer (literal scan — anchors don't need
+            // string-literal fidelity, only a boundary; on no closer, stop).
+            let mut j = i + 2;
+            let mut closed = None;
+            while j + 1 < n {
+                if bytes[j] == close_delim && bytes[j + 1] == b'}' {
+                    closed = Some(j + 2);
+                    break;
+                }
+                j += 1;
+            }
+            let Some(after) = closed else {
+                // Unterminated construct: nothing literal beyond here.
+                seg_start = n;
+                break;
+            };
+            i = after;
+            seg_start = after;
+        } else {
+            i += 1;
+        }
+    }
+    push_seg(seg_start, n, &mut frags);
+    // Longest-first: the most specific anchor is tried before shorter ones.
+    frags.sort_by_key(|(s, e)| std::cmp::Reverse(e - s));
+    frags.into_iter().map(|(s, e)| &body[s..e]).collect()
+}
+
+/// The longest contiguous literal (non-Jinja) text fragment in a zone body —
+/// the single best token-location anchor (cute-dbt#448). Thin wrapper over the
+/// longest-first [`literal_fragments`]. `None` when the body is all-Jinja /
+/// whitespace. Test-only since the ambiguity-safe [`resolve_zone_compiled`]
+/// walks the full [`literal_fragments`] candidate list, not just the head.
+#[cfg(test)]
+fn longest_literal_fragment(body: &str) -> Option<&str> {
+    literal_fragments(body).into_iter().next()
+}
+
+/// The per-model column-lineage render projection (cute-dbt#446, CLL-1) —
+/// Serialize-only. In CLL-1 it carries ONLY the Tier-2 `context` half (the
+/// pure manifest fold: per-column definition + tested-by); the Tier-1 `edges`
+/// array is filled by CLL-2 (`SpanRole::Column` provenance) and is omitted
+/// from the wire entirely until then. The `context`-only shape lets the
+/// column-selection UX ship before any edge math, and keeps every pre-#446
+/// golden byte-stable (the whole key is omitted when a model has no documented
+/// or tested columns).
+#[derive(Debug, Clone, Serialize)]
+pub struct ColumnLineagePayload {
+    /// Per-column context keyed by column name — definition (`data_type` +
+    /// `description`) + tested-by (`TestFact`s) + the `documented` honesty
+    /// flag. Omitted when empty (an undocumented, untested model) so older
+    /// goldens stay byte-identical.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub context: BTreeMap<String, ColumnContext>,
+    /// Tier-1 intra-model column-provenance edges (cute-dbt#447, CLL-2) —
+    /// pass-through / rename derivations, each with an honest `confidence`.
+    /// Omitted when empty (a model with no statically-resolvable column
+    /// edges) so pre-#447 goldens stay byte-stable.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<ColumnEdge>,
+}
+
 /// Per-model entry in the JSON payload — mirrors the design's
 /// `window.CUTE_DBT_SAMPLE.models[i]` shape so the inlined interaction
 /// script consumes it without remapping.
@@ -325,10 +612,29 @@ pub struct ModelPayload {
     pub description: Option<String>,
     /// DAG nodes + edges, keyed for the design's JS.
     pub dag: DagPayload,
-    /// Per-node compiled SQL, keyed by node id (CTE name or model name
-    /// for the terminal). Empty when the CTE engine could not parse
-    /// (the model card still renders the metadata + tests + an empty DAG).
+    /// Per-node compiled SQL, keyed by node id (CTE name or the stable
+    /// terminal id for the final select). Empty when the CTE engine could
+    /// not parse (the model card still renders the metadata + tests + an
+    /// empty DAG). A DERIVED PROJECTION of [`Self::code_map`]'s source map
+    /// (cute-dbt#445) — `compiled_sql[id]` byte-equals
+    /// `code_map.compiled[node_spans[id].byte_range()]` by construction.
     pub compiled_sql: BTreeMap<String, String>,
+    /// The per-model source map projection (cute-dbt#445) — the faithful
+    /// full compiled text plus the `CteBody` node-span table. The single
+    /// source of truth `compiled_sql` derives from; the JS DAG↔code sync
+    /// (cute-dbt#446) indexes the compiled `<pre>` through `node_spans`.
+    /// `None` only when the model has no compiled code (a seed/source); the
+    /// key is omitted then so older fixtures stay byte-stable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_map: Option<CodeMapPayload>,
+    /// Column-lineage context (cute-dbt#446, CLL-1) — the Tier-2 pure
+    /// manifest fold: per-column definition (`data_type` + `description`) +
+    /// tested-by + the `documented` honesty flag. `None` (key omitted) when
+    /// the model has no documented or tested columns, so every pre-#446
+    /// golden stays byte-stable. The Tier-1 column edges (#447, CLL-2) land
+    /// as an additive `edges` array inside this section later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column_lineage: Option<ColumnLineagePayload>,
     /// Raw Jinja source of the model file (`models/**/*.sql`).
     /// Surfaced verbatim in the per-model "Model SQL" expandable
     /// section (cute-dbt#47). `None` only when the manifest lacks
@@ -3072,6 +3378,483 @@ fn skip_ws_bytes(bytes: &[u8], mut i: usize) -> usize {
     i
 }
 
+/// One raw-Jinja control zone located in `raw_code` — the ADAPTER-internal
+/// intermediate emitted by [`locate_raw_zones`], NOT a domain type. Mirrors
+/// dbt-fusion's `JinjaLayoutEvent` shape (kind + source span + a depth-stack
+/// `block_id` pairing start↔end) but owns ZERO dependency (cute-dbt#448, L1).
+/// `raw_span` covers the FULL construct: the opener `{%`/`{%-` through the
+/// closer `%}`/`-%}` of the matching `endif`/`endfor`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ZoneFact {
+    kind: ZoneKind,
+    raw_span: SourceSpan,
+    /// The depth-stack pairing id (start↔end). Distinguishes nested
+    /// constructs the way fusion's `block_id` linker does; carried for fact
+    /// completeness even though resolution keys on `raw_span`.
+    block_id: u32,
+}
+
+/// A `{%…%}` block-tag boundary parsed out of `raw_code` by [`scan_block_tags`]:
+/// the half-open byte range `[open, close)` of the WHOLE tag (delimiters
+/// included, whitespace-control dashes included) and its classified leading
+/// keyword. Variable tags `{{…}}` and comments `{#…#}` are skipped at the scan
+/// layer and never surface as a `BlockTag`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockTag {
+    open: usize,
+    close: usize,
+    role: TagRole,
+}
+
+/// The block-pairing kind tracked on the depth-stack. SUPERSET of the public
+/// [`ZoneKind`] (which is `#[non_exhaustive]` and carries only the EMITTED
+/// kinds): adds `PlainIf` so a non-incremental `{% if %}…{% endif %}` still
+/// PAIRS correctly (preserving nesting) without emitting a v0.1 zone (L9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockKind {
+    /// `{% if is_incremental() %}` — emits an [`ZoneKind::IncrementalGuard`].
+    IncrementalGuard,
+    /// `{% for … %}` — emits an [`ZoneKind::ForLoop`].
+    ForLoop,
+    /// Any other `{% if … %}` — paired (so nesting is honored) but NOT a zone.
+    PlainIf,
+}
+
+impl BlockKind {
+    /// The emitted [`ZoneKind`], or `None` for a non-emitting opener
+    /// (`PlainIf`). Drives whether a matched pair produces a [`ZoneFact`].
+    fn zone_kind(self) -> Option<ZoneKind> {
+        match self {
+            Self::IncrementalGuard => Some(ZoneKind::IncrementalGuard),
+            Self::ForLoop => Some(ZoneKind::ForLoop),
+            Self::PlainIf => None,
+        }
+    }
+
+    /// Whether `closer` (an `endif`/`endfor` family) closes THIS opener:
+    /// `if`/`plain-if`/`incremental-guard` all close with `endif`; `for` closes
+    /// with `endfor`.
+    fn closes_with(self, closer: EndKind) -> bool {
+        matches!(
+            (self, closer),
+            (Self::IncrementalGuard | Self::PlainIf, EndKind::If) | (Self::ForLoop, EndKind::For)
+        )
+    }
+}
+
+/// The family an `end…` tag closes (`endif` vs `endfor`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndKind {
+    /// `{% endif %}`.
+    If,
+    /// `{% endfor %}`.
+    For,
+}
+
+/// The control-flow role of a `{%…%}` tag's leading keyword. `Other` is any tag
+/// we do not pair (`set`, `macro`, `call`, …) — scanned-and-skipped, never a
+/// zone boundary in v0.1 (L9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TagRole {
+    /// `{% if … %}` / `{% for … %}` — opens a block.
+    Start { kind: BlockKind },
+    /// `{% else %}` / `{% elif … %}` — a mid-block divider (consumed by the
+    /// depth-stack, never its own zone).
+    Mid,
+    /// `{% endif %}` / `{% endfor %}` — closes a block.
+    End { kind: EndKind },
+    /// Any other `{%…%}` tag — skipped.
+    Other,
+}
+
+/// Fuzz seam (cute-dbt#464, Z3): drive the hand-rolled raw-zone scanner
+/// ([`locate_raw_zones`]) with adversarial `raw_code` text.
+///
+/// `raw_code` is cute-dbt's SECOND untrusted-input parser (after the
+/// `--pr-diff` patch parser fuzzed in cute-dbt#383): a malicious manifest can
+/// carry arbitrary bytes in a node's `raw_code`, fed straight into this
+/// hand-rolled `{%…%}`/`{{…}}`/`{#…#}` tag-boundary scanner. The scanner owns
+/// the whitespace-control / string-literal-aware / comment-swallowing edge
+/// cases minijinja's lexer would have handled for free (the cost of hand-roll,
+/// the design's §9 fuzz obligation), so it is exactly the org's named Q4 blind
+/// spot.
+///
+/// This `#[doc(hidden)]` re-export lets the `tests/fuzz_zone_scanner` bolero
+/// target (stable Rust, no nightly) feed it random bytes and assert the
+/// FAIL-CLOSED contract: the scan never panics / hangs, and a
+/// malformed/unbalanced tag stream degrades to an EMPTY result — never a
+/// fabricated zone. It returns a flattened, fully-`Eq` POD per located zone
+/// (`(kind_tag, raw_start_byte, raw_end_byte, block_id)`) so the fuzz target
+/// can assert DETERMINISM (the same bytes scan identically) and the structural
+/// invariant (every emitted span is non-empty + in-bounds) without reaching
+/// the private adapter `ZoneFact`/`SourceSpan` types. Not part of the v0.x
+/// public API surface — it exists solely so a test target outside the crate can
+/// reach the private scanner, the same internal-reach motivation
+/// [`crate::cli::fuzz_parse_unified_diff`] has.
+///
+/// See `.claude/rules/testing.md` (the **Fuzz** rung) for the Q4
+/// bring-into-shape context.
+#[doc(hidden)]
+#[must_use]
+pub fn fuzz_locate_raw_zones(raw_code: &str) -> Vec<(u8, u32, u32, u32)> {
+    locate_raw_zones(raw_code)
+        .into_iter()
+        .map(|z| {
+            // A stable tag per emitted ZoneKind: the wire never sees this; it
+            // only has to be deterministic so the fuzz target can compare two
+            // scans of the same input for equality.
+            // `ZoneKind` is `#[non_exhaustive]` but defined in THIS crate, so an
+            // exhaustive match here is intra-crate-complete; a future emitted
+            // variant deliberately breaks this site so determinism stays
+            // well-defined (the maintainer assigns its sentinel).
+            let kind_tag = match z.kind {
+                ZoneKind::IncrementalGuard => 0u8,
+                ZoneKind::ForLoop => 1u8,
+            };
+            (
+                kind_tag,
+                z.raw_span.start.byte,
+                z.raw_span.end.byte,
+                z.block_id,
+            )
+        })
+        .collect()
+}
+
+/// Hand-rolled tag-boundary scanner over `raw_code` (cute-dbt#448, Z1). Emits a
+/// [`ZoneFact`] per matched `{% if … %}…{% endif %}` / `{% for … %}…{% endfor %}`
+/// construct, pairing start↔end with a DEPTH-STACK (NOT first-`endif`-wins) so
+/// nested zones bind correctly. Mirrors fusion's `JinjaLayoutEvent` model with
+/// no dependency (L1–L4): lives in the ADAPTER beside [`macro_call_sites`], so
+/// even a future parser dep cannot leak into `src/domain/`.
+///
+/// Honesty backstop (FAIL-CLOSED): a malformed/unterminated/unbalanced tag
+/// stream degrades to an EMPTY vec for the offending construct — NEVER a panic,
+/// hang, or fabricated zone (§2.4). The edge surface owned by hand-roll:
+/// whitespace control (`{%-`/`-%}`), string-literal-aware `%}` skipping
+/// (`{% … "%}" … %}` does not close early), and `{#…#}` comments swallowing
+/// inner tags (`{# {% if %} #}` is NOT a zone).
+fn locate_raw_zones(raw_code: &str) -> Vec<ZoneFact> {
+    if raw_code.is_empty() {
+        return Vec::new();
+    }
+    // A malformed/unterminated tag aborts the whole scan (fail-closed).
+    let Some(tags) = scan_block_tags(raw_code) else {
+        return Vec::new();
+    };
+    let mut stack: Vec<(BlockKind, usize, u32)> = Vec::new();
+    let mut zones: Vec<ZoneFact> = Vec::new();
+    let mut next_block_id: u32 = 0;
+    for tag in &tags {
+        match tag.role {
+            TagRole::Start { kind } => {
+                let block_id = next_block_id;
+                next_block_id = next_block_id.wrapping_add(1);
+                stack.push((kind, tag.open, block_id));
+            }
+            TagRole::End { kind: end_kind } => {
+                match stack.pop() {
+                    // The closer must close the opener's family (if↔endif,
+                    // for↔endfor). A mismatch is unbalanced → fail-closed.
+                    Some((open_kind, open_at, block_id)) if open_kind.closes_with(end_kind) => {
+                        // A v0.1 zone is emitted ONLY for an incremental guard
+                        // or a for-loop; a plain `{% if %}` pairs but emits no
+                        // zone (L9). DELIBERATELY nested `if let` (NOT a
+                        // `let`-chain): the prefix-scanning `byte_span` is
+                        // skipped entirely for a non-emitting opener
+                        // (`zone_kind()` is `None`) — a real perf win for plain
+                        // `{% if %}` blocks — and it sidesteps the unstable
+                        // `let_chains` feature question on MSRV 1.88. Collapsing
+                        // to a `let`-chain would undo both, so the lint is
+                        // suppressed at this site only.
+                        #[allow(clippy::collapsible_if)]
+                        if let Some(zone_kind) = open_kind.zone_kind() {
+                            if let Some(raw_span) = byte_span(raw_code, open_at, tag.close) {
+                                zones.push(ZoneFact {
+                                    kind: zone_kind,
+                                    raw_span,
+                                    block_id,
+                                });
+                            }
+                        }
+                    }
+                    _ => return Vec::new(),
+                }
+            }
+            // A mid-block divider (`else`/`elif`) is valid ONLY inside an open
+            // block — it must have a matching opener on the depth-stack. An
+            // ORPHAN mid-tag (empty stack) is malformed Jinja → fail-closed
+            // (empty vec, never letting a later zone emit from a broken stream).
+            TagRole::Mid => {
+                if stack.is_empty() {
+                    return Vec::new();
+                }
+            }
+            // Other tags are consumed without affecting pairing.
+            TagRole::Other => {}
+        }
+    }
+    // Unclosed openers ⇒ unbalanced ⇒ fail-closed.
+    if !stack.is_empty() {
+        return Vec::new();
+    }
+    zones
+}
+
+/// Scan `raw_code` for every `{%…%}` block tag, skipping `{{…}}` variable tags
+/// and `{#…#}` comments wholesale (so an inner `{% … %}` inside a comment never
+/// surfaces). Returns `None` on a malformed/unterminated tag (an opener with no
+/// matching closer before EOF) — the fail-closed signal. Whitespace control
+/// (`{%-`/`-%}`) and string-literal-aware `%}` skipping are handled here.
+fn scan_block_tags(raw_code: &str) -> Option<Vec<BlockTag>> {
+    let bytes = raw_code.as_bytes();
+    let n = bytes.len();
+    let mut tags: Vec<BlockTag> = Vec::new();
+    let mut i = 0;
+    while i < n {
+        if bytes[i] == b'{' && i + 1 < n {
+            match bytes[i + 1] {
+                b'#' => {
+                    // Comment: skip to the matching `#}` (no nesting in Jinja).
+                    let close = find_close(bytes, i + 2, b'#')?;
+                    i = close;
+                }
+                b'{' => {
+                    // Variable tag: skip to `}}`, string-literal-aware.
+                    let close = find_expr_close(bytes, i + 2, b'}')?;
+                    i = close;
+                }
+                b'%' => {
+                    // Block tag: find the closing `%}`, string-literal-aware.
+                    let close = find_expr_close(bytes, i + 2, b'%')?;
+                    let role = classify_block_tag(&raw_code[i..close]);
+                    tags.push(BlockTag {
+                        open: i,
+                        close,
+                        role,
+                    });
+                    i = close;
+                }
+                _ => i += 1,
+            }
+        } else {
+            i += 1;
+        }
+    }
+    Some(tags)
+}
+
+/// Find the byte index PAST a `<delim>}` closer (e.g. `#}`) starting at `from`,
+/// scanning literally (comments do not respect string literals). Returns the
+/// index after the closing `}`, or `None` if unterminated.
+fn find_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
+    let n = bytes.len();
+    let mut i = from;
+    while i + 1 < n {
+        if bytes[i] == delim && bytes[i + 1] == b'}' {
+            return Some(i + 2);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Find the byte index PAST a `<delim>}` closer for an EXPRESSION tag (`%}` or
+/// `}}`), honoring single/double-quoted string literals so a `%}`/`}}` INSIDE a
+/// string does not close the tag early (§2.4). Returns the index after the
+/// closing `}`, or `None` if unterminated. (The whitespace-control `-%}` is
+/// covered: the `%` then `}` still close; the leading `-` is just preceding
+/// content.)
+fn find_expr_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
+    let n = bytes.len();
+    let mut i = from;
+    let mut quote: Option<u8> = None;
+    while i < n {
+        let b = bytes[i];
+        match quote {
+            Some(q) => {
+                if b == q {
+                    quote = None;
+                }
+                // Jinja string escapes (`\'`): skip the escaped byte.
+                else if b == b'\\' && i + 1 < n {
+                    i += 1;
+                }
+            }
+            None => {
+                if b == b'\'' || b == b'"' {
+                    quote = Some(b);
+                } else if b == delim && i + 1 < n && bytes[i + 1] == b'}' {
+                    return Some(i + 2);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Whether an `{% if … %}` condition contains an ACTUAL `is_incremental()` CALL
+/// (cute-dbt#448) — an identifier-boundary, quote-aware token, NOT a bare
+/// substring. The match requires:
+/// - the literal token `is_incremental` with IDENTIFIER BOUNDARIES on BOTH sides
+///   (the preceding/following char is not `[A-Za-z0-9_]`), so a larger
+///   identifier like `some_is_incremental_flag` does NOT match;
+/// - NOT inside a single/double-quoted string literal (a quoted
+///   `'is_incremental'` is data, not a call);
+/// - followed by optional whitespace then `(` — an actual call invocation.
+///
+/// A plain `{% if %}` whose condition merely embeds the substring must classify
+/// as `PlainIf` (no v0.1 zone) — never a false `IncrementalGuard`.
+fn mentions_is_incremental_call(cond: &str) -> bool {
+    const TOKEN: &str = "is_incremental";
+    let bytes = cond.as_bytes();
+    // Iterate every literal occurrence of the token; return on the first that
+    // is a real, unquoted, parenthesized call. Each predicate is a small
+    // single-purpose helper so the boundary/quote/call logic stays low-CC.
+    cond.match_indices(TOKEN).any(|(at, _)| {
+        token_left_boundary_ok(bytes, at)
+            && token_right_boundary_ok(bytes, at + TOKEN.len())
+            && call_paren_follows(bytes, at + TOKEN.len())
+            && !offset_in_string_literal(bytes, at)
+    })
+}
+
+/// Whether `b` is an identifier (word) char `[A-Za-z0-9_]`.
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// LEFT identifier boundary at token start `at`: the preceding byte (if any)
+/// must NOT be a word char, so `some_is_incremental_flag` does not match.
+fn token_left_boundary_ok(bytes: &[u8], at: usize) -> bool {
+    at == 0 || !is_word_byte(bytes[at - 1])
+}
+
+/// RIGHT identifier boundary just past the token (`after`): the next byte (if
+/// any) must NOT be a word char, so `is_incremental_flag` does not match.
+fn token_right_boundary_ok(bytes: &[u8], after: usize) -> bool {
+    after >= bytes.len() || !is_word_byte(bytes[after])
+}
+
+/// Whether an actual call `(` follows the token (skipping optional whitespace
+/// past `after`) — distinguishing a call `is_incremental()` from a bare ident.
+fn call_paren_follows(bytes: &[u8], after: usize) -> bool {
+    let mut j = after;
+    while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+        j += 1;
+    }
+    bytes.get(j) == Some(&b'(')
+}
+
+/// Whether byte offset `at` lies INSIDE a single/double-quoted string literal,
+/// scanning from the start and honoring `\`-escapes — so a quoted
+/// `'is_incremental'` is treated as data, not a call.
+fn offset_in_string_literal(bytes: &[u8], at: usize) -> bool {
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < at {
+        i = step_string_scan(bytes, i, &mut quote);
+    }
+    quote.is_some()
+}
+
+/// Advance the quote-aware string scan one logical step from `i`, updating the
+/// open-quote state, and return the next index. A `\`-escape inside a quote
+/// consumes the escaped byte too.
+fn step_string_scan(bytes: &[u8], i: usize, quote: &mut Option<u8>) -> usize {
+    let b = bytes[i];
+    match *quote {
+        Some(q) => {
+            if b == b'\\' && i + 1 < bytes.len() {
+                return i + 2;
+            }
+            if b == q {
+                *quote = None;
+            }
+        }
+        None => {
+            if b == b'\'' || b == b'"' {
+                *quote = Some(b);
+            }
+        }
+    }
+    i + 1
+}
+
+/// Classify a full `{%…%}` tag slice by its leading keyword (after the `{%`
+/// delimiter + optional `-` whitespace-control dash + whitespace). An `if`
+/// whose condition makes an actual `is_incremental()` call is an
+/// [`ZoneKind::IncrementalGuard`]; any other `if`/`for` is a generic
+/// [`TagRole::Start`].
+fn classify_block_tag(tag: &str) -> TagRole {
+    // Strip `{%`, an optional `-`, and leading whitespace; strip the trailing
+    // `%}`/`-%}` and trailing whitespace, to read the inner statement.
+    let inner = tag
+        .strip_prefix("{%")
+        .unwrap_or(tag)
+        .trim_start_matches('-')
+        .trim_start();
+    let inner = inner
+        .strip_suffix("%}")
+        .unwrap_or(inner)
+        .trim_end()
+        .trim_end_matches('-')
+        .trim_end();
+    // The leading keyword is the first whitespace-delimited token.
+    let keyword = inner.split_whitespace().next().unwrap_or("");
+    match keyword {
+        "if" => {
+            // An incremental guard emits a zone; any other `{% if %}` still
+            // PAIRS (so nesting is honored) but emits no v0.1 zone (L9). Match an
+            // ACTUAL `is_incremental()` CALL — an identifier-boundary, quote-aware
+            // token — NOT a bare substring (`some_is_incremental_flag` and a
+            // quoted `'is_incremental'` must NOT classify as a guard).
+            let kind = if mentions_is_incremental_call(inner) {
+                BlockKind::IncrementalGuard
+            } else {
+                BlockKind::PlainIf
+            };
+            TagRole::Start { kind }
+        }
+        "for" => TagRole::Start {
+            kind: BlockKind::ForLoop,
+        },
+        "endif" => TagRole::End { kind: EndKind::If },
+        "endfor" => TagRole::End { kind: EndKind::For },
+        "else" | "elif" => TagRole::Mid,
+        _ => TagRole::Other,
+    }
+}
+
+/// Build a [`SourceSpan`] over the half-open byte range `[start, end)` of
+/// `text`, computing honest 1-based line/col endpoints by counting newlines.
+/// Returns `None` if the range is out of bounds or not on char boundaries
+/// (fail-closed — the scanner never fabricates a span).
+fn byte_span(text: &str, start: usize, end: usize) -> Option<SourceSpan> {
+    if start > end || end > text.len() {
+        return None;
+    }
+    if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return None;
+    }
+    Some(SourceSpan {
+        start: line_col_pos(text, start),
+        end: line_col_pos(text, end),
+    })
+}
+
+/// 1-based line / unicode-char col + 0-based byte for `offset` in `text`.
+fn line_col_pos(text: &str, offset: usize) -> SourcePos {
+    let prefix = &text[..offset];
+    let line =
+        u32::try_from(prefix.bytes().filter(|&b| b == b'\n').count() + 1).unwrap_or(u32::MAX);
+    let last_line = prefix.rsplit('\n').next().unwrap_or("");
+    let col = u32::try_from(last_line.chars().count() + 1).unwrap_or(u32::MAX);
+    let byte = u32::try_from(offset).unwrap_or(u32::MAX);
+    SourcePos { line, col, byte }
+}
+
 /// The macro's current body as plain context [`DiffLine`]s — the fallback
 /// the section renders when no inline diff applies. One terminator stripped
 /// (the engine-divergent normalization), then one Context line per `\n`-split
@@ -3832,7 +4615,50 @@ fn build_model_payload(
     let is_recursive = graph.is_recursive();
     let nodes = build_node_payloads(&graph, &bare_name);
     let edges = build_edge_payloads(&graph);
-    let compiled_sql = build_compiled_sql(&graph, &bare_name, compiled_code);
+    // cute-dbt#445 — the source map is the single source of truth: assemble it
+    // once from the parsed graph + the faithful compiled text, then DERIVE
+    // `compiled_sql` (the per-node slices) and project `code_map` from it. The
+    // domain assembler emits one CteBody entry per node (and synthesizes the
+    // lone terminal entry for a WITH-less model), so the derived keys agree
+    // with the DAG by construction.
+    let mut source_map = SourceMap::from_cte_graph(&graph, compiled_code, TERMINAL_NODE_NAME);
+    // cute-dbt#448 (Z1+Z2) — raw-Jinja zones: scan the model's raw_code for
+    // {% if is_incremental() %} / {% for %} control zones, resolve each into a
+    // SpanRole::Zone SourceMapEntry (compiled-span by honest token-location,
+    // None ⇒ pruned this build), and append to the spine. The presence verdict
+    // + node back-ref are derived downstream in gather_raw_zones. Only runs when
+    // there is both a source map (compiled present) AND raw_code to scan.
+    // DELIBERATELY nested `if let` (NOT a `let`-chain) — the model's `raw_code`
+    // is only read when a source map exists, and this sidesteps the unstable
+    // `let_chains` feature question on MSRV 1.88 while keeping behavior
+    // identical. Collapsing to a `let`-chain would reintroduce that question, so
+    // the lint is suppressed at this site only.
+    #[allow(clippy::collapsible_if)]
+    if let Some(sm) = source_map.as_mut() {
+        if let Some(raw) = model.raw_code().filter(|s| !s.is_empty()) {
+            append_zone_entries(sm, raw, compiled_code);
+        }
+    }
+    let compiled_sql = build_compiled_sql(source_map.as_ref());
+    let code_map = source_map.as_ref().map(CodeMapPayload::from_source_map);
+    // cute-dbt#446 (CLL-1) — the Tier-2 column-lineage context: a pure
+    // manifest fold (per-column definition + tested-by). `context`-only
+    // (no edges yet); omitted from the wire when the model has no documented
+    // or tested columns, so pre-#446 goldens stay byte-stable.
+    // cute-dbt#446 (CLL-1) context + cute-dbt#447 (CLL-2) edges. The edges are
+    // the engine's intra-model column-provenance facts (pass-through / rename),
+    // read off the already-parsed graph — never a second parse. The whole
+    // section is omitted when BOTH halves are empty so pre-#446 goldens stay
+    // byte-stable.
+    let column_lineage = {
+        let context = column_contexts(current, model);
+        let edges = graph.column_edges().to_vec();
+        if context.is_empty() && edges.is_empty() {
+            None
+        } else {
+            Some(ColumnLineagePayload { context, edges })
+        }
+    };
     let raw_sql = model
         .raw_code()
         .filter(|s| !s.is_empty())
@@ -3876,6 +4702,13 @@ fn build_model_payload(
         description: model.description().map(str::to_owned),
         dag: DagPayload { nodes, edges },
         compiled_sql,
+        // cute-dbt#445 — the source-map projection (None for a model with no
+        // compiled code; the key is omitted so older fixtures stay byte-stable).
+        code_map,
+        // cute-dbt#446 — the Tier-2 column-lineage context (None when the
+        // model has no documented or tested columns; key omitted so pre-#446
+        // goldens stay byte-stable).
+        column_lineage,
         raw_sql,
         sql_diff,
         model_yaml,
@@ -3962,29 +4795,24 @@ fn endpoint_id(graph: &CteGraph, index: usize) -> String {
         .unwrap_or_default()
 }
 
-/// Build the `compiled_sql` map: per-node `raw_sql` keyed by the stable
+/// Build the `compiled_sql` map: per-node compiled SQL keyed by the stable
 /// node id (a CTE alias, or [`TERMINAL_NODE_NAME`] for the terminal).
 ///
-/// The empty-graph branch (a model with no `WITH` clause emits no nodes)
-/// falls back to the full compiled code keyed by the model's bare name so
-/// the renderer still surfaces SOMETHING; that key is never reached by the
-/// node-keyed lookup (there are no nodes), so it cannot collide.
-fn build_compiled_sql(
-    graph: &CteGraph,
-    model_name: &str,
-    full_compiled_code: &str,
-) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
-    if graph.is_empty() {
-        map.insert(model_name.to_owned(), full_compiled_code.to_owned());
-        return map;
+/// DERIVED (cute-dbt#445) from the per-model [`SourceMap`] — the single source
+/// of truth: `compiled_sql[id]` is `compiled[node_spans[id].byte_range()]`,
+/// byte-equal to the legacy per-node `raw_sql` slice by the S1 contract. The
+/// WITH-less model is ONE terminal `CteBody` entry over the whole text, so it
+/// keys by [`TERMINAL_NODE_NAME`] (NOT the model's bare name as v1's
+/// empty-graph branch did — the cute-dbt#445 key fix).
+///
+/// `source_map` is `None` ONLY when the model has no compiled code at all
+/// (a seed/source — [`SourceMap::from_cte_graph`] returns `None` solely on an
+/// empty compiled string), so there is no slice to surface: the map is empty.
+fn build_compiled_sql(source_map: Option<&SourceMap>) -> BTreeMap<String, String> {
+    match source_map {
+        Some(sm) => sm.compiled_slices(),
+        None => BTreeMap::new(),
     }
-    for node in graph.nodes() {
-        if let Some(sql) = node.raw_sql() {
-            map.insert(node.name().to_owned(), sql.to_owned());
-        }
-    }
-    map
 }
 
 /// One external fixture file loaded for a given/expect (cute-dbt#126).
@@ -5902,6 +6730,100 @@ mod tests {
     }
 
     #[test]
+    fn model_payload_emits_column_lineage_context_for_documented_and_tested_columns() {
+        // cute-dbt#446 (CLL-1) — a documented + tested column rides the wire
+        // as `column_lineage.context.<col>` with data_type, description,
+        // documented:true, and its tested-by facts. The Tier-1 `edges` array
+        // does NOT exist yet (context-only).
+        let model = Node::new(
+            NodeId::new("model.shop.customers"),
+            "model",
+            checksum("body"),
+            Some("select 1".to_owned()),
+            None,
+            DependsOn::default(),
+            None,
+            NodeConfig::default(),
+            None,
+            BTreeMap::from([("customer_id".to_owned(), Some("integer".to_owned()))]),
+        )
+        .with_column_descriptions(BTreeMap::from([(
+            "customer_id".to_owned(),
+            "PK of the customer".to_owned(),
+        )]));
+        let not_null = column_test_node(
+            "test.shop.not_null_customers_customer_id",
+            "model.shop.customers",
+            "customer_id",
+            TestMetadata::new("not_null", None, Value::Null),
+        );
+        let ut = simple_unit_test("customers", "test_one");
+        let manifest = manifest_for(vec![model, not_null], vec![("unit_test.shop.test_one", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.customers")]);
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        let cl = payload.models[0]
+            .column_lineage
+            .as_ref()
+            .expect("documented+tested model carries column_lineage");
+        let col = cl.context.get("customer_id").expect("column present");
+        assert!(col.documented);
+        assert_eq!(col.data_type.as_deref(), Some("integer"));
+        assert_eq!(col.description.as_deref(), Some("PK of the customer"));
+        assert_eq!(col.tests.len(), 1);
+        assert_eq!(col.tests[0].kind, "not_null");
+
+        let json = serde_json::to_value(&payload).expect("payload serializes");
+        let ctx = &json["models"][0]["column_lineage"]["context"]["customer_id"];
+        assert_eq!(ctx["data_type"], "integer");
+        assert_eq!(ctx["documented"], true);
+        assert_eq!(ctx["tests"][0]["kind"], "not_null");
+        // CLL-1 ships context-only — no `edges` key anywhere on the wire.
+        assert!(
+            json["models"][0]["column_lineage"].get("edges").is_none(),
+            "CLL-1 is context-only; edges land with CLL-2 (#447)",
+        );
+    }
+
+    #[test]
+    fn model_payload_omits_column_lineage_when_no_documented_or_tested_columns() {
+        // cute-dbt#446 — an undocumented, untested model omits the whole
+        // `column_lineage` key so every pre-#446 golden stays byte-stable.
+        let node = model_node("model.shop.stg_orders", "body", Some("select 1"));
+        let ut = simple_unit_test("stg_orders", "test_one");
+        let manifest = manifest_for(vec![node], vec![("unit_test.shop.test_one", ut)]);
+        let in_scope = InScopeSet::from_iter(["unit_test.shop.test_one".to_owned()]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.stg_orders")]);
+        let payload = build_payload(
+            &manifest,
+            &in_scope,
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "baseline.json",
+        );
+        assert!(payload.models[0].column_lineage.is_none());
+        let json = serde_json::to_string(&payload).expect("payload serializes");
+        assert!(
+            !json.contains(r#""column_lineage""#),
+            "no documented/tested columns ⇒ no column_lineage key (older goldens stay stable)",
+        );
+    }
+
+    #[test]
     fn model_payload_path_is_omitted_when_the_manifest_carries_none() {
         // cute-dbt#179 — synthetic / pre-1.8 manifests carry no
         // original_file_path: the key is omitted from the wire (the JS
@@ -6812,6 +7734,659 @@ mod tests {
         );
     }
 
+    /// cute-dbt#445 TDD #2 (render level): the derived `compiled_sql[id]`
+    /// byte-equals `code_map.compiled[node_spans[id].byte_range()]` for every
+    /// node — the source map is the single source of truth.
+    #[test]
+    fn compiled_sql_byte_equals_code_map_slice_for_every_node() {
+        let compiled = "with a as (select 1), b as (select * from a) select * from b";
+        let node = model_node("model.shop.x", "body", Some(compiled));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let model = &payload.models[0];
+        let code_map = model
+            .code_map
+            .as_ref()
+            .expect("compiled model has a code map");
+        // The faithful text is the model's compiled code verbatim.
+        assert_eq!(code_map.compiled, compiled);
+        // Every node-span slices the faithful text to the compiled_sql value.
+        assert_eq!(
+            code_map.node_spans.keys().collect::<Vec<_>>(),
+            model.compiled_sql.keys().collect::<Vec<_>>(),
+            "node_spans.keys() == compiled_sql.keys()"
+        );
+        for (id, span) in &code_map.node_spans {
+            assert_eq!(
+                &code_map.compiled[span.byte_range()],
+                model.compiled_sql.get(id).unwrap(),
+                "compiled_sql[{id}] byte-equals the faithful slice"
+            );
+        }
+        // The terminal slice byte-equals the legacy trimmed terminal text
+        // (Blocker-1): it must NOT carry the leading `) ` glue.
+        let terminal = model.compiled_sql.get(TERMINAL_NODE_NAME).unwrap();
+        assert!(
+            terminal.starts_with("select"),
+            "terminal slice is post-trim (no leading glue): {terminal:?}"
+        );
+    }
+
+    /// cute-dbt#445 TDD #6 (the fitness function, here as a unit-level
+    /// structural check): every `dag.nodes[].id` has a `CteBody` entry in the
+    /// model's `code_map.node_spans`, or the model has no compiled code. The
+    /// always-on `source-map-completeness` CI gate (`.github/workflows/ci.yml`)
+    /// enforces the same invariant over the committed example payloads; this
+    /// pins it on the renderer at unit level.
+    #[test]
+    fn every_dag_node_has_a_code_map_entry() {
+        let compiled = "with a as (select 1), b as (select * from a) select * from b";
+        let node = model_node("model.shop.x", "body", Some(compiled));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let model = &payload.models[0];
+        let code_map = model
+            .code_map
+            .as_ref()
+            .expect("compiled model has a code map");
+        for n in &model.dag.nodes {
+            assert!(
+                code_map.node_spans.contains_key(&n.id),
+                "dag node {:?} has a CteBody entry",
+                n.id
+            );
+        }
+    }
+
+    /// cute-dbt#448: `gather_raw_zones` projects `Zone` entries into
+    /// `raw_zones` with the derived 3-state `presence` string + node back-ref.
+    /// A `compiled: None` zone (the incremental-guard compiled-OUT case) is
+    /// `compiled_out` with `node_id: None` — type-incapable of an edge.
+    #[test]
+    fn from_source_map_projects_zone_entries_into_raw_zones() {
+        let sm = SourceMap {
+            compiled: "select 1".to_owned(),
+            entries: vec![
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: TERMINAL_NODE_NAME.to_owned(),
+                    },
+                    raw: None,
+                    compiled: Some(SourceSpan {
+                        start: SourcePos {
+                            line: 1,
+                            col: 1,
+                            byte: 0,
+                        },
+                        end: SourcePos {
+                            line: 1,
+                            col: 9,
+                            byte: 8,
+                        },
+                    }),
+                },
+                SourceMapEntry {
+                    role: SpanRole::Zone {
+                        kind: ZoneKind::IncrementalGuard,
+                    },
+                    raw: Some(SourceSpan {
+                        start: SourcePos {
+                            line: 1,
+                            col: 1,
+                            byte: 0,
+                        },
+                        end: SourcePos {
+                            line: 1,
+                            col: 5,
+                            byte: 4,
+                        },
+                    }),
+                    compiled: None,
+                },
+            ],
+        };
+        let payload = CodeMapPayload::from_source_map(&sm);
+        // The CteBody entry projects into node_spans (not raw_zones).
+        assert_eq!(payload.node_spans.len(), 1);
+        assert!(payload.node_spans.contains_key(TERMINAL_NODE_NAME));
+        // The Zone entry projects into raw_zones with kind + raw start/end +
+        // the derived presence string + node back-ref.
+        assert_eq!(payload.raw_zones.len(), 1, "the Zone arm is projected");
+        assert_eq!(payload.raw_zones[0].kind, ZoneKind::IncrementalGuard);
+        assert_eq!(payload.raw_zones[0].start.byte, 0);
+        assert_eq!(payload.raw_zones[0].end.byte, 4);
+        assert_eq!(
+            payload.raw_zones[0].presence, "compiled_out",
+            "compiled: None ⇒ the honest pruned verdict"
+        );
+        assert!(
+            payload.raw_zones[0].node_id.is_none(),
+            "compiled_out ⇒ no node edge (never-a-false-claim)"
+        );
+    }
+
+    // ── cute-dbt#448 (Z1): the hand-rolled tag-boundary scanner ──
+
+    #[test]
+    fn scan_locates_an_incremental_guard() {
+        let raw = "select *\nfrom events\n{% if is_incremental() %}\nwhere ts > 0\n{% endif %}";
+        let zones = locate_raw_zones(raw);
+        assert_eq!(zones.len(), 1, "one incremental-guard zone");
+        assert_eq!(zones[0].kind, ZoneKind::IncrementalGuard);
+        // The raw span covers the whole {% if … %}…{% endif %} construct.
+        let covered = &raw[zones[0].raw_span.byte_range()];
+        assert!(covered.starts_with("{% if is_incremental()"));
+        assert!(covered.ends_with("{% endif %}"));
+    }
+
+    #[test]
+    fn scan_locates_a_for_loop() {
+        let raw = "case status\n{% for s in statuses %}when {{ s }} then 1\n{% endfor %}\nend";
+        let zones = locate_raw_zones(raw);
+        assert_eq!(zones.len(), 1, "one for-loop zone");
+        assert_eq!(zones[0].kind, ZoneKind::ForLoop);
+        let covered = &raw[zones[0].raw_span.byte_range()];
+        assert!(covered.starts_with("{% for s in statuses %}"));
+        assert!(covered.ends_with("{% endfor %}"));
+    }
+
+    #[test]
+    fn scan_pairs_nested_if_inside_for_by_depth_stack() {
+        // {% for %} containing {% if is_incremental() %}: the depth-stack pairs
+        // the inner endif to the inner if, NOT first-endif-wins.
+        let raw = "{% for x in xs %}{% if is_incremental() %}a{% endif %}b{% endfor %}";
+        let zones = locate_raw_zones(raw);
+        // Two zones: the inner incremental guard AND the outer for-loop.
+        assert_eq!(zones.len(), 2, "inner guard + outer for-loop");
+        let kinds: Vec<ZoneKind> = zones.iter().map(|z| z.kind).collect();
+        assert!(kinds.contains(&ZoneKind::IncrementalGuard));
+        assert!(kinds.contains(&ZoneKind::ForLoop));
+        // The inner guard closes FIRST (popped before the for-loop).
+        assert_eq!(
+            zones[0].kind,
+            ZoneKind::IncrementalGuard,
+            "inner endif pairs to the inner if (depth-stack, not first-endif-wins)"
+        );
+        // Inner guard's raw span is strictly inside the for-loop's raw span.
+        let outer = zones
+            .iter()
+            .find(|z| z.kind == ZoneKind::ForLoop)
+            .unwrap()
+            .raw_span;
+        assert!(outer.contains_range(&zones[0].raw_span));
+    }
+
+    #[test]
+    fn scan_handles_whitespace_control_trim_markers() {
+        // {%- … -%} whitespace control: the raw span stays anchored on the raw
+        // delimiters (the {%- is included).
+        let raw = "x\n{%- if is_incremental() -%}\ny\n{%- endif -%}\nz";
+        let zones = locate_raw_zones(raw);
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].kind, ZoneKind::IncrementalGuard);
+        let covered = &raw[zones[0].raw_span.byte_range()];
+        assert!(covered.starts_with("{%- if is_incremental()"));
+        assert!(covered.ends_with("-%}"));
+    }
+
+    #[test]
+    fn scan_comment_swallows_an_inner_tag() {
+        // {# {% if %} #}: the comment swallows the inner tag — NO zone, and no
+        // dangling opener to unbalance the scan.
+        let raw = "select 1 {# {% if is_incremental() %} #} from t";
+        assert!(
+            locate_raw_zones(raw).is_empty(),
+            "a tag inside a comment is not a zone"
+        );
+    }
+
+    #[test]
+    fn scan_string_literal_does_not_close_the_tag_early() {
+        // A `%}` inside a string literal must NOT close the {% … %} tag.
+        let raw = "{% if is_incremental() and x == '%}' %}body{% endif %}";
+        let zones = locate_raw_zones(raw);
+        assert_eq!(
+            zones.len(),
+            1,
+            "a percent-brace inside a string literal does not close the tag early"
+        );
+        assert_eq!(zones[0].kind, ZoneKind::IncrementalGuard);
+        let covered = &raw[zones[0].raw_span.byte_range()];
+        assert!(covered.ends_with("{% endif %}"));
+    }
+
+    #[test]
+    fn scan_unbalanced_yields_empty_fail_closed() {
+        // An opener with no closer → empty vec (fail-closed), never a panic.
+        assert!(locate_raw_zones("{% if is_incremental() %}body").is_empty());
+        // A closer with no opener → empty.
+        assert!(locate_raw_zones("body{% endif %}").is_empty());
+        // A mismatched pair (if…endfor) → empty.
+        assert!(locate_raw_zones("{% if is_incremental() %}x{% endfor %}").is_empty());
+        // An unterminated tag → empty (never hangs).
+        assert!(locate_raw_zones("{% if is_incremental() ").is_empty());
+        // Empty input → empty.
+        assert!(locate_raw_zones("").is_empty());
+    }
+
+    #[test]
+    fn scan_plain_if_pairs_but_emits_no_zone() {
+        // A non-incremental {% if %} pairs correctly (so it does not unbalance a
+        // sibling zone) but emits NO v0.1 zone (L9).
+        let raw = "{% if foo %}a{% endif %}\n{% for x in xs %}b{% endfor %}";
+        let zones = locate_raw_zones(raw);
+        assert_eq!(zones.len(), 1, "only the for-loop is a zone");
+        assert_eq!(zones[0].kind, ZoneKind::ForLoop);
+    }
+
+    // ── cute-dbt#448 (Z2): zone facts → SpanRole::Zone entries + presence ──
+
+    #[test]
+    fn append_zone_entries_incremental_guard_pruned_is_compiled_out() {
+        // The {% if is_incremental() %} guard's body is ABSENT from a fresh
+        // compile (is_incremental()==false) → compiled: None, presence
+        // compiled_out, node_id: null.
+        let raw = "select *\nfrom events\n{% if is_incremental() %}\nwhere ts > (select max(ts) from this)\n{% endif %}";
+        let compiled = "select *\nfrom events"; // the guard body is pruned
+        let mut sm = SourceMap {
+            compiled: compiled.to_owned(),
+            entries: vec![SourceMapEntry {
+                role: SpanRole::CteBody {
+                    node_id: TERMINAL_NODE_NAME.to_owned(),
+                },
+                raw: None,
+                compiled: byte_span(compiled, 0, compiled.len()),
+            }],
+        };
+        append_zone_entries(&mut sm, raw, compiled);
+        let payload = CodeMapPayload::from_source_map(&sm);
+        assert_eq!(payload.raw_zones.len(), 1);
+        let z = &payload.raw_zones[0];
+        assert_eq!(z.kind, ZoneKind::IncrementalGuard);
+        assert_eq!(z.presence, "compiled_out", "guard pruned this build");
+        assert!(z.node_id.is_none(), "compiled_out ⇒ no node edge");
+    }
+
+    #[test]
+    fn append_zone_entries_shape_a_for_loop_is_structural() {
+        // A {% for %} expanding columns INSIDE one CTE body: the loop's literal
+        // tokens land inside the terminal CteBody span → Structural, bound to
+        // the containing node. The loop body carries a UNIQUE literal anchor
+        // ("when unique_status_marker then") that appears exactly once in the
+        // unrolled compiled output, so the ambiguity-safe resolver (FIX B) can
+        // soundly bind it (a loop whose body literal REPEATS verbatim per
+        // iteration is genuinely unbindable — see
+        // `resolve_zone_compiled_ambiguous_anchor_is_none_not_a_false_bind`).
+        let raw = "select\n  case status\n  {% for s in statuses %}when unique_status_marker then {{ s }}\n  {% endfor %}\n  end as label\nfrom events";
+        // The compiled text contains the loop's UNIQUE literal fragment
+        // ("when unique_status_marker then") inside the (whole-text) terminal
+        // body, exactly once.
+        let compiled = "select\n  case status\n  when unique_status_marker then 1\n  end as label\nfrom events";
+        let mut sm = SourceMap {
+            compiled: compiled.to_owned(),
+            entries: vec![SourceMapEntry {
+                role: SpanRole::CteBody {
+                    node_id: TERMINAL_NODE_NAME.to_owned(),
+                },
+                raw: None,
+                compiled: byte_span(compiled, 0, compiled.len()),
+            }],
+        };
+        append_zone_entries(&mut sm, raw, compiled);
+        let payload = CodeMapPayload::from_source_map(&sm);
+        assert_eq!(payload.raw_zones.len(), 1, "one for-loop zone");
+        let z = &payload.raw_zones[0];
+        assert_eq!(z.kind, ZoneKind::ForLoop);
+        assert_eq!(
+            z.presence, "structural",
+            "the loop expands inside one CTE body (strictly nested)"
+        );
+        assert_eq!(
+            z.node_id.as_deref(),
+            Some(TERMINAL_NODE_NAME),
+            "structural zone binds to its containing node"
+        );
+    }
+
+    #[test]
+    fn longest_literal_fragment_skips_jinja_constructs() {
+        // The anchor is the longest literal run with Jinja stripped.
+        let body = "{% if x %}select distinct id from {{ ref('t') }} where active{% endif %}";
+        let frag = longest_literal_fragment(body).expect("a literal fragment");
+        assert_eq!(frag, "select distinct id from");
+    }
+
+    #[test]
+    fn resolve_zone_compiled_returns_none_when_anchor_absent() {
+        // A zone whose literal anchor is not in the compiled text → None
+        // (degrade to absence, never a fabricated Some).
+        let raw = "{% if is_incremental() %}where unique_marker_xyz > 0{% endif %}";
+        let zone = &locate_raw_zones(raw)[0];
+        let compiled = "select * from events"; // anchor absent
+        assert!(resolve_zone_compiled(raw, &zone.raw_span, compiled).is_none());
+    }
+
+    // ── cute-dbt#448 FIX B (CodeRabbit Major, never-a-false-claim): the zone
+    // anchor must resolve UNAMBIGUOUSLY. A pruned guard whose literal also
+    // appears OUTSIDE the actual zone region must NOT fabricate a Some — it
+    // degrades to None (honest CompiledOut), never a false bind. ──
+
+    #[test]
+    fn resolve_zone_compiled_ambiguous_anchor_is_none_not_a_false_bind() {
+        // The guard's longest literal anchor ("where status = 'active'") ALSO
+        // appears verbatim elsewhere in `compiled` (the guard itself was pruned
+        // this build). Binding the FIRST occurrence would claim CompiledIn at a
+        // region OUTSIDE the zone — a false claim. The ambiguity-safe resolver
+        // refuses to bind and returns None (honest CompiledOut).
+        let raw = "{% if is_incremental() %}where status = 'active'{% endif %}";
+        let zone = &locate_raw_zones(raw)[0];
+        // The anchor "where status = 'active'" occurs TWICE in compiled, and
+        // neither is the (pruned) zone region — ambiguous, must not bind.
+        let compiled = "select * from a where status = 'active'\n\
+                        union all\n\
+                        select * from b where status = 'active'";
+        assert!(
+            resolve_zone_compiled(raw, &zone.raw_span, compiled).is_none(),
+            "a multiply-occurring anchor must NOT fabricate a Some (never-a-false-claim)"
+        );
+    }
+
+    #[test]
+    fn append_zone_entries_ambiguous_anchor_resolves_to_compiled_out() {
+        // End-to-end through the projection: the same ambiguous-anchor guard →
+        // presence compiled_out, node_id null (no fabricated edge), NOT a false
+        // structural/compiled_in.
+        let raw =
+            "select *\nfrom events\n{% if is_incremental() %}where status = 'active'{% endif %}";
+        let compiled = "select * from a where status = 'active'\n\
+                        union all\n\
+                        select * from b where status = 'active'";
+        let mut sm = SourceMap {
+            compiled: compiled.to_owned(),
+            entries: vec![SourceMapEntry {
+                role: SpanRole::CteBody {
+                    node_id: TERMINAL_NODE_NAME.to_owned(),
+                },
+                raw: None,
+                compiled: byte_span(compiled, 0, compiled.len()),
+            }],
+        };
+        append_zone_entries(&mut sm, raw, compiled);
+        let payload = CodeMapPayload::from_source_map(&sm);
+        assert_eq!(payload.raw_zones.len(), 1);
+        let z = &payload.raw_zones[0];
+        assert_eq!(
+            z.presence, "compiled_out",
+            "ambiguous anchor ⇒ honest absence, never a fabricated presence"
+        );
+        assert!(
+            z.node_id.is_none(),
+            "no fabricated node edge from an ambiguous anchor"
+        );
+    }
+
+    #[test]
+    fn resolve_zone_compiled_prefers_a_unique_shorter_anchor_over_an_ambiguous_longer_one() {
+        // The longest literal ("where status = 'active'") is ambiguous (appears
+        // twice), but a shorter UNIQUE literal fragment ("and rare_marker_q > 0")
+        // is present exactly once → bind that one (degrade gracefully to the
+        // next-best unambiguous candidate, never lie, never give up early).
+        let raw = "{% if is_incremental() %}where status = 'active'\n\
+                   {{ adapter }}and rare_marker_q > 0{% endif %}";
+        let zone = &locate_raw_zones(raw)[0];
+        let compiled = "select * from a where status = 'active'\n\
+                        union all\n\
+                        select * from b where status = 'active' and rare_marker_q > 0";
+        let span = resolve_zone_compiled(raw, &zone.raw_span, compiled)
+            .expect("the unique shorter fragment resolves");
+        let matched = &compiled[span.byte_range()];
+        assert_eq!(
+            matched, "and rare_marker_q > 0",
+            "binds the UNIQUE fragment, not the first occurrence of the ambiguous one"
+        );
+    }
+
+    // ── cute-dbt#448 FIX C (CodeRabbit Major, fail-closed): an orphan mid-block
+    // tag (`{% else %}` / `{% elif %}` with no opener on the depth-stack) is
+    // malformed Jinja → empty vec, never letting a later zone emit. ──
+
+    #[test]
+    fn scan_orphan_else_yields_empty_fail_closed() {
+        // An `{% else %}` with NO `{% if %}` opener is malformed — fail-closed.
+        assert!(
+            locate_raw_zones("select 1\n{% else %}\nselect 2").is_empty(),
+            "an orphan else (no opener) ⇒ empty (fail-closed)"
+        );
+        // An orphan `{% elif %}` is equally malformed.
+        assert!(
+            locate_raw_zones("select 1\n{% elif x %}\nselect 2").is_empty(),
+            "an orphan elif (no opener) ⇒ empty (fail-closed)"
+        );
+        // And it must NOT let a LATER well-formed zone emit from a broken stream.
+        assert!(
+            locate_raw_zones("{% else %}\n{% for x in xs %}a{% endfor %}").is_empty(),
+            "an orphan else must abort the whole scan, not just its own region"
+        );
+    }
+
+    #[test]
+    fn scan_well_placed_else_inside_a_block_still_pairs() {
+        // A WELL-PLACED `{% else %}` (inside an open block) is fine — the block
+        // still pairs and emits its zone. The orphan guard must not regress this.
+        let raw = "{% if is_incremental() %}a{% else %}b{% endif %}";
+        let zones = locate_raw_zones(raw);
+        assert_eq!(zones.len(), 1, "a well-placed else does not break pairing");
+        assert_eq!(zones[0].kind, ZoneKind::IncrementalGuard);
+    }
+
+    // ── cute-dbt#448 FIX D (CodeRabbit Major, classifier correctness): the
+    // IncrementalGuard classification matches an ACTUAL `is_incremental()` CALL,
+    // not a bare substring. ──
+
+    #[test]
+    fn classify_is_incremental_matches_an_actual_call_not_a_substring() {
+        // A real `is_incremental()` call IS a guard (zone emitted).
+        let raw = "{% if is_incremental() %}a{% endif %}";
+        let zones = locate_raw_zones(raw);
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].kind, ZoneKind::IncrementalGuard);
+
+        // A larger identifier merely CONTAINING `is_incremental` is NOT a guard
+        // (it is a plain `{% if %}` — pairs, emits no zone).
+        assert!(
+            locate_raw_zones("{% if some_is_incremental_flag %}a{% endif %}").is_empty(),
+            "`some_is_incremental_flag` is a plain if, not an incremental guard"
+        );
+
+        // A QUOTED string containing `is_incremental` is data, not a call.
+        assert!(
+            locate_raw_zones("{% if x == 'is_incremental' %}a{% endif %}").is_empty(),
+            "a quoted 'is_incremental' literal is not a call ⇒ plain if, no zone"
+        );
+
+        // The bare token with no call parens is also not a call.
+        assert!(
+            locate_raw_zones("{% if is_incremental %}a{% endif %}").is_empty(),
+            "`is_incremental` with no `(` is not a call ⇒ plain if, no zone"
+        );
+
+        // Whitespace between the token and `(` is still a call.
+        let zones = locate_raw_zones("{% if is_incremental () %}a{% endif %}");
+        assert_eq!(zones.len(), 1, "whitespace before `(` is still a call");
+        assert_eq!(zones[0].kind, ZoneKind::IncrementalGuard);
+    }
+
+    // ── cute-dbt#448: per-helper unit coverage for the decomposed
+    // `mentions_is_incremental_call` predicates (the char-scanning broken into
+    // small single-purpose fns so each stays well under the strict CC gate). ──
+
+    #[test]
+    fn is_word_byte_classifies_identifier_chars() {
+        for b in [b'a', b'Z', b'0', b'9', b'_'] {
+            assert!(is_word_byte(b), "{} is a word char", b as char);
+        }
+        for b in [b' ', b'(', b'\'', b'-', b'.'] {
+            assert!(!is_word_byte(b), "{} is not a word char", b as char);
+        }
+    }
+
+    #[test]
+    fn token_boundary_helpers_honor_identifier_edges() {
+        // `xis_incremental` — left byte is a word char ⇒ left boundary fails.
+        let b = b"xis_incremental";
+        assert!(!token_left_boundary_ok(b, 1));
+        // Token at the very start ⇒ left boundary ok.
+        assert!(token_left_boundary_ok(b"is_incremental", 0));
+        // Right boundary: next byte `_` is a word char ⇒ fails.
+        assert!(!token_right_boundary_ok(b"is_incremental_x", 14));
+        // Right boundary at end-of-string ⇒ ok.
+        assert!(token_right_boundary_ok(b"is_incremental", 14));
+        // Right boundary: next byte `(` is not a word char ⇒ ok.
+        assert!(token_right_boundary_ok(b"is_incremental(", 14));
+    }
+
+    #[test]
+    fn call_paren_follows_skips_whitespace_then_requires_open_paren() {
+        assert!(call_paren_follows(b"(", 0));
+        assert!(call_paren_follows(b"   (", 0), "leading ws then `(`");
+        assert!(!call_paren_follows(b"   ", 0), "ws only, no `(`");
+        assert!(!call_paren_follows(b"x", 0), "non-`(` byte");
+        assert!(!call_paren_follows(b"", 0), "empty ⇒ no `(`");
+    }
+
+    #[test]
+    fn offset_in_string_literal_detects_quote_state() {
+        // Inside a single-quoted literal.
+        let s = b"x == 'is_incremental'";
+        assert!(
+            offset_in_string_literal(s, 6),
+            "offset 6 is inside the quote"
+        );
+        // The same buffer, AFTER the closing quote ⇒ not inside.
+        assert!(!offset_in_string_literal(s, 21));
+        // Outside any quote.
+        assert!(!offset_in_string_literal(b"is_incremental()", 0));
+        // Inside a DOUBLE-quoted literal (the other quote arm).
+        assert!(offset_in_string_literal(b"x == \"abc\"", 6));
+        // A `\`-escape inside a quote does not prematurely close it: the
+        // escaped `'` is consumed, so the offset past it is still inside.
+        assert!(
+            offset_in_string_literal(b"'a\\'b'c", 4),
+            "escaped quote keeps the literal open"
+        );
+        // A trailing lone backslash at end-of-buffer is handled (no overrun).
+        assert!(offset_in_string_literal(b"'a\\", 3), "unterminated escape");
+    }
+
+    #[test]
+    fn step_string_scan_advances_and_tracks_quotes() {
+        // Opening a quote from the neutral state.
+        let mut q: Option<u8> = None;
+        let next = step_string_scan(b"'a'", 0, &mut q);
+        assert_eq!((next, q), (1, Some(b'\'')));
+        // Closing the matching quote.
+        let mut q = Some(b'\'');
+        let next = step_string_scan(b"'a'", 2, &mut q);
+        assert_eq!((next, q), (3, None));
+        // An escape inside a quote skips two bytes and keeps the quote open.
+        let mut q = Some(b'\'');
+        let next = step_string_scan(b"\\'", 0, &mut q);
+        assert_eq!((next, q), (2, Some(b'\'')));
+        // A double-quote opener (the other neutral-state arm).
+        let mut q: Option<u8> = None;
+        let next = step_string_scan(b"\"x", 0, &mut q);
+        assert_eq!((next, q), (1, Some(b'"')));
+        // A neutral, non-quote byte just advances by one.
+        let mut q: Option<u8> = None;
+        let next = step_string_scan(b"ab", 0, &mut q);
+        assert_eq!((next, q), (1, None));
+    }
+
+    /// cute-dbt#445 TDD #4 (the inlined-data assertion, without a browser): the
+    /// serialized model payload — the data script the headless report reads —
+    /// carries `code_map.compiled` + `node_spans`. The headless leg
+    /// (cute-dbt#446) drives the live `<pre>` sync; this pins the wire shape.
+    #[test]
+    fn serialized_payload_carries_code_map_compiled_and_node_spans() {
+        let compiled = "with a as (select 1) select * from a";
+        let node = model_node("model.shop.x", "body", Some(compiled));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let json = serde_json::to_string(&payload.models[0]).unwrap();
+        assert!(json.contains("\"code_map\""), "code_map present: {json}");
+        assert!(
+            json.contains("\"node_spans\""),
+            "node_spans present: {json}"
+        );
+        // The faithful compiled text is embedded under code_map.compiled.
+        assert!(
+            json.contains("with a as (select 1) select * from a"),
+            "faithful compiled text embedded: {json}"
+        );
+    }
+
+    /// cute-dbt#445: a model with NO compiled code (a `dbt parse` shape /
+    /// seed-like node) omits `code_map` entirely — the key is absent so older
+    /// fixtures without the field stay byte-stable.
+    #[test]
+    fn no_compiled_code_omits_code_map() {
+        // model_node with None compiled → no compiled_code.
+        let node = model_node("model.shop.uncompiled", "body", None);
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.uncompiled")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let model = &payload.models[0];
+        assert!(model.code_map.is_none(), "no compiled code ⇒ no code_map");
+        let json = serde_json::to_string(model).unwrap();
+        assert!(
+            !json.contains("code_map"),
+            "code_map key omitted from the wire: {json}"
+        );
+    }
+
     #[test]
     fn self_named_import_cte_does_not_collapse_into_the_terminal() {
         // cute-dbt#155 regression: a model named `orders` whose import CTE
@@ -6911,10 +8486,12 @@ mod tests {
     }
 
     #[test]
-    fn build_payload_empty_graph_falls_back_to_full_compiled_code() {
-        // A `select 1` body has no WITH clause → empty CteGraph. The
-        // compiled_sql map still carries the model's body keyed by the
-        // bare name so the renderer surfaces SOMETHING.
+    fn build_payload_no_with_model_is_one_terminal_cte_body_entry() {
+        // A `select 1` body has no WITH clause → empty CteGraph (the engine
+        // emits no nodes). cute-dbt#445: the source map synthesizes ONE
+        // terminal CteBody entry over the whole text, so compiled_sql keys by
+        // the stable terminal id (NOT the bare model name as v1 did) and
+        // node_spans.keys() == compiled_sql.keys() by construction.
         let compiled = "select 1";
         let node = model_node("model.shop.flat", "body", Some(compiled));
         let manifest = manifest_for(vec![node], vec![]);
@@ -6930,17 +8507,38 @@ mod tests {
             &HashMap::new(),
             "b",
         );
+        let model = &payload.models[0];
+        // The single terminal entry carries the whole body, keyed by the
+        // stable terminal id.
         assert_eq!(
-            payload.models[0].compiled_sql.get("flat").unwrap(),
-            compiled
+            model.compiled_sql.get(TERMINAL_NODE_NAME).unwrap(),
+            compiled,
+            "no-WITH body keyed by the stable terminal id, not the model name"
         );
+        assert!(
+            !model.compiled_sql.contains_key("flat"),
+            "no longer keyed by the bare model name (cute-dbt#445 key fix)"
+        );
+        // The code_map projection carries the same body + node-span table.
+        let code_map = model
+            .code_map
+            .as_ref()
+            .expect("compiled model has a code map");
+        assert_eq!(code_map.compiled, compiled);
+        // node_spans.keys() == compiled_sql.keys() by construction.
+        let node_keys: Vec<&String> = code_map.node_spans.keys().collect();
+        let slice_keys: Vec<&String> = model.compiled_sql.keys().collect();
+        assert_eq!(node_keys, slice_keys);
+        assert_eq!(node_keys, vec![&TERMINAL_NODE_NAME.to_owned()]);
     }
 
     #[test]
     fn build_payload_handles_unparseable_compiled_code_gracefully() {
         // The engine returns CteError::Parse for garbage SQL. The renderer
         // treats that as an empty graph, NOT a hard failure — the report
-        // still ships, the model card just has no DAG.
+        // still ships, the model card just has no DAG. cute-dbt#445: the
+        // faithful (unparseable) text still surfaces as the single terminal
+        // CteBody entry over the whole text.
         let node = model_node("model.shop.broken", "body", Some("not valid sql {"));
         let manifest = manifest_for(vec![node], vec![]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.broken")]);
@@ -6956,13 +8554,16 @@ mod tests {
             "b",
         );
         assert_eq!(payload.models.len(), 1);
-        // Empty graph → empty nodes/edges, but compiled_sql carries the
-        // original body keyed by bare name.
-        assert!(payload.models[0].dag.nodes.is_empty());
+        let model = &payload.models[0];
+        // Empty graph → empty nodes/edges, but the faithful body still
+        // surfaces, keyed by the stable terminal id.
+        assert!(model.dag.nodes.is_empty());
         assert_eq!(
-            payload.models[0].compiled_sql.get("broken").unwrap(),
+            model.compiled_sql.get(TERMINAL_NODE_NAME).unwrap(),
             "not valid sql {",
         );
+        // The code_map carries the faithful (even unparseable) text verbatim.
+        assert_eq!(model.code_map.as_ref().unwrap().compiled, "not valid sql {",);
     }
 
     #[test]

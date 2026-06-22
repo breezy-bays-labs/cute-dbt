@@ -45,8 +45,9 @@ use crate::domain::pr_diff::{BlockDiff, DiffLine, diff_lines};
 /// the report could ever display ("defined at line N") cross the
 /// boundary; the parser's byte offsets / filename machinery stay in the
 /// adapter. Named `project_def::Span` (not re-exported at the domain
-/// root) because [`crate::domain::cte::Span`] already owns the bare name
-/// there.
+/// root) — distinct from the byte-faithful [`crate::domain::span::SourceSpan`]
+/// the CTE engine retains (cute-dbt#444); this is a coarse 1-based
+/// (line, column) marker for a `dbt_project.yml` position only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     /// 1-based source line.
@@ -958,35 +959,38 @@ pub struct ConfigProvenance {
     pub path: String,
 }
 
-/// Every config key the `models:` tree sets along `fqn`, paired with its
-/// resolved value (fusion's deepest-match-wins) — the key universe is the
-/// union of `+key`s on every node the fqn descent visits.
-fn keys_along_fqn<'t>(tree: &'t ConfigTree, fqn: &[String]) -> BTreeSet<&'t String> {
-    let mut keys: BTreeSet<&String> = tree.configs.keys().collect();
+/// Resolve every `models:` config key that applies to ONE model's fqn,
+/// fusion's deepest-match-wins, in a SINGLE fqn descent (cute-dbt#433).
+///
+/// Walk the fqn once and, for each node visited shallow→deep, record every
+/// `+key` it sets; a deeper node overwrites a shallower one, so per key the
+/// last write is the deepest setter — exactly what a per-key
+/// [`resolve_key_for_fqn`] re-walk produced. This replaces the former
+/// `keys_along_fqn` (collect the key universe) + per-key re-resolve, an
+/// `O(K·L)` walk-per-key, with one `O(L)` descent. The `BTreeMap`
+/// accumulator keeps the output sorted by key, so the rendered ordering is
+/// byte-identical to the prior `BTreeSet`-keyed pass.
+fn provenance_for_fqn(tree: &ConfigTree, fqn: &[String]) -> Vec<ConfigProvenance> {
+    let mut winners: BTreeMap<&String, (usize, &Value)> = BTreeMap::new();
     let mut node = tree;
-    for segment in fqn {
+    for (key, value) in &node.configs {
+        winners.insert(key, (0, value));
+    }
+    for (i, segment) in fqn.iter().enumerate() {
         let Some(child) = node.children.get(segment) else {
             break;
         };
         node = child;
-        keys.extend(node.configs.keys());
+        for (key, value) in &node.configs {
+            winners.insert(key, (i + 1, value));
+        }
     }
-    keys
-}
-
-/// Resolve every `models:` config key that applies to ONE model's fqn,
-/// fusion's deepest-match-wins (the same private `resolve_key_for_fqn`
-/// descent the change-attribution uses). Sorted by key for deterministic
-/// rendering.
-fn provenance_for_fqn(tree: &ConfigTree, fqn: &[String]) -> Vec<ConfigProvenance> {
-    keys_along_fqn(tree, fqn)
+    winners
         .into_iter()
-        .filter_map(|key| {
-            resolve_key_for_fqn(tree, fqn, key).map(|(depth, value)| ConfigProvenance {
-                key: key.clone(),
-                value: value.clone(),
-                path: dotted_tree_path(MODELS_SECTION, &fqn[..depth]),
-            })
+        .map(|(key, (depth, value))| ConfigProvenance {
+            key: key.clone(),
+            value: value.clone(),
+            path: dotted_tree_path(MODELS_SECTION, &fqn[..depth]),
         })
         .collect()
 }

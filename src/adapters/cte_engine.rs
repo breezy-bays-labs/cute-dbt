@@ -59,7 +59,9 @@ use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Location, Span};
 
 use crate::domain::{
-    CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, SubqueryFact, SubqueryKind,
+    ColumnEdge, ColumnEdgeConfidence, ColumnEdgeKind, ColumnRef, ColumnSpan, CteEdge, CteGraph,
+    CteNode, EdgeType, JoinKeyPair, LeftJoinFact, SourcePos, SourceSpan, SubqueryFact,
+    SubqueryKind,
 };
 
 /// Display name of the synthetic terminal node — the final `SELECT` that
@@ -120,6 +122,12 @@ fn parse_query(compiled_sql: &str) -> Result<Query, CteError> {
 /// DAG-safe regardless.
 fn build_graph(compiled_sql: &str, query: &Query) -> CteGraph {
     let ctes = cte_tables(query);
+    // CLL-2 (cute-dbt#447): the projection-provenance pass rides this SAME
+    // single parse — never a second one. It walks every body's projection,
+    // emits intra-model column edges (pass-through / rename) + per-column
+    // compiled spans, and the domain `SourceMap` folds the spans into
+    // `SpanRole::Column` entries. Both arms (WITH-bearing + WITH-less) run it.
+    let lineage = collect_column_lineage(compiled_sql, ctes, query);
     if ctes.is_empty() {
         // No CTE structure to visualise — but the body's LEFT JOIN
         // facts still surface (cute-dbt#173): the catalog C4 canonical
@@ -129,7 +137,9 @@ fn build_graph(compiled_sql: &str, query: &Query) -> CteGraph {
         let facts = compute_shape_facts(TERMINAL_NODE_NAME, &query.body);
         return CteGraph::default()
             .with_left_join_facts(facts.left_joins)
-            .with_subquery_facts(facts.subqueries);
+            .with_subquery_facts(facts.subqueries)
+            .with_column_edges(lineage.edges)
+            .with_column_spans(lineage.spans);
     }
     let recursive = query.with.as_ref().is_some_and(|with| with.recursive);
     let (nodes, left_joins, subqueries) = build_nodes(compiled_sql, ctes, query);
@@ -137,7 +147,9 @@ fn build_graph(compiled_sql: &str, query: &Query) -> CteGraph {
     let edges = build_edges(ctes, query, &index);
     let graph = CteGraph::new(nodes, edges)
         .with_left_join_facts(left_joins)
-        .with_subquery_facts(subqueries);
+        .with_subquery_facts(subqueries)
+        .with_column_edges(lineage.edges)
+        .with_column_spans(lineage.spans);
     if recursive {
         graph.with_recursive()
     } else {
@@ -182,26 +194,462 @@ fn build_nodes(
     let mut nodes: Vec<CteNode> = ctes
         .iter()
         .map(|cte| {
-            let raw = slice_or_fallback(compiled_sql, &byte_index, cte.span(), || {
-                cte.query.to_string()
-            });
+            let (raw, source_span) =
+                slice_or_fallback(compiled_sql, &byte_index, cte.span(), || {
+                    cte.query.to_string()
+                });
             let facts = compute_shape_facts(cte_name(cte), &cte.query.body);
             left_joins.extend(facts.left_joins);
             subqueries.extend(facts.subqueries);
-            CteNode::new(cte_name(cte), None, Some(raw), None)
+            CteNode::new(cte_name(cte), source_span, Some(raw), None)
                 .with_shape_facts(facts.is_simple, facts.leaf_refs)
         })
         .collect();
-    let terminal_raw =
-        slice_terminal(compiled_sql, &byte_index, ctes).unwrap_or_else(|| query.body.to_string());
+    let (terminal_raw, terminal_span) = match slice_terminal(compiled_sql, &byte_index, ctes) {
+        Some((raw, span)) => (raw, Some(span)),
+        None => (query.body.to_string(), None),
+    };
     let terminal_facts = compute_shape_facts(TERMINAL_NODE_NAME, &query.body);
     left_joins.extend(terminal_facts.left_joins);
     subqueries.extend(terminal_facts.subqueries);
     nodes.push(
-        CteNode::new(TERMINAL_NODE_NAME, None, Some(terminal_raw), None)
+        CteNode::new(TERMINAL_NODE_NAME, terminal_span, Some(terminal_raw), None)
             .with_shape_facts(terminal_facts.is_simple, terminal_facts.leaf_refs),
     );
     (nodes, left_joins, subqueries)
+}
+
+// ---------------------------------------------------------------------
+// Intra-model column lineage — the projection-provenance pass
+// (cute-dbt#447, CLL-2).
+//
+// Tier-1 MVP = PASS-THROUGH (`c.email AS email`) + RENAME
+// (`c.email AS contact_email`) ONLY — the cases the existing projection
+// walker reaches (`Identifier` / aliased `CompoundIdentifier`). Expression
+// provenance (`coalesce(a.x, b.y) AS z`) is CLL-3: those items emit NO
+// `Derived` edge here (honest absence — never a fabricated edge).
+//
+// Confidence tracks SQL EXPLICITNESS (never-a-false-claim):
+//   - Resolved  — qualified ref, or single-source unqualified (sole_relation_leaf).
+//   - Ambiguous — unqualified column under a multi-relation FROM → FAN OUT
+//                 to every candidate source (never dropped).
+//   - Opaque    — `SELECT *` / `q.*` over an UNKNOWN external relation → a
+//                 virtual `*→*` edge, badged. A star over a known intra-model
+//                 CTE is NOT auto-Opaque: the design (column-lineage-feasibility
+//                 §3 Tier-1) scopes intra-model star-EXPANSION into CLL-2 — the
+//                 upstream CTE's output columns were resolved when the pass
+//                 walked that CTE's own projection, so a downstream
+//                 `select * from <known_cte>` EXPANDS into one Resolved
+//                 PassThrough edge per upstream output column. Opaque is
+//                 reserved STRICTLY for a star over an UNKNOWN external relation
+//                 (an undocumented `source()` / a leaf the resolver cannot
+//                 expand). Cross-model star expansion (over a `ref()` boundary)
+//                 stays CLL-4.
+// ---------------------------------------------------------------------
+
+/// The output of the projection-provenance pass: the intra-model column
+/// edges and the per-output-column compiled spans, both written back onto
+/// the [`CteGraph`].
+struct ColumnLineage {
+    edges: Vec<ColumnEdge>,
+    spans: Vec<ColumnSpan>,
+}
+
+/// A CTE's resolved output-column list (lowercased, in projection order) when
+/// the body is FULLY enumerable, else `None`. A `None` body — one whose
+/// projection carries an Opaque star or a positionally-anonymous expression —
+/// cannot have its star expanded downstream (we would have to fabricate the
+/// missing names), so a `select * from <that-cte>` honestly stays Opaque.
+type KnownCteColumns = HashMap<String, Option<Vec<String>>>;
+
+/// Walk every body's `select.projection` (each CTE + the terminal select),
+/// emitting pass-through / rename [`ColumnEdge`]s and per-column
+/// [`ColumnSpan`]s. Rides the single parse — never re-parses.
+///
+/// CTEs are walked in DECLARATION order so that by the time a body does
+/// `select * from <upstream_cte>` the upstream CTE's resolved output columns
+/// are already recorded in `known_cte_columns` — the design's intra-model
+/// star-EXPANSION (CLL-2), keyed off the columns the pass already resolved.
+fn collect_column_lineage(compiled_sql: &str, ctes: &[Cte], query: &Query) -> ColumnLineage {
+    let index = ByteIndex::new(compiled_sql);
+    let mut edges: Vec<ColumnEdge> = Vec::new();
+    let mut spans: Vec<ColumnSpan> = Vec::new();
+    let mut known_cte_columns: KnownCteColumns = HashMap::new();
+    for cte in ctes {
+        let name = cte_name(cte);
+        let outputs = collect_body_column_lineage(
+            name,
+            &cte.query.body,
+            compiled_sql,
+            &index,
+            &known_cte_columns,
+            &mut edges,
+            &mut spans,
+        );
+        known_cte_columns.insert(name.to_ascii_lowercase(), outputs);
+    }
+    collect_body_column_lineage(
+        TERMINAL_NODE_NAME,
+        &query.body,
+        compiled_sql,
+        &index,
+        &known_cte_columns,
+        &mut edges,
+        &mut spans,
+    );
+    ColumnLineage { edges, spans }
+}
+
+/// Column lineage for ONE body. Only a top-level `SetExpr::Select` is
+/// analysed — a `UNION`/`EXCEPT`/parenthesised query is not a single
+/// projection list (UNION-by-position is a deferred refinement), so it
+/// emits no edges (honest absence, never a fabricated claim).
+///
+/// Returns the body's resolved output-column descriptor (see
+/// [`KnownCteColumns`]) so the caller can register it for downstream star
+/// expansion. A non-`Select` body is non-enumerable (`None`).
+fn collect_body_column_lineage(
+    node_id: &str,
+    body: &SetExpr,
+    sql: &str,
+    index: &ByteIndex,
+    known_cte_columns: &KnownCteColumns,
+    edges: &mut Vec<ColumnEdge>,
+    spans: &mut Vec<ColumnSpan>,
+) -> Option<Vec<String>> {
+    let SetExpr::Select(select) = body else {
+        return None;
+    };
+    let aliases = select_alias_map(select);
+    let sole_leaf = sole_relation_leaf(select);
+    // Accumulate the body's output columns; `enumerable` flips to false the
+    // moment one item has no statically-knowable output name (an Opaque star
+    // or an anonymous expression) — then the whole body is non-enumerable.
+    let mut outputs: Vec<String> = Vec::new();
+    let mut enumerable = true;
+    for item in &select.projection {
+        let item_outputs = resolve_projection_item(
+            node_id,
+            item,
+            &aliases,
+            sole_leaf.as_deref(),
+            known_cte_columns,
+            sql,
+            index,
+            edges,
+            spans,
+        );
+        match item_outputs {
+            Some(cols) => outputs.extend(cols),
+            None => enumerable = false,
+        }
+    }
+    enumerable.then_some(outputs)
+}
+
+/// Resolve ONE `SelectItem` into its output column(s) + provenance edge(s) +
+/// span. Tier-1: pass-through / rename direct refs; a star over a KNOWN
+/// intra-model CTE EXPANDS into one Resolved edge per upstream output column;
+/// a star over an UNKNOWN external relation degrades honestly to `Opaque`;
+/// expressions (functions/CASE/…) emit a span but NO edge (CLL-3).
+///
+/// Returns this item's contribution to the body's output-column list:
+/// `Some(cols)` = the statically-knowable output name(s); `None` = the item
+/// has no enumerable output name (an Opaque star or an anonymous expression),
+/// which makes the owning body non-enumerable for downstream star expansion.
+#[allow(clippy::too_many_arguments)]
+fn resolve_projection_item(
+    node_id: &str,
+    item: &SelectItem,
+    aliases: &HashMap<String, String>,
+    sole_leaf: Option<&str>,
+    known_cte_columns: &KnownCteColumns,
+    sql: &str,
+    index: &ByteIndex,
+    edges: &mut Vec<ColumnEdge>,
+    spans: &mut Vec<ColumnSpan>,
+) -> Option<Vec<String>> {
+    match item {
+        // `expr AS alias` — the output name is the alias; the input is the
+        // column inside `expr`. Pass-through when name==col, else rename.
+        SelectItem::ExprWithAlias { expr, alias } => {
+            let output = alias.value.to_ascii_lowercase();
+            if let Some(input) = direct_column_ref(expr, aliases, sole_leaf) {
+                let kind = if input.column == output {
+                    ColumnEdgeKind::PassThrough
+                } else {
+                    ColumnEdgeKind::Renamed
+                };
+                push_edges(node_id, &output, input, kind, edges);
+                push_span(node_id, &output, item, sql, index, spans);
+            } else {
+                // An expression (coalesce/CASE/func) — honest absence: NO
+                // edge here (that is CLL-3). Still record the column span so
+                // the column→code sync can flash it.
+                push_span(node_id, &output, item, sql, index, spans);
+            }
+            // The output NAME is known regardless of whether an edge was
+            // emitted — the alias is explicit in the SQL.
+            Some(vec![output])
+        }
+        // A bare `col` or `q.col` projection — the output name is the column
+        // itself; always a pass-through.
+        SelectItem::UnnamedExpr(expr) => {
+            if let Some(input) = direct_column_ref(expr, aliases, sole_leaf) {
+                let output = input.column.clone();
+                push_edges(node_id, &output, input, ColumnEdgeKind::PassThrough, edges);
+                push_span(node_id, &output, item, sql, index, spans);
+                Some(vec![output])
+            } else {
+                // A bare non-column expression with no alias has no stable
+                // output name — no edge, no span, nothing to anchor — and it
+                // makes the body non-enumerable (we cannot name this column).
+                None
+            }
+        }
+        // `SELECT *` — over a KNOWN intra-model CTE this EXPANDS into one
+        // Resolved PassThrough edge per upstream output column (the design's
+        // CLL-2 intra-model star expansion). Over an UNKNOWN external relation
+        // (or a CTE whose own output is non-enumerable) it degrades honestly to
+        // a single virtual `*→*` Opaque edge — never a fabricated column list.
+        SelectItem::Wildcard(_) => resolve_star(
+            node_id,
+            sole_leaf,
+            known_cte_columns,
+            item,
+            sql,
+            index,
+            edges,
+            spans,
+        ),
+        // `q.*` — a qualified star over relation `q`. Same expansion/degrade
+        // rule, sourced from `q`'s resolved leaf.
+        SelectItem::QualifiedWildcard(kind, _) => {
+            let leaf = qualified_wildcard_leaf(kind, aliases);
+            resolve_star(
+                node_id,
+                leaf.as_deref(),
+                known_cte_columns,
+                item,
+                sql,
+                index,
+                edges,
+                spans,
+            )
+        }
+        // Spark's `expr AS (a, b, …)` multi-alias form — not a direct column
+        // reference; no Tier-1 edge (honest absence). No single stable output
+        // name ⇒ the body is non-enumerable.
+        SelectItem::ExprWithAliases { .. } => None,
+    }
+}
+
+/// Resolve a star (`*` or `q.*`) sourced from `source_leaf`. When the leaf
+/// names a KNOWN intra-model CTE with a fully-enumerable output-column list,
+/// EXPAND: emit one `PassThrough`/`Resolved` edge per upstream column
+/// (`<leaf>.<col> → <node_id>.<col>`) and return those columns. Otherwise
+/// (unknown external relation, or a CTE whose own projection was
+/// non-enumerable) degrade to a single virtual `*→*` Opaque edge and return
+/// `None` — the never-a-false-claim honest gap. The `*` column span is
+/// recorded either way so the column→code sync can flash the projection.
+#[allow(clippy::too_many_arguments)]
+fn resolve_star(
+    node_id: &str,
+    source_leaf: Option<&str>,
+    known_cte_columns: &KnownCteColumns,
+    item: &SelectItem,
+    sql: &str,
+    index: &ByteIndex,
+    edges: &mut Vec<ColumnEdge>,
+    spans: &mut Vec<ColumnSpan>,
+) -> Option<Vec<String>> {
+    push_span(node_id, "*", item, sql, index, spans);
+    if let Some(columns) = known_cte_output_columns(source_leaf, known_cte_columns) {
+        let leaf = source_leaf.expect("a known CTE was found, so the leaf is Some");
+        for column in &columns {
+            edges.push(ColumnEdge::new(
+                ColumnRef::intra(leaf, column.clone()),
+                ColumnRef::intra(node_id, column.clone()),
+                ColumnEdgeKind::PassThrough,
+                ColumnEdgeConfidence::Resolved,
+            ));
+        }
+        Some(columns)
+    } else {
+        push_star_edge(node_id, source_leaf, edges);
+        None
+    }
+}
+
+/// The fully-enumerable output columns of the CTE named `source_leaf`, when
+/// that leaf names a KNOWN intra-model CTE whose own projection was
+/// enumerable. `None` for an unknown external relation, an unqualified star
+/// (`source_leaf` is `None`), or a known CTE whose output was non-enumerable
+/// (it carried its own Opaque star / anonymous expression).
+fn known_cte_output_columns(
+    source_leaf: Option<&str>,
+    known_cte_columns: &KnownCteColumns,
+) -> Option<Vec<String>> {
+    let leaf = source_leaf?;
+    known_cte_columns.get(leaf).cloned().flatten()
+}
+
+/// A resolved input column reference for the Tier-1 cases — the qualifier
+/// (when present) maps through `aliases`; an unqualified column resolves
+/// against the sole relation, or fans out (handled by the caller via
+/// [`InputCol::candidates`]).
+struct InputCol {
+    /// Candidate source node ids the column could come from. One ⇒ Resolved;
+    /// many ⇒ Ambiguous (fan out). The qualified case has exactly one.
+    candidates: Vec<String>,
+    column: String,
+    confidence: ColumnEdgeConfidence,
+}
+
+/// Extract the direct input column of a projection expression for the
+/// Tier-1 cases ONLY: a bare `Identifier` or an aliased/qualified
+/// `CompoundIdentifier`. Returns `None` for any expression
+/// (function/CASE/binary-op/…) — those are CLL-3's honest absence.
+fn direct_column_ref(
+    expr: &Expr,
+    aliases: &HashMap<String, String>,
+    sole_leaf: Option<&str>,
+) -> Option<InputCol> {
+    match expr {
+        // `col` — unqualified. Single-source ⇒ Resolved against the sole
+        // leaf; multi-source ⇒ Ambiguous fan-out to every candidate.
+        Expr::Identifier(ident) => {
+            let column = ident.value.to_ascii_lowercase();
+            if let Some(leaf) = sole_leaf {
+                return Some(InputCol {
+                    candidates: vec![leaf.to_owned()],
+                    column,
+                    confidence: ColumnEdgeConfidence::Resolved,
+                });
+            }
+            // Multi-source (or zero-source) ⇒ fan out to every candidate
+            // relation, all Ambiguous. De-duplicated + ordered (BTreeSet) so
+            // the emitted edge order is deterministic for goldens.
+            let candidates: Vec<String> = aliases
+                .values()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if candidates.is_empty() {
+                None
+            } else {
+                Some(InputCol {
+                    candidates,
+                    column,
+                    confidence: ColumnEdgeConfidence::Ambiguous,
+                })
+            }
+        }
+        // `q.col` — qualified. The qualifier resolves through `aliases` to a
+        // source leaf ⇒ Resolved. An unresolvable qualifier still yields the
+        // edge against the bare qualifier (Resolved — the SQL was explicit).
+        Expr::CompoundIdentifier(_) => {
+            let (qualifier, column) = qualified_column(expr)?;
+            let source = aliases.get(&qualifier).cloned().unwrap_or(qualifier);
+            Some(InputCol {
+                candidates: vec![source],
+                column,
+                confidence: ColumnEdgeConfidence::Resolved,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Push one edge per candidate source (fan-out for the Ambiguous case;
+/// exactly one for the Resolved case). Each edge is intra-model.
+fn push_edges(
+    node_id: &str,
+    output: &str,
+    input: InputCol,
+    kind: ColumnEdgeKind,
+    edges: &mut Vec<ColumnEdge>,
+) {
+    for source in input.candidates {
+        edges.push(ColumnEdge::new(
+            ColumnRef::intra(source, input.column.clone()),
+            ColumnRef::intra(node_id, output),
+            kind,
+            input.confidence,
+        ));
+    }
+}
+
+/// Push the virtual `*→*` Opaque edge for a `SELECT *` / `q.*` over an
+/// UNKNOWN external relation (the only case that reaches here — a star over a
+/// known intra-model CTE is expanded by [`resolve_star`] instead). The source
+/// node is the relation's leaf when known, else a synthetic `*` source.
+fn push_star_edge(node_id: &str, source_leaf: Option<&str>, edges: &mut Vec<ColumnEdge>) {
+    let source = source_leaf.unwrap_or("*");
+    edges.push(ColumnEdge::new(
+        ColumnRef::intra(source, "*"),
+        ColumnRef::intra(node_id, "*"),
+        ColumnEdgeKind::Source,
+        ColumnEdgeConfidence::Opaque,
+    ));
+}
+
+/// The leaf relation of a `q.*` qualified wildcard, resolved through the
+/// alias map. `None` for an expression-qualified wildcard.
+fn qualified_wildcard_leaf(
+    kind: &SelectItemQualifiedWildcardKind,
+    aliases: &HashMap<String, String>,
+) -> Option<String> {
+    let SelectItemQualifiedWildcardKind::ObjectName(name) = kind else {
+        return None;
+    };
+    let qualifier = name.0.last()?.as_ident()?.value.to_ascii_lowercase();
+    Some(aliases.get(&qualifier).cloned().unwrap_or(qualifier))
+}
+
+/// Record the compiled span of one projection item as a [`ColumnSpan`] for
+/// `column` under `node_id` — a sub-range of the owning body. Degraded
+/// spans (empty / out-of-bounds) are dropped (degrade, not lie), so the
+/// `SpanRole::Column` entry is simply absent.
+fn push_span(
+    node_id: &str,
+    column: &str,
+    item: &SelectItem,
+    sql: &str,
+    index: &ByteIndex,
+    spans: &mut Vec<ColumnSpan>,
+) {
+    let Some(source_span) = span_to_source_span(item.span(), sql, index) else {
+        return;
+    };
+    spans.push(ColumnSpan::new(
+        node_id,
+        column.to_ascii_lowercase(),
+        source_span,
+    ));
+}
+
+/// Convert a sqlparser [`Span`] into a domain [`SourceSpan`], or `None` when
+/// the span is degraded — a line-0 sentinel (`start.line == 0 ||
+/// end.line == 0`, sqlparser's "no span") or an invalid byte range
+/// (`start > end || end > sql.len()`). The degrade-not-lie boundary: a
+/// fabricated span would point the column→code sync at the wrong bytes, so an
+/// absent span is the honest answer. Split out of [`push_span`] so the guard
+/// is unit-testable with synthetic spans (no parser round-trip needed).
+fn span_to_source_span(span: Span, sql: &str, index: &ByteIndex) -> Option<SourceSpan> {
+    if span.start.line == 0 || span.end.line == 0 {
+        return None;
+    }
+    let start = index.byte_of(sql, span.start);
+    let end = index.byte_of(sql, span.end);
+    if start > end || end > sql.len() {
+        return None;
+    }
+    Some(SourceSpan {
+        start: loc_to_pos(span.start, start),
+        end: loc_to_pos(span.end, end),
+    })
 }
 
 /// Engine-computed structural facts about a query body
@@ -825,24 +1273,37 @@ fn push_leaf(factor: &TableFactor, refs: &mut Vec<String>) {
 /// 0.62 token spans — `closing_paren_token` reports
 /// `(Location(L, C), Location(L, C+1))` for the single-character `)`).
 ///
-/// Returns the fallback when the span is empty or yields an out-of-bounds
-/// range (defensive — sqlparser populates spans for every CTE we've
-/// observed, but the engine must never panic on a fixture).
+/// Returns `(text, Some(source_span))` on success, where `source_span`
+/// carries the 1-based line/col endpoints (from the sqlparser `Span`) plus
+/// the 0-based UTF-8 byte offsets (from [`ByteIndex`]) — the retained fact
+/// `build_nodes` attaches to the `CteNode` (cute-dbt#444). `sql[span.byte_range()]`
+/// byte-equals the returned text by construction.
+///
+/// Returns `(fallback(), None)` when the span is empty or yields an
+/// out-of-bounds range (defensive — sqlparser populates spans for every CTE
+/// we've observed, but the engine must never panic on a fixture, and a
+/// degraded span is `None` rather than a lie).
 fn slice_or_fallback<F: FnOnce() -> String>(
     sql: &str,
     index: &ByteIndex,
     span: Span,
     fallback: F,
-) -> String {
+) -> (String, Option<SourceSpan>) {
     if span.start.line == 0 || span.end.line == 0 {
-        return fallback();
+        return (fallback(), None);
     }
     let start = index.byte_of(sql, span.start);
     let end = index.byte_of(sql, span.end);
     if start > end || end > sql.len() {
-        return fallback();
+        return (fallback(), None);
     }
-    sql[start..end].to_owned()
+    // The non-terminal `CteBody` span is the untrimmed `name AS ( … )`
+    // range; its line/col endpoints come straight from the sqlparser `Span`.
+    let source_span = SourceSpan {
+        start: loc_to_pos(span.start, start),
+        end: loc_to_pos(span.end, end),
+    };
+    (sql[start..end].to_owned(), Some(source_span))
 }
 
 /// Slice the terminal `SELECT` — everything after the last CTE's
@@ -850,24 +1311,62 @@ fn slice_or_fallback<F: FnOnce() -> String>(
 ///
 /// Starts at the byte position immediately past `)` so any comments or
 /// whitespace between the `WITH` clause and the final `SELECT` survive.
-/// Returns `None` when no CTEs are present (the caller falls back to the
-/// AST roundtrip, though `build_nodes` only fires this branch when at
-/// least one CTE exists).
-fn slice_terminal(sql: &str, index: &ByteIndex, ctes: &[Cte]) -> Option<String> {
+/// Returns `Some((text, source_span))` where `source_span.start.byte` is
+/// advanced PAST the same leading-trim prefix the text strips
+/// (`[',', '\n', '\r', ' ', '\t']`, cute-dbt#444 Blocker-1) so
+/// `sql[source_span.byte_range()]` byte-equals the trimmed text — NOT the
+/// raw closing-paren-end offset. The end endpoint is end-of-`sql`. Returns
+/// `None` when no CTEs are present (the caller falls back to the AST
+/// roundtrip, though `build_nodes` only fires this branch when at least one
+/// CTE exists).
+fn slice_terminal(sql: &str, index: &ByteIndex, ctes: &[Cte]) -> Option<(String, SourceSpan)> {
     let last = ctes.last()?;
     let close_end = last.closing_paren_token.0.span.end;
     if close_end.line == 0 {
         return None;
     }
-    let start = index.byte_of(sql, close_end);
-    if start > sql.len() {
+    let raw_start = index.byte_of(sql, close_end);
+    if raw_start > sql.len() {
         return None;
     }
-    Some(
-        sql[start..]
-            .trim_start_matches([',', '\n', '\r', ' ', '\t'])
-            .to_owned(),
-    )
+    let tail = &sql[raw_start..];
+    let trimmed = tail.trim_start_matches([',', '\n', '\r', ' ', '\t']);
+    // The post-trim start byte: raw_start advanced by the stripped prefix
+    // length (Blocker-1). `trimmed` is a suffix of `tail`, so the prefix
+    // length is `tail.len() - trimmed.len()`.
+    let start_byte = raw_start + (tail.len() - trimmed.len());
+    let source_span = SourceSpan {
+        start: index.pos_at(sql, start_byte),
+        end: index.pos_at(sql, sql.len()),
+    };
+    Some((trimmed.to_owned(), source_span))
+}
+
+/// The guarded `→ u32` narrowing at the ONE ingestion boundary where a span
+/// byte/line/col value becomes a [`SourcePos`] field (cute-dbt#444, Part I §5
+/// FIX 6) — fusion widened minijinja `u16 → u32` for exactly this
+/// silent-truncation class, so cute-dbt asserts the cast rather than
+/// trusting it. `u32::MAX` is the fail-closed fallback in release (a 4 GB
+/// model — or a 4-billion-line one — is not real); `debug_assert!` trips in
+/// tests. ALL THREE axes (byte, line, col) route through this one helper so
+/// the narrowing is uniform + debug-asserted (no bare saturating
+/// `unwrap_or(u32::MAX)` left on the line/col axes).
+fn clamp_u32<T: TryInto<u32>>(value: T, axis: &'static str) -> u32 {
+    value.try_into().unwrap_or_else(|_| {
+        debug_assert!(false, "span {axis} exceeds u32::MAX");
+        u32::MAX
+    })
+}
+
+/// Build a [`SourcePos`] from a sqlparser [`Location`] (1-based line/col)
+/// and an already-computed 0-based byte offset. Used for endpoints whose
+/// line/col the parser already reports.
+fn loc_to_pos(loc: Location, byte: usize) -> SourcePos {
+    SourcePos {
+        line: clamp_u32(loc.line, "line"),
+        col: clamp_u32(loc.column, "col"),
+        byte: clamp_u32(byte, "byte offset"),
+    }
 }
 
 /// Maps `(line, column)` to byte offsets in a SQL source string.
@@ -919,6 +1418,30 @@ impl ByteIndex {
             }
         }
         line_start + line_text.len()
+    }
+
+    /// Inverse of [`Self::byte_of`]: the 1-based `(line, col)` and 0-based
+    /// `byte` [`SourcePos`] for a byte offset. Used for span endpoints the
+    /// parser does NOT report a `Location` for — the terminal node's
+    /// post-trim start (Blocker-1) and its end-of-`sql` endpoint
+    /// (cute-dbt#444). `col` is a 1-based unicode-char column, matching the
+    /// sqlparser `Location` convention `byte_of` consumes. A `byte` past
+    /// end-of-`sql` (only the saturating fallbacks reach here) clamps to the
+    /// last line; `byte` is recorded verbatim (guarded `usize → u32`).
+    fn pos_at(&self, sql: &str, byte: usize) -> SourcePos {
+        // `line_starts` is sorted ascending; the owning line is the last
+        // start `<= byte`. `partition_point` gives the count of starts
+        // `<= byte`; that count is the 1-based line number.
+        let clamped = byte.min(sql.len());
+        let line_no = self.line_starts.partition_point(|&s| s <= clamped).max(1);
+        let line_start = self.line_starts[line_no - 1];
+        // 1-based char column within the line.
+        let col = sql[line_start..clamped].chars().count() + 1;
+        SourcePos {
+            line: clamp_u32(line_no, "line"),
+            col: clamp_u32(col, "col"),
+            byte: clamp_u32(byte, "byte offset"),
+        }
     }
 }
 
@@ -1577,6 +2100,192 @@ mod tests {
         );
     }
 
+    // ── cute-dbt#444: per-CTE SourceSpan retention ──────────────────────
+
+    /// TDD 1 — slice fidelity: `compiled[node.source_span().byte_range()]`
+    /// byte-equals the node's `raw_sql()` for EVERY node, pinned against the
+    /// comment-preserving fixture (`cte_slice_preserves_sql_comments`).
+    #[test]
+    fn retained_span_slices_byte_equal_raw_sql() {
+        let sql = "with stg AS (\n    -- pulling from raw.users\n    /* note: id only */\n    select id from raw.users\n)\n-- final pass\nselect * from stg";
+        let g = parse_cte_graph(sql).unwrap();
+        for node in g.nodes() {
+            let span = node
+                .source_span()
+                .unwrap_or_else(|| panic!("node `{}` retains a span", node.name()));
+            let raw = node.raw_sql().expect("node carries raw_sql");
+            assert_eq!(
+                &sql[span.byte_range()],
+                raw,
+                "compiled[span] byte-equals raw_sql for node `{}`",
+                node.name()
+            );
+        }
+    }
+
+    /// TDD 1 (multi-CTE) — the slice-fidelity invariant holds across CTE
+    /// bodies AND the terminal, with non-ASCII text in comments (the
+    /// char-vs-byte column path).
+    #[test]
+    fn retained_span_slices_byte_equal_with_unicode() {
+        let sql = "with a AS (\n  -- café ☕\n  select 1 AS id\n), b AS (select 2 AS id)\nselect * from a join b on a.id = b.id";
+        let g = parse_cte_graph(sql).unwrap();
+        assert_eq!(g.nodes().len(), 3, "two CTEs + terminal");
+        for node in g.nodes() {
+            let span = node.source_span().expect("span retained");
+            assert_eq!(
+                &sql[span.byte_range()],
+                node.raw_sql().unwrap(),
+                "node `{}` slice byte-equals raw_sql",
+                node.name()
+            );
+        }
+    }
+
+    /// TDD 2 (Blocker-1) — the TERMINAL node's `start.byte` is the POST-trim
+    /// offset: `compiled[span]` byte-equals the trimmed terminal text, NOT
+    /// the raw closing-paren-end (which would include the `\n-- final pass\n`
+    /// leading glue). The slice must START at the trimmed text's first byte.
+    #[test]
+    fn terminal_span_start_is_post_trim() {
+        let sql =
+            "with stg AS (\n    select id from raw.users\n)\n-- final pass\nselect * from stg";
+        let g = parse_cte_graph(sql).unwrap();
+        let terminal = &g.nodes()[1];
+        let span = terminal.source_span().expect("terminal span retained");
+        let raw = terminal.raw_sql().unwrap();
+        // The retained text equals the trimmed terminal (begins at the
+        // first non-trim char — here the `-- final pass` comment).
+        assert_eq!(&sql[span.byte_range()], raw);
+        assert!(
+            raw.starts_with("-- final pass"),
+            "terminal begins at the post-trim first byte, got:\n{raw}"
+        );
+        // The raw closing-paren-end byte (before trimming) points AT a
+        // newline; the post-trim start must be strictly greater.
+        let close_end = sql.find(")\n").unwrap() + 1; // byte just past `)`
+        assert!(
+            (span.start.byte as usize) > close_end,
+            "post-trim start ({}) advanced past the raw close-end ({close_end})",
+            span.start.byte
+        );
+        assert_eq!(
+            sql.as_bytes()[close_end],
+            b'\n',
+            "the raw close-end sits on the leading-trim newline"
+        );
+        // Pin a `pos_at`-derived `col` to its EXACT 1-based char column so the
+        // `let col = …chars().count() + 1` step is mutation-covered (a
+        // `+1 → *1` off-by-one — 1-based → 0-based — survives otherwise; no
+        // other test fixes a `pos_at` col ≥ 2). The terminal `end` reaches
+        // end-of-`sql`, which here is the last byte of `select * from stg`
+        // (17 chars, no trailing newline) on line 5 — so `end.col` is the
+        // post-the-last-char column 18 (`17 + 1`), which `17 * 1 = 17` cannot
+        // reproduce.
+        assert_eq!(span.end.line, 5, "terminal end is on the last line (5)");
+        assert_eq!(
+            span.end.col, 18,
+            "terminal end.col is the 1-based char column past `select * from stg` (17 chars + 1)"
+        );
+    }
+
+    /// TDD 3 — the terminal node's `end` endpoint reaches end-of-`sql`; its
+    /// `end.line` is the last line, derived by `ByteIndex::pos_at`.
+    #[test]
+    fn terminal_span_end_reaches_eof() {
+        let sql = "with stg AS (\n  select 1 AS id\n)\nselect * from stg\n";
+        let g = parse_cte_graph(sql).unwrap();
+        let span = g.nodes()[1].source_span().expect("terminal span");
+        assert_eq!(
+            span.end.byte as usize,
+            sql.len(),
+            "terminal end is end-of-sql"
+        );
+        let last_line = u32::try_from(sql.matches('\n').count() + 1).unwrap();
+        assert_eq!(
+            span.end.line, last_line,
+            "terminal end_line is the last line"
+        );
+    }
+
+    /// TDD 1/3 — line/col endpoints agree with the byte endpoints: slicing
+    /// from `pos_at(start.byte)` reproduces the same text and the recorded
+    /// line/col round-trip through `byte_of`-style reconstruction.
+    #[test]
+    fn span_line_col_agree_with_bytes() {
+        let sql = "with a AS (\n  select 1 AS id\n)\nselect * from a";
+        let g = parse_cte_graph(sql).unwrap();
+        let cte = &g.nodes()[0];
+        let span = cte.source_span().unwrap();
+        // start.line is 1 (the `with a AS (` is on line 1).
+        assert_eq!(span.start.line, 1, "CTE body span starts on line 1");
+        assert_eq!(span.start.col, 6, "CTE body span starts at the alias `a`");
+        assert!(span.start.byte < span.end.byte, "half-open, non-empty");
+
+        // Cross-check `start.col` against the BYTES under the §3.1 invariant
+        // ("line/col endpoints agree with byte endpoints"). This endpoint's
+        // col comes from the sqlparser-`Location` path (`loc_to_pos`); the
+        // terminal-span test pins the `pos_at` path. Computing the col from
+        // bytes independently of either source pins BOTH against the one
+        // invariant. The line-1 byte offset of the line start is 0.
+        let line_starts: Vec<usize> = std::iter::once(0)
+            .chain(sql.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        let start_line_start = line_starts[(span.start.line - 1) as usize];
+        let col_from_bytes = sql[start_line_start..span.start.byte as usize]
+            .chars()
+            .count()
+            + 1;
+        assert_eq!(
+            span.start.col as usize, col_from_bytes,
+            "start.col agrees with the byte-derived char column"
+        );
+    }
+
+    /// TDD 4 — fallback degrade: a node whose span the engine cannot soundly
+    /// locate carries `None`, never a fabricated/wrong span. A no-`WITH`
+    /// query produces no CTE nodes, so we exercise the empty-graph path and
+    /// the `slice_or_fallback` empty-span branch directly.
+    #[test]
+    fn empty_or_oob_span_degrades_to_none() {
+        // Empty span (line 0) ⇒ fallback text + None.
+        let sql = "select 1";
+        let idx = ByteIndex::new(sql);
+        let empty = Span {
+            start: Location { line: 0, column: 0 },
+            end: Location { line: 0, column: 0 },
+        };
+        let (text, span) = slice_or_fallback(sql, &idx, empty, || "FALLBACK".to_owned());
+        assert_eq!(text, "FALLBACK", "empty span yields the fallback text");
+        assert!(span.is_none(), "degraded span is None, never a lie");
+
+        // Inverted span (start strictly after end) ⇒ the `start > end`
+        // guard fires the fallback + None.
+        let inverted = Span {
+            start: Location { line: 1, column: 8 },
+            end: Location { line: 1, column: 2 },
+        };
+        let (text, span) = slice_or_fallback(sql, &idx, inverted, || "FB2".to_owned());
+        assert_eq!(text, "FB2", "inverted span yields the fallback text");
+        assert!(span.is_none(), "inverted span degrades to None");
+    }
+
+    /// TDD 7 — the `→ u32` guard caps at `u32::MAX` (the tested behavior). In
+    /// a debug build `clamp_u32` would `debug_assert!`, so this exercises the
+    /// in-range pass-through; the cap path is verified by construction (the
+    /// `unwrap_or_else` returns `u32::MAX`). All three axes share the helper,
+    /// so the byte axis exercises it for line/col too.
+    #[test]
+    fn clamp_u32_guard_passes_in_range() {
+        assert_eq!(clamp_u32(0_usize, "byte offset"), 0);
+        assert_eq!(clamp_u32(123_456_usize, "byte offset"), 123_456);
+        assert_eq!(clamp_u32(u32::MAX as usize, "byte offset"), u32::MAX);
+        // The line/col axes route through the same helper (u64 inputs from
+        // the sqlparser `Location`).
+        assert_eq!(clamp_u32(7_u64, "line"), 7);
+        assert_eq!(clamp_u32(u64::from(u32::MAX), "col"), u32::MAX);
+    }
+
     #[test]
     fn structural_invariants_hold_across_varied_sql() {
         // Enumerated property test: for every sample, node count matches
@@ -2224,6 +2933,417 @@ mod tests {
             Some("unrefunded"),
             "the sole outer relation may itself be a CTE — the detector \
              binds it through the simple-FROM closure"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // CLL-2 (cute-dbt#447) — intra-model column edges (pass-through /
+    // rename) + the `SpanRole::Column` sub-range spans.
+    // -----------------------------------------------------------------
+
+    /// Find every edge whose `to_col` is `(node_id, column)` in declaration
+    /// order — the resolver's output for one projected column.
+    fn edges_to<'a>(g: &'a CteGraph, node_id: &str, column: &str) -> Vec<&'a ColumnEdge> {
+        g.column_edges()
+            .iter()
+            .filter(|e| e.to_col == ColumnRef::intra(node_id, column))
+            .collect()
+    }
+
+    #[test]
+    fn column_lineage_pass_through_resolved() {
+        // `c.email AS email` — output name == input column ⇒ PassThrough,
+        // qualified ⇒ Resolved; the qualifier resolves through select_alias_map.
+        let g = graph(
+            "WITH customers AS (SELECT 1 AS email) \
+             SELECT c.email AS email FROM customers c",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "email");
+        assert_eq!(edges.len(), 1, "exactly one resolved input");
+        let e = edges[0];
+        assert_eq!(e.from_col, ColumnRef::intra("customers", "email"));
+        assert_eq!(e.kind, ColumnEdgeKind::PassThrough);
+        assert_eq!(e.confidence, ColumnEdgeConfidence::Resolved);
+    }
+
+    #[test]
+    fn column_lineage_rename_resolved() {
+        // `c.email AS contact_email` — output != input ⇒ Renamed/Resolved.
+        let g = graph(
+            "WITH customers AS (SELECT 1 AS email) \
+             SELECT c.email AS contact_email FROM customers c",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "contact_email");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].from_col, ColumnRef::intra("customers", "email"));
+        assert_eq!(edges[0].kind, ColumnEdgeKind::Renamed);
+        assert_eq!(edges[0].confidence, ColumnEdgeConfidence::Resolved);
+    }
+
+    #[test]
+    fn column_lineage_single_source_unqualified_resolved() {
+        // Unqualified `email` over a SOLE relation ⇒ Resolved (sole_relation_leaf).
+        let g = graph(
+            "WITH customers AS (SELECT 1 AS email) \
+             SELECT email FROM customers",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "email");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].from_col, ColumnRef::intra("customers", "email"));
+        assert_eq!(edges[0].kind, ColumnEdgeKind::PassThrough);
+        assert_eq!(edges[0].confidence, ColumnEdgeConfidence::Resolved);
+    }
+
+    #[test]
+    fn column_lineage_ambiguous_fan_out_never_dropped() {
+        // Unqualified `status` under a multi-relation FROM ⇒ fan out to EVERY
+        // candidate source, all Ambiguous, never dropped.
+        let g = graph(
+            "WITH orders AS (SELECT 1 AS status), refunds AS (SELECT 2 AS status) \
+             SELECT status AS status FROM orders, refunds",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "status");
+        assert_eq!(edges.len(), 2, "fanned out to both candidate sources");
+        let froms: std::collections::BTreeSet<_> =
+            edges.iter().map(|e| e.from_col.column.clone()).collect();
+        assert_eq!(froms, ["status".to_owned()].into_iter().collect());
+        let sources: std::collections::BTreeSet<_> = edges
+            .iter()
+            .map(|e| match &e.from_col.scope {
+                crate::domain::ColumnScope::Intra { node_id } => node_id.clone(),
+                crate::domain::ColumnScope::Cross { .. } => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            sources,
+            ["orders".to_owned(), "refunds".to_owned()]
+                .into_iter()
+                .collect()
+        );
+        assert!(
+            edges
+                .iter()
+                .all(|e| e.confidence == ColumnEdgeConfidence::Ambiguous),
+            "every fan-out edge is Ambiguous"
+        );
+    }
+
+    #[test]
+    fn column_lineage_opaque_star_over_unknown_external() {
+        // `SELECT *` over an undocumented external source ⇒ a virtual `*→*`
+        // edge, Opaque, never a fabricated column list.
+        let g = graph("SELECT * FROM raw_external_thing");
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "*");
+        assert_eq!(edges.len(), 1, "one virtual star edge");
+        let e = edges[0];
+        assert_eq!(e.from_col.column, "*");
+        assert_eq!(e.to_col.column, "*");
+        assert_eq!(e.confidence, ColumnEdgeConfidence::Opaque);
+        assert_eq!(e.kind, ColumnEdgeKind::Source);
+        assert_eq!(
+            e.from_col,
+            ColumnRef::intra("raw_external_thing", "*"),
+            "the star sources from the (unknown) external relation leaf"
+        );
+    }
+
+    #[test]
+    fn column_lineage_star_over_known_cte_expands_not_opaque() {
+        // never-a-false-claim: `select * from <known_cte>` is NOT Opaque — the
+        // upstream CTE's output columns were resolved when the pass walked it,
+        // so the star EXPANDS into one Resolved PassThrough edge per column.
+        // This mirrors jaffle-shop's compiled `stg_customers`
+        // (`… renamed as (select id as customer_id, …) select * from renamed`).
+        let g = graph(
+            "WITH renamed AS ( \
+                SELECT id AS customer_id, \
+                       trim(first_name) AS first_name, \
+                       trim(last_name) AS last_name \
+                FROM source \
+             ) \
+             SELECT * FROM renamed",
+        );
+        // The false `renamed.* → (final select).*` Opaque edge is GONE.
+        let star_edges = edges_to(&g, TERMINAL_NODE_NAME, "*");
+        assert!(
+            star_edges.is_empty(),
+            "no virtual `*→*` edge for a star over a known CTE — it expands"
+        );
+        assert!(
+            g.column_edges()
+                .iter()
+                .all(|e| e.confidence != ColumnEdgeConfidence::Opaque
+                    || e.from_col.column != "*"
+                    || !matches!(
+                        &e.from_col.scope,
+                        crate::domain::ColumnScope::Intra { node_id } if node_id == "renamed"
+                    )),
+            "the renamed.* Opaque edge must not exist (never-a-false-claim)"
+        );
+        // One Resolved PassThrough edge per upstream output column.
+        for column in ["customer_id", "first_name", "last_name"] {
+            let edges = edges_to(&g, TERMINAL_NODE_NAME, column);
+            assert_eq!(
+                edges.len(),
+                1,
+                "expanded `{column}` has exactly one upstream edge"
+            );
+            let e = edges[0];
+            assert_eq!(
+                e.from_col,
+                ColumnRef::intra("renamed", column),
+                "`{column}` traces back to the renamed CTE's same-named column"
+            );
+            assert_eq!(e.kind, ColumnEdgeKind::PassThrough);
+            assert_eq!(
+                e.confidence,
+                ColumnEdgeConfidence::Resolved,
+                "a star over a KNOWN CTE is Resolved, never Opaque"
+            );
+        }
+    }
+
+    #[test]
+    fn column_lineage_qualified_star_over_known_cte_expands() {
+        // `q.*` over a known CTE expands the same way (sourced through the
+        // alias map), Resolved per-column — never Opaque.
+        let g = graph(
+            "WITH renamed AS (SELECT 1 AS a, 2 AS b) \
+             SELECT r.* FROM renamed r",
+        );
+        assert!(
+            edges_to(&g, TERMINAL_NODE_NAME, "*").is_empty(),
+            "no virtual `*→*` edge for a qualified star over a known CTE"
+        );
+        for column in ["a", "b"] {
+            let edges = edges_to(&g, TERMINAL_NODE_NAME, column);
+            assert_eq!(edges.len(), 1, "expanded `{column}`");
+            assert_eq!(edges[0].from_col, ColumnRef::intra("renamed", column));
+            assert_eq!(edges[0].kind, ColumnEdgeKind::PassThrough);
+            assert_eq!(edges[0].confidence, ColumnEdgeConfidence::Resolved);
+        }
+    }
+
+    #[test]
+    fn column_lineage_star_over_cte_with_opaque_star_stays_opaque() {
+        // The honest gap: a star over a CTE whose OWN projection is a star over
+        // an unknown external relation is non-enumerable — we cannot list its
+        // columns, so the downstream star degrades to Opaque (never fabricated).
+        // This mirrors jaffle-shop's `source as (select * from raw_customers)`.
+        let g = graph(
+            "WITH source AS (SELECT * FROM raw_external_thing) \
+             SELECT * FROM source",
+        );
+        // source's own star over the unknown external stays Opaque.
+        let source_star = edges_to(&g, "source", "*");
+        assert_eq!(source_star.len(), 1);
+        assert_eq!(source_star[0].confidence, ColumnEdgeConfidence::Opaque);
+        assert_eq!(
+            source_star[0].from_col,
+            ColumnRef::intra("raw_external_thing", "*")
+        );
+        // The terminal star over `source` cannot expand (source is
+        // non-enumerable) ⇒ it ALSO stays an honest Opaque `*→*` edge.
+        let term_star = edges_to(&g, TERMINAL_NODE_NAME, "*");
+        assert_eq!(term_star.len(), 1, "one honest Opaque star edge");
+        assert_eq!(term_star[0].confidence, ColumnEdgeConfidence::Opaque);
+        assert_eq!(term_star[0].from_col, ColumnRef::intra("source", "*"));
+    }
+
+    #[test]
+    fn column_lineage_derived_not_produced_honest_absence() {
+        // `coalesce(a.x, b.y) AS z` is an Expr::Function — CLL-2 emits NO
+        // Derived edge (that is CLL-3); honest absence, never a fabricated edge.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x), b AS (SELECT 2 AS y) \
+             SELECT coalesce(a.x, b.y) AS z FROM a, b",
+        );
+        assert!(
+            edges_to(&g, TERMINAL_NODE_NAME, "z").is_empty(),
+            "no Derived edge for an expression in CLL-2"
+        );
+        assert!(
+            g.column_edges()
+                .iter()
+                .all(|e| e.kind != ColumnEdgeKind::Derived),
+            "no Derived edge is ever produced by CLL-2"
+        );
+        // But the column span IS recorded so column→code sync can flash it.
+        assert!(
+            g.column_spans()
+                .iter()
+                .any(|cs| cs.node_id == TERMINAL_NODE_NAME && cs.column == "z"),
+            "the derived column still carries a span for the sync layer"
+        );
+    }
+
+    #[test]
+    fn column_lineage_downstream_reverse_index() {
+        // B (downstream impact): a reverse index over the SAME edge set — no
+        // new parse. Changing `customers.email` reaches `contact_email`.
+        let g = graph(
+            "WITH customers AS (SELECT 1 AS email) \
+             SELECT c.email AS contact_email FROM customers c",
+        );
+        let downstream: Vec<_> = g
+            .column_edges()
+            .iter()
+            .filter(|e| e.from_col == ColumnRef::intra("customers", "email"))
+            .map(|e| e.to_col.clone())
+            .collect();
+        assert_eq!(
+            downstream,
+            vec![ColumnRef::intra(TERMINAL_NODE_NAME, "contact_email")]
+        );
+    }
+
+    #[test]
+    fn column_lineage_upstream_trace_dead_ends_at_ref_boundary() {
+        // C (intra-model upstream trace): walk an output column backward over
+        // the edge set; it dead-ends at the first leaf-table boundary (the
+        // `ref()` leaf has no intra-model upstream edge).
+        let g = graph(
+            "WITH stg AS (SELECT id FROM raw_source) \
+             SELECT s.id AS id FROM stg s",
+        );
+        // terminal.id <- stg.id
+        let up1: Vec<_> = g
+            .column_edges()
+            .iter()
+            .filter(|e| e.to_col == ColumnRef::intra(TERMINAL_NODE_NAME, "id"))
+            .map(|e| e.from_col.clone())
+            .collect();
+        assert_eq!(up1, vec![ColumnRef::intra("stg", "id")]);
+        // stg.id <- raw_source.id (the leaf boundary). No edge whose source is
+        // raw_source.id (it is outside the model — dead end).
+        let beyond_leaf: Vec<_> = g
+            .column_edges()
+            .iter()
+            .filter(|e| e.to_col == ColumnRef::intra("raw_source", "id"))
+            .collect();
+        assert!(
+            beyond_leaf.is_empty(),
+            "upstream trace dead-ends at the ref boundary"
+        );
+    }
+
+    #[test]
+    fn column_spans_are_subranges_of_owning_cte_body() {
+        // The `SpanRole::Column` span MUST be contained within the owning
+        // CteBody node's span (contains_range), so the column anchor resolves
+        // under the node anchor.
+        let sql = "WITH customers AS (SELECT 1 AS email) \
+                   SELECT c.email AS contact_email FROM customers c";
+        let g = graph(sql);
+        let term_span = g
+            .nodes()
+            .iter()
+            .find(|n| n.name() == TERMINAL_NODE_NAME)
+            .and_then(|n| n.source_span())
+            .copied()
+            .expect("terminal node has a span");
+        let col = g
+            .column_spans()
+            .iter()
+            .find(|cs| cs.node_id == TERMINAL_NODE_NAME && cs.column == "contact_email")
+            .expect("contact_email has a column span");
+        assert!(
+            term_span.contains_range(&col.span),
+            "column span {:?} must be a sub-range of the owning CteBody {:?}",
+            col.span,
+            term_span
+        );
+        // And the span byte-slices to the projection-item text.
+        let slice = &sql[col.span.start.byte as usize..col.span.end.byte as usize];
+        assert_eq!(slice, "c.email AS contact_email");
+    }
+
+    #[test]
+    fn degraded_spans_are_dropped_not_fabricated() {
+        // The degrade-not-lie boundary guard in `span_to_source_span` (the
+        // column-span path, distinct from `slice_or_fallback`'s node-span
+        // path): an empty (line-0 sentinel) or inverted byte range yields NO
+        // span — never a fabricated one that would mis-anchor the column→code
+        // sync. Kills the boundary-guard mutant on this strict-CRAP module by
+        // driving each REACHABLE degrade path plus a valid control. (The
+        // `end > sql.len()` clause is a belt-and-braces guard: `byte_of` itself
+        // already clamps every offset to `sql.len()`, so it is unreachable
+        // through this caller — exercised here only via the valid control's
+        // upper-bound equality.)
+        let sql = "select a from t"; // 15 bytes, single line
+        let index = ByteIndex::new(sql);
+        let loc = |line, col| Location::new(line, col);
+
+        // Line-0 sentinel on either endpoint ⇒ dropped.
+        assert!(
+            span_to_source_span(Span::new(loc(0, 1), loc(1, 4)), sql, &index).is_none(),
+            "a line-0 start (sqlparser's no-span) is dropped"
+        );
+        assert!(
+            span_to_source_span(Span::new(loc(1, 1), loc(0, 1)), sql, &index).is_none(),
+            "a line-0 end is dropped"
+        );
+
+        // Inverted byte range (start > end) ⇒ dropped. col 10 > col 2 on the
+        // same line, so byte(start) > byte(end).
+        assert!(
+            span_to_source_span(Span::new(loc(1, 10), loc(1, 2)), sql, &index).is_none(),
+            "an inverted byte range is dropped"
+        );
+
+        // Control: a valid in-bounds, ordered span IS retained and byte-slices
+        // back to the source — proving the guard rejects only the degrades, and
+        // that a span ending exactly at sql.len() is NOT dropped (the
+        // `end > sql.len()` clause is `>`, not `>=`).
+        let ok = span_to_source_span(Span::new(loc(1, 1), loc(1, 16)), sql, &index)
+            .expect("a valid span is retained");
+        let slice = &sql[ok.start.byte as usize..ok.end.byte as usize];
+        assert_eq!(
+            slice, "select a from t",
+            "the retained span (ending at sql.len()) slices to the whole source"
+        );
+        assert_eq!(
+            ok.end.byte as usize,
+            sql.len(),
+            "an end exactly at sql.len() is retained (guard is `>`, not `>=`)"
+        );
+    }
+
+    #[test]
+    fn column_lineage_canonical_vocab_is_stable_snake_case() {
+        // The Recce 5-way vocabulary serializes to its stable wire strings —
+        // goldens depend on these never drifting.
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeKind::PassThrough).unwrap(),
+            "\"pass_through\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeKind::Renamed).unwrap(),
+            "\"renamed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeKind::Derived).unwrap(),
+            "\"derived\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeKind::Source).unwrap(),
+            "\"source\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeKind::JoinKey).unwrap(),
+            "\"join_key\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeConfidence::Resolved).unwrap(),
+            "\"resolved\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeConfidence::Ambiguous).unwrap(),
+            "\"ambiguous\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ColumnEdgeConfidence::Opaque).unwrap(),
+            "\"opaque\""
         );
     }
 }

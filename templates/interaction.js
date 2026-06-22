@@ -2597,6 +2597,37 @@
       $btn.attr("aria-expanded", open ? "false" : "true");
       $btn.closest("li").find(".mdc-col-tests").prop("hidden", open);
     });
+    // cute-dbt#446 (S3, code→DAG) — click a line in the source-map pane to
+    // select the DAG node whose compiled span owns that line. Routes through
+    // the #180 in-place selection seam (a Cytoscape `tap` when live, else
+    // openNodeShelf) — never a renderDag rebuild that would reset pan/zoom.
+    // Delegated on `document` because the shelf body is rebuilt per selection.
+    $(document).on("click", ".code-map-pre .code-line", function () {
+      var line = parseInt(this.getAttribute("data-line"), 10);
+      if (!line) return;
+      var m = currentModel();
+      var owner = nodeOwningLine(m, line);
+      if (!owner) return;
+      selectNodeInPlace(owner);
+    });
+  }
+
+  // cute-dbt#446 (S3) — select a DAG node through the #180 in-place seam: emit
+  // a Cytoscape `tap` when the live instance has the node (runs the bound
+  // click path: lineage highlight + the node-detail shelf), else fall back to
+  // openNodeShelf. Shared by the code→DAG line click and any other in-place
+  // selector. Never calls renderDag (which would reset pan/zoom — the #180
+  // rule).
+  function selectNodeInPlace(id) {
+    var cyto = dagEngine === "cytoscape" && window.CuteCyto
+      ? window.CuteCyto.cyInstance()
+      : null;
+    var cyEle = cyto ? cyto.getElementById(String(id)) : null;
+    if (cyEle && cyEle.length) {
+      cyEle.emit("tap");
+    } else {
+      openNodeShelf(id);
+    }
   }
 
   // cute-dbt#402 (epic #360) — the subject-lens tab strip. Implements the
@@ -2722,11 +2753,134 @@
     $det.append($sqlWrap);
     $detail.append($det);
 
+    // cute-dbt#446 (S3) — the bidirectional compiled-CTE↔code sync pane. The
+    // full `code_map.compiled` text (the single faithful source #445 derives
+    // every per-node slice from) renders as ONE numbered <pre>; the selected
+    // node's compiled span flashes, and clicking any line selects the node
+    // whose span owns it (the #180 in-place selection seam — never a
+    // renderDag rebuild). Present only for compiled models (code_map None on a
+    // seed/source); the per-node Compiled SQL slice above stays unchanged.
+    var $codeMap = buildCodeMapPane(m, node.id);
+    if ($codeMap) $detail.append($codeMap);
+
     $wrap.append($detail);
     // Initialize the (lazy-init) DataTables on the seed grid only after it is
     // in the document — initDataTablesIn is a no-op when no seed card was
     // appended (the non-seed-node path).
     if (seedCard) initDataTablesIn($wrap);
+    // cute-dbt#446 (S3, DAG→code) — flash the selected node's compiled span in
+    // the source-map pane and scroll it into view, AFTER the shelf body is in
+    // the document. A no-op when this model has no code_map.
+    flashNodeSpan(node.id);
+  }
+
+  // cute-dbt#446 (S3) — the model's compiled source map: the line range a DAG
+  // node's compiled span covers, derived from `code_map.node_spans[id]`
+  // (#445). 1-based, inclusive `[startLine, endLine]`. The span end is the
+  // half-open byte end carried with its 1-based `end.line`; when the exclusive
+  // end sits at column 1 of `end.line` (the slice ends exactly at a newline)
+  // that line carries no node bytes, so it is excluded. `null` when the model
+  // has no code_map or the node id has no span (a seed/source/import-only id).
+  function nodeSpanLines(m, nodeId) {
+    if (!m || !m.code_map || !m.code_map.node_spans) return null;
+    var sp = m.code_map.node_spans[nodeId];
+    if (!sp || !sp.start || !sp.end) return null;
+    var startLine = sp.start.line;
+    var endLine = sp.end.line;
+    // Exclusive end at column 1 ⇒ the end line holds no node bytes.
+    if (sp.end.col != null && sp.end.col <= 1 && endLine > startLine) endLine -= 1;
+    if (endLine < startLine) endLine = startLine;
+    return { start: startLine, end: endLine };
+  }
+
+  // cute-dbt#446 (S3) — the node whose compiled span CONTAINS `line` (1-based),
+  // or null. The compiled CTE bodies tile the text without overlap (#445), so
+  // at most one node owns a line; ties (a line on a shared boundary) resolve to
+  // the most specific (smallest) span, which is the inner node.
+  function nodeOwningLine(m, line) {
+    if (!m || !m.code_map || !m.code_map.node_spans) return null;
+    var spans = m.code_map.node_spans;
+    var best = null;
+    var bestSize = Infinity;
+    Object.keys(spans).forEach(function (id) {
+      var r = nodeSpanLines(m, id);
+      if (!r) return;
+      if (line >= r.start && line <= r.end) {
+        var size = r.end - r.start;
+        if (size < bestSize) { bestSize = size; best = id; }
+      }
+    });
+    return best;
+  }
+
+  // cute-dbt#446 (S3) — build the source-map pane: the full `code_map.compiled`
+  // text as ONE numbered <pre> of `.code-line` rows, each tagged `data-line`
+  // (1-based) so the DAG→code flash can target a line range and the code→DAG
+  // click can read the line a row owns. Returns null when the model has no
+  // code_map (seed/source). NOTE: highlightLinesSql already emits a `.code-line`
+  // per source line in order, so the gutter number === the 1-based line — we
+  // only annotate each row with its line index for the sync handlers.
+  function buildCodeMapPane(m, selectedNodeId) {
+    if (!m || !m.code_map || !m.code_map.compiled) return null;
+    var $det = $("<details>").addClass("code-map").attr("open", "open");
+    var $sum = $("<summary>");
+    $sum.append($("<span>").addClass("cs-label").text("Source map"));
+    $sum.append(
+      $("<span>").addClass("code-map-hint").text("click a line to select its node")
+    );
+    $det.append($sum);
+    var $pre = $("<pre>").addClass("sql-block code-map-pre")
+      .attr("data-model", m.name);
+    var $code = $("<code>").html(highlightLinesSql(m.code_map.compiled));
+    $pre.append($code);
+    // Annotate every rendered line with its 1-based index (highlightLinesSql
+    // emits one `.code-line` per source line, in order).
+    $code.children(".code-line").each(function (i) {
+      this.setAttribute("data-line", String(i + 1));
+    });
+    $det.append($pre);
+    // Mark the selected node's lines so the initial render shows the owned
+    // range even before the flash animation (idempotent re-highlight).
+    void selectedNodeId;
+    return $det;
+  }
+
+  // cute-dbt#446 (S3, DAG→code) — flash the lines the node's compiled span
+  // owns and scroll the first into view. Uses the same `pin-flash`-style
+  // restart trick the finding pin uses (#170): toggle the class off, force a
+  // reflow, toggle it on, then clear after the animation. A no-op when the
+  // pane is absent (no code_map) or the node has no span.
+  function flashNodeSpan(nodeId) {
+    var m = currentModel();
+    var range = nodeSpanLines(m, nodeId);
+    var pre = document.querySelector(".code-map-pre");
+    if (!pre || !range) return;
+    var lines = pre.querySelectorAll(".code-line");
+    var first = null;
+    for (var i = 0; i < lines.length; i++) {
+      var n = parseInt(lines[i].getAttribute("data-line"), 10);
+      var owned = n >= range.start && n <= range.end;
+      lines[i].classList.toggle("code-line-owned", owned);
+      if (owned) {
+        if (!first) first = lines[i];
+        lines[i].classList.remove("code-flash");
+      }
+    }
+    if (!first) return;
+    // Restart the flash animation on the owned run.
+    void pre.offsetWidth;
+    for (var j = 0; j < lines.length; j++) {
+      var k = parseInt(lines[j].getAttribute("data-line"), 10);
+      if (k >= range.start && k <= range.end) lines[j].classList.add("code-flash");
+    }
+    if (first.scrollIntoView) first.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    if (pre.__cuteCodeFlashTimer) clearTimeout(pre.__cuteCodeFlashTimer);
+    pre.__cuteCodeFlashTimer = setTimeout(function () {
+      pre.querySelectorAll(".code-flash").forEach(function (el) {
+        el.classList.remove("code-flash");
+      });
+      pre.__cuteCodeFlashTimer = null;
+    }, 1600);
   }
 
   // cute-dbt#398 — the seed card (DATA.seed_cards entry) a DAG node maps to,
@@ -3697,6 +3851,16 @@
   window.__cuteHighlightYaml = highlightYaml;
   window.__cuteTokenizeSql = tokenizeSql;
   window.__cuteTokenizeYaml = tokenizeYaml;
+  // cute-dbt#446 (S3) — expose the span↔line resolution for the headless E2E:
+  // which line range a node owns, and which node owns a line (the two halves
+  // of the bidirectional sync). Read the live currentModel internally so the
+  // test drives the same data the handlers do.
+  window.__cuteNodeSpanLines = function (nodeId) {
+    return nodeSpanLines(currentModel(), nodeId);
+  };
+  window.__cuteNodeOwningLine = function (line) {
+    return nodeOwningLine(currentModel(), line);
+  };
 
   // Overlay the codepoint `emphasis` range [a,b) onto a token stream. Walks
   // the tokens tracking a running CODEPOINT offset; each token is intersected

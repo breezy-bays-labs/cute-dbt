@@ -1,0 +1,4 @@
+case status
+{% for s in statuses %}when {{ s }} then 1
+{% endfor %}
+end

@@ -181,6 +181,19 @@ name = "fuzz_pr_diff_parser"
 path = "tests/fuzz_pr_diff_parser/main.rs"
 harness = false
 
+# The cute-dbt#464 (Z3) fuzz target on the raw-Jinja zone scanner
+# (`render::locate_raw_zones`, reached via the `fuzz_locate_raw_zones`
+# seam) — cute-dbt's SECOND untrusted-input parser after the `--pr-diff`
+# patch parser. Same bolero-on-stable harness as `fuzz_pr_diff_parser`:
+# `check!`-owned `main()` ⇒ `harness = false`, invoked via `cargo test
+# --test fuzz_zone_scanner` (the committed `corpus/` replays as a cheap
+# regression there; a `cargo nextest`/`cargo test` run BUILDS it so the
+# seam stays compiled). NOT a blocking merge gate (fuzz is schedule/manual).
+[[test]]
+name = "fuzz_zone_scanner"
+path = "tests/fuzz_zone_scanner/main.rs"
+harness = false
+
 # Bolero's recommended optimized fuzzing profile (inherits dev so the
 # crate's debug-assertions stay on — a fuzz run wants overflow/panic
 # checks armed). Used by `cargo bolero test … --profile fuzz`; the plain

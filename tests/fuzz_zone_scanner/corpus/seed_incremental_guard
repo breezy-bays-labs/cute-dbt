@@ -1,0 +1,5 @@
+select *
+from events
+{% if is_incremental() %}
+where ts > 0
+{% endif %}

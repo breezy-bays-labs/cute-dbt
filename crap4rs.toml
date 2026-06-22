@@ -39,6 +39,26 @@ pattern ="src/adapters/cte_engine.rs"
 threshold = 15
 
 [[overrides]]
+# THE position/span vocabulary — the half-open byte primitives
+# (contains/contains_byte/contains_range/overlaps) + the empty-span guard
+# (cute-dbt#444). Off-by-one / underflow bugs here silently mis-bind a zone
+# to the wrong node or mis-slice compiled SQL, never crash — correctness-
+# load-bearing, strict.
+pattern ="src/domain/span.rs"
+threshold = 15
+
+[[overrides]]
+# THE per-model source-map primitive — the SourceMap assembler
+# (`from_cte_graph`) + the derived `compiled_slices`/`node_spans`
+# projections + the whole-text terminal-span synthesis (cute-dbt#445,
+# source-map-spine S2). The single source of truth `compiled_sql` derives
+# from; a silent span-arithmetic or key-derivation bug yields a
+# mis-sliced compiled SQL or a DAG node with no code anchor, never a
+# crash — correctness-load-bearing, strict.
+pattern ="src/domain/source_map.rs"
+threshold = 15
+
+[[overrides]]
 # Asset-inlining infra (PR 8a). The embedding logic is where bytes-vs-
 # templates accidents creep in.
 pattern ="src/adapters/asset_embed.rs"
@@ -90,6 +110,17 @@ threshold = 15
 # induced-edge bug yields a wrong/misleading PR-shape graph, never a
 # crash. Pure-domain graph walks — comfortably under 15.
 pattern ="src/domain/pr_dag.rs"
+threshold = 15
+
+[[overrides]]
+# The ONE cross-model `depends_on` self-inversion site (cute-dbt#443,
+# source-map-spine S0). `invert_depends_on` + `ModelLineage::from_manifest`
+# are the single producer→consumer inversion the three consumers
+# (explore lineage, PR mini-DAG, governance blast-radius) now read instead
+# of each re-inverting — a silent inversion bug here mis-shapes every
+# downstream lineage view, never crashes. Simple loops; comfortably under
+# 15.
+pattern ="src/domain/lineage.rs"
 threshold = 15
 
 # crap4rs v0.4.0's [[overrides]] schema accepts only `pattern` and

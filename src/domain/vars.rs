@@ -1059,11 +1059,28 @@ pub fn project_var_inventory(current: &Manifest, def: &ProjectDefinition) -> Var
     }
     let (scans, footprint) = scan_models(current);
     let root = current.metadata().project_name();
+    // Pair each scanned model with its resolved package ONCE (cute-dbt#433):
+    // the package depends only on the model, not the var, so the former
+    // per-var re-resolution inside `inventory_entry` was an O(V×M) manifest
+    // lookup + `NodeId` clone each. Materialize (id, scan, package) in O(M)
+    // and iterate the slice directly below — the inner loop carries
+    // everything it needs with no per-iteration map lookup.
+    let scanned_pkgs: Vec<(&String, &ModelScan, Option<&str>)> = scans
+        .iter()
+        .map(|(id, scan)| {
+            let pkg = current
+                .nodes()
+                .get(&crate::domain::manifest::NodeId::new(id.clone()))
+                .and_then(|n| n.package_name())
+                .or(root);
+            (id, scan, pkg)
+        })
+        .collect();
     let mut var_models: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut entries: Vec<VarInventoryEntry> = triples
         .into_iter()
         .map(|(name, scope, value)| {
-            inventory_entry(current, &scans, root, name, scope, value, &mut var_models)
+            inventory_entry(&scanned_pkgs, name, scope, value, &mut var_models)
         })
         .collect();
     entries.sort_by(|a, b| {
@@ -1084,9 +1101,7 @@ pub fn project_var_inventory(current: &Manifest, def: &ProjectDefinition) -> Var
 /// counts and append every literal-referencing model into the shared
 /// `var_models` filter index.
 fn inventory_entry(
-    current: &Manifest,
-    scans: &BTreeMap<String, ModelScan>,
-    root: Option<&str>,
+    scanned_pkgs: &[(&String, &ModelScan, Option<&str>)],
     name: String,
     scope: VarScope,
     value: Value,
@@ -1098,12 +1113,9 @@ fn inventory_entry(
         value,
         ..VarInventoryEntry::default()
     };
-    for (id, scan) in scans {
-        let model_pkg = current
-            .nodes()
-            .get(&crate::domain::manifest::NodeId::new(id.clone()))
-            .and_then(|n| n.package_name())
-            .or(root);
+    // Iterate the (id, scan, package) triples resolved once in
+    // `project_var_inventory` (cute-dbt#433) — no per-iteration lookup.
+    for &(id, scan, model_pkg) in scanned_pkgs {
         if !scope_reaches(&entry.scope, model_pkg) {
             continue;
         }
