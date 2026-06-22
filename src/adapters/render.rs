@@ -455,52 +455,69 @@ fn append_zone_entries(sm: &mut SourceMap, raw: &str, compiled: &str) {
 }
 
 /// Resolve a zone's compiled span by honest token-location (cute-dbt#448, §6).
-/// Extract the zone body's longest contiguous LITERAL SQL fragment (Jinja
-/// `{%…%}`/`{{…}}`/`{#…#}` stripped), then locate that fragment in `compiled`.
-/// Found ⇒ `Some` span over the matched bytes; not found (pruned this build, or
-/// no usable literal anchor) ⇒ `None` — degrade to absence, never a fabricated
-/// `Some` (never-a-false-claim). Raw-text matching is the LAST-RESORT mechanism
-/// the shaping permits; it only ever produces a `None` on miss, so it cannot
+/// Extract the zone body's literal SQL fragments (Jinja `{%…%}`/`{{…}}`/`{#…#}`
+/// stripped, longest first), then locate the BEST UNAMBIGUOUS fragment in
+/// `compiled`. A fragment is usable only when it occurs EXACTLY ONCE in
+/// `compiled`: a fragment that appears MULTIPLY (e.g. a pruned guard whose
+/// literal also lives outside the zone region) could bind the FIRST occurrence
+/// — a region OUTSIDE the actual zone — and fabricate a false
+/// `Some`/`CompiledIn`. The honest verdict there is absence: try the next-best
+/// fragment, and if NONE is unambiguous, return `None` (`CompiledOut`). Degrade,
+/// never guess (never-a-false-claim). Raw-text matching is the LAST-RESORT
+/// mechanism the shaping permits; this fix makes it ambiguity-safe so it cannot
 /// lie about presence.
 fn resolve_zone_compiled(raw: &str, raw_span: &SourceSpan, compiled: &str) -> Option<SourceSpan> {
     let body = raw.get(raw_span.byte_range())?;
-    let anchor = longest_literal_fragment(body)?;
-    // The anchor must be a meaningful token run, not a stray symbol — a single
-    // char/whitespace match would over-bind. Require ≥3 non-whitespace bytes.
-    if anchor.chars().filter(|c| !c.is_whitespace()).count() < 3 {
-        return None;
+    // Candidates longest-first; bind the first that resolves UNAMBIGUOUSLY.
+    for anchor in literal_fragments(body) {
+        // The anchor must be a meaningful token run, not a stray symbol — a
+        // single char/whitespace match would over-bind. Require ≥3
+        // non-whitespace bytes.
+        if anchor.chars().filter(|c| !c.is_whitespace()).count() < 3 {
+            continue;
+        }
+        // UNAMBIGUOUS ONLY: bind iff the anchor occurs exactly once. A multiply
+        // occurring anchor cannot tell the zone's region from a coincidental
+        // twin elsewhere in `compiled`, so binding it would risk a false claim.
+        let mut occurrences = compiled.match_indices(anchor);
+        let first = occurrences.next();
+        let unique = occurrences.next().is_none();
+        if let Some((at, _)) = first.filter(|_| unique) {
+            // Exactly one occurrence — an honest, unambiguous bind.
+            return byte_span(compiled, at, at + anchor.len());
+        }
+        // 0 occurrences (absent) or ≥2 (ambiguous): try the next-best candidate.
     }
-    let at = compiled.find(anchor)?;
-    let end = at + anchor.len();
-    byte_span(compiled, at, end)
+    // No unambiguous literal anchor present ⇒ honest absence (CompiledOut).
+    None
 }
 
-/// The longest contiguous literal (non-Jinja) text fragment in a zone body —
-/// the token-location anchor (cute-dbt#448). Strips `{%…%}` / `{{…}}` / `{#…#}`
-/// constructs (replacing each with a boundary) and returns the longest
-/// remaining run, trimmed. `None` when the body is all-Jinja / whitespace.
-fn longest_literal_fragment(body: &str) -> Option<&str> {
+/// Every contiguous literal (non-Jinja) text fragment in a zone body, ORDERED
+/// LONGEST-FIRST (cute-dbt#448) — the token-location anchor candidates. Strips
+/// `{%…%}` / `{{…}}` / `{#…#}` constructs (each is a boundary) and trims each
+/// remaining run. Empty when the body is all-Jinja / whitespace. The
+/// ambiguity-safe [`resolve_zone_compiled`] walks these in order, binding the
+/// first that occurs EXACTLY ONCE in the compiled text.
+fn literal_fragments(body: &str) -> Vec<&str> {
     let bytes = body.as_bytes();
     let n = bytes.len();
-    let mut best: Option<(usize, usize)> = None;
+    let mut frags: Vec<(usize, usize)> = Vec::new();
     let mut seg_start = 0usize;
     let mut i = 0usize;
-    let consider = |start: usize, end: usize, best: &mut Option<(usize, usize)>| {
+    let push_seg = |start: usize, end: usize, frags: &mut Vec<(usize, usize)>| {
         let frag = body[start..end].trim();
         if !frag.is_empty() {
             // Map the trimmed fragment back to byte offsets within `body`.
             let lead = body[start..end].len() - body[start..end].trim_start().len();
             let fs = start + lead;
             let fe = fs + frag.len();
-            if best.is_none_or(|(bs, be)| (fe - fs) > (be - bs)) {
-                *best = Some((fs, fe));
-            }
+            frags.push((fs, fe));
         }
     };
     while i < n {
         if bytes[i] == b'{' && i + 1 < n && matches!(bytes[i + 1], b'%' | b'{' | b'#') {
             // Close the current literal segment, then skip the Jinja construct.
-            consider(seg_start, i, &mut best);
+            push_seg(seg_start, i, &mut frags);
             let close_delim = match bytes[i + 1] {
                 b'%' => b'%',
                 b'{' => b'}',
@@ -528,8 +545,20 @@ fn longest_literal_fragment(body: &str) -> Option<&str> {
             i += 1;
         }
     }
-    consider(seg_start, n, &mut best);
-    best.map(|(s, e)| &body[s..e])
+    push_seg(seg_start, n, &mut frags);
+    // Longest-first: the most specific anchor is tried before shorter ones.
+    frags.sort_by_key(|(s, e)| std::cmp::Reverse(e - s));
+    frags.into_iter().map(|(s, e)| &body[s..e]).collect()
+}
+
+/// The longest contiguous literal (non-Jinja) text fragment in a zone body —
+/// the single best token-location anchor (cute-dbt#448). Thin wrapper over the
+/// longest-first [`literal_fragments`]. `None` when the body is all-Jinja /
+/// whitespace. Test-only since the ambiguity-safe [`resolve_zone_compiled`]
+/// walks the full [`literal_fragments`] candidate list, not just the head.
+#[cfg(test)]
+fn longest_literal_fragment(body: &str) -> Option<&str> {
+    literal_fragments(body).into_iter().next()
 }
 
 /// The per-model column-lineage render projection (cute-dbt#446, CLL-1) —
@@ -3476,22 +3505,39 @@ fn locate_raw_zones(raw_code: &str) -> Vec<ZoneFact> {
                     Some((open_kind, open_at, block_id)) if open_kind.closes_with(end_kind) => {
                         // A v0.1 zone is emitted ONLY for an incremental guard
                         // or a for-loop; a plain `{% if %}` pairs but emits no
-                        // zone (L9).
-                        if let Some(zone_kind) = open_kind.zone_kind()
-                            && let Some(raw_span) = byte_span(raw_code, open_at, tag.close)
-                        {
-                            zones.push(ZoneFact {
-                                kind: zone_kind,
-                                raw_span,
-                                block_id,
-                            });
+                        // zone (L9). DELIBERATELY nested `if let` (NOT a
+                        // `let`-chain): the prefix-scanning `byte_span` is
+                        // skipped entirely for a non-emitting opener
+                        // (`zone_kind()` is `None`) — a real perf win for plain
+                        // `{% if %}` blocks — and it sidesteps the unstable
+                        // `let_chains` feature question on MSRV 1.88. Collapsing
+                        // to a `let`-chain would undo both, so the lint is
+                        // suppressed at this site only.
+                        #[allow(clippy::collapsible_if)]
+                        if let Some(zone_kind) = open_kind.zone_kind() {
+                            if let Some(raw_span) = byte_span(raw_code, open_at, tag.close) {
+                                zones.push(ZoneFact {
+                                    kind: zone_kind,
+                                    raw_span,
+                                    block_id,
+                                });
+                            }
                         }
                     }
                     _ => return Vec::new(),
                 }
             }
-            // Mids and other tags are consumed without affecting pairing.
-            TagRole::Mid | TagRole::Other => {}
+            // A mid-block divider (`else`/`elif`) is valid ONLY inside an open
+            // block — it must have a matching opener on the depth-stack. An
+            // ORPHAN mid-tag (empty stack) is malformed Jinja → fail-closed
+            // (empty vec, never letting a later zone emit from a broken stream).
+            TagRole::Mid => {
+                if stack.is_empty() {
+                    return Vec::new();
+                }
+            }
+            // Other tags are consumed without affecting pairing.
+            TagRole::Other => {}
         }
     }
     // Unclosed openers ⇒ unbalanced ⇒ fail-closed.
@@ -3594,10 +3640,74 @@ fn find_expr_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
     None
 }
 
+/// Whether an `{% if … %}` condition contains an ACTUAL `is_incremental()` CALL
+/// (cute-dbt#448) — an identifier-boundary, quote-aware token, NOT a bare
+/// substring. The match requires:
+/// - the literal token `is_incremental` with IDENTIFIER BOUNDARIES on BOTH sides
+///   (the preceding/following char is not `[A-Za-z0-9_]`), so a larger
+///   identifier like `some_is_incremental_flag` does NOT match;
+/// - NOT inside a single/double-quoted string literal (a quoted
+///   `'is_incremental'` is data, not a call);
+/// - followed by optional whitespace then `(` — an actual call invocation.
+///
+/// A plain `{% if %}` whose condition merely embeds the substring must classify
+/// as `PlainIf` (no v0.1 zone) — never a false `IncrementalGuard`.
+fn mentions_is_incremental_call(cond: &str) -> bool {
+    const TOKEN: &str = "is_incremental";
+    let bytes = cond.as_bytes();
+    let n = bytes.len();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut quote: Option<u8> = None;
+    let mut i = 0usize;
+    while i < n {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            // Inside a string literal: only a backslash escape or the matching
+            // closing quote is meaningful; the token never matches here.
+            if b == b'\\' && i + 1 < n {
+                // A backslash escape: skip the escaped byte (so an embedded
+                // `\'` does not prematurely close the string literal).
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+        } else {
+            if b == b'\'' || b == b'"' {
+                quote = Some(b);
+                i += 1;
+                continue;
+            }
+            // Try to match the token starting at `i` with a left identifier
+            // boundary (the char before `i` must not be a word char).
+            let left_ok = i == 0 || !is_word(bytes[i - 1]);
+            // Right identifier boundary + an actual call `(` (optional ws).
+            if left_ok && cond[i..].starts_with(TOKEN) {
+                let after = i + TOKEN.len();
+                let right_ok = after >= n || !is_word(bytes[after]);
+                if right_ok {
+                    let mut j = after;
+                    while j < n && bytes[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                    if j < n && bytes[j] == b'(' {
+                        return true;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+    false
+}
+
 /// Classify a full `{%…%}` tag slice by its leading keyword (after the `{%`
 /// delimiter + optional `-` whitespace-control dash + whitespace). An `if`
-/// whose condition mentions `is_incremental` is an [`ZoneKind::IncrementalGuard`];
-/// any other `if`/`for` is a generic [`TagRole::Start`].
+/// whose condition makes an actual `is_incremental()` call is an
+/// [`ZoneKind::IncrementalGuard`]; any other `if`/`for` is a generic
+/// [`TagRole::Start`].
 fn classify_block_tag(tag: &str) -> TagRole {
     // Strip `{%`, an optional `-`, and leading whitespace; strip the trailing
     // `%}`/`-%}` and trailing whitespace, to read the inner statement.
@@ -3617,8 +3727,11 @@ fn classify_block_tag(tag: &str) -> TagRole {
     match keyword {
         "if" => {
             // An incremental guard emits a zone; any other `{% if %}` still
-            // PAIRS (so nesting is honored) but emits no v0.1 zone (L9).
-            let kind = if inner.contains("is_incremental") {
+            // PAIRS (so nesting is honored) but emits no v0.1 zone (L9). Match an
+            // ACTUAL `is_incremental()` CALL — an identifier-boundary, quote-aware
+            // token — NOT a bare substring (`some_is_incremental_flag` and a
+            // quoted `'is_incremental'` must NOT classify as a guard).
+            let kind = if mentions_is_incremental_call(inner) {
                 BlockKind::IncrementalGuard
             } else {
                 BlockKind::PlainIf
@@ -4436,10 +4549,16 @@ fn build_model_payload(
     // None ⇒ pruned this build), and append to the spine. The presence verdict
     // + node back-ref are derived downstream in gather_raw_zones. Only runs when
     // there is both a source map (compiled present) AND raw_code to scan.
-    if let Some(sm) = source_map.as_mut()
-        && let Some(raw) = model.raw_code().filter(|s| !s.is_empty())
-    {
-        append_zone_entries(sm, raw, compiled_code);
+    // DELIBERATELY nested `if let` (NOT a `let`-chain) — the model's `raw_code`
+    // is only read when a source map exists, and this sidesteps the unstable
+    // `let_chains` feature question on MSRV 1.88 while keeping behavior
+    // identical. Collapsing to a `let`-chain would reintroduce that question, so
+    // the lint is suppressed at this site only.
+    #[allow(clippy::collapsible_if)]
+    if let Some(sm) = source_map.as_mut() {
+        if let Some(raw) = model.raw_code().filter(|s| !s.is_empty()) {
+            append_zone_entries(sm, raw, compiled_code);
+        }
     }
     let compiled_sql = build_compiled_sql(source_map.as_ref());
     let code_map = source_map.as_ref().map(CodeMapPayload::from_source_map);
@@ -7835,11 +7954,17 @@ mod tests {
     fn append_zone_entries_shape_a_for_loop_is_structural() {
         // A {% for %} expanding columns INSIDE one CTE body: the loop's literal
         // tokens land inside the terminal CteBody span → Structural, bound to
-        // the containing node.
-        let raw = "select\n  case status\n  {% for s in statuses %}when '{{ s }}' then '{{ s }}'\n  {% endfor %}\n  end as label\nfrom events";
-        // The compiled text contains the loop's literal "when ... then ..."
-        // fragment inside the (whole-text) terminal body.
-        let compiled = "select\n  case status\n  when 'a' then 'a'\n  when 'b' then 'b'\n  end as label\nfrom events";
+        // the containing node. The loop body carries a UNIQUE literal anchor
+        // ("when unique_status_marker then") that appears exactly once in the
+        // unrolled compiled output, so the ambiguity-safe resolver (FIX B) can
+        // soundly bind it (a loop whose body literal REPEATS verbatim per
+        // iteration is genuinely unbindable — see
+        // `resolve_zone_compiled_ambiguous_anchor_is_none_not_a_false_bind`).
+        let raw = "select\n  case status\n  {% for s in statuses %}when unique_status_marker then {{ s }}\n  {% endfor %}\n  end as label\nfrom events";
+        // The compiled text contains the loop's UNIQUE literal fragment
+        // ("when unique_status_marker then") inside the (whole-text) terminal
+        // body, exactly once.
+        let compiled = "select\n  case status\n  when unique_status_marker then 1\n  end as label\nfrom events";
         let mut sm = SourceMap {
             compiled: compiled.to_owned(),
             entries: vec![SourceMapEntry {
@@ -7882,6 +8007,156 @@ mod tests {
         let zone = &locate_raw_zones(raw)[0];
         let compiled = "select * from events"; // anchor absent
         assert!(resolve_zone_compiled(raw, &zone.raw_span, compiled).is_none());
+    }
+
+    // ── cute-dbt#448 FIX B (CodeRabbit Major, never-a-false-claim): the zone
+    // anchor must resolve UNAMBIGUOUSLY. A pruned guard whose literal also
+    // appears OUTSIDE the actual zone region must NOT fabricate a Some — it
+    // degrades to None (honest CompiledOut), never a false bind. ──
+
+    #[test]
+    fn resolve_zone_compiled_ambiguous_anchor_is_none_not_a_false_bind() {
+        // The guard's longest literal anchor ("where status = 'active'") ALSO
+        // appears verbatim elsewhere in `compiled` (the guard itself was pruned
+        // this build). Binding the FIRST occurrence would claim CompiledIn at a
+        // region OUTSIDE the zone — a false claim. The ambiguity-safe resolver
+        // refuses to bind and returns None (honest CompiledOut).
+        let raw = "{% if is_incremental() %}where status = 'active'{% endif %}";
+        let zone = &locate_raw_zones(raw)[0];
+        // The anchor "where status = 'active'" occurs TWICE in compiled, and
+        // neither is the (pruned) zone region — ambiguous, must not bind.
+        let compiled = "select * from a where status = 'active'\n\
+                        union all\n\
+                        select * from b where status = 'active'";
+        assert!(
+            resolve_zone_compiled(raw, &zone.raw_span, compiled).is_none(),
+            "a multiply-occurring anchor must NOT fabricate a Some (never-a-false-claim)"
+        );
+    }
+
+    #[test]
+    fn append_zone_entries_ambiguous_anchor_resolves_to_compiled_out() {
+        // End-to-end through the projection: the same ambiguous-anchor guard →
+        // presence compiled_out, node_id null (no fabricated edge), NOT a false
+        // structural/compiled_in.
+        let raw =
+            "select *\nfrom events\n{% if is_incremental() %}where status = 'active'{% endif %}";
+        let compiled = "select * from a where status = 'active'\n\
+                        union all\n\
+                        select * from b where status = 'active'";
+        let mut sm = SourceMap {
+            compiled: compiled.to_owned(),
+            entries: vec![SourceMapEntry {
+                role: SpanRole::CteBody {
+                    node_id: TERMINAL_NODE_NAME.to_owned(),
+                },
+                raw: None,
+                compiled: byte_span(compiled, 0, compiled.len()),
+            }],
+        };
+        append_zone_entries(&mut sm, raw, compiled);
+        let payload = CodeMapPayload::from_source_map(&sm);
+        assert_eq!(payload.raw_zones.len(), 1);
+        let z = &payload.raw_zones[0];
+        assert_eq!(
+            z.presence, "compiled_out",
+            "ambiguous anchor ⇒ honest absence, never a fabricated presence"
+        );
+        assert!(
+            z.node_id.is_none(),
+            "no fabricated node edge from an ambiguous anchor"
+        );
+    }
+
+    #[test]
+    fn resolve_zone_compiled_prefers_a_unique_shorter_anchor_over_an_ambiguous_longer_one() {
+        // The longest literal ("where status = 'active'") is ambiguous (appears
+        // twice), but a shorter UNIQUE literal fragment ("and rare_marker_q > 0")
+        // is present exactly once → bind that one (degrade gracefully to the
+        // next-best unambiguous candidate, never lie, never give up early).
+        let raw = "{% if is_incremental() %}where status = 'active'\n\
+                   {{ adapter }}and rare_marker_q > 0{% endif %}";
+        let zone = &locate_raw_zones(raw)[0];
+        let compiled = "select * from a where status = 'active'\n\
+                        union all\n\
+                        select * from b where status = 'active' and rare_marker_q > 0";
+        let span = resolve_zone_compiled(raw, &zone.raw_span, compiled)
+            .expect("the unique shorter fragment resolves");
+        let matched = &compiled[span.byte_range()];
+        assert_eq!(
+            matched, "and rare_marker_q > 0",
+            "binds the UNIQUE fragment, not the first occurrence of the ambiguous one"
+        );
+    }
+
+    // ── cute-dbt#448 FIX C (CodeRabbit Major, fail-closed): an orphan mid-block
+    // tag (`{% else %}` / `{% elif %}` with no opener on the depth-stack) is
+    // malformed Jinja → empty vec, never letting a later zone emit. ──
+
+    #[test]
+    fn scan_orphan_else_yields_empty_fail_closed() {
+        // An `{% else %}` with NO `{% if %}` opener is malformed — fail-closed.
+        assert!(
+            locate_raw_zones("select 1\n{% else %}\nselect 2").is_empty(),
+            "an orphan else (no opener) ⇒ empty (fail-closed)"
+        );
+        // An orphan `{% elif %}` is equally malformed.
+        assert!(
+            locate_raw_zones("select 1\n{% elif x %}\nselect 2").is_empty(),
+            "an orphan elif (no opener) ⇒ empty (fail-closed)"
+        );
+        // And it must NOT let a LATER well-formed zone emit from a broken stream.
+        assert!(
+            locate_raw_zones("{% else %}\n{% for x in xs %}a{% endfor %}").is_empty(),
+            "an orphan else must abort the whole scan, not just its own region"
+        );
+    }
+
+    #[test]
+    fn scan_well_placed_else_inside_a_block_still_pairs() {
+        // A WELL-PLACED `{% else %}` (inside an open block) is fine — the block
+        // still pairs and emits its zone. The orphan guard must not regress this.
+        let raw = "{% if is_incremental() %}a{% else %}b{% endif %}";
+        let zones = locate_raw_zones(raw);
+        assert_eq!(zones.len(), 1, "a well-placed else does not break pairing");
+        assert_eq!(zones[0].kind, ZoneKind::IncrementalGuard);
+    }
+
+    // ── cute-dbt#448 FIX D (CodeRabbit Major, classifier correctness): the
+    // IncrementalGuard classification matches an ACTUAL `is_incremental()` CALL,
+    // not a bare substring. ──
+
+    #[test]
+    fn classify_is_incremental_matches_an_actual_call_not_a_substring() {
+        // A real `is_incremental()` call IS a guard (zone emitted).
+        let raw = "{% if is_incremental() %}a{% endif %}";
+        let zones = locate_raw_zones(raw);
+        assert_eq!(zones.len(), 1);
+        assert_eq!(zones[0].kind, ZoneKind::IncrementalGuard);
+
+        // A larger identifier merely CONTAINING `is_incremental` is NOT a guard
+        // (it is a plain `{% if %}` — pairs, emits no zone).
+        assert!(
+            locate_raw_zones("{% if some_is_incremental_flag %}a{% endif %}").is_empty(),
+            "`some_is_incremental_flag` is a plain if, not an incremental guard"
+        );
+
+        // A QUOTED string containing `is_incremental` is data, not a call.
+        assert!(
+            locate_raw_zones("{% if x == 'is_incremental' %}a{% endif %}").is_empty(),
+            "a quoted 'is_incremental' literal is not a call ⇒ plain if, no zone"
+        );
+
+        // The bare token with no call parens is also not a call.
+        assert!(
+            locate_raw_zones("{% if is_incremental %}a{% endif %}").is_empty(),
+            "`is_incremental` with no `(` is not a call ⇒ plain if, no zone"
+        );
+
+        // Whitespace between the token and `(` is still a call.
+        let zones = locate_raw_zones("{% if is_incremental () %}a{% endif %}");
+        assert_eq!(zones.len(), 1, "whitespace before `(` is still a call");
+        assert_eq!(zones[0].kind, ZoneKind::IncrementalGuard);
     }
 
     /// cute-dbt#445 TDD #4 (the inlined-data assertion, without a browser): the
