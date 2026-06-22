@@ -311,6 +311,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/report-preview
+          # Write the patch to $RUNNER_TEMP, NOT under target/: this step runs
+          # BEFORE Swatinem/rust-cache restores its cached `target/`, and a
+          # cache hit overwrites the whole `target/` tree — clobbering a patch
+          # written here and breaking the later render step with "No such file".
+          # $RUNNER_TEMP is outside target/, so the cache restore can't touch it.
+          # (Surfaced when PR #440's post-main-merge run got its first
+          # prdiff-preview cache hit; the prior cold-cache run masked the bug.)
           # Exclude `dbt-project/target/` — it is gitignored build output
           # (the manifest is recompiled fresh below via `dbt compile`, never
           # consumed from git), so changes there are not a model/test SOURCE
@@ -318,8 +325,8 @@ jobs:
           # render for an empty-scope report.
           git diff --unified=0 --find-renames "${BASE_SHA}...${HEAD_SHA}" \
             -- dbt-project/ ':(exclude)dbt-project/target/' \
-            > target/report-preview/prdiff.patch
-          if [ -s target/report-preview/prdiff.patch ]; then
+            > "${RUNNER_TEMP}/prdiff.patch"
+          if [ -s "${RUNNER_TEMP}/prdiff.patch" ]; then
             echo "touched=true" >> "$GITHUB_OUTPUT"
             echo "This PR touches dbt-project/ — rendering PrDiff preview."
           else
@@ -416,7 +423,7 @@ jobs:
           # unchanged — annotations only add inline context, never a gate.
           cargo run --quiet --locked --bin cute-dbt -- report \
             --manifest dbt-project/target/manifest.json \
-            --pr-diff @target/report-preview/prdiff.patch \
+            --pr-diff "@${RUNNER_TEMP}/prdiff.patch" \
             --project-root dbt-project \
             --pr-url "$PR_URL" \
             --pr-title "$PR_TITLE" \
