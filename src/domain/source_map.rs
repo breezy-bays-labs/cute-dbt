@@ -100,20 +100,48 @@ impl SourceMapEntry {
     /// compiled span for a parsed CTE / terminal select), so presence is
     /// TRIVIALLY `compiled.is_some()` — no 3-state, no containment scan. The
     /// only producer of a `compiled: None` entry, or of a span nested INSIDE
-    /// another's range, is the deferred `RawZoneSync` raw-zone path (S5), where
-    /// the 3-state `presence()` lands WITH it.
+    /// another's range, is the raw-zone path (cute-dbt#448), where the 3-state
+    /// [`SourceMapEntry::presence`] lands WITH it.
     #[must_use]
     pub fn is_compiled_in(&self) -> bool {
         self.compiled.is_some()
     }
+
+    /// The 3-state presence verdict — CORE (cute-dbt#448), un-gated. Derived,
+    /// NEVER stored (the entry holds `Option<SourceSpan>` only; this is the
+    /// single honesty authority, computed once at the projection boundary and
+    /// emitted as a string the prototype renders verbatim — never recomputed in
+    /// JS).
+    ///
+    /// `cte_spans` are the `CteBody` compiled spans of the SAME model (the
+    /// node-span table). The contract (never-a-false-claim):
+    /// - `compiled: None` ⇒ [`Presence::CompiledOut`] (tokens pruned this
+    ///   build; the entry is type-incapable of binding a node).
+    /// - `compiled: Some(c)` strictly contained inside a LARGER `CteBody` span
+    ///   (not equal to it) ⇒ [`Presence::Structural`] (a zone expanding inside
+    ///   one node body, e.g. a Shape-A `{% for %}`); click flashes the
+    ///   containing node.
+    /// - `compiled: Some(_)` otherwise ⇒ [`Presence::CompiledIn`].
+    ///
+    /// The containment uses the off-by-one-free half-open
+    /// [`SourceSpan::contains_range`] (no `end.byte - 1` arithmetic).
+    #[must_use]
+    pub fn presence(&self, cte_spans: &[SourceSpan]) -> Presence {
+        match self.compiled {
+            None => Presence::CompiledOut,
+            // Strictly contained inside a LARGER CTE body (not equal to it).
+            Some(c) if cte_spans.iter().any(|n| *n != c && n.contains_range(&c)) => {
+                Presence::Structural
+            }
+            Some(_) => Presence::CompiledIn,
+        }
+    }
 }
 
-/// RESERVED 3-state presence (cheap, forward-compatible) — the deriving METHOD
-/// lands behind `Experiment::RawZoneSync` (S5), NOT in core. The enum is kept
-/// now so the wire/derive surface is stable; the deriving method, `Structural`
-/// detection, and the containment scan are S5 work, because only the S5
-/// raw-zone path can ever produce a `compiled: None` or a span strictly nested
-/// inside a CTE body.
+/// The 3-state presence verdict (cute-dbt#448) — CORE, un-gated. Derived once
+/// by [`SourceMapEntry::presence`] at the `RawZonePayload` projection boundary
+/// and emitted as a string; NEVER a stored domain field (no drift), NEVER
+/// recomputed in JS (the prototype renders the pre-derived badge verbatim).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Presence {
     /// Tokens present in this build's compiled output.
@@ -122,6 +150,19 @@ pub enum Presence {
     CompiledOut,
     /// Compiled in, but strictly nested inside a larger CTE body.
     Structural,
+}
+
+impl Presence {
+    /// The `snake_case` wire string the Claude-Design prototype renders
+    /// verbatim (L6) — the single derive-once authority, never duplicated in JS.
+    #[must_use]
+    pub fn to_wire(self) -> &'static str {
+        match self {
+            Self::CompiledIn => "compiled_in",
+            Self::CompiledOut => "compiled_out",
+            Self::Structural => "structural",
+        }
+    }
 }
 
 /// One model's full raw↔compiled source map: the faithful text + the
@@ -642,10 +683,125 @@ mod tests {
 
     #[test]
     fn presence_variants_are_distinct() {
-        // The reserved enum is stable now (the deriving method lands in S5).
         assert_ne!(Presence::CompiledIn, Presence::CompiledOut);
         assert_ne!(Presence::CompiledIn, Presence::Structural);
         assert_ne!(Presence::CompiledOut, Presence::Structural);
+    }
+
+    #[test]
+    fn presence_to_wire_is_the_snake_case_string() {
+        assert_eq!(Presence::CompiledIn.to_wire(), "compiled_in");
+        assert_eq!(Presence::CompiledOut.to_wire(), "compiled_out");
+        assert_eq!(Presence::Structural.to_wire(), "structural");
+    }
+
+    // ── cute-dbt#448 (Z2): the 3-state presence() derivation ──
+
+    // `compiled: None` ⇒ CompiledOut (the incremental-guard compiled-OUT case:
+    // is_incremental()==false strips the guard body before the DAG; the zone is
+    // the honest "pruned this build" verdict).
+    #[test]
+    fn presence_none_compiled_is_compiled_out() {
+        let zone = SourceMapEntry {
+            role: SpanRole::Zone {
+                kind: ZoneKind::IncrementalGuard,
+            },
+            raw: Some(span(0, 30)),
+            compiled: None,
+        };
+        // Even with CTE spans available, a None-compiled zone is CompiledOut —
+        // and crucially type-incapable of any node edge.
+        let cte_spans = [span(0, 50)];
+        assert_eq!(zone.presence(&cte_spans), Presence::CompiledOut);
+    }
+
+    // `compiled: Some(c)` strictly nested INSIDE a larger CteBody span ⇒
+    // Structural (the Shape-A {% for %} expanding columns inside one CTE body —
+    // bound to the containing node, never a guessed sibling CTE edge).
+    #[test]
+    fn presence_strictly_nested_in_a_cte_body_is_structural() {
+        // CteBody [0,50); the zone's compiled tokens land at [10,20), strictly
+        // inside the body.
+        let cte_spans = [span(0, 50)];
+        let zone = SourceMapEntry {
+            role: SpanRole::Zone {
+                kind: ZoneKind::ForLoop,
+            },
+            raw: Some(span(5, 25)),
+            compiled: Some(span(10, 20)),
+        };
+        assert_eq!(zone.presence(&cte_spans), Presence::Structural);
+    }
+
+    // `compiled: Some(c)` not nested inside any LARGER CteBody span ⇒
+    // CompiledIn. A span EQUAL to a CteBody span is NOT structural (the
+    // `*n != c` guard): a zone whose compiled region coincides with a node is
+    // compiled-in, not nested.
+    #[test]
+    fn presence_equal_to_a_cte_body_span_is_compiled_in_not_structural() {
+        let cte_spans = [span(10, 20)];
+        let zone = SourceMapEntry {
+            role: SpanRole::Zone {
+                kind: ZoneKind::IncrementalGuard,
+            },
+            raw: Some(span(0, 30)),
+            compiled: Some(span(10, 20)),
+        };
+        assert_eq!(
+            zone.presence(&cte_spans),
+            Presence::CompiledIn,
+            "a span equal to a CteBody span is compiled-in, not structural"
+        );
+    }
+
+    // `compiled: Some(c)` with no containing CteBody (terminal WHERE predicate
+    // of an incremental guard compiling IN: the verified
+    // fct_encounters_incremental shape) ⇒ CompiledIn.
+    #[test]
+    fn presence_some_with_no_containing_body_is_compiled_in() {
+        // The guard's tokens compile in as a terminal WHERE [40,60), contained
+        // by NOTHING larger (cte_spans are smaller, earlier bodies).
+        let cte_spans = [span(0, 20), span(20, 38)];
+        let zone = SourceMapEntry {
+            role: SpanRole::Zone {
+                kind: ZoneKind::IncrementalGuard,
+            },
+            raw: Some(span(0, 70)),
+            compiled: Some(span(40, 60)),
+        };
+        assert_eq!(zone.presence(&cte_spans), Presence::CompiledIn);
+    }
+
+    // THE FITNESS TEST (§7, never-a-false-claim): compiled == None ⇒ no node
+    // edge. The presence verdict is CompiledOut for EVERY possible cte_spans
+    // configuration — a None-compiled entry can never bind a node.
+    #[test]
+    fn fitness_compiled_none_never_binds_a_node_for_any_cte_spans() {
+        // Exhaustive small enumeration of CteBody-span configurations.
+        const N: u32 = 5;
+        let zone = SourceMapEntry {
+            role: SpanRole::Zone {
+                kind: ZoneKind::ForLoop,
+            },
+            raw: Some(span(0, 100)),
+            compiled: None,
+        };
+        for a in 0..=N {
+            for b in a..=N {
+                for c in 0..=N {
+                    for d in c..=N {
+                        let cte_spans = [span(a, b), span(c, d)];
+                        assert_eq!(
+                            zone.presence(&cte_spans),
+                            Presence::CompiledOut,
+                            "compiled:None is CompiledOut for cte_spans [{a},{b}),[{c},{d}) — never an edge"
+                        );
+                    }
+                }
+            }
+        }
+        // And with no CteBody spans at all.
+        assert_eq!(zone.presence(&[]), Presence::CompiledOut);
     }
 
     // unused-import guard: CteEdge/EdgeType used to keep the test module's
