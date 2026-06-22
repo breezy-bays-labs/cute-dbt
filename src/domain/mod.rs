@@ -59,6 +59,7 @@ pub mod preflight;
 pub mod project_def;
 pub mod scope;
 pub mod seed_card;
+pub mod source_map;
 pub mod span;
 pub mod state;
 pub mod unit_test;
@@ -148,6 +149,7 @@ pub use scope::{
     select_in_scope, select_seeds_in_scope, widen_with_config_attributions,
 };
 pub use seed_card::SeedCard;
+pub use source_map::{Presence, SourceMap, SourceMapEntry, SpanRole, ZoneKind};
 pub use span::{SourcePos, SourceSpan};
 pub use state::{
     BANNER_EMPTY_SCOPE, BodyChecksumModifier, ConfigsModifier, ContractModifier, InScopeSet,

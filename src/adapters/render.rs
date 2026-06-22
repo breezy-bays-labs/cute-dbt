@@ -73,11 +73,11 @@ use crate::domain::{
     HookManifestPresence, InScopeSet, Instrument, MacroIdentity, Manifest, ModelInScopeSet,
     ModelState, ModelYamlOutcome, Node, NodeId, NormalizedDiffIndex, PrDagGraph, PrRef,
     ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition, ProjectFacts,
-    ProjectFallbackReason, SeedCard, SourceNode, TestMetadata, Tier, UnitTest, UnitTestDataDiff,
-    UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock, VarAttribution, VarChangeFacts,
-    VarReference, VarScanFootprint, apply_check_policy, macro_blast_radius, model_findings,
-    reconstruct_macro_sql_diff, resolve_target_model, resolve_tested_model,
-    table_from_manifest_rows,
+    ProjectFallbackReason, SeedCard, SourceMap, SourceNode, SourceSpan, SpanRole, TestMetadata,
+    Tier, UnitTest, UnitTestDataDiff, UnitTestGiven, UnitTestOverrides, UnitTestYamlBlock,
+    VarAttribution, VarChangeFacts, VarReference, VarScanFootprint, ZoneKind, apply_check_policy,
+    macro_blast_radius, model_findings, reconstruct_macro_sql_diff, resolve_target_model,
+    resolve_tested_model, table_from_manifest_rows,
 };
 
 /// Snake-case wire key for an [`EdgeType`] — the exact JSON-serde string
@@ -298,6 +298,67 @@ impl From<ChangeAxes> for AxesPayload {
     }
 }
 
+/// One raw-Jinja zone projection (cute-dbt#445 reserved shape; filled by the
+/// deferred `RawZoneSync` slice, S4/S5). In core S2 the source map carries no
+/// `Zone` entries, so `CodeMapPayload.raw_zones` is always empty and never
+/// serializes (`skip_serializing_if`). Kept now so the wire surface is stable
+/// when zones land.
+#[derive(Debug, Clone, Serialize)]
+pub struct RawZonePayload {
+    /// Which control-flow construct this zone is.
+    pub kind: ZoneKind,
+    /// Region in the raw Jinja source, when located.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<SourceSpan>,
+    /// Region in the compiled output. `None` ⇒ pruned from this build.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compiled: Option<SourceSpan>,
+}
+
+/// The per-model source-map render projection (cute-dbt#445) — Serialize-only,
+/// PROJECTS the domain [`SourceMap`] spine fact. The faithful full `compiled`
+/// text plus the derived `CteBody` node-span table; `raw_zones` is the deferred
+/// `Zone` projection (empty in core S2).
+#[derive(Debug, Clone, Serialize)]
+pub struct CodeMapPayload {
+    /// `SourceMap.compiled` — the one faithful text every span indexes into.
+    pub compiled: String,
+    /// Derived: the `CteBody` entries' compiled spans, keyed by node id.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_spans: BTreeMap<String, SourceSpan>,
+    /// Derived: the `Zone` entries (empty in core S2; the S4/S5 raw-zone path
+    /// fills it).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub raw_zones: Vec<RawZonePayload>,
+}
+
+impl CodeMapPayload {
+    /// Project a domain [`SourceMap`] into the render payload — the faithful
+    /// text, the derived `CteBody` node-span table, and the (deferred) raw
+    /// zones. Pure projection: every field is read off the spine fact, never
+    /// recomputed.
+    fn from_source_map(sm: &SourceMap) -> Self {
+        let node_spans = sm.node_spans();
+        let raw_zones = sm
+            .entries
+            .iter()
+            .filter_map(|e| match &e.role {
+                SpanRole::Zone { kind } => Some(RawZonePayload {
+                    kind: *kind,
+                    raw: e.raw,
+                    compiled: e.compiled,
+                }),
+                _ => None,
+            })
+            .collect();
+        Self {
+            compiled: sm.compiled.clone(),
+            node_spans,
+            raw_zones,
+        }
+    }
+}
+
 /// Per-model entry in the JSON payload — mirrors the design's
 /// `window.CUTE_DBT_SAMPLE.models[i]` shape so the inlined interaction
 /// script consumes it without remapping.
@@ -325,10 +386,21 @@ pub struct ModelPayload {
     pub description: Option<String>,
     /// DAG nodes + edges, keyed for the design's JS.
     pub dag: DagPayload,
-    /// Per-node compiled SQL, keyed by node id (CTE name or model name
-    /// for the terminal). Empty when the CTE engine could not parse
-    /// (the model card still renders the metadata + tests + an empty DAG).
+    /// Per-node compiled SQL, keyed by node id (CTE name or the stable
+    /// terminal id for the final select). Empty when the CTE engine could
+    /// not parse (the model card still renders the metadata + tests + an
+    /// empty DAG). A DERIVED PROJECTION of [`Self::code_map`]'s source map
+    /// (cute-dbt#445) — `compiled_sql[id]` byte-equals
+    /// `code_map.compiled[node_spans[id].byte_range()]` by construction.
     pub compiled_sql: BTreeMap<String, String>,
+    /// The per-model source map projection (cute-dbt#445) — the faithful
+    /// full compiled text plus the `CteBody` node-span table. The single
+    /// source of truth `compiled_sql` derives from; the JS DAG↔code sync
+    /// (cute-dbt#446) indexes the compiled `<pre>` through `node_spans`.
+    /// `None` only when the model has no compiled code (a seed/source); the
+    /// key is omitted then so older fixtures stay byte-stable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_map: Option<CodeMapPayload>,
     /// Raw Jinja source of the model file (`models/**/*.sql`).
     /// Surfaced verbatim in the per-model "Model SQL" expandable
     /// section (cute-dbt#47). `None` only when the manifest lacks
@@ -3832,7 +3904,15 @@ fn build_model_payload(
     let is_recursive = graph.is_recursive();
     let nodes = build_node_payloads(&graph, &bare_name);
     let edges = build_edge_payloads(&graph);
-    let compiled_sql = build_compiled_sql(&graph, &bare_name, compiled_code);
+    // cute-dbt#445 — the source map is the single source of truth: assemble it
+    // once from the parsed graph + the faithful compiled text, then DERIVE
+    // `compiled_sql` (the per-node slices) and project `code_map` from it. The
+    // domain assembler emits one CteBody entry per node (and synthesizes the
+    // lone terminal entry for a WITH-less model), so the derived keys agree
+    // with the DAG by construction.
+    let source_map = SourceMap::from_cte_graph(&graph, compiled_code, TERMINAL_NODE_NAME);
+    let compiled_sql = build_compiled_sql(source_map.as_ref());
+    let code_map = source_map.as_ref().map(CodeMapPayload::from_source_map);
     let raw_sql = model
         .raw_code()
         .filter(|s| !s.is_empty())
@@ -3876,6 +3956,9 @@ fn build_model_payload(
         description: model.description().map(str::to_owned),
         dag: DagPayload { nodes, edges },
         compiled_sql,
+        // cute-dbt#445 — the source-map projection (None for a model with no
+        // compiled code; the key is omitted so older fixtures stay byte-stable).
+        code_map,
         raw_sql,
         sql_diff,
         model_yaml,
@@ -3962,29 +4045,24 @@ fn endpoint_id(graph: &CteGraph, index: usize) -> String {
         .unwrap_or_default()
 }
 
-/// Build the `compiled_sql` map: per-node `raw_sql` keyed by the stable
+/// Build the `compiled_sql` map: per-node compiled SQL keyed by the stable
 /// node id (a CTE alias, or [`TERMINAL_NODE_NAME`] for the terminal).
 ///
-/// The empty-graph branch (a model with no `WITH` clause emits no nodes)
-/// falls back to the full compiled code keyed by the model's bare name so
-/// the renderer still surfaces SOMETHING; that key is never reached by the
-/// node-keyed lookup (there are no nodes), so it cannot collide.
-fn build_compiled_sql(
-    graph: &CteGraph,
-    model_name: &str,
-    full_compiled_code: &str,
-) -> BTreeMap<String, String> {
-    let mut map = BTreeMap::new();
-    if graph.is_empty() {
-        map.insert(model_name.to_owned(), full_compiled_code.to_owned());
-        return map;
+/// DERIVED (cute-dbt#445) from the per-model [`SourceMap`] — the single source
+/// of truth: `compiled_sql[id]` is `compiled[node_spans[id].byte_range()]`,
+/// byte-equal to the legacy per-node `raw_sql` slice by the S1 contract. The
+/// WITH-less model is ONE terminal `CteBody` entry over the whole text, so it
+/// keys by [`TERMINAL_NODE_NAME`] (NOT the model's bare name as v1's
+/// empty-graph branch did — the cute-dbt#445 key fix).
+///
+/// `source_map` is `None` ONLY when the model has no compiled code at all
+/// (a seed/source — [`SourceMap::from_cte_graph`] returns `None` solely on an
+/// empty compiled string), so there is no slice to surface: the map is empty.
+fn build_compiled_sql(source_map: Option<&SourceMap>) -> BTreeMap<String, String> {
+    match source_map {
+        Some(sm) => sm.compiled_slices(),
+        None => BTreeMap::new(),
     }
-    for node in graph.nodes() {
-        if let Some(sql) = node.raw_sql() {
-            map.insert(node.name().to_owned(), sql.to_owned());
-        }
-    }
-    map
 }
 
 /// One external fixture file loaded for a given/expect (cute-dbt#126).
@@ -4404,6 +4482,8 @@ fn leaf_segment(id: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::SourcePos;
+    use crate::domain::source_map::SourceMapEntry;
     use crate::domain::{
         BlastRadius, Checksum, ColumnMetaTags, ContractClass, ContractColumnDiff, CteEdge, CteNode,
         DEFAULT_MACRO_BODY_CAP, DEFAULT_REPORT_TITLE, DependsOn, DiffLine, DiffLineKind, EdgeType,
@@ -6812,6 +6892,217 @@ mod tests {
         );
     }
 
+    /// cute-dbt#445 TDD #2 (render level): the derived `compiled_sql[id]`
+    /// byte-equals `code_map.compiled[node_spans[id].byte_range()]` for every
+    /// node — the source map is the single source of truth.
+    #[test]
+    fn compiled_sql_byte_equals_code_map_slice_for_every_node() {
+        let compiled = "with a as (select 1), b as (select * from a) select * from b";
+        let node = model_node("model.shop.x", "body", Some(compiled));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let model = &payload.models[0];
+        let code_map = model
+            .code_map
+            .as_ref()
+            .expect("compiled model has a code map");
+        // The faithful text is the model's compiled code verbatim.
+        assert_eq!(code_map.compiled, compiled);
+        // Every node-span slices the faithful text to the compiled_sql value.
+        assert_eq!(
+            code_map.node_spans.keys().collect::<Vec<_>>(),
+            model.compiled_sql.keys().collect::<Vec<_>>(),
+            "node_spans.keys() == compiled_sql.keys()"
+        );
+        for (id, span) in &code_map.node_spans {
+            assert_eq!(
+                &code_map.compiled[span.byte_range()],
+                model.compiled_sql.get(id).unwrap(),
+                "compiled_sql[{id}] byte-equals the faithful slice"
+            );
+        }
+        // The terminal slice byte-equals the legacy trimmed terminal text
+        // (Blocker-1): it must NOT carry the leading `) ` glue.
+        let terminal = model.compiled_sql.get(TERMINAL_NODE_NAME).unwrap();
+        assert!(
+            terminal.starts_with("select"),
+            "terminal slice is post-trim (no leading glue): {terminal:?}"
+        );
+    }
+
+    /// cute-dbt#445 TDD #6 (the fitness function, here as a unit-level
+    /// structural check): every `dag.nodes[].id` has a `CteBody` entry in the
+    /// model's `code_map.node_spans`, or the model has no compiled code. The
+    /// always-on `source-map-completeness` CI gate (`.github/workflows/ci.yml`)
+    /// enforces the same invariant over the committed example payloads; this
+    /// pins it on the renderer at unit level.
+    #[test]
+    fn every_dag_node_has_a_code_map_entry() {
+        let compiled = "with a as (select 1), b as (select * from a) select * from b";
+        let node = model_node("model.shop.x", "body", Some(compiled));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let model = &payload.models[0];
+        let code_map = model
+            .code_map
+            .as_ref()
+            .expect("compiled model has a code map");
+        for n in &model.dag.nodes {
+            assert!(
+                code_map.node_spans.contains_key(&n.id),
+                "dag node {:?} has a CteBody entry",
+                n.id
+            );
+        }
+    }
+
+    /// cute-dbt#445: `CodeMapPayload::from_source_map` projects `Zone` entries
+    /// into `raw_zones`. Core S2 never PRODUCES a `Zone` entry (the assembler
+    /// emits `CteBody` only), so this pins the deferred projection arm directly
+    /// from a hand-built `SourceMap` — keeping the wire surface stable + the
+    /// match arm killed before the S4/S5 raw-zone path lands.
+    #[test]
+    fn from_source_map_projects_zone_entries_into_raw_zones() {
+        let sm = SourceMap {
+            compiled: "select 1".to_owned(),
+            entries: vec![
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: TERMINAL_NODE_NAME.to_owned(),
+                    },
+                    raw: None,
+                    compiled: Some(SourceSpan {
+                        start: SourcePos {
+                            line: 1,
+                            col: 1,
+                            byte: 0,
+                        },
+                        end: SourcePos {
+                            line: 1,
+                            col: 9,
+                            byte: 8,
+                        },
+                    }),
+                },
+                SourceMapEntry {
+                    role: SpanRole::Zone {
+                        kind: ZoneKind::IncrementalGuard,
+                    },
+                    raw: Some(SourceSpan {
+                        start: SourcePos {
+                            line: 1,
+                            col: 1,
+                            byte: 0,
+                        },
+                        end: SourcePos {
+                            line: 1,
+                            col: 5,
+                            byte: 4,
+                        },
+                    }),
+                    compiled: None,
+                },
+            ],
+        };
+        let payload = CodeMapPayload::from_source_map(&sm);
+        // The CteBody entry projects into node_spans (not raw_zones).
+        assert_eq!(payload.node_spans.len(), 1);
+        assert!(payload.node_spans.contains_key(TERMINAL_NODE_NAME));
+        // The Zone entry projects into raw_zones with its kind + spans.
+        assert_eq!(payload.raw_zones.len(), 1, "the Zone arm is projected");
+        assert_eq!(payload.raw_zones[0].kind, ZoneKind::IncrementalGuard);
+        assert!(payload.raw_zones[0].raw.is_some());
+        assert!(
+            payload.raw_zones[0].compiled.is_none(),
+            "compiled: None (pruned) survives the projection verbatim"
+        );
+    }
+
+    /// cute-dbt#445 TDD #4 (the inlined-data assertion, without a browser): the
+    /// serialized model payload — the data script the headless report reads —
+    /// carries `code_map.compiled` + `node_spans`. The headless leg
+    /// (cute-dbt#446) drives the live `<pre>` sync; this pins the wire shape.
+    #[test]
+    fn serialized_payload_carries_code_map_compiled_and_node_spans() {
+        let compiled = "with a as (select 1) select * from a";
+        let node = model_node("model.shop.x", "body", Some(compiled));
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.x")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let json = serde_json::to_string(&payload.models[0]).unwrap();
+        assert!(json.contains("\"code_map\""), "code_map present: {json}");
+        assert!(
+            json.contains("\"node_spans\""),
+            "node_spans present: {json}"
+        );
+        // The faithful compiled text is embedded under code_map.compiled.
+        assert!(
+            json.contains("with a as (select 1) select * from a"),
+            "faithful compiled text embedded: {json}"
+        );
+    }
+
+    /// cute-dbt#445: a model with NO compiled code (a `dbt parse` shape /
+    /// seed-like node) omits `code_map` entirely — the key is absent so older
+    /// fixtures without the field stay byte-stable.
+    #[test]
+    fn no_compiled_code_omits_code_map() {
+        // model_node with None compiled → no compiled_code.
+        let node = model_node("model.shop.uncompiled", "body", None);
+        let manifest = manifest_for(vec![node], vec![]);
+        let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.uncompiled")]);
+        let payload = build_payload(
+            &manifest,
+            &InScopeSet::new(),
+            &models,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            "b",
+        );
+        let model = &payload.models[0];
+        assert!(model.code_map.is_none(), "no compiled code ⇒ no code_map");
+        let json = serde_json::to_string(model).unwrap();
+        assert!(
+            !json.contains("code_map"),
+            "code_map key omitted from the wire: {json}"
+        );
+    }
+
     #[test]
     fn self_named_import_cte_does_not_collapse_into_the_terminal() {
         // cute-dbt#155 regression: a model named `orders` whose import CTE
@@ -6911,10 +7202,12 @@ mod tests {
     }
 
     #[test]
-    fn build_payload_empty_graph_falls_back_to_full_compiled_code() {
-        // A `select 1` body has no WITH clause → empty CteGraph. The
-        // compiled_sql map still carries the model's body keyed by the
-        // bare name so the renderer surfaces SOMETHING.
+    fn build_payload_no_with_model_is_one_terminal_cte_body_entry() {
+        // A `select 1` body has no WITH clause → empty CteGraph (the engine
+        // emits no nodes). cute-dbt#445: the source map synthesizes ONE
+        // terminal CteBody entry over the whole text, so compiled_sql keys by
+        // the stable terminal id (NOT the bare model name as v1 did) and
+        // node_spans.keys() == compiled_sql.keys() by construction.
         let compiled = "select 1";
         let node = model_node("model.shop.flat", "body", Some(compiled));
         let manifest = manifest_for(vec![node], vec![]);
@@ -6930,17 +7223,38 @@ mod tests {
             &HashMap::new(),
             "b",
         );
+        let model = &payload.models[0];
+        // The single terminal entry carries the whole body, keyed by the
+        // stable terminal id.
         assert_eq!(
-            payload.models[0].compiled_sql.get("flat").unwrap(),
-            compiled
+            model.compiled_sql.get(TERMINAL_NODE_NAME).unwrap(),
+            compiled,
+            "no-WITH body keyed by the stable terminal id, not the model name"
         );
+        assert!(
+            !model.compiled_sql.contains_key("flat"),
+            "no longer keyed by the bare model name (cute-dbt#445 key fix)"
+        );
+        // The code_map projection carries the same body + node-span table.
+        let code_map = model
+            .code_map
+            .as_ref()
+            .expect("compiled model has a code map");
+        assert_eq!(code_map.compiled, compiled);
+        // node_spans.keys() == compiled_sql.keys() by construction.
+        let node_keys: Vec<&String> = code_map.node_spans.keys().collect();
+        let slice_keys: Vec<&String> = model.compiled_sql.keys().collect();
+        assert_eq!(node_keys, slice_keys);
+        assert_eq!(node_keys, vec![&TERMINAL_NODE_NAME.to_owned()]);
     }
 
     #[test]
     fn build_payload_handles_unparseable_compiled_code_gracefully() {
         // The engine returns CteError::Parse for garbage SQL. The renderer
         // treats that as an empty graph, NOT a hard failure — the report
-        // still ships, the model card just has no DAG.
+        // still ships, the model card just has no DAG. cute-dbt#445: the
+        // faithful (unparseable) text still surfaces as the single terminal
+        // CteBody entry over the whole text.
         let node = model_node("model.shop.broken", "body", Some("not valid sql {"));
         let manifest = manifest_for(vec![node], vec![]);
         let models = ModelInScopeSet::from_iter([NodeId::new("model.shop.broken")]);
@@ -6956,13 +7270,16 @@ mod tests {
             "b",
         );
         assert_eq!(payload.models.len(), 1);
-        // Empty graph → empty nodes/edges, but compiled_sql carries the
-        // original body keyed by bare name.
-        assert!(payload.models[0].dag.nodes.is_empty());
+        let model = &payload.models[0];
+        // Empty graph → empty nodes/edges, but the faithful body still
+        // surfaces, keyed by the stable terminal id.
+        assert!(model.dag.nodes.is_empty());
         assert_eq!(
-            payload.models[0].compiled_sql.get("broken").unwrap(),
+            model.compiled_sql.get(TERMINAL_NODE_NAME).unwrap(),
             "not valid sql {",
         );
+        // The code_map carries the faithful (even unparseable) text verbatim.
+        assert_eq!(model.code_map.as_ref().unwrap().compiled, "not valid sql {",);
     }
 
     #[test]
