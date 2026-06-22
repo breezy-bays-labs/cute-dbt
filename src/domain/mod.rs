@@ -45,6 +45,7 @@ pub mod finding_anchor;
 pub mod findings_envelope;
 pub mod governance;
 pub mod grain;
+pub mod lineage;
 pub mod macro_lens;
 pub mod manifest;
 pub mod model_yaml;
@@ -103,6 +104,7 @@ pub use governance::{
     exposures_reachable_from, gather_governance,
 };
 pub use grain::{GrainKind, GrainSignal, model_grain_signals, test_is_enabled};
+pub use lineage::{ModelLineage, invert_depends_on};
 pub use macro_lens::{
     MacroFocusSet, changed_macros_baseline, changed_macros_pr_diff, macro_blast_radius,
     macro_focus_set, macro_test_consumers,

@@ -101,6 +101,17 @@ threshold = 15
 pattern ="src/domain/pr_dag.rs"
 threshold = 15
 
+[[overrides]]
+# The ONE cross-model `depends_on` self-inversion site (cute-dbt#443,
+# source-map-spine S0). `invert_depends_on` + `ModelLineage::from_manifest`
+# are the single producer→consumer inversion the three consumers
+# (explore lineage, PR mini-DAG, governance blast-radius) now read instead
+# of each re-inverting — a silent inversion bug here mis-shapes every
+# downstream lineage view, never crashes. Simple loops; comfortably under
+# 15.
+pattern ="src/domain/lineage.rs"
+threshold = 15
+
 # crap4rs v0.4.0's [[overrides]] schema accepts only `pattern` and
 # `threshold`. There is no top-level `exclude` array; to exclude a file
 # from gating, add an [[overrides]] entry with a very high threshold
