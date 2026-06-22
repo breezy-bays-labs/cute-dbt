@@ -45,8 +45,9 @@ use crate::domain::pr_diff::{BlockDiff, DiffLine, diff_lines};
 /// the report could ever display ("defined at line N") cross the
 /// boundary; the parser's byte offsets / filename machinery stay in the
 /// adapter. Named `project_def::Span` (not re-exported at the domain
-/// root) because [`crate::domain::cte::Span`] already owns the bare name
-/// there.
+/// root) — distinct from the byte-faithful [`crate::domain::span::SourceSpan`]
+/// the CTE engine retains (cute-dbt#444); this is a coarse 1-based
+/// (line, column) marker for a `dbt_project.yml` position only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     /// 1-based source line.

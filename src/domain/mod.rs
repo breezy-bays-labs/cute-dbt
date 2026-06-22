@@ -59,6 +59,7 @@ pub mod preflight;
 pub mod project_def;
 pub mod scope;
 pub mod seed_card;
+pub mod span;
 pub mod state;
 pub mod unit_test;
 pub mod unit_test_table;
@@ -85,8 +86,7 @@ pub use config::{
     SeedsConfig,
 };
 pub use cte::{
-    CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, Span, SubqueryFact,
-    SubqueryKind,
+    CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, SubqueryFact, SubqueryKind,
 };
 pub use experimental::{
     DEFAULT_MACRO_BODY_CAP, EnabledExperiments, Experiment, ExperimentalConfig, ExperimentalError,
@@ -132,9 +132,10 @@ pub use pr_diff::{
     refine_changed_by_hunks, reverse_apply, ws_equal,
 };
 pub use preflight::{PreflightError, preflight_compiled};
-// `project_def::Span` is deliberately NOT re-exported here — `cte::Span`
-// already owns the bare name at the domain root; consumers address the
-// YAML source span as `project_def::Span`.
+// `project_def::Span` is deliberately NOT re-exported here — the canonical
+// `SourceSpan` (re-exported below) now owns the position/span vocabulary at
+// the domain root, so the bare `Span` name stays reserved for it; consumers
+// address the YAML source span as `project_def::Span`.
 pub use project_def::{
     ConfigAttribution, ConfigLeafPath, ConfigProvenance, ConfigTree, HookChangeFacts,
     HookManifestPresence, HookOperation, HookOperations, ProjectChange, ProjectChangeCategory,
@@ -147,6 +148,7 @@ pub use scope::{
     select_in_scope, select_seeds_in_scope, widen_with_config_attributions,
 };
 pub use seed_card::SeedCard;
+pub use span::{SourcePos, SourceSpan};
 pub use state::{
     BANNER_EMPTY_SCOPE, BodyChecksumModifier, ConfigsModifier, ContractModifier, InScopeSet,
     MacrosModifier, ModelInScopeSet, ModifiedSet, ModifierKind, RelationModifier, SeedInScopeSet,
