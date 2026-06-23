@@ -670,15 +670,34 @@ fn stitch_enumerable(
 ) -> (BTreeSet<String>, BTreeSet<NodeId>) {
     let mut covered: BTreeSet<String> = BTreeSet::new();
     let mut source_upstreams: BTreeSet<NodeId> = BTreeSet::new();
+    // NEVER-A-FALSE-CLAIM (#450): a flowed upstream column becomes a downstream
+    // edge ONLY if the downstream actually EXPOSES it in its own terminal
+    // projection. When the downstream NARROWS the upstream's projection (the
+    // most common dbt pattern), the dropped column must NOT become a phantom
+    // cross-model edge. `None` (a non-enumerable downstream terminal) means we
+    // cannot bound the exposed set, so we keep the prior pass-through behaviour
+    // (the column flows; the downstream's own thin stays Opaque elsewhere).
+    let downstream_outputs: Option<BTreeSet<&str>> = mo
+        .output_columns
+        .as_ref()
+        .map(|cols| cols.iter().map(String::as_str).collect());
     for leaf in &mo.leaf_refs {
         let StitchOutcome::Resolved { upstream } = stitch_leaf(leaf, producers, index) else {
             continue; // Opaque — no edge, honest gap.
         };
         match outputs.get(&upstream).cloned().flatten() {
-            // The upstream's output columns ARE the columns flowing into the
-            // downstream over this `ref()` boundary (the catalog-equivalent).
+            // The upstream's output columns flow into the downstream over this
+            // `ref()` boundary, INTERSECTED against the downstream's own
+            // terminal outputs (the catalog-equivalent) — a column the
+            // downstream narrowed away gets NO edge.
             Some(upstream_cols) => {
                 for column in upstream_cols {
+                    if downstream_outputs
+                        .as_ref()
+                        .is_some_and(|exposed| !exposed.contains(column.as_str()))
+                    {
+                        continue; // Narrowed away downstream — no phantom edge.
+                    }
                     covered.insert(column.clone());
                     edges.push(CrossModelEdge {
                         upstream: upstream.clone(),

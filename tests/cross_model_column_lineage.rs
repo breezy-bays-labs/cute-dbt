@@ -496,3 +496,203 @@ fn stitch_uses_dagfacts_lineage_not_a_fresh_inversion() {
         "no depends_on edge ⇒ no cross-model attribution (lineage is the authority)"
     );
 }
+
+// ---- never-a-false-claim: downstream NARROWING (no phantom edge) ---------
+// The decisive CLL-4 adversarial finding (#450): when a downstream NARROWS
+// the upstream's projection (drops a column), the dropped column must NOT
+// become a phantom cross-model edge. The flowed upstream columns are
+// intersected against the downstream model's OWN terminal output_columns.
+
+/// stg exposes (order_id, amount); dim NARROWS to `select order_id from stg`.
+/// The graph's outputs map correctly says dim outputs = {order_id}, so the
+/// edge set must NOT claim a `stg.amount → dim.amount` flow.
+fn narrowing_manifest() -> Manifest {
+    let stg = "select order_id, amount from \"db\".\"raw\".\"raw_o\"";
+    let dim = "select order_id from \"db\".\"staging\".\"stg\"";
+    manifest_of(
+        vec![
+            model(
+                "model.p.stg",
+                "\"db\".\"staging\".\"stg\"",
+                stg,
+                &["source.p.raw.raw_o"],
+            ),
+            model(
+                "model.p.dim",
+                "\"db\".\"marts\".\"dim\"",
+                dim,
+                &["model.p.stg"],
+            ),
+        ],
+        vec![source(
+            "source.p.raw.raw_o",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"raw_o\"",
+        )],
+    )
+}
+
+#[test]
+fn downstream_narrowing_emits_no_phantom_edge_for_dropped_column() {
+    let manifest = narrowing_manifest();
+    let graph = project_graph(&manifest);
+
+    // The downstream's REAL terminal outputs are {order_id} — `amount` dropped.
+    assert_eq!(
+        graph.outputs().get(&nid("model.p.dim")).cloned().flatten(),
+        Some(vec!["order_id".to_owned()]),
+        "dim narrows to a single column — the outputs map is the catalog truth"
+    );
+
+    // No fabricated `stg.amount → dim.amount` edge: dim never exposes amount.
+    let phantom = graph.edges().iter().any(|e| {
+        e.upstream == nid("model.p.stg")
+            && e.upstream_column == "amount"
+            && e.downstream == nid("model.p.dim")
+    });
+    assert!(
+        !phantom,
+        "a column the downstream NARROWS away gets NO cross-model edge \
+         (never-a-false-claim): the stg.amount→dim.amount edge is phantom"
+    );
+    // Defensively: NO dim edge carries the `amount` downstream column at all.
+    assert!(
+        graph
+            .edges()
+            .iter()
+            .all(|e| !(e.downstream == nid("model.p.dim") && e.downstream_column == "amount")),
+        "dim has no inbound edge on a column it does not output"
+    );
+}
+
+#[test]
+fn blast_radius_excludes_a_narrowed_away_column() {
+    let manifest = narrowing_manifest();
+    let graph = project_graph(&manifest);
+    // stg.amount is dropped by dim → blast_radius(stg, amount) must NOT list dim.
+    let reached = graph.blast_radius(&nid("model.p.stg"), "amount");
+    assert!(
+        reached.iter().all(|h| h.node != nid("model.p.dim")),
+        "blast_radius(stg, amount) does NOT falsely list dim — the column is \
+         narrowed away downstream"
+    );
+}
+
+#[test]
+fn trace_to_source_does_not_fabricate_a_chain_for_a_narrowed_away_column() {
+    let manifest = narrowing_manifest();
+    let graph = project_graph(&manifest);
+    // dim does NOT expose `amount`; tracing it must NOT return a confident
+    // dim.amount → stg.amount Root/Source chain.
+    let trace = graph.trace_to_source(&manifest, &nid("model.p.dim"), "amount");
+    assert_ne!(
+        trace.termination,
+        TraceTermination::Source,
+        "a column dim does not expose never claims a fabricated source origin"
+    );
+    // The trace must not contain a phantom stg.amount hop.
+    assert!(
+        trace
+            .hops
+            .iter()
+            .all(|h| !(h.node == nid("model.p.stg") && h.column == "amount")),
+        "the trace fabricates no stg.amount hop for a column dim never exposes"
+    );
+}
+
+#[test]
+fn exposed_column_still_gets_its_cross_model_edge_after_narrowing() {
+    // Regression guard: the column the downstream DOES expose (order_id) keeps
+    // its correct, sound cross-model edge — the fix removes ONLY the phantom.
+    let manifest = narrowing_manifest();
+    let graph = project_graph(&manifest);
+    let kept = graph.edges().iter().any(|e| {
+        e.upstream == nid("model.p.stg")
+            && e.upstream_column == "order_id"
+            && e.downstream == nid("model.p.dim")
+            && e.downstream_column == "order_id"
+    });
+    assert!(
+        kept,
+        "the exposed column keeps its sound stg.order_id → dim.order_id edge"
+    );
+    // And it still traces all the way to the source.
+    let trace = graph.trace_to_source(&manifest, &nid("model.p.dim"), "order_id");
+    assert_eq!(
+        trace.termination,
+        TraceTermination::Source,
+        "the exposed column still traces to its source"
+    );
+}
+
+#[test]
+fn cte_import_join_narrowing_emits_no_phantom_for_unexposed_column() {
+    // The CTE-import-join shape: dim imports stg_a (order_id, a_val) and stg_b
+    // (order_id, b_val), but its terminal projection exposes only
+    // {order_id, b_val}. The a_val column is narrowed away → no phantom
+    // `stg_a.a_val → dim.a_val` edge.
+    let stg_a = "select order_id, a_val from \"db\".\"raw\".\"raw_a\"";
+    let stg_b = "select order_id, b_val from \"db\".\"raw\".\"raw_b\"";
+    let dim = "\
+with a as (
+    select * from \"db\".\"staging\".\"stg_a\"
+),
+b as (
+    select * from \"db\".\"staging\".\"stg_b\"
+)
+select a.order_id, b.b_val from a join b on a.order_id = b.order_id";
+    let manifest = manifest_of(
+        vec![
+            model(
+                "model.p.stg_a",
+                "\"db\".\"staging\".\"stg_a\"",
+                stg_a,
+                &["source.p.raw.raw_a"],
+            ),
+            model(
+                "model.p.stg_b",
+                "\"db\".\"staging\".\"stg_b\"",
+                stg_b,
+                &["source.p.raw.raw_b"],
+            ),
+            model(
+                "model.p.dim",
+                "\"db\".\"marts\".\"dim\"",
+                dim,
+                &["model.p.stg_a", "model.p.stg_b"],
+            ),
+        ],
+        vec![
+            source(
+                "source.p.raw.raw_a",
+                "raw",
+                "db",
+                "\"db\".\"raw\".\"raw_a\"",
+            ),
+            source(
+                "source.p.raw.raw_b",
+                "raw",
+                "db",
+                "\"db\".\"raw\".\"raw_b\"",
+            ),
+        ],
+    );
+    let graph = project_graph(&manifest);
+    let dim_outputs = graph.outputs().get(&nid("model.p.dim")).cloned().flatten();
+    // Whatever the terminal projection resolves to, a_val is NOT exposed.
+    if let Some(cols) = &dim_outputs {
+        assert!(
+            !cols.contains(&"a_val".to_owned()),
+            "dim does not expose a_val (it projects order_id, b_val)"
+        );
+    }
+    // No phantom a_val edge into dim regardless.
+    assert!(
+        graph
+            .edges()
+            .iter()
+            .all(|e| !(e.downstream == nid("model.p.dim") && e.downstream_column == "a_val")),
+        "the narrowed-away a_val produces no phantom cross-model edge"
+    );
+}
