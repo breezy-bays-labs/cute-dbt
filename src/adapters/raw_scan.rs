@@ -509,9 +509,18 @@ fn is_maskable_token(token: &Token) -> bool {
     )
 }
 
-/// Blank `out[from..to]` with ASCII spaces (offset-preserving).
+/// Blank `out[from..to]` with ASCII spaces (offset-preserving). **Total**: a
+/// malformed span — `to` past the end, or an inverted `from >= to` — blanks
+/// nothing rather than panicking. The masker must fail closed (over-mask or
+/// omit), never crash the render on a manifest-derived span. Today's callers
+/// pass codepoint-aligned, ordered, in-bounds offsets (`ByteIndex::byte_of`
+/// clamps to `len`; token spans are ordered), so the guards are belt-and-braces
+/// against any future caller that isn't — not a reachable path now.
 fn blank(out: &mut [u8], from: usize, to: usize) {
     let end = to.min(out.len());
+    if from >= end {
+        return;
+    }
     for b in &mut out[from..end] {
         *b = b' ';
     }
@@ -521,6 +530,31 @@ fn blank(out: &mut [u8], from: usize, to: usize) {
 mod tests {
     use super::*;
     use crate::domain::source_map::{SourceMapEntry, ZoneKind};
+
+    #[test]
+    fn blank_is_total_on_malformed_spans() {
+        // The masker must never panic on a malformed span — it fails closed.
+        // Valid range blanks exactly that range.
+        let mut a = b"abcdef".to_vec();
+        blank(&mut a, 2, 4);
+        assert_eq!(&a, b"ab  ef");
+        // `to` past the end clamps to len (blanks the tail), never out-of-bounds.
+        let mut b = b"abcdef".to_vec();
+        blank(&mut b, 2, 999);
+        assert_eq!(&b, b"ab    ");
+        // Empty range (from == to) is a no-op.
+        let mut c = b"abcdef".to_vec();
+        blank(&mut c, 3, 3);
+        assert_eq!(&c, b"abcdef");
+        // Inverted range (from > to) is a no-op, NOT a panic.
+        let mut d = b"abcdef".to_vec();
+        blank(&mut d, 4, 2);
+        assert_eq!(&d, b"abcdef");
+        // `from` past the end is a no-op, NOT a panic.
+        let mut e = b"abcdef".to_vec();
+        blank(&mut e, 10, 999);
+        assert_eq!(&e, b"abcdef");
+    }
 
     fn cte_entry(node_id: &str) -> SourceMapEntry {
         SourceMapEntry {
