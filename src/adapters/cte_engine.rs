@@ -381,6 +381,62 @@ fn collect_body_column_lineage(
 /// a star over an UNKNOWN external relation degrades honestly to `Opaque`;
 /// expressions (functions/CASE/…) emit a span but NO edge (CLL-3).
 ///
+/// Resolve an `expr AS alias` projection item — emit its edge(s), span, and
+/// POSITIVE per-column provenance (cute-dbt#450). A direct/qualified column ref
+/// (`a.x AS x` / `a.x AS y`) is a `DirectColumn` / `Rename` (`PassThrough` /
+/// `Renamed` edge) that traces to a real source field; an expression
+/// (`a.x + 1 AS y`, `coalesce(...) AS z`) emits `Derived` edges and is marked
+/// `Expression`; a pure literal/function with no column ref (`42 AS magic`,
+/// `current_timestamp AS t`) emits no edge and is marked `Literal`. The
+/// `Expression`/`Literal` markers EXCLUDE the column from the cross-model
+/// source-name-carry even when paired with a `select *` — the root fix for the
+/// literal/expr-paired-with-star fabrication class. Split out of
+/// [`resolve_projection_item`] to keep that dispatcher under the strict CRAP
+/// cap.
+#[allow(clippy::too_many_arguments)]
+fn resolve_aliased_item(
+    node_id: &str,
+    expr: &Expr,
+    output: &str,
+    aliases: &HashMap<String, String>,
+    sole_leaf: Option<&str>,
+    item: &SelectItem,
+    sql: &str,
+    index: &ByteIndex,
+    sink: &mut LineageSink,
+) {
+    if let Some(input) = direct_column_ref(expr, aliases, sole_leaf) {
+        let (kind, provenance) = if input.column == output {
+            (ColumnEdgeKind::PassThrough, ColumnProvenance::DirectColumn)
+        } else {
+            (ColumnEdgeKind::Renamed, ColumnProvenance::Rename)
+        };
+        push_edges(node_id, output, input, kind, &mut sink.edges);
+        sink.push_provenance(node_id, output, provenance);
+    } else {
+        // An expression (coalesce/CASE/func/arithmetic) — CLL-3 (cute-dbt#449):
+        // one `Derived` edge per input column it reads (many-to-one). A literal
+        // / column-free function reads no column → no edge.
+        let collected = collect_derived_refs(expr);
+        let provenance = if collected.refs.is_empty() {
+            ColumnProvenance::Literal
+        } else {
+            ColumnProvenance::Expression
+        };
+        for input in derived_input_cols(collected, aliases, sole_leaf) {
+            push_edges(
+                node_id,
+                output,
+                input,
+                ColumnEdgeKind::Derived,
+                &mut sink.edges,
+            );
+        }
+        sink.push_provenance(node_id, output, provenance);
+    }
+    push_span(node_id, output, item, sql, index, &mut sink.spans);
+}
+
 /// Returns this item's contribution to the body's output-column list:
 /// `Some(cols)` = the statically-knowable output name(s); `None` = the item
 /// has no enumerable output name (an Opaque star or an anonymous expression),
@@ -398,51 +454,13 @@ fn resolve_projection_item(
 ) -> Option<Vec<String>> {
     match item {
         // `expr AS alias` — the output name is the alias; the input is the
-        // column inside `expr`. Pass-through when name==col, else rename.
+        // column inside `expr`. Classified + edged in the dedicated helper
+        // (keeps this dispatcher's branch count under the strict CRAP cap).
         SelectItem::ExprWithAlias { expr, alias } => {
             let output = alias.value.to_ascii_lowercase();
-            if let Some(input) = direct_column_ref(expr, aliases, sole_leaf) {
-                let (kind, provenance) = if input.column == output {
-                    (ColumnEdgeKind::PassThrough, ColumnProvenance::DirectColumn)
-                } else {
-                    (ColumnEdgeKind::Renamed, ColumnProvenance::Rename)
-                };
-                push_edges(node_id, &output, input, kind, &mut sink.edges);
-                // POSITIVE provenance (#450): `a.x AS x` is a direct column,
-                // `a.x AS y` a rename — both trace to a real source field.
-                sink.push_provenance(node_id, &output, provenance);
-                push_span(node_id, &output, item, sql, index, &mut sink.spans);
-            } else {
-                // An expression (coalesce/CASE/func/arithmetic) — CLL-3
-                // (cute-dbt#449): collect every input column it reads and emit
-                // one `Derived` edge per input (many-to-one), depth-capped and
-                // degrading to Ambiguous honestly. Never a fabricated edge:
-                // an expression with no recoverable column ref emits none.
-                let collected = collect_derived_refs(expr);
-                let has_ref = !collected.refs.is_empty();
-                for input in derived_input_cols(collected, aliases, sole_leaf) {
-                    push_edges(
-                        node_id,
-                        &output,
-                        input,
-                        ColumnEdgeKind::Derived,
-                        &mut sink.edges,
-                    );
-                }
-                // POSITIVE provenance (#450): a computed expression
-                // (`a.x + 1 AS y`) is `Expression`; a pure literal with no
-                // column ref (`42 AS magic`, `current_timestamp AS t`) is
-                // `Literal`. NEITHER is a source field — both are EXCLUDED from
-                // the cross-model source-name-carry even when paired with a
-                // `select *`, closing the literal/expr-paired-with-star class.
-                let provenance = if has_ref {
-                    ColumnProvenance::Expression
-                } else {
-                    ColumnProvenance::Literal
-                };
-                sink.push_provenance(node_id, &output, provenance);
-                push_span(node_id, &output, item, sql, index, &mut sink.spans);
-            }
+            resolve_aliased_item(
+                node_id, expr, &output, aliases, sole_leaf, item, sql, index, sink,
+            );
             // The output NAME is known regardless of whether an edge was
             // emitted — the alias is explicit in the SQL.
             Some(vec![output])
