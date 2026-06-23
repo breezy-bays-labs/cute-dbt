@@ -624,10 +624,16 @@ fn build_raw_dag_and_node_map(
             presence: Presence::CompiledIn.to_wire(),
         });
     }
-    // Zone raw nodes — id `zone:<index>` by appearance order; honest 3-state
-    // presence. Keep each zone's raw span + id for the extent fold.
+    // Zone raw nodes — id `zone:<index>` by appearance order. Keep each zone's
+    // raw span + id for the extent fold, and its LEGACY anchor-based presence as
+    // the fallback for an unanchorable zone. The zone NODE's presence is NOT
+    // emitted here: it is DERIVED from the extent fold below so it can never
+    // contradict `node_map.raw` membership (cute-dbt#471 Finding C).
     let cte_spans: Vec<SourceSpan> = node_spans.values().copied().collect();
     let mut zone_nodes: Vec<ZoneNode> = Vec::new();
+    // Each zone's `(id, legacy_presence)` in appearance order — drives node push
+    // AFTER the fold so presence is fold-consistent.
+    let mut zone_meta: Vec<(String, Presence)> = Vec::new();
     for (zone_index, entry) in sm
         .entries
         .iter()
@@ -635,12 +641,7 @@ fn build_raw_dag_and_node_map(
         .enumerate()
     {
         let id = format!("zone:{zone_index}");
-        nodes.push(RawDagNodePayload {
-            id: id.clone(),
-            role: "zone",
-            is_zone: true,
-            presence: entry.presence(&cte_spans).to_wire(),
-        });
+        zone_meta.push((id.clone(), entry.presence(&cte_spans)));
         if let Some(raw_span) = entry.raw {
             zone_nodes.push(ZoneNode { id, raw_span });
         }
@@ -648,7 +649,29 @@ fn build_raw_dag_and_node_map(
 
     // cute-dbt#471 (S3): the observed fanned→zone EXTENT fold (compiled_owner =
     // the N→1 backfill, zone_members = the 1→N observed sets, omit-on-ambiguous).
+    // MUST run before the zone nodes are pushed so each zone's emitted presence
+    // is reconciled with its proven membership (Finding C: never claim a zone
+    // `compiled_out` while `node_map.raw[zone]` lists members).
     let fold = fold_zone_extents(raw, sm, node_spans, &zone_nodes);
+    // Push the zone nodes with FOLD-DERIVED presence (Finding C consistency):
+    // - non-empty `zone_members` ⇒ CompiledIn (provably produced compiled CTEs);
+    // - empty `[]` `zone_members` ⇒ CompiledOut (sound-empty extent = pruned);
+    // - an omitted (unanchorable) zone, or a zone with no raw span (never folded)
+    //   ⇒ keep the legacy anchor-based presence (SOUND: `node_map.raw` omits the
+    //   zone in both cases, so there is no members-vs-presence contradiction).
+    for (id, legacy_presence) in &zone_meta {
+        let presence = match fold.zone_members.get(id) {
+            Some(members) if !members.is_empty() => Presence::CompiledIn,
+            Some(_) => Presence::CompiledOut,
+            None => *legacy_presence,
+        };
+        nodes.push(RawDagNodePayload {
+            id: id.clone(),
+            role: "zone",
+            is_zone: true,
+            presence: presence.to_wire(),
+        });
+    }
     let compiled_map =
         build_node_map_compiled(node_spans, &raw_cte_ids, is_with_less, &fold.compiled_owner);
     let raw_map = build_node_map_raw(
@@ -699,6 +722,39 @@ struct ZoneExtentFold {
     omitted_zones: std::collections::BTreeSet<String>,
 }
 
+/// A zone's boundary-anchored compiled EXTENT — the `[start, end)` byte range
+/// plus the zone id, retained so NESTED/overlapping extents can be reconciled by
+/// innermost-wins / omit-on-overlap (cute-dbt#471 Finding D).
+struct ZoneExtent {
+    id: String,
+    start: u32,
+    end: u32,
+}
+
+impl ZoneExtent {
+    /// The byte width of the extent — smaller ⇒ tighter (the innermost producer
+    /// of a CTE structurally inside several nested zone extents).
+    fn width(&self) -> u32 {
+        self.end.saturating_sub(self.start)
+    }
+
+    /// Does this extent CONTAIN `span` (half-open, both endpoints inside)?
+    fn contains(&self, span: &SourceSpan) -> bool {
+        self.start < self.end // a non-empty extent only
+            && span.start.byte >= self.start
+            && span.end.byte <= self.end
+    }
+
+    /// Is this extent STRICTLY inside `other` (contained AND not identical)? Used
+    /// to pick the innermost owner: the unique extent contained in every other
+    /// extent that also contains the CTE.
+    fn strictly_inside(&self, other: &ZoneExtent) -> bool {
+        other.start <= self.start
+            && self.end <= other.end
+            && (other.start, other.end) != (self.start, self.end)
+    }
+}
+
 /// For each zone raw node, derive its compiled EXTENT by boundary-anchoring
 /// (`raw_scan::zone_compiled_extent`, omit-on-ambiguous), then fold the compiled
 /// CTEs structurally inside it — the OBSERVED fan-out (cute-dbt#471, S3). A sound
@@ -706,6 +762,17 @@ struct ZoneExtentFold {
 /// unanchorable extent OMITS the zone (we can prove NEITHER membership NOR
 /// emptiness — never a guessed `[]`). Only attempted when `raw` is present (the
 /// report path); `None` raw ⇒ the S2 shape (an empty fold).
+///
+/// NESTED / OVERLAPPING extents (cute-dbt#471 Finding D, never-a-false-claim): a
+/// compiled CTE structurally inside `{% for %} … {% if %} … {% endif %} …
+/// {% endfor %}` falls inside BOTH zone extents. We MUST NOT let the last
+/// `insert` arbitrarily win:
+/// - `compiled_owner` (N→1): a CTE claimed by >1 zone extent has an AMBIGUOUS raw
+///   origin ⇒ OMITTED (no key, never a guessed/last-wins owner).
+/// - `zone_members` (1→N): a CTE is listed ONLY under the INNERMOST (smallest-
+///   byte-span) containing extent — the true producer — so it is not
+///   double-claimed. If two containing extents are identical/incomparable
+///   (neither strictly inside the other), the CTE is OMITTED from both.
 fn fold_zone_extents(
     raw: Option<&str>,
     sm: &SourceMap,
@@ -722,30 +789,22 @@ fn fold_zone_extents(
             omitted_zones,
         };
     };
+    // First pass: anchor each zone's extent (omit-on-ambiguous). KEY-PRESENT
+    // zone_members seeded to `[]` so a sound-but-empty extent is the honest `[]`.
+    let mut extents: Vec<ZoneExtent> = Vec::new();
     for zone in zone_nodes {
         match crate::adapters::raw_scan::zone_compiled_extent(
             raw_text,
             &zone.raw_span,
             &sm.compiled,
         ) {
-            Some((ext_start, ext_end)) => {
-                let mut members: Vec<String> = node_spans
-                    .iter()
-                    .filter(|(id, span)| {
-                        id.as_str() != TERMINAL_NODE_NAME
-                            && ext_start < ext_end // a non-empty extent only
-                            && span.start.byte >= ext_start
-                            && span.end.byte <= ext_end
-                    })
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                members.sort();
-                for m in &members {
-                    compiled_owner.insert(m.clone(), zone.id.clone());
-                }
-                // KEY PRESENT even when empty: a sound extent with zero members is
-                // the honest `[]` (e.g. a pruned guard bracketed by verbatim CTEs).
-                zone_members.insert(zone.id.clone(), members);
+            Some((start, end)) => {
+                extents.push(ZoneExtent {
+                    id: zone.id.clone(),
+                    start,
+                    end,
+                });
+                zone_members.insert(zone.id.clone(), Vec::new());
             }
             None => {
                 // Unanchorable extent ⇒ OMIT (omit-on-ambiguous). We do NOT fall
@@ -753,16 +812,65 @@ fn fold_zone_extents(
                 // presence can arise from an AMBIGUOUS anchor (a loop body literal
                 // occurring N times) just as much as a genuine prune, so a `[]`
                 // here would risk a FALSE "zero compiled nodes this build" claim.
-                // The honest `[]` is ONLY the sound-empty-extent case above.
+                // The honest `[]` is ONLY the sound-empty-extent case below.
                 omitted_zones.insert(zone.id.clone());
             }
         }
+    }
+    // Second pass: fold each compiled CTE into the two maps under DISTINCT rules
+    // (cute-dbt#471 Finding D) — both fail-closed against a guessed origin:
+    //
+    // - `compiled_owner` (N→1, `compiledId → owning zone`): the key is written
+    //   ONLY when EXACTLY ONE extent contains the CTE. A CTE claimed by >1 extent
+    //   has an AMBIGUOUS raw origin ⇒ OMITTED (no key, never last-wins).
+    // - `zone_members` (1→N, `zone → [compiledId…]`): a CTE inside several nested
+    //   extents is listed under the INNERMOST (tightest) one — its true producer.
+    //   Two incomparable/identical containing extents ⇒ OMITTED from both (we
+    //   cannot prove which is the producer).
+    for (id, span) in node_spans {
+        if id.as_str() == TERMINAL_NODE_NAME {
+            continue;
+        }
+        let containing: Vec<&ZoneExtent> = extents.iter().filter(|e| e.contains(span)).collect();
+        // N→1: a UNIQUE containing extent is an unambiguous owner; >1 ⇒ omit.
+        if let [only] = containing.as_slice() {
+            compiled_owner.insert(id.clone(), only.id.clone());
+        }
+        // 1→N: list under the innermost (or omit when incomparable/identical).
+        if let Some(producer) = innermost_extent(&containing) {
+            zone_members
+                .entry(producer.id.clone())
+                .or_default()
+                .push(id.clone());
+        }
+    }
+    for members in zone_members.values_mut() {
+        members.sort();
     }
     ZoneExtentFold {
         compiled_owner,
         zone_members,
         omitted_zones,
     }
+}
+
+/// The unique INNERMOST extent of `containing` (the extents that all contain one
+/// compiled CTE) — the tightest (smallest-width) extent that is STRICTLY inside
+/// every other containing extent (cute-dbt#471 Finding D, innermost-wins). The
+/// true producer of a CTE nested in `{% for %} … {% if %} … {% endif %} …
+/// {% endfor %}` is the inner `{% if %}`. Returns `None` when:
+/// - `containing` is empty (the CTE is in no zone extent), OR
+/// - the tightest candidate is NOT strictly inside some other containing extent
+///   — i.e. two extents are identical or partially overlap without nesting
+///   (incomparable). An ambiguous origin ⇒ omit from both maps (never last-wins).
+fn innermost_extent<'a>(containing: &[&'a ZoneExtent]) -> Option<&'a ZoneExtent> {
+    // The tightest candidate (smallest byte width) is the only one that COULD be
+    // strictly inside all the others. Ties on width are incomparable ⇒ ambiguous.
+    let candidate = *containing.iter().min_by_key(|e| e.width())?;
+    let unambiguous = containing
+        .iter()
+        .all(|other| std::ptr::eq(*other, candidate) || candidate.strictly_inside(other));
+    unambiguous.then_some(candidate)
 }
 
 /// `node_map.compiled` (N→1): a verbatim CTE (same id), the WITH-less terminal,
@@ -9164,6 +9272,203 @@ mod tests {
             node_map.compiled.get("us_sales").map(String::as_str),
             Some("zone:0")
         );
+    }
+
+    // ── cute-dbt#471 Finding C (CodeRabbit Major, never-a-false-claim): the
+    // zone NODE's presence is DERIVED from the extent fold, so it can never
+    // contradict `node_map.raw` membership. The pre-fix code set presence from
+    // the LEGACY in-zone anchor (`entry.presence`) BEFORE the fold ran — for a
+    // fan-out whose body literals REPEAT, that anchor is ambiguous ⇒ the node
+    // claimed `compiled_out` while `node_map.raw[zone]` listed proven members. ──
+
+    /// The smallest helper: a zone raw node's emitted presence by id.
+    fn zone_presence(payload: &CodeMapPayload, zone_id: &str) -> Option<String> {
+        payload.raw_dag.as_ref().and_then(|d| {
+            d.nodes
+                .iter()
+                .find(|n| n.is_zone && n.id == zone_id)
+                .map(|n| n.presence.to_owned())
+        })
+    }
+
+    #[test]
+    fn fan_out_zone_presence_is_compiled_in_consistent_with_nonempty_members() {
+        // A `{% for %}` fan-out whose body literal is BYTE-IDENTICAL per iteration
+        // (`select amount from base` — no per-iteration value) compiles to two CTEs
+        // (us_sales, eu_sales) whose bodies are identical text. The legacy in-zone
+        // anchor therefore occurs MULTIPLY in compiled ⇒ ambiguous ⇒ the old code's
+        // `entry.presence` was `compiled_out`. The boundary-anchored extent still
+        // proves BOTH members. The fix derives presence FROM the fold ⇒ compiled_in,
+        // consistent with the non-empty `node_map.raw[zone:0]`.
+        let raw = "with base as (\n  select amount from src\n),\n{% for region in ['us','eu'] %}\n{{ region }}_sales as (\n  select amount from base\n),\n{% endfor %}\nfinal as (\n  select amount from base\n)\nselect amount from final";
+        let compiled = "with base as (\n  select amount from src\n),\nus_sales as (\n  select amount from base\n),\neu_sales as (\n  select amount from base\n),\nfinal as (\n  select amount from base\n)\nselect amount from final";
+        let payload = code_map_through_real_path(raw, compiled);
+        let node_map = payload.node_map.as_ref().expect("node_map present");
+        // The extent fold proves both fanned CTEs are inside zone:0.
+        let members = node_map
+            .raw
+            .get("zone:0")
+            .expect("the loop zone node_map.raw key is present (extent anchored)");
+        assert_eq!(
+            members,
+            &vec!["eu_sales".to_owned(), "us_sales".to_owned()],
+            "the boundary-anchored extent proves both fanned CTEs as members"
+        );
+        // CONSISTENCY (Finding C): the zone NODE is compiled_in, NOT compiled_out,
+        // because it provably produced compiled CTEs — never the self-contradiction
+        // of `compiled_out` + non-empty members.
+        assert_eq!(
+            zone_presence(&payload, "zone:0").as_deref(),
+            Some("compiled_in"),
+            "a fan-out zone with proven members is compiled_in (NOT the legacy \
+             ambiguous-anchor compiled_out)"
+        );
+        // The cross-cutting invariant: NEVER compiled_out with non-empty members.
+        assert_node_map_presence_consistent(&payload);
+    }
+
+    #[test]
+    fn pruned_guard_zone_presence_is_compiled_out_consistent_with_empty_members() {
+        // A `{% if is_incremental() %}` guard PRUNED this build, bracketed by a
+        // verbatim `base` CTE (before) and the terminal select (after): the extent
+        // anchors soundly to an EMPTY region ⇒ `node_map.raw[zone:0] == []`. The
+        // zone NODE presence is DERIVED to compiled_out, consistent with `[]`.
+        let raw = "with base as (\n  select id from src\n)\n{% if is_incremental() %}\n, recent as (\n  select id from base where id > 0\n)\n{% endif %}\nselect * from base";
+        let compiled = "with base as (\n  select id from src\n)\nselect * from base";
+        let payload = code_map_through_real_path(raw, compiled);
+        let node_map = payload.node_map.as_ref().expect("node_map present");
+        assert_eq!(
+            node_map.raw.get("zone:0").map(Vec::as_slice),
+            Some([].as_slice()),
+            "a sound-but-empty extent is the honest [] (KEY PRESENT)"
+        );
+        assert_eq!(
+            zone_presence(&payload, "zone:0").as_deref(),
+            Some("compiled_out"),
+            "a sound-empty-extent zone is compiled_out, consistent with the [] members"
+        );
+        assert_node_map_presence_consistent(&payload);
+    }
+
+    /// The Finding-C invariant, asserted over a whole payload: a zone raw node is
+    /// NEVER `compiled_out` while `node_map.raw[its id]` is a NON-EMPTY list, and a
+    /// `compiled_in` zone is never `node_map.raw == []`. (Tri-state consistency:
+    /// non-empty ⟺ `compiled_in`; `[]` ⟺ `compiled_out`; absent ⟺ omitted.)
+    fn assert_node_map_presence_consistent(payload: &CodeMapPayload) {
+        let Some(raw_dag) = payload.raw_dag.as_ref() else {
+            return;
+        };
+        let raw_map = payload.node_map.as_ref().map(|m| &m.raw);
+        for node in raw_dag.nodes.iter().filter(|n| n.is_zone) {
+            let members = raw_map.and_then(|m| m.get(&node.id));
+            match members {
+                Some(m) if !m.is_empty() => assert_eq!(
+                    node.presence, "compiled_in",
+                    "zone {} has non-empty members ⇒ must be compiled_in, was {}",
+                    node.id, node.presence
+                ),
+                Some(_) => assert_eq!(
+                    node.presence, "compiled_out",
+                    "zone {} has [] members ⇒ must be compiled_out, was {}",
+                    node.id, node.presence
+                ),
+                None => {} // omitted (unanchorable) zone ⇒ legacy presence, no claim
+            }
+        }
+    }
+
+    #[test]
+    fn nested_for_if_zone_omits_overlapping_owner_and_lists_innermost_only() {
+        // cute-dbt#471 Finding D (CodeRabbit Major): a FANNED compiled CTE
+        // structurally inside NESTED `{% for %} … {% if is_incremental() %} …
+        // {% endif %} … {% endfor %}` falls inside BOTH zone extents (both EMITTING
+        // zones: ForLoop + IncrementalGuard). The N→1 owner must NOT be a
+        // last-insert-wins guess — `only_recent` is claimed by >1 extent ⇒ OMITTED
+        // from node_map.compiled (ambiguous raw origin); the 1→N node_map.raw lists
+        // it ONLY under the INNERMOST containing zone (the tighter guard extent).
+        //
+        // The CTE name `{{ r }}_recent` is TEMPLATED (not verbatim in raw), so it
+        // is NOT a raw CTE node and genuinely reaches the zone-owner fold (a
+        // verbatim name would map 1→1 by identity and never test the overlap).
+        // Verbatim `lp`/`pp` inside the loop but OUTSIDE the guard make the guard
+        // extent STRICTLY TIGHTER than the for extent (innermost-wins, not the
+        // identical-extent tie). The guard is KEPT this build (compiles in).
+        let raw = "with base as (\n  select id from src\n),\n{% for r in ['only'] %}\nlp as (\n  select 1 as p\n),\n{% if is_incremental() %}\n{{ r }}_recent as (\n  select id from base where id > 0\n),\n{% endif %}\npp as (\n  select 2 as q\n),\n{% endfor %}\nfinal as (\n  select id from base\n)\nselect id from final";
+        let compiled = "with base as (\n  select id from src\n),\nlp as (\n  select 1 as p\n),\nonly_recent as (\n  select id from base where id > 0\n),\npp as (\n  select 2 as q\n),\nfinal as (\n  select id from base\n)\nselect id from final";
+        let payload = code_map_through_real_path(raw, compiled);
+        let node_map = payload.node_map.as_ref().expect("node_map present");
+        // TWO zone extents anchored (the for-loop + the incremental guard); a
+        // genuine overlap, not a vacuous single-zone case.
+        let zone_ids: Vec<&String> = node_map
+            .raw
+            .keys()
+            .filter(|k| k.starts_with("zone:"))
+            .collect();
+        assert!(
+            zone_ids.len() >= 2,
+            "the nested for+incremental-guard produced two zone extents (got {zone_ids:?})"
+        );
+        // N→1: `only_recent` is claimed by >1 zone extent ⇒ OMITTED from
+        // node_map.compiled (no key — ambiguous raw origin, never last-wins). It is
+        // also NOT a verbatim CTE, so identity mapping does not rescue it.
+        assert!(
+            !node_map.compiled.contains_key("only_recent"),
+            "a fanned CTE inside two nested zone extents is omitted from \
+             node_map.compiled (never last-wins), got {:?}",
+            node_map.compiled.get("only_recent")
+        );
+        // 1→N: `only_recent` is listed under EXACTLY ONE zone — the innermost
+        // (tightest-byte-span) extent, the inner incremental guard — never both.
+        let listing_zones: Vec<&String> = zone_ids
+            .iter()
+            .filter(|z| {
+                node_map
+                    .raw
+                    .get(**z)
+                    .is_some_and(|ms| ms.iter().any(|m| m == "only_recent"))
+            })
+            .copied()
+            .collect();
+        assert_eq!(
+            listing_zones.len(),
+            1,
+            "`only_recent` is listed under exactly the innermost zone, never \
+             double-claimed (listing zones: {listing_zones:?})"
+        );
+        // The innermost zone lists ONLY `only_recent` (the tight guard extent),
+        // proving it is the inner guard, not the wider for-loop.
+        let inner = listing_zones[0];
+        assert_eq!(
+            node_map.raw.get(inner).map(Vec::as_slice),
+            Some(["only_recent".to_owned()].as_slice()),
+            "the innermost zone lists exactly [only_recent] (the tight guard extent)"
+        );
+        // The OTHER zone (the wider for-loop) lists its own siblings but NOT
+        // `only_recent` (it ceded the inner CTE to the tighter guard).
+        let outer = zone_ids
+            .iter()
+            .find(|z| **z != inner)
+            .expect("the wider for-loop zone");
+        assert_eq!(
+            node_map.raw.get(*outer).map(Vec::as_slice),
+            Some(["lp".to_owned(), "pp".to_owned()].as_slice()),
+            "the wider zone lists its own siblings (lp/pp), never `only_recent`"
+        );
+        // The verbatim siblings still map 1→1 by identity, untouched by the
+        // overlap handling (lp/pp are each in only the for extent; the verbatim
+        // identity rule in build_node_map_compiled wins over the zone owner).
+        assert_eq!(node_map.compiled.get("lp").map(String::as_str), Some("lp"));
+        assert_eq!(node_map.compiled.get("pp").map(String::as_str), Some("pp"));
+        assert_eq!(
+            node_map.compiled.get("base").map(String::as_str),
+            Some("base")
+        );
+        assert_eq!(
+            node_map.compiled.get("final").map(String::as_str),
+            Some("final")
+        );
+        // Presence stays consistent with membership (Finding C invariant).
+        assert_node_map_presence_consistent(&payload);
     }
 
     #[test]

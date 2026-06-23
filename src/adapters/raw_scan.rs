@@ -2282,19 +2282,41 @@ mod tests {
 
     #[test]
     fn zone_compiled_extent_omits_on_a_non_unique_after_anchor() {
-        // OMIT-ON-AMBIGUOUS: when the after-region's literal text is NOT unique in
-        // compiled, the extent end cannot bind ⇒ None (the caller then omits the
-        // zone, never over-claiming). We force the after-anchor non-unique by
-        // making the trailing terminal text byte-identical to an earlier region.
-        // Zone at byte [5, 40) of a raw whose after-region (`xx`) appears many
-        // times in compiled and carries no ≥3-char unique run.
-        let raw = "with {% for x in [1] %}a as (select 1){% endfor %} bb";
-        let compiled = "bb bb bb bb"; // the after-region 'bb' is non-unique
-        // Build a zone span covering the {% for %}…{% endfor %} region.
+        // OMIT-ON-AMBIGUOUS reached at the AFTER-anchor specifically. The
+        // before-region carries a UNIQUE ≥3-char literal (`unique_prefix_xyz`)
+        // that binds the extent START — so execution genuinely REACHES the
+        // after-anchor (this is the cute-dbt#471 Finding B fix: the old fixture
+        // omitted on the before-anchor `with`, never exercising this branch). The
+        // after-region's leading literal (`repeated_tail`) appears TWICE in
+        // compiled and its widened two-token form is absent, so NO after-candidate
+        // binds uniquely ⇒ the extent END cannot anchor ⇒ None.
+        let raw =
+            "unique_prefix_xyz\n{% for x in [1] %}body{% endfor %}\nrepeated_tail repeated_tail";
+        let compiled = "unique_prefix_xyz body repeated_tail then repeated_tail end";
         let zone_span = first_zone_span(raw);
+        // MECHANICAL PROOF the after-anchor branch executes: reconstruct the
+        // before/after regions exactly as `zone_compiled_extent` does (masked raw,
+        // sliced at the zone span) and assert the before-anchor BINDS while the
+        // after-anchor does NOT — so the function genuinely reaches and omits at
+        // the after-anchor (the cute-dbt#471 Finding B fix: the old fixture's
+        // before-anchor `with` was absent in compiled, omitting BEFORE this point).
+        let zr = zone_span.byte_range();
+        let masked = mask_regions(raw).expect("well-formed jinja masks");
+        let before_region = &masked[..zr.start];
+        let after_region = &masked[zr.end..];
+        assert!(
+            boundary_anchor_end(before_region, compiled).is_some(),
+            "the before-anchor binds ⇒ the extent START resolves and execution \
+             REACHES the after-anchor (not a vacuous before-anchor omit)"
+        );
+        assert!(
+            boundary_anchor_start(after_region, compiled).is_none(),
+            "the after-anchor does NOT bind ⇒ this is where the omit genuinely fires"
+        );
         assert!(
             zone_compiled_extent(raw, &zone_span, compiled).is_none(),
-            "a non-unique after-anchor ⇒ None (omit-on-ambiguous, never over-claim)"
+            "a non-unique after-anchor (reached after a unique before-anchor) ⇒ None \
+             (omit-on-ambiguous, never over-claim)"
         );
     }
 
