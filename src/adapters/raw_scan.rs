@@ -535,11 +535,27 @@ pub(crate) struct RawEdge {
 /// unresolved, never a guessed edge. Fail-closed: malformed Jinja ⇒ `mask_regions`
 /// returns `None` and the scan emits NOTHING.
 ///
+/// CONTROL-BLOCK CONDITIONALITY (cute-dbt#471, the honesty fix): masking blanks
+/// Jinja control TAGS (`{% if … %}`, `{% endif %}`, `{% for … %}`, …) but leaves
+/// the control-block BODY between them LIVE (S1/S2 anchor a real name in a
+/// conditional body). For EDGE emission that live body is a TRAP: a literal
+/// `from <sibling>` inside `{% if is_incremental() %} … {% endif %}` is a
+/// CONDITIONAL dependency — on a full-refresh build the guard is pruned and
+/// `base→derived` has NO compiled counterpart, so asserting a `resolved` edge
+/// would be a FALSE claim. Edges therefore use a STRICTER exclusion than the
+/// node/column path: a `from`-referent whose byte position falls inside ANY
+/// `{% … %}…{% end… %}` control-block span ([`control_block_spans`]) is SUPPRESSED
+/// (the pane shows it unresolved — never a guessed/conditional edge). Only a
+/// TOP-LEVEL (depth-0, un-templated) `from <sibling>` is unconditional enough to
+/// be an edge. `mask_regions` is left untouched (the node/column/zone-extent
+/// behavior is unchanged); the exclusion is edge-local.
+///
 /// Each emitted edge is `confidence: resolved` at the call site — the masking
 /// scan only ever yields a dependency it can prove lexically (a live, whole-word
-/// `from`/`join` keyword immediately followed by a sibling CTE id). A reference
-/// that is NOT a sibling CTE id (an external relation, a `ref()`-mediated name
-/// masked away, a column) is simply not emitted.
+/// `from`/`join` keyword immediately followed by a sibling CTE id) AND
+/// unconditionally (outside every control block). A reference that is NOT a
+/// sibling CTE id (an external relation, a `ref()`-mediated name masked away, a
+/// column) is simply not emitted.
 pub(crate) fn explicit_cte_edges(
     raw: &str,
     raw_cte_spans: &std::collections::BTreeMap<String, SourceSpan>,
@@ -548,13 +564,28 @@ pub(crate) fn explicit_cte_edges(
         // Malformed Jinja ⇒ emit nothing (fail-closed).
         return Vec::new();
     };
+    // The byte spans of every Jinja control-block body — a `from`-referent inside
+    // any of these is CONDITIONAL and must NOT emit an edge (the stricter,
+    // edge-local exclusion; see the fn doc). Fail-closed: a malformed/unbalanced
+    // control-block stream yields a span covering the rest of the source, so a
+    // `from` after the break is treated as inside-a-block (never under-suppressed).
+    let block_spans = control_block_spans(raw);
     let mut edges: Vec<RawEdge> = Vec::new();
     for (to_id, body_span) in raw_cte_spans {
         let range = body_span.byte_range();
         let Some(body) = masked.get(range.clone()) else {
             continue;
         };
-        for referenced in from_join_referents(body) {
+        // `body` is a sub-slice of `masked` starting at `range.start` in raw
+        // coordinates; a referent's position in `body` maps to `range.start + pos`.
+        let body_base = range.start;
+        for (referenced, body_pos) in from_join_referents(body) {
+            // CONTROL-BLOCK EXCLUSION: a referent inside any `{% … %}…{% end… %}`
+            // body is conditional ⇒ no edge (never a false claim).
+            let abs_pos = body_base + body_pos;
+            if position_in_any_span(abs_pos, &block_spans) {
+                continue;
+            }
             // Only a reference to ANOTHER verbatim raw CTE (a sound raw node) is
             // an edge — a self-reference, an external relation, or a name not in
             // the raw-CTE set is not emitted. (A CTE cannot depend on itself in
@@ -575,17 +606,25 @@ pub(crate) fn explicit_cte_edges(
     edges
 }
 
+/// Whether byte offset `pos` falls inside any half-open `[start, end)` span of
+/// `spans` (the control-block body extents). A `from`-referent at `pos` inside one
+/// is a CONDITIONAL dependency ⇒ suppressed from edges.
+fn position_in_any_span(pos: usize, spans: &[(usize, usize)]) -> bool {
+    spans.iter().any(|&(start, end)| pos >= start && pos < end)
+}
+
 /// Every identifier that immediately follows a whole-word `from` / `join`
-/// keyword in the masked CTE body `body` (cute-dbt#471, S3). The body is already
-/// masked (no strings/comments/Jinja), so every `from`/`join` here is a LIVE SQL
-/// keyword and every following word is a LIVE relation reference. ASCII
-/// case-insensitive keyword match; the referent is returned verbatim (the engine
-/// folds identifier case before the domain, so the comparison at the call site is
-/// exact).
-fn from_join_referents(body: &str) -> Vec<String> {
+/// keyword in the masked CTE body `body` (cute-dbt#471, S3), paired with the
+/// referent's BYTE START in `body` (so the edge caller can map it to a raw
+/// coordinate and apply the control-block exclusion). The body is already masked
+/// (no strings/comments/Jinja), so every `from`/`join` here is a LIVE SQL keyword
+/// and every following word is a LIVE relation reference. ASCII case-insensitive
+/// keyword match; the referent is returned verbatim (the engine folds identifier
+/// case before the domain, so the comparison at the call site is exact).
+fn from_join_referents(body: &str) -> Vec<(String, usize)> {
     let bytes = body.as_bytes();
     let n = bytes.len();
-    let mut out: Vec<String> = Vec::new();
+    let mut out: Vec<(String, usize)> = Vec::new();
     let mut i = 0usize;
     while i < n {
         // Find the start of the next identifier-or-keyword word.
@@ -615,13 +654,221 @@ fn from_join_referents(body: &str) -> Vec<String> {
                 // immediately after the word means it is not a bare CTE name.
                 let qualified = rend < n && bytes[rend] == b'.';
                 if !qualified {
-                    out.push(body[rstart..rend].to_owned());
+                    out.push((body[rstart..rend].to_owned(), rstart));
                 }
                 i = rend;
             }
         }
     }
     out
+}
+
+/// The half-open byte spans (in `raw` coordinates) of every Jinja control-block
+/// BODY — the live text BETWEEN a `{% <opener> … %}` and its depth-matched
+/// `{% end<opener> %}` (cute-dbt#471, the honesty fix). A `from <sibling>`
+/// referent whose position lands inside one of these is a CONDITIONAL dependency
+/// (pruned away on the wrong build) and must NOT emit an edge.
+///
+/// Recognized openers — every Jinja construct with an `end…` closer a `raw_code`
+/// model body can carry: `if`, `for`, `block`, `macro`, `call`, `filter`, `with`,
+/// `autoescape`, `raw`, `trans`, `apply`, and the BLOCK form of `set`
+/// (`{% set x %}…{% endset %}`, distinguished from the inline `{% set x = … %}` by
+/// the absence of an `=` before the tag close). Each opener pushes a depth-stack
+/// frame keyed by its keyword; the matching `end<keyword>` pops it and records the
+/// body span `[opener_close, closer_open)`. Mid dividers (`else`/`elif`) are
+/// ignored (they do not change the enclosing block's body extent). Variable tags
+/// `{{…}}` and comments `{#…#}` are skipped wholesale (an inner `{% %}` inside a
+/// comment never counts).
+///
+/// FAIL-CLOSED (never under-suppress): the instant the scan hits an UNBALANCE — an
+/// unterminated tag, an `end<x>` with no matching opener, or a mismatched
+/// `end<x>` — it abandons structural matching and returns a single span covering
+/// `[break_point, raw.len())`, so every `from` from the break to EOF is treated as
+/// inside-a-block. Likewise any opener left UNCLOSED at EOF contributes a span
+/// `[its_body_start, raw.len())`. The exclusion can only ever DROP a (possibly
+/// real) edge, never fabricate one — the honest failure direction.
+fn control_block_spans(raw: &str) -> Vec<(usize, usize)> {
+    let bytes = raw.as_bytes();
+    let n = bytes.len();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    // The depth stack: (opener keyword lowercased, body-start byte = past the
+    // opener's `%}`).
+    let mut stack: Vec<(String, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        if bytes[i] != b'{' || i + 1 >= n {
+            i += 1;
+            continue;
+        }
+        // Delegate the per-`{`-opener handling (skip a `{#…#}`/`{{…}}` region, or
+        // classify + pair a `{%…%}` block tag) to keep this loop low-complexity.
+        match step_control_scan(raw, i, &mut spans, &mut stack) {
+            ScanStep::Advance(next) => i = next,
+            // Malformed / unbalanced ⇒ fail-closed from `i` to EOF.
+            ScanStep::FailClosed => return fail_closed_from(i, n, &stack),
+        }
+    }
+    // Any opener left unclosed at EOF: its body runs to EOF (fail-closed).
+    for (_, body_start) in &stack {
+        spans.push((*body_start, n));
+    }
+    spans
+}
+
+/// The outcome of processing the `{`-led region at byte `i` in
+/// [`control_block_spans`]: advance to a resumption index, or fail closed.
+enum ScanStep {
+    /// Resume the scan at this byte index.
+    Advance(usize),
+    /// A malformed/unbalanced tag ⇒ the caller fails closed from `i` to EOF.
+    FailClosed,
+}
+
+/// Process the single `{`-led region at byte `i` of `raw` for
+/// [`control_block_spans`]: skip a `{#…#}` comment / `{{…}}` variable tag
+/// wholesale, or classify + depth-pair a `{%…%}` block tag (pushing an opener,
+/// popping + recording a matched closer's body span). Mutates `spans`/`stack` in
+/// place and returns the resumption index, or [`ScanStep::FailClosed`] on a
+/// malformed tag or a mismatched/orphan closer. The caller guarantees
+/// `bytes[i] == b'{'` and `i + 1 < bytes.len()`.
+fn step_control_scan(
+    raw: &str,
+    i: usize,
+    spans: &mut Vec<(usize, usize)>,
+    stack: &mut Vec<(String, usize)>,
+) -> ScanStep {
+    let bytes = raw.as_bytes();
+    match bytes[i + 1] {
+        // Comment `{#…#}` — skip wholesale; an inner `{% %}` never counts.
+        b'#' => find_close(bytes, i + 2, b'#').map_or(ScanStep::FailClosed, ScanStep::Advance),
+        // Variable tag `{{…}}` — skip wholesale (string-literal-aware).
+        b'{' => find_expr_close(bytes, i + 2, b'}').map_or(ScanStep::FailClosed, ScanStep::Advance),
+        // Block tag `{%…%}` — classify + pair.
+        b'%' => {
+            let Some(close) = find_expr_close(bytes, i + 2, b'%') else {
+                return ScanStep::FailClosed;
+            };
+            match classify_control_tag(&raw[i..close]) {
+                ControlTag::Open { keyword } => stack.push((keyword, close)),
+                // The closer must match the innermost opener's keyword; a
+                // mismatched / orphan `end<x>` ⇒ unbalanced ⇒ fail closed.
+                ControlTag::End { keyword } => match stack.pop() {
+                    Some((open_kw, body_start)) if open_kw == keyword => {
+                        spans.push((body_start, i));
+                    }
+                    _ => return ScanStep::FailClosed,
+                },
+                // `else`/`elif` and every non-paired tag (`set` inline, …) do not
+                // change the enclosing block's body extent.
+                ControlTag::Skip => {}
+            }
+            ScanStep::Advance(close)
+        }
+        // A bare `{X` opens no Jinja region; advance one byte.
+        _ => ScanStep::Advance(i + 1),
+    }
+}
+
+/// The fail-closed result for [`control_block_spans`]: a span `[break, len)` (the
+/// rest of the source is treated as inside-a-block), UNIONED with the body span of
+/// every still-open frame on the stack (their bodies also run to EOF). This is the
+/// never-under-suppress contract — on ANY malformed/unbalanced Jinja the edge
+/// scanner suppresses every `from` from the break point onward.
+fn fail_closed_from(
+    break_point: usize,
+    len: usize,
+    stack: &[(String, usize)],
+) -> Vec<(usize, usize)> {
+    let mut spans: Vec<(usize, usize)> = stack
+        .iter()
+        .map(|&(_, body_start)| (body_start, len))
+        .collect();
+    spans.push((break_point, len));
+    spans
+}
+
+/// Every Jinja construct that pairs with an `end…` closer and so bounds a body
+/// extent (besides the block-form `set`, handled separately because it shares a
+/// keyword with the inline `{% set x = … %}` assignment). The matching closer is
+/// `end<keyword>`.
+const BLOCK_OPENERS: &[&str] = &[
+    "if",
+    "for",
+    "block",
+    "macro",
+    "call",
+    "filter",
+    "with",
+    "autoescape",
+    "raw",
+    "trans",
+    "apply",
+    "embed",
+];
+
+/// The control-flow classification of a `{%…%}` tag for [`control_block_spans`].
+enum ControlTag {
+    /// A block opener (`if`/`for`/`block`/`macro`/…) keyed by its lowercased
+    /// keyword; the matching closer is `end<keyword>`.
+    Open { keyword: String },
+    /// A block closer `end<keyword>` (the `end` prefix stripped).
+    End { keyword: String },
+    /// Any tag that does NOT bound a body extent (a mid divider `else`/`elif`, an
+    /// inline `{% set x = … %}`, or any unrecognized tag).
+    Skip,
+}
+
+/// Classify a full `{%…%}` tag slice `tag` into a [`ControlTag`] by its leading
+/// keyword. An `end<x>` closer is `End { keyword: x }`. A known block opener is
+/// `Open { keyword }`. The BLOCK form of `set` (`{% set x %}`, no `=` before the
+/// close) opens; the INLINE form (`{% set x = … %}`) is `Skip`. Everything else
+/// (`else`/`elif`/unrecognized) is `Skip`.
+fn classify_control_tag(tag: &str) -> ControlTag {
+    // Strip `{%`, an optional whitespace-control `-`, and leading whitespace;
+    // strip the trailing `%}`/`-%}` and surrounding whitespace, to read the inner
+    // statement (mirrors render::classify_block_tag's shape).
+    let inner = tag
+        .strip_prefix("{%")
+        .unwrap_or(tag)
+        .trim_start_matches('-')
+        .trim_start();
+    let inner = inner
+        .strip_suffix("%}")
+        .unwrap_or(inner)
+        .trim_end()
+        .trim_end_matches('-')
+        .trim_end();
+    let keyword = inner.split_whitespace().next().unwrap_or("");
+    // A closer: `end` + a non-empty keyword (`endif`, `endfor`, `endmacro`, …). The
+    // non-empty guard rejects a bare `end` (not a Jinja closer). Avoids a let-chain
+    // (unstable on MSRV 1.88) by matching the post-strip result directly.
+    match keyword.strip_prefix("end") {
+        Some(closed) if !closed.is_empty() => {
+            return ControlTag::End {
+                keyword: closed.to_ascii_lowercase(),
+            };
+        }
+        _ => {}
+    }
+    // The block-form `set` opens a body ONLY when it carries NO `=` (the inline
+    // `{% set x = expr %}` form assigns and has no `{% endset %}`).
+    if keyword == "set" {
+        return if inner.contains('=') {
+            ControlTag::Skip
+        } else {
+            ControlTag::Open {
+                keyword: "set".to_owned(),
+            }
+        };
+    }
+    // Every other Jinja construct that pairs with an `end…` closer.
+    if BLOCK_OPENERS.contains(&keyword) {
+        ControlTag::Open {
+            keyword: keyword.to_ascii_lowercase(),
+        }
+    } else {
+        ControlTag::Skip
+    }
 }
 
 /// Derive a `{% for %}` / `{% if %}` zone's compiled **EXTENT** by BOUNDARY-
@@ -1873,6 +2120,143 @@ mod tests {
         assert!(
             edges.is_empty(),
             "malformed Jinja ⇒ emit nothing (fail-closed)"
+        );
+    }
+
+    // ── cute-dbt#471 honesty fix: control-block `from` is CONDITIONAL ⇒ no edge ──
+    // The masker blanks the control TAGS but leaves the BODY live, so a literal
+    // `from <sibling>` inside `{% if %}`/`{% for %}` previously emitted a `resolved`
+    // edge — a FALSE claim (the dependency is pruned away on the wrong build). The
+    // edge path now excludes any referent inside a control-block body. All built
+    // through the REAL SourceMap path (`raw_cte_spans_for` runs `fill_raw_spans`).
+
+    #[test]
+    fn literal_from_inside_an_if_block_emits_no_edge() {
+        // `from base` lives inside `{% if true %} … {% endif %}` ⇒ CONDITIONAL ⇒
+        // NO edge (the pane shows it unresolved, never a guessed/conditional edge).
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  {% if true %}\n  select id from base\n  {% endif %}\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert!(
+            edges.is_empty(),
+            "a `from base` inside an `{{% if %}}` block is conditional ⇒ NO edge; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn literal_from_inside_an_incremental_guard_emits_no_edge_full_refresh() {
+        // The canonical false-claim: `from base` inside `{% if is_incremental() %}`.
+        // On a FULL-REFRESH build the guard is pruned and `from base` is ABSENT from
+        // compiled, so a `resolved` base→derived edge would be a lie. NO edge.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  {% if is_incremental() %}\n  select id from base\n  {% endif %}\n)\nselect * from derived";
+        // Full-refresh compiled: the guarded `from base` is gone entirely.
+        let compiled =
+            "with base as (\n  select id from src\n),\nderived as (\n  \n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert!(
+            edges.is_empty(),
+            "a `from base` inside `{{% if is_incremental() %}}` is conditional ⇒ NO edge; got {edges:?}"
+        );
+        // The compiled text genuinely has no `from base` — the would-be edge has no
+        // compiled counterpart, so asserting it would be a false claim.
+        assert!(
+            !compiled.contains("from base"),
+            "full-refresh compiled has no `from base` — the suppressed edge is unbacked"
+        );
+    }
+
+    #[test]
+    fn literal_from_inside_a_for_loop_emits_no_edge() {
+        // `from base` inside `{% for r in [...] %} … {% endfor %}` ⇒ CONDITIONAL on
+        // the loop body being expanded ⇒ NO edge (even with a verbatim, un-templated
+        // `from base` in the loop body).
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  {% for r in [1, 2] %}\n  select id from base\n  {% endfor %}\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert!(
+            edges.is_empty(),
+            "a `from base` inside a `{{% for %}}` loop is conditional ⇒ NO edge; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn top_level_from_outside_any_block_still_emits_a_resolved_edge() {
+        // REGRESSION GUARD: a TOP-LEVEL (depth-0, un-templated) `from base` is
+        // unconditional and MUST still emit a resolved edge — the exclusion is
+        // strictly about control-block BODIES, not all `from`s.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from base\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert_eq!(
+            edges,
+            vec![RawEdge {
+                from: "base".to_owned(),
+                to: "derived".to_owned()
+            }],
+            "a top-level `from base` is unconditional ⇒ one resolved edge base→derived"
+        );
+    }
+
+    #[test]
+    fn top_level_from_with_a_sibling_if_block_still_emits_its_edge() {
+        // A control block ELSEWHERE in the body must not suppress an UNCONDITIONAL
+        // top-level `from` (the exclusion is position-scoped to block bodies, not
+        // model-wide). Here `derived` has both a guarded `from other` (no edge) and
+        // a top-level `from base` (edge) — only base→derived survives.
+        let raw = "with base as (\n  select id from src\n),\nother as (\n  select 1 as id\n),\nderived as (\n  select id from base\n  {% if is_incremental() %}\n  union all select id from other\n  {% endif %}\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "other", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert_eq!(
+            edges,
+            vec![RawEdge {
+                from: "base".to_owned(),
+                to: "derived".to_owned()
+            }],
+            "top-level `from base` survives; the guarded `from other` is suppressed; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn nested_control_block_from_emits_no_edge() {
+        // A `from base` nested TWO blocks deep (`{% for %}` inside `{% if %}`) is
+        // still inside a control-block body ⇒ NO edge (depth-matched exclusion).
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  {% if is_incremental() %}\n  {% for r in [1] %}\n  select id from base\n  {% endfor %}\n  {% endif %}\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert!(
+            edges.is_empty(),
+            "a `from base` nested inside `{{% if %}}`→`{{% for %}}` is conditional ⇒ NO edge; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn unbalanced_control_block_fails_closed_suppressing_following_from() {
+        // An `{% if %}` opener with NO matching `{% endif %}` ⇒ unbalanced ⇒
+        // fail-closed: every `from` from the opener body to EOF is suppressed
+        // (never under-suppress). The control-block scanner's malformed path; the
+        // tag stream is otherwise well-formed so `mask_regions` succeeds.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  {% if true %}\n  select id from base\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert!(
+            edges.is_empty(),
+            "an unbalanced `{{% if %}}` ⇒ fail-closed ⇒ the trailing `from base` is suppressed; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn templated_from_inside_a_for_loop_still_emits_no_edge() {
+        // The PRE-EXISTING guard (kept): a TEMPLATED `from {{ prev }}` is blanked by
+        // masking, so even outside the control-block-body exclusion it produces no
+        // edge. This is the original `for_loop_mediated_dependency_emits_no_edge`
+        // shape, kept at the unit level to prove masking still covers it.
+        let raw = "with base as (\n  select 1 as id\n),\nstep as (\n  {% for prev in ['base'] %}\n  select id from {{ prev }}\n  {% endfor %}\n)\nselect * from step";
+        let spans = raw_cte_spans_for(raw, &["base", "step"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert!(
+            edges.is_empty(),
+            "a templated `from {{{{ prev }}}}` is masked ⇒ NO edge; got {edges:?}"
         );
     }
 

@@ -8995,6 +8995,37 @@ mod tests {
     }
 
     #[test]
+    fn literal_from_inside_an_incremental_guard_emits_no_edge_through_render() {
+        // The honesty fix THROUGH THE REAL RENDER PATH (cute-dbt#471): a LITERAL,
+        // un-templated `from base` inside `{% if is_incremental() %}` is CONDITIONAL
+        // — on this FULL-REFRESH compiled build the guard is pruned and `from base`
+        // is ABSENT from compiled. Masking blanks the `{% if %}`/`{% endif %}` TAGS
+        // but leaves the body's `from base` live; the edge path's control-block
+        // exclusion suppresses it ⇒ NO edge (never a `resolved` false claim).
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  {% if is_incremental() %}\n  select id from base\n  {% endif %}\n)\nselect * from derived";
+        let compiled =
+            "with base as (\n  select id from src\n),\nderived as (\n  \n)\nselect * from derived";
+        let payload = code_map_through_real_path(raw, compiled);
+        let raw_dag = payload.raw_dag.expect("raw_dag present");
+        assert!(
+            raw_dag.edges.is_empty(),
+            "a guarded literal `from base` emits NO edge through the render path"
+        );
+        // The empty edges key stays off the wire (byte-stability).
+        let json = serde_json::to_string(&raw_dag).unwrap();
+        assert!(
+            !json.contains("\"edges\""),
+            "empty edges omitted from the wire"
+        );
+        // Honesty proof: the compiled build genuinely lacks `from base`, so a
+        // `resolved` edge would have had no compiled counterpart.
+        assert!(
+            !compiled.contains("from base"),
+            "full-refresh compiled has no `from base` — the suppressed edge is unbacked"
+        );
+    }
+
+    #[test]
     fn a_name_inside_a_string_or_comment_is_not_an_edge_endpoint() {
         // `derived` mentions `base` ONLY inside a string literal and a comment —
         // both masked ⇒ NO edge. The bare `from external_rel` is not a sibling CTE.
