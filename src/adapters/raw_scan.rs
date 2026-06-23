@@ -446,11 +446,47 @@ fn mask_sql_tokens(jinja_masked: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| jinja_masked.to_owned())
 }
 
-/// Whether `token` is a non-SQL-structural region whose byte span must be
-/// blanked: every STRING literal form, every COMMENT, the DOLLAR-QUOTE string,
-/// and every QUOTED IDENTIFIER (`Word { quote_style: Some(_) }`). Enumerated
-/// exhaustively over the sqlparser 0.62 `Token` variants so a new string form
-/// cannot silently slip through unmasked.
+/// The masking classification of a single SQL [`Token`]: either its byte span
+/// is blanked ([`Mask`](MaskClass::Mask)) or it is left untouched in the live
+/// text ([`Live`](MaskClass::Live)). A two-state result so [`classify_token`]
+/// can be written as a TOTAL match — the compiler enforces exhaustiveness.
+///
+/// [`Mask`](MaskClass::Mask): every STRING literal form, every COMMENT, and
+/// every QUOTED IDENTIFIER (`Word { quote_style: Some(_) }`). [`Live`](MaskClass::Live):
+/// a bare `Word`, every operator/number/punctuation/placeholder, and
+/// whitespace that is not a comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaskClass {
+    /// The token's byte span is blanked (non-SQL-structural name-bearing region).
+    Mask,
+    /// The token is left live (SQL structure / bare identifier — carries no
+    /// hidden name).
+    Live,
+}
+
+/// Whether `token`'s byte span must be blanked. Thin boolean adapter over
+/// [`classify_token`]; the exhaustiveness guarantee lives in that match.
+fn is_maskable_token(token: &Token) -> bool {
+    matches!(classify_token(token), MaskClass::Mask)
+}
+
+/// Classify every sqlparser [`Token`] as [`Mask`](MaskClass::Mask) (blank its
+/// byte span) or [`Live`](MaskClass::Live) (leave it in the live text).
+///
+/// ## Compile-time exhaustiveness (the dep-bump under-mask guard — cute-dbt#474)
+///
+/// This is a TOTAL `match` over `sqlparser::tokenizer::Token` with **NO
+/// wildcard arm**. Every structural / number / punctuation / operator token is
+/// classified [`Live`](MaskClass::Live) *explicitly*, never wildcard-defaulted.
+/// The consequence is the whole point of the refactor: a future sqlparser bump
+/// that adds a new `Token` variant — say a new string-literal form — makes this
+/// match non-exhaustive and FAILS THE BUILD, forcing the maintainer to classify
+/// the new variant by hand. The old `matches!(…)` with its implicit `_ => false`
+/// wildcard would have silently defaulted such a variant to [`Live`](MaskClass::Live),
+/// letting its interior leak as a live span — a FALSE ANCHOR that violates
+/// never-a-false-claim. With this match, that defaulting is a compile error, not
+/// a silent soundness hole. (The nested `Whitespace` match is total for the same
+/// reason — a new `Whitespace` variant also forces a classify decision.)
 ///
 /// ## Why quoted identifiers are masked (soundness)
 ///
@@ -477,36 +513,142 @@ fn mask_sql_tokens(jinja_masked: &str) -> String {
 /// direction; it can only ever DROP a (already-dropped) anchor, never fabricate
 /// one. An UNQUOTED `Word` (a real bare identifier) is left LIVE — that is the
 /// only `Word` form that carries a matchable name.
-fn is_maskable_token(token: &Token) -> bool {
-    if let Token::Word(w) = token {
-        // A quoted identifier is blanked (see doc); a bare identifier is live.
-        return w.quote_style.is_some();
-    }
-    matches!(
-        token,
+// The length is INTRINSIC and load-bearing: one explicit arm per `Token` variant
+// (no wildcard) is precisely the compile-time exhaustiveness guard this refactor
+// exists to install. Splitting the match to satisfy `too_many_lines` would
+// reintroduce a catch-all on one side and defeat the guard, so we allow the lint
+// at this single site rather than weaken the invariant.
+#[allow(clippy::too_many_lines)]
+fn classify_token(token: &Token) -> MaskClass {
+    use MaskClass::{Live, Mask};
+    match token {
+        // A quoted identifier is blanked (paren-balance soundness + behavior
+        // parity, see doc); a bare identifier is the only live `Word`.
+        Token::Word(w) => {
+            if w.quote_style.is_some() {
+                Mask
+            } else {
+                Live
+            }
+        }
+
+        // ── Mask: every string-literal form, every comment ──────────────────
         Token::SingleQuotedString(_)
-            | Token::DoubleQuotedString(_)
-            | Token::TripleSingleQuotedString(_)
-            | Token::TripleDoubleQuotedString(_)
-            | Token::DollarQuotedString(_)
-            | Token::SingleQuotedByteStringLiteral(_)
-            | Token::DoubleQuotedByteStringLiteral(_)
-            | Token::TripleSingleQuotedByteStringLiteral(_)
-            | Token::TripleDoubleQuotedByteStringLiteral(_)
-            | Token::SingleQuotedRawStringLiteral(_)
-            | Token::DoubleQuotedRawStringLiteral(_)
-            | Token::TripleSingleQuotedRawStringLiteral(_)
-            | Token::TripleDoubleQuotedRawStringLiteral(_)
-            | Token::NationalStringLiteral(_)
-            | Token::QuoteDelimitedStringLiteral(_)
-            | Token::NationalQuoteDelimitedStringLiteral(_)
-            | Token::EscapedStringLiteral(_)
-            | Token::UnicodeStringLiteral(_)
-            | Token::HexStringLiteral(_)
-            | Token::Whitespace(
-                Whitespace::SingleLineComment { .. } | Whitespace::MultiLineComment(_)
-            )
-    )
+        | Token::DoubleQuotedString(_)
+        | Token::TripleSingleQuotedString(_)
+        | Token::TripleDoubleQuotedString(_)
+        | Token::DollarQuotedString(_)
+        | Token::SingleQuotedByteStringLiteral(_)
+        | Token::DoubleQuotedByteStringLiteral(_)
+        | Token::TripleSingleQuotedByteStringLiteral(_)
+        | Token::TripleDoubleQuotedByteStringLiteral(_)
+        | Token::SingleQuotedRawStringLiteral(_)
+        | Token::DoubleQuotedRawStringLiteral(_)
+        | Token::TripleSingleQuotedRawStringLiteral(_)
+        | Token::TripleDoubleQuotedRawStringLiteral(_)
+        | Token::NationalStringLiteral(_)
+        | Token::QuoteDelimitedStringLiteral(_)
+        | Token::NationalQuoteDelimitedStringLiteral(_)
+        | Token::EscapedStringLiteral(_)
+        | Token::UnicodeStringLiteral(_)
+        | Token::HexStringLiteral(_) => Mask,
+
+        // Whitespace splits: comments are name-bearing regions (Mask); real
+        // whitespace is live SQL structure. Total match — a new `Whitespace`
+        // variant forces a classify decision here too.
+        Token::Whitespace(ws) => match ws {
+            Whitespace::SingleLineComment { .. } | Whitespace::MultiLineComment(_) => Mask,
+            Whitespace::Space | Whitespace::Newline | Whitespace::Tab => Live,
+        },
+
+        // ── Live: numbers, the EOF/Char lexer atoms, and every operator /
+        // punctuation token. NONE carries a hidden interior name; each is
+        // listed EXPLICITLY (no wildcard) so a new variant can't default here.
+        Token::EOF
+        | Token::Number(_, _)
+        | Token::Char(_)
+        | Token::Comma
+        | Token::DoubleEq
+        | Token::Eq
+        | Token::Neq
+        | Token::Lt
+        | Token::Gt
+        | Token::LtEq
+        | Token::GtEq
+        | Token::Spaceship
+        | Token::Plus
+        | Token::Minus
+        | Token::Mul
+        | Token::Div
+        | Token::DuckIntDiv
+        | Token::Mod
+        | Token::StringConcat
+        | Token::LParen
+        | Token::RParen
+        | Token::Period
+        | Token::Colon
+        | Token::DoubleColon
+        | Token::Assignment
+        | Token::SemiColon
+        | Token::Backslash
+        | Token::LBracket
+        | Token::RBracket
+        | Token::Ampersand
+        | Token::Pipe
+        | Token::Caret
+        | Token::LBrace
+        | Token::RBrace
+        | Token::RArrow
+        | Token::Sharp
+        | Token::DoubleSharp
+        | Token::Tilde
+        | Token::TildeAsterisk
+        | Token::ExclamationMarkTilde
+        | Token::ExclamationMarkTildeAsterisk
+        | Token::DoubleTilde
+        | Token::DoubleTildeAsterisk
+        | Token::ExclamationMarkDoubleTilde
+        | Token::ExclamationMarkDoubleTildeAsterisk
+        | Token::ShiftLeft
+        | Token::ShiftRight
+        | Token::Overlap
+        | Token::ExclamationMark
+        | Token::DoubleExclamationMark
+        | Token::AtSign
+        | Token::CaretAt
+        | Token::PGSquareRoot
+        | Token::PGCubeRoot
+        | Token::Placeholder(_)
+        | Token::Arrow
+        | Token::LongArrow
+        | Token::HashArrow
+        | Token::AtDashAt
+        | Token::QuestionMarkDash
+        | Token::AmpersandLeftAngleBracket
+        | Token::AmpersandRightAngleBracket
+        | Token::AmpersandLeftAngleBracketVerticalBar
+        | Token::VerticalBarAmpersandRightAngleBracket
+        | Token::TwoWayArrow
+        | Token::LeftAngleBracketCaret
+        | Token::RightAngleBracketCaret
+        | Token::QuestionMarkSharp
+        | Token::QuestionMarkDashVerticalBar
+        | Token::QuestionMarkDoubleVerticalBar
+        | Token::TildeEqual
+        | Token::ShiftLeftVerticalBar
+        | Token::VerticalBarShiftRight
+        | Token::VerticalBarRightAngleBracket
+        | Token::HashLongArrow
+        | Token::AtArrow
+        | Token::ArrowAt
+        | Token::HashMinus
+        | Token::AtQuestion
+        | Token::AtAt
+        | Token::Question
+        | Token::QuestionAnd
+        | Token::QuestionPipe
+        | Token::CustomBinaryOperator(_) => Live,
+    }
 }
 
 /// One lexically-explicit, unconditional raw CTE-to-CTE dependency
@@ -589,10 +731,21 @@ pub(crate) fn explicit_cte_edges(
             // Only a reference to ANOTHER verbatim raw CTE (a sound raw node) is
             // an edge — a self-reference, an external relation, or a name not in
             // the raw-CTE set is not emitted. (A CTE cannot depend on itself in
-            // standard SQL; the `to_id != referenced` guard makes that explicit.)
-            if &referenced != to_id && raw_cte_spans.contains_key(&referenced) {
+            // standard SQL; the self-reference guard inside the case-insensitive
+            // resolve makes that explicit.)
+            //
+            // CASE-FOLDING (cute-dbt#478): `referenced` is an UNQUOTED bare
+            // identifier (a quoted `"Base"` referent was blanked by `mask_regions`
+            // — see `classify_token` — so a quoted case-mismatch never reaches
+            // here, honoring dbt-ident quoting for free). dbt/warehouse fold
+            // unquoted identifier case, so `from Base` referencing `with base`
+            // is a genuine sibling reference and must resolve to the `base` key
+            // case-INSENSITIVELY. We resolve against the actual key so the edge's
+            // `from` carries the canonical CTE-name (the map key), not the
+            // referent's source casing.
+            if let Some(canonical) = resolve_sibling_cte(&referenced, to_id, raw_cte_spans) {
                 let edge = RawEdge {
-                    from: referenced,
+                    from: canonical,
                     to: to_id.clone(),
                 };
                 // De-dupe (a body may name the same sibling in both a FROM and a
@@ -613,14 +766,43 @@ fn position_in_any_span(pos: usize, spans: &[(usize, usize)]) -> bool {
     spans.iter().any(|&(start, end)| pos >= start && pos < end)
 }
 
+/// Resolve an unquoted `from`/`join` referent to the CANONICAL sibling-CTE name
+/// (the `raw_cte_spans` key) it references, or `None` if it is not a sibling
+/// (cute-dbt#478). `referent` is always an unquoted bare identifier — a quoted
+/// `"Base"` was blanked by `mask_regions` before this point — so we mirror
+/// dbt-ident's UNQUOTED-identifier semantics: case is folded
+/// (`Base` == `base` == `BASE`). The match is ASCII-case-insensitive against
+/// every key EXCEPT `self_id` (a CTE cannot reference itself in standard SQL).
+///
+/// NEVER-A-FALSE-EDGE (honesty principle 3): case-folding only ever resolves a
+/// referent whose folded form EQUALS a real sibling CTE key — it never invents a
+/// key, and a quoted referent (already masked away) never reaches here, so a
+/// quoted `"Base"` does NOT fold onto `base`. The returned `String` is the
+/// MAP KEY (canonical CTE-name), never the referent's source casing, so the
+/// emitted edge endpoint matches the node id the rest of the DAG uses.
+fn resolve_sibling_cte(
+    referent: &str,
+    self_id: &str,
+    raw_cte_spans: &std::collections::BTreeMap<String, SourceSpan>,
+) -> Option<String> {
+    raw_cte_spans
+        .keys()
+        .find(|key| key.as_str() != self_id && key.eq_ignore_ascii_case(referent))
+        .cloned()
+}
+
 /// Every identifier that immediately follows a whole-word `from` / `join`
 /// keyword in the masked CTE body `body` (cute-dbt#471, S3), paired with the
 /// referent's BYTE START in `body` (so the edge caller can map it to a raw
 /// coordinate and apply the control-block exclusion). The body is already masked
 /// (no strings/comments/Jinja), so every `from`/`join` here is a LIVE SQL keyword
 /// and every following word is a LIVE relation reference. ASCII case-insensitive
-/// keyword match; the referent is returned verbatim (the engine folds identifier
-/// case before the domain, so the comparison at the call site is exact).
+/// keyword match; the referent is returned verbatim in its SOURCE CASING (it is
+/// always an unquoted bare identifier — quoted referents were blanked by
+/// `mask_regions`). The call site folds case ASCII-case-insensitively against the
+/// raw-CTE keys (`resolve_sibling_cte`, cute-dbt#478) to mirror how dbt/the
+/// warehouse fold UNQUOTED identifier case — so `from Base` resolves to a `base`
+/// CTE while a quoted case-mismatch (already masked away) never matches.
 fn from_join_referents(body: &str) -> Vec<(String, usize)> {
     let bytes = body.as_bytes();
     let n = bytes.len();
@@ -1286,6 +1468,81 @@ mod tests {
         assert!(!masked.contains("customer_id"), "$tag$ body blanked");
         assert!(!masked.contains("other_id"), "$$ body blanked");
         assert!(masked.ends_with(" from raw"), "live SQL after survives");
+    }
+
+    /// GUARD INTENT (cute-dbt#474): `classify_token` is a TOTAL match over
+    /// `sqlparser::tokenizer::Token` with no wildcard arm, so a dep bump that
+    /// adds a new `Token` variant FAILS THE BUILD instead of silently defaulting
+    /// it to live (a potential false anchor). This test can't assert the compile
+    /// error itself, but it PINS the classification of one token from each class
+    /// so the behavior the guard protects is recorded — and so a maintainer who
+    /// reclassifies a variant while fixing a future non-exhaustive-match error
+    /// trips a red test if they get the Mask/Live direction wrong.
+    #[test]
+    fn classify_token_pins_mask_and_live_classes() {
+        use sqlparser::ast::DollarQuotedString;
+        use sqlparser::keywords::Keyword;
+        use sqlparser::tokenizer::Word;
+
+        let quoted_ident = Token::Word(Word {
+            value: "my col".to_owned(),
+            quote_style: Some('"'),
+            keyword: Keyword::NoKeyword,
+        });
+        let bare_ident = Token::Word(Word {
+            value: "customer_id".to_owned(),
+            quote_style: None,
+            keyword: Keyword::NoKeyword,
+        });
+
+        // Mask: every string-literal form, comments, and quoted identifiers.
+        for tok in [
+            Token::SingleQuotedString("x".to_owned()),
+            Token::DollarQuotedString(DollarQuotedString {
+                value: "x".to_owned(),
+                tag: None,
+            }),
+            Token::EscapedStringLiteral("x".to_owned()),
+            Token::UnicodeStringLiteral("x".to_owned()),
+            Token::NationalStringLiteral("x".to_owned()),
+            Token::HexStringLiteral("x".to_owned()),
+            Token::Whitespace(Whitespace::SingleLineComment {
+                comment: "c".to_owned(),
+                prefix: "--".to_owned(),
+            }),
+            Token::Whitespace(Whitespace::MultiLineComment("c".to_owned())),
+            quoted_ident,
+        ] {
+            assert_eq!(
+                classify_token(&tok),
+                MaskClass::Mask,
+                "{tok:?} must be masked (name-bearing region)"
+            );
+            assert!(is_maskable_token(&tok), "{tok:?} maskable");
+        }
+
+        // Live: bare identifier, numbers, real whitespace, structure/operators.
+        for tok in [
+            bare_ident,
+            Token::Number("42".to_owned(), false),
+            Token::Whitespace(Whitespace::Space),
+            Token::Whitespace(Whitespace::Newline),
+            Token::Whitespace(Whitespace::Tab),
+            Token::LParen,
+            Token::RParen,
+            Token::Comma,
+            Token::Period,
+            Token::Placeholder("$1".to_owned()),
+            Token::Eq,
+            Token::EOF,
+        ] {
+            assert_eq!(
+                classify_token(&tok),
+                MaskClass::Live,
+                "{tok:?} must stay live (carries no hidden name)"
+            );
+            assert!(!is_maskable_token(&tok), "{tok:?} not maskable");
+        }
     }
 
     #[test]
@@ -2227,6 +2484,114 @@ mod tests {
         assert!(
             edges.is_empty(),
             "a `from base` nested inside `{{% if %}}`→`{{% for %}}` is conditional ⇒ NO edge; got {edges:?}"
+        );
+    }
+
+    // ── cute-dbt#478: case-insensitive raw-DAG edge matching (quote-aware) ──────
+    // dbt/the warehouse fold UNQUOTED identifier case, so `from Base` referencing
+    // `with base` is a genuine sibling reference and must emit the edge. A QUOTED
+    // referent (`from "Base"`) preserves case (dbt-ident); it is blanked by
+    // `mask_regions` before the scan, so a quoted case-mismatch never matches —
+    // honoring quoting for free. The canonical edge endpoint is always the
+    // raw-CTE map key (`base`), never the referent's source casing.
+
+    #[test]
+    fn unquoted_from_mixed_case_resolves_to_lowercase_sibling() {
+        // `from Base` (mixed case) referencing `with base` ⇒ edge base→derived
+        // (unquoted identifier case folds). The edge endpoint is the key `base`.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from Base\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert_eq!(
+            edges,
+            vec![RawEdge {
+                from: "base".to_owned(),
+                to: "derived".to_owned()
+            }],
+            "unquoted `from Base` folds to the `base` CTE ⇒ one edge base→derived; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn unquoted_from_uppercase_resolves_to_lowercase_sibling() {
+        // `from BASE` (all caps) referencing `with base` ⇒ edge base→derived.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from BASE\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert_eq!(
+            edges,
+            vec![RawEdge {
+                from: "base".to_owned(),
+                to: "derived".to_owned()
+            }],
+            "unquoted `from BASE` folds to the `base` CTE ⇒ one edge base→derived; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn quoted_from_case_mismatch_emits_no_edge() {
+        // `from "Base"` (QUOTED, case-PRESERVING per dbt-ident) referencing a
+        // `with base` CTE is NOT a match — the quoted referent is blanked by
+        // `mask_regions`, so it never reaches the resolve. NO false edge.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from \"Base\"\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert!(
+            edges.is_empty(),
+            "a QUOTED `\"Base\"` is case-sensitive and does NOT match the `base` CTE ⇒ NO edge; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn unquoted_exact_case_still_emits_edge_regression() {
+        // REGRESSION GUARD: the common exact-case `from base` → `with base` path
+        // is unchanged by the case-fold (a top-level unquoted edge still works).
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from base\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert_eq!(
+            edges,
+            vec![RawEdge {
+                from: "base".to_owned(),
+                to: "derived".to_owned()
+            }],
+            "exact-case `from base` still emits base→derived; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn case_fold_never_fabricates_an_edge_for_an_unrelated_name() {
+        // A coincidental case-fold of an UNRELATED relation must NOT become an
+        // edge. `derived`'s only sibling reference is `from base`; `from EXTERNAL`
+        // (not a sibling CTE, despite caps) produces no edge — the case-fold only
+        // resolves a referent whose folded form equals a real sibling key.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from base\n  union all select id from EXTERNAL\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert_eq!(
+            edges,
+            vec![RawEdge {
+                from: "base".to_owned(),
+                to: "derived".to_owned()
+            }],
+            "only the real sibling `base` resolves; `EXTERNAL` is not folded into any CTE; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn case_fold_does_not_create_a_self_edge() {
+        // The self-reference guard is case-insensitive too: a `derived` body that
+        // names `from Derived` (own name, different case) must NOT self-edge.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from base\n  union all select 1 from Derived\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert_eq!(
+            edges,
+            vec![RawEdge {
+                from: "base".to_owned(),
+                to: "derived".to_owned()
+            }],
+            "a case-variant self-reference `from Derived` is not a self-edge; only base→derived; got {edges:?}"
         );
     }
 
