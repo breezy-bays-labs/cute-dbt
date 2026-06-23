@@ -506,15 +506,18 @@ impl CodeMapPayload {
 ///   appearance order). `presence` is the honest 3-state [`Presence`] verdict
 ///   (a pruned `is_incremental()` zone is `compiled_out`, NEVER `compiled_in`).
 ///
-/// ## `node_map.compiled` (N→1, `compiledId → rawId`, omit-on-ambiguous)
+/// ## `node_map.compiled` (N→1, `compiledId → rawId`, S2 = uniquely-locatable only)
 ///
-/// For each compiled DAG node id:
+/// For each compiled DAG node id, S2 maps ONLY the two origins it can locate
+/// UNAMBIGUOUSLY without a zone compiled-EXTENT:
 /// - A raw CTE node with the SAME id ⇒ map to it (the verbatim-CTE identity).
 /// - Else the WITH-less terminal ⇒ map to the synthesized terminal raw node.
-/// - Else fold by STRUCTURAL CONTAINMENT: the raw zone node whose COMPILED span
-///   uniquely contains this compiled node's span ⇒ map to that ONE zone (the
-///   `{% for %}`-fanned CTEs → the ONE template node). Zero or MULTIPLE
-///   containing zones ⇒ OMIT the key (never a guessed `rawId`).
+/// - Everything else (a `{% for %}`-fanned CTE, a macro-expanded CTE) has NO
+///   uniquely-locatable raw origin in S2 and is honestly OMITTED — never a
+///   guessed `rawId`. The observed fanned→zone mapping needs the zone's compiled
+///   EXTENT (a zone's `entry.compiled` is a single literal ANCHOR, not an
+///   extent — see `resolve_zone_compiled`), so it lands in S3 #471 alongside
+///   `node_map.raw`.
 fn build_raw_dag_and_node_map(
     sm: &SourceMap,
     node_spans: &BTreeMap<String, SourceSpan>,
@@ -550,38 +553,41 @@ fn build_raw_dag_and_node_map(
         });
     }
     // Zone raw nodes — id `zone:<index>` by appearance order; carry the honest
-    // 3-state presence + (compiled span, if any) for the structural fold below.
+    // 3-state presence. The zone's `entry.compiled` is a single literal ANCHOR
+    // (`resolve_zone_compiled`), NOT the zone's compiled EXTENT, so it cannot
+    // locate the separate fanned CTE bodies — S2 emits the zone NODE but folds
+    // nothing through it (the fanned→zone mapping is S3 #471, which needs the
+    // extent + `node_map.raw`).
     let cte_spans: Vec<SourceSpan> = node_spans.values().copied().collect();
-    let mut zone_compiled: Vec<(String, Option<SourceSpan>)> = Vec::new();
-    for entry in sm
+    for (zone_index, entry) in sm
         .entries
         .iter()
         .filter(|e| matches!(e.role, SpanRole::Zone { .. }))
+        .enumerate()
     {
-        let zone_id = format!("zone:{}", zone_compiled.len());
         nodes.push(RawDagNodePayload {
-            id: zone_id.clone(),
+            id: format!("zone:{zone_index}"),
             role: "zone",
             is_zone: true,
             presence: entry.presence(&cte_spans).to_wire(),
         });
-        zone_compiled.push((zone_id, entry.compiled));
     }
 
-    // node_map.compiled — fold each compiled DAG node back to its raw origin.
+    // node_map.compiled — fold each compiled DAG node back to the ONLY origins
+    // S2 can locate UNAMBIGUOUSLY: a verbatim CTE (same id) and the WITH-less
+    // terminal. A fanned/macro CTE has no uniquely-locatable raw origin here (a
+    // zone's `entry.compiled` is an anchor, not an extent), so it is honestly
+    // OMITTED — never a guessed rawId. The fanned→zone mapping lands in S3 #471.
     let mut compiled_map: BTreeMap<String, String> = BTreeMap::new();
-    for (compiled_id, compiled_span) in node_spans {
+    for compiled_id in node_spans.keys() {
         if raw_cte_ids.contains(compiled_id) {
             // Verbatim CTE identity: compiled id == raw id.
             compiled_map.insert(compiled_id.clone(), compiled_id.clone());
         } else if is_with_less && compiled_id == TERMINAL_NODE_NAME {
             // WITH-less terminal ⇒ the synthesized terminal raw node.
             compiled_map.insert(compiled_id.clone(), TERMINAL_NODE_NAME.to_owned());
-        } else if let Some(zone_id) = unique_containing_zone(&zone_compiled, compiled_span) {
-            // A fanned compiled CTE inside a {% for %} ⇒ the ONE template zone.
-            compiled_map.insert(compiled_id.clone(), zone_id);
         }
-        // No unique raw origin ⇒ OMIT (never a guessed rawId).
+        // No uniquely-locatable raw origin ⇒ OMIT (never a guessed rawId).
     }
 
     let raw_dag = (!nodes.is_empty()).then_some(RawDagPayload { nodes });
@@ -589,30 +595,6 @@ fn build_raw_dag_and_node_map(
         compiled: compiled_map,
     });
     (raw_dag, node_map)
-}
-
-/// The id of the ONE zone raw node whose COMPILED span strictly contains
-/// `compiled` (cute-dbt#470, S2). Returns `None` when zero or MULTIPLE zones
-/// contain it (ambiguous origin ⇒ omit — never a guessed rawId). A zone with no
-/// compiled span (`compiled_out`) can never contain a compiled node, so it is
-/// skipped. "Strictly contains" excludes a zone span EQUAL to the compiled node
-/// (an equal span is the node itself, not a containing template).
-fn unique_containing_zone(
-    zone_compiled: &[(String, Option<SourceSpan>)],
-    compiled: &SourceSpan,
-) -> Option<String> {
-    let mut hit: Option<&str> = None;
-    for (zone_id, zspan) in zone_compiled {
-        let Some(zspan) = zspan else { continue };
-        if zspan != compiled && zspan.contains_range(compiled) {
-            if hit.is_some() {
-                // A second containing zone ⇒ ambiguous ⇒ omit.
-                return None;
-            }
-            hit = Some(zone_id);
-        }
-    }
-    hit.map(str::to_owned)
 }
 
 /// Project the `SpanRole::Zone` entries of a [`SourceMap`] into
@@ -8428,22 +8410,33 @@ mod tests {
     }
 
     #[test]
-    fn fanned_compiled_nodes_map_to_one_template_zone() {
-        // A {% for %} loop fans out N compiled CTEs (us_sales, eu_sales) whose
-        // compiled spans are CONTAINED in the loop zone's compiled span. All N
-        // map back to the ONE template zone raw node (by structural containment).
+    fn fanned_cte_with_no_verbatim_raw_origin_is_omitted_in_s2() {
+        // A {% for %} loop fans out N compiled CTEs (us_sales, eu_sales) from a
+        // single `{{ region }}_sales` template. In S2 the zone's `entry.compiled`
+        // is a single literal ANCHOR (what `resolve_zone_compiled` produces — one
+        // ≥3-char fragment located unambiguously), NOT the zone's compiled
+        // EXTENT, so it cannot locate the separate fanned CTE bodies. The fanned
+        // CTEs therefore have NO uniquely-locatable raw origin in S2 and are
+        // honestly OMITTED from node_map.compiled (never mapped to a guessed
+        // zone) — while the ONE template zone is still emitted as a raw node with
+        // its honest presence. The observed fanned→zone mapping (which needs the
+        // zone compiled-EXTENT + node_map.raw) is S3 #471's job.
         let compiled = "with us_sales as (select 1), eu_sales as (select 2) select * from us_sales";
-        // The loop zone's compiled region covers BOTH fanned CTE bodies [0,51).
-        let zone_compiled = rs(0, 51);
         let us = rs(5, 27); // us_sales as (select 1)
         let eu = rs(29, 51); // eu_sales as (select 2)
         let term = rs(52, u32::try_from(compiled.len()).unwrap());
+        // A realistic anchor: the loop body's one unambiguous literal fragment
+        // resolved inside the first fanned CTE's body — strictly nested in the
+        // `us_sales` CteBody span, so its honest presence is `structural`. It is
+        // an ANCHOR, NOT the loop's extent: it does NOT cover the `eu_sales` body.
+        let zone_anchor = rs(18, 26); // "select 1" — a literal fragment inside us_sales
         let sm = SourceMap {
             compiled: compiled.to_owned(),
             entries: vec![
                 // The fanned CTEs carry NO raw span (no verbatim per-iteration
                 // name in raw — they came from `{{ region }}_sales`), so they are
-                // NOT raw CTE nodes; they fold via the zone instead.
+                // NOT raw CTE nodes. With only an anchor (not an extent) for the
+                // zone, S2 cannot locate them ⇒ omitted.
                 SourceMapEntry {
                     role: SpanRole::CteBody {
                         node_id: "us_sales".to_owned(),
@@ -8465,35 +8458,38 @@ mod tests {
                     raw: None,
                     compiled: Some(term),
                 },
-                // The ONE template zone (the {% for %} loop), compiling IN.
+                // The ONE template zone (the {% for %} loop). Its compiled span
+                // is the resolved literal anchor, NOT the loop's extent.
                 SourceMapEntry {
                     role: SpanRole::Zone {
                         kind: ZoneKind::ForLoop,
                     },
                     raw: Some(rs(0, 4)),
-                    compiled: Some(zone_compiled),
+                    compiled: Some(zone_anchor),
                 },
             ],
         };
         let payload = CodeMapPayload::from_source_map(&sm);
-        let node_map = payload.node_map.expect("node_map present");
-        // Both fanned CTEs map back to the SAME one template zone (zone:0).
-        assert_eq!(
-            node_map.compiled.get("us_sales").map(String::as_str),
-            Some("zone:0"),
-            "us_sales folds to the ONE template zone"
+        // The fanned CTEs are OMITTED — never mapped (no uniquely-locatable raw
+        // origin in S2). The terminal is WITH-bearing (CTEs exist) so it is also
+        // omitted, leaving node_map.compiled empty ⇒ the whole key is omitted.
+        assert!(
+            payload.node_map.is_none(),
+            "fanned CTEs + a WITH-bearing terminal have no uniquely-locatable raw \
+             origin in S2 ⇒ node_map omitted (the fanned→zone mapping is S3 #471)"
         );
-        assert_eq!(
-            node_map.compiled.get("eu_sales").map(String::as_str),
-            Some("zone:0"),
-            "eu_sales folds to the SAME one template zone"
-        );
-        // There is exactly one zone raw node (the template), never N.
-        let raw_dag = payload.raw_dag.expect("raw_dag present");
+        // The ONE template zone is still emitted as a raw node with its honest
+        // presence — the zone node lands in S2; only its fold target is deferred.
+        let raw_dag = payload.raw_dag.expect("raw_dag present (the zone node)");
         let zone_nodes: Vec<_> = raw_dag.nodes.iter().filter(|n| n.is_zone).collect();
         assert_eq!(zone_nodes.len(), 1, "the fanned loop is ONE template node");
         assert_eq!(zone_nodes[0].id, "zone:0");
         assert_eq!(zone_nodes[0].role, "zone");
+        assert_eq!(
+            zone_nodes[0].presence, "structural",
+            "the zone's anchor is strictly nested inside the us_sales CteBody ⇒ \
+             structural (the honest 3-state presence verdict)"
+        );
     }
 
     #[test]
@@ -8531,57 +8527,6 @@ mod tests {
         assert!(
             payload.node_map.is_none(),
             "no unique raw origin for any compiled node ⇒ node_map omitted (never guessed)"
-        );
-    }
-
-    #[test]
-    fn ambiguous_two_containing_zones_omits_the_key() {
-        // A compiled node contained by TWO zones (e.g. nested loops whose
-        // compiled spans both contain it) has an ambiguous origin ⇒ OMIT
-        // (never pick one). Same omit-on-ambiguous posture as the raw-span fold.
-        let compiled = "with x as (select 1) select * from x";
-        let inner = rs(5, 20);
-        let sm = SourceMap {
-            compiled: compiled.to_owned(),
-            entries: vec![
-                SourceMapEntry {
-                    role: SpanRole::CteBody {
-                        node_id: "x".to_owned(),
-                    },
-                    raw: None,
-                    compiled: Some(inner),
-                },
-                SourceMapEntry {
-                    role: SpanRole::CteBody {
-                        node_id: TERMINAL_NODE_NAME.to_owned(),
-                    },
-                    raw: None,
-                    compiled: Some(rs(21, 36)),
-                },
-                // Two zones BOTH containing `x`'s compiled span [5,20).
-                SourceMapEntry {
-                    role: SpanRole::Zone {
-                        kind: ZoneKind::ForLoop,
-                    },
-                    raw: Some(rs(0, 3)),
-                    compiled: Some(rs(0, 36)),
-                },
-                SourceMapEntry {
-                    role: SpanRole::Zone {
-                        kind: ZoneKind::IncrementalGuard,
-                    },
-                    raw: Some(rs(3, 6)),
-                    compiled: Some(rs(4, 30)),
-                },
-            ],
-        };
-        let payload = CodeMapPayload::from_source_map(&sm);
-        let node_map = payload
-            .node_map
-            .expect("node_map present (terminal zone-less)");
-        assert!(
-            !node_map.compiled.contains_key("x"),
-            "two containing zones ⇒ ambiguous origin ⇒ omit (never pick one)"
         );
     }
 
