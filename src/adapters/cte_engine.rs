@@ -663,11 +663,30 @@ fn walk_derived_refs(expr: &Expr, depth: u32, out: &mut DerivedRefs) {
                 column: ident.value.to_ascii_lowercase(),
             });
         }
-        // An `EXISTS`/`IN`-subquery is a shape we do NOT attribute
-        // semantically — a complexity signal that trips the cap (degrade to
-        // Ambiguous) rather than silently claim full resolution. Refs already
-        // seen are kept (honest absence, never a silent total drop).
-        Expr::Exists { .. } | Expr::InSubquery { .. } => {
+        // An `EXISTS`/`IN`-subquery, OR a SCALAR `(SELECT …)` projection
+        // subquery, is a shape we do NOT attribute semantically — a
+        // complexity signal that trips the cap (degrade to Ambiguous) rather
+        // than silently claim full resolution. Refs already seen are kept
+        // (honest absence, never a silent total drop).
+        //
+        // A scalar `Expr::Subquery` is the load-bearing case (cute-dbt#449,
+        // CodeRabbit/verifier): its value comes from ANOTHER relation through
+        // the subquery — an honestly UNKNOWN intra-model source, NOT an input
+        // the projection reads. Descending its body (its correlated `WHERE` or
+        // its inner projection) would FABRICATE provenance: it would emit a
+        // Resolved edge from a PREDICATE column (`p.order_id`, never the value
+        // column `p.paid_at`) attributed to a PHANTOM relation that is not an
+        // intra-model DAG node. So we treat it EXACTLY like EXISTS/IN — never
+        // collect any of its internals. A pure-subquery projection
+        // (`(SELECT …) AS m`) thus yields NO intra-model Derived edge (Opaque /
+        // honest absence); a mixed projection (`coalesce(a.x, (SELECT …))`)
+        // trips the cap, degrading every produced edge — fanned out from ONLY
+        // the other top-level visible refs (`a.x`) — to Ambiguous. The
+        // correlation walker ([`collect_qualified_refs`]) still descends
+        // `Expr::Subquery` for its own (different) outer-correlation purpose;
+        // only THIS projection-provenance walker caps it. Cross-model trace
+        // into the inner relation is CLL-4 (#450).
+        Expr::Exists { .. } | Expr::InSubquery { .. } | Expr::Subquery(_) => {
             out.capped = true;
         }
         // Every other shape descends over its shared child set (the SAME
@@ -1325,10 +1344,17 @@ fn collect_qualified_refs(expr: &Expr, refs: &mut Vec<(String, String)>) {
 /// SINGLE place that knows the predicate/expression shapes cute-dbt models
 /// (AND/OR trees, comparisons, IS \[NOT\] NULL, BETWEEN, IN lists, LIKE,
 /// CAST, parens, unary NOT) plus, since CLL-3 (cute-dbt#449),
-/// `Function` args, `Case` branches, and a scalar `Subquery`'s correlated
-/// `WHERE`. Sharing this between [`collect_qualified_refs`] and
-/// [`walk_derived_refs`] keeps the two walkers thin (one descent shape,
-/// not two) and fully exercised. `Identifier` / `CompoundIdentifier` leaves
+/// `Function` args, `Case` branches, the special-syntax exprs sqlparser
+/// models as their own variants rather than `Expr::Function`
+/// (`Extract`/`Ceil`/`Floor`/`Convert`/`Collate`/`Substring`/`Trim`/
+/// `Position`/`Overlay`), and a scalar `Subquery`'s correlated `WHERE`.
+/// Sharing this between [`collect_qualified_refs`] and [`walk_derived_refs`]
+/// keeps the two walkers thin (one descent shape, not two) and fully
+/// exercised — EXCEPT the `Subquery` arm, which only the correlation walker
+/// reaches: [`walk_derived_refs`] short-circuits `Expr::Subquery` as a cap
+/// signal BEFORE calling this (a scalar subquery is not an intra-model
+/// input — descending it would fabricate provenance; see that walker).
+/// `Identifier` / `CompoundIdentifier` leaves
 /// have NO children — the callers handle them. Unknown variants yield no
 /// children: silence, never misclassification.
 fn expr_children(expr: &Expr) -> Vec<&Expr> {
@@ -1338,7 +1364,20 @@ fn expr_children(expr: &Expr) -> Vec<&Expr> {
         | Expr::Nested(inner)
         | Expr::IsNull(inner)
         | Expr::IsNotNull(inner)
-        | Expr::Cast { expr: inner, .. } => vec![inner],
+        | Expr::Cast { expr: inner, .. }
+        // Special-syntax single-operand exprs (cute-dbt#449,
+        // CodeRabbit/verifier): sqlparser models `extract(field FROM a.x)`,
+        // `ceil(a.x)`, `floor(a.x)`, `convert(a.x, …)`, and `a.x COLLATE c`
+        // as DISTINCT `Expr` variants rather than `Expr::Function`, so their
+        // operand refs were silently dropped. Descending them collects the
+        // operand (honest-direction — ADDS a correct `Derived` edge, never
+        // fabricates one). The non-`Expr` fields (datetime field, target
+        // type, collation name) carry no column refs.
+        | Expr::Extract { expr: inner, .. }
+        | Expr::Ceil { expr: inner, .. }
+        | Expr::Floor { expr: inner, .. }
+        | Expr::Convert { expr: inner, .. }
+        | Expr::Collate { expr: inner, .. } => vec![inner],
         Expr::Between {
             expr: inner,
             low,
@@ -1362,6 +1401,49 @@ fn expr_children(expr: &Expr) -> Vec<&Expr> {
             pattern,
             ..
         } => vec![inner, pattern],
+        // Multi-operand special-syntax exprs (cute-dbt#449,
+        // CodeRabbit/verifier): `substring(a.x FROM b.lo FOR b.len)`,
+        // `trim(b.ch FROM a.x)`, `position(a.x IN b.hay)`,
+        // `overlay(a.x PLACING b.p FROM b.f)`. Each is its OWN `Expr`
+        // variant (not `Expr::Function`), so every column operand was
+        // dropped. Collect ALL the `Expr`-typed operands (the `Option`
+        // ones only when present). Honest-direction: ADDS correct
+        // `Derived` edges, never fabricates one.
+        Expr::Substring {
+            expr: inner,
+            substring_from,
+            substring_for,
+            ..
+        } => {
+            let mut out = vec![inner.as_ref()];
+            out.extend(substring_from.as_deref());
+            out.extend(substring_for.as_deref());
+            out
+        }
+        Expr::Trim {
+            expr: inner,
+            trim_what,
+            trim_characters,
+            ..
+        } => {
+            let mut out = vec![inner.as_ref()];
+            out.extend(trim_what.as_deref());
+            if let Some(chars) = trim_characters {
+                out.extend(chars.iter());
+            }
+            out
+        }
+        Expr::Position { expr: inner, r#in } => vec![inner, r#in],
+        Expr::Overlay {
+            expr: inner,
+            overlay_what,
+            overlay_from,
+            overlay_for,
+        } => {
+            let mut out = vec![inner.as_ref(), overlay_what.as_ref(), overlay_from.as_ref()];
+            out.extend(overlay_for.as_deref());
+            out
+        }
         Expr::Function(func) => function_arg_exprs(func),
         Expr::Case {
             operand,
@@ -3681,29 +3763,198 @@ mod tests {
     }
 
     #[test]
-    fn column_lineage_derived_subquery_conservative_outer_ref() {
-        // A scalar correlated subquery: the OUTER ref it can see (a.id) is
-        // collected conservatively. The walker descends Expr::Subquery's
-        // body WHERE; inner-only refs are not mistaken for outer inputs.
+    fn column_lineage_derived_pure_scalar_subquery_emits_no_fabricated_edge() {
+        // cute-dbt#449 (CodeRabbit/verifier) — the DECISIVE honesty fix. A
+        // projection that is JUST a scalar correlated subquery
+        // (`(SELECT … WHERE p.k = o.id) AS m`) has its value come from ANOTHER
+        // relation through the subquery — an honestly UNKNOWN intra-model
+        // source, NOT an input this model reads. The OLD code descended the
+        // subquery's WHERE and emitted a Resolved edge from the PREDICATE
+        // column (`a.id`/`b.aid`), never the value column (`b.amt`), against a
+        // relation that is not even an intra-model DAG node — a false claim on
+        // BOTH prongs (wrong column + phantom source). The cap fix makes a pure
+        // subquery a complexity signal (like EXISTS/IN): NO intra-model Derived
+        // edge at all (Opaque / honest absence). Cross-model trace is CLL-4.
         let g = graph(
             "WITH a AS (SELECT 1 AS id), b AS (SELECT 2 AS aid, 3 AS amt) \
              SELECT (SELECT max(b.amt) FROM b WHERE b.aid = a.id) AS m FROM a",
         );
-        let from: std::collections::BTreeSet<_> = edges_to(&g, TERMINAL_NODE_NAME, "m")
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "m");
+        // No fabricated source: never the predicate col, never any inner col.
+        let from: std::collections::BTreeSet<_> = edges
             .iter()
             .map(|&e| (source_node(e), e.from_col.column.clone()))
             .collect();
-        // a.id is the outer correlation ref; it is collected (never dropped).
         assert!(
-            from.contains(&("a".to_owned(), "id".to_owned())),
-            "the correlated outer ref a.id is collected: {from:?}"
+            !from.contains(&("a".to_owned(), "id".to_owned())),
+            "the predicate col a.id must NOT be fabricated as a value source: {from:?}"
         );
         assert!(
-            edges_to(&g, TERMINAL_NODE_NAME, "m")
+            from.iter().all(|(node, _)| node != "b"),
+            "no inner-relation (b.*) col is fabricated as an intra-model source: {from:?}"
+        );
+        // A pure-subquery projection yields no intra-model Derived edge at all
+        // (its source is honestly unknown — never a fabricated Resolved).
+        assert!(
+            edges.is_empty(),
+            "a pure scalar-subquery projection has no fabricated intra-model edge: {:?}",
+            edges
                 .iter()
-                .all(|e| e.kind == ColumnEdgeKind::Derived),
-            "a subquery-bearing projection is Derived"
+                .map(|e| (source_node(e), e.from_col.column.clone(), e.confidence))
+                .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn column_lineage_derived_subquery_verifier_repro_last_paid() {
+        // The verifier's EXACT first repro. `last_paid` is a pure scalar
+        // subquery over `raw_pay p` (not an intra-model DAG node). NO edge with
+        // a `p.*` source (neither the predicate `p.order_id` nor the value
+        // `p.paid_at`), and NO Resolved edge for `last_paid` from a non-DAG
+        // node — its intra-model source is honestly unknown.
+        let g = graph(
+            "WITH orders AS (SELECT id, amount FROM raw_orders) \
+             SELECT o.id AS id, \
+                    (SELECT max(p.paid_at) FROM raw_pay p WHERE p.order_id = o.id) AS last_paid \
+             FROM orders o",
+        );
+        let last_paid = edges_to(&g, TERMINAL_NODE_NAME, "last_paid");
+        assert!(
+            last_paid
+                .iter()
+                .all(|e| source_node(e) != "p" && source_node(e) != "raw_pay"),
+            "no p.*/raw_pay source is fabricated for last_paid: {:?}",
+            last_paid
+                .iter()
+                .map(|&e| (source_node(e), e.from_col.column.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !last_paid
+                .iter()
+                .any(|e| e.confidence == ColumnEdgeConfidence::Resolved),
+            "last_paid carries no Resolved edge from a non-DAG node: {:?}",
+            last_paid.iter().map(|e| e.confidence).collect::<Vec<_>>()
+        );
+        // The direct sibling column `id` is unaffected (still resolves).
+        let id_edges = edges_to(&g, TERMINAL_NODE_NAME, "id");
+        assert!(
+            id_edges
+                .iter()
+                .any(|&e| source_node(e) == "orders" && e.from_col.column == "id"),
+            "the plain sibling column o.id still resolves through `orders`: {:?}",
+            id_edges
+                .iter()
+                .map(|&e| (source_node(e), e.from_col.column.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_subquery_verifier_repro_no_phantom_inner_refs() {
+        // The verifier's second repro: a scalar subquery whose WHERE references
+        // ONLY its own inner relation (`b.x = b.y`, no outer correlation). The
+        // OLD code would still descend and fabricate `b.x`/`b.y` edges; the cap
+        // emits none. (`m` is a pure subquery ⇒ no intra-model edge.)
+        let g = graph("SELECT (SELECT max(b.z) FROM t2 b WHERE b.x = b.y) AS m FROM t1 a");
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "m");
+        assert!(
+            edges
+                .iter()
+                .all(|e| source_node(e) != "b" && source_node(e) != "t2"),
+            "no fabricated b.x/b.y/b.z inner refs: {:?}",
+            edges
+                .iter()
+                .map(|&e| (source_node(e), e.from_col.column.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_mixed_subquery_degrades_visible_ref_to_ambiguous() {
+        // The mixed case: `coalesce(a.x, (SELECT …)) AS z` over a SOLE/known
+        // source. The top-level visible ref `a.x` IS collected, but the scalar
+        // subquery trips the cap, so `a.x` degrades to Ambiguous — never a
+        // Resolved fabrication, and NONE of the subquery's internals (`b.*`)
+        // are collected.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x, 2 AS k), b AS (SELECT 3 AS z, 4 AS k) \
+             SELECT coalesce(a.x, (SELECT max(b.z) FROM b WHERE b.k = a.k)) AS z FROM a",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "z");
+        // a.x is present (visible top-level ref, never dropped)…
+        assert!(
+            edges
+                .iter()
+                .any(|&e| source_node(e) == "a" && e.from_col.column == "x"),
+            "the visible top-level ref a.x is collected: {:?}",
+            edges
+                .iter()
+                .map(|&e| (source_node(e), e.from_col.column.clone()))
+                .collect::<Vec<_>>()
+        );
+        // …but degraded to Ambiguous by the subquery cap (never Resolved).
+        assert!(
+            edges
+                .iter()
+                .all(|e| e.confidence == ColumnEdgeConfidence::Ambiguous),
+            "the subquery cap degrades every edge to Ambiguous, never a \
+             fabricated Resolved: {:?}",
+            edges.iter().map(|e| e.confidence).collect::<Vec<_>>()
+        );
+        // No subquery internals (b.z / b.k) are ever collected.
+        assert!(
+            edges.iter().all(|e| source_node(e) != "b"),
+            "the subquery's inner refs (b.*) are never collected: {:?}",
+            edges
+                .iter()
+                .map(|&e| (source_node(e), e.from_col.column.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_special_syntax_exprs_collect_operand() {
+        // cute-dbt#449 (CodeRabbit/verifier) — the SECONDARY honest-direction
+        // fix. sqlparser models `substring`/`trim`/`extract`/`position` as
+        // DISTINCT `Expr` variants (not `Expr::Function`), so their operand
+        // refs were silently dropped (no edge). Now each descends, collecting
+        // its column operand as a `Derived` edge. Single-source ⇒ Resolved.
+        let cases = [
+            ("substring(a.x FROM 1 FOR 3)", "y"),
+            ("trim(a.x)", "y"),
+            ("extract(year FROM a.x)", "y"),
+            ("position('z' IN a.x)", "y"),
+            // OVERLAY parses to its OWN `Expr::Overlay` variant; the target
+            // operand a.x is collected (kills the `delete Expr::Overlay arm`
+            // mutant in `expr_children`).
+            ("overlay(a.x PLACING 'q' FROM 2)", "y"),
+        ];
+        for (proj, out_col) in cases {
+            let sql = format!("WITH a AS (SELECT 1 AS x) SELECT {proj} AS {out_col} FROM a");
+            let g = graph(&sql);
+            let edges = edges_to(&g, TERMINAL_NODE_NAME, out_col);
+            assert!(
+                edges
+                    .iter()
+                    .any(|&e| source_node(e) == "a" && e.from_col.column == "x"),
+                "`{proj}` must collect the operand a.x as a Derived edge: {:?}",
+                edges
+                    .iter()
+                    .map(|&e| (source_node(e), e.from_col.column.clone()))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                edges.iter().all(|e| e.kind == ColumnEdgeKind::Derived),
+                "`{proj}` is a Derived projection"
+            );
+            assert!(
+                edges
+                    .iter()
+                    .all(|e| e.confidence == ColumnEdgeConfidence::Resolved),
+                "`{proj}`'s single-source operand is Resolved"
+            );
+        }
     }
 
     #[test]
