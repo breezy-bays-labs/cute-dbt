@@ -1374,13 +1374,18 @@ fn loc_to_pos(loc: Location, byte: usize) -> SourcePos {
 /// `line` and `column` are 1-indexed per sqlparser's convention.
 /// Columns are character indices (codepoints), not byte indices —
 /// matters whenever a SQL comment carries non-ASCII text.
-struct ByteIndex {
+///
+/// `pub(crate)` so the raw-source scanner (`raw_scan`) can convert the
+/// tokenizer's `Location` line/col endpoints to byte offsets with the SAME
+/// helper the compiled side uses — one shared line/col↔byte convention, no
+/// divergence (cute-dbt#473).
+pub(crate) struct ByteIndex {
     /// `line_starts[i]` = byte offset of the start of line `i + 1`.
     line_starts: Vec<usize>,
 }
 
 impl ByteIndex {
-    fn new(sql: &str) -> Self {
+    pub(crate) fn new(sql: &str) -> Self {
         let mut line_starts = Vec::with_capacity(sql.bytes().filter(|&b| b == b'\n').count() + 1);
         line_starts.push(0);
         for (i, byte) in sql.bytes().enumerate() {
@@ -1395,7 +1400,7 @@ impl ByteIndex {
     /// (`Location(line, col + 1)` where `col` is the last character),
     /// this returns the byte immediately past the span — slice it as
     /// `sql[start..end]` directly.
-    fn byte_of(&self, sql: &str, loc: Location) -> usize {
+    pub(crate) fn byte_of(&self, sql: &str, loc: Location) -> usize {
         if loc.line == 0 {
             return 0;
         }
