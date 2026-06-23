@@ -11,13 +11,18 @@
 //! NORTH STAR — never-a-false-claim. A raw span is emitted ONLY when the
 //! CTE/column name resolves to EXACTLY ONE lexical anchor in the **masked** raw
 //! text. Zero or multiple matches ⇒ the key is OMITTED (an unanchored region is
-//! never a picked offset). The mask (offset-preserving) blanks BOTH every
-//! `{%…%}` / `{{…}}` / `{#…#}` Jinja region AND every SQL comment (`--`-to-EOL,
-//! `/* … */`), so a name that only appears INSIDE Jinja OR inside a SQL comment
-//! is never matched or anchored (a CTE/column name living in commented-out code
-//! is NOT a live definition — anchoring to it would be a false claim,
-//! cute-dbt#469). Malformed/unbalanced Jinja ⇒ the model emits NOTHING
-//! (fail-closed, mirroring `locate_raw_zones`).
+//! never a picked offset). The mask (offset-preserving) blanks EVERY non-SQL-
+//! structural lexical region — every `{%…%}` / `{{…}}` / `{#…#}` Jinja region,
+//! every SQL comment (`--`-to-EOL, `/* … */`), every SQL **string literal**
+//! (`'…'`, doubled-`''` escape), every **quoted identifier** (`"…"`, doubled-`""`
+//! escape), and every duckdb **dollar-quoted string** (`$tag$…$tag$` / `$$…$$`).
+//! After masking, the match / definition-site / boundary layers see ONLY live SQL
+//! structure, so a CTE/column name that appears solely INSIDE Jinja, a comment, a
+//! string literal, a quoted identifier, or a dollar-quoted string can never be
+//! matched or anchored (a name living in any of those is NOT a live definition —
+//! anchoring to it would be a false claim, cute-dbt#469). The complete lexical-
+//! region exhaustiveness argument is in `mask_regions`. Malformed/unbalanced
+//! Jinja ⇒ the model emits NOTHING (fail-closed, mirroring `locate_raw_zones`).
 //!
 //! The mask is for MATCHING + boundary-finding ONLY: the final emitted SPAN is
 //! still over the ORIGINAL raw bytes (a string literal or comment INSIDE a live
@@ -178,88 +183,91 @@ fn skip_ws(bytes: &[u8], from: usize) -> usize {
 /// Balance parentheses starting at the opener `open` (a `(`); return the byte
 /// index PAST the matching `)`. `None` if unbalanced before EOF (fail-closed).
 ///
-/// Operates on `mask_regions` output, so Jinja regions AND SQL comments are
-/// already blanked to spaces — a stray `'`/`)`/`(` inside a `--` / `/* */`
-/// comment (e.g. the `dim_date` golden's `-- new year's day`) carries no quote or
-/// paren and cannot desync the scan. The only remaining lexical layer is the
-/// **live SQL string literal**, which IS preserved in the mask (strings inside a
-/// CTE body stay part of the body), so paren counting stays string-aware here:
-///
-/// - A stray `)` inside a quoted string (e.g. `select ')' as x`) does NOT close
-///   the CTE body early — the span is CORRECT and complete, never truncated
-///   mid-literal. The SQL doubled-quote escape is honoured: a `''` inside a `'…'`
-///   string (or `""` inside a `"…"` string) stays in-string (the doubled quote is
-///   an escaped quote char, not a close-then-reopen).
-///
-/// With Jinja + comments masked and live strings tracked, paren counting over
-/// the remaining live SQL is sound.
+/// Operates on `mask_regions` output, where EVERY non-SQL-structural lexical
+/// region is already blanked to spaces — Jinja, SQL comments, **string literals**
+/// (`'…'`), **quoted identifiers** (`"…"`), and **dollar-quoted strings**. So a
+/// stray `(`/`)` inside ANY of those (e.g. `select ')' as x`, the `dim_date`
+/// golden's `-- new year's day`, a `/* don't ) */` block) carries no live paren
+/// and cannot desync the scan. The only `(`/`)` bytes that survive masking are
+/// **live SQL parens**, so a plain depth count over the masked text is sound —
+/// `balanced_close` no longer needs its own string-literal-awareness (that layer
+/// moved up into [`mask_regions`], the single place the escape logic lives).
 fn balanced_close(masked: &str, open: usize) -> Option<usize> {
     let bytes = masked.as_bytes();
     let n = bytes.len();
     let mut depth = 0usize;
     let mut i = open;
-    let mut quote: Option<u8> = None;
     while i < n {
-        let b = bytes[i];
-        match quote {
-            Some(q) => {
-                if b == q {
-                    // A doubled quote (`''` / `""`) is an escaped quote that
-                    // stays in-string: consume both and remain quoted.
-                    if i + 1 < n && bytes[i + 1] == q {
-                        i += 1;
-                    } else {
-                        quote = None;
-                    }
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                // Fail-closed on an unbalanced `)` at depth 0 (a `)` with no
+                // matching `(`): `checked_sub` returns `None` rather than
+                // usize-underflow-panicking (cute-dbt#469 robustness nit).
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(i + 1);
                 }
             }
-            None => match b {
-                b'\'' | b'"' => quote = Some(b),
-                b'(' => depth += 1,
-                b')' => {
-                    // Fail-closed on an unbalanced `)` at depth 0 (a `)` with no
-                    // matching `(`): `checked_sub` returns `None` rather than
-                    // usize-underflow-panicking (cute-dbt#469 robustness nit).
-                    depth = depth.checked_sub(1)?;
-                    if depth == 0 {
-                        return Some(i + 1);
-                    }
-                }
-                _ => {}
-            },
+            _ => {}
         }
         i += 1;
     }
     None
 }
 
-/// Return a copy of `raw` with every Jinja region — `{%…%}` block tags,
-/// `{{…}}` variable tags, `{#…#}` comments — AND every SQL comment (`--`-to-EOL
-/// line comments, `/* … */` block comments) replaced by spaces, BYTE-FOR-BYTE
-/// (offsets preserved, so a span over the masked text indexes the same region of
-/// the original `raw`). Returns `None` on a malformed/unterminated Jinja region
-/// (fail-closed — mirrors `scan_block_tags`).
+/// Return a copy of `raw` with EVERY non-SQL-structural lexical region replaced
+/// by spaces, BYTE-FOR-BYTE (offsets preserved, so a span over the masked text
+/// indexes the same region of the original `raw`). Returns `None` on a
+/// malformed/unterminated Jinja region (fail-closed — mirrors `scan_block_tags`).
 ///
 /// Masking (not deletion) is the load-bearing honesty primitive: a CTE/column
-/// name that only appears INSIDE a Jinja region OR inside a SQL comment is
-/// blanked out, so it can never be matched as a verbatim raw anchor OR a
-/// `name AS (` definition site — a name in commented-out code is not a live
-/// definition (never-a-false-claim, cute-dbt#469).
+/// name that only appears INSIDE one of these regions is blanked out, so it can
+/// never be matched as a verbatim raw anchor OR a `name AS (` definition site — a
+/// name in commented-out code, a string literal, or a templated region is not a
+/// live definition (never-a-false-claim, cute-dbt#469).
+///
+/// ## Lexical-region exhaustiveness (the never-a-false-claim argument)
+///
+/// A name can falsely hide in EXACTLY these region kinds in the duckdb-SQL + Jinja
+/// grammar a `raw_code` model body draws from. Each is masked here, so after this
+/// pass the only bytes a name can match against are LIVE SQL structure:
+///
+/// | Region kind | Opener | Closer | In-region escape | Masked by |
+/// |---|---|---|---|---|
+/// | Jinja variable tag | `{{` | `}}` | backslash `\'` | `render::find_expr_close` |
+/// | Jinja block tag | `{%` | `%}` | backslash `\'` | `render::find_expr_close` |
+/// | Jinja comment | `{#` | `#}` | — | `render::find_close` |
+/// | SQL line comment | `--` | newline / EOF | — | inline scan |
+/// | SQL block comment | `/*` | `*/` / EOF | — | inline scan |
+/// | SQL string literal | `'` | `'` | doubled `''` | `scan_sql_quoted` |
+/// | SQL quoted identifier | `"` | `"` | doubled `""` | `scan_sql_quoted` |
+/// | Dollar-quoted string | `$tag$` / `$$` | matching `$tag$` | — (no escapes) | `scan_dollar_quote` |
+///
+/// Dollar-quoted strings ARE in scope: duckdb accepts PostgreSQL-style
+/// `$tag$…$tag$` / `$$…$$` string constants in a SELECT body, so a name inside one
+/// must not anchor. They are masked here. (If a `$`-run is NOT a well-formed
+/// dollar-quote opener — e.g. a lone `$` or `$1` positional param — it is left
+/// live and advanced over one byte; it is not a region opener, so it cannot hide
+/// a name.)
 ///
 /// The Jinja close-finders are render.rs's vetted scanners
 /// (`render::find_close` / `render::find_expr_close`), so the raw-span path and
 /// the zone path (`scan_block_tags`) agree on Jinja boundaries — including the
 /// backslash string-escape — on the SAME model (one shared implementation, no
-/// divergence).
+/// divergence). The SQL doubled-quote escape logic lives in ONE place
+/// (`scan_sql_quoted`).
 ///
-/// **Precedence.** A SQL comment opener (`--`/`/*`) is only honoured OUTSIDE a
-/// Jinja region (the Jinja regions are consumed first); conversely a `{`-opener
-/// is only honoured outside a SQL comment. This mirrors a lexer's single forward
-/// pass — whichever opener is reached first claims its region.
+/// **Precedence — a single forward pass.** From a LIVE state, whichever opener is
+/// reached first claims its region; the scanner resumes at that region's end.
+/// A `--` inside a string is already consumed (inside the string region); a `'`
+/// inside a comment is already consumed; a `{` inside a string is already
+/// consumed; etc. This mirrors a lexer's single forward pass — no opener is ever
+/// honoured inside another region.
 pub(crate) fn mask_regions(raw: &str) -> Option<String> {
     let bytes = raw.as_bytes();
     let n = bytes.len();
-    // Start from the original bytes; blank Jinja + SQL-comment regions in place.
+    // Start from the original bytes; blank every non-structural region in place.
     // We only ever overwrite ASCII bytes with ASCII spaces, so the result stays
     // valid UTF-8 and every byte offset is preserved.
     let mut out = raw.as_bytes().to_vec();
@@ -299,6 +307,24 @@ pub(crate) fn mask_regions(raw: &str) -> Option<String> {
             let close = if j + 1 < n { j + 2 } else { n };
             blank(&mut out, i, close);
             i = close;
+        } else if bytes[i] == b'\'' || bytes[i] == b'"' {
+            // Live SQL string literal (`'…'`) or quoted identifier (`"…"`):
+            // blank to the matching close, honouring the doubled-quote escape
+            // (`''` / `""`). Unterminated ⇒ swallow to EOF (a SQL lexer treats an
+            // unterminated literal that way; never a false anchor past it).
+            let close = scan_sql_quoted(bytes, i);
+            blank(&mut out, i, close);
+            i = close;
+        } else if bytes[i] == b'$' {
+            // Possible duckdb dollar-quoted string (`$tag$…$tag$` / `$$…$$`).
+            if let Some(close) = scan_dollar_quote(bytes, i) {
+                blank(&mut out, i, close);
+                i = close;
+            } else {
+                // Not a dollar-quote opener (lone `$`, `$1` param, etc.) — it is
+                // not a region opener and cannot hide a name; advance one byte.
+                i += 1;
+            }
         } else {
             i += 1;
         }
@@ -307,6 +333,68 @@ pub(crate) fn mask_regions(raw: &str) -> Option<String> {
     // ranges that began at an ASCII opener (a char boundary), so the result is
     // valid UTF-8. Use the checked constructor regardless (no unsafe).
     String::from_utf8(out).ok()
+}
+
+/// Scan a LIVE SQL quoted region opened by `bytes[open]` (a `'` or `"`); return
+/// the byte index PAST the closing quote. The SQL doubled-quote escape is the ONE
+/// in-string escape: a `''` inside a `'…'` string (or `""` inside a `"…"`) is an
+/// escaped quote char that stays in-string (consume both, remain open), NOT a
+/// close-then-reopen. An unterminated literal swallows to EOF (returns `n`) —
+/// mirroring a SQL lexer; never a false anchor past the open quote. This is the
+/// single home of the SQL doubled-quote escape logic (cute-dbt#469).
+fn scan_sql_quoted(bytes: &[u8], open: usize) -> usize {
+    let n = bytes.len();
+    let q = bytes[open];
+    let mut i = open + 1;
+    while i < n {
+        if bytes[i] == q {
+            if i + 1 < n && bytes[i + 1] == q {
+                // Doubled quote: an escaped quote char; stay in-string.
+                i += 2;
+                continue;
+            }
+            return i + 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// Scan a possible duckdb dollar-quoted string opened at `bytes[open]` (a `$`).
+/// A dollar-quote tag is `$` then zero-or-more tag chars (`[A-Za-z0-9_]`, must not
+/// start with a digit) then `$`; the string runs to the matching `$tag$`
+/// (`$$…$$` for the empty tag). There are NO in-string escapes — the only thing
+/// that closes it is the verbatim closing tag. Returns the byte index PAST the
+/// closing tag, or `None` if `bytes[open..]` is NOT a well-formed dollar-quote
+/// opener (so the caller leaves it live). An opened-but-unterminated dollar-quote
+/// swallows to EOF (returns `Some(n)`) — never a false anchor past the opener.
+fn scan_dollar_quote(bytes: &[u8], open: usize) -> Option<usize> {
+    let n = bytes.len();
+    // Parse the opening tag `$<tag>$`.
+    let mut j = open + 1;
+    while j < n && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+        // A tag must not start with a digit (Postgres/duckdb rule).
+        if j == open + 1 && bytes[j].is_ascii_digit() {
+            return None;
+        }
+        j += 1;
+    }
+    // The opening tag must close with a `$`.
+    if j >= n || bytes[j] != b'$' {
+        return None;
+    }
+    let tag = &bytes[open..=j]; // includes both `$` delimiters
+    let tag_len = tag.len();
+    // Scan for the matching closing tag `$tag$`.
+    let mut k = j + 1;
+    while k + tag_len <= n {
+        if &bytes[k..k + tag_len] == tag {
+            return Some(k + tag_len);
+        }
+        k += 1;
+    }
+    // Unterminated dollar-quote: swallow to EOF (never a false anchor past it).
+    Some(n)
 }
 
 /// Blank `out[from..to]` with ASCII spaces (offset-preserving).
@@ -434,6 +522,117 @@ mod tests {
         );
         assert!(!masked.contains("set"), "whole block tag blanked");
         assert!(!masked.contains("rest'"), "no leakage past the string");
+    }
+
+    #[test]
+    fn mask_blanks_sql_string_literal_offset_preserving() {
+        // A live SQL string literal is blanked; surrounding live SQL survives.
+        let raw = "select 'customer_id desc' as d from raw";
+        let masked = mask_regions(raw).expect("well-formed");
+        assert_eq!(masked.len(), raw.len(), "offsets preserved");
+        assert!(masked.starts_with("select "), "live SQL before survives");
+        assert!(
+            masked.ends_with(" as d from raw"),
+            "live SQL after survives"
+        );
+        assert!(
+            !masked.contains("customer_id"),
+            "name inside the string literal is blanked"
+        );
+    }
+
+    #[test]
+    fn mask_blanks_double_quoted_identifier() {
+        let raw = "select x as \"my col\" from raw";
+        let masked = mask_regions(raw).expect("well-formed");
+        assert_eq!(masked.len(), raw.len(), "offsets preserved");
+        assert!(!masked.contains("my col"), "quoted identifier is blanked");
+        assert!(masked.ends_with(" from raw"), "live SQL after survives");
+    }
+
+    #[test]
+    fn mask_honours_sql_doubled_quote_escape_in_string() {
+        // `''` inside a `'…'` string is an escaped quote, NOT a close-then-reopen,
+        // so the whole `'a''b'` literal is one region and the trailing live SQL is
+        // not swallowed.
+        let raw = "select 'a''b' as v, customer_id from raw";
+        let masked = mask_regions(raw).expect("well-formed");
+        assert!(
+            !masked.contains("'a''b'") && !masked.contains("a''b"),
+            "the doubled-quote string is fully blanked"
+        );
+        assert!(
+            masked.contains("customer_id"),
+            "live SQL after the escaped string survives (no early close)"
+        );
+    }
+
+    #[test]
+    fn mask_honours_doubled_quote_escape_in_identifier() {
+        // `""` inside a `"…"` identifier is an escaped quote; the live tail must
+        // survive (no early close on the doubled quote).
+        let raw = "select x as \"a\"\"b\", customer_id from raw";
+        let masked = mask_regions(raw).expect("well-formed");
+        assert!(
+            !masked.contains("a\"\"b"),
+            "the doubled-quote ident is blanked"
+        );
+        assert!(
+            masked.contains("customer_id"),
+            "live SQL after the escaped identifier survives"
+        );
+    }
+
+    #[test]
+    fn mask_precedence_brace_inside_string_is_not_a_jinja_opener() {
+        // A `{{` inside a SQL string must NOT be read as a Jinja variable tag —
+        // the string region is claimed first (single forward pass). Without this,
+        // an unterminated-looking `{{` in data could fail-close a valid model.
+        let raw = "select '{{ not jinja }}' as v from raw";
+        let masked = mask_regions(raw).expect("string claims the braces, not Jinja");
+        assert_eq!(masked.len(), raw.len(), "offsets preserved");
+        assert!(
+            masked.ends_with(" as v from raw"),
+            "live SQL after survives"
+        );
+    }
+
+    #[test]
+    fn mask_precedence_quote_inside_jinja_is_not_a_sql_string() {
+        // A `'` inside a `{% … %}` tag is consumed by the Jinja region first; it
+        // must NOT open a SQL string that swallows the live tail.
+        let raw = "{% set x = 'a' %} select customer_id from raw";
+        let masked = mask_regions(raw).expect("Jinja claims the quote, not SQL");
+        assert!(!masked.contains("set"), "the block tag is blanked");
+        assert!(
+            masked.contains("customer_id"),
+            "live SQL after the tag survives (the tag's quote did not open a string)"
+        );
+    }
+
+    #[test]
+    fn mask_blanks_dollar_quoted_string() {
+        // duckdb `$tag$…$tag$` and `$$…$$` constants are blanked.
+        let raw = "select $tag$customer_id$tag$ as a, $$other_id$$ as b from raw";
+        let masked = mask_regions(raw).expect("well-formed");
+        assert_eq!(masked.len(), raw.len(), "offsets preserved");
+        assert!(!masked.contains("customer_id"), "$tag$ body blanked");
+        assert!(!masked.contains("other_id"), "$$ body blanked");
+        assert!(masked.ends_with(" from raw"), "live SQL after survives");
+    }
+
+    #[test]
+    fn mask_lone_dollar_is_left_live() {
+        // A lone `$` / positional `$1` is NOT a dollar-quote opener and is left
+        // live (it cannot hide a name, so masking it would be wrong-but-harmless;
+        // leaving it live is the honest no-op).
+        let raw = "select a $ b, customer_id from raw";
+        let masked = mask_regions(raw).expect("well-formed");
+        assert!(
+            masked.contains("customer_id"),
+            "live SQL survives around a lone $"
+        );
+        assert!(masked.contains(" $ "), "the lone $ is left in place");
     }
 
     // ── verbatim-unique-hit ─────────────────────────────────────────────────
@@ -807,6 +1006,86 @@ mod tests {
             .raw
             .expect("commented-out dup is masked ⇒ the real def is unique");
         assert_eq!(raw_slice(raw, &span), "dup as (select 1)");
+    }
+
+    // ── string-literal-anchored span is a FALSE CLAIM ⇒ OMIT (cute-dbt#469) ──
+
+    #[test]
+    fn column_only_inside_string_literal_omits() {
+        // THE PROBE (design §4 Ask 1 — "collides with a string literal" = OMIT):
+        // the column's only would-be live occurrence falls INSIDE a SQL string
+        // literal (`'customer_id desc'`); its real value is templated by
+        // `{{ quote('customer_id') }}`. After masking, BOTH occurrences are gone
+        // (Jinja + string), so the name is unanchored ⇒ omit. Anchoring into the
+        // string would be a false claim.
+        let raw = "select {{ quote('customer_id') }}, 'customer_id desc' as d from raw";
+        let mut sm = sm_with(vec![column_entry("(final select)", "customer_id")]);
+        fill_raw_spans(&mut sm, raw);
+        assert!(
+            sm.entries[0].raw.is_none(),
+            "a column whose only occurrence is inside a string literal ⇒ omit"
+        );
+    }
+
+    #[test]
+    fn cte_def_only_inside_string_literal_omits() {
+        // The ONLY `stg as (` text lives inside a SQL string literal (e.g. a
+        // dynamic-SQL string being assembled). Masking blanks it ⇒ no live
+        // definition site ⇒ omit.
+        let raw = "select 'with stg as (select 1)' as generated_sql from raw";
+        let mut sm = sm_with(vec![cte_entry("stg")]);
+        fill_raw_spans(&mut sm, raw);
+        assert!(
+            sm.entries[0].raw.is_none(),
+            "a CTE def inside a string literal is not a live definition ⇒ omit"
+        );
+    }
+
+    #[test]
+    fn name_around_doubled_quote_escape_inside_string_omits() {
+        // The name sits inside a string that ALSO contains the `''` doubled-quote
+        // escape — the whole `'…''…'` literal is one masked region, so the name is
+        // blanked and omitted (the escape must not split the string and leak the
+        // name as live).
+        let raw = "select 'a customer_id ''quoted'' tail' as note from raw";
+        let mut sm = sm_with(vec![column_entry("(final select)", "customer_id")]);
+        fill_raw_spans(&mut sm, raw);
+        assert!(
+            sm.entries[0].raw.is_none(),
+            "a name inside a string with a '' escape is masked ⇒ omit"
+        );
+    }
+
+    #[test]
+    fn column_only_inside_quoted_identifier_omits() {
+        // The name appears only as a double-quoted identifier string `"my col"`;
+        // masking blanks it ⇒ omit (the quotes break the live identifier run).
+        let raw = "select x as \"my col\" from raw";
+        let mut sm = sm_with(vec![column_entry("(final select)", "my col")]);
+        fill_raw_spans(&mut sm, raw);
+        assert!(
+            sm.entries[0].raw.is_none(),
+            "a name only inside a quoted identifier is masked ⇒ omit"
+        );
+    }
+
+    #[test]
+    fn column_live_once_outside_any_string_still_anchors() {
+        // Regression guard: a column that legitimately appears ONCE outside any
+        // string (the same name also occurring inside a masked string region)
+        // still anchors to the LIVE occurrence — masking strings must not break
+        // honest, well-anchored columns.
+        let raw = "select customer_id from raw where note = 'customer_id is legacy'";
+        let mut sm = sm_with(vec![column_entry("(final select)", "customer_id")]);
+        fill_raw_spans(&mut sm, raw);
+        let span = sm.entries[0]
+            .raw
+            .expect("the live occurrence outside the string is the unique anchor");
+        assert_eq!(raw_slice(raw, &span), "customer_id");
+        assert!(
+            (span.start.byte as usize) < raw.find("where").unwrap(),
+            "anchored to the live occurrence, not the one inside the string"
+        );
     }
 
     // ── council should-fix: completeness (cute-dbt#469) ──────────────────────
