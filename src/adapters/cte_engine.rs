@@ -59,9 +59,9 @@ use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Location, Span};
 
 use crate::domain::{
-    ColumnEdge, ColumnEdgeConfidence, ColumnEdgeKind, ColumnRef, ColumnSpan, CteEdge, CteGraph,
-    CteNode, EdgeType, JoinKeyPair, LeftJoinFact, SourcePos, SourceSpan, SubqueryFact,
-    SubqueryKind,
+    ColumnEdge, ColumnEdgeConfidence, ColumnEdgeKind, ColumnProvenance, ColumnProvenanceEntry,
+    ColumnRef, ColumnSpan, CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact,
+    SourcePos, SourceSpan, SubqueryFact, SubqueryKind,
 };
 
 /// Display name of the synthetic terminal node — the final `SELECT` that
@@ -139,7 +139,8 @@ fn build_graph(compiled_sql: &str, query: &Query) -> CteGraph {
             .with_left_join_facts(facts.left_joins)
             .with_subquery_facts(facts.subqueries)
             .with_column_edges(lineage.edges)
-            .with_column_spans(lineage.spans);
+            .with_column_spans(lineage.spans)
+            .with_column_provenance(lineage.provenance);
     }
     let recursive = query.with.as_ref().is_some_and(|with| with.recursive);
     let (nodes, left_joins, subqueries) = build_nodes(compiled_sql, ctes, query);
@@ -149,7 +150,8 @@ fn build_graph(compiled_sql: &str, query: &Query) -> CteGraph {
         .with_left_join_facts(left_joins)
         .with_subquery_facts(subqueries)
         .with_column_edges(lineage.edges)
-        .with_column_spans(lineage.spans);
+        .with_column_spans(lineage.spans)
+        .with_column_provenance(lineage.provenance);
     if recursive {
         graph.with_recursive()
     } else {
@@ -248,11 +250,38 @@ fn build_nodes(
 // ---------------------------------------------------------------------
 
 /// The output of the projection-provenance pass: the intra-model column
-/// edges and the per-output-column compiled spans, both written back onto
-/// the [`CteGraph`].
+/// edges, the per-output-column compiled spans, and the POSITIVE per-column
+/// provenance (cute-dbt#450) — all written back onto the [`CteGraph`].
 struct ColumnLineage {
     edges: Vec<ColumnEdge>,
     spans: Vec<ColumnSpan>,
+    provenance: Vec<ColumnProvenanceEntry>,
+}
+
+/// The three write-only output channels of the projection-provenance pass,
+/// bundled so the recursive projection walk threads ONE `&mut` instead of
+/// three (keeps the per-fn arg count down for the clippy gate). Each `push_*`
+/// helper appends to the relevant channel.
+struct LineageSink {
+    edges: Vec<ColumnEdge>,
+    spans: Vec<ColumnSpan>,
+    provenance: Vec<ColumnProvenanceEntry>,
+}
+
+impl LineageSink {
+    fn new() -> Self {
+        Self {
+            edges: Vec::new(),
+            spans: Vec::new(),
+            provenance: Vec::new(),
+        }
+    }
+
+    /// Record one positive per-output-column provenance fact.
+    fn push_provenance(&mut self, node_id: &str, column: &str, provenance: ColumnProvenance) {
+        self.provenance
+            .push(ColumnProvenanceEntry::new(node_id, column, provenance));
+    }
 }
 
 /// A CTE's resolved output-column list (lowercased, in projection order) when
@@ -272,8 +301,7 @@ type KnownCteColumns = HashMap<String, Option<Vec<String>>>;
 /// star-EXPANSION (CLL-2), keyed off the columns the pass already resolved.
 fn collect_column_lineage(compiled_sql: &str, ctes: &[Cte], query: &Query) -> ColumnLineage {
     let index = ByteIndex::new(compiled_sql);
-    let mut edges: Vec<ColumnEdge> = Vec::new();
-    let mut spans: Vec<ColumnSpan> = Vec::new();
+    let mut sink = LineageSink::new();
     let mut known_cte_columns: KnownCteColumns = HashMap::new();
     for cte in ctes {
         let name = cte_name(cte);
@@ -283,8 +311,7 @@ fn collect_column_lineage(compiled_sql: &str, ctes: &[Cte], query: &Query) -> Co
             compiled_sql,
             &index,
             &known_cte_columns,
-            &mut edges,
-            &mut spans,
+            &mut sink,
         );
         known_cte_columns.insert(name.to_ascii_lowercase(), outputs);
     }
@@ -294,10 +321,13 @@ fn collect_column_lineage(compiled_sql: &str, ctes: &[Cte], query: &Query) -> Co
         compiled_sql,
         &index,
         &known_cte_columns,
-        &mut edges,
-        &mut spans,
+        &mut sink,
     );
-    ColumnLineage { edges, spans }
+    ColumnLineage {
+        edges: sink.edges,
+        spans: sink.spans,
+        provenance: sink.provenance,
+    }
 }
 
 /// Column lineage for ONE body. Only a top-level `SetExpr::Select` is
@@ -314,8 +344,7 @@ fn collect_body_column_lineage(
     sql: &str,
     index: &ByteIndex,
     known_cte_columns: &KnownCteColumns,
-    edges: &mut Vec<ColumnEdge>,
-    spans: &mut Vec<ColumnSpan>,
+    sink: &mut LineageSink,
 ) -> Option<Vec<String>> {
     let SetExpr::Select(select) = body else {
         return None;
@@ -336,8 +365,7 @@ fn collect_body_column_lineage(
             known_cte_columns,
             sql,
             index,
-            edges,
-            spans,
+            sink,
         );
         match item_outputs {
             Some(cols) => outputs.extend(cols),
@@ -353,6 +381,62 @@ fn collect_body_column_lineage(
 /// a star over an UNKNOWN external relation degrades honestly to `Opaque`;
 /// expressions (functions/CASE/…) emit a span but NO edge (CLL-3).
 ///
+/// Resolve an `expr AS alias` projection item — emit its edge(s), span, and
+/// POSITIVE per-column provenance (cute-dbt#450). A direct/qualified column ref
+/// (`a.x AS x` / `a.x AS y`) is a `DirectColumn` / `Rename` (`PassThrough` /
+/// `Renamed` edge) that traces to a real source field; an expression
+/// (`a.x + 1 AS y`, `coalesce(...) AS z`) emits `Derived` edges and is marked
+/// `Expression`; a pure literal/function with no column ref (`42 AS magic`,
+/// `current_timestamp AS t`) emits no edge and is marked `Literal`. The
+/// `Expression`/`Literal` markers EXCLUDE the column from the cross-model
+/// source-name-carry even when paired with a `select *` — the root fix for the
+/// literal/expr-paired-with-star fabrication class. Split out of
+/// [`resolve_projection_item`] to keep that dispatcher under the strict CRAP
+/// cap.
+#[allow(clippy::too_many_arguments)]
+fn resolve_aliased_item(
+    node_id: &str,
+    expr: &Expr,
+    output: &str,
+    aliases: &HashMap<String, String>,
+    sole_leaf: Option<&str>,
+    item: &SelectItem,
+    sql: &str,
+    index: &ByteIndex,
+    sink: &mut LineageSink,
+) {
+    if let Some(input) = direct_column_ref(expr, aliases, sole_leaf) {
+        let (kind, provenance) = if input.column == output {
+            (ColumnEdgeKind::PassThrough, ColumnProvenance::DirectColumn)
+        } else {
+            (ColumnEdgeKind::Renamed, ColumnProvenance::Rename)
+        };
+        push_edges(node_id, output, input, kind, &mut sink.edges);
+        sink.push_provenance(node_id, output, provenance);
+    } else {
+        // An expression (coalesce/CASE/func/arithmetic) — CLL-3 (cute-dbt#449):
+        // one `Derived` edge per input column it reads (many-to-one). A literal
+        // / column-free function reads no column → no edge.
+        let collected = collect_derived_refs(expr);
+        let provenance = if collected.refs.is_empty() {
+            ColumnProvenance::Literal
+        } else {
+            ColumnProvenance::Expression
+        };
+        for input in derived_input_cols(collected, aliases, sole_leaf) {
+            push_edges(
+                node_id,
+                output,
+                input,
+                ColumnEdgeKind::Derived,
+                &mut sink.edges,
+            );
+        }
+        sink.push_provenance(node_id, output, provenance);
+    }
+    push_span(node_id, output, item, sql, index, &mut sink.spans);
+}
+
 /// Returns this item's contribution to the body's output-column list:
 /// `Some(cols)` = the statically-knowable output name(s); `None` = the item
 /// has no enumerable output name (an Opaque star or an anonymous expression),
@@ -366,34 +450,17 @@ fn resolve_projection_item(
     known_cte_columns: &KnownCteColumns,
     sql: &str,
     index: &ByteIndex,
-    edges: &mut Vec<ColumnEdge>,
-    spans: &mut Vec<ColumnSpan>,
+    sink: &mut LineageSink,
 ) -> Option<Vec<String>> {
     match item {
         // `expr AS alias` — the output name is the alias; the input is the
-        // column inside `expr`. Pass-through when name==col, else rename.
+        // column inside `expr`. Classified + edged in the dedicated helper
+        // (keeps this dispatcher's branch count under the strict CRAP cap).
         SelectItem::ExprWithAlias { expr, alias } => {
             let output = alias.value.to_ascii_lowercase();
-            if let Some(input) = direct_column_ref(expr, aliases, sole_leaf) {
-                let kind = if input.column == output {
-                    ColumnEdgeKind::PassThrough
-                } else {
-                    ColumnEdgeKind::Renamed
-                };
-                push_edges(node_id, &output, input, kind, edges);
-                push_span(node_id, &output, item, sql, index, spans);
-            } else {
-                // An expression (coalesce/CASE/func/arithmetic) — CLL-3
-                // (cute-dbt#449): collect every input column it reads and emit
-                // one `Derived` edge per input (many-to-one), depth-capped and
-                // degrading to Ambiguous honestly. Never a fabricated edge:
-                // an expression with no recoverable column ref emits none.
-                let collected = collect_derived_refs(expr);
-                for input in derived_input_cols(collected, aliases, sole_leaf) {
-                    push_edges(node_id, &output, input, ColumnEdgeKind::Derived, edges);
-                }
-                push_span(node_id, &output, item, sql, index, spans);
-            }
+            resolve_aliased_item(
+                node_id, expr, &output, aliases, sole_leaf, item, sql, index, sink,
+            );
             // The output NAME is known regardless of whether an edge was
             // emitted — the alias is explicit in the SQL.
             Some(vec![output])
@@ -403,8 +470,15 @@ fn resolve_projection_item(
         SelectItem::UnnamedExpr(expr) => {
             if let Some(input) = direct_column_ref(expr, aliases, sole_leaf) {
                 let output = input.column.clone();
-                push_edges(node_id, &output, input, ColumnEdgeKind::PassThrough, edges);
-                push_span(node_id, &output, item, sql, index, spans);
+                push_edges(
+                    node_id,
+                    &output,
+                    input,
+                    ColumnEdgeKind::PassThrough,
+                    &mut sink.edges,
+                );
+                sink.push_provenance(node_id, &output, ColumnProvenance::DirectColumn);
+                push_span(node_id, &output, item, sql, index, &mut sink.spans);
                 Some(vec![output])
             } else {
                 // A bare non-column expression with no alias has no stable
@@ -425,8 +499,7 @@ fn resolve_projection_item(
             item,
             sql,
             index,
-            edges,
-            spans,
+            sink,
         ),
         // `q.*` — a qualified star over relation `q`. Same expansion/degrade
         // rule, sourced from `q`'s resolved leaf.
@@ -439,8 +512,7 @@ fn resolve_projection_item(
                 item,
                 sql,
                 index,
-                edges,
-                spans,
+                sink,
             )
         }
         // Spark's `expr AS (a, b, …)` multi-alias form — not a direct column
@@ -466,23 +538,36 @@ fn resolve_star(
     item: &SelectItem,
     sql: &str,
     index: &ByteIndex,
-    edges: &mut Vec<ColumnEdge>,
-    spans: &mut Vec<ColumnSpan>,
+    sink: &mut LineageSink,
 ) -> Option<Vec<String>> {
-    push_span(node_id, "*", item, sql, index, spans);
+    push_span(node_id, "*", item, sql, index, &mut sink.spans);
     if let Some(columns) = known_cte_output_columns(source_leaf, known_cte_columns) {
         let leaf = source_leaf.expect("a known CTE was found, so the leaf is Some");
         for column in &columns {
-            edges.push(ColumnEdge::new(
+            sink.edges.push(ColumnEdge::new(
                 ColumnRef::intra(leaf, column.clone()),
                 ColumnRef::intra(node_id, column.clone()),
                 ColumnEdgeKind::PassThrough,
                 ColumnEdgeConfidence::Resolved,
             ));
+            // Each expanded column is a direct pass-through from the known CTE.
+            sink.push_provenance(node_id, column, ColumnProvenance::DirectColumn);
         }
         Some(columns)
     } else {
-        push_star_edge(node_id, source_leaf, edges);
+        push_star_edge(node_id, source_leaf, &mut sink.edges);
+        // POSITIVE provenance (#450): mark the `*` slot StarCoveredExternal ONLY
+        // when the star is over a TRULY external relation (a `ref()`/`source()`
+        // leaf, NOT a sibling CTE) — the only case a no-inbound-edge column may
+        // be name-carried to the source under its own name. An unqualified star
+        // (`source_leaf` is None) or a star over a known-but-non-enumerable CTE
+        // is NOT external: it leaves no positive star marker, so a no-edge
+        // column there honestly degrades.
+        let star_is_external =
+            source_leaf.is_some_and(|leaf| !known_cte_columns.contains_key(leaf));
+        if star_is_external {
+            sink.push_provenance(node_id, "*", ColumnProvenance::StarCoveredExternal);
+        }
         None
     }
 }

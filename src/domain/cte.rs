@@ -566,6 +566,81 @@ pub enum ColumnEdgeConfidence {
     Opaque,
 }
 
+/// POSITIVE per-output-column provenance (cute-dbt#450, CLL-4 reshape) — the
+/// projection resolver's explicit classification of HOW each output column of a
+/// CTE/terminal body originated. This is the never-INFER floor: the cross-model
+/// source-name-carry reads this marker to decide whether a column can trace to
+/// a real source field, instead of guessing from edge-ABSENCE.
+///
+/// The fabrication class the previous rounds chased — a `42 AS magic` / an
+/// `a.x + 1 AS y` projected ALONGSIDE a `select *` over an external leaf, which
+/// has no inbound column edge and so was mis-read as a "star pass-through" and
+/// fabricated as `source.magic`/`source.y` — is closed at the root here: such a
+/// column is positively marked [`Self::Literal`] / [`Self::Expression`] at the
+/// resolver and is NEVER source-attributed, even when it shares the projection
+/// with a star.
+///
+/// `#[non_exhaustive]` — additive; rendered/serialized only on the
+/// engine-internal facts (`#[serde(skip)]` on the graph), never in the embedded
+/// report payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ColumnProvenance {
+    /// A direct column reference — `a.x` (a bare/qualified pass-through). The
+    /// output name equals the input column name. Carries an inbound
+    /// `PassThrough` edge; resolves through the chain to a real source field.
+    DirectColumn,
+    /// A renamed column — `a.x AS y`. Carries an inbound `Renamed` edge;
+    /// resolves to the ORIGINAL upstream field name (`y → x`), so the trace
+    /// names the field that actually exists, never the renamed downstream name.
+    Rename,
+    /// A literal / constant projection — `42 AS magic`, `'US' AS country`,
+    /// `current_timestamp AS t`. NO source field exists; never traced.
+    Literal,
+    /// A computed expression — `a.x + 1 AS y`, `coalesce(a.x, b.y) AS z`. The
+    /// output is derived, not copied; NO single source field. Never traced.
+    Expression,
+    /// The column flowed through a `select *` / `q.*` over an EXTERNAL
+    /// `ref()`/`source()` leaf — it provably exists on that leaf under its own
+    /// name (the only star-pass-through case that may carry to a source). Set
+    /// only for the recorded `*` projection slot; a per-column star expansion
+    /// over a KNOWN intra CTE instead emits explicit `PassThrough` edges
+    /// (→ [`Self::DirectColumn`]).
+    StarCoveredExternal,
+}
+
+/// One per-output-column positive-provenance fact: the `(node_id, column)` the
+/// classification applies to, plus the [`ColumnProvenance`] marker. Engine-
+/// computed in the projection-provenance pass, hung off the [`CteGraph`] as a
+/// `#[serde(skip)]` fact (consumed by the cross-model source-name-carry only —
+/// never serialized into the embedded report payload, so goldens stay
+/// byte-stable). The `*` star slot is recorded under `column == "*"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnProvenanceEntry {
+    /// The owning node id (a CTE alias or `TERMINAL_NODE_NAME`).
+    pub node_id: String,
+    /// The output column name (lowercased), or `"*"` for the star slot.
+    pub column: String,
+    /// The positive provenance classification.
+    pub provenance: ColumnProvenance,
+}
+
+impl ColumnProvenanceEntry {
+    /// Canonical constructor.
+    #[must_use]
+    pub fn new(
+        node_id: impl Into<String>,
+        column: impl Into<String>,
+        provenance: ColumnProvenance,
+    ) -> Self {
+        Self {
+            node_id: node_id.into(),
+            column: column.into(),
+            provenance,
+        }
+    }
+}
+
 /// ONE directed column-provenance edge: an output column `to_col` derives
 /// from an input column `from_col`, classified by `kind` + `confidence`.
 /// The bidirectional edge set serves all three affordances (context,
@@ -691,6 +766,16 @@ pub struct CteGraph {
     /// in the same projection walk. Additive + `skip_serializing_if`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     column_spans: Vec<ColumnSpan>,
+    /// POSITIVE per-output-column provenance (cute-dbt#450, CLL-4 reshape) —
+    /// the projection resolver's explicit classification of every output column
+    /// across every body (`Literal` / `Expression` / `DirectColumn` / `Rename`
+    /// / `StarCoveredExternal`). The cross-model source-name-carry READS these
+    /// to decide a source edge, instead of INFERRING from edge-absence. Engine-
+    /// computed in the same single-parse projection pass. `#[serde(skip)]` —
+    /// an engine-internal fact consumed by the domain only, never serialized
+    /// into the embedded report payload (goldens stay byte-stable).
+    #[serde(skip)]
+    column_provenance: Vec<ColumnProvenanceEntry>,
 }
 
 impl CteGraph {
@@ -708,6 +793,7 @@ impl CteGraph {
             subquery_facts: Vec::new(),
             column_edges: Vec::new(),
             column_spans: Vec::new(),
+            column_provenance: Vec::new(),
         }
     }
 
@@ -803,6 +889,37 @@ impl CteGraph {
         &self.column_spans
     }
 
+    /// Attach engine-computed POSITIVE per-output-column provenance
+    /// (cute-dbt#450, CLL-4 reshape).
+    ///
+    /// Returns `self` with `column_provenance` set. Same single-parse
+    /// projection pass as [`Self::with_column_edges`] — never a second parse.
+    #[must_use]
+    pub fn with_column_provenance(mut self, column_provenance: Vec<ColumnProvenanceEntry>) -> Self {
+        self.column_provenance = column_provenance;
+        self
+    }
+
+    /// POSITIVE per-output-column provenance across every body (cute-dbt#450).
+    /// The cross-model source-name-carry reads this to decide a source edge
+    /// instead of inferring from edge-absence. Empty for graphs built without
+    /// engine-computed provenance.
+    #[must_use]
+    pub fn column_provenance(&self) -> &[ColumnProvenanceEntry] {
+        &self.column_provenance
+    }
+
+    /// The positive provenance of `(node_id, column)`, or `None` when the
+    /// resolver recorded no classification for it (an unreachable column — the
+    /// honest absence). First-match wins; the resolver records at most one
+    /// provenance per `(node_id, column)`.
+    fn provenance_of(&self, node_id: &str, column: &str) -> Option<ColumnProvenance> {
+        self.column_provenance
+            .iter()
+            .find(|p| p.node_id == node_id && p.column == column)
+            .map(|p| p.provenance)
+    }
+
     /// CTE nodes in declaration order.
     #[must_use]
     pub fn nodes(&self) -> &[CteNode] {
@@ -829,6 +946,371 @@ impl CteGraph {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Derive this model's CROSS-MODEL facts (cute-dbt#450, CLL-4) — its
+    /// terminal OUTPUT columns and the bare leaf relations it reads — from the
+    /// already-resolved intra-model column edges (never a second parse). The
+    /// cross-model builder
+    /// ([`ProjectColumnGraph::build`](crate::domain::column_lineage::ProjectColumnGraph::build))
+    /// consumes these.
+    ///
+    /// `terminal_node_id` is the engine's terminal-select node name
+    /// (`cte_engine::TERMINAL_NODE_NAME`) — passed in so the domain stays
+    /// decoupled from the adapter constant.
+    ///
+    /// Output columns are the `to_col.column`s of every edge landing on the
+    /// terminal node, in first-seen (edge) order, de-duplicated. The terminal
+    /// projection is NON-ENUMERABLE (`output_columns = None`) when it carries
+    /// an Opaque star — an edge onto the terminal whose `from_col.column` is
+    /// `"*"` with `Opaque` confidence (a `SELECT *` over an unknown external
+    /// relation the resolver could not expand). This is the honest
+    /// project-wide output map: a model whose own output can't be enumerated
+    /// can't have a downstream star expanded over it (no fabricated names).
+    #[must_use]
+    pub fn model_outputs(
+        &self,
+        terminal_node_id: &str,
+    ) -> crate::domain::column_lineage::ModelOutputs {
+        let output_columns = self.terminal_output_columns(terminal_node_id);
+        let leaf_refs = self.model_leaf_refs(terminal_node_id);
+        let leaf_reading_nodes = self.leaf_reading_nodes(terminal_node_id);
+        let source_passthrough_columns = self.source_passthrough_terminal_columns(
+            terminal_node_id,
+            output_columns.as_deref().unwrap_or(&[]),
+            &leaf_reading_nodes,
+        );
+        crate::domain::column_lineage::ModelOutputs::with_passthrough(
+            output_columns,
+            leaf_refs,
+            source_passthrough_columns,
+        )
+    }
+
+    /// The model's terminal OUTPUT columns (lowercased, first-seen order),
+    /// or `None` when the terminal projection is non-enumerable — an Opaque
+    /// `*` edge lands on the terminal, or the terminal produced no resolvable
+    /// edge at all (we could not name a single output column).
+    fn terminal_output_columns(&self, terminal_node_id: &str) -> Option<Vec<String>> {
+        let is_terminal = |scope: &ColumnScope| matches!(scope, ColumnScope::Intra { node_id } if node_id == terminal_node_id);
+        let opaque_terminal = self.column_edges.iter().any(|e| {
+            is_terminal(&e.to_col.scope)
+                && e.from_col.column == "*"
+                && e.confidence == ColumnEdgeConfidence::Opaque
+        });
+        if opaque_terminal {
+            return None;
+        }
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut cols: Vec<String> = Vec::new();
+        for edge in &self.column_edges {
+            if is_terminal(&edge.to_col.scope) && seen.insert(edge.to_col.column.clone()) {
+                cols.push(edge.to_col.column.clone());
+            }
+        }
+        if cols.is_empty() { None } else { Some(cols) }
+    }
+
+    /// Every bare leaf the model reads across all bodies — the candidate
+    /// `ref()`/`source()` boundaries. The cross-model builder constrains these
+    /// to the model's REAL `depends_on` producers, so an intra-model CTE alias
+    /// appearing here can never mis-stitch. A WITH-less model (no CTE nodes)
+    /// recovers its leaf from the star edges' `from_col` scope node id.
+    fn model_leaf_refs(&self, terminal_node_id: &str) -> Vec<String> {
+        let mut leaf_seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut leaf_refs: Vec<String> = Vec::new();
+        for node in &self.nodes {
+            for leaf in node.body_leaf_table_refs() {
+                if leaf_seen.insert(leaf.clone()) {
+                    leaf_refs.push(leaf.clone());
+                }
+            }
+        }
+        for edge in &self.column_edges {
+            if let ColumnScope::Intra { node_id } = &edge.from_col.scope
+                && node_id != terminal_node_id
+                && leaf_seen.insert(node_id.clone())
+            {
+                leaf_refs.push(node_id.clone());
+            }
+        }
+        leaf_refs
+    }
+
+    /// The CTE/terminal node IDS whose body reads an EXTERNAL leaf relation (a
+    /// `ref()`/`source()` boundary — NOT another CTE in this same model). A
+    /// column reaching one of these flowed in from OUTSIDE the model.
+    ///
+    /// `body_leaf_table_refs` includes intra-CTE references (the import CTE
+    /// `renamed` "reads" the CTE `source`), so we EXCLUDE refs that name a
+    /// sibling CTE — only a truly external relation marks a leaf boundary.
+    /// (The import CTE `source` reads `organizations`, an external relation →
+    /// leaf-reading; `final` reads `renamed`, a sibling CTE → NOT leaf-reading,
+    /// so a column computed in `final` like `_loaded_at` never falsely reaches
+    /// a source.)
+    fn leaf_reading_nodes(&self, terminal_node_id: &str) -> std::collections::BTreeSet<String> {
+        let cte_names: std::collections::BTreeSet<String> = self
+            .nodes
+            .iter()
+            .map(|n| n.name().to_ascii_lowercase())
+            .filter(|n| n != terminal_node_id)
+            .collect();
+        let mut leaf_reading_nodes: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for node in &self.nodes {
+            let reads_external = node
+                .body_leaf_table_refs()
+                .iter()
+                .any(|leaf| !cte_names.contains(leaf));
+            if reads_external {
+                leaf_reading_nodes.insert(node.name().to_ascii_lowercase());
+            }
+        }
+        // WITH-less / star-only: the from-side leaf nodes of star edges are
+        // leaf-reading boundaries when they name an external relation.
+        for edge in &self.column_edges {
+            if let ColumnScope::Intra { node_id } = &edge.from_col.scope
+                && node_id != terminal_node_id
+                && !cte_names.contains(node_id)
+            {
+                leaf_reading_nodes.insert(node_id.clone());
+            }
+        }
+        leaf_reading_nodes
+    }
+
+    /// The terminal output columns whose intra provenance is a pure
+    /// pass-through/rename chain to a leaf-reading boundary, MAPPED to the
+    /// ORIGINAL source-side column name that name reaches at the boundary
+    /// (cute-dbt#450, round-4 robust name-tracking).
+    ///
+    /// The map's KEY is the terminal output column; the VALUE is the column
+    /// name on the leaf-reading boundary (the real source field). For a pure
+    /// same-name pass-through they are equal (`order_id → order_id`); for a
+    /// RENAME anywhere in the chain the value is the ORIGINAL upstream name
+    /// (`order_amount → amount`, `qty → legacy_qty`). The cross-model source
+    /// name-carry uses the VALUE as the source field, so a renamed staging
+    /// column traces to the field that actually exists — never a fabricated
+    /// `source.<renamed_name>` (the never-a-false-claim floor).
+    ///
+    /// `leaf_nodes` is the set of node ids that read a leaf relation (the
+    /// `ref()`/`source()` boundary). A column whose chain dead-ends at a
+    /// computed expression (a `Derived` edge, or a node with no resolvable
+    /// inbound that is NOT a star-passthrough over a leaf) is EXCLUDED — never
+    /// a fabricated source attribution. A column whose source name cannot be
+    /// UNIQUELY resolved (a fork to two distinct source-side names) degrades to
+    /// EXCLUDED rather than guess.
+    fn source_passthrough_terminal_columns(
+        &self,
+        terminal_node_id: &str,
+        output_columns: &[String],
+        leaf_nodes: &std::collections::BTreeSet<String>,
+    ) -> std::collections::BTreeMap<String, String> {
+        let cte_names: std::collections::BTreeSet<String> = self
+            .nodes
+            .iter()
+            .map(|n| n.name().to_ascii_lowercase())
+            .collect();
+        let mut memo: std::collections::HashMap<(String, String), Option<String>> =
+            std::collections::HashMap::new();
+        let mut out: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        for col in output_columns {
+            if let Some(source_col) = self.resolve_leaf_column(
+                terminal_node_id,
+                col,
+                leaf_nodes,
+                &cte_names,
+                &mut memo,
+                0,
+            ) {
+                out.insert(col.clone(), source_col);
+            }
+        }
+        out
+    }
+
+    /// Resolve the column `(node_id, column)` to the ORIGINAL source-side
+    /// column name it reaches at a leaf-reading boundary, threading the name
+    /// through every rename in the chain — or `None` when it does not reach a
+    /// leaf cleanly (a computed/`Derived` dead-end, or a non-uniquely-resolvable
+    /// fork). Memoized; depth-capped (guards a pathological / cyclic AST).
+    ///
+    /// The resolution carries the ORIGINAL name (cute-dbt#450 round-4): a
+    /// `Renamed` edge (`legacy_qty AS qty`) is followed on its UPSTREAM column
+    /// (`legacy_qty`), so the name reaching the boundary is the real source
+    /// field — NEVER the renamed downstream name. The round-3 floor (no
+    /// fabricated source field) is preserved AND the staging-rename headline
+    /// trace-to-source is restored.
+    ///
+    /// Boundary cases:
+    /// - `(leaf_node, column)` with an explicit inbound edge from an EXTERNAL
+    ///   relation (`from` scope is not a sibling CTE): the edge's `from` column
+    ///   IS the source field (`PassThrough` → same name; `Renamed` → original
+    ///   name).
+    /// - `(leaf_node, column)` with NO explicit inbound edge: the column flowed
+    ///   in through a `select *` over the external leaf — it passes through
+    ///   UNCHANGED, so the source field is `column` itself. (A column with a
+    ///   `Derived` inbound is computed, not a star-passthrough → `None`.)
+    /// - A `Derived` / `JoinKey` / Opaque `*→*` inbound anywhere → `None`.
+    fn resolve_leaf_column(
+        &self,
+        node_id: &str,
+        column: &str,
+        leaf_nodes: &std::collections::BTreeSet<String>,
+        cte_names: &std::collections::BTreeSet<String>,
+        memo: &mut std::collections::HashMap<(String, String), Option<String>>,
+        depth: u32,
+    ) -> Option<String> {
+        if depth > 256 {
+            return None; // pathological chain — degrade (never a false claim).
+        }
+        let key = (node_id.to_owned(), column.to_owned());
+        if let Some(hit) = memo.get(&key) {
+            return hit.clone();
+        }
+        // Pre-seed `None` to break cycles (a column transitively feeding itself
+        // is not a clean pass-through to a leaf).
+        memo.insert(key.clone(), None);
+
+        // Fold every inbound edge defining this column into a unique resolution
+        // (or a degrade). The per-edge classification lives in
+        // `inbound_source_name`; here we only accumulate uniqueness.
+        let mut acc = LeafResolution::default();
+        for edge in &self.column_edges {
+            if !Self::edge_targets(edge, node_id, column) {
+                continue;
+            }
+            acc.saw_edge = true;
+            acc.absorb(self.inbound_source_name(edge, leaf_nodes, cte_names, memo, depth));
+        }
+
+        // POSITIVE PROVENANCE (cute-dbt#450 reshape): a column with NO inbound
+        // edge is a star pass-through to the source ONLY when (a) the node
+        // POSITIVELY carries a `*` slot marked `StarCoveredExternal` (a
+        // `select *` over an external `ref()`/`source()` leaf — recorded at the
+        // projection resolver, NOT inferred from edge-absence) AND (b) the
+        // column itself is NOT positively marked `Literal` / `Expression`. A
+        // `42 AS magic` / `a.x + 1 AS y` projected ALONGSIDE the star also has
+        // no inbound edge, but it is positively `Literal`/`Expression` →
+        // EXCLUDED, even paired with the star. This closes the whole
+        // literal/expr-paired-with-star fabrication class: the star covers only
+        // the columns it provably passes through under their own name, never a
+        // sibling literal/computed projection. A column with no marker at all
+        // (it was never explicitly projected here — it flowed through the star)
+        // is eligible iff the node's star is external.
+        let own = self.provenance_of(node_id, column);
+        let column_is_computed = matches!(
+            own,
+            Some(ColumnProvenance::Literal | ColumnProvenance::Expression)
+        );
+        let star_passthrough = leaf_nodes.contains(node_id)
+            && !column_is_computed
+            && self.provenance_of(node_id, "*") == Some(ColumnProvenance::StarCoveredExternal);
+        let result = acc.into_name(column, star_passthrough);
+        memo.insert(key, result.clone());
+        result
+    }
+
+    /// `true` when `edge` is an intra-scoped edge whose target is exactly
+    /// `(node_id, column)` — the inbound edges defining this column.
+    fn edge_targets(edge: &ColumnEdge, node_id: &str, column: &str) -> bool {
+        matches!(
+            &edge.to_col.scope,
+            ColumnScope::Intra { node_id: to } if to == node_id
+        ) && edge.to_col.column == column
+    }
+
+    /// Classify ONE inbound edge to the resolution name it contributes.
+    /// `None` (degrade) for a non-intra source, a `Derived`/`JoinKey`/Opaque
+    /// `*→*` edge (the column is computed/non-enumerable here), or an upstream
+    /// recursion that itself degrades. `Some(name)` carries the ORIGINAL
+    /// source-side column name: the upstream column for a sibling-CTE recursion
+    /// (threading renames), or the external `from` column at the leaf boundary.
+    fn inbound_source_name(
+        &self,
+        edge: &ColumnEdge,
+        leaf_nodes: &std::collections::BTreeSet<String>,
+        cte_names: &std::collections::BTreeSet<String>,
+        memo: &mut std::collections::HashMap<(String, String), Option<String>>,
+        depth: u32,
+    ) -> Option<String> {
+        let ColumnScope::Intra { node_id: from_node } = &edge.from_col.scope else {
+            return None;
+        };
+        let clean = matches!(
+            edge.kind,
+            ColumnEdgeKind::PassThrough | ColumnEdgeKind::Renamed
+        ) && edge.from_col.column != "*";
+        if !clean {
+            return None;
+        }
+        if cte_names.contains(from_node) {
+            // Sibling CTE — recurse on the UPSTREAM name (rename follows its
+            // original name).
+            self.resolve_leaf_column(
+                from_node,
+                &edge.from_col.column,
+                leaf_nodes,
+                cte_names,
+                memo,
+                depth + 1,
+            )
+        } else {
+            // External leaf boundary — the `from` column IS the source field.
+            Some(edge.from_col.column.clone())
+        }
+    }
+}
+
+/// The accumulator for [`CteGraph::resolve_leaf_column`] — folds the per-edge
+/// classifications into a UNIQUE source-side name (or a degrade). Keeps the
+/// fold's branching out of the recursive function (crap4rs CC budget).
+#[derive(Default)]
+struct LeafResolution {
+    /// The unique resolved source name so far (`None` until the first clean
+    /// edge resolves).
+    name: Option<String>,
+    /// A clean edge defining this column was seen (so the "no explicit edge →
+    /// star pass-through" fallback does NOT apply).
+    saw_edge: bool,
+    /// Two distinct source-side names, or a degrading/blocking edge — the
+    /// resolution cannot be unique; degrade.
+    blocked: bool,
+}
+
+impl LeafResolution {
+    /// Absorb one edge's classification: `Some(name)` resolves (conflicting
+    /// names block); `None` blocks (a computed/non-enumerable inbound).
+    fn absorb(&mut self, candidate: Option<String>) {
+        match candidate {
+            Some(name) => match &self.name {
+                Some(prev) if *prev != name => self.blocked = true,
+                _ => self.name = Some(name),
+            },
+            None => self.blocked = true,
+        }
+    }
+
+    /// Resolve the fold to a source-side column name, or `None` to degrade.
+    /// `leaf_star_passthrough` is `true` ONLY when the caller has POSITIVELY
+    /// proven (via [`ColumnProvenance::StarCoveredExternal`] on the node's `*`
+    /// slot, AND the column is not itself marked `Literal`/`Expression`) that a
+    /// column with NO clean inbound edge flowed in through a `select *` over an
+    /// external leaf unchanged — so the source field is the column's own name.
+    /// Otherwise (a literal/computed projection, or no positive star marker) an
+    /// edge-less column MUST degrade to `None` (never a fabricated source
+    /// field). The decision is read from positive provenance, never inferred
+    /// from edge-absence (cute-dbt#450 reshape).
+    fn into_name(self, column: &str, leaf_star_passthrough: bool) -> Option<String> {
+        if self.blocked {
+            None
+        } else if let Some(name) = self.name {
+            Some(name)
+        } else if !self.saw_edge && leaf_star_passthrough {
+            Some(column.to_owned())
+        } else {
+            None
+        }
     }
 }
 
