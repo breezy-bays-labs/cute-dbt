@@ -731,10 +731,21 @@ pub(crate) fn explicit_cte_edges(
             // Only a reference to ANOTHER verbatim raw CTE (a sound raw node) is
             // an edge — a self-reference, an external relation, or a name not in
             // the raw-CTE set is not emitted. (A CTE cannot depend on itself in
-            // standard SQL; the `to_id != referenced` guard makes that explicit.)
-            if &referenced != to_id && raw_cte_spans.contains_key(&referenced) {
+            // standard SQL; the self-reference guard inside the case-insensitive
+            // resolve makes that explicit.)
+            //
+            // CASE-FOLDING (cute-dbt#478): `referenced` is an UNQUOTED bare
+            // identifier (a quoted `"Base"` referent was blanked by `mask_regions`
+            // — see `classify_token` — so a quoted case-mismatch never reaches
+            // here, honoring dbt-ident quoting for free). dbt/warehouse fold
+            // unquoted identifier case, so `from Base` referencing `with base`
+            // is a genuine sibling reference and must resolve to the `base` key
+            // case-INSENSITIVELY. We resolve against the actual key so the edge's
+            // `from` carries the canonical CTE-name (the map key), not the
+            // referent's source casing.
+            if let Some(canonical) = resolve_sibling_cte(&referenced, to_id, raw_cte_spans) {
                 let edge = RawEdge {
-                    from: referenced,
+                    from: canonical,
                     to: to_id.clone(),
                 };
                 // De-dupe (a body may name the same sibling in both a FROM and a
@@ -755,14 +766,43 @@ fn position_in_any_span(pos: usize, spans: &[(usize, usize)]) -> bool {
     spans.iter().any(|&(start, end)| pos >= start && pos < end)
 }
 
+/// Resolve an unquoted `from`/`join` referent to the CANONICAL sibling-CTE name
+/// (the `raw_cte_spans` key) it references, or `None` if it is not a sibling
+/// (cute-dbt#478). `referent` is always an unquoted bare identifier — a quoted
+/// `"Base"` was blanked by `mask_regions` before this point — so we mirror
+/// dbt-ident's UNQUOTED-identifier semantics: case is folded
+/// (`Base` == `base` == `BASE`). The match is ASCII-case-insensitive against
+/// every key EXCEPT `self_id` (a CTE cannot reference itself in standard SQL).
+///
+/// NEVER-A-FALSE-EDGE (honesty principle 3): case-folding only ever resolves a
+/// referent whose folded form EQUALS a real sibling CTE key — it never invents a
+/// key, and a quoted referent (already masked away) never reaches here, so a
+/// quoted `"Base"` does NOT fold onto `base`. The returned `String` is the
+/// MAP KEY (canonical CTE-name), never the referent's source casing, so the
+/// emitted edge endpoint matches the node id the rest of the DAG uses.
+fn resolve_sibling_cte(
+    referent: &str,
+    self_id: &str,
+    raw_cte_spans: &std::collections::BTreeMap<String, SourceSpan>,
+) -> Option<String> {
+    raw_cte_spans
+        .keys()
+        .find(|key| key.as_str() != self_id && key.eq_ignore_ascii_case(referent))
+        .cloned()
+}
+
 /// Every identifier that immediately follows a whole-word `from` / `join`
 /// keyword in the masked CTE body `body` (cute-dbt#471, S3), paired with the
 /// referent's BYTE START in `body` (so the edge caller can map it to a raw
 /// coordinate and apply the control-block exclusion). The body is already masked
 /// (no strings/comments/Jinja), so every `from`/`join` here is a LIVE SQL keyword
 /// and every following word is a LIVE relation reference. ASCII case-insensitive
-/// keyword match; the referent is returned verbatim (the engine folds identifier
-/// case before the domain, so the comparison at the call site is exact).
+/// keyword match; the referent is returned verbatim in its SOURCE CASING (it is
+/// always an unquoted bare identifier — quoted referents were blanked by
+/// `mask_regions`). The call site folds case ASCII-case-insensitively against the
+/// raw-CTE keys (`resolve_sibling_cte`, cute-dbt#478) to mirror how dbt/the
+/// warehouse fold UNQUOTED identifier case — so `from Base` resolves to a `base`
+/// CTE while a quoted case-mismatch (already masked away) never matches.
 fn from_join_referents(body: &str) -> Vec<(String, usize)> {
     let bytes = body.as_bytes();
     let n = bytes.len();
@@ -2444,6 +2484,114 @@ mod tests {
         assert!(
             edges.is_empty(),
             "a `from base` nested inside `{{% if %}}`→`{{% for %}}` is conditional ⇒ NO edge; got {edges:?}"
+        );
+    }
+
+    // ── cute-dbt#478: case-insensitive raw-DAG edge matching (quote-aware) ──────
+    // dbt/the warehouse fold UNQUOTED identifier case, so `from Base` referencing
+    // `with base` is a genuine sibling reference and must emit the edge. A QUOTED
+    // referent (`from "Base"`) preserves case (dbt-ident); it is blanked by
+    // `mask_regions` before the scan, so a quoted case-mismatch never matches —
+    // honoring quoting for free. The canonical edge endpoint is always the
+    // raw-CTE map key (`base`), never the referent's source casing.
+
+    #[test]
+    fn unquoted_from_mixed_case_resolves_to_lowercase_sibling() {
+        // `from Base` (mixed case) referencing `with base` ⇒ edge base→derived
+        // (unquoted identifier case folds). The edge endpoint is the key `base`.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from Base\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert_eq!(
+            edges,
+            vec![RawEdge {
+                from: "base".to_owned(),
+                to: "derived".to_owned()
+            }],
+            "unquoted `from Base` folds to the `base` CTE ⇒ one edge base→derived; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn unquoted_from_uppercase_resolves_to_lowercase_sibling() {
+        // `from BASE` (all caps) referencing `with base` ⇒ edge base→derived.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from BASE\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert_eq!(
+            edges,
+            vec![RawEdge {
+                from: "base".to_owned(),
+                to: "derived".to_owned()
+            }],
+            "unquoted `from BASE` folds to the `base` CTE ⇒ one edge base→derived; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn quoted_from_case_mismatch_emits_no_edge() {
+        // `from "Base"` (QUOTED, case-PRESERVING per dbt-ident) referencing a
+        // `with base` CTE is NOT a match — the quoted referent is blanked by
+        // `mask_regions`, so it never reaches the resolve. NO false edge.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from \"Base\"\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert!(
+            edges.is_empty(),
+            "a QUOTED `\"Base\"` is case-sensitive and does NOT match the `base` CTE ⇒ NO edge; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn unquoted_exact_case_still_emits_edge_regression() {
+        // REGRESSION GUARD: the common exact-case `from base` → `with base` path
+        // is unchanged by the case-fold (a top-level unquoted edge still works).
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from base\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert_eq!(
+            edges,
+            vec![RawEdge {
+                from: "base".to_owned(),
+                to: "derived".to_owned()
+            }],
+            "exact-case `from base` still emits base→derived; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn case_fold_never_fabricates_an_edge_for_an_unrelated_name() {
+        // A coincidental case-fold of an UNRELATED relation must NOT become an
+        // edge. `derived`'s only sibling reference is `from base`; `from EXTERNAL`
+        // (not a sibling CTE, despite caps) produces no edge — the case-fold only
+        // resolves a referent whose folded form equals a real sibling key.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from base\n  union all select id from EXTERNAL\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert_eq!(
+            edges,
+            vec![RawEdge {
+                from: "base".to_owned(),
+                to: "derived".to_owned()
+            }],
+            "only the real sibling `base` resolves; `EXTERNAL` is not folded into any CTE; got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn case_fold_does_not_create_a_self_edge() {
+        // The self-reference guard is case-insensitive too: a `derived` body that
+        // names `from Derived` (own name, different case) must NOT self-edge.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from base\n  union all select 1 from Derived\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert_eq!(
+            edges,
+            vec![RawEdge {
+                from: "base".to_owned(),
+                to: "derived".to_owned()
+            }],
+            "a case-variant self-reference `from Derived` is not a self-edge; only base→derived; got {edges:?}"
         );
     }
 
