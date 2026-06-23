@@ -3674,7 +3674,10 @@ fn scan_block_tags(raw_code: &str) -> Option<Vec<BlockTag>> {
 /// Find the byte index PAST a `<delim>}` closer (e.g. `#}`) starting at `from`,
 /// scanning literally (comments do not respect string literals). Returns the
 /// index after the closing `}`, or `None` if unterminated.
-fn find_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
+///
+/// `pub(crate)` so the raw-span scanner (`raw_scan`) reuses this exact vetted
+/// scanner rather than carrying a divergent copy (cute-dbt#469).
+pub(crate) fn find_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
     let n = bytes.len();
     let mut i = from;
     while i + 1 < n {
@@ -3692,7 +3695,11 @@ fn find_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
 /// closing `}`, or `None` if unterminated. (The whitespace-control `-%}` is
 /// covered: the `%` then `}` still close; the leading `-` is just preceding
 /// content.)
-fn find_expr_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
+///
+/// `pub(crate)` so the raw-span scanner (`raw_scan`) reuses this exact vetted
+/// scanner — including the Jinja backslash string-escape — rather than carrying
+/// a divergent copy that previously DROPPED the escape (cute-dbt#469).
+pub(crate) fn find_expr_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
     let n = bytes.len();
     let mut i = from;
     let mut quote: Option<u8> = None;
