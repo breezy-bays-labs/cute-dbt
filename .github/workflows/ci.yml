@@ -779,6 +779,30 @@ jobs:
             output: examples/seed-showcase-report.html
             project_root: tests/fixtures/seed-showcase-source
             experimental: "1"
+          # cute-dbt#470 (epic #468, S2) — the GOLDEN raw-DAG incremental
+          # showcase. A dedicated minimal SYNTHETIC manifest (one incremental
+          # model + its staging dep) whose `fct_events` raw_code wraps an inner
+          # CTE inside a `{% if is_incremental() %}` guard, and whose
+          # compiled_code is the FRESH-build shape (the guard body PRUNED). So
+          # the regenerated golden exercises the raw structural DAG: the
+          # verbatim `base` CTE as a `compiled_in` raw node, and the pruned
+          # incremental guard as a first-class `compiled_out` zone raw node
+          # (never falsely "compiled") — the honest incremental-CTE visibility
+          # the spine was built for. node_map.compiled folds `base → base`
+          # (identity); the pruned zone is type-incapable of a fold target.
+          # Rendered in --pr-diff mode (a synthetic one-line edit to the model
+          # file marks it in-scope). No baseline — the showcase is --pr-diff
+          # only. The compiled manifest is hand-authored (the fresh-build
+          # compile), never from a real `dbt compile`, so it leaks no
+          # root_path/username (synthetic-only fixture invariant).
+          - name: incremental-showcase
+            mode: report
+            current: tests/fixtures/incremental-showcase-current.json
+            baseline: ""
+            pr_diff: tests/fixtures/incremental-showcase-pr-diff.patch
+            output: examples/incremental-showcase-report.html
+            project_root: tests/fixtures/incremental-showcase-source
+            experimental: ""
           # cute-dbt#404 (epic #352) — the GOLDEN PR-scope lineage mini-DAG.
           # A dedicated minimal manifest with a CONNECTOR PATH
           # (stg_orders → int_order_items → fct_orders): stg_orders and

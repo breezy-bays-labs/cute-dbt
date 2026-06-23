@@ -809,6 +809,80 @@ generic state codes, no real records.\
 """
 
 [[fixture]]
+path = "incremental-showcase-current.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/470"
+sha256 = "e212f5b896f5bbeaebc9335dbb23ed6f2beeeabf39dfd8280b7308afdfe47582"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The SYNTHETIC manifest for the raw-DAG incremental GOLDEN (cute-dbt#470, epic \
+#468, S2). One incremental model (`fct_events`) + its staging dep \
+(`stg_events`). `fct_events` raw_code wraps an inner CTE inside a \
+`{% if is_incremental() %}` guard; its compiled_code is the FRESH-build shape \
+(the guard body PRUNED), so the report's raw structural DAG shows the verbatim \
+`base` CTE as a `compiled_in` raw node and the pruned incremental guard as a \
+first-class `compiled_out` zone raw node (never falsely "compiled") — the \
+honest incremental-CTE visibility the spine was built for. The compiled_code \
+is HAND-AUTHORED (the fresh-build compile), never from a real `dbt compile`, \
+so it leaks no root_path/username. Pure synthetic data — generic event \
+columns, no real records.\
+"""
+
+[[fixture]]
+path = "incremental-showcase-pr-diff.patch"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/470"
+sha256 = "c6635e0afb441a6ebdaa52b0583d025ed6555c62706d882bfffa159ded862cf4"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The hand-crafted PR diff for the incremental-showcase GOLDEN (cute-dbt#470). A \
+synthetic one-line edit to `models/marts/fct_events.sql` so the incremental \
+model lands in --pr-diff scope and its raw structural DAG renders in the \
+golden. No baseline — the showcase is --pr-diff only. Synthetic, no real \
+records.\
+"""
+
+[[fixture]]
+path = "incremental-showcase-source/models/marts/fct_events.sql"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/470"
+sha256 = "ebcab8a65bf1a843f5658c147bfa172942579a98ff89521ed411f84c0ae9d39f"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The working-tree MODEL SQL for the incremental-showcase GOLDEN (cute-dbt#470). \
+A synthetic incremental model (`fct_events`) whose `with base as (...)` import \
+CTE precedes an inner `recent` CTE wrapped in a `{% if is_incremental() %}` \
+guard — byte-aligned to the committed `model.analytics.fct_events` raw_code in \
+incremental-showcase-current.json (the same-revision contract), so reading it \
+through `--project-root tests/fixtures/incremental-showcase-source` matches \
+the manifest. The incremental-showcase-pr-diff.patch carries an edit hunk \
+against this file so the model lands in --pr-diff scope. Pure synthetic SQL — \
+no real data.\
+"""
+
+[[fixture]]
+path = "incremental-showcase-source/models/staging/stg_events.sql"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/470"
+sha256 = "ce7eb04cf0ed429e06a11a74cf6ace879218f76e61656583873b4d26ae4ea4de"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The working-tree staging SQL for the incremental-showcase GOLDEN \
+(cute-dbt#470). A synthetic staging model (`stg_events`) the incremental \
+`fct_events` model `ref()`s — byte-aligned to the committed \
+`model.analytics.stg_events` raw_code in incremental-showcase-current.json (the \
+same-revision contract). Pure synthetic SQL — no real data.\
+"""
+
+[[fixture]]
 path = "prdiff-minidag-current.json"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/404"
