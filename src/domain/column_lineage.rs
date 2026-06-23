@@ -334,12 +334,33 @@ impl ModelOutputs {
 
     /// Build with an explicit `source_passthrough_columns` set — the
     /// SQL-proven pass-through-to-leaf subset (the adapter's real path).
+    ///
+    /// Normalizes at the boundary EXACTLY like [`Self::new`] (cute-dbt#450):
+    /// `output_columns`, `leaf_refs`, and `source_passthrough_columns` are
+    /// lowercased so a mixed-case output column (e.g. `OrderId`) is not silently
+    /// missed by `trace_to_source` / `blast_radius`, which lowercase the queried
+    /// column before matching. This is the real explorer path (`model_outputs`),
+    /// so skipping normalization here would let mixed-case columns escape the
+    /// lowercase contract `new()` enforces.
     #[must_use]
     pub fn with_passthrough(
         output_columns: Option<Vec<String>>,
         leaf_refs: Vec<String>,
         source_passthrough_columns: BTreeSet<String>,
     ) -> Self {
+        let output_columns = output_columns.map(|cols| {
+            cols.into_iter()
+                .map(|c| c.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        });
+        let leaf_refs = leaf_refs
+            .into_iter()
+            .map(|l| l.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        let source_passthrough_columns = source_passthrough_columns
+            .into_iter()
+            .map(|c| c.to_ascii_lowercase())
+            .collect::<BTreeSet<_>>();
         Self {
             output_columns,
             leaf_refs,

@@ -994,11 +994,23 @@ impl CteGraph {
             .collect()
     }
 
-    /// `true` when the column `(node_id, column)` flows UNCHANGED (pass-through
-    /// / rename only) to a leaf-reading boundary. Memoized; depth-capped (the
-    /// chain is the per-model CTE depth — finite — but the cap guards a
-    /// pathological / cyclic AST). A `Derived` inbound edge or a non-leaf node
-    /// with no pass-through inbound breaks the chain (returns `false`).
+    /// `true` when the column `(node_id, column)` flows UNCHANGED **under the
+    /// same name** (pure pass-through only) to a leaf-reading boundary.
+    /// Memoized; depth-capped (the chain is the per-model CTE depth — finite —
+    /// but the cap guards a pathological / cyclic AST). A `Derived` inbound
+    /// edge, a `Renamed` inbound edge, or a non-leaf node with no pass-through
+    /// inbound breaks the chain (returns `false`).
+    ///
+    /// `Renamed` is EXCLUDED on purpose (cute-dbt#450, the open-fabrication
+    /// fix): the source name-carry attributes a downstream output column to its
+    /// source under the SAME name. A renamed column (`amount AS order_amount`)
+    /// is exposed downstream as `order_amount` while the source field is
+    /// `amount` — name-carrying `order_amount` would claim a `source.order_amount`
+    /// that does not exist (a Resolved trace to a fabricated source column).
+    /// Until a terminal→leaf original-column mapping exists, a renamed column
+    /// degrades to no source edge (Opaque/Root) rather than fabricate one. Only
+    /// a same-name pass-through chain proves terminal-name == leaf-name ==
+    /// carried-source-column.
     fn column_reaches_leaf(
         &self,
         node_id: &str,
@@ -1030,12 +1042,12 @@ impl CteGraph {
             if to_node != node_id || edge.to_col.column != column {
                 continue;
             }
-            // Only a pass-through / rename preserves the column unchanged. A
-            // `Derived` / `Source`(Opaque `*`) / `JoinKey` edge breaks it.
-            if !matches!(
-                edge.kind,
-                ColumnEdgeKind::PassThrough | ColumnEdgeKind::Renamed
-            ) {
+            // Only a SAME-NAME pass-through preserves the column name unchanged
+            // all the way to the leaf. A `Renamed` edge changes the name, so the
+            // downstream output name no longer matches the leaf/source column —
+            // name-carrying it would fabricate a source field (cute-dbt#450).
+            // A `Derived` / `Source`(Opaque `*`) / `JoinKey` edge also breaks it.
+            if !matches!(edge.kind, ColumnEdgeKind::PassThrough) {
                 continue;
             }
             let ColumnScope::Intra { node_id: from_node } = &edge.from_col.scope else {

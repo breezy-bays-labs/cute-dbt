@@ -250,24 +250,28 @@ fn renamed_column_trace_follows_the_rename() {
 // ---- never-a-false-claim: a COMPUTED column is NOT a source field --------
 
 #[test]
-fn computed_column_is_never_attributed_to_a_source() {
-    // A staging model `select *`-ing a source AND injecting a computed column
-    // (`current_timestamp as _loaded_at`, a surrogate `row_number()` key) —
-    // the computed columns must NOT be attributed to the source (they do not
-    // ORIGINATE there; claiming so is a fabricated lineage). Only the
-    // pass-through columns trace to the source.
+fn computed_and_renamed_columns_are_never_attributed_to_a_source() {
+    // A staging model `select *`-ing a source, carrying TWO same-name
+    // pass-through columns (`id`, `amount`), RENAMING one (`legacy_qty AS qty`),
+    // and injecting computed columns (`current_timestamp as _loaded_at`, a
+    // surrogate `row_number()` key). Only the SAME-NAME pass-throughs may trace
+    // to the source. The computed columns and the RENAMED column must NOT —
+    // attributing them is a fabricated source field (#450 never-a-false-claim;
+    // a rename means the source field name differs from the downstream name, so
+    // `source.qty` does not exist — the source field is `legacy_qty`).
     let stg = "\
 with source as (
     select * from \"db\".\"raw\".\"raw_orders\"
 ),
 renamed as (
-    select id as order_id, amount as order_amount from source
+    select id, amount, legacy_qty as qty from source
 ),
 final as (
     select
-        row_number() over (order by order_id) as order_key
-        , order_id
-        , order_amount
+        row_number() over (order by id) as order_key
+        , id
+        , amount
+        , qty
         , current_timestamp as _loaded_at
     from renamed
 )
@@ -293,12 +297,19 @@ select * from final";
         .filter(|e| e.upstream == nid("source.p.raw.raw_orders"))
         .map(|e| e.downstream_column.as_str())
         .collect();
-    // The pass-through columns reach the source.
+    // The SAME-NAME pass-through columns reach the source.
     assert!(
-        to_source.contains("order_id"),
-        "a pass-through column traces to the source"
+        to_source.contains("id"),
+        "a same-name pass-through column traces to the source"
     );
-    assert!(to_source.contains("order_amount"));
+    assert!(to_source.contains("amount"));
+    // The RENAMED column must NOT — `source.qty` does not exist (the source
+    // field is `legacy_qty`); name-carrying `qty` would fabricate it (#450).
+    assert!(
+        !to_source.contains("qty"),
+        "legacy_qty AS qty is a RENAME — the source field is legacy_qty, NOT qty; \
+         name-carrying qty would fabricate a source.qty"
+    );
     // The COMPUTED columns must NOT — never a fabricated source field.
     assert!(
         !to_source.contains("_loaded_at"),
@@ -308,13 +319,15 @@ select * from final";
         !to_source.contains("order_key"),
         "a surrogate row_number() key is computed in-model — NOT a source field"
     );
-    // And the computed column's trace terminates honestly (NOT Source).
-    let trace = graph.trace_to_source(&manifest, &nid("model.p.stg_orders"), "_loaded_at");
-    assert_ne!(
-        trace.termination,
-        TraceTermination::Source,
-        "a computed column never claims a source origin"
-    );
+    // And the computed + renamed columns' traces terminate honestly (NOT Source).
+    for col in ["_loaded_at", "qty"] {
+        let trace = graph.trace_to_source(&manifest, &nid("model.p.stg_orders"), col);
+        assert_ne!(
+            trace.termination,
+            TraceTermination::Source,
+            "a computed/renamed column ({col}) never claims a source origin"
+        );
+    }
 }
 
 // ---- B: blast-radius (TDD 3) --------------------------------------------
@@ -623,6 +636,170 @@ fn exposed_column_still_gets_its_cross_model_edge_after_narrowing() {
         trace.termination,
         TraceTermination::Source,
         "the exposed column still traces to its source"
+    );
+}
+
+// ---- never-a-false-claim: a RENAMED column is NOT a same-name source field
+// (cute-dbt#450 round-3, the open-fabrication fix). `amount AS order_amount`
+// over a source: the source field is `amount`, the downstream output is
+// `order_amount`. The source name-carry must NOT fabricate a
+// `source.order_amount` (a Resolved trace to a source column that does not
+// exist). A renamed column degrades (no source edge) until a terminal→leaf
+// original-column mapping exists. A pure pass-through (same name both sides)
+// STILL traces correctly.
+
+/// stg `select id as order_id, amount as order_amount from <source>`: BOTH
+/// outputs are RENAMES of the source fields (id→order_id, amount→order_amount).
+/// The source is referenced directly (not a `select *`), so there is no clean
+/// pass-through column — neither output may name-carry to the source.
+fn rename_over_source_manifest() -> Manifest {
+    let stg = "select id as order_id, amount as order_amount \
+               from \"db\".\"raw\".\"raw_orders\"";
+    manifest_of(
+        vec![model(
+            "model.p.stg_orders",
+            "\"db\".\"staging\".\"stg_orders\"",
+            stg,
+            &["source.p.raw.raw_orders"],
+        )],
+        vec![source(
+            "source.p.raw.raw_orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"raw_orders\"",
+        )],
+    )
+}
+
+#[test]
+fn renamed_column_does_not_fabricate_a_same_name_source_field() {
+    let manifest = rename_over_source_manifest();
+    let graph = project_graph(&manifest);
+
+    // NO cross-model edge attributes a renamed output column to the source
+    // under that downstream name — `source.order_amount` does not exist.
+    let fabricated = graph.edges().iter().any(|e| {
+        e.upstream == nid("source.p.raw.raw_orders")
+            && (e.downstream_column == "order_amount" || e.upstream_column == "order_amount")
+    });
+    assert!(
+        !fabricated,
+        "a renamed column (amount AS order_amount) must NOT fabricate a \
+         source.order_amount edge — the source field is `amount`, not `order_amount`"
+    );
+
+    // And trace_to_source for the renamed column does NOT claim a source origin
+    // named order_amount: it degrades (Root/Opaque), never a Resolved
+    // fabrication.
+    let trace = graph.trace_to_source(&manifest, &nid("model.p.stg_orders"), "order_amount");
+    assert_ne!(
+        trace.termination,
+        TraceTermination::Source,
+        "a renamed column never claims a (fabricated) same-name source origin"
+    );
+    assert!(
+        trace
+            .hops
+            .iter()
+            .all(|h| !(h.node == nid("source.p.raw.raw_orders") && h.column == "order_amount")),
+        "the trace fabricates no source.order_amount hop for a renamed column"
+    );
+}
+
+#[test]
+fn pure_passthrough_over_source_still_traces_to_source() {
+    // Regression guard: a SAME-NAME pass-through to the source still
+    // name-carries correctly. stg `select order_id from <source>` — order_id
+    // flows unchanged, so it honestly originates at the source.
+    let stg = "select order_id from \"db\".\"raw\".\"raw_orders\"";
+    let manifest = manifest_of(
+        vec![model(
+            "model.p.stg_orders",
+            "\"db\".\"staging\".\"stg_orders\"",
+            stg,
+            &["source.p.raw.raw_orders"],
+        )],
+        vec![source(
+            "source.p.raw.raw_orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"raw_orders\"",
+        )],
+    );
+    let graph = project_graph(&manifest);
+    let trace = graph.trace_to_source(&manifest, &nid("model.p.stg_orders"), "order_id");
+    assert_eq!(
+        trace.termination,
+        TraceTermination::Source,
+        "a same-name pass-through column still traces to its source (the fix \
+         removes ONLY the renamed fabrication)"
+    );
+    assert!(
+        graph
+            .edges()
+            .iter()
+            .any(|e| e.upstream == nid("source.p.raw.raw_orders")
+                && e.downstream_column == "order_id"),
+        "the pass-through column keeps its sound source edge"
+    );
+}
+
+// ---- mixed-case output column normalization (cute-dbt#450, #346 fix) ------
+// `CteGraph::model_outputs` uses `with_passthrough` on the real explorer path;
+// it must lowercase output_columns / leaf_refs / passthrough names exactly like
+// `new()`, so a mixed-Case output column is not silently missed by the
+// lowercased trace_to_source / blast_radius lookups.
+
+#[test]
+fn mixed_case_output_column_is_found_by_trace_and_blast() {
+    // stg projects a MIXED-CASE output column `OrderId` (quoted to survive the
+    // parser as-cased) over a source, and dim consumes it. The lowercased
+    // trace/blast lookups must still find it (with_passthrough lowercases).
+    let stg = "select \"OrderId\" from \"db\".\"raw\".\"raw_orders\"";
+    let dim = "select * from \"db\".\"staging\".\"stg_orders\"";
+    let manifest = manifest_of(
+        vec![
+            model(
+                "model.p.stg_orders",
+                "\"db\".\"staging\".\"stg_orders\"",
+                stg,
+                &["source.p.raw.raw_orders"],
+            ),
+            model(
+                "model.p.dim_orders",
+                "\"db\".\"marts\".\"dim_orders\"",
+                dim,
+                &["model.p.stg_orders"],
+            ),
+        ],
+        vec![source(
+            "source.p.raw.raw_orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"raw_orders\"",
+        )],
+    );
+    let graph = project_graph(&manifest);
+
+    // The stg output column is normalized to lowercase `orderid`. trace_to_source
+    // accepts either case (it lowercases the query) and finds the column.
+    for query in ["OrderId", "orderid"] {
+        let trace = graph.trace_to_source(&manifest, &nid("model.p.stg_orders"), query);
+        assert_eq!(
+            trace.termination,
+            TraceTermination::Source,
+            "trace_to_source({query}) finds the lowercased output column — \
+             with_passthrough must normalize like new()"
+        );
+    }
+
+    // blast_radius likewise finds the lowercased column flowing into dim.
+    let reached = graph.blast_radius(&nid("model.p.stg_orders"), "OrderId");
+    let nodes: std::collections::BTreeSet<&str> = reached.iter().map(|h| h.node.as_str()).collect();
+    assert!(
+        nodes.contains("model.p.dim_orders"),
+        "blast_radius on a mixed-case column reaches the downstream consumer \
+         (the lookup lowercases and the output is normalized)"
     );
 }
 
