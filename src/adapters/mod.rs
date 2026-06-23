@@ -71,4 +71,5 @@ pub mod manifest;
 pub mod pr_comments;
 pub mod project_def;
 pub mod project_file;
+pub mod raw_scan;
 pub mod render;
