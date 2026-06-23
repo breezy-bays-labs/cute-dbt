@@ -242,8 +242,13 @@ impl RelationIndex {
     /// dropped the schema/database qualifier.
     #[must_use]
     pub fn node_for_bare_leaf(&self, identifier: &str) -> Option<&NodeId> {
-        let leaf = identifier.to_ascii_lowercase();
-        let relations = self.by_identifier.get(&leaf)?;
+        // Happy path: callers frequently pass an already-lowercased leaf (e.g.
+        // `leaf_lc` in `stitch_leaf`). Try a direct lookup first so the common
+        // case never allocates; only fall back to lowercasing on a miss.
+        let relations = self.by_identifier.get(identifier).or_else(|| {
+            let leaf = identifier.to_ascii_lowercase();
+            self.by_identifier.get(&leaf)
+        })?;
         let mut iter = relations.iter();
         match (iter.next(), iter.next()) {
             // Exactly one relation carries this leaf — globally unique.
@@ -303,6 +308,19 @@ impl ModelOutputs {
     /// uses [`Self::with_passthrough`] to pass the SQL-proven subset.
     #[must_use]
     pub fn new(output_columns: Option<Vec<String>>, leaf_refs: Vec<String>) -> Self {
+        // Normalize at the boundary: the docs promise lowercased
+        // `output_columns` / `leaf_refs`, and `trace_to_source` / `blast_radius`
+        // lowercase query columns before matching. A mixed-case caller input
+        // would otherwise be silently untraceable.
+        let output_columns = output_columns.map(|cols| {
+            cols.into_iter()
+                .map(|c| c.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        });
+        let leaf_refs = leaf_refs
+            .into_iter()
+            .map(|l| l.to_ascii_lowercase())
+            .collect::<Vec<_>>();
         let source_passthrough_columns = output_columns
             .as_ref()
             .map(|cols| cols.iter().cloned().collect())
@@ -517,12 +535,19 @@ impl ProjectColumnGraph {
                     termination: TraceTermination::Source,
                 };
             }
-            // Find the single upstream edge feeding this column.
-            let next = self
+            // Find the upstream edge(s) feeding this column. A column may carry
+            // MORE THAN ONE incoming cross-model edge (duplicate `select *`
+            // columns, or a derived column fed by several upstreams). We must
+            // NOT `.find()` the first by sort order — that would claim a
+            // sort-order-dependent WRONG source. The v0.1 trace API is a single
+            // linear chain (no branching), so a fork is honestly non-traceable:
+            // degrade to Opaque (never fabricate one of the upstreams as THE
+            // source) until the API grows branching traces.
+            let mut incoming = self
                 .edges
                 .iter()
-                .find(|e| e.downstream == current.0 && e.downstream_column == current.1);
-            let Some(edge) = next else {
+                .filter(|e| e.downstream == current.0 && e.downstream_column == current.1);
+            let Some(edge) = incoming.next() else {
                 // No further cross-model edge. Distinguish "this column maps
                 // to a real producer but the producer is non-enumerable
                 // (Opaque)" from "this column genuinely originates here
@@ -536,6 +561,15 @@ impl ProjectColumnGraph {
                 };
                 return TraceToSource { hops, termination };
             };
+            if incoming.next().is_some() {
+                // Multiple incoming cross-model edges — the trace forks. The
+                // single-chain API cannot represent a branch, so degrade to
+                // Opaque rather than pick one upstream (never-a-false-claim).
+                return TraceToSource {
+                    hops,
+                    termination: TraceTermination::Opaque,
+                };
+            }
             let upstream = (edge.upstream.clone(), edge.upstream_column.clone());
             if !visited.insert(upstream.clone()) {
                 // Cycle guard — stop, honest dead-end.
@@ -552,14 +586,28 @@ impl ProjectColumnGraph {
         }
     }
 
-    /// `true` when `node`'s lineage thins to Opaque — it has at least one
-    /// producer but no enumerable output edge could be formed (a `*` over a
-    /// non-enumerable / unknown upstream). Used only to label a trace
-    /// dead-end honestly (Opaque vs Root).
+    /// `true` when `node`'s lineage thins to Opaque rather than genuinely
+    /// rooting here. Two honest Opaque shapes (never-a-false-claim):
+    ///
+    /// 1. The node's OWN terminal projection is non-enumerable (`*` over an
+    ///    unknown external / anonymous expression ⇒ `outputs[node] == None`):
+    ///    the column could not have originated here as a clean field — it came
+    ///    from a relation the engine could not enumerate. This holds even with
+    ///    NO manifest producer (a `select *` over an external not in the
+    ///    manifest), which is the documented unknown-external contract.
+    /// 2. The node consumes a real producer (an inbound DAG edge) but no
+    ///    resolved cross-model column edge lands on it ⇒ the `ref()` boundary
+    ///    was Opaque.
+    ///
+    /// A genuine root — an enumerable column that derives in-SQL with no
+    /// non-enumerable thin — is Root, not Opaque.
     fn column_thins_opaque(&self, manifest: &Manifest, node: &NodeId) -> bool {
-        // The node consumes something (has an inbound model edge in the DAG)
-        // but no resolved cross-model column edge lands on it ⇒ the boundary
-        // was Opaque. A genuine root (no producers) is Root, not Opaque.
+        // (1) The node's own terminal output is non-enumerable.
+        let own_output_opaque = matches!(self.outputs.get(node), Some(None));
+        if own_output_opaque {
+            return true;
+        }
+        // (2) Consumes a real producer but no resolved column edge landed.
         let has_producer = manifest
             .node(node)
             .is_some_and(|n| !n.depends_on().nodes().is_empty());
@@ -720,12 +768,15 @@ fn stitch_leaf(leaf: &str, producers: &[NodeId], index: &RelationIndex) -> Stitc
     }
     // Fallback: among the REAL producers, exactly one carries this leaf as the
     // identifier of its normalized relation. (The producer set is the
-    // authoritative edge — this can never reach outside it.)
+    // authoritative edge — this can never reach outside it.) Use the
+    // `by_identifier` index to fetch only the relations sharing this leaf
+    // (O(log M)) instead of scanning the entire `by_relation` map (O(M)).
+    let leaf_rels = index.by_identifier.get(&leaf_lc);
     let mut matches = producers.iter().filter(|p| {
-        index
-            .by_relation
-            .iter()
-            .any(|(rel, owner)| owner == *p && rel.identifier == leaf_lc)
+        leaf_rels.is_some_and(|rels| {
+            rels.iter()
+                .any(|rel| index.by_relation.get(rel) == Some(*p))
+        })
     });
     match (matches.next(), matches.next()) {
         (Some(only), None) => StitchOutcome::Resolved {
@@ -1192,12 +1243,129 @@ mod tests {
         assert_eq!(graph, back);
     }
 
+    /// Exhaustive serde round-trip over EVERY new `Serialize + Deserialize`
+    /// wire boundary type (house style: explicit constructed values covering
+    /// each enum variant + the `Option`/empty edges of each struct, not a
+    /// sampled proptest). The contract: `from_json(to_json(x)) == x` for each.
+    #[test]
+    fn new_wire_types_serde_round_trip() {
+        fn round_trip<T>(value: &T)
+        where
+            T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+        {
+            let json = serde_json::to_string(value).expect("serialize");
+            let back: T = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(value, &back, "round-trip mismatch for {json}");
+        }
+
+        // NormalizedRelation — fully-qualified and bare (database/schema None).
+        round_trip(&parse_relation_name("\"db\".\"schema\".\"orders\""));
+        round_trip(&parse_relation_name("orders"));
+
+        // NOTE: `RelationIndex` is intentionally NOT JSON-round-tripped here.
+        // It is an in-process ingestion index (`from_manifest` → `build`),
+        // never emitted on the `--context-out`/findings wire. Its
+        // `BTreeMap<NormalizedRelation, _>` uses a STRUCT key, which `serde_json`
+        // cannot represent (JSON object keys must be strings). The `Serialize`
+        // derive exists for uniformity, not for a JSON boundary.
+
+        // ModelOutputs — enumerable and non-enumerable (None) outputs, plus the
+        // passthrough subset variant.
+        round_trip(&ModelOutputs::new(
+            Some(vec!["order_id".into(), "amount".into()]),
+            vec!["raw_orders".into()],
+        ));
+        round_trip(&ModelOutputs::new(None, vec![]));
+        round_trip(&ModelOutputs::with_passthrough(
+            Some(vec!["order_id".into()]),
+            vec!["raw_orders".into()],
+            ["order_id".to_string()].into_iter().collect(),
+        ));
+
+        // StitchOutcome — both variants.
+        round_trip(&StitchOutcome::Resolved {
+            upstream: nid("model.p.stg_orders"),
+        });
+        round_trip(&StitchOutcome::Opaque);
+
+        // TraceToSource — every TraceTermination variant, with hops.
+        for termination in [
+            TraceTermination::Source,
+            TraceTermination::Opaque,
+            TraceTermination::Root,
+        ] {
+            round_trip(&TraceToSource {
+                hops: vec![TraceHop {
+                    node: nid("model.p.dim_orders"),
+                    column: "order_id".into(),
+                }],
+                termination,
+            });
+        }
+    }
+
     #[test]
     fn build_is_deterministic() {
         let (manifest, lineage, index, outputs) = three_model_chain();
         let a = ProjectColumnGraph::build(&manifest, &lineage, &index, &outputs);
         let b = ProjectColumnGraph::build(&manifest, &lineage, &index, &outputs);
         assert_eq!(a, b);
+    }
+
+    /// A downstream column fed by MORE THAN ONE cross-model upstream (duplicate
+    /// `select *` columns, or a derived column with several inputs) must NOT
+    /// pick the first edge by sort order — that would be a sort-order-dependent
+    /// WRONG source claim. The single-chain trace API cannot represent a fork,
+    /// so the trace degrades to Opaque (never-a-false-claim). This pins the
+    /// CodeRabbit-flagged first-source-on-ambiguity contract.
+    #[test]
+    fn multi_upstream_column_traces_opaque_not_first_wins() {
+        let manifest = manifest_of(
+            vec![
+                model("model.p.up_a", Some("\"db\".\"s\".\"up_a\""), &[]),
+                model("model.p.up_b", Some("\"db\".\"s\".\"up_b\""), &[]),
+                model(
+                    "model.p.dim",
+                    Some("\"db\".\"m\".\"dim\""),
+                    &["model.p.up_a", "model.p.up_b"],
+                ),
+            ],
+            vec![],
+        );
+        // Two cross-model edges feed dim.order_id — one from each upstream.
+        let edges = vec![
+            CrossModelEdge {
+                upstream: nid("model.p.up_a"),
+                upstream_column: "order_id".into(),
+                downstream: nid("model.p.dim"),
+                downstream_column: "order_id".into(),
+                via_star: true,
+            },
+            CrossModelEdge {
+                upstream: nid("model.p.up_b"),
+                upstream_column: "order_id".into(),
+                downstream: nid("model.p.dim"),
+                downstream_column: "order_id".into(),
+                via_star: true,
+            },
+        ];
+        let mut outputs: BTreeMap<NodeId, Option<Vec<String>>> = BTreeMap::new();
+        outputs.insert(nid("model.p.up_a"), Some(vec!["order_id".into()]));
+        outputs.insert(nid("model.p.up_b"), Some(vec!["order_id".into()]));
+        outputs.insert(nid("model.p.dim"), Some(vec!["order_id".into()]));
+        let graph = ProjectColumnGraph { edges, outputs };
+
+        let trace = graph.trace_to_source(&manifest, &nid("model.p.dim"), "order_id");
+        assert_eq!(
+            trace.termination,
+            TraceTermination::Opaque,
+            "a column with two cross-model upstreams degrades to Opaque — never \
+             first-by-sort-order"
+        );
+        // The walk stopped AT the fork: only the queried column is in the hop
+        // chain (it never committed to either upstream).
+        assert_eq!(trace.hops.len(), 1, "the trace does not pick one upstream");
+        assert_eq!(trace.hops[0].node, nid("model.p.dim"));
     }
 
     /// A real `source()` node (in the sources map, not a seed) terminates the

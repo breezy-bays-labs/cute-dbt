@@ -374,8 +374,9 @@ fn star_over_unknown_external_stays_opaque_no_fabrication() {
     let trace = graph.trace_to_source(&manifest, &nid("model.p.lonely"), "anything");
     assert_eq!(
         trace.termination,
-        TraceTermination::Root,
-        "no producers ⇒ Root; a column over the unknown external is honestly a dead-end"
+        TraceTermination::Opaque,
+        "a `*` over an unknown external is non-enumerable — the trace degrades to \
+         Opaque, never claiming a fabricated Root origin"
     );
     // And the explorer emits no carrier at all for a flow-free project.
     assert!(
