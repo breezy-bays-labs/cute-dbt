@@ -1,0 +1,96 @@
+{
+    "metadata": {
+        "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+        "project_name": "analytics"
+    },
+    "nodes": {
+        "model.analytics.fct_events": {
+            "name": "fct_events",
+            "resource_type": "model",
+            "package_name": "analytics",
+            "unique_id": "model.analytics.fct_events",
+            "original_file_path": "models/marts/fct_events.sql",
+            "path": "marts/fct_events.sql",
+            "checksum": {
+                "name": "sha256",
+                "checksum": "c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00"
+            },
+            "compiled_code": "with base as (\n    select event_id, occurred_at, amount from \"memory\".\"main\".\"stg_events\"\n)\nselect event_id, occurred_at, amount from base\n",
+            "raw_code": "{{ config(materialized='incremental', unique_key='event_id') }}\n\nwith base as (\n    select event_id, occurred_at, amount from {{ ref('stg_events') }}\n)\n\n{% if is_incremental() %}\n, recent as (\n    select event_id, occurred_at, amount\n    from base\n    where occurred_at > (select max(occurred_at) from {{ this }})\n)\n{% endif %}\n\nselect event_id, occurred_at, amount from base\n",
+            "depends_on": {
+                "macros": [],
+                "nodes": [
+                    "model.analytics.stg_events"
+                ]
+            },
+            "config": {
+                "materialized": "incremental",
+                "unique_key": "event_id"
+            }
+        },
+        "model.analytics.stg_events": {
+            "name": "stg_events",
+            "resource_type": "model",
+            "package_name": "analytics",
+            "unique_id": "model.analytics.stg_events",
+            "original_file_path": "models/staging/stg_events.sql",
+            "path": "staging/stg_events.sql",
+            "checksum": {
+                "name": "sha256",
+                "checksum": "d00dad00d00dad00d00dad00d00dad00d00dad00d00dad00d00dad00d00dad000"
+            },
+            "compiled_code": "select event_id, occurred_at, amount from \"memory\".\"main\".\"raw_events\"\n",
+            "raw_code": "select event_id, occurred_at, amount from {{ source('raw', 'raw_events') }}\n",
+            "depends_on": {
+                "macros": [],
+                "nodes": []
+            },
+            "config": {}
+        }
+    },
+    "sources": {},
+    "macros": {},
+    "unit_tests": {
+        "unit_test.analytics.fct_events.test_fct_events_passthrough": {
+            "model": "fct_events",
+            "given": [
+                {
+                    "input": "ref('stg_events')",
+                    "rows": [
+                        {
+                            "event_id": "e1",
+                            "occurred_at": "2024-01-01",
+                            "amount": "10"
+                        }
+                    ],
+                    "format": "dict",
+                    "fixture": null
+                }
+            ],
+            "expect": {
+                "rows": [
+                    {
+                        "event_id": "e1",
+                        "occurred_at": "2024-01-01",
+                        "amount": "10"
+                    }
+                ],
+                "format": "dict",
+                "fixture": null
+            },
+            "name": "test_fct_events_passthrough",
+            "resource_type": "unit_test",
+            "package_name": "analytics",
+            "path": "marts/unit_tests.yml",
+            "original_file_path": "models/marts/unit_tests.yml",
+            "unique_id": "unit_test.analytics.fct_events.test_fct_events_passthrough",
+            "depends_on": {
+                "macros": [],
+                "nodes": [
+                    "model.analytics.fct_events"
+                ]
+            },
+            "config": {}
+        }
+    }
+}

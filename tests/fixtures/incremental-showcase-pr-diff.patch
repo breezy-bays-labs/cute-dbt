@@ -1,0 +1,6 @@
+diff --git a/models/marts/fct_events.sql b/models/marts/fct_events.sql
+--- a/models/marts/fct_events.sql
++++ b/models/marts/fct_events.sql
+@@ -3 +3 @@
+-with base as (   -- old
++with base as (

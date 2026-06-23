@@ -72,7 +72,7 @@ use crate::domain::{
     EdgeType, Finding, FixtureTable, FixtureTableDiff, GovernanceFacts, HeuristicId,
     HookChangeFacts, HookManifestPresence, InScopeSet, Instrument, MacroIdentity, Manifest,
     ModelInScopeSet, ModelState, ModelYamlOutcome, Node, NodeId, NormalizedDiffIndex, PrDagGraph,
-    PrRef, ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition,
+    PrRef, Presence, ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition,
     ProjectFacts, ProjectFallbackReason, SeedCard, SourceMap, SourceMapEntry, SourceNode,
     SourcePos, SourceSpan, SpanRole, TestMetadata, Tier, UnitTest, UnitTestDataDiff, UnitTestGiven,
     UnitTestOverrides, UnitTestYamlBlock, VarAttribution, VarChangeFacts, VarReference,
@@ -329,6 +329,65 @@ pub struct RawZonePayload {
     pub node_id: Option<String>,
 }
 
+/// One raw structural DAG node (cute-dbt#470, S2) — a literal `raw_code` region
+/// that has STRUCTURE as written, before any Jinja expansion. SOUND by
+/// construction: every node is a real lexical region of `raw_code` (a verbatim
+/// `WITH` CTE, the WITH-less terminal select, or a `{% if %}`/`{% for %}` control
+/// zone), never a fabricated/predicted node. Serialize-only projection of the
+/// assembled [`SourceMap`] (the filled `raw` spans + the `Zone` entries).
+///
+/// `presence` is the 3-state honesty verdict (`compiled_in` / `compiled_out` /
+/// `structural`): a `{% if is_incremental() %}` zone pruned this build is
+/// `compiled_out` (NEVER `compiled`/`compiled_in`) — a first-class raw node the
+/// future Incremental⇄Full-refresh toggle shows/hides with no recompile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RawDagNodePayload {
+    /// Stable raw-node id. A CTE node's id is its alias (== the compiled DAG
+    /// node id, the N→1 identity origin); the WITH-less terminal is
+    /// [`TERMINAL_NODE_NAME`]; a zone is `zone:<index>` (stable appearance
+    /// order among the model's `Zone` entries).
+    pub id: String,
+    /// `"cte"` | `"terminal"` | `"zone"` — the structural role of the raw
+    /// region. Distinct from `is_zone` so a consumer can branch on either.
+    pub role: &'static str,
+    /// Whether this is a control-flow zone (`{% if %}`/`{% for %}`) — `true`
+    /// only for `role == "zone"`. Carried explicitly (not just derivable from
+    /// `role`) so the prototype can style zones without string-matching.
+    pub is_zone: bool,
+    /// The 3-state presence verdict DERIVED ONCE in Rust (`compiled_in` /
+    /// `compiled_out` / `structural`), emitted as the wire string the prototype
+    /// renders verbatim. A verbatim CTE / WITH-less terminal is always
+    /// `compiled_in` (it is, by definition, present in the compiled output it
+    /// was anchored against). A zone carries its honest [`Presence`] verdict.
+    pub presence: &'static str,
+}
+
+/// The raw structural DAG (cute-dbt#470, S2) — `nodes` only. Edges +
+/// `node_map.raw` (the 1→N observed correspondence) are S3 (cute-dbt#471) and
+/// are DELIBERATELY ABSENT here, never faked: this payload carries only the
+/// sound raw nodes + the N→1 `node_map.compiled` fold (on [`CodeMapPayload`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RawDagPayload {
+    /// The sound raw structural nodes (verbatim CTEs + WITH-less terminal +
+    /// control zones). Empty (the whole `raw_dag` key omitted) for a model with
+    /// no resolvable raw structure, so pre-#470 goldens stay byte-stable.
+    pub nodes: Vec<RawDagNodePayload>,
+}
+
+/// The compiled⇄raw node correspondence (cute-dbt#470, S2) — S2 fills ONLY the
+/// `compiled` half (the N→1 fold `compiledId → rawId`); the `raw` half (1→N,
+/// observed) is S3 (cute-dbt#471) and is absent here, never faked. The whole
+/// `node_map` key is omitted when `compiled` is empty (byte-stable goldens).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NodeMapPayload {
+    /// `compiledId → rawId` (N→1): each compiled DAG node folded back to its
+    /// UNIQUE raw origin. A compiled node with NO unique raw origin OMITS its
+    /// key (never a guessed `rawId`). A `{% for %}`-fanned set of compiled CTEs
+    /// all map back to the ONE template zone raw node (by structural
+    /// containment), omitting where the origin is ambiguous.
+    pub compiled: BTreeMap<String, String>,
+}
+
 /// The per-model source-map render projection (cute-dbt#445) — Serialize-only,
 /// PROJECTS the domain [`SourceMap`] spine fact. The faithful full `compiled`
 /// text plus the derived `CteBody` node-span table; `raw_zones` is the deferred
@@ -366,6 +425,18 @@ pub struct CodeMapPayload {
     /// region). Empty (omitted) until a column resolves a unique raw anchor.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub raw_column_spans: BTreeMap<String, SourceSpan>,
+    /// The raw structural DAG (cute-dbt#470, S2) — sound raw nodes (verbatim
+    /// CTEs + WITH-less terminal + control zones). `None` (key omitted) when the
+    /// model resolves no raw structure, so pre-#470 goldens stay byte-stable.
+    /// Edges are S3 (cute-dbt#471) and are absent here, never faked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_dag: Option<RawDagPayload>,
+    /// The compiled⇄raw node correspondence (cute-dbt#470, S2) — S2 fills ONLY
+    /// the N→1 `compiled` half (`compiledId → rawId`, omit-on-ambiguous); the
+    /// 1→N `raw` half is S3 (cute-dbt#471). `None` (key omitted) when no
+    /// compiled node folds to a unique raw origin, so goldens stay byte-stable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_map: Option<NodeMapPayload>,
 }
 
 impl CodeMapPayload {
@@ -396,6 +467,12 @@ impl CodeMapPayload {
             .into_iter()
             .map(|((node_id, column), span)| (format!("{node_id}\u{1f}{column}"), span))
             .collect();
+        // cute-dbt#470 (S2) — the raw structural DAG nodes + the N→1
+        // `node_map.compiled` fold, built once over the assembled spine
+        // (`node_spans` are the compiled DAG nodes folded back). `None` when no
+        // raw structure / no unique origin resolves, so the keys are omitted and
+        // pre-#470 goldens stay byte-stable.
+        let (raw_dag, node_map) = build_raw_dag_and_node_map(sm, &node_spans);
         Self {
             compiled: sm.compiled.clone(),
             node_spans,
@@ -403,8 +480,139 @@ impl CodeMapPayload {
             column_spans,
             raw_node_spans,
             raw_column_spans,
+            raw_dag,
+            node_map,
         }
     }
+}
+
+/// Build the raw structural DAG nodes + the N→1 `node_map.compiled` fold
+/// (cute-dbt#470, S2) from the assembled [`SourceMap`] and the model's compiled
+/// `node_spans` (the compiled DAG node ids → spans).
+///
+/// ## `raw_dag.nodes` (every node a SOUND literal `raw_code` region)
+///
+/// - **CTE raw node** — one per `CteBody` entry whose `raw` span the `raw_scan`
+///   adapter UNIQUELY anchored (a verbatim `WITH` CTE). `presence = compiled_in`
+///   (a verbatim CTE anchored against the compiled output is, by definition, in
+///   it). Id == the CTE alias (== the compiled DAG node id — the N→1 identity).
+/// - **WITH-less terminal raw node** — synthesized as exactly ONE `terminal`
+///   node when the model is WITH-less (the compiled DAG is the lone
+///   [`TERMINAL_NODE_NAME`] node AND no `CteBody` carries a raw span — there is
+///   no `WITH`). Mirrors [`crate::domain::source_map::SourceMap::from_cte_graph`]'s
+///   terminal synthesis so `node_map.compiled` stays TOTAL for WITH-less models.
+///   `presence = compiled_in`.
+/// - **Zone raw node** — one per `Zone` entry, id `zone:<index>` (stable
+///   appearance order). `presence` is the honest 3-state [`Presence`] verdict
+///   (a pruned `is_incremental()` zone is `compiled_out`, NEVER `compiled_in`).
+///
+/// ## `node_map.compiled` (N→1, `compiledId → rawId`, omit-on-ambiguous)
+///
+/// For each compiled DAG node id:
+/// - A raw CTE node with the SAME id ⇒ map to it (the verbatim-CTE identity).
+/// - Else the WITH-less terminal ⇒ map to the synthesized terminal raw node.
+/// - Else fold by STRUCTURAL CONTAINMENT: the raw zone node whose COMPILED span
+///   uniquely contains this compiled node's span ⇒ map to that ONE zone (the
+///   `{% for %}`-fanned CTEs → the ONE template node). Zero or MULTIPLE
+///   containing zones ⇒ OMIT the key (never a guessed `rawId`).
+fn build_raw_dag_and_node_map(
+    sm: &SourceMap,
+    node_spans: &BTreeMap<String, SourceSpan>,
+) -> (Option<RawDagPayload>, Option<NodeMapPayload>) {
+    // The raw CTE nodes: every CteBody whose raw span was uniquely anchored.
+    let raw_cte_ids: std::collections::BTreeSet<String> = sm.raw_node_spans().into_keys().collect();
+    // A WITH-less model: the compiled DAG is the lone terminal node AND no CTE
+    // carries a raw span (no `WITH`). Mirror from_cte_graph's terminal synthesis
+    // so node_map.compiled stays total for WITH-less models. A WITH-bearing
+    // terminal has no verbatim raw region, so it is NOT synthesized here and its
+    // node_map key is honestly omitted.
+    let is_with_less = raw_cte_ids.is_empty()
+        && node_spans.len() == 1
+        && node_spans.contains_key(TERMINAL_NODE_NAME);
+
+    let mut nodes: Vec<RawDagNodePayload> = Vec::new();
+    // CTE raw nodes (stable BTreeSet order).
+    for id in &raw_cte_ids {
+        nodes.push(RawDagNodePayload {
+            id: id.clone(),
+            role: "cte",
+            is_zone: false,
+            presence: Presence::CompiledIn.to_wire(),
+        });
+    }
+    // The WITH-less terminal raw node (exactly one).
+    if is_with_less {
+        nodes.push(RawDagNodePayload {
+            id: TERMINAL_NODE_NAME.to_owned(),
+            role: "terminal",
+            is_zone: false,
+            presence: Presence::CompiledIn.to_wire(),
+        });
+    }
+    // Zone raw nodes — id `zone:<index>` by appearance order; carry the honest
+    // 3-state presence + (compiled span, if any) for the structural fold below.
+    let cte_spans: Vec<SourceSpan> = node_spans.values().copied().collect();
+    let mut zone_compiled: Vec<(String, Option<SourceSpan>)> = Vec::new();
+    for entry in sm
+        .entries
+        .iter()
+        .filter(|e| matches!(e.role, SpanRole::Zone { .. }))
+    {
+        let zone_id = format!("zone:{}", zone_compiled.len());
+        nodes.push(RawDagNodePayload {
+            id: zone_id.clone(),
+            role: "zone",
+            is_zone: true,
+            presence: entry.presence(&cte_spans).to_wire(),
+        });
+        zone_compiled.push((zone_id, entry.compiled));
+    }
+
+    // node_map.compiled — fold each compiled DAG node back to its raw origin.
+    let mut compiled_map: BTreeMap<String, String> = BTreeMap::new();
+    for (compiled_id, compiled_span) in node_spans {
+        if raw_cte_ids.contains(compiled_id) {
+            // Verbatim CTE identity: compiled id == raw id.
+            compiled_map.insert(compiled_id.clone(), compiled_id.clone());
+        } else if is_with_less && compiled_id == TERMINAL_NODE_NAME {
+            // WITH-less terminal ⇒ the synthesized terminal raw node.
+            compiled_map.insert(compiled_id.clone(), TERMINAL_NODE_NAME.to_owned());
+        } else if let Some(zone_id) = unique_containing_zone(&zone_compiled, compiled_span) {
+            // A fanned compiled CTE inside a {% for %} ⇒ the ONE template zone.
+            compiled_map.insert(compiled_id.clone(), zone_id);
+        }
+        // No unique raw origin ⇒ OMIT (never a guessed rawId).
+    }
+
+    let raw_dag = (!nodes.is_empty()).then_some(RawDagPayload { nodes });
+    let node_map = (!compiled_map.is_empty()).then_some(NodeMapPayload {
+        compiled: compiled_map,
+    });
+    (raw_dag, node_map)
+}
+
+/// The id of the ONE zone raw node whose COMPILED span strictly contains
+/// `compiled` (cute-dbt#470, S2). Returns `None` when zero or MULTIPLE zones
+/// contain it (ambiguous origin ⇒ omit — never a guessed rawId). A zone with no
+/// compiled span (`compiled_out`) can never contain a compiled node, so it is
+/// skipped. "Strictly contains" excludes a zone span EQUAL to the compiled node
+/// (an equal span is the node itself, not a containing template).
+fn unique_containing_zone(
+    zone_compiled: &[(String, Option<SourceSpan>)],
+    compiled: &SourceSpan,
+) -> Option<String> {
+    let mut hit: Option<&str> = None;
+    for (zone_id, zspan) in zone_compiled {
+        let Some(zspan) = zspan else { continue };
+        if zspan != compiled && zspan.contains_range(compiled) {
+            if hit.is_some() {
+                // A second containing zone ⇒ ambiguous ⇒ omit.
+                return None;
+            }
+            hit = Some(zone_id);
+        }
+    }
+    hit.map(str::to_owned)
 }
 
 /// Project the `SpanRole::Zone` entries of a [`SourceMap`] into
@@ -8108,6 +8316,384 @@ mod tests {
             z.node_id.as_deref(),
             Some(TERMINAL_NODE_NAME),
             "structural zone binds to its containing node"
+        );
+    }
+
+    // ── cute-dbt#470 (S2): raw_dag nodes + node_map.compiled (N→1) ───────────
+
+    /// A `SourceMapEntry` for a `CteBody` carrying both a raw and a compiled
+    /// span — the shape `raw_scan::fill_raw_spans` produces for a verbatim CTE.
+    fn cte_entry_with_raw(node_id: &str, raw: SourceSpan, compiled: SourceSpan) -> SourceMapEntry {
+        SourceMapEntry {
+            role: SpanRole::CteBody {
+                node_id: node_id.to_owned(),
+            },
+            raw: Some(raw),
+            compiled: Some(compiled),
+        }
+    }
+
+    fn rs(start: u32, end: u32) -> SourceSpan {
+        SourceSpan {
+            start: SourcePos {
+                line: 1,
+                col: start + 1,
+                byte: start,
+            },
+            end: SourcePos {
+                line: 1,
+                col: end + 1,
+                byte: end,
+            },
+        }
+    }
+
+    #[test]
+    fn raw_dag_nodes_are_sound_literal_regions_with_a_compiled_in_cte() {
+        // A verbatim WITH CTE (raw uniquely anchored) becomes a `cte` raw node;
+        // every node carries a literal-region role + presence. The terminal here
+        // is WITH-bearing (a CTE exists), so NO terminal raw node is synthesized.
+        let compiled = "with a as (select 1) select * from a";
+        let sm = SourceMap {
+            compiled: compiled.to_owned(),
+            entries: vec![
+                cte_entry_with_raw("a", rs(5, 20), rs(5, 20)),
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: TERMINAL_NODE_NAME.to_owned(),
+                    },
+                    raw: None, // terminal has no verbatim raw region (S1 omits it)
+                    compiled: Some(rs(21, 36)),
+                },
+            ],
+        };
+        let payload = CodeMapPayload::from_source_map(&sm);
+        let raw_dag = payload.raw_dag.expect("raw_dag present (a CTE resolved)");
+        // Exactly one raw node: the verbatim CTE `a`. No terminal node (WITH-bearing).
+        assert_eq!(raw_dag.nodes.len(), 1);
+        let node = &raw_dag.nodes[0];
+        assert_eq!(node.id, "a");
+        assert_eq!(node.role, "cte");
+        assert!(!node.is_zone);
+        assert_eq!(
+            node.presence, "compiled_in",
+            "a verbatim CTE is compiled-in"
+        );
+        // node_map.compiled folds the compiled CTE `a` → raw CTE `a` (identity).
+        let node_map = payload.node_map.expect("node_map present");
+        assert_eq!(node_map.compiled.get("a").map(String::as_str), Some("a"));
+        // The WITH-bearing terminal has no unique raw origin ⇒ its key is OMITTED.
+        assert!(
+            !node_map.compiled.contains_key(TERMINAL_NODE_NAME),
+            "WITH-bearing terminal omits its node_map key (no verbatim raw region)"
+        );
+    }
+
+    #[test]
+    fn with_less_model_emits_exactly_one_terminal_raw_node() {
+        // A WITH-less model: the compiled DAG is the lone terminal node and no
+        // CTE carries a raw span. Mirror from_cte_graph's terminal synthesis —
+        // exactly ONE terminal raw node — so node_map.compiled stays TOTAL.
+        let compiled = "select id, name from raw_customers";
+        let sm = SourceMap {
+            compiled: compiled.to_owned(),
+            entries: vec![SourceMapEntry {
+                role: SpanRole::CteBody {
+                    node_id: TERMINAL_NODE_NAME.to_owned(),
+                },
+                raw: None,
+                compiled: Some(rs(0, u32::try_from(compiled.len()).unwrap())),
+            }],
+        };
+        let payload = CodeMapPayload::from_source_map(&sm);
+        let raw_dag = payload
+            .raw_dag
+            .expect("raw_dag present (terminal synthesized)");
+        assert_eq!(raw_dag.nodes.len(), 1, "exactly one terminal raw node");
+        let node = &raw_dag.nodes[0];
+        assert_eq!(node.id, TERMINAL_NODE_NAME);
+        assert_eq!(node.role, "terminal");
+        assert!(!node.is_zone);
+        assert_eq!(node.presence, "compiled_in");
+        // node_map.compiled is TOTAL: the lone compiled terminal maps to it.
+        let node_map = payload.node_map.expect("node_map present");
+        assert_eq!(
+            node_map
+                .compiled
+                .get(TERMINAL_NODE_NAME)
+                .map(String::as_str),
+            Some(TERMINAL_NODE_NAME),
+            "WITH-less terminal maps to the synthesized terminal raw node (total)"
+        );
+    }
+
+    #[test]
+    fn fanned_compiled_nodes_map_to_one_template_zone() {
+        // A {% for %} loop fans out N compiled CTEs (us_sales, eu_sales) whose
+        // compiled spans are CONTAINED in the loop zone's compiled span. All N
+        // map back to the ONE template zone raw node (by structural containment).
+        let compiled = "with us_sales as (select 1), eu_sales as (select 2) select * from us_sales";
+        // The loop zone's compiled region covers BOTH fanned CTE bodies [0,51).
+        let zone_compiled = rs(0, 51);
+        let us = rs(5, 27); // us_sales as (select 1)
+        let eu = rs(29, 51); // eu_sales as (select 2)
+        let term = rs(52, u32::try_from(compiled.len()).unwrap());
+        let sm = SourceMap {
+            compiled: compiled.to_owned(),
+            entries: vec![
+                // The fanned CTEs carry NO raw span (no verbatim per-iteration
+                // name in raw — they came from `{{ region }}_sales`), so they are
+                // NOT raw CTE nodes; they fold via the zone instead.
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: "us_sales".to_owned(),
+                    },
+                    raw: None,
+                    compiled: Some(us),
+                },
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: "eu_sales".to_owned(),
+                    },
+                    raw: None,
+                    compiled: Some(eu),
+                },
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: TERMINAL_NODE_NAME.to_owned(),
+                    },
+                    raw: None,
+                    compiled: Some(term),
+                },
+                // The ONE template zone (the {% for %} loop), compiling IN.
+                SourceMapEntry {
+                    role: SpanRole::Zone {
+                        kind: ZoneKind::ForLoop,
+                    },
+                    raw: Some(rs(0, 4)),
+                    compiled: Some(zone_compiled),
+                },
+            ],
+        };
+        let payload = CodeMapPayload::from_source_map(&sm);
+        let node_map = payload.node_map.expect("node_map present");
+        // Both fanned CTEs map back to the SAME one template zone (zone:0).
+        assert_eq!(
+            node_map.compiled.get("us_sales").map(String::as_str),
+            Some("zone:0"),
+            "us_sales folds to the ONE template zone"
+        );
+        assert_eq!(
+            node_map.compiled.get("eu_sales").map(String::as_str),
+            Some("zone:0"),
+            "eu_sales folds to the SAME one template zone"
+        );
+        // There is exactly one zone raw node (the template), never N.
+        let raw_dag = payload.raw_dag.expect("raw_dag present");
+        let zone_nodes: Vec<_> = raw_dag.nodes.iter().filter(|n| n.is_zone).collect();
+        assert_eq!(zone_nodes.len(), 1, "the fanned loop is ONE template node");
+        assert_eq!(zone_nodes[0].id, "zone:0");
+        assert_eq!(zone_nodes[0].role, "zone");
+    }
+
+    #[test]
+    fn compiled_node_with_no_unique_origin_omits_its_key() {
+        // A macro-expanded compiled CTE with NO verbatim raw region AND no
+        // containing zone (e.g. a `{{ my_macro() }}`-generated CTE outside any
+        // located zone) has no unique raw origin ⇒ its node_map key is OMITTED
+        // (never a guessed rawId).
+        let compiled = "with gen as (select 1) select * from gen";
+        let sm = SourceMap {
+            compiled: compiled.to_owned(),
+            entries: vec![
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: "gen".to_owned(),
+                    },
+                    raw: None, // macro-expanded: no verbatim raw anchor
+                    compiled: Some(rs(5, 22)),
+                },
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: TERMINAL_NODE_NAME.to_owned(),
+                    },
+                    raw: None,
+                    compiled: Some(rs(23, 40)),
+                },
+            ],
+        };
+        let payload = CodeMapPayload::from_source_map(&sm);
+        // No raw node resolved AND no node_map key (both omitted) ⇒ both None.
+        assert!(
+            payload.raw_dag.is_none(),
+            "no sound raw region ⇒ raw_dag omitted"
+        );
+        assert!(
+            payload.node_map.is_none(),
+            "no unique raw origin for any compiled node ⇒ node_map omitted (never guessed)"
+        );
+    }
+
+    #[test]
+    fn ambiguous_two_containing_zones_omits_the_key() {
+        // A compiled node contained by TWO zones (e.g. nested loops whose
+        // compiled spans both contain it) has an ambiguous origin ⇒ OMIT
+        // (never pick one). Same omit-on-ambiguous posture as the raw-span fold.
+        let compiled = "with x as (select 1) select * from x";
+        let inner = rs(5, 20);
+        let sm = SourceMap {
+            compiled: compiled.to_owned(),
+            entries: vec![
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: "x".to_owned(),
+                    },
+                    raw: None,
+                    compiled: Some(inner),
+                },
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: TERMINAL_NODE_NAME.to_owned(),
+                    },
+                    raw: None,
+                    compiled: Some(rs(21, 36)),
+                },
+                // Two zones BOTH containing `x`'s compiled span [5,20).
+                SourceMapEntry {
+                    role: SpanRole::Zone {
+                        kind: ZoneKind::ForLoop,
+                    },
+                    raw: Some(rs(0, 3)),
+                    compiled: Some(rs(0, 36)),
+                },
+                SourceMapEntry {
+                    role: SpanRole::Zone {
+                        kind: ZoneKind::IncrementalGuard,
+                    },
+                    raw: Some(rs(3, 6)),
+                    compiled: Some(rs(4, 30)),
+                },
+            ],
+        };
+        let payload = CodeMapPayload::from_source_map(&sm);
+        let node_map = payload
+            .node_map
+            .expect("node_map present (terminal zone-less)");
+        assert!(
+            !node_map.compiled.contains_key("x"),
+            "two containing zones ⇒ ambiguous origin ⇒ omit (never pick one)"
+        );
+    }
+
+    #[test]
+    fn incremental_guard_zone_node_is_compiled_out_never_compiled_in() {
+        // A {% if is_incremental() %} guard pruned this build is a first-class
+        // raw node with presence `compiled_out` — NEVER "compiled"/"compiled_in".
+        // This is the dogfood honesty case: an incremental zone is visible in the
+        // raw DAG as compiled-out, the future toggle's show/hide target.
+        let compiled = "select *\nfrom events"; // the guard body is pruned
+        let sm = SourceMap {
+            compiled: compiled.to_owned(),
+            entries: vec![
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: TERMINAL_NODE_NAME.to_owned(),
+                    },
+                    raw: None,
+                    compiled: Some(rs(0, u32::try_from(compiled.len()).unwrap())),
+                },
+                SourceMapEntry {
+                    role: SpanRole::Zone {
+                        kind: ZoneKind::IncrementalGuard,
+                    },
+                    raw: Some(rs(0, 30)),
+                    compiled: None, // pruned this build
+                },
+            ],
+        };
+        let payload = CodeMapPayload::from_source_map(&sm);
+        let raw_dag = payload.raw_dag.expect("raw_dag present");
+        let zone = raw_dag
+            .nodes
+            .iter()
+            .find(|n| n.is_zone)
+            .expect("the incremental zone is a raw node");
+        assert_eq!(
+            zone.presence, "compiled_out",
+            "a pruned is_incremental() zone is compiled_out, NEVER compiled_in"
+        );
+        assert_eq!(zone.role, "zone");
+        // A compiled_out zone (no compiled span) can never be a fold target — the
+        // terminal still maps via WITH-less synthesis, not the zone.
+        let node_map = payload.node_map.expect("node_map present");
+        assert_eq!(
+            node_map
+                .compiled
+                .get(TERMINAL_NODE_NAME)
+                .map(String::as_str),
+            Some(TERMINAL_NODE_NAME),
+            "the WITH-less terminal maps to the terminal raw node, not the compiled_out zone"
+        );
+    }
+
+    #[test]
+    fn raw_dag_and_node_map_serialize_with_stable_wire_shape() {
+        // Pin the wire shape the prototype consumes: raw_dag.nodes carries
+        // id/role/is_zone/presence; node_map.compiled is a flat compiledId→rawId
+        // map. (Serialize-only payloads — no Deserialize round-trip needed.)
+        let raw_dag = RawDagPayload {
+            nodes: vec![
+                RawDagNodePayload {
+                    id: "a".to_owned(),
+                    role: "cte",
+                    is_zone: false,
+                    presence: "compiled_in",
+                },
+                RawDagNodePayload {
+                    id: "zone:0".to_owned(),
+                    role: "zone",
+                    is_zone: true,
+                    presence: "compiled_out",
+                },
+            ],
+        };
+        let json = serde_json::to_string(&raw_dag).unwrap();
+        assert_eq!(
+            json,
+            r#"{"nodes":[{"id":"a","role":"cte","is_zone":false,"presence":"compiled_in"},{"id":"zone:0","role":"zone","is_zone":true,"presence":"compiled_out"}]}"#
+        );
+        let mut compiled = BTreeMap::new();
+        compiled.insert("a".to_owned(), "a".to_owned());
+        compiled.insert("eu_sales".to_owned(), "zone:0".to_owned());
+        let node_map = NodeMapPayload { compiled };
+        let json = serde_json::to_string(&node_map).unwrap();
+        assert_eq!(json, r#"{"compiled":{"a":"a","eu_sales":"zone:0"}}"#);
+    }
+
+    #[test]
+    fn no_raw_structure_omits_both_keys_for_byte_stable_goldens() {
+        // A WITH-bearing model whose CTEs carry no raw span and that has no zones
+        // resolves NO raw nodes and NO node_map keys ⇒ both keys omitted, so
+        // pre-#470 goldens stay byte-stable.
+        let compiled = "with a as (select 1) select * from a";
+        let graph = parse_cte_graph(compiled).unwrap();
+        let sm = SourceMap::from_cte_graph(&graph, compiled, TERMINAL_NODE_NAME).unwrap();
+        // from_cte_graph leaves every raw: None (no scanner run) and adds no zones.
+        let payload = CodeMapPayload::from_source_map(&sm);
+        assert!(
+            payload.raw_dag.is_none(),
+            "no raw structure ⇒ raw_dag omitted"
+        );
+        assert!(
+            payload.node_map.is_none(),
+            "no unique origin ⇒ node_map omitted"
+        );
+        // And the JSON carries neither key (byte-stability).
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(!json.contains("raw_dag"), "raw_dag key absent on the wire");
+        assert!(
+            !json.contains("node_map"),
+            "node_map key absent on the wire"
         );
     }
 
