@@ -360,6 +360,123 @@ select * from final";
     }
 }
 
+// ---- never-a-false-claim: a LITERAL / COMPUTED alias is NOT a source -----
+// The round-5 adversarial finding (#450): a literal/constant projection with
+// an explicit alias (`42 AS magic`, `1 AS x`, `current_timestamp AS t`) reads
+// the external leaf but emits NO inbound column edge. The pre-fix star-
+// passthrough fallback fired on "leaf-reading node with NO inbound edge" and
+// fabricated `source.<leaf>.<alias>` for a column the source does not have.
+// A source edge must be emitted ONLY when a PROVABLE pass-through/rename chain
+// (or a genuine star over the leaf) terminates in a REAL source field. Every
+// literal/computed alias degrades to None — no fabricated source field.
+
+#[test]
+fn literal_alias_in_a_leaf_cte_never_fabricates_a_source_field() {
+    // `42 AS magic` in the leaf-reading CTE `a` (which `select *`s nothing —
+    // it names two explicit projections, one a real pass-through `order_id`
+    // and one a LITERAL `42 AS magic`). `magic` has NO inbound edge: it is the
+    // constant 42, not a column the source emits.
+    let m = "\
+with a as (
+    select order_id, 42 as magic from \"db\".\"raw\".\"orders\"
+)
+select order_id, magic from a";
+    let manifest = manifest_of(
+        vec![model(
+            "model.p.stg",
+            "\"db\".\"staging\".\"stg\"",
+            m,
+            &["source.p.raw.orders"],
+        )],
+        vec![source(
+            "source.p.raw.orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"orders\"",
+        )],
+    );
+    let graph = project_graph(&manifest);
+    let source_fields_named: std::collections::BTreeSet<&str> = graph
+        .edges()
+        .iter()
+        .filter(|e| e.upstream == nid("source.p.raw.orders"))
+        .map(|e| e.upstream_column.as_str())
+        .collect();
+    // THE FLOOR: the literal alias `magic` is NEVER named as a source field.
+    assert!(
+        !source_fields_named.contains("magic"),
+        "`42 as magic` is a literal — the source field `magic` does NOT exist \
+         and must NEVER be fabricated as a source attribution"
+    );
+    // The real pass-through `order_id` still reaches the source.
+    assert!(
+        source_fields_named.contains("order_id"),
+        "the real pass-through `order_id` still traces to the source"
+    );
+    // And `magic`'s trace degrades — it never claims a source origin.
+    let magic_trace = graph.trace_to_source(&manifest, &nid("model.p.stg"), "magic");
+    assert_ne!(
+        magic_trace.termination,
+        TraceTermination::Source,
+        "a literal alias never claims a source origin"
+    );
+}
+
+#[test]
+fn computed_and_constant_aliases_in_a_single_model_never_fabricate_a_source() {
+    // A single leaf-reading model projecting a real pass-through alongside
+    // assorted constant/computed aliases: `1 as x`, `a.id + 1 as y`,
+    // `current_timestamp as t`, `'US' as country`. NONE of these is a source
+    // field; only the real pass-through `order_id` reaches the source.
+    let m = "\
+select
+      order_id
+    , 1 as x
+    , order_id + 1 as y
+    , current_timestamp as t
+    , 'US' as country
+from \"db\".\"raw\".\"orders\"";
+    let manifest = manifest_of(
+        vec![model(
+            "model.p.stg",
+            "\"db\".\"staging\".\"stg\"",
+            m,
+            &["source.p.raw.orders"],
+        )],
+        vec![source(
+            "source.p.raw.orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"orders\"",
+        )],
+    );
+    let graph = project_graph(&manifest);
+    let source_fields_named: std::collections::BTreeSet<&str> = graph
+        .edges()
+        .iter()
+        .filter(|e| e.upstream == nid("source.p.raw.orders"))
+        .map(|e| e.upstream_column.as_str())
+        .collect();
+    for fabricated in ["x", "y", "t", "country"] {
+        assert!(
+            !source_fields_named.contains(fabricated),
+            "`{fabricated}` is a literal/computed alias — never a fabricated source field"
+        );
+    }
+    assert!(
+        source_fields_named.contains("order_id"),
+        "the real pass-through `order_id` still traces to the source"
+    );
+    for col in ["x", "y", "t", "country"] {
+        let trace = graph.trace_to_source(&manifest, &nid("model.p.stg"), col);
+        assert_ne!(
+            trace.termination,
+            TraceTermination::Source,
+            "a literal/computed alias ({col}) never claims a source origin"
+        );
+    }
+}
+
 // ---- B: blast-radius (TDD 3) --------------------------------------------
 
 #[test]

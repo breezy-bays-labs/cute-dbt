@@ -1067,9 +1067,45 @@ impl CteGraph {
             acc.absorb(self.inbound_source_name(edge, leaf_nodes, cte_names, memo, depth));
         }
 
-        let result = acc.into_name(column, leaf_nodes.contains(node_id));
+        // The star-passthrough fallback (a column with NO inbound edge flowed
+        // in through `select *` over the external leaf) fires ONLY when this
+        // node ACTUALLY carries a star projection over an external leaf — a
+        // recorded `*→*` edge landing on `(node_id, "*")` whose from-side is a
+        // truly external relation. A leaf-reading node with NO star at all (its
+        // projection is explicit) has a no-inbound-edge column because that
+        // column is a LITERAL / computed expression (`42 AS magic`,
+        // `current_timestamp AS t`) — which the engine emits NO edge for. Such
+        // a column MUST degrade to `None`; it is not a source field. (#450
+        // round-5: no `no-inbound-edge ⇒ assume pass-through` guess.)
+        let star_over_external = self.has_external_star(node_id, cte_names);
+        let result = acc.into_name(column, leaf_nodes.contains(node_id) && star_over_external);
         memo.insert(key, result.clone());
         result
+    }
+
+    /// `true` when `node_id` carries a star projection (`select *` / `q.*`)
+    /// over an EXTERNAL leaf relation — a recorded `*→*` column edge whose
+    /// target is `(node_id, "*")` and whose source node is NOT a sibling CTE
+    /// (a genuine `ref()`/`source()` boundary). This is the ONLY justification
+    /// for attributing a no-inbound-edge column to the source under its own
+    /// name: it flowed through the star unchanged. A node whose star is over a
+    /// KNOWN intra-model CTE instead expands to per-column edges (so its
+    /// columns carry explicit inbound edges and never reach the fallback); a
+    /// node with no star at all has no business attributing an edge-less
+    /// (literal/computed) column to a source.
+    fn has_external_star(
+        &self,
+        node_id: &str,
+        cte_names: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        self.column_edges.iter().any(|edge| {
+            edge.from_col.column == "*"
+                && Self::edge_targets(edge, node_id, "*")
+                && matches!(
+                    &edge.from_col.scope,
+                    ColumnScope::Intra { node_id: from } if !cte_names.contains(from)
+                )
+        })
     }
 
     /// `true` when `edge` is an intra-scoped edge whose target is exactly
@@ -1153,16 +1189,20 @@ impl LeafResolution {
     }
 
     /// Resolve the fold to a source-side column name, or `None` to degrade.
-    /// A leaf-reading node with NO clean edge for this column flowed it in
-    /// through a `select *` over the external leaf — the source field is the
-    /// column's own (unchanged) name (a computed column would have carried a
-    /// blocking `Derived` edge instead).
-    fn into_name(self, column: &str, on_leaf_node: bool) -> Option<String> {
+    /// `leaf_star_passthrough` is `true` ONLY when this node both reads an
+    /// external leaf AND carries a genuine `*` projection over it (see
+    /// [`CteGraph::has_external_star`]); in that case a column with NO clean
+    /// inbound edge flowed in through the `select *` unchanged, so the source
+    /// field is the column's own name. When the node has NO such star, an
+    /// edge-less column is a LITERAL / computed expression (`42 AS magic`,
+    /// `current_timestamp AS t`) — the engine emits no edge for it — and it
+    /// MUST degrade to `None` (never a fabricated source field).
+    fn into_name(self, column: &str, leaf_star_passthrough: bool) -> Option<String> {
         if self.blocked {
             None
         } else if let Some(name) = self.name {
             Some(name)
-        } else if !self.saw_edge && on_leaf_node {
+        } else if !self.saw_edge && leaf_star_passthrough {
             Some(column.to_owned())
         } else {
             None
